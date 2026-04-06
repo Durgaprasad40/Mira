@@ -11,6 +11,7 @@ import {
   PanResponder,
   Modal,
 } from "react-native";
+import { Image } from "expo-image";
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -27,6 +28,7 @@ import { useDemoStore } from "@/stores/demoStore";
 import { useBlockStore } from "@/stores/blockStore";
 import { COLORS, INCOGNITO_COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
+import { useBestLocation, calculateDistanceKm } from "@/stores/locationStore";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const SWIPE_THRESHOLD_X = SCREEN_WIDTH * 0.15; // 15% — easier swipe
@@ -40,15 +42,38 @@ interface ProfileData {
   /** Original Convex ID for live profiles - used for type-safe mutations */
   _convexId?: Id<'users'>;
   name: string;
+  /** Phase-1: First name for explicit display (firstName + lastName) */
+  firstName?: string;
+  /** Phase-1: Last name for explicit display (firstName + lastName) */
+  lastName?: string;
   age: number;
   bio?: string;
   city?: string;
   isVerified?: boolean;
+  /** Backend-computed distance (fallback if no live GPS) */
   distance?: number;
+  /** LIVE_LOCATION: Profile latitude for client-side instant distance */
+  latitude?: number;
+  /** LIVE_LOCATION: Profile longitude for client-side instant distance */
+  longitude?: number;
+  /** Last active timestamp for presence display */
+  lastActive?: number;
   photos: { url: string }[];
   relationshipIntent?: string[];
   activities?: string[];
   profilePrompt?: { question: string; answer: string };
+  /** All profile prompts for richer content display */
+  profilePrompts?: { question: string; answer: string }[];
+  /** Gender preferences (looking for) */
+  lookingFor?: string[];
+  /** User's gender for identity display */
+  gender?: string;
+  /** Height in cm */
+  height?: number;
+  /** Smoking preference */
+  smoking?: string;
+  /** Drinking preference */
+  drinking?: string;
 }
 
 // P0-002 FIX: Allowed swipe actions (matches Convex mutation args)
@@ -71,6 +96,10 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   const token = useAuthStore((s) => s.token);
   const { minAge, maxAge, maxDistance, gender, relationshipIntent, filterVersion } = useFilterStore();
   useSubscriptionStore();
+
+  // LIVE_LOCATION: Get device GPS for instant distance calculation
+  // Priority: live GPS > backend distance for instant UX
+  const bestLocation = useBestLocation();
 
   // Demo store — single source of truth for Phase-1 demo profiles
   const demoProfiles = useDemoStore((s) => s.profiles);
@@ -148,6 +177,9 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
         .map((p) => ({
           id: p._id,
           name: p.name,
+          // Phase-1: Include firstName/lastName for explicit display
+          firstName: (p as any).firstName,
+          lastName: (p as any).lastName,
           age: p.age,
           bio: p.bio,
           city: p.city,
@@ -162,24 +194,55 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   );
 
   // P0-002 FIX: Preserve _convexId for type-safe mutations
+  // LIVE_LOCATION: Compute instant distance using device GPS when available
   const liveItems = useMemo<ProfileData[]>(
     () =>
-      profilesSafe.map((p: any) => ({
-        id: p._id || p.id,
-        _convexId: p._id as Id<'users'> | undefined, // Preserve original Convex ID
-        name: p.name,
-        age: p.age,
-        bio: p.bio,
-        city: p.city,
-        isVerified: p.isVerified,
-        distance: p.distance,
-        photos:
-          p.photos?.map((photo: any) => ({ url: photo.url || photo })) ?? EMPTY_ARRAY,
-        relationshipIntent: p.relationshipIntent,
-        activities: p.activities,
-        profilePrompt: p.profilePrompts?.[0],
-      })),
-    [profilesSafe],
+      profilesSafe.map((p: any) => {
+        // LIVE_LOCATION: Compute instant distance client-side if we have GPS
+        let liveDistance: number | undefined;
+        if (bestLocation && p.latitude && p.longitude) {
+          const distKm = calculateDistanceKm(
+            bestLocation.latitude,
+            bestLocation.longitude,
+            p.latitude,
+            p.longitude
+          );
+          liveDistance = Math.round(distKm); // Round to whole km
+        }
+
+        return {
+          id: p._id || p.id,
+          _convexId: p._id as Id<'users'> | undefined, // Preserve original Convex ID
+          name: p.name,
+          // Phase-1: Include firstName/lastName for explicit display (if available)
+          firstName: p.firstName,
+          lastName: p.lastName,
+          age: p.age,
+          bio: p.bio,
+          city: p.city,
+          isVerified: p.isVerified,
+          // LIVE_LOCATION: Prefer live GPS distance, fallback to backend distance
+          distance: liveDistance ?? p.distance,
+          // Store lat/lng for potential future use
+          latitude: p.latitude,
+          longitude: p.longitude,
+          // PRESENCE: Include lastActive for "Online Now" display
+          lastActive: p.lastActive,
+          photos:
+            p.photos?.map((photo: any) => ({ url: photo.url || photo })) ?? EMPTY_ARRAY,
+          relationshipIntent: p.relationshipIntent,
+          activities: p.activities,
+          profilePrompt: p.profilePrompts?.[0],
+          // DATA_CONSISTENCY: Additional fields for card content richness
+          lookingFor: p.lookingFor,
+          gender: p.gender,
+          height: p.height,
+          smoking: p.smoking,
+          drinking: p.drinking,
+          profilePrompts: p.profilePrompts,
+        };
+      }),
+    [profilesSafe, bestLocation], // Re-compute when GPS updates
   );
 
   const profiles: ProfileData[] = isDemoMode ? demoItems : liveItems;
@@ -202,6 +265,56 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
 
   const currentProfile = profiles[currentIndex];
   const nextProfile = profiles[currentIndex + 1];
+
+  // PERF: Prefetch current profile photos for instant profile open
+  useEffect(() => {
+    if (!currentProfile?.photos?.length) return;
+
+    currentProfile.photos.forEach((photo: { url: string }) => {
+      if (photo?.url) {
+        Image.prefetch(photo.url).catch(() => {
+          // Silent fail - photos will still load on-demand
+        });
+      }
+    });
+
+    if (__DEV__) {
+      console.log('[DISCOVER_PREFETCH] Current:', {
+        profileId: currentProfile.id?.slice?.(-6) || 'unknown',
+        photoCount: currentProfile.photos.length,
+      });
+    }
+  }, [currentProfile?.id]);
+
+  // PERF: Prefetch next profile photos for instant card reveal
+  useEffect(() => {
+    if (!nextProfile?.photos?.length) return;
+
+    nextProfile.photos.forEach((photo: { url: string }) => {
+      if (photo?.url) {
+        Image.prefetch(photo.url).catch(() => {
+          // Silent fail - photos will still load on-demand
+        });
+      }
+    });
+
+    if (__DEV__) {
+      console.log('[DISCOVER_PREFETCH] Next:', {
+        profileId: nextProfile.id?.slice?.(-6) || 'unknown',
+        photoCount: nextProfile.photos.length,
+      });
+    }
+  }, [nextProfile?.id]);
+
+  // PHOTO_SOURCE_AUDIT: Debug logging for photo consistency verification
+  if (__DEV__ && currentProfile) {
+    console.log('[PHOTO_SOURCE_AUDIT] [DISCOVER_PHOTOS] Current profile:', {
+      source: isDemoMode ? 'demoStore' : 'api.discover.getDiscoverProfiles (pre-filtered)',
+      profileId: currentProfile.id?.slice?.(-6) || 'unknown',
+      totalRegularPhotos: currentProfile.photos?.length ?? 0,
+      photoUrls: currentProfile.photos?.map((p: { url: string }) => p.url?.slice(-30)).join(',') || 'none',
+    });
+  }
 
   const resetPosition = useCallback(() => {
     Animated.spring(pan, {
@@ -543,12 +656,24 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
           <Animated.View style={[styles.nextCard, nextCardAnimatedStyle]}>
             <ProfileCard
               name={nextProfile.name}
+              firstName={nextProfile.firstName}
+              lastName={nextProfile.lastName}
               age={nextProfile.age}
               bio={nextProfile.bio}
               city={nextProfile.city}
               isVerified={nextProfile.isVerified}
               distance={nextProfile.distance}
+              lastActive={nextProfile.lastActive}
               photos={nextProfile.photos}
+              relationshipIntent={nextProfile.relationshipIntent}
+              activities={nextProfile.activities}
+              profilePrompt={nextProfile.profilePrompt}
+              profilePrompts={nextProfile.profilePrompts}
+              lookingFor={nextProfile.lookingFor}
+              gender={nextProfile.gender}
+              height={nextProfile.height}
+              smoking={nextProfile.smoking}
+              drinking={nextProfile.drinking}
               theme={theme}
             />
           </Animated.View>
@@ -560,15 +685,24 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
           >
             <ProfileCard
               name={currentProfile.name}
+              firstName={currentProfile.firstName}
+              lastName={currentProfile.lastName}
               age={currentProfile.age}
               bio={currentProfile.bio}
               city={currentProfile.city}
               isVerified={currentProfile.isVerified}
               distance={currentProfile.distance}
+              lastActive={currentProfile.lastActive}
               photos={currentProfile.photos}
               relationshipIntent={currentProfile.relationshipIntent}
               activities={currentProfile.activities}
               profilePrompt={currentProfile.profilePrompt}
+              profilePrompts={currentProfile.profilePrompts}
+              lookingFor={currentProfile.lookingFor}
+              gender={currentProfile.gender}
+              height={currentProfile.height}
+              smoking={currentProfile.smoking}
+              drinking={currentProfile.drinking}
               showCarousel
               theme={theme}
               onOpenProfile={onOpenProfile ? () => onOpenProfile(currentProfile.id) : undefined}

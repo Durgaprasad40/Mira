@@ -37,8 +37,20 @@ const GENDER_LABELS: Record<string, string> = {
   other: 'Everyone',
 };
 
+// Gender icon mapping for identity display
+const GENDER_ICONS: Record<string, { icon: string; color: string }> = {
+  male: { icon: 'male', color: '#3B82F6' }, // Blue
+  female: { icon: 'female', color: '#EC4899' }, // Pink
+  non_binary: { icon: 'male-female', color: '#A855F7' }, // Purple
+  other: { icon: 'person', color: '#6B7280' }, // Gray
+};
+
 export interface ProfileCardProps {
   name: string;
+  /** Optional: First name for explicit display (Phase-1 uses firstName + lastName) */
+  firstName?: string;
+  /** Optional: Last name for explicit display (Phase-1 uses firstName + lastName) */
+  lastName?: string;
   age: number;
   bio?: string;
   city?: string;
@@ -67,6 +79,17 @@ export interface ProfileCardProps {
   relationshipIntent?: string[];
   /** Activities/interests keys */
   activities?: string[];
+  /** User's gender for identity display */
+  gender?: string;
+  /** Viewer profile data for computing common points (Phase-1 only) */
+  viewerProfile?: {
+    activities?: string[];
+    relationshipIntent?: string[];
+    lookingFor?: string[];
+    smoking?: string;
+    drinking?: string;
+    height?: number;
+  };
   /** True if user has incognito mode enabled (shows badge) */
   isIncognito?: boolean;
   /** Explore category tag - shows "Why this profile" label above name */
@@ -129,6 +152,8 @@ const PhotoStack = memo(function PhotoStack({
 
 export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   name,
+  firstName,
+  lastName,
   age,
   bio,
   city,
@@ -146,6 +171,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   lookingFor,
   relationshipIntent,
   activities,
+  gender,
+  viewerProfile,
   isIncognito,
   exploreTag,
   lastActive,
@@ -155,8 +182,28 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   onPress,
 }) => {
   const dark = theme === 'dark';
-  // PHASE-2 DETECTION: Use privateIntentKeys presence, NOT theme
-  const isPhase2 = !!privateIntentKeys;
+  // PHASE-2 DETECTION: Check for non-empty privateIntentKeys array
+  // IMPORTANT: Empty array [] is truthy, so we must check length > 0
+  const isPhase2 = Array.isArray(privateIntentKeys) && privateIntentKeys.length > 0;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1 NAME DISPLAY: Use firstName + lastName when available
+  // Phase-1 shows full name (first + last), Phase-2 uses nickname (name/handle)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const displayName = useMemo(() => {
+    // Phase-2 uses the name field (which should be nickname/handle)
+    if (isPhase2) return name;
+
+    // Phase-1: Prefer firstName + lastName combination
+    if (firstName && lastName) {
+      return `${firstName} ${lastName}`.trim();
+    }
+    if (firstName) {
+      return firstName;
+    }
+    // Fallback to name prop if no firstName/lastName available
+    return name;
+  }, [isPhase2, name, firstName, lastName]);
   const TC = dark ? INCOGNITO_COLORS : COLORS;
   const { height: windowHeight } = useWindowDimensions();
 
@@ -164,12 +211,36 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // On ~850px device, 140px ≈ 16.5% from bottom — scale proportionally
   const arrowButtonBottom = Math.round(windowHeight * 0.165);
 
-  // Check if user is active now (within 10 minutes)
+  // PRESENCE: Check if user is active now (within 10 minutes of last activity)
+  // After 10 minutes of inactivity, badge is removed
   const isActiveNow = useMemo(() => {
     if (!lastActive) return false;
-    const tenMinutesMs = 10 * 60 * 1000;
+    const tenMinutesMs = 10 * 60 * 1000; // 10 minutes threshold
     return (Date.now() - lastActive) < tenMinutesMs;
   }, [lastActive]);
+
+  // PRESENCE: Check if user was active today (within 24 hours but NOT currently online)
+  const isActiveToday = useMemo(() => {
+    if (!lastActive || isActiveNow) return false;
+    const twentyFourHoursMs = 24 * 60 * 60 * 1000;
+    return (Date.now() - lastActive) < twentyFourHoursMs;
+  }, [lastActive, isActiveNow]);
+
+  // [P1_CARD_PRESENCE] Debug logging for presence badge verification
+  useEffect(() => {
+    if (__DEV__ && showCarousel && !isPhase2) {
+      const timeSinceActive = lastActive ? Math.round((Date.now() - lastActive) / 60000) : null;
+      console.log('[P1_CARD_PRESENCE]', {
+        name,
+        lastActive,
+        timeSinceActiveMinutes: timeSinceActive,
+        isActiveNow,
+        isActiveToday,
+        renderedBadge: isActiveNow ? 'Online Now' : (isActiveToday ? 'Active Today' : 'None'),
+        showCarousel,
+      });
+    }
+  }, [name, lastActive, isActiveNow, isActiveToday, showCarousel, isPhase2]);
 
   // Phase-1 only: Compute "Looking for" text
   const lookingForText = useMemo(() => {
@@ -196,9 +267,681 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     return activities
       .map(key => ACTIVITY_FILTERS.find(a => a.value === key))
       .filter(Boolean)
-      .slice(0, 3) // Show max 3 on card
+      .slice(0, 5) // Show max 5 on reveal photo
       .map(a => ({ emoji: a!.emoji, label: a!.label }));
   }, [isPhase2, activities]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1: PROMPT-FIRST DISCOVERY MODEL (UX REFACTOR)
+  // Priority: Prompt (P1) > Bio (P2) > Lifestyle (P3) > Interests (P4) > Intent (P5)
+  //
+  // Photo 1 = IDENTITY: name, age, gender, badges, distance (first impression)
+  // Photo 2 = PROMPT: strongest hook - personality reveal
+  // Photo 3 = BIO: about them
+  // Photo 4 = LIFESTYLE: height, drinking, smoking
+  // Photo 5 = INTERESTS: activities/hobbies
+  // Photo 6+ = INTENT: relationship goal OR minimal
+  //
+  // ADAPTIVE FALLBACKS (based on photo count):
+  // - 2 photos: p1=identity, p2=prompt OR bio (single item)
+  // - 3 photos: p1=identity, p2=prompt/bio, p3=bio/lifestyle
+  // - 4 photos: p1=identity, p2=prompt, p3=bio, p4=lifestyle/interests
+  // - 5+ photos: Full progressive reveal
+  //
+  // NO "Both..." comparison text, NO redundancy across photos
+  //
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1 WAVE DISTRIBUTION: BALANCED CONTENT ACROSS PHOTOS
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Wave density pattern: LOW → MEDIUM → HIGH → MEDIUM → HIGH...
+  // Each content unit used at MOST ONCE (no repetition except identity)
+  // Identity (name, age, gender, badges, distance) always on Photo 1
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Display unit types for wave distribution
+  type DisplayUnitType = 'bio' | 'prompt' | 'basics' | 'interests';
+
+  interface DisplayUnit {
+    key: string;
+    type: DisplayUnitType;
+    priority: number;
+    payload: any;
+    weight: number; // 1 = small, 2 = medium (long content)
+  }
+
+  // Density levels for wave pattern
+  type WaveDensity = 'low' | 'medium' | 'high';
+
+  // Photo content plan from distribution engine
+  interface PhotoContentPlan {
+    photoIndex: number;
+    includeIdentity: boolean;
+    density: WaveDensity;
+    units: DisplayUnit[];
+  }
+
+  // Slot types for rendering
+  type Phase1ContentSlot =
+    | 'identity'           // Photo 1: name, age, gender, badges, distance
+    | 'identity_bio'       // Identity + bio (for 2-4 photo profiles)
+    | 'wave_content';      // Wave-distributed content units
+
+  // Get primary intent as a single elegant line
+  const phase1IntentLine = useMemo(() => {
+    if (isPhase2 || !relationshipIntent || relationshipIntent.length === 0) return null;
+    const primaryIntent = RELATIONSHIP_INTENTS.find(i => i.value === relationshipIntent[0]);
+    if (!primaryIntent) return null;
+    // Create elegant phrasing
+    const intentPhrases: Record<string, string> = {
+      'serious_vibes': 'Looking for something serious',
+      'keep_it_casual': 'Keeping things casual',
+      'exploring_vibes': 'Still figuring things out',
+      'see_where_it_goes': 'Open to see where it goes',
+      'open_to_vibes': 'Open to different vibes',
+      'just_friends': 'Looking for friendship',
+      'open_to_anything': 'Open to anything',
+      'single_parent': 'Single parent looking for love',
+      'new_to_dating': 'New to the dating scene',
+    };
+    return intentPhrases[primaryIntent.value] || primaryIntent.label;
+  }, [isPhase2, relationshipIntent]);
+
+  // Get ALL prompts for Phase-1 (not just the best one)
+  const phase1AllPrompts = useMemo(() => {
+    if (isPhase2) return [];
+    const prompts: { question: string; answer: string }[] = [];
+    if (profilePrompts && profilePrompts.length > 0) {
+      prompts.push(...profilePrompts);
+    } else if (profilePrompt) {
+      prompts.push(profilePrompt);
+    }
+    return prompts;
+  }, [isPhase2, profilePrompts, profilePrompt]);
+
+  // Legacy alias for backward compatibility
+  const phase1BestPrompt = phase1AllPrompts.length > 0 ? phase1AllPrompts[0] : null;
+
+  // Phase-1: Lifestyle data (height, smoking, drinking) - ALL fields rendered
+  const phase1Lifestyle = useMemo(() => {
+    if (isPhase2) return [];
+    const items: { icon: string; label: string }[] = [];
+
+    // Height
+    if (profileHeight && profileHeight > 0) {
+      const heightStr = cmToFeetInches(profileHeight);
+      if (heightStr) items.push({ icon: 'resize-outline', label: heightStr });
+    }
+
+    // Smoking - ALL values
+    if (smoking && smoking !== 'prefer_not_to_say') {
+      const smokingLabels: Record<string, string> = {
+        never: 'Non-smoker',
+        sometimes: 'Sometimes smokes',
+        socially: 'Social smoker',
+        regularly: 'Smoker',
+        trying_to_quit: 'Quitting smoking',
+      };
+      if (smokingLabels[smoking]) items.push({ icon: 'flame-outline', label: smokingLabels[smoking] });
+    }
+
+    // Drinking - ALL values
+    if (drinking && drinking !== 'prefer_not_to_say') {
+      const drinkingLabels: Record<string, string> = {
+        never: "Doesn't drink",
+        socially: 'Social drinker',
+        regularly: 'Regular drinker',
+        sober: 'Sober',
+      };
+      if (drinkingLabels[drinking]) items.push({ icon: 'wine-outline', label: drinkingLabels[drinking] });
+    }
+
+    return items;
+  }, [isPhase2, profileHeight, smoking, drinking]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1: SHARED INTERESTS (NO comparison text, just matching activities)
+  // Shows candidate's interests that viewer ALSO has - displayed as simple labels
+  // NO "Both..." or "You have in common..." text - just the interest itself
+  // ═══════════════════════════════════════════════════════════════════════════
+  const phase1SharedInterests = useMemo(() => {
+    if (isPhase2 || !viewerProfile) return [];
+
+    const viewerActivities = viewerProfile.activities ?? [];
+    const candidateActivities = activities ?? [];
+
+    // Find activities that both have
+    const sharedActivities = viewerActivities.filter(a => candidateActivities.includes(a));
+
+    // Return as simple labeled items (NO comparison text)
+    return sharedActivities
+      .map(key => ACTIVITY_FILTERS.find(a => a.value === key))
+      .filter(Boolean)
+      .slice(0, 3) // Max 3 shared interests
+      .map(a => ({ emoji: a!.emoji, label: a!.label }));
+  }, [isPhase2, viewerProfile, activities]);
+
+  // LEGACY: phase1CommonPointsLegacy - DEPRECATED, kept for compatibility but returns empty
+  // All "Both..." comparison text has been removed per UX refactor
+  const phase1CommonPointsLegacy: { icon: string; text: string; priority: number }[] = [];
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1: COMMON POINTS (CRITICAL - SHOW FIRST WHEN EXISTS)
+  // Priority highlights: shared interests, matching intent, lifestyle compatibility
+  // Format: ⭐ Label (e.g., "⭐ Gym", "⭐ Serious relationship")
+  // Max 2 items, no sentences, no "you both"
+  // ═══════════════════════════════════════════════════════════════════════════
+  const phase1CommonPoints = useMemo((): string[] => {
+    if (isPhase2 || !viewerProfile) return [];
+
+    const commonItems: string[] = [];
+
+    // Priority 1: Shared interests (most valuable)
+    if (phase1SharedInterests.length > 0) {
+      phase1SharedInterests.slice(0, 2).forEach(item => {
+        commonItems.push(item.label);
+      });
+    }
+
+    // Priority 2: Matching relationship intent
+    if (commonItems.length < 2 && viewerProfile.relationshipIntent && relationshipIntent) {
+      const viewerIntents = viewerProfile.relationshipIntent;
+      const matchingIntent = relationshipIntent.find(intent => viewerIntents.includes(intent));
+      if (matchingIntent) {
+        const intentLabels: Record<string, string> = {
+          'serious_vibes': 'Serious relationship',
+          'keep_it_casual': 'Casual dating',
+          'exploring_vibes': 'Exploring',
+          'see_where_it_goes': 'Open-minded',
+          'open_to_vibes': 'Open to anything',
+          'just_friends': 'Friendship',
+          'open_to_anything': 'Open to anything',
+        };
+        if (intentLabels[matchingIntent]) {
+          commonItems.push(intentLabels[matchingIntent]);
+        }
+      }
+    }
+
+    // Priority 3: Matching lifestyle (if still space)
+    if (commonItems.length < 2) {
+      // Matching drinking
+      if (viewerProfile.drinking && drinking && viewerProfile.drinking === drinking) {
+        const drinkingLabels: Record<string, string> = {
+          never: 'Non-drinker',
+          socially: 'Social drinker',
+          regularly: 'Drinks often',
+          sober: 'Sober',
+        };
+        if (drinkingLabels[drinking] && commonItems.length < 2) {
+          commonItems.push(drinkingLabels[drinking]);
+        }
+      }
+      // Matching smoking
+      if (viewerProfile.smoking && smoking && viewerProfile.smoking === smoking) {
+        const smokingLabels: Record<string, string> = {
+          never: 'Non-smoker',
+          sometimes: 'Sometimes smokes',
+          regularly: 'Smoker',
+          trying_to_quit: 'Quitting smoking',
+        };
+        if (smokingLabels[smoking] && commonItems.length < 2) {
+          commonItems.push(smokingLabels[smoking]);
+        }
+      }
+    }
+
+    return commonItems.slice(0, 2); // Strict max 2
+  }, [isPhase2, viewerProfile, phase1SharedInterests, relationshipIntent, drinking, smoking]);
+
+  // Alias for backward compatibility
+  const phase1SubtleHighlights = phase1CommonPoints;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1: WAVE DISTRIBUTION CONTENT MODEL
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Wave density: LOW(1) → MEDIUM(2) → HIGH(3) → MEDIUM(2) → HIGH(3)...
+  // Photo 1 is special: identity only (or identity+bio for 2-4 photos)
+  // Each content unit used AT MOST ONCE - NO repetition
+  // ═══════════════════════════════════════════════════════════════════════════
+  interface Phase1PhotoContentItem {
+    bio?: string;
+    intent?: string;
+    prompts: { question: string; shortLabel: string; answer: string; id: number }[];
+    lifestyle: { icon: string; label: string; key: string }[];
+    interests: { emoji: string; label: string; key: string }[];
+    commonPoints: { text: string; key: string }[];
+    slotType: Phase1ContentSlot;
+    // Wave distribution data
+    waveUnits: DisplayUnit[];
+    waveDensity: WaveDensity;
+  }
+
+  // Helper: Convert prompt question to short label (4-5 words max)
+  const toShortLabel = (question: string): string => {
+    // Remove trailing punctuation and common prefixes
+    let label = question
+      .replace(/[?!.,]+$/, '')
+      .replace(/^(What|How|Why|When|Where|Who|Tell us about|Describe|Share)\s+/i, '')
+      .trim();
+
+    // Take first 4-5 words
+    const words = label.split(/\s+/);
+    if (words.length > 5) {
+      label = words.slice(0, 5).join(' ');
+    }
+
+    // Capitalize first letter
+    return label.charAt(0).toUpperCase() + label.slice(1);
+  };
+
+  // DETERMINISTIC prompt selection: Same 2 prompts for homepage AND full profile
+  const selectedPrompts = useMemo(() => {
+    if (isPhase2 || phase1AllPrompts.length === 0) return [];
+    // Always select first 2 prompts (deterministic)
+    return phase1AllPrompts.slice(0, 2).map((p, idx) => ({
+      ...p,
+      id: idx,
+      shortLabel: toShortLabel(p.question),
+    }));
+  }, [isPhase2, phase1AllPrompts]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1 WAVE DISTRIBUTION ENGINE
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PRIVACY: "Looking for" / intent NEVER shown in public UI
+  // RULE: Each content unit used AT MOST ONCE - NO repetition except identity
+  //
+  // WAVE DENSITY PATTERN:
+  //   LOW(1 unit) → MEDIUM(2 units) → HIGH(3 units) → MEDIUM → HIGH...
+  //
+  // PHOTO-COUNT SPECIFIC RULES:
+  //   1 photo:  P1 = identity only
+  //   2 photos: P1 = identity+bio, P2 = prompt1+basics
+  //   3 photos: P1 = identity+bio, P2 = prompt1+basics, P3 = remaining medium
+  //   4 photos: P1 = identity+bio, P2 = prompt1+basics, P3 = medium, P4 = medium
+  //   5+ photos: P1 = identity only, then wave distribute remaining
+  // ═══════════════════════════════════════════════════════════════════════════
+  const phase1PhotoContents = useMemo((): Phase1PhotoContentItem[] => {
+    if (isPhase2) return [];
+
+    const contents: Phase1PhotoContentItem[] = [];
+    const totalPhotos = photos?.length || 1;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TASK 1: UNIT GENERATOR - Build ordered unique display units
+    // Priority: bio → prompt1 → basics → prompt2 → interests → prompt3
+    // ═══════════════════════════════════════════════════════════════════════
+    const units: DisplayUnit[] = [];
+    let priority = 0;
+
+    // Prepare data
+    const lifestyleWithKeys = phase1Lifestyle.map((l, idx) => ({ ...l, key: `ls-${idx}-${l.label}` }));
+    const hasBio = !!bio && bio.trim().length > 0;
+    const hasBasics = lifestyleWithKeys.length > 0;
+    const hasInterests = activities && activities.length > 0;
+
+    // Convert activities to interest chips (max 5)
+    const interestChips = hasInterests
+      ? activities!.slice(0, 5).map((key, idx) => {
+          const activity = ACTIVITY_FILTERS.find(a => a.value === key);
+          return activity
+            ? { emoji: activity.emoji, label: activity.label, key: `int-${idx}-${key}` }
+            : null;
+        }).filter(Boolean) as { emoji: string; label: string; key: string }[]
+      : [];
+
+    // Unit 1: Bio (priority 1, weight based on length)
+    if (hasBio) {
+      const bioWeight = bio!.length > 100 ? 2 : 1;
+      units.push({
+        key: 'bio',
+        type: 'bio',
+        priority: priority++,
+        payload: { text: bio },
+        weight: bioWeight,
+      });
+    }
+
+    // Unit 2: Prompt 1 (priority 2)
+    if (selectedPrompts.length > 0) {
+      const promptWeight = selectedPrompts[0].answer.length > 80 ? 2 : 1;
+      units.push({
+        key: 'prompt1',
+        type: 'prompt',
+        priority: priority++,
+        payload: { prompt: selectedPrompts[0] },
+        weight: promptWeight,
+      });
+    }
+
+    // Unit 3: Basics compact (height/smoking/drinking combined)
+    if (hasBasics) {
+      units.push({
+        key: 'basics_compact',
+        type: 'basics',
+        priority: priority++,
+        payload: { items: lifestyleWithKeys },
+        weight: 1,
+      });
+    }
+
+    // Unit 4: Prompt 2 (priority 4)
+    if (selectedPrompts.length > 1) {
+      const promptWeight = selectedPrompts[1].answer.length > 80 ? 2 : 1;
+      units.push({
+        key: 'prompt2',
+        type: 'prompt',
+        priority: priority++,
+        payload: { prompt: selectedPrompts[1] },
+        weight: promptWeight,
+      });
+    }
+
+    // Unit 5: Interests (priority 5)
+    if (interestChips.length > 0) {
+      units.push({
+        key: 'interests',
+        type: 'interests',
+        priority: priority++,
+        payload: { chips: interestChips },
+        weight: 1,
+      });
+    }
+
+    // Unit 6: Prompt 3 (priority 6, if available)
+    if (selectedPrompts.length > 2) {
+      units.push({
+        key: 'prompt3',
+        type: 'prompt',
+        priority: priority++,
+        payload: { prompt: selectedPrompts[2] },
+        weight: 1,
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TASK 2: PHOTO DISTRIBUTION ENGINE - Wave-based assignment
+    // ═══════════════════════════════════════════════════════════════════════
+    const usedUnitKeys = new Set<string>();
+
+    // Helper: Get next N unused units
+    const getNextUnits = (count: number): DisplayUnit[] => {
+      const result: DisplayUnit[] = [];
+      let totalWeight = 0;
+      for (const unit of units) {
+        if (usedUnitKeys.has(unit.key)) continue;
+        if (result.length >= count) break;
+        // Don't exceed weight of 3 per photo
+        if (totalWeight + unit.weight > 3 && result.length > 0) break;
+        result.push(unit);
+        totalWeight += unit.weight;
+        usedUnitKeys.add(unit.key);
+      }
+      return result;
+    };
+
+    // Helper: Create empty content item
+    const createEmptyContent = (): Phase1PhotoContentItem => ({
+      prompts: [],
+      lifestyle: [],
+      interests: [],
+      commonPoints: [],
+      slotType: 'identity',
+      waveUnits: [],
+      waveDensity: 'low',
+    });
+
+    // Helper: Apply units to content item
+    const applyUnitsToContent = (content: Phase1PhotoContentItem, unitsToApply: DisplayUnit[]) => {
+      for (const unit of unitsToApply) {
+        switch (unit.type) {
+          case 'bio':
+            content.bio = unit.payload.text;
+            break;
+          case 'prompt':
+            content.prompts.push(unit.payload.prompt);
+            break;
+          case 'basics':
+            content.lifestyle = unit.payload.items;
+            break;
+          case 'interests':
+            content.interests = unit.payload.chips;
+            break;
+        }
+      }
+      content.waveUnits = unitsToApply;
+    };
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DISTRIBUTION RULES BY PHOTO COUNT
+    // ═══════════════════════════════════════════════════════════════════════
+
+    if (totalPhotos === 1) {
+      // ─────────────────────────────────────────────────────────────────────
+      // 1 PHOTO: Identity only
+      // ─────────────────────────────────────────────────────────────────────
+      const content = createEmptyContent();
+      content.slotType = 'identity';
+      content.waveDensity = 'low';
+      contents.push(content);
+
+    } else if (totalPhotos === 2) {
+      // ─────────────────────────────────────────────────────────────────────
+      // 2 PHOTOS: P1 = identity+bio, P2 = prompt1+basics
+      // ─────────────────────────────────────────────────────────────────────
+      // Photo 1: Identity + bio (allowed because only 2 photos)
+      const p1 = createEmptyContent();
+      p1.slotType = hasBio ? 'identity_bio' : 'identity';
+      p1.waveDensity = hasBio ? 'medium' : 'low';
+      if (hasBio) {
+        const bioUnit = units.find(u => u.key === 'bio');
+        if (bioUnit) {
+          p1.bio = bioUnit.payload.text;
+          p1.waveUnits = [bioUnit];
+          usedUnitKeys.add('bio');
+        }
+      }
+      contents.push(p1);
+
+      // Photo 2: Remaining units (prompt + basics)
+      const p2 = createEmptyContent();
+      const p2Units = getNextUnits(2);
+      applyUnitsToContent(p2, p2Units);
+      p2.slotType = p2Units.length > 0 ? 'wave_content' : 'identity';
+      p2.waveDensity = p2Units.length >= 2 ? 'medium' : 'low';
+      contents.push(p2);
+
+    } else if (totalPhotos === 3) {
+      // ─────────────────────────────────────────────────────────────────────
+      // 3 PHOTOS: P1 = identity+bio, P2 = prompt1+basics, P3 = remaining
+      // ─────────────────────────────────────────────────────────────────────
+      // Photo 1: Identity + bio
+      const p1 = createEmptyContent();
+      p1.slotType = hasBio ? 'identity_bio' : 'identity';
+      p1.waveDensity = hasBio ? 'medium' : 'low';
+      if (hasBio) {
+        const bioUnit = units.find(u => u.key === 'bio');
+        if (bioUnit) {
+          p1.bio = bioUnit.payload.text;
+          p1.waveUnits = [bioUnit];
+          usedUnitKeys.add('bio');
+        }
+      }
+      contents.push(p1);
+
+      // Photo 2: MEDIUM (prompt1 + basics)
+      const p2 = createEmptyContent();
+      const p2Units = getNextUnits(2);
+      applyUnitsToContent(p2, p2Units);
+      p2.slotType = p2Units.length > 0 ? 'wave_content' : 'identity';
+      p2.waveDensity = 'medium';
+      contents.push(p2);
+
+      // Photo 3: MEDIUM (remaining content)
+      const p3 = createEmptyContent();
+      const p3Units = getNextUnits(2);
+      applyUnitsToContent(p3, p3Units);
+      p3.slotType = p3Units.length > 0 ? 'wave_content' : 'identity';
+      p3.waveDensity = 'medium';
+      contents.push(p3);
+
+    } else if (totalPhotos === 4) {
+      // ─────────────────────────────────────────────────────────────────────
+      // 4 PHOTOS: P1 = identity+bio, P2 = MEDIUM, P3 = MEDIUM, P4 = MEDIUM
+      // ─────────────────────────────────────────────────────────────────────
+      // Photo 1: Identity + bio
+      const p1 = createEmptyContent();
+      p1.slotType = hasBio ? 'identity_bio' : 'identity';
+      p1.waveDensity = hasBio ? 'medium' : 'low';
+      if (hasBio) {
+        const bioUnit = units.find(u => u.key === 'bio');
+        if (bioUnit) {
+          p1.bio = bioUnit.payload.text;
+          p1.waveUnits = [bioUnit];
+          usedUnitKeys.add('bio');
+        }
+      }
+      contents.push(p1);
+
+      // Photos 2-4: Distribute remaining units evenly (MEDIUM density)
+      for (let i = 1; i < 4; i++) {
+        const content = createEmptyContent();
+        const photoUnits = getNextUnits(2);
+        applyUnitsToContent(content, photoUnits);
+        content.slotType = photoUnits.length > 0 ? 'wave_content' : 'identity';
+        content.waveDensity = 'medium';
+        contents.push(content);
+      }
+
+    } else {
+      // ─────────────────────────────────────────────────────────────────────
+      // 5+ PHOTOS: STRICT LOCKED DISTRIBUTION ORDER
+      // Photo 1: identity only (NO bio, NO prompt)
+      // Photo 2: bio only
+      // Photo 3: prompt1 + basics_compact
+      // Photo 4: prompt2 + interests
+      // Photo 5: remaining content (prompt3, etc.)
+      // Photo 6+: continue with remaining unique content
+      // ─────────────────────────────────────────────────────────────────────
+
+      // Helper: Get specific unit by key
+      const getUnitByKey = (key: string): DisplayUnit | undefined => {
+        const unit = units.find(u => u.key === key && !usedUnitKeys.has(u.key));
+        if (unit) usedUnitKeys.add(unit.key);
+        return unit;
+      };
+
+      // Photo 1: Identity only (NO bio, NO prompt)
+      const p1 = createEmptyContent();
+      p1.slotType = 'identity';
+      p1.waveDensity = 'low';
+      contents.push(p1);
+
+      // Photo 2: Bio only
+      const p2 = createEmptyContent();
+      const bioUnit = getUnitByKey('bio');
+      if (bioUnit) {
+        p2.bio = bioUnit.payload.text;
+        p2.waveUnits = [bioUnit];
+        p2.slotType = 'wave_content';
+        p2.waveDensity = 'medium';
+      } else {
+        p2.slotType = 'identity';
+        p2.waveDensity = 'low';
+      }
+      contents.push(p2);
+
+      // Photo 3: prompt1 + basics_compact
+      const p3 = createEmptyContent();
+      const p3Units: DisplayUnit[] = [];
+      const prompt1Unit = getUnitByKey('prompt1');
+      if (prompt1Unit) {
+        p3.prompts.push(prompt1Unit.payload.prompt);
+        p3Units.push(prompt1Unit);
+      }
+      const basicsUnit = getUnitByKey('basics_compact');
+      if (basicsUnit) {
+        p3.lifestyle = basicsUnit.payload.items;
+        p3Units.push(basicsUnit);
+      }
+      p3.waveUnits = p3Units;
+      p3.slotType = p3Units.length > 0 ? 'wave_content' : 'identity';
+      p3.waveDensity = p3Units.length >= 2 ? 'high' : (p3Units.length > 0 ? 'medium' : 'low');
+      contents.push(p3);
+
+      // Photo 4: prompt2 + interests
+      const p4 = createEmptyContent();
+      const p4Units: DisplayUnit[] = [];
+      const prompt2Unit = getUnitByKey('prompt2');
+      if (prompt2Unit) {
+        p4.prompts.push(prompt2Unit.payload.prompt);
+        p4Units.push(prompt2Unit);
+      }
+      const interestsUnit = getUnitByKey('interests');
+      if (interestsUnit) {
+        p4.interests = interestsUnit.payload.chips;
+        p4Units.push(interestsUnit);
+      }
+      p4.waveUnits = p4Units;
+      p4.slotType = p4Units.length > 0 ? 'wave_content' : 'identity';
+      p4.waveDensity = p4Units.length >= 2 ? 'high' : (p4Units.length > 0 ? 'medium' : 'low');
+      contents.push(p4);
+
+      // Photo 5+: Remaining content (prompt3, etc.) - distribute evenly
+      for (let i = 4; i < totalPhotos; i++) {
+        const content = createEmptyContent();
+        const photoUnits = getNextUnits(2); // Get up to 2 remaining units
+        applyUnitsToContent(content, photoUnits);
+        content.waveUnits = photoUnits;
+        content.slotType = photoUnits.length > 0 ? 'wave_content' : 'identity';
+        content.waveDensity = photoUnits.length >= 2 ? 'medium' : (photoUnits.length > 0 ? 'low' : 'low');
+        contents.push(content);
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DEBUG LOGGING: P1_WAVE_UNITS_FULL, P1_WAVE_PLAN_FULL
+    // ═══════════════════════════════════════════════════════════════════════
+    if (__DEV__) {
+      // P1_WAVE_UNITS_FULL: Log available units with source data
+      console.log('[P1_WAVE_UNITS_FULL]', {
+        name,
+        photoCount: totalPhotos,
+        totalUnits: units.length,
+        unitKeys: units.map(u => u.key),
+        rawDataAvailable: {
+          hasBio,
+          promptCount: selectedPrompts.length,
+          hasBasics,
+          hasInterests,
+          lifestyleItems: lifestyleWithKeys.length,
+          interestItems: interestChips.length,
+        },
+      });
+
+      // P1_WAVE_PLAN_FULL: Log distribution plan with slot assignments
+      const plan = contents.map((c, idx) => ({
+        photoIndex: idx,
+        slotType: c.slotType,
+        density: c.waveDensity,
+        assignedUnitKeys: c.waveUnits.map(u => u.key),
+        hasBio: !!c.bio,
+        promptCount: c.prompts.length,
+        lifestyleCount: c.lifestyle.length,
+        interestCount: c.interests.length,
+      }));
+      console.log('[P1_WAVE_PLAN_FULL]', {
+        name,
+        photoCount: totalPhotos,
+        is5Plus: totalPhotos >= 5,
+        plan,
+      });
+    }
+
+    return contents;
+  }, [isPhase2, photos?.length, bio, selectedPrompts, phase1Lifestyle, activities, name]);
+
+  // NOTE: currentPhotoContent is computed after photoIndex state declaration (see below)
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE-2: DATA-AWARE CONTENT QUEUE
@@ -276,6 +1019,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   // Photo count needed for distribution logic
   const photoCount = photos?.length || 0;
+
+  // Get content for current photo (consumption-based, no repetition)
+  // Note: phase1PhotoContents handles all slot distribution - no separate phase1ContentSlot needed
+  const currentPhotoContent = phase1PhotoContents[photoIndex] || {
+    prompts: [],
+    lifestyle: [],
+    interests: [],
+    commonPoints: [],
+    slotType: 'identity' as Phase1ContentSlot, // Use identity as fallback (clean photo)
+  };
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE-2: ADAPTIVE PHOTO-STORY DISTRIBUTION
@@ -528,7 +1281,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         )}
         <View style={styles.gridOverlay}>
           <Text style={styles.gridName} numberOfLines={1}>
-            {name}, {age}
+            {displayName}, {age}
           </Text>
           {isVerified && <Ionicons name="checkmark-circle" size={14} color={COLORS.superLike} />}
         </View>
@@ -567,21 +1320,22 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </View>
         )}
 
-        {/* Premium gradient overlay - top (subtle, for status bar area) */}
+        {/* Premium gradient overlay - top (elegant, subtle vignette) */}
         <LinearGradient
           colors={dark
-            ? ['rgba(0,0,0,0.5)', 'rgba(0,0,0,0.2)', 'transparent']
-            : ['rgba(0,0,0,0.3)', 'transparent']}
+            ? ['rgba(0,0,0,0.45)', 'rgba(0,0,0,0.15)', 'transparent']
+            : ['rgba(0,0,0,0.25)', 'rgba(0,0,0,0.08)', 'transparent']}
+          locations={[0, 0.5, 1]}
           style={styles.topGradient}
           pointerEvents="none"
         />
 
-        {/* Premium gradient overlay - bottom (stronger, for text readability) */}
+        {/* Premium gradient overlay - bottom (smooth, cinematic fade for immersive feel) */}
         <LinearGradient
           colors={dark
-            ? ['transparent', 'rgba(0,0,0,0.4)', 'rgba(0,0,0,0.85)', 'rgba(0,0,0,0.95)']
-            : ['transparent', 'rgba(0,0,0,0.3)', 'rgba(0,0,0,0.7)']}
-          locations={dark ? [0, 0.3, 0.7, 1] : [0, 0.4, 1]}
+            ? ['transparent', 'rgba(0,0,0,0.15)', 'rgba(0,0,0,0.5)', 'rgba(0,0,0,0.85)', 'rgba(0,0,0,0.95)']
+            : ['transparent', 'rgba(0,0,0,0.08)', 'rgba(0,0,0,0.35)', 'rgba(0,0,0,0.65)', 'rgba(0,0,0,0.85)']}
+          locations={dark ? [0, 0.15, 0.4, 0.7, 1] : [0, 0.12, 0.35, 0.6, 1]}
           style={styles.bottomGradient}
           pointerEvents="none"
         />
@@ -652,16 +1406,55 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       {isPhase2 ? (
         <View style={[styles.overlay, styles.overlayDark, styles.phase2Overlay]} pointerEvents="none">
           {/* ═══════════════════════════════════════════════════════════════════════════
-              PREMIUM UX: LOCKED IDENTITY LAYER
-              Name + Age + Badge = always visible, no animation, no layout shift
-              This is the stable anchor that never changes
+              PHASE-2 PARITY: ENHANCED IDENTITY LAYER
+              Name + Age + Gender + Badge = always visible (persistent anchor)
+              Photo-1 only: Presence status + city
               ═══════════════════════════════════════════════════════════════════════════ */}
-          <View style={styles.phase2IdentityRow}>
-            <Text style={styles.phase2Name}>{name}</Text>
-            <Text style={styles.phase2Age}>{age}</Text>
-            {isVerified && (
-              <View style={styles.phase2VerifiedBadge}>
-                <Ionicons name="checkmark" size={10} color={COLORS.white} />
+          <View style={styles.phase2IdentitySection}>
+            {/* LAYER A: PERSISTENT IDENTITY (ALL PHOTOS) - Name + Age + Gender */}
+            <View style={styles.phase2IdentityRow}>
+              <Text style={styles.phase2Name}>{name}</Text>
+              <Text style={styles.phase2Age}>{age}</Text>
+              {/* Gender icon - matches Phase-1 styling */}
+              {gender && GENDER_ICONS[gender] && (
+                <View style={[styles.phase2GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}30` }]}>
+                  <Ionicons
+                    name={GENDER_ICONS[gender].icon as any}
+                    size={12}
+                    color={GENDER_ICONS[gender].color}
+                  />
+                </View>
+              )}
+              {isVerified && (
+                <View style={styles.phase2VerifiedBadge}>
+                  <Ionicons name="checkmark" size={10} color={COLORS.white} />
+                </View>
+              )}
+            </View>
+
+            {/* LAYER B: PHOTO-1-ONLY METADATA - Presence + City */}
+            {photoIndex === 0 && (
+              <View style={styles.phase2MetadataRow}>
+                {/* Online/Active status badges */}
+                {isActiveNow && (
+                  <View style={styles.phase2StatusBadge}>
+                    <View style={styles.phase2OnlineDot} />
+                    <Text style={styles.phase2StatusText}>Online</Text>
+                  </View>
+                )}
+                {isActiveToday && !isActiveNow && (
+                  <View style={styles.phase2StatusBadge}>
+                    <Ionicons name="time-outline" size={10} color="rgba(255,255,255,0.7)" />
+                    <Text style={styles.phase2StatusText}>Active Today</Text>
+                  </View>
+                )}
+                {/* City */}
+                {city && (
+                  <View style={styles.phase2CityBadge}>
+                    <Ionicons name="location-outline" size={10} color="rgba(255,255,255,0.6)" />
+                    <Text style={styles.phase2CityText}>{city}</Text>
+                  </View>
+                )}
               </View>
             )}
           </View>
@@ -814,106 +1607,227 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           )}
         </View>
       ) : (
-        /* PHASE-1: Original overlay (unchanged) */
-        <View style={[styles.overlay, dark && styles.overlayDark]} pointerEvents="none">
-          <View style={[styles.headerRow, dark && styles.headerRowDark]}>
-            <View style={styles.headerContent}>
-              {/* Active Now badge */}
-              {isActiveNow && (
-                <View style={[styles.activeNowBadge, dark && styles.activeNowBadgeDark]}>
-                  <View style={styles.activeNowDot} />
-                  <Text style={styles.activeNowText}>Active now</Text>
-                </View>
-              )}
-              {/* Explore category tag - "Why this profile" */}
-              {exploreTag && !isActiveNow && (
-                <View style={styles.exploreTagContainer}>
-                  <Text style={styles.exploreTagText}>{exploreTag}</Text>
-                </View>
-              )}
-              {/* Name and Age - improved hierarchy */}
-              <View style={styles.nameRow}>
-                <Text style={[styles.name, dark && styles.nameDark]}>{name}</Text>
-                <Text style={[styles.age, dark && styles.ageDark]}>{age}</Text>
-                {isVerified && (
-                  <View style={[styles.verifiedBadge, dark && styles.verifiedBadgeDark]}>
-                    <Ionicons name="checkmark" size={12} color={COLORS.white} />
-                  </View>
-                )}
+        /* PHASE-1: PREMIUM PROGRESSIVE REVEAL OVERLAY */
+        <View style={[styles.overlay, styles.phase1PremiumOverlay]} pointerEvents="none">
+          {/* ═══════════════════════════════════════════════════════════════════════════
+              IDENTITY LAYER - Split into two parts:
+              A) Persistent (ALL photos): name + age + gender icon
+              B) Photo-1-only: badge row + distance row
+              ═══════════════════════════════════════════════════════════════════════════ */}
+          <View style={styles.phase1IdentitySection}>
+            {/* Explore category tag - only when present (Photo 1 only) */}
+            {exploreTag && photoIndex === 0 && (
+              <View style={styles.phase1ExploreTag}>
+                <Text style={styles.phase1ExploreTagText}>{exploreTag}</Text>
               </View>
-              {/* City - Phase-1 only */}
-              {!!city && (
-                <View style={styles.locationRow}>
-                  <Ionicons name="location-outline" size={13} color={'rgba(255,255,255,0.8)'} />
-                  <Text style={styles.city}>{city}</Text>
-                </View>
-              )}
-              {/* Phase-1 only: Looking for + intent chips */}
-              {(lookingForText || intentLabels.length > 0) && (
-                <View style={styles.intentChipRow}>
-                  {lookingForText && (
-                    <View style={styles.intentChip}>
-                      <Text style={styles.intentChipText}>{lookingForText}</Text>
-                    </View>
-                  )}
-                  {intentLabels.map((label, idx) => (
-                    <View key={idx} style={styles.intentChip}>
-                      <Text style={styles.intentChipText}>{label}</Text>
-                    </View>
-                  ))}
-                </View>
-              )}
-              {/* Phase-1 only: Activities/interests chips */}
-              {activityItems.length > 0 && (
-                <View style={styles.activityChipRow}>
-                  {activityItems.map((item, idx) => (
-                    <View key={idx} style={styles.activityChip}>
-                      <Text style={styles.activityChipText}>{item.emoji} {item.label}</Text>
-                    </View>
-                  ))}
+            )}
+
+            {/* ─────────────────────────────────────────────────────────────────────────
+                LAYER A: PERSISTENT IDENTITY (ALL PHOTOS)
+                Name + Age + Gender icon - always visible
+                ───────────────────────────────────────────────────────────────────────── */}
+            <View style={styles.phase1NameRow}>
+              <Text style={styles.phase1Name}>{displayName}</Text>
+              <Text style={styles.phase1Age}>{age}</Text>
+              {/* Gender icon - subtle but visible */}
+              {gender && GENDER_ICONS[gender] && (
+                <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}20` }]}>
+                  <Ionicons
+                    name={GENDER_ICONS[gender].icon as any}
+                    size={14}
+                    color={GENDER_ICONS[gender].color}
+                  />
                 </View>
               )}
             </View>
-            {!!distance && (
-              <Text style={[styles.distance, dark && styles.distanceDark]}>{distance.toFixed(0)} km</Text>
+
+            {/* ─────────────────────────────────────────────────────────────────────────
+                LAYER B: PHOTO-1-ONLY METADATA
+                Badge row + Distance - only visible on first photo
+                ───────────────────────────────────────────────────────────────────────── */}
+            {photoIndex === 0 && (
+              <>
+                {/* Premium Badge Row - Face Verified / Online Now / Active Today */}
+                {(isVerified || isActiveNow || isActiveToday) && (
+                  <View style={styles.phase1BadgeRow}>
+                    {isVerified && (
+                      <View style={styles.phase1BadgePill}>
+                        <Ionicons name="shield-checkmark" size={12} color="#10B981" />
+                        <Text style={styles.phase1BadgeText}>Face Verified</Text>
+                      </View>
+                    )}
+                    {isActiveNow && (
+                      <View style={[styles.phase1BadgePill, styles.phase1BadgePillOnline]}>
+                        <View style={styles.phase1OnlineDot} />
+                        <Text style={[styles.phase1BadgeText, styles.phase1BadgeTextOnline]}>Online Now</Text>
+                      </View>
+                    )}
+                    {isActiveToday && !isActiveNow && (
+                      <View style={styles.phase1BadgePill}>
+                        <Ionicons name="time-outline" size={12} color="rgba(255,255,255,0.7)" />
+                        <Text style={styles.phase1BadgeText}>Active Today</Text>
+                      </View>
+                    )}
+                  </View>
+                )}
+
+                {/* Distance row */}
+                {!!distance && (
+                  <View style={styles.phase1DistanceRow}>
+                    <Ionicons name="location-outline" size={14} color="rgba(255,255,255,0.8)" />
+                    <Text style={styles.phase1IdentityDistanceText}>{distance.toFixed(0)} km away</Text>
+                  </View>
+                )}
+
+                {/* ─────────────────────────────────────────────────────────────────────────
+                    LAYER C: PHOTO-1 COMPACT PREVIEW
+                    Only for 2-4 photo profiles - shows prompt teaser
+                    5+ PHOTOS: NO prompt, NO bio on Photo 1 - identity only
+                    [P1_IDENTITY_GUARD] blocks prompt/bio for 5+ photos
+                    ───────────────────────────────────────────────────────────────────────── */}
+                {photoCount < 5 && phase1BestPrompt && (
+                  <View style={styles.phase1CompactPreview}>
+                    <Text style={styles.phase1CompactBioText} numberOfLines={1}>
+                      {phase1BestPrompt.answer?.trim()}
+                    </Text>
+                  </View>
+                )}
+                {/* [P1_IDENTITY_GUARD] Log when blocking prompt for 5+ photos */}
+                {__DEV__ && photoCount >= 5 && phase1BestPrompt && (() => {
+                  console.log('[P1_IDENTITY_GUARD]', {
+                    photoCount,
+                    photoIndex: 0,
+                    action: 'BLOCKED_PROMPT_ON_PHOTO_1',
+                    reason: '5+ photos require identity-only Photo 1',
+                  });
+                  return null;
+                })()}
+              </>
             )}
           </View>
 
-          {/* Trust badges - Phase-1 only */}
-          {trustBadges && trustBadges.length > 0 && (
-            <View style={styles.trustBadgeRow}>
-              {trustBadges.slice(0, 3).map((badge) => (
-                <View key={badge.key} style={[styles.trustBadgeCompact, { backgroundColor: badge.color + '30' }]}>
-                  <Ionicons name={badge.icon as any} size={11} color={COLORS.white} />
-                  <Text style={styles.trustBadgeLabel}>{badge.label}</Text>
-                </View>
-              ))}
-              {trustBadges.length > 3 && (
-                <View style={[styles.trustBadgeCompact, { backgroundColor: COLORS.textMuted + '30' }]}>
-                  <Text style={styles.trustBadgeLabel}>+{trustBadges.length - 3}</Text>
+          {/* ═══════════════════════════════════════════════════════════════════════════
+              PHASE-1 UX FLOW: PROGRESSIVE ENGAGING REVEAL
+              Priority: identity > bestPrompt > bio > intent > secondPrompt > lifestyle > interests
+              - Photo 1: identity (always)
+              - Photo 2: bestPrompt (personality hook - CRITICAL)
+              - Photo 3: intent
+              - Photo 4: secondPrompt OR bio
+              - Photo 5: lifestyle
+              - Photo 6+: reinforcement cycling (no empty slides!)
+              ═══════════════════════════════════════════════════════════════════════════ */}
+
+          {/* ═══════════════════════════════════════════════════════════════════════════
+              WAVE DISTRIBUTION RENDERING
+              Slot types: identity, identity_bio, wave_content
+              Each photo shows balanced content without repetition
+              BIO RENDER RULE: Bio ONLY renders from currentPhotoContent.bio (never direct bio prop)
+              ═══════════════════════════════════════════════════════════════════════════ */}
+
+          {/* [P1_BIO_RENDER] Debug: Track bio render location */}
+          {__DEV__ && currentPhotoContent.bio && (() => {
+            console.log('[P1_BIO_RENDER]', {
+              photoIndex,
+              slotType: currentPhotoContent.slotType,
+              hasBio: !!currentPhotoContent.bio,
+              bioPreview: currentPhotoContent.bio?.slice(0, 30),
+              renderLocation: currentPhotoContent.slotType === 'identity_bio' ? 'identity_bio_slot' : 'wave_content_slot',
+            });
+            return null;
+          })()}
+
+          {/* IDENTITY + BIO SLOT (for 2-4 photo profiles) */}
+          {currentPhotoContent.slotType === 'identity_bio' && currentPhotoContent.bio && (
+            <Animated.View
+              key={`p1-identity-bio-${photoIndex}`}
+              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(180)}
+              exiting={FadeOut.duration(150)}
+              style={styles.phase1RevealSection}
+            >
+              <View style={styles.phase1BioCard}>
+                <Text style={styles.phase1BioText} numberOfLines={3}>
+                  {currentPhotoContent.bio}
+                </Text>
+              </View>
+            </Animated.View>
+          )}
+
+          {/* WAVE CONTENT SLOT (dynamic rendering based on distributed units) */}
+          {currentPhotoContent.slotType === 'wave_content' && (
+            <Animated.View
+              key={`p1-wave-${photoIndex}`}
+              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(180)}
+              exiting={FadeOut.duration(150)}
+              style={styles.phase1RevealSection}
+            >
+              {/* Bio unit */}
+              {currentPhotoContent.bio && (
+                <View style={styles.phase1BioCard}>
+                  <Text style={styles.phase1BioText} numberOfLines={3}>
+                    {currentPhotoContent.bio}
+                  </Text>
                 </View>
               )}
-            </View>
+
+              {/* Prompt units (render each prompt in sequence) */}
+              {currentPhotoContent.prompts.map((prompt, idx) => (
+                <View
+                  key={`prompt-${idx}-${prompt.id}`}
+                  style={[styles.phase1PromptCard, { marginTop: (currentPhotoContent.bio || idx > 0) ? 12 : 0 }]}
+                >
+                  <Text style={styles.phase1PromptQuestion} numberOfLines={1}>
+                    {prompt.shortLabel}
+                  </Text>
+                  <Text style={styles.phase1PromptAnswer} numberOfLines={2}>
+                    {prompt.answer}
+                  </Text>
+                </View>
+              ))}
+
+              {/* Basics/Lifestyle chips */}
+              {currentPhotoContent.lifestyle.length > 0 && (
+                <View style={[
+                  styles.phase1LifestyleRow,
+                  { marginTop: (currentPhotoContent.bio || currentPhotoContent.prompts.length > 0) ? 12 : 0 }
+                ]}>
+                  {currentPhotoContent.lifestyle.map((item) => (
+                    <View key={item.key} style={styles.phase1LifestyleChip}>
+                      <Ionicons name={item.icon as any} size={14} color="rgba(255,255,255,0.8)" />
+                      <Text style={styles.phase1LifestyleChipText}>{item.label}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {/* Interest chips */}
+              {currentPhotoContent.interests.length > 0 && (
+                <View style={[
+                  styles.phase1InterestsRow,
+                  { marginTop: (currentPhotoContent.bio || currentPhotoContent.prompts.length > 0 || currentPhotoContent.lifestyle.length > 0) ? 10 : 0 }
+                ]}>
+                  {currentPhotoContent.interests.map((item) => (
+                    <View key={item.key} style={styles.phase1InterestChip}>
+                      <Text style={styles.phase1InterestText}>{item.emoji} {item.label}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {/* Fallback if no content (shouldn't happen with wave distribution) */}
+              {!currentPhotoContent.bio &&
+               currentPhotoContent.prompts.length === 0 &&
+               currentPhotoContent.lifestyle.length === 0 &&
+               currentPhotoContent.interests.length === 0 && (
+                <View style={styles.phase1ViewProfileCue}>
+                  <Ionicons name="chevron-up" size={18} color="rgba(255,255,255,0.7)" />
+                  <Text style={styles.phase1ViewProfileText}>View full profile</Text>
+                </View>
+              )}
+            </Animated.View>
           )}
 
-          {/* Bio - Phase-1 only */}
-          {showCarousel && bio && (
-            <Text style={[styles.bio]} numberOfLines={2}>
-              {bio}
-            </Text>
-          )}
-
-          {/* Profile prompt - Phase-1 */}
-          {profilePrompt && (
-            <View style={[styles.promptCard, dark && styles.promptCardDark]}>
-              <Text style={[styles.promptQuestion, dark && styles.promptQuestionDark]} numberOfLines={1}>
-                {profilePrompt.question}
-              </Text>
-              <Text style={[styles.promptAnswer, dark && styles.promptAnswerDark]} numberOfLines={2}>
-                {profilePrompt.answer}
-              </Text>
-            </View>
-          )}
+          {/* NOTE: Old slot types (bio, prompt, lifestyle, prompt_lifestyle) replaced by wave_content */}
+          {/* NOTE: Photos with slotType='identity' show no overlay content - just the photo */}
         </View>
       )}
     </View>
@@ -937,13 +1851,13 @@ const styles = StyleSheet.create({
   image: {
     ...StyleSheet.absoluteFillObject,
   },
-  // Premium gradient overlays
+  // Premium gradient overlays - REDESIGNED for immersive full-photo feel
   topGradient: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
-    height: 100,
+    height: 120,
     zIndex: 2,
   },
   bottomGradient: {
@@ -951,7 +1865,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    height: '55%',
+    height: '65%', // Extended for more content coverage
     zIndex: 2,
   },
   photoPlaceholder: {
@@ -1002,74 +1916,72 @@ const styles = StyleSheet.create({
     width: '33%',
     zIndex: 5,
   },
-  // Photo progress bars (Tinder-style)
+  // Photo progress bars - REDESIGNED: more elegant, minimal
   barsRow: {
     position: 'absolute',
-    top: 10,
-    left: 12,
-    right: 12,
+    top: 14,
+    left: 14,
+    right: 14,
     flexDirection: 'row',
     gap: 4,
     zIndex: 10,
   },
   barsRowDark: {
-    top: 12,
+    top: 16,
     left: 16,
     right: 16,
   },
   bar: {
     flex: 1,
-    height: 3,
+    height: 2.5,
     borderRadius: 1.5,
     backgroundColor: 'rgba(255,255,255,0.35)',
   },
   barDark: {
-    height: 2.5,
+    height: 2,
     backgroundColor: 'rgba(255,255,255,0.25)',
   },
   barActive: {
     backgroundColor: COLORS.white,
   },
   barActiveDark: {
-    backgroundColor: 'rgba(255,255,255,0.95)',
+    backgroundColor: 'rgba(255,255,255,0.9)',
   },
-  // Arrow button (opens full profile)
+  // Arrow button (opens full profile) - REDESIGNED: smaller, more integrated
   // NOTE: `bottom` is computed dynamically via arrowButtonBottom for device responsiveness
   arrowBtn: {
     position: 'absolute',
-    right: 12,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    right: 14,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.35)',
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 15,
   },
   arrowBtnDark: {
     right: 16,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.15)',
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
-  // Info overlay — now transparent (gradient handles background)
+  // Info overlay - REDESIGNED: transparent, relies on gradient for readability
   overlay: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    paddingTop: 32,
+    paddingTop: 20,
     paddingHorizontal: 16,
-    paddingBottom: 16,
+    paddingBottom: 12, // Reduced to sit closer to action buttons
     backgroundColor: 'transparent',
     zIndex: 3,
   },
   overlayDark: {
-    paddingHorizontal: 20,
-    paddingBottom: 20,
+    paddingHorizontal: 18,
+    paddingBottom: 14,
   },
   headerRow: {
     flexDirection: 'row',
@@ -1473,6 +2385,62 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // PHASE2_PARITY: Identity section wrapper
+  phase2IdentitySection: {
+    marginBottom: 4,
+  },
+  // PHASE2_PARITY: Gender icon (matches Phase-1)
+  phase2GenderIcon: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 4,
+    marginRight: 4,
+  },
+  // PHASE2_PARITY: Metadata row (presence + city)
+  phase2MetadataRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  // PHASE2_PARITY: Status badge (Online/Active Today)
+  phase2StatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  // PHASE2_PARITY: Online dot (green indicator)
+  phase2OnlineDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#4ade80',
+  },
+  // PHASE2_PARITY: Status text
+  phase2StatusText: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.8)',
+  },
+  // PHASE2_PARITY: City badge
+  phase2CityBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  // PHASE2_PARITY: City text
+  phase2CityText: {
+    fontSize: 11,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.6)',
+  },
   phase2RevealSection: {
     marginTop: 4,
   },
@@ -1576,5 +2544,726 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.85)',
     lineHeight: 20,
     fontStyle: 'italic',
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1: PREMIUM IMMERSIVE OVERLAY STYLES
+  // Full-photo experience with elegant text hierarchy - no boxed elements
+  // ═══════════════════════════════════════════════════════════════════════════
+  phase1PremiumOverlay: {
+    paddingHorizontal: 18,
+    paddingBottom: 14, // Reduced to integrate with button area
+    paddingTop: 20,
+  },
+  phase1IdentitySection: {
+    marginBottom: 2,
+  },
+  // Active Now badge (legacy - kept for compatibility)
+  phase1ActiveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    alignSelf: 'flex-start',
+    marginBottom: 6,
+    gap: 5,
+  },
+  phase1ActiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#10B981',
+  },
+  phase1ActiveText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#10B981',
+  },
+  // Explore tag - subtle, elegant
+  phase1ExploreTag: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 10,
+    alignSelf: 'flex-start',
+    marginBottom: 6,
+  },
+  phase1ExploreTagText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.9)',
+    letterSpacing: 0.3,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Name + Age row - Premium typography, larger and bolder
+  phase1NameRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    marginBottom: 4,
+  },
+  phase1Name: {
+    fontSize: 34,
+    fontWeight: '700',
+    color: COLORS.white,
+    marginRight: 8,
+    letterSpacing: -0.8,
+    // Strong shadow for readability on any photo
+    textShadowColor: 'rgba(0,0,0,0.9)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 10,
+  },
+  phase1Age: {
+    fontSize: 30,
+    fontWeight: '300',
+    color: 'rgba(255,255,255,0.95)',
+    marginRight: 8,
+    textShadowColor: 'rgba(0,0,0,0.9)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 10,
+  },
+  phase1VerifiedBadge: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Gender icon badge - subtle, integrated
+  phase1GenderIcon: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 4,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  // Premium Badge Row - Minimal, elegant pills
+  phase1BadgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 6,
+  },
+  phase1BadgePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+  },
+  phase1BadgePillOnline: {
+    backgroundColor: 'rgba(16, 185, 129, 0.25)',
+  },
+  phase1OnlineDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#10B981',
+  },
+  phase1BadgeText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.9)',
+    letterSpacing: 0.2,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1BadgeTextOnline: {
+    color: '#34D399',
+  },
+  // Distance row - clean inline text
+  phase1DistanceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  phase1IdentityDistanceText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.8)',
+    letterSpacing: 0.2,
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  // Compact Preview - Photo 1 personality snapshot
+  phase1CompactPreview: {
+    marginTop: 8,
+    gap: 6,
+  },
+  // NOTE: phase1CompactBioText is defined below (line ~3195) to avoid duplication
+  phase1CompactLookingFor: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.75)',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  phase1CompactInterests: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginTop: 2,
+  },
+  phase1CompactInterestChip: {
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  phase1CompactInterestText: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.85)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Legacy location row (for fallback)
+  phase1LocationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  phase1LocationText: {
+    fontSize: 13,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.7)',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  // Common points row (Photo 1 hook) - LEGACY, not used in new design
+  phase1CommonPointsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  phase1CommonPointChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+  },
+  phase1CommonPointText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.9)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Common points row - ⭐ format for shared interests/intent
+  phase1CommonRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  phase1CommonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.95)',
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  // Content reveal section - tighter spacing for immersive feel
+  phase1RevealSection: {
+    marginTop: 12,
+  },
+  // Intent display - NO box, just elegant inline text with icon
+  phase1IntentCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 6,
+    // NO background, NO border - text only
+  },
+  phase1IntentText: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.95)',
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  // Common Points Card - REDESIGNED as elegant list, no box
+  phase1CommonPointsCard: {
+    // NO background, NO border - pure text hierarchy
+  },
+  phase1CommonPointsLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.6)',
+    marginBottom: 8,
+    textTransform: 'uppercase' as const,
+    letterSpacing: 1,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1CommonPointsList: {
+    gap: 8,
+  },
+  phase1CommonPointItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  phase1CommonPointItemText: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.95)',
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  // Distance card - LEGACY (not used, replaced by inline distance row)
+  phase1DistanceCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+  },
+  phase1DistanceText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.85)',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  // Bio section - REDESIGNED: elegant text, no box
+  phase1BioCard: {
+    // NO background, NO border - pure typography
+    maxHeight: 90,
+  },
+  phase1BioLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.55)',
+    marginBottom: 4,
+    textTransform: 'uppercase' as const,
+    letterSpacing: 1,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1BioText: {
+    fontSize: 15,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.95)',
+    lineHeight: 21,
+    fontStyle: 'italic',
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  // Lifestyle row - REDESIGNED: subtle inline items, no heavy chips
+  phase1LifestyleRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    alignItems: 'center',
+  },
+  phase1LifestyleChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    // NO background - inline text with icon
+  },
+  phase1LifestyleChipText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.9)',
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  // Smaller lifestyle chips for compact view
+  phase1LifestyleChipSmall: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    // NO background
+  },
+  phase1LifestyleChipTextSmall: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.85)',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Compact bio for 2-photo profiles - REDESIGNED: no box
+  phase1CompactBio: {
+    // NO background, NO border
+    maxHeight: 50,
+  },
+  phase1CompactBioText: {
+    fontSize: 13,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.9)',
+    lineHeight: 18,
+    fontStyle: 'italic',
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  // Small intent for compact view - NO box
+  phase1IntentCardSmall: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+    // NO background, NO border
+  },
+  phase1IntentTextSmall: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.9)',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Small interests row for compact view - subtle inline
+  phase1InterestsRowSmall: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  phase1InterestChipSmall: {
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  phase1InterestTextSmall: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.9)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1InterestOverflowSmall: {
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  phase1InterestOverflowTextSmall: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.6)',
+  },
+  // ═══════════════════════════════════════════════════════════════════════════
+  // COMPACT MODE STYLES (≤4 photos) - Natural, flowing, human feel
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Bio + Intent flowing content (no boxes, natural text)
+  phase1FlowingContent: {
+    // Natural text flow, no visual separation
+  },
+  phase1FlowingBio: {
+    fontSize: 14,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.95)',
+    lineHeight: 20,
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  phase1FlowingIntent: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.8)',
+    fontStyle: 'italic',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+
+  // Unified attributes row (max 2+2 items)
+  phase1AttributesRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  phase1AttributeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    gap: 5,
+  },
+  phase1AttributeText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.9)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+
+  // Prompt as THE moment - conversation starter, emphasized
+  phase1PromptMoment: {
+    // More breathing room for emphasis
+    paddingVertical: 4,
+  },
+  phase1PromptQuestionMoment: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.5)',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1PromptAnswerMoment: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.98)',
+    lineHeight: 22,
+    fontStyle: 'italic',
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+
+  // Subtle highlights - minimal, inline text
+  phase1HighlightsRowSubtle: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  phase1HighlightTextSubtle: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,235,180,0.85)',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+
+  // Legacy compact styles (kept for backward compatibility)
+  phase1IntentCardCompact: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  phase1IntentTextCompact: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.95)',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1LifestyleChipCompact: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 10,
+    gap: 5,
+  },
+  phase1LifestyleChipTextCompact: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.9)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1InterestsRowCompact: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    maxHeight: 60,
+    overflow: 'hidden',
+  },
+  phase1InterestChipCompact: {
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 10,
+  },
+  phase1InterestTextCompact: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.9)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1InterestOverflowCompact: {
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    paddingHorizontal: 7,
+    paddingVertical: 5,
+    borderRadius: 10,
+  },
+  phase1InterestOverflowTextCompact: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.6)',
+  },
+  phase1PromptCardCompact: {
+    maxHeight: 80,
+  },
+  phase1PromptQuestionCompact: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.55)',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1PromptAnswerCompact: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.95)',
+    lineHeight: 19,
+    fontStyle: 'italic',
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  phase1HighlightsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  phase1HighlightChip: {
+    backgroundColor: 'rgba(255,215,0,0.15)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,215,0,0.3)',
+  },
+  phase1HighlightText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,235,150,0.95)',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Empty slot - REDESIGNED: minimal, no dashed border
+  phase1EmptySlot: {
+    paddingVertical: 8,
+  },
+  phase1EmptyText: {
+    fontSize: 13,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.35)',
+    fontStyle: 'italic',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Interests row - REDESIGNED: subtle minimal chips
+  phase1InterestsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    maxHeight: 70,
+    overflow: 'hidden',
+  },
+  phase1InterestChip: {
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  phase1InterestText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.95)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Overflow indicator for interests - subtle
+  phase1InterestOverflow: {
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  phase1InterestOverflowText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.6)',
+  },
+  // Prompt section - REDESIGNED: elegant typography, no box
+  phase1PromptCard: {
+    // NO background, NO border - pure text hierarchy
+    maxHeight: 90,
+  },
+  phase1PromptQuestion: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.55)',
+    marginBottom: 4,
+    textTransform: 'uppercase' as const,
+    letterSpacing: 1,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1PromptAnswer: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.95)',
+    lineHeight: 21,
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  // View profile cue - REDESIGNED: subtle, minimal
+  phase1ViewProfileCue: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    // NO background - just subtle text
+  },
+  phase1ViewProfileText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.6)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
 });
