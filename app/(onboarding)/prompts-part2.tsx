@@ -102,6 +102,19 @@ export default function PromptsPart2Screen() {
     // Priority: currentUser.profilePrompts > onboardingStore.profilePrompts
     const existingPrompts = (currentUser as any)?.profilePrompts ?? profilePrompts ?? [];
 
+    if (__DEV__) {
+      console.log('[PROMPTS_HYDRATE] Source: currentUser.profilePrompts =', (currentUser as any)?.profilePrompts?.length ?? 'null');
+      console.log('[PROMPTS_HYDRATE] Source: onboardingStore.profilePrompts =', profilePrompts?.length ?? 'null');
+      console.log('[PROMPTS_HYDRATE] Using existingPrompts count =', existingPrompts.length);
+      existingPrompts.forEach((p: any, i: number) => {
+        console.log(`[PROMPTS_HYDRATE] Prompt[${i}]:`, {
+          section: p.section ?? 'NONE',
+          question: p.question?.substring(0, 40) + '...',
+          answerLen: p.answer?.length ?? 0,
+        });
+      });
+    }
+
     if (existingPrompts.length > 0) {
       // Reconstruct sectionAnswers from stored prompts
       const newSectionAnswers: Record<SectionKey, SectionPromptEntry | null> = {
@@ -112,9 +125,10 @@ export default function PromptsPart2Screen() {
       };
 
       // Try to match prompts to sections by question text
-      existingPrompts.forEach((prompt: { question: string; answer: string; section?: SectionKey }) => {
+      existingPrompts.forEach((prompt: { question: string; answer: string; section?: SectionKey }, idx: number) => {
         // If prompt has section field, use it directly
         if (prompt.section && SECTIONS.find(s => s.key === prompt.section)) {
+          if (__DEV__) console.log(`[PROMPTS_HYDRATE] Prompt[${idx}] matched by SECTION field:`, prompt.section);
           newSectionAnswers[prompt.section] = {
             section: prompt.section,
             question: prompt.question,
@@ -124,24 +138,35 @@ export default function PromptsPart2Screen() {
         }
 
         // Otherwise, try to find the section by matching question text
+        let matched = false;
         for (const section of SECTIONS) {
           const matchingQuestion = section.questions.find(q => q.text === prompt.question);
           if (matchingQuestion && !newSectionAnswers[section.key]) {
+            if (__DEV__) console.log(`[PROMPTS_HYDRATE] Prompt[${idx}] matched by QUESTION TEXT to section:`, section.key);
             newSectionAnswers[section.key] = {
               section: section.key,
               question: prompt.question,
               answer: prompt.answer,
             };
+            matched = true;
             break;
           }
+        }
+        if (!matched && __DEV__) {
+          console.log(`[PROMPTS_HYDRATE] Prompt[${idx}] UNMATCHED! Question:`, prompt.question);
         }
       });
 
       setSectionAnswers(newSectionAnswers);
       if (__DEV__) {
         const filledCount = Object.values(newSectionAnswers).filter(Boolean).length;
-        console.log('[PROMPTS_PART2] Initialized with', filledCount, 'section prompts');
+        console.log('[PROMPTS_HYDRATE] Result: filledSections =', filledCount, '/', TOTAL_SECTIONS);
+        Object.entries(newSectionAnswers).forEach(([key, val]) => {
+          console.log(`[PROMPTS_HYDRATE] Section[${key}]:`, val ? 'FILLED' : 'EMPTY');
+        });
       }
+    } else if (__DEV__) {
+      console.log('[PROMPTS_HYDRATE] No existing prompts to hydrate');
     }
   }, [currentUser]);
 
@@ -202,6 +227,22 @@ export default function PromptsPart2Screen() {
   // Validation: all 4 sections must have valid prompts
   const canContinue = filledSections === TOTAL_SECTIONS;
 
+  // Debug: Log validation state when sectionAnswers changes
+  useEffect(() => {
+    if (__DEV__) {
+      console.log('[PROMPTS_VALIDATE] filledSections =', filledSections, '/', TOTAL_SECTIONS, 'canContinue =', canContinue);
+      Object.entries(sectionAnswers).forEach(([key, val]) => {
+        if (val) {
+          const answerLen = val.answer?.length ?? 0;
+          const isValid = isAnswerValid(val.answer);
+          console.log(`[PROMPTS_VALIDATE] ${key}: len=${answerLen}, valid=${isValid}, question="${val.question.substring(0, 30)}..."`);
+        } else {
+          console.log(`[PROMPTS_VALIDATE] ${key}: EMPTY`);
+        }
+      });
+    }
+  }, [sectionAnswers, filledSections, canContinue]);
+
   // Select a question in a section (replaces any existing selection in that section)
   const selectQuestion = useCallback((sectionKey: SectionKey, questionText: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -238,6 +279,16 @@ export default function PromptsPart2Screen() {
     if (!canContinue || isSubmitting) return;
     setIsSubmitting(true);
 
+    if (__DEV__) {
+      console.log('[PROMPTS_SAVE] handleContinue called');
+      console.log('[PROMPTS_SAVE] Current sectionAnswers:', Object.entries(sectionAnswers).map(([k, v]) => ({
+        section: k,
+        hasEntry: !!v,
+        answerLen: v?.answer?.length ?? 0,
+        isValid: v ? isAnswerValid(v.answer) : false,
+      })));
+    }
+
     // Convert sectionAnswers to array format for storage
     const validPrompts = Object.values(sectionAnswers)
       .filter((entry): entry is SectionPromptEntry => entry !== null && isAnswerValid(entry.answer))
@@ -247,23 +298,43 @@ export default function PromptsPart2Screen() {
         answer: entry.answer.trim().slice(0, PROMPT_ANSWER_MAX_LENGTH),
       }));
 
-    // Save to local store (without section for backward compatibility with display)
+    if (__DEV__) {
+      console.log('[PROMPTS_SAVE] validPrompts count:', validPrompts.length);
+      validPrompts.forEach((p, i) => {
+        console.log(`[PROMPTS_SAVE] validPrompt[${i}]:`, {
+          section: p.section,
+          question: p.question.substring(0, 40) + '...',
+          answerLen: p.answer.length,
+        });
+      });
+    }
+
+    // BUGFIX: Include section field for reliable hydration
+    // This ensures prompts can be correctly matched to sections when re-loading
     const storagePrompts = validPrompts.map((p) => ({
+      section: p.section,
       question: p.question,
       answer: p.answer,
     }));
     setProfilePrompts(storagePrompts);
 
+    if (__DEV__) {
+      console.log('[PROMPTS_SAVE] storagePrompts (with section):', storagePrompts.length);
+    }
+
     // LIVE MODE: Save directly to user.profilePrompts
     if (!isDemoMode && token) {
       try {
+        if (__DEV__) console.log('[PROMPTS_SAVE] Calling updateProfilePrompts mutation...');
         await updateProfilePrompts({ token, prompts: storagePrompts });
         if (__DEV__) {
-          console.log('[PROMPTS_PART2] Saved', validPrompts.length, 'prompts to user.profilePrompts');
+          console.log('[PROMPTS_SAVE] SUCCESS: Saved', validPrompts.length, 'prompts to user.profilePrompts');
         }
       } catch (error) {
-        if (__DEV__) console.error('[PROMPTS_PART2] Failed to save prompts:', error);
+        if (__DEV__) console.error('[PROMPTS_SAVE] FAILED:', error);
       }
+    } else if (__DEV__) {
+      console.log('[PROMPTS_SAVE] Skipped mutation: isDemoMode=', isDemoMode, 'token=', !!token);
     }
 
     // Navigate

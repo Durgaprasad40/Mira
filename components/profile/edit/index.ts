@@ -13,3 +13,4 @@ export { DetailsSection } from './DetailsSection';
 export { LifestyleSection } from './LifestyleSection';
 export { LifeRhythmSection } from './LifeRhythmSection';
 export { EducationReligionSection } from './EducationReligionSection';
+export { InterestsSection } from './InterestsSection';

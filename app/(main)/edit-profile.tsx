@@ -49,6 +49,7 @@ import {
   TravelStyleValue,
   WorkStyleValue,
   CoreValueValue,
+  ActivityFilter,
 } from '@/lib/constants';
 
 // Section-based prompt types
@@ -85,6 +86,7 @@ import {
   LifestyleSection,
   LifeRhythmSection,
   EducationReligionSection,
+  InterestsSection,
 } from '@/components/profile/edit';
 
 const GRID_SIZE = 9;
@@ -104,6 +106,13 @@ export default function EditProfileScreen() {
 
   // MIGRATION: Track if sectionPrompts → profilePrompts migration has been attempted
   const hasMigratedPromptsRef = useRef(false);
+
+  // SURGICAL FIX: Hydration + dirty guards to prevent accidental data wipe
+  // These refs track whether data has been loaded from backend and whether user edited it
+  const interestsHydratedRef = useRef(false);  // true once interests loaded from Convex
+  const interestsDirtyRef = useRef(false);      // true if user explicitly changed interests
+  const promptsHydratedRef = useRef(false);     // true once prompts loaded from Convex
+  const promptsDirtyRef = useRef(false);        // true if user explicitly changed prompts
 
   // PERF: Track photo grid load time
   const gridRenderTimeRef = useRef(0);
@@ -190,8 +199,11 @@ export default function EditProfileScreen() {
   const [coreValues, setCoreValues] = useState<CoreValueValue[]>([]);
 
   // Review-style UI: Track which section is expanded for inline editing
-  type ExpandableSection = 'prompts' | 'basicInfo' | 'lifestyle' | 'lifeRhythm' | 'educationReligion' | null;
+  type ExpandableSection = 'prompts' | 'basicInfo' | 'lifestyle' | 'lifeRhythm' | 'educationReligion' | 'interests' | null;
   const [expandedSection, setExpandedSection] = useState<ExpandableSection>(null);
+
+  // Interests/Activities state (max 5)
+  const [activities, setActivities] = useState<ActivityFilter[]>([]);
 
   // Helper: Get label from options array by value
   const getOptionLabel = useCallback((
@@ -236,6 +248,22 @@ export default function EditProfileScreen() {
     });
   }, []);
 
+  // Helper: Toggle activity/interest selection (max 5)
+  const toggleActivity = useCallback((activity: ActivityFilter) => {
+    // SURGICAL FIX: Mark interests as dirty when user explicitly changes them
+    interestsDirtyRef.current = true;
+    setActivities((prev) => {
+      if (prev.includes(activity)) {
+        return prev.filter((a) => a !== activity);
+      }
+      if (prev.length >= 5) {
+        Alert.alert('Limit Reached', 'You can select up to 5 interests.');
+        return prev;
+      }
+      return [...prev, activity];
+    });
+  }, []);
+
   // Photo state for 9-slot grid (SLOT-BASED: index = slot number)
   const [photoSlots, setPhotoSlots] = useState<PhotoSlots9>(createEmptyPhotoSlots());
   const [failedSlots, setFailedSlots] = useState<Set<number>>(new Set());
@@ -258,6 +286,18 @@ export default function EditProfileScreen() {
 
       // Load prompts into section-based format
       const existingPrompts = (currentUser as any)?.profilePrompts ?? [];
+
+      if (__DEV__) {
+        console.log('[PROFILE_PROMPTS_HYDRATE] Raw existingPrompts from backend:', existingPrompts.length);
+        existingPrompts.forEach((p: any, i: number) => {
+          console.log(`[PROFILE_PROMPTS_HYDRATE] Raw[${i}]:`, {
+            section: p.section ?? 'NONE',
+            question: p.question?.substring(0, 40) + '...',
+            answerLen: p.answer?.length ?? 0,
+          });
+        });
+      }
+
       const newSectionAnswers: Record<SectionKey, SectionPromptEntry | null> = {
         builder: null,
         performer: null,
@@ -266,9 +306,10 @@ export default function EditProfileScreen() {
       };
 
       // Reconstruct section answers from existing prompts by matching question text
-      existingPrompts.forEach((prompt: { question: string; answer: string; section?: SectionKey }) => {
+      existingPrompts.forEach((prompt: { question: string; answer: string; section?: SectionKey }, idx: number) => {
         // If prompt has section field, use it directly
         if (prompt.section && PROMPT_SECTIONS.find(s => s.key === prompt.section)) {
+          if (__DEV__) console.log(`[PROFILE_PROMPTS_HYDRATE] Prompt[${idx}] matched by SECTION field:`, prompt.section);
           newSectionAnswers[prompt.section] = {
             section: prompt.section,
             question: prompt.question,
@@ -278,24 +319,36 @@ export default function EditProfileScreen() {
         }
 
         // Otherwise, find the section by matching question text
+        let matched = false;
         for (const section of PROMPT_SECTIONS) {
           const matchingQuestion = section.questions.find(q => q.text === prompt.question);
           if (matchingQuestion && !newSectionAnswers[section.key]) {
+            if (__DEV__) console.log(`[PROFILE_PROMPTS_HYDRATE] Prompt[${idx}] matched by QUESTION TEXT to section:`, section.key);
             newSectionAnswers[section.key] = {
               section: section.key,
               question: prompt.question,
               answer: prompt.answer,
             };
+            matched = true;
             break;
           }
+        }
+        if (!matched && __DEV__) {
+          console.log(`[PROFILE_PROMPTS_HYDRATE] Prompt[${idx}] UNMATCHED! Question:`, prompt.question);
         }
       });
 
       setSectionAnswers(newSectionAnswers);
+      // SURGICAL FIX: Mark prompts as hydrated from backend
+      promptsHydratedRef.current = true;
+      promptsDirtyRef.current = false; // Reset dirty flag on hydration
 
       if (__DEV__) {
         const filledCount = Object.values(newSectionAnswers).filter(Boolean).length;
-        console.log('[EditProfile] Loaded section prompts:', filledCount);
+        console.log('[PROFILE_PROMPTS_HYDRATE] Result: filledSections =', filledCount, '/', TOTAL_SECTIONS);
+        Object.entries(newSectionAnswers).forEach(([key, val]) => {
+          console.log(`[PROFILE_PROMPTS_HYDRATE] Section[${key}]:`, val ? 'FILLED' : 'EMPTY');
+        });
       }
 
       setHeight(currentUser.height?.toString() || '');
@@ -311,6 +364,22 @@ export default function EditProfileScreen() {
       setExercise(currentUser.exercise || null);
       setPets(currentUser.pets || []);
       setInsect(currentUser.insect || null);
+
+      // Load activities/interests from Convex backend
+      const loadedActivities = currentUser.activities || [];
+      setActivities(loadedActivities as ActivityFilter[]);
+      // SURGICAL FIX: Mark interests as hydrated from backend
+      interestsHydratedRef.current = true;
+      interestsDirtyRef.current = false; // Reset dirty flag on hydration
+      if (__DEV__) {
+        console.log('[PROFILE_INTERESTS_LOAD] Loaded from Convex:', {
+          source: 'currentUser.activities',
+          count: loadedActivities.length,
+          values: loadedActivities,
+          query: 'api.users.getCurrentUser',
+          hydrated: true,
+        });
+      }
 
       // Load Life Rhythm from onboardingDraft
       const lifeRhythm = currentUser?.onboardingDraft?.lifeRhythm;
@@ -405,18 +474,23 @@ export default function EditProfileScreen() {
   }, [currentUser?._id, currentUser?.id, currentDemoUserId]);
 
   // LIVE MODE: Sync photo slots AND blur state from currentUser.photos (source of truth)
-  // BUG FIX (2026-03-23): Use currentUser.photos instead of backendPhotos (getUserPhotos)
-  // getUserPhotos EXCLUDES verification_reference photos, causing the primary selfie to be hidden
-  // currentUser.photos from getCurrentUser includes ALL photos (same fix as Phase-2 onboarding)
+  // BUGFIX: Filter out verification_reference photos from the editable grid
+  // Only show regular profile photos in the user-editable photo grid
   useEffect(() => {
     if (isDemoMode || !currentUser?.photos) return;
+
+    // BUGFIX: Filter out verification_reference photos - they should NOT appear in the editable grid
+    // verification_reference photos are internal photos used for face verification, not user profile photos
+    const editablePhotos = currentUser.photos.filter(
+      (photo: any) => photo.photoType !== 'verification_reference'
+    );
 
     // Map photos to slots by array index (photos are already sorted by order from getCurrentUser)
     const slotsFromBackend: PhotoSlots9 = createEmptyPhotoSlots();
     // Initialize blur state from backend photos.isBlurred field
     const blurFromBackend: Record<number, boolean> = {};
 
-    currentUser.photos.forEach((photo: any, index: number) => {
+    editablePhotos.forEach((photo: any, index: number) => {
       if (index >= 0 && index < 9 && photo.url) {
         slotsFromBackend[index] = photo.url;
         // Read isBlurred from backend photo record
@@ -431,20 +505,14 @@ export default function EditProfileScreen() {
     if (hasPhotos) {
       if (__DEV__) {
         const filledSlots = slotsFromBackend.map((s, i) => s ? i : -1).filter(i => i >= 0);
-        // Show raw photo records with order/isPrimary/photoType/isBlurred
-        const photoDetails = currentUser.photos.map((p: any) => ({
-          id: p._id?.slice(-6),
-          order: p.order,
-          isPrimary: p.isPrimary,
-          photoType: p.photoType || 'regular',
-          isBlurred: p.isBlurred ?? false,
-        }));
-        console.log('[EditProfile] 📸 Photos loaded (includes all types):', {
-          count: currentUser.photos.length,
+        // PHOTO_SOURCE_AUDIT: Log photo source for debugging consistency
+        // NOTE: currentUser.photos is now pre-filtered by backend (excludes verification_reference)
+        console.log('[PHOTO_SOURCE_AUDIT] [EDIT_PROFILE_PHOTOS] Grid loaded:', {
+          source: 'api.users.getCurrentUser (pre-filtered)',
+          totalRegularPhotos: currentUser.photos.length,
           filledSlots,
-          photos: photoDetails,
-          primaryPhoto: currentUser.photos.find((p: any) => p.isPrimary)?._id?.slice(-6),
-          blurredSlots: Object.keys(blurFromBackend).filter(k => blurFromBackend[Number(k)]),
+          mainPhotoId: editablePhotos[0]?._id?.slice(-6) || null,
+          photoIds: editablePhotos.map((p: any) => p._id?.slice(-6)).join(','),
         });
       }
       setPhotoSlots(slotsFromBackend);
@@ -730,11 +798,26 @@ export default function EditProfileScreen() {
   };
 
   // SLOT-BASED: Swap photo to slot 0 (main position) AND persist to backend immediately
+  // SAFE REORDER: Uses order-only for primary, validates no photo loss, never deletes photos
   const handleSetMainPhoto = async (fromSlot: number) => {
     if (fromSlot === 0) return; // Already main
 
     // Get current slots before swap for revert on failure
     const previousSlots = [...photoSlots] as PhotoSlots9;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // STEP A: Build filtered working array of regular display photos only
+    // ═══════════════════════════════════════════════════════════════════════════
+    const originalPhotoIds = currentUser?.photos?.map((p: any) => p._id) || [];
+    const originalPhotoCount = originalPhotoIds.length;
+
+    if (__DEV__) {
+      console.log('[PHOTO_REORDER_START]', {
+        fromSlot,
+        originalPhotoCount,
+        originalPhotoIds: originalPhotoIds.map((id: string) => id?.slice(-6)).join(','),
+      });
+    }
 
     // Optimistic UI update - swap locally
     const newSlots = [...photoSlots] as PhotoSlots9;
@@ -744,23 +827,31 @@ export default function EditProfileScreen() {
     setPhotoSlots(newSlots);
 
     if (__DEV__) {
-      console.log('[EditProfile] 🔄 setMainPhoto swap slot', fromSlot, '<-> 0');
+      console.log('[PHOTO_REORDER_BEFORE]', {
+        action: 'swap',
+        slot0Before: previousSlots[0]?.slice(-30) || 'empty',
+        slotNBefore: previousSlots[fromSlot]?.slice(-30) || 'empty',
+        slot0After: newSlots[0]?.slice(-30) || 'empty',
+        slotNAfter: newSlots[fromSlot]?.slice(-30) || 'empty',
+      });
     }
 
     // BACKEND PERSISTENCE: Call reorderPhotosWithToken immediately
-    // BUG FIX: Use currentUser.photos (from getCurrentUser) instead of backendPhotos (from getUserPhotos)
-    // getUserPhotos EXCLUDES verification_reference photos, causing URL lookup failures
-    // This aligns with the slot population logic (lines 440-470) which uses currentUser.photos
     if (!isDemoMode && currentUser?.photos && currentUser.photos.length > 0) {
       const token = useAuthStore.getState().token;
       if (!token) {
         Alert.alert('Error', 'Session expired. Please log in again.');
         setPhotoSlots(previousSlots); // Revert
+        if (__DEV__) {
+          console.log('[PHOTO_REORDER_ABORT] No session token');
+        }
         return;
       }
 
       try {
-        // Build URL -> photoId map from currentUser.photos (includes ALL photo types)
+        // ═══════════════════════════════════════════════════════════════════════════
+        // STEP B: Build URL -> photoId map from currentUser.photos
+        // ═══════════════════════════════════════════════════════════════════════════
         const urlToPhotoId = new Map<string, string>();
         for (const photo of currentUser.photos) {
           if (photo.url) {
@@ -768,7 +859,9 @@ export default function EditProfileScreen() {
           }
         }
 
-        // Build ordered photo IDs based on NEW slot order
+        // ═══════════════════════════════════════════════════════════════════════════
+        // STEP C: Build ordered photo IDs based on NEW slot order
+        // ═══════════════════════════════════════════════════════════════════════════
         const orderedPhotoIds: string[] = [];
         for (const slotUrl of newSlots) {
           if (slotUrl && urlToPhotoId.has(slotUrl)) {
@@ -776,11 +869,67 @@ export default function EditProfileScreen() {
           }
         }
 
+        // ═══════════════════════════════════════════════════════════════════════════
+        // STEP D: VALIDATION - Ensure no photo loss before saving
+        // CRITICAL: Same number of photos before and after, same set of IDs, no duplicates
+        // ═══════════════════════════════════════════════════════════════════════════
+        const reorderedCount = orderedPhotoIds.length;
+        const reorderedSet = new Set(orderedPhotoIds);
+        const originalSet = new Set(originalPhotoIds);
+
+        // Check for duplicates
+        const hasDuplicates = reorderedSet.size !== reorderedCount;
+
+        // Check for same count
+        const sameCount = reorderedCount === originalPhotoCount;
+
+        // Check for same IDs (both ways)
+        const allOriginalPresent = originalPhotoIds.every((id: string) => reorderedSet.has(id));
+        const noExtraIds = orderedPhotoIds.every((id: string) => originalSet.has(id));
+
+        const validationPassed = !hasDuplicates && sameCount && allOriginalPresent && noExtraIds;
+
+        if (__DEV__) {
+          console.log('[PHOTO_REORDER_VALIDATE]', {
+            originalCount: originalPhotoCount,
+            reorderedCount,
+            hasDuplicates,
+            sameCount,
+            allOriginalPresent,
+            noExtraIds,
+            validationPassed,
+            originalIds: originalPhotoIds.map((id: string) => id?.slice(-6)).join(','),
+            reorderedIds: orderedPhotoIds.map((id: string) => id?.slice(-6)).join(','),
+          });
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // STEP E: Only save if validation passes
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (!validationPassed) {
+          console.error('[PHOTO_REORDER_ABORT] Validation failed - aborting to prevent photo loss', {
+            originalCount: originalPhotoCount,
+            reorderedCount,
+            hasDuplicates,
+            sameCount,
+            allOriginalPresent,
+            noExtraIds,
+          });
+          Alert.alert('Error', 'Could not reorder photos safely. Please refresh and try again.');
+          setPhotoSlots(previousSlots); // Revert
+          return;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // STEP F: Persist - validation passed, safe to save
+        // ═══════════════════════════════════════════════════════════════════════════
         if (orderedPhotoIds.length > 0) {
           if (__DEV__) {
-            console.log('[EditProfile] 📸 Persisting main photo change:', {
-              newMainPhotoId: orderedPhotoIds[0],
+            console.log('[PHOTO_REORDER_SAVE]', {
+              action: 'setMainPhoto',
+              newMainPhotoId: orderedPhotoIds[0]?.slice(-6),
               totalPhotos: orderedPhotoIds.length,
+              allPhotoIds: orderedPhotoIds.map((id: string) => id?.slice(-6)).join(','),
             });
           }
           await reorderPhotos({
@@ -788,11 +937,11 @@ export default function EditProfileScreen() {
             token,
           });
           if (__DEV__) {
-            console.log('[EditProfile] ✅ Main photo persisted to backend');
+            console.log('[PHOTO_REORDER_AFTER] ✅ Reorder persisted successfully');
           }
         }
       } catch (error: any) {
-        console.error('[EditProfile] ❌ Failed to persist main photo:', error);
+        console.error('[PHOTO_REORDER_ABORT] Backend error:', error);
         Alert.alert('Error', error.message || 'Failed to set main photo. Please try again.');
         setPhotoSlots(previousSlots); // Revert on failure
       }
@@ -812,14 +961,17 @@ export default function EditProfileScreen() {
   }, []);
 
   // Section-based prompts: computed values
+  // BUGFIX: Include section field for reliable hydration
   const filledPrompts = Object.values(sectionAnswers)
     .filter((entry): entry is SectionPromptEntry => entry !== null && entry.answer.trim().length >= PROMPT_ANSWER_MIN_LENGTH)
-    .map((entry) => ({ question: entry.question, answer: entry.answer }));
+    .map((entry) => ({ section: entry.section, question: entry.question, answer: entry.answer }));
 
   const allSectionsFilled = filledPrompts.length === TOTAL_SECTIONS;
 
   // Section-based handlers
   const handleSelectQuestion = useCallback((sectionKey: SectionKey, questionText: string) => {
+    // SURGICAL FIX: Mark prompts as dirty when user explicitly changes them
+    promptsDirtyRef.current = true;
     setSectionAnswers((prev) => ({
       ...prev,
       [sectionKey]: {
@@ -832,6 +984,8 @@ export default function EditProfileScreen() {
   }, []);
 
   const handleUpdateSectionAnswer = useCallback((sectionKey: SectionKey, answer: string) => {
+    // SURGICAL FIX: Mark prompts as dirty when user explicitly changes them
+    promptsDirtyRef.current = true;
     setSectionAnswers((prev) => ({
       ...prev,
       [sectionKey]: prev[sectionKey]
@@ -929,6 +1083,15 @@ export default function EditProfileScreen() {
       if (pets.length > 0) patch.pets = pets;
       if (insect) patch.insect = insect;
 
+      // Activities/Interests - always save (empty array is valid)
+      patch.activities = activities;
+      if (__DEV__) {
+        console.log('[PROFILE_INTERESTS] Saving to demo store:', {
+          count: activities.length,
+          values: activities,
+        });
+      }
+
       // Life Rhythm - save to onboardingDraft structure
       const lifeRhythmPatch: Record<string, any> = {};
       if (lifeRhythmCity) lifeRhythmPatch.city = lifeRhythmCity;
@@ -982,8 +1145,38 @@ export default function EditProfileScreen() {
     }
 
     try {
+      // Get session token from authStore for secure server-side validation
+      // (needed for prompts, photo reorder, and blur mutations)
+      const sessionToken = useAuthStore.getState().token;
+      if (!sessionToken) {
+        throw new Error('No session token available');
+      }
+
       // Construct full name from firstName/lastName
       const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+
+      // SURGICAL FIX: Determine if interests should be included in save
+      // Only save interests if:
+      // 1. Interests were hydrated from backend (we know the real state), OR
+      // 2. User explicitly changed interests this session (dirty flag)
+      // This prevents accidental wipe when hydration is incomplete
+      const shouldSaveInterests = interestsHydratedRef.current || interestsDirtyRef.current;
+
+      // If saving interests: include them (even if empty = user intentionally cleared)
+      // If not saving: omit field entirely to preserve backend state
+      const activitiesPayload = shouldSaveInterests
+        ? (activities as any) // Send current state (could be empty if user cleared)
+        : undefined; // Omit field - don't touch backend
+
+      if (__DEV__) {
+        console.log('[EDIT_PROFILE_SAVE_GUARD] Interests save decision:', {
+          hydrated: interestsHydratedRef.current,
+          dirty: interestsDirtyRef.current,
+          shouldSave: shouldSaveInterests,
+          count: activities.length,
+          action: shouldSaveInterests ? (activities.length > 0 ? 'SAVE_VALUES' : 'SAVE_EMPTY') : 'SKIP_PRESERVE_BACKEND',
+        });
+      }
 
       await updateProfile({
         authUserId: userId as string,
@@ -1002,13 +1195,37 @@ export default function EditProfileScreen() {
         exercise: (exercise || undefined) as any,
         pets: pets.length > 0 ? (pets as any) : undefined,
         insect: (insect || undefined) as any,
+        activities: activitiesPayload,
       });
-      // Get session token from authStore for secure server-side validation
-      const sessionToken = useAuthStore.getState().token;
-      if (!sessionToken) {
-        throw new Error('No session token available');
+
+      // SURGICAL FIX: Only save prompts if hydrated or edited
+      // This prevents accidental wipe when prompts haven't loaded yet
+      const shouldSavePrompts = promptsHydratedRef.current || promptsDirtyRef.current;
+
+      if (__DEV__) {
+        console.log('[EDIT_PROFILE_SAVE_GUARD] Prompts save decision:', {
+          hydrated: promptsHydratedRef.current,
+          dirty: promptsDirtyRef.current,
+          shouldSave: shouldSavePrompts,
+          count: filledPrompts.length,
+          action: shouldSavePrompts ? 'SAVE_PROMPTS' : 'SKIP_PRESERVE_BACKEND',
+        });
       }
-      await updateProfilePrompts({ token: sessionToken, prompts: filledPrompts });
+
+      if (shouldSavePrompts) {
+        if (__DEV__) {
+          console.log('[PROFILE_PROMPTS_SAVE] Saving to Convex:', {
+            count: filledPrompts.length,
+            prompts: filledPrompts.map(p => ({ q: p.question.slice(0, 30), a: p.answer.slice(0, 30) })),
+            mutation: 'api.users.updateProfilePrompts',
+          });
+        }
+        await updateProfilePrompts({ token: sessionToken, prompts: filledPrompts });
+      } else {
+        if (__DEV__) {
+          console.log('[PROFILE_PROMPTS_SAVE] SKIPPED - not hydrated and not edited, preserving backend state');
+        }
+      }
 
       // Save Life Rhythm to onboardingDraft
       const lifeRhythmPatch: Record<string, any> = {};
@@ -1289,6 +1506,14 @@ export default function EditProfileScreen() {
         onTogglePet={togglePet}
         onChangeInsect={setInsect}
         getOptionLabel={getOptionLabel}
+      />
+
+      {/* Interests Section */}
+      <InterestsSection
+        expanded={expandedSection === 'interests'}
+        onToggleExpand={() => toggleSection('interests')}
+        activities={activities}
+        onToggleActivity={toggleActivity}
       />
 
       {/* Life Rhythm Section */}

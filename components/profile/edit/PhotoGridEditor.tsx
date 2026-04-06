@@ -113,12 +113,14 @@ export function PhotoGridEditor({
           <TouchableOpacity style={styles.photoRemoveButton} onPress={() => onRemovePhoto(slotIndex)}>
             <Ionicons name="close" size={14} color={COLORS.white} />
           </TouchableOpacity>
-          {/* Main badge or Set as Main button */}
+          {/* Star indicator: filled = current main (slot 0), outline = tap to make main */}
           {isMain ? (
-            <View style={styles.mainBadge}><Text style={styles.mainBadgeText}>Main</Text></View>
+            <View style={styles.mainStarBadge}>
+              <Ionicons name="star" size={12} color="#FFD700" />
+            </View>
           ) : (
             <TouchableOpacity style={styles.setMainButton} onPress={() => onSetMainPhoto(slotIndex)}>
-              <Ionicons name="star" size={10} color={COLORS.white} />
+              <Ionicons name="star-outline" size={12} color={COLORS.white} />
             </TouchableOpacity>
           )}
         </View>
@@ -168,16 +170,18 @@ const styles = StyleSheet.create({
   photoRemoveButton: { position: 'absolute', top: 6, right: 6, width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   uploadText: { fontSize: 11, color: COLORS.primary, marginTop: 4, fontWeight: '500' },
   photoCount: { fontSize: 12, color: COLORS.textLight, textAlign: 'center', marginTop: 12 },
-  mainBadge: {
+  // Filled star badge for main photo (slot 0)
+  mainStarBadge: {
     position: 'absolute',
     bottom: 6,
     left: 6,
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  mainBadgeText: { fontSize: 10, fontWeight: '700', color: COLORS.white },
   setMainButton: {
     position: 'absolute',
     bottom: 6,
