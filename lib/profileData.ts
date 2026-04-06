@@ -6,6 +6,10 @@ export interface ProfileData {
   /** Phase-2 only: The user ID (distinct from profile doc _id) */
   userId?: string;
   name: string;
+  /** Phase-1: First name for explicit display (firstName + lastName) */
+  firstName?: string;
+  /** Phase-1: Last name for explicit display (firstName + lastName) */
+  lastName?: string;
   age: number;
   bio?: string;
   city?: string;
@@ -16,6 +20,10 @@ export interface ProfileData {
   tags?: string[];
   activities?: string[];
   relationshipIntent?: string[];
+  /** User's gender for identity display */
+  gender?: string;
+  /** Looking for (gender preferences) */
+  lookingFor?: string[];
   lastActive?: number;
   createdAt?: number;
   profilePrompts?: { question: string; answer: string }[];
@@ -52,6 +60,9 @@ export function toProfileData(p: any): ProfileData {
     // Phase-2 profiles have separate userId; Phase-1 uses id as userId
     userId: p.userId,
     name: p.name,
+    // Phase-1: Preserve firstName/lastName for explicit display
+    firstName: p.firstName,
+    lastName: p.lastName,
     age: p.age,
     bio: p.bio,
     city: p.city,
@@ -66,6 +77,8 @@ export function toProfileData(p: any): ProfileData {
       : typeof p.relationshipIntent === "string"
         ? [p.relationshipIntent]
         : [],
+    gender: p.gender,
+    lookingFor: Array.isArray(p.lookingFor) ? p.lookingFor : [],
     lastActive: p.lastActive ?? p.lastActiveAt,
     createdAt: p.createdAt,
     profilePrompts: p.profilePrompts,

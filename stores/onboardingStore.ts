@@ -189,7 +189,7 @@ interface OnboardingState {
 
   displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
   bio: string;
-  profilePrompts: { question: string; answer: string }[]; // Legacy prompt system
+  profilePrompts: { question: string; answer: string; section?: string }[]; // Section-based prompts
 
   // ═══════════════════════════════════════════════════════════════════════════════
   // NEW PROMPT SYSTEM V2 (2-Page Structure)

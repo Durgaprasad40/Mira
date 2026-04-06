@@ -1,14 +1,34 @@
 /**
- * locationStore — Centralized location management for instant Nearby tab opening.
+ * locationStore — Centralized location management for all location needs.
  *
- * This store prewarms location data on app boot so that Nearby can render
- * immediately without blocking on GPS acquisition.
+ * FUNCTION RESPONSIBILITIES:
  *
- * Flow:
- * 1. App boots → startLocationTracking() is called
- * 2. Immediately fetches lastKnownPosition (fast, cached GPS)
- * 3. Starts watchPosition for live updates
- * 4. Nearby screen reads from this store — no local GPS calls needed
+ * 1. getBestLocation()
+ *    - Returns current GPS or last known (no network, instant)
+ *    - Used for: Immediate distance calculation
+ *
+ * 2. refreshLocation()
+ *    - Forces a fresh GPS acquisition (blocking)
+ *    - Updates currentLocation + lastKnownLocation in store
+ *    - Used for: Manual refresh, background updates
+ *
+ * 3. refreshLocationCached({ allowBackgroundFreshen })
+ *    - Two-step refresh for screen focus events:
+ *      a) Fresh cache (<20s): Return immediately, no GPS call
+ *      b) Stale cache (20-45s): Return immediately + silent background freshen
+ *      c) Expired cache (>45s) or no cache: Blocking refresh
+ *    - Used for: Discover/DeepConnect screen focus
+ *
+ * 4. startLocationTracking() / stopLocationTracking()
+ *    - Manages continuous GPS watch subscription
+ *    - Used for: Nearby map, background updates
+ *
+ * CACHE STATE (store-owned, not module-level):
+ * - lastLiveRefreshAt: Timestamp of last successful GPS acquisition
+ * - lastBackgroundFreshenAt: Timestamp of last background freshen attempt
+ * - isRefreshingLive: Guard against overlapping GPS requests
+ *
+ * DEBUG TAGS: [LIVE_LOCATION], [LOCATION]
  */
 import { create } from 'zustand';
 import * as Location from 'expo-location';
@@ -31,6 +51,19 @@ const MAX_SPEED_METERS_PER_SEC = 55; // ~200 km/h
 
 /** Minimum time gap to consider for speed check (avoid division by tiny values) */
 const MIN_TIME_GAP_MS = 1000; // 1 second
+
+// ---------------------------------------------------------------------------
+// Live Location Cache Constants (for Discover/DeepConnect instant UX)
+// ---------------------------------------------------------------------------
+
+/** Cache freshness window: skip GPS fetch if refreshed within this time */
+const LIVE_REFRESH_CACHE_MS = 45 * 1000; // 45 seconds
+
+/** Stale-but-usable window: return cached but trigger background freshen */
+const LIVE_STALE_THRESHOLD_MS = 20 * 1000; // 20 seconds
+
+/** Minimum gap between background freshens to prevent spam */
+const BACKGROUND_FRESHEN_THROTTLE_MS = 10 * 1000; // 10 seconds
 
 // ---------------------------------------------------------------------------
 // GPS Jitter Protection Helpers
@@ -140,6 +173,23 @@ interface LocationState {
   /** Error message if location fails */
   error: string | null;
 
+  // ---------------------------------------------------------------------------
+  // Live Location Cache State (store-owned, not module-level)
+  // ---------------------------------------------------------------------------
+
+  /** Timestamp of last successful live location refresh */
+  lastLiveRefreshAt: number;
+
+  /** Timestamp of last background freshen attempt */
+  lastBackgroundFreshenAt: number;
+
+  /** Whether a live GPS refresh is currently in progress (prevents overlapping) */
+  isRefreshingLive: boolean;
+
+  // ---------------------------------------------------------------------------
+  // Actions
+  // ---------------------------------------------------------------------------
+
   /** Fetch last known position only (fast, no continuous tracking) */
   fetchLastKnownOnly: () => Promise<void>;
 
@@ -154,6 +204,17 @@ interface LocationState {
 
   /** Get best available location (current > lastKnown > null) */
   getBestLocation: () => LocationCoords | null;
+
+  /**
+   * Two-step refresh for screen focus events (Discover/DeepConnect):
+   * 1. Returns cached location immediately if fresh (< 45s) — fast UX
+   * 2. If cache is stale-but-usable (20-45s), returns cached + triggers silent background freshen
+   * 3. If no cache or expired, performs blocking refresh
+   *
+   * Options:
+   * - allowBackgroundFreshen: If true, triggers silent freshen when cache is stale-but-usable
+   */
+  refreshLocationCached: (options?: { allowBackgroundFreshen?: boolean }) => Promise<LocationCoords | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +235,11 @@ export const useLocationStore = create<LocationState>((set, get) => ({
   city: null,
   isTracking: false,
   error: null,
+
+  // Live location cache state (store-owned)
+  lastLiveRefreshAt: 0,
+  lastBackgroundFreshenAt: 0,
+  isRefreshingLive: false,
 
   // Fast: fetch last known position only, no continuous tracking
   // Called on app boot for quick map display without blocking startup
@@ -477,6 +543,105 @@ export const useLocationStore = create<LocationState>((set, get) => ({
     const state = get();
     return state.currentLocation || state.lastKnownLocation;
   },
+
+  // ---------------------------------------------------------------------------
+  // LIVE_LOCATION: Two-step cached refresh for screen focus events
+  // ---------------------------------------------------------------------------
+  // Step 1: Return cached location immediately if fresh (fast UX)
+  // Step 2: If stale-but-usable, return cached + trigger silent background freshen
+  // Step 3: If no cache or expired, perform blocking refresh
+  // ---------------------------------------------------------------------------
+  refreshLocationCached: async (options = {}) => {
+    const { allowBackgroundFreshen = false } = options;
+    const state = get();
+    const now = Date.now();
+    const timeSinceLastRefresh = now - state.lastLiveRefreshAt;
+    const cached = state.getBestLocation();
+
+    // Guard: If already refreshing, return cached immediately (no overlap)
+    if (state.isRefreshingLive) {
+      if (__DEV__) {
+        log.info('[LIVE_LOCATION]', 'refresh already in progress, returning cached');
+      }
+      return cached;
+    }
+
+    // CASE 1: Cache is fresh (< 20s) — return immediately, no freshen needed
+    if (cached && timeSinceLastRefresh < LIVE_STALE_THRESHOLD_MS) {
+      if (__DEV__) {
+        log.info('[LIVE_LOCATION]', 'cache fresh, returning immediately', {
+          cacheAgeMs: timeSinceLastRefresh,
+          lat: cached.latitude.toFixed(4),
+        });
+      }
+      return cached;
+    }
+
+    // CASE 2: Cache is stale-but-usable (20-45s) — return cached + background freshen
+    if (cached && timeSinceLastRefresh < LIVE_REFRESH_CACHE_MS) {
+      if (__DEV__) {
+        log.info('[LIVE_LOCATION]', 'cache stale but usable, returning + scheduling freshen', {
+          cacheAgeMs: timeSinceLastRefresh,
+          lat: cached.latitude.toFixed(4),
+        });
+      }
+
+      // Trigger silent background freshen if allowed and not recently done
+      if (allowBackgroundFreshen) {
+        const timeSinceLastFreshen = now - state.lastBackgroundFreshenAt;
+        if (timeSinceLastFreshen >= BACKGROUND_FRESHEN_THROTTLE_MS) {
+          set({ lastBackgroundFreshenAt: now });
+
+          // Fire-and-forget background refresh (no await, no blocking)
+          (async () => {
+            // Double-check guard before starting
+            if (get().isRefreshingLive) return;
+
+            set({ isRefreshingLive: true });
+            try {
+              const freshResult = await get().refreshLocation();
+              if (freshResult) {
+                set({ lastLiveRefreshAt: Date.now() });
+                if (__DEV__) {
+                  log.info('[LIVE_LOCATION]', 'background freshen complete', {
+                    lat: freshResult.latitude.toFixed(4),
+                  });
+                }
+              }
+            } finally {
+              set({ isRefreshingLive: false });
+            }
+          })();
+        } else if (__DEV__) {
+          log.info('[LIVE_LOCATION]', 'background freshen throttled', {
+            timeSinceLastFreshenMs: timeSinceLastFreshen,
+          });
+        }
+      }
+
+      return cached;
+    }
+
+    // CASE 3: No cache or cache expired (> 45s) — perform blocking refresh
+    set({ isRefreshingLive: true });
+    try {
+      const result = await get().refreshLocation();
+
+      if (result) {
+        set({ lastLiveRefreshAt: now });
+        if (__DEV__) {
+          log.info('[LIVE_LOCATION]', 'fresh GPS acquired (blocking)', {
+            trigger: cached ? 'cache_expired' : 'no_cache',
+            lat: result.latitude.toFixed(4),
+          });
+        }
+      }
+
+      return result;
+    } finally {
+      set({ isRefreshingLive: false });
+    }
+  },
 }));
 
 /**
@@ -487,4 +652,51 @@ export function useBestLocation(): LocationCoords | null {
   const currentLocation = useLocationStore((s) => s.currentLocation);
   const lastKnownLocation = useLocationStore((s) => s.lastKnownLocation);
   return currentLocation || lastKnownLocation;
+}
+
+/**
+ * Calculate distance in km between two coordinates using Haversine formula.
+ * Used for instant client-side distance calculation in Discover/DeepConnect.
+ */
+export function calculateDistanceKm(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371; // Earth radius in km
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * Hook to calculate live distance from current GPS to a profile.
+ * Returns distance in km, or undefined if location not available.
+ *
+ * INSTANT UX: This uses live GPS, not backend distance.
+ * Use this in Discover/DeepConnect for instant distance display.
+ */
+export function useLiveDistance(profileLat?: number, profileLng?: number): number | undefined {
+  const bestLocation = useBestLocation();
+
+  if (!bestLocation || profileLat === undefined || profileLng === undefined) {
+    return undefined;
+  }
+
+  const distance = calculateDistanceKm(
+    bestLocation.latitude,
+    bestLocation.longitude,
+    profileLat,
+    profileLng
+  );
+
+  return Math.round(distance * 10) / 10; // Round to 1 decimal
 }
