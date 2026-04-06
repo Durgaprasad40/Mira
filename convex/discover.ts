@@ -624,7 +624,21 @@ export const getDiscoverProfiles = query({
     const candidates = [];
     for (let i = 0; i < filteredCandidates.length; i++) {
       const { user, distance } = filteredCandidates[i];
-      const photos = photoResults[i];
+      const rawPhotos = photoResults[i];
+
+      // PHOTO SOURCE FIX: Filter out verification_reference photos
+      // These are private verification photos, NOT display photos
+      // This ensures Discover shows the same photos as Edit Profile and Profile Tab
+      const photos = rawPhotos.filter((p) => p.photoType !== 'verification_reference');
+
+      console.log('[P1_CARD_PHOTOS] getDiscoverProfiles photo source', {
+        userId: user._id,
+        userName: user.name,
+        rawCount: rawPhotos.length,
+        filteredCount: photos.length,
+        filteredOut: rawPhotos.length - photos.length,
+        photoIds: photos.map((p) => p._id),
+      });
 
       const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
       if (nonNsfwPhotos.length === 0) continue; // at least 1 photo required
@@ -651,6 +665,10 @@ export const getDiscoverProfiles = query({
         verificationStatus: user.verificationStatus || 'unverified',
         city: user.city,
         distance,
+        // LIVE_LOCATION: Include lat/lng for client-side instant distance calculation
+        // Client uses this with device GPS for sub-second distance refresh
+        latitude: user.latitude,
+        longitude: user.longitude,
         lastActive: user.lastActive,
         createdAt: user.createdAt,
         lookingFor: user.lookingFor,

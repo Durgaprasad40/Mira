@@ -39,10 +39,16 @@ export const getCurrentUser = query({
     if (!user) return null;
 
     // Get user's photos
-    const photos = await ctx.db
+    const allPhotos = await ctx.db
       .query("photos")
       .withIndex("by_user_order", (q) => q.eq("userId", convexUserId))
       .collect();
+
+    // PHOTO SOURCE FIX: Filter out verification_reference photos
+    // These are private verification photos, NOT display photos
+    // This ensures getCurrentUser returns the same photos as getUserPhotos
+    // for consistent photo counts across Edit Profile, Profile Tab, and Discover
+    const photos = allPhotos.filter((p) => p.photoType !== 'verification_reference');
 
     return {
       ...user,
@@ -116,10 +122,23 @@ export const getUserById = query({
     }
 
     // Get photos
-    const photos = await ctx.db
+    const allPhotos = await ctx.db
       .query("photos")
       .withIndex("by_user_order", (q) => q.eq("userId", args.userId))
       .collect();
+
+    // PHOTO SOURCE FIX: Filter out verification_reference photos
+    // This ensures getUserById returns the same photos as getDiscoverProfiles
+    // for consistent photo counts between Discover card and opened profile
+    const photos = allPhotos.filter((p) => p.photoType !== 'verification_reference');
+
+    console.log('[P1_PROFILE_PHOTOS] getUserById photo source', {
+      userId: args.userId,
+      allPhotosCount: allPhotos.length,
+      filteredCount: photos.length,
+      filteredOut: allPhotos.length - photos.length,
+      photoIds: photos.map((p) => p._id),
+    });
 
     // Calculate distance if both have location
     const viewer = await ctx.db.get(args.viewerId);
@@ -173,7 +192,8 @@ export const getUserById = query({
       // MINI PROFILE: Return limited data for confession_comment matches
       // Only expose: name (first name only), age, gender, one blurred photo
       const firstName = user.name?.split(" ")[0] || "Anonymous";
-      const primaryPhoto = photos.find((p) => p.isPrimary) || photos[0];
+      // ORDER-BASED PRIMARY: First photo by order is primary (photos are pre-sorted by order)
+      const primaryPhoto = photos[0];
 
       return {
         id: user._id,
@@ -209,6 +229,9 @@ export const getUserById = query({
     }
 
     // Return full public profile data
+    // Extract lifeRhythm from onboardingDraft for Deeper Traits section
+    const lifeRhythm = user.onboardingDraft?.lifeRhythm;
+
     return {
       id: user._id,
       name: user.name,
@@ -218,6 +241,8 @@ export const getUserById = query({
       height: user.height,
       smoking: user.smoking,
       drinking: user.drinking,
+      exercise: user.exercise, // Added for Lifestyle section
+      pets: user.pets, // Added for Lifestyle section
       kids: user.kids,
       education: user.education,
       religion: user.religion,
@@ -235,6 +260,12 @@ export const getUserById = query({
       profilePrompts: user.profilePrompts ?? [],
       photos: photos.sort((a, b) => a.order - b.order),
       photoBlurred: user.photoBlurred === true,
+      // Deeper Traits from lifeRhythm (onboardingDraft)
+      sleepSchedule: lifeRhythm?.sleepSchedule,
+      socialRhythm: lifeRhythm?.socialRhythm,
+      travelStyle: lifeRhythm?.travelStyle,
+      workStyle: lifeRhythm?.workStyle,
+      coreValues: lifeRhythm?.coreValues,
     };
   },
 });
@@ -246,37 +277,53 @@ export const updateProfilePrompts = mutation({
     prompts: v.array(v.object({
       question: v.string(),
       answer: v.string(),
+      section: v.optional(v.string()), // BUGFIX: Include section for reliable hydration
     })),
   },
   handler: async (ctx, args) => {
+    console.log('[PROMPTS_BACKEND] updateProfilePrompts called with', args.prompts.length, 'prompts');
+    args.prompts.forEach((p, i) => {
+      console.log(`[PROMPTS_BACKEND] Received[${i}]: section=${p.section ?? 'NONE'}, question="${p.question.substring(0, 40)}...", answerLen=${p.answer.length}`);
+    });
+
     // SESSION AUTH: Validate token and get userId (same pattern as photos.ts)
     const userId = await validateSessionToken(ctx, args.token);
     if (!userId) {
+      console.log('[PROMPTS_BACKEND] FAILED: Invalid session token');
       throw new Error('Unauthorized: invalid or expired session');
     }
 
     const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    if (!user) {
+      console.log('[PROMPTS_BACKEND] FAILED: User not found for userId:', userId);
+      throw new Error("User not found");
+    }
 
     // BUGFIX #62: Reject empty prompts after trimming whitespace
     for (const prompt of args.prompts) {
       const trimmedQuestion = prompt.question.trim();
       const trimmedAnswer = prompt.answer.trim();
       if (trimmedQuestion.length === 0) {
+        console.log('[PROMPTS_BACKEND] FAILED: Empty question after trim');
         throw new Error("Prompt question cannot be empty");
       }
       if (trimmedAnswer.length === 0) {
+        console.log('[PROMPTS_BACKEND] FAILED: Empty answer after trim');
         throw new Error("Prompt answer cannot be empty");
       }
     }
 
     // Exactly 4 prompts (one per section), answer max 200 chars
+    // BUGFIX: Include section field for reliable hydration
     const cleaned = args.prompts.slice(0, 4).map((p) => ({
       question: p.question.trim().slice(0, 100),
       answer: p.answer.trim().slice(0, 200),
+      ...(p.section && { section: p.section }), // Preserve section if provided
     }));
 
+    console.log('[PROMPTS_BACKEND] Saving', cleaned.length, 'cleaned prompts to profilePrompts field');
     await ctx.db.patch(userId, { profilePrompts: cleaned });
+    console.log('[PROMPTS_BACKEND] SUCCESS: Saved prompts for user:', userId);
     return { success: true };
   },
 });
@@ -367,29 +414,26 @@ export const updateProfile = mutation({
         ),
       ),
     ),
+    // BUGFIX: Accept all 70 activities (matching schema.ts and ACTIVITY_FILTERS)
     activities: v.optional(
       v.array(
         v.union(
-          v.literal("coffee"),
-          v.literal("date_night"),
-          v.literal("sports"),
-          v.literal("movies"),
-          v.literal("free_tonight"),
-          v.literal("foodie"),
-          v.literal("gym_partner"),
-          v.literal("concerts"),
-          v.literal("travel"),
-          v.literal("outdoors"),
-          v.literal("art_culture"),
-          v.literal("gaming"),
-          v.literal("nightlife"),
-          v.literal("brunch"),
-          v.literal("study_date"),
-          v.literal("this_weekend"),
-          v.literal("beach_pool"),
-          v.literal("road_trip"),
-          v.literal("photography"),
-          v.literal("volunteering"),
+          // Original 20 activities
+          v.literal("coffee"), v.literal("date_night"), v.literal("sports"), v.literal("movies"), v.literal("free_tonight"),
+          v.literal("foodie"), v.literal("gym_partner"), v.literal("concerts"), v.literal("travel"), v.literal("outdoors"),
+          v.literal("art_culture"), v.literal("gaming"), v.literal("nightlife"), v.literal("brunch"), v.literal("study_date"),
+          v.literal("this_weekend"), v.literal("beach_pool"), v.literal("road_trip"), v.literal("photography"), v.literal("volunteering"),
+          // Additional 50 activities (matching frontend ACTIVITY_FILTERS)
+          v.literal("late_night_talks"), v.literal("street_food"), v.literal("home_cooking"), v.literal("baking"), v.literal("healthy_eating"),
+          v.literal("weekend_getaways"), v.literal("long_drives"), v.literal("city_exploring"), v.literal("beach_vibes"), v.literal("mountain_views"),
+          v.literal("nature_walks"), v.literal("sunset_views"), v.literal("hiking"), v.literal("camping"), v.literal("stargazing"),
+          v.literal("gardening"), v.literal("gym"), v.literal("yoga"), v.literal("running"), v.literal("cycling"),
+          v.literal("meditation"), v.literal("pilates"), v.literal("music_lover"), v.literal("live_concerts"), v.literal("singing"),
+          v.literal("podcasts"), v.literal("binge_watching"), v.literal("thrillers"), v.literal("documentaries"), v.literal("anime"),
+          v.literal("k_dramas"), v.literal("board_games"), v.literal("chess"), v.literal("escape_rooms"), v.literal("drawing"),
+          v.literal("painting"), v.literal("writing"), v.literal("journaling"), v.literal("diy_projects"), v.literal("reading"),
+          v.literal("personal_growth"), v.literal("learning_new_skills"), v.literal("mindfulness"), v.literal("tech_enthusiast"), v.literal("startups"),
+          v.literal("coding"), v.literal("community_service"), v.literal("sustainability"), v.literal("plant_parenting"),
         ),
       ),
     ),
@@ -625,6 +669,31 @@ export const updateLocation = mutation({
     });
 
     return { success: true };
+  },
+});
+
+// Heartbeat - updates lastActive for presence (Online Now / Active Today)
+// Called periodically when app is in foreground to keep user marked as "online"
+// PRESENCE FIX: This mutation enables accurate "Online now" display on Discover cards
+export const heartbeat = mutation({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { authUserId } = args;
+
+    // Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false, reason: 'user_not_found' };
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(userId, {
+      lastActive: now,
+    });
+
+    return { success: true, lastActive: now };
   },
 });
 
@@ -1396,9 +1465,11 @@ export const completeOnboarding = mutation({
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
     // FIX: Add missing validators for profilePrompts and lgbtqSelf
+    // BUGFIX: Include section for reliable hydration
     profilePrompts: v.optional(v.array(v.object({
       question: v.string(),
       answer: v.string(),
+      section: v.optional(v.string()), // builder | performer | seeker | grounded
     }))),
     lgbtqSelf: v.optional(v.array(v.union(
       v.literal('gay'),

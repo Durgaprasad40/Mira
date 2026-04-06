@@ -243,9 +243,11 @@ export default defineSchema({
     createdAt: v.number(),
 
     // Profile Prompts (icebreakers)
+    // BUGFIX: Added section field for reliable hydration when editing
     profilePrompts: v.optional(v.array(v.object({
       question: v.string(),
       answer: v.string(),
+      section: v.optional(v.string()), // builder | performer | seeker | grounded
     }))),
 
     // Onboarding
@@ -291,6 +293,7 @@ export default defineSchema({
         profilePrompts: v.optional(v.array(v.object({
           question: v.string(),
           answer: v.string(),
+          section: v.optional(v.string()), // builder | performer | seeker | grounded
         }))),
         displayPhotoVariant: v.optional(v.union(
           v.literal('original'),

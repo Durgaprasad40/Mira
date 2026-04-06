@@ -848,12 +848,14 @@ export const getReplies = query({
           };
         }
 
-        // Get commenter's primary photo
+        // Get commenter's primary photo - ORDER IS SOURCE OF TRUTH
         const photos = await ctx.db
           .query('photos')
           .withIndex('by_user_order', (q) => q.eq('userId', reply.userId))
           .collect();
-        const primaryPhoto = photos.find((p) => p.isPrimary) || photos[0];
+        // Photos are sorted by order via index; first photo is primary
+        const sortedPhotos = photos.sort((a, b) => a.order - b.order);
+        const primaryPhoto = sortedPhotos[0];
 
         // Determine identity mode (backward compat: default to 'blur' if not set)
         let mode = reply.identityMode || (reply.isAnonymous ? 'blur' : 'open');
