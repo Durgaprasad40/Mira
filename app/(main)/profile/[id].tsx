@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   ScrollView,
   TouchableOpacity,
   useWindowDimensions,
+  Pressable,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -13,7 +14,24 @@ import { safePush } from '@/lib/safeRouter';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS, PROFILE_PROMPT_QUESTIONS } from '@/lib/constants';
+import {
+  COLORS,
+  RELATIONSHIP_INTENTS,
+  ACTIVITY_FILTERS,
+  PROFILE_PROMPT_QUESTIONS,
+  SMOKING_OPTIONS,
+  DRINKING_OPTIONS,
+  EXERCISE_OPTIONS,
+  PETS_OPTIONS,
+  KIDS_OPTIONS,
+  EDUCATION_OPTIONS,
+  RELIGION_OPTIONS,
+  SLEEP_SCHEDULE_OPTIONS,
+  SOCIAL_RHYTHM_OPTIONS,
+  TRAVEL_STYLE_OPTIONS,
+  WORK_STYLE_OPTIONS,
+  CORE_VALUES_OPTIONS,
+} from '@/lib/constants';
 import { computeIntentCompat, getIntentCompatColor, getIntentMismatchWarning } from '@/lib/intentCompat';
 import { getTrustBadges } from '@/lib/trustBadges';
 import { Button, Avatar } from '@/components/ui';
@@ -45,6 +63,17 @@ export default function ViewProfileScreen() {
     fromChat?: string;
   }>();
   const isPhase2 = mode === 'phase2';
+
+  // [P1_PROFILE_QUERY] Debug logging for phase isolation verification
+  if (__DEV__) {
+    console.log('[P1_PROFILE_QUERY] ViewProfileScreen mounted', {
+      userId,
+      mode,
+      isPhase2,
+      route: '/(main)/profile/[id]',
+      expectedPhase: isPhase2 ? 'Phase-2' : 'Phase-1',
+    });
+  }
   const isConfessPreview = mode === 'confess_preview';
   const isConfessRevisit = mode === 'confess_revisit';
   const isConfessionComment = mode === 'confession_comment'; // FIX 8: Mini profile for comment connect
@@ -57,6 +86,9 @@ export default function ViewProfileScreen() {
   const { userId: currentUserId, token } = useAuthStore();
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [showReportBlock, setShowReportBlock] = useState(false);
+
+  // Part E: Photo tap navigation ref
+  const photoListRef = useRef<FlatList>(null);
 
   // NOTE: Preview consumption is now handled BEFORE navigation in confessions.tsx
   // This ensures the preview is consumed before showing the profile, preventing abuse
@@ -185,6 +217,41 @@ export default function ViewProfileScreen() {
   // The UI handles conditional display of fields appropriately
   const profile = (isDemoMode ? demoProfile : convexProfile) as any;
 
+  // Part E: Photo tap navigation handlers
+  const totalPhotos = profile?.photos?.length ?? 0;
+
+  const handlePhotoTapLeft = useCallback(() => {
+    if (currentPhotoIndex > 0) {
+      const newIndex = currentPhotoIndex - 1;
+      if (__DEV__) {
+        console.log('[P1_PROFILE_PHOTO_TAP]', {
+          side: 'left',
+          previousIndex: currentPhotoIndex,
+          nextIndex: newIndex,
+          totalPhotos,
+        });
+      }
+      setCurrentPhotoIndex(newIndex);
+      photoListRef.current?.scrollToIndex({ index: newIndex, animated: true });
+    }
+  }, [currentPhotoIndex, totalPhotos]);
+
+  const handlePhotoTapRight = useCallback(() => {
+    if (currentPhotoIndex < totalPhotos - 1) {
+      const newIndex = currentPhotoIndex + 1;
+      if (__DEV__) {
+        console.log('[P1_PROFILE_PHOTO_TAP]', {
+          side: 'right',
+          previousIndex: currentPhotoIndex,
+          nextIndex: newIndex,
+          totalPhotos,
+        });
+      }
+      setCurrentPhotoIndex(newIndex);
+      photoListRef.current?.scrollToIndex({ index: newIndex, animated: true });
+    }
+  }, [currentPhotoIndex, totalPhotos]);
+
   // Phase-1 swipe mutation (shared likes.ts)
   const swipe = useMutation(api.likes.swipe);
   // Phase-2 swipe mutation (isolated privateSwipes.ts) - STRICT ISOLATION
@@ -299,6 +366,7 @@ export default function ViewProfileScreen() {
   const age = profile.age || 0;
 
   return (
+    <View style={{ flex: 1, backgroundColor: COLORS.background }}>
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       {/* Header: No back button, no overlay, just the 3-dots menu in top-right */}
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
@@ -334,33 +402,51 @@ export default function ViewProfileScreen() {
         }
 
         return profile.photos && profile.photos.length > 0 ? (
-          <FlatList
-            horizontal
-            pagingEnabled
-            showsHorizontalScrollIndicator={false}
-            bounces={false}
-            snapToAlignment="start"
-            decelerationRate="fast"
-            snapToInterval={screenWidth}
-            disableIntervalMomentum
-            data={profile.photos}
-            keyExtractor={(item, index) => item._id || `photo-${index}`}
-            onMomentumScrollEnd={(e) => {
-              const index = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
-              setCurrentPhotoIndex(index);
-            }}
-            renderItem={({ item }) => (
-              <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
-                <Image
-                  source={{ uri: item.url }}
-                  style={{ width: '100%', height: 500 }}
-                  contentFit="cover"
-                  blurRadius={blurIntensity}
+          <View style={{ position: 'relative' }}>
+            <FlatList
+              ref={photoListRef}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              bounces={false}
+              snapToAlignment="start"
+              decelerationRate="fast"
+              snapToInterval={screenWidth}
+              disableIntervalMomentum
+              scrollEnabled={false} // Disable swipe, use tap navigation only
+              data={profile.photos}
+              keyExtractor={(item, index) => item._id || `photo-${index}`}
+              getItemLayout={(_, index) => ({
+                length: screenWidth,
+                offset: screenWidth * index,
+                index,
+              })}
+              renderItem={({ item }) => (
+                <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top, backgroundColor: COLORS.backgroundDark }}>
+                  <Image
+                    source={{ uri: item.url }}
+                    style={{ width: '100%', height: 500 }}
+                    contentFit="cover"
+                    blurRadius={blurIntensity}
+                  />
+                </View>
+              )}
+              style={styles.photoCarousel}
+            />
+            {/* Part E: Tap zones for photo navigation - tap left = prev, tap right = next */}
+            {totalPhotos > 1 && (
+              <View style={styles.photoTapZones} pointerEvents="box-none">
+                <Pressable
+                  style={styles.photoTapZoneLeft}
+                  onPress={handlePhotoTapLeft}
+                />
+                <Pressable
+                  style={styles.photoTapZoneRight}
+                  onPress={handlePhotoTapRight}
                 />
               </View>
             )}
-            style={styles.photoCarousel}
-          />
+          </View>
         ) : null;
       })()}
       {!(profile.photos && profile.photos.length > 0) && (
@@ -393,51 +479,17 @@ export default function ViewProfileScreen() {
           )}
         </View>
 
-        {/* Trust Badges - includes verification status */}
-        {(() => {
-          const badges = getTrustBadges({
-            isVerified: profile.isVerified,
-            lastActive: (profile as any).lastActive,
-            photoCount: profile.photos?.length,
-            bio: profile.bio,
-          });
-          // Filter out the "Verified" badge from getTrustBadges since we show it separately
-          const otherBadges = badges.filter((b) => b.key !== 'verified');
-          const visible = otherBadges.slice(0, 2); // Show 2 other badges max
-          const overflow = otherBadges.length - 2;
-
-          // Verification badge: both verified and unverified show green check (per product decision)
-          const verificationBadge = {
-            label: profile.isVerified ? 'Verified' : 'Unverified',
-            color: '#22C55E', // Green for both states
-            icon: 'checkmark-circle' as const,
-          };
-
-          return (
-            <View style={styles.trustBadgeRow}>
-              {/* Verification badge - always first */}
-              <View style={[styles.trustBadge, { borderColor: verificationBadge.color + '40' }]}>
-                <Ionicons name={verificationBadge.icon} size={14} color={verificationBadge.color} />
-                <Text style={[styles.trustBadgeText, { color: verificationBadge.color }]}>
-                  {verificationBadge.label}
-                </Text>
-              </View>
-
-              {/* Other trust badges */}
-              {visible.map((badge) => (
-                <View key={badge.key} style={[styles.trustBadge, { borderColor: badge.color + '40' }]}>
-                  <Ionicons name={badge.icon as any} size={14} color={badge.color} />
-                  <Text style={[styles.trustBadgeText, { color: badge.color }]}>{badge.label}</Text>
-                </View>
-              ))}
-              {overflow > 0 && (
-                <View style={[styles.trustBadge, { borderColor: COLORS.textMuted + '40' }]}>
-                  <Text style={[styles.trustBadgeText, { color: COLORS.textMuted }]}>+{overflow}</Text>
-                </View>
-              )}
-            </View>
-          );
-        })()}
+        {/* Trust Badges - SIMPLIFIED: Only show Face Verified badge */}
+        {/* Part C FIX: Removed Photos Added, Active Today, Profile Complete badges */}
+        {/* Only Verified badge is shown per product decision */}
+        <View style={styles.trustBadgeRow}>
+          <View style={[styles.trustBadge, { borderColor: '#22C55E40' }]}>
+            <Ionicons name="checkmark-circle" size={14} color="#22C55E" />
+            <Text style={[styles.trustBadgeText, { color: '#22C55E' }]}>
+              {profile.isVerified ? 'Face Verified' : 'Unverified'}
+            </Text>
+          </View>
+        </View>
 
         {/* ========== PHASE-2 SECTION ORDER: Bio → My Intent → Hobbies → Interests (NO Details) ========== */}
 
@@ -516,158 +568,340 @@ export default function ViewProfileScreen() {
           );
         })()}
 
-        {/* ========== PHASE-1 SECTION ORDER: Intent → Bio → Prompts → Interests → Hobbies → Details ========== */}
+        {/* ═══════════════════════════════════════════════════════════════════════════
+            PHASE-1 FULL PROFILE SECTION ORDER (STRICT):
+            1. ABOUT (bio + prompts)
+            2. LOOKING FOR (relationshipIntent)
+            3. INTERESTS (activities)
+            4. LIFESTYLE (smoking, drinking, exercise, pets, kids)
+            5. ESSENTIALS (height, job, school, education)
+            6. DEEPER TRAITS (sleepSchedule, socialRhythm, travelStyle, workStyle, coreValues)
+            7. OPTIONAL (religion)
+            + Shared Interests ("You both enjoy")
+            + Common Places
+            ═══════════════════════════════════════════════════════════════════════════ */}
 
-        {/* Phase-1 Intent - show lookingFor (gender) + relationshipIntent chips */}
+        {/* DEBUG: Log full profile data */}
         {!isPhase2 && (() => {
-          const lookingFor: string[] = (profile as any).lookingFor || [];
-          const relIntent: string[] = profile.relationshipIntent || [];
-          if (lookingFor.length === 0 && relIntent.length === 0) return null;
+          // Helper functions for display labels
+          const getSmokingLabel = (v: string) => SMOKING_OPTIONS.find(o => o.value === v)?.label || v;
+          const getDrinkingLabel = (v: string) => DRINKING_OPTIONS.find(o => o.value === v)?.label || v;
+          const getExerciseLabel = (v: string) => EXERCISE_OPTIONS.find(o => o.value === v)?.label || v;
+          const getKidsLabel = (v: string) => KIDS_OPTIONS.find(o => o.value === v)?.label || v;
+          const getEducationLabel = (v: string) => EDUCATION_OPTIONS.find(o => o.value === v)?.label || v;
+          const getReligionLabel = (v: string) => RELIGION_OPTIONS.find(o => o.value === v)?.label || v;
+          const getSleepLabel = (v: string) => SLEEP_SCHEDULE_OPTIONS.find(o => o.value === v)?.label || v;
+          const getSocialLabel = (v: string) => SOCIAL_RHYTHM_OPTIONS.find(o => o.value === v)?.label || v;
+          const getTravelLabel = (v: string) => TRAVEL_STYLE_OPTIONS.find(o => o.value === v)?.label || v;
+          const getWorkLabel = (v: string) => WORK_STYLE_OPTIONS.find(o => o.value === v)?.label || v;
+          const getCoreValueLabel = (v: string) => CORE_VALUES_OPTIONS.find(o => o.value === v)?.label || v;
+          const getPetLabel = (v: string) => PETS_OPTIONS.find(o => o.value === v)?.label || v;
 
-          let lookingForText = '';
-          if (lookingFor.length >= 3) {
-            lookingForText = 'Everyone';
-          } else if (lookingFor.length > 0) {
-            const labels = lookingFor.map(g => GENDER_LABELS[g] || g).filter(Boolean);
-            const unique = [...new Set(labels)];
-            lookingForText = unique.join(', ');
+          // Section visibility helpers
+          const hasBio = !!profile.bio;
+          const hasPrompts = profile.profilePrompts && profile.profilePrompts.length > 0;
+          const hasAbout = hasBio || hasPrompts;
+
+          const relIntent: string[] = profile.relationshipIntent || [];
+          const hasLookingFor = relIntent.length > 0;
+
+          const hasInterests = profile.activities && profile.activities.length > 0;
+
+          const hasLifestyle = !!(
+            profile.smoking ||
+            profile.drinking ||
+            profile.exercise ||
+            (profile.pets && profile.pets.length > 0) ||
+            profile.kids
+          );
+
+          const hasEssentials = !!(
+            profile.height ||
+            profile.jobTitle ||
+            profile.school ||
+            profile.education
+          );
+
+          const hasDeeperTraits = !!(
+            profile.sleepSchedule ||
+            profile.socialRhythm ||
+            profile.travelStyle ||
+            profile.workStyle ||
+            (profile.coreValues && profile.coreValues.length > 0)
+          );
+
+          const hasOptional = !!profile.religion;
+
+          // Build rendered sections list for logging
+          // NOTE: looking_for removed from public profile per privacy rules
+          const sectionsRendered: string[] = ['hero'];
+          if (hasAbout) sectionsRendered.push('about');
+          if (hasInterests) sectionsRendered.push('interests');
+          if (hasLifestyle) sectionsRendered.push('lifestyle');
+          if (hasEssentials) sectionsRendered.push('essentials');
+          if (hasDeeperTraits) sectionsRendered.push('deeper_traits');
+          if (hasOptional) sectionsRendered.push('optional');
+
+          if (__DEV__) {
+            console.log('[FULL_PROFILE_DATA]', {
+              hasBio,
+              promptCount: profile.profilePrompts?.length || 0,
+              interestCount: profile.activities?.length || 0,
+              hasLifestyle,
+              hasEssentials,
+              hasDeeperTraits,
+              sectionsRendered: sectionsRendered.join(' | '),
+            });
+            console.log('[FULL_PROFILE_INTERESTS]', {
+              count: profile.activities?.length || 0,
+              values: profile.activities || [],
+              source: 'profile.activities',
+            });
+            console.log('[FULL_PROFILE_SECTIONS]', sectionsRendered.join(' | '));
           }
 
-          const intentLabels = relIntent
-            .map(key => RELATIONSHIP_INTENTS.find(i => i.value === key))
-            .filter(Boolean);
-
           return (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Looking for</Text>
-              <View style={styles.chips}>
-                {lookingForText && (
-                  <View style={styles.lookingForChip}>
-                    <Ionicons name="people-outline" size={14} color={COLORS.primary} />
-                    <Text style={styles.lookingForText}>{lookingForText}</Text>
-                  </View>
-                )}
-                {intentLabels.map((intent, idx) => (
-                  <View key={idx} style={styles.chip}>
-                    <Text style={styles.chipText}>{intent!.emoji} {intent!.label}</Text>
-                  </View>
-                ))}
-              </View>
-            </View>
-          );
-        })()}
-
-        {/* Phase-1: About (Bio) */}
-        {!isPhase2 && profile.bio && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>About</Text>
-            <Text style={styles.bio}>{profile.bio}</Text>
-          </View>
-        )}
-
-        {/* Profile Prompts - Phase-1 ONLY */}
-        {!isPhase2 && profile.profilePrompts && profile.profilePrompts.length > 0 && (
-          <View style={styles.section}>
-            {profile.profilePrompts.slice(0, 3).map((prompt: { question: string; answer: string }, idx: number) => (
-              <View key={idx} style={styles.promptCard}>
-                <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                <Text style={styles.promptAnswer}>{prompt.answer}</Text>
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* Shared Interests - Both phases */}
-        {(() => {
-          const myActivities: string[] = isDemoMode ? getDemoCurrentUser().activities : [];
-          const shared = (profile.activities || []).filter((a: string) => myActivities.includes(a));
-          if (shared.length === 0) return null;
-          return (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>You both enjoy</Text>
-              <View style={styles.chips}>
-                {shared.map((activity: string) => {
-                  const data = ACTIVITY_FILTERS.find((a) => a.value === activity);
-                  return (
-                    <View key={activity} style={styles.sharedChip}>
-                      <Text style={styles.sharedChipText}>
-                        {data?.emoji} {data?.label}
-                      </Text>
+            <>
+              {/* ═══════════════════════════════════════════════════════════════════════════
+                  SECTION 1: ABOUT (Bio + Prompts)
+                  ═══════════════════════════════════════════════════════════════════════════ */}
+              {hasAbout && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>About</Text>
+                  {hasBio && <Text style={styles.bio}>{profile.bio}</Text>}
+                  {hasPrompts && (
+                    <View style={hasBio ? { marginTop: 16 } : undefined}>
+                      {profile.profilePrompts.slice(0, 3).map((prompt: { question: string; answer: string }, idx: number) => (
+                        <View key={idx} style={styles.promptCard}>
+                          <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                          <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                        </View>
+                      ))}
                     </View>
-                  );
-                })}
-              </View>
-            </View>
-          );
-        })()}
-
-        {/* Common Places - Phase-1 only, privacy-safe shared locations */}
-        {!isPhase2 && sharedPlaces && sharedPlaces.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Common Places</Text>
-            <View style={styles.chips}>
-              {sharedPlaces.map((place: { id: string; label: string }) => (
-                <View key={place.id} style={styles.commonPlaceChip}>
-                  <Ionicons name="location-outline" size={14} color={COLORS.secondary} />
-                  <Text style={styles.commonPlaceText}>{place.label}</Text>
+                  )}
                 </View>
-              ))}
-            </View>
-          </View>
-        )}
+              )}
 
-        {/* Interests - Both phases (Phase-2 shows above in different section) */}
-        {!isPhase2 && profile.activities && profile.activities.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Interests</Text>
-            <View style={styles.chips}>
-              {profile.activities.map((activity: string) => {
-                const activityData = ACTIVITY_FILTERS.find((a) => a.value === activity);
+              {/* ═══════════════════════════════════════════════════════════════════════════
+                  SECTION 2: RELATIONSHIP GOALS (moved to private/match context only)
+                  NOTE: "Looking for" removed from public profile per privacy rules
+                  Partner preferences and relationship intents are private information
+                  ═══════════════════════════════════════════════════════════════════════════ */}
+
+              {/* ═══════════════════════════════════════════════════════════════════════════
+                  SECTION 3: INTERESTS (Activities)
+                  ═══════════════════════════════════════════════════════════════════════════ */}
+              {hasInterests && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Interests</Text>
+                  <View style={styles.chips}>
+                    {profile.activities.map((activity: string) => {
+                      const activityData = ACTIVITY_FILTERS.find((a) => a.value === activity);
+                      return (
+                        <View key={activity} style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {activityData?.emoji} {activityData?.label || activity}
+                          </Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              )}
+
+              {/* ═══════════════════════════════════════════════════════════════════════════
+                  SECTION 4: LIFESTYLE (Smoking, Drinking, Exercise, Pets, Kids)
+                  ═══════════════════════════════════════════════════════════════════════════ */}
+              {hasLifestyle && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Lifestyle</Text>
+                  <View style={styles.details}>
+                    {profile.smoking && profile.smoking !== 'prefer_not_to_say' && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="flame-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getSmokingLabel(profile.smoking)}</Text>
+                      </View>
+                    )}
+                    {profile.drinking && profile.drinking !== 'prefer_not_to_say' && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="wine-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getDrinkingLabel(profile.drinking)}</Text>
+                      </View>
+                    )}
+                    {profile.exercise && profile.exercise !== 'prefer_not_to_say' && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="fitness-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getExerciseLabel(profile.exercise)}</Text>
+                      </View>
+                    )}
+                    {profile.pets && profile.pets.length > 0 && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="paw-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>
+                          {profile.pets.map((p: string) => getPetLabel(p)).join(', ')}
+                        </Text>
+                      </View>
+                    )}
+                    {profile.kids && profile.kids !== 'prefer_not_to_say' && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="people-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getKidsLabel(profile.kids)}</Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              )}
+
+              {/* ═══════════════════════════════════════════════════════════════════════════
+                  SECTION 5: ESSENTIALS (Height, Job, School, Education)
+                  ═══════════════════════════════════════════════════════════════════════════ */}
+              {hasEssentials && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Essentials</Text>
+                  <View style={styles.details}>
+                    {profile.height && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="resize-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{profile.height} cm</Text>
+                      </View>
+                    )}
+                    {profile.jobTitle && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="briefcase-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>
+                          {profile.jobTitle}
+                          {profile.company && ` at ${profile.company}`}
+                        </Text>
+                      </View>
+                    )}
+                    {profile.school && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="school-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{profile.school}</Text>
+                      </View>
+                    )}
+                    {profile.education && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="book-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getEducationLabel(profile.education)}</Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              )}
+
+              {/* ═══════════════════════════════════════════════════════════════════════════
+                  SECTION 6: DEEPER TRAITS (Sleep, Social, Travel, Work Style, Core Values)
+                  ═══════════════════════════════════════════════════════════════════════════ */}
+              {hasDeeperTraits && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Deeper Traits</Text>
+                  <View style={styles.details}>
+                    {profile.sleepSchedule && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="moon-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getSleepLabel(profile.sleepSchedule)}</Text>
+                      </View>
+                    )}
+                    {profile.socialRhythm && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="people-circle-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getSocialLabel(profile.socialRhythm)}</Text>
+                      </View>
+                    )}
+                    {profile.travelStyle && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="airplane-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getTravelLabel(profile.travelStyle)}</Text>
+                      </View>
+                    )}
+                    {profile.workStyle && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="laptop-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getWorkLabel(profile.workStyle)}</Text>
+                      </View>
+                    )}
+                    {profile.coreValues && profile.coreValues.length > 0 && (
+                      <View style={styles.coreValuesRow}>
+                        <View style={styles.detailRow}>
+                          <Ionicons name="heart-outline" size={20} color={COLORS.textLight} />
+                          <Text style={styles.detailText}>Core Values</Text>
+                        </View>
+                        <View style={styles.coreValuesChips}>
+                          {profile.coreValues.map((v: string) => (
+                            <View key={v} style={styles.coreValueChip}>
+                              <Text style={styles.coreValueChipText}>{getCoreValueLabel(v)}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              )}
+
+              {/* ═══════════════════════════════════════════════════════════════════════════
+                  SECTION 7: OPTIONAL (Religion)
+                  ═══════════════════════════════════════════════════════════════════════════ */}
+              {hasOptional && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>More About Me</Text>
+                  <View style={styles.details}>
+                    {profile.religion && profile.religion !== 'prefer_not_to_say' && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="sparkles-outline" size={20} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{getReligionLabel(profile.religion)}</Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              )}
+
+              {/* ═══════════════════════════════════════════════════════════════════════════
+                  SHARED INTERESTS ("You both enjoy")
+                  ═══════════════════════════════════════════════════════════════════════════ */}
+              {(() => {
+                const myActivities: string[] = isDemoMode ? getDemoCurrentUser().activities : [];
+                const shared = (profile.activities || []).filter((a: string) => myActivities.includes(a));
+                if (shared.length === 0) return null;
                 return (
-                  <View key={activity} style={styles.chip}>
-                    <Text style={styles.chipText}>
-                      {activityData?.emoji} {activityData?.label}
-                    </Text>
+                  <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>You Both Enjoy</Text>
+                    <View style={styles.chips}>
+                      {shared.map((activity: string) => {
+                        const data = ACTIVITY_FILTERS.find((a) => a.value === activity);
+                        return (
+                          <View key={activity} style={styles.sharedChip}>
+                            <Text style={styles.sharedChipText}>
+                              {data?.emoji} {data?.label}
+                            </Text>
+                          </View>
+                        );
+                      })}
+                    </View>
                   </View>
                 );
-              })}
-            </View>
-          </View>
-        )}
+              })()}
 
-        {/* Details - Phase-1 ONLY (hidden in Phase-2) */}
-        {!isPhase2 && (profile.height ||
-          profile.smoking ||
-          profile.drinking ||
-          profile.education ||
-          profile.jobTitle) && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Details</Text>
-            <View style={styles.details}>
-              {profile.height && (
-                <View style={styles.detailRow}>
-                  <Ionicons name="resize" size={20} color={COLORS.textLight} />
-                  <Text style={styles.detailText}>{profile.height} cm</Text>
+              {/* ═══════════════════════════════════════════════════════════════════════════
+                  COMMON PLACES (Privacy-safe shared locations)
+                  ═══════════════════════════════════════════════════════════════════════════ */}
+              {sharedPlaces && sharedPlaces.length > 0 && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Common Places</Text>
+                  <View style={styles.chips}>
+                    {sharedPlaces.map((place: { id: string; label: string }) => (
+                      <View key={place.id} style={styles.commonPlaceChip}>
+                        <Ionicons name="location-outline" size={14} color={COLORS.secondary} />
+                        <Text style={styles.commonPlaceText}>{place.label}</Text>
+                      </View>
+                    ))}
+                  </View>
                 </View>
               )}
-              {profile.jobTitle && (
-                <View style={styles.detailRow}>
-                  <Ionicons name="briefcase" size={20} color={COLORS.textLight} />
-                  <Text style={styles.detailText}>
-                    {profile.jobTitle}
-                    {profile.company && ` at ${profile.company}`}
-                  </Text>
-                </View>
-              )}
-              {profile.education && (
-                <View style={styles.detailRow}>
-                  <Ionicons name="school" size={20} color={COLORS.textLight} />
-                  <Text style={styles.detailText}>{profile.education}</Text>
-                </View>
-              )}
-            </View>
-          </View>
-        )}
+            </>
+          );
+        })()}
 
         {/* Action Buttons - Hidden in limited view modes or when opened from chat */}
         {/* HARDENING FIX 3: Also check backend flag for automatic detection */}
@@ -720,6 +954,7 @@ export default function ViewProfileScreen() {
         onBlockSuccess={() => router.back()}
       />
     </ScrollView>
+    </View>
   );
 }
 
@@ -766,6 +1001,23 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.backgroundDark,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  // Part E: Photo tap navigation zones
+  photoTapZones: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    flexDirection: 'row',
+  },
+  photoTapZoneLeft: {
+    flex: 1,
+    // Transparent - tap area only
+  },
+  photoTapZoneRight: {
+    flex: 1,
+    // Transparent - tap area only
   },
   photoIndicators: {
     flexDirection: 'row',
@@ -1022,6 +1274,30 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: COLORS.text,
     marginLeft: 12,
+  },
+  // Core Values specific styles
+  coreValuesRow: {
+    marginTop: 4,
+  },
+  coreValuesChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    marginLeft: 32,
+  },
+  coreValueChip: {
+    backgroundColor: COLORS.primary + '15',
+    borderWidth: 1,
+    borderColor: COLORS.primary + '30',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  coreValueChipText: {
+    fontSize: 14,
+    color: COLORS.primary,
+    fontWeight: '500',
   },
   actions: {
     flexDirection: 'row',
