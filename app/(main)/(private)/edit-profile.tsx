@@ -5,7 +5,7 @@
  * 1. Basic Info (nickname, age, gender)
  * 2. Photos (grid with add/remove)
  * 3. Photo Visibility (blur controls)
- * 4. About (bio)
+ * 4. Bio
  * 5. Prompts (2 visible, +X more expandable)
  * 6. Details (all onboarding fields)
  * 7. Settings
@@ -295,7 +295,7 @@ export default function EditProfileScreen() {
   // Local state
   const [addingSlotIndex, setAddingSlotIndex] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  // NOTE: saveSuccess state removed - we now navigate back on success instead
   const [promptsExpanded, setPromptsExpanded] = useState(false);
   const [editingBio, setEditingBio] = useState(false);
   const [draftBio, setDraftBio] = useState(privateBio);
@@ -466,6 +466,45 @@ export default function EditProfileScreen() {
     }
   };
 
+  // Set main photo (move selected photo to index 0)
+  const handleSetMainPhoto = async (fromIndex: number) => {
+    if (fromIndex === 0) return; // Already main
+
+    const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+    if (fromIndex < 0 || fromIndex >= currentPhotos.length) return;
+
+    // Swap: move selected photo to index 0, shift others down
+    const newPhotos = [...currentPhotos];
+    const selectedPhoto = newPhotos[fromIndex];
+    newPhotos.splice(fromIndex, 1); // Remove from current position
+    newPhotos.unshift(selectedPhoto); // Add to beginning
+
+    // Update store immediately for responsive UI
+    setSelectedPhotos([], newPhotos);
+
+    if (__DEV__) {
+      console.log('[P2_EditProfile] 🔄 setMainPhoto', { fromIndex, newFirst: selectedPhoto?.slice(-30) });
+    }
+
+    // Persist to backend
+    if (!isDemoMode && userId) {
+      try {
+        await updatePrivateProfile({
+          authUserId: userId,
+          privatePhotoUrls: newPhotos,
+        });
+        if (__DEV__) {
+          console.log('[P2_EditProfile] ✅ Main photo persisted');
+        }
+      } catch (error) {
+        if (__DEV__) console.error('[P2_EditProfile] ❌ Failed to persist main photo:', error);
+        // Revert on failure
+        setSelectedPhotos([], currentPhotos);
+        Alert.alert('Error', 'Failed to set main photo. Please try again.');
+      }
+    }
+  };
+
   // Toggle photo blur
   const handleTogglePhotoBlur = async (slotIndex: number) => {
     togglePhotoBlurSlot(slotIndex);
@@ -516,7 +555,6 @@ export default function EditProfileScreen() {
     if (isSaving) return;
 
     setIsSaving(true);
-    setSaveSuccess(false);
     Keyboard.dismiss();
 
     try {
@@ -554,24 +592,22 @@ export default function EditProfileScreen() {
         });
       }
 
-      // Show success feedback
-      setSaveSuccess(true);
-      setTimeout(() => {
-        if (mountedRef.current) {
-          setSaveSuccess(false);
-        }
-      }, 2000);
+      // SUCCESS: Navigate back to profile tab (clean UX, no "Saved" button state)
+      // Using router.back() to return to the Phase-2 profile tab the user came from
+      router.back();
 
     } catch (error) {
       if (__DEV__) {
         console.error('[EditProfile] Save failed:', error);
       }
       Alert.alert('Error', 'Failed to save changes. Please try again.');
-    } finally {
+      // On failure: stay on page, reset saving state
       if (mountedRef.current) {
         setIsSaving(false);
       }
     }
+    // NOTE: No finally block needed - on success we navigate away,
+    // on failure we reset isSaving in the catch block
   };
 
   // Go back
@@ -675,10 +711,19 @@ export default function EditProfileScreen() {
                         transition={200}
                       />
 
-                      {isMain && (
+                      {/* Star indicator: filled = current main, outline = tap to make main */}
+                      {isMain ? (
                         <View style={styles.mainBadge}>
-                          <Ionicons name="star" size={10} color="#FFD700" />
+                          <Ionicons name="star" size={12} color="#FFD700" />
                         </View>
+                      ) : (
+                        <TouchableOpacity
+                          style={styles.setMainBtn}
+                          onPress={() => handleSetMainPhoto(slotIndex)}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons name="star-outline" size={12} color="#FFFFFF" />
+                        </TouchableOpacity>
                       )}
 
                       {blurMyPhoto && (
@@ -779,11 +824,11 @@ export default function EditProfileScreen() {
           </View>
 
           {/* ────────────────────────────────────────────────────────────── */}
-          {/* SECTION 4: ABOUT */}
+          {/* SECTION 4: BIO */}
           {/* ────────────────────────────────────────────────────────────── */}
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>About</Text>
+              <Text style={styles.sectionTitle}>Bio</Text>
               {!editingBio && (
                 <TouchableOpacity onPress={() => setEditingBio(true)}>
                   <Text style={styles.editLink}>Edit</Text>
@@ -1080,7 +1125,6 @@ export default function EditProfileScreen() {
             style={[
               styles.saveButton,
               isSaving && styles.saveButtonDisabled,
-              saveSuccess && styles.saveButtonSuccess,
             ]}
             onPress={handleSaveAll}
             disabled={isSaving}
@@ -1088,11 +1132,6 @@ export default function EditProfileScreen() {
           >
             {isSaving ? (
               <ActivityIndicator size="small" color="#FFFFFF" />
-            ) : saveSuccess ? (
-              <>
-                <Ionicons name="checkmark-circle" size={20} color="#FFFFFF" />
-                <Text style={styles.saveButtonText}>Saved</Text>
-              </>
             ) : (
               <Text style={styles.saveButtonText}>Save Changes</Text>
             )}
@@ -1256,10 +1295,21 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 6,
     left: 6,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  setMainBtn: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.5)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1547,9 +1597,7 @@ const styles = StyleSheet.create({
   saveButtonDisabled: {
     opacity: 0.7,
   },
-  saveButtonSuccess: {
-    backgroundColor: '#4CAF50',
-  },
+  // NOTE: saveButtonSuccess style removed - we now navigate back on success
   saveButtonText: {
     fontSize: 16,
     fontWeight: '700',

@@ -263,6 +263,16 @@ export default function Phase2FullProfileScreen() {
   const currentUserId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
 
+  // [P2_PROFILE_QUERY] Debug logging - this screen should ONLY be reached from Phase-2
+  if (__DEV__) {
+    console.log('[P2_PROFILE_QUERY] Phase2FullProfileScreen mounted', {
+      profileUserId,
+      route: '/(main)/(private)/p2-profile/[userId]',
+      phase: 'Phase-2 ONLY',
+      isolationFix: 'Renamed from /profile to /p2-profile to avoid URL collision',
+    });
+  }
+
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const photoListRef = useRef<FlatList>(null);
 

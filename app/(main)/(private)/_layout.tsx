@@ -80,7 +80,16 @@ export default function PrivateLayout() {
   // PERF: Log mount time
   useEffect(() => {
     _privateLayoutMountTime = Date.now();
-    if (__DEV__) console.log('[PERF] PrivateLayout mounted', { t: _privateLayoutMountTime });
+    if (__DEV__) {
+      console.log('[PERF] PrivateLayout mounted', { t: _privateLayoutMountTime });
+      // P0 ISOLATION DEBUG: Log when PrivateLayout mounts - should NEVER happen from Phase-1 Discover
+      console.log('[P2_LAYOUT_MOUNT] PrivateLayout mounted', {
+        pathname,
+        segments: segmentStrings,
+        phaseMode,
+        warning: 'If you see this after P1_PROFILE_ROUTE, there is a routing isolation bug!',
+      });
+    }
   }, []);
 
   // Get the parent (main) stack navigator — beforeRemove fires here

@@ -162,7 +162,8 @@ export default function Phase2LikesScreen() {
       console.log('[P2_LIKES_PAGE] Opening profile:', like.fromUserId?.slice?.(-8));
     }
     // Navigate to dedicated Phase-2 full profile (within private route group)
-    router.push(`/(main)/(private)/profile/${like.fromUserId}` as any);
+    // ISOLATION FIX: Use p2-profile to avoid URL collision with Phase-1 profile
+    router.push(`/(main)/(private)/p2-profile/${like.fromUserId}` as any);
   };
 
   // P2-004: Using centralized getGenderIcon from lib/genderIcon.ts
