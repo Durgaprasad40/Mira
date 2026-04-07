@@ -22,6 +22,12 @@ function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | un
   return sanitized.length > 0 ? sanitized : undefined;
 }
 
+function getSafeProfilePhotos<T extends { url?: string; isNsfw?: boolean; order: number }>(photos: T[]): T[] {
+  return photos
+    .filter((photo) => !photo.isNsfw && typeof photo.url === "string" && photo.url.trim().length > 0)
+    .sort((a, b) => a.order - b.order);
+}
+
 // Get current user profile
 export const getCurrentUser = query({
   args: {
@@ -49,10 +55,11 @@ export const getCurrentUser = query({
     // This ensures getCurrentUser returns the same photos as getUserPhotos
     // for consistent photo counts across Edit Profile, Profile Tab, and Discover
     const photos = allPhotos.filter((p) => p.photoType !== 'verification_reference');
+    const safePhotos = getSafeProfilePhotos(photos);
 
     return {
       ...user,
-      photos: photos.sort((a, b) => a.order - b.order),
+      photos: safePhotos,
     };
   },
 });
@@ -131,13 +138,15 @@ export const getUserById = query({
     // This ensures getUserById returns the same photos as getDiscoverProfiles
     // for consistent photo counts between Discover card and opened profile
     const photos = allPhotos.filter((p) => p.photoType !== 'verification_reference');
+    const safePhotos = getSafeProfilePhotos(photos);
 
     console.log('[P1_PROFILE_PHOTOS] getUserById photo source', {
       userId: args.userId,
       allPhotosCount: allPhotos.length,
       filteredCount: photos.length,
       filteredOut: allPhotos.length - photos.length,
-      photoIds: photos.map((p) => p._id),
+      safeCount: safePhotos.length,
+      photoIds: safePhotos.map((p) => p._id),
     });
 
     // Calculate distance if both have location
@@ -193,7 +202,7 @@ export const getUserById = query({
       // Only expose: name (first name only), age, gender, one blurred photo
       const firstName = user.name?.split(" ")[0] || "Anonymous";
       // ORDER-BASED PRIMARY: First photo by order is primary (photos are pre-sorted by order)
-      const primaryPhoto = photos[0];
+      const primaryPhoto = safePhotos[0];
 
       return {
         id: user._id,
@@ -258,7 +267,7 @@ export const getUserById = query({
       relationshipIntent: user.relationshipIntent,
       activities: user.activities,
       profilePrompts: user.profilePrompts ?? [],
-      photos: photos.sort((a, b) => a.order - b.order),
+      photos: safePhotos,
       photoBlurred: user.photoBlurred === true,
       // Deeper Traits from lifeRhythm (onboardingDraft)
       sleepSchedule: lifeRhythm?.sleepSchedule,

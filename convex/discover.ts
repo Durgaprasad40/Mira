@@ -70,6 +70,22 @@ function isDistanceAllowed(distance: number | undefined, maxDistanceKm: number):
   return distance <= maxDistanceKm;
 }
 
+function getSafeDiscoverPhotos<T extends { url?: string; isNsfw?: boolean; order: number }>(photos: T[]): T[] {
+  return photos
+    .filter((photo) => !photo.isNsfw && typeof photo.url === 'string' && photo.url.trim().length > 0)
+    .sort((a, b) => a.order - b.order);
+}
+
+function getDiscoverFetchLimit(
+  offset: number,
+  limit: number,
+  sortBy: 'recommended' | 'distance' | 'age' | 'recently_active' | 'newest',
+): number {
+  const requestedWindow = Math.max(offset + limit, limit, 1);
+  const bufferMultiplier = sortBy === 'recommended' ? 25 : 15;
+  return Math.min(Math.max(requestedWindow * bufferMultiplier, 300), 1000);
+}
+
 // ---------------------------------------------------------------------------
 // DISCOVER-CATEGORY-FIX: Shared eligibility helper for counts + detail consistency
 // ---------------------------------------------------------------------------
@@ -543,7 +559,7 @@ export const getDiscoverProfiles = query({
 
     // PERF #8: Use take() with buffer to avoid loading entire user table
     // Fetch more than needed since many will be filtered out
-    const fetchLimit = (offset + limit) * 10; // 10x buffer for filtering
+    const fetchLimit = getDiscoverFetchLimit(offset, limit, sortBy);
     const allUsers = await ctx.db.query('users').take(fetchLimit);
 
     // First pass: filter candidates without photo queries
@@ -649,7 +665,7 @@ export const getDiscoverProfiles = query({
       const displayPhotos = rawPhotos.filter((p) => p.photoType !== 'verification_reference');
 
       // Filter out NSFW photos - these should never be shown in Discover
-      const nonNsfwPhotos = displayPhotos.filter((p) => !p.isNsfw);
+      const safePhotos = getSafeDiscoverPhotos(displayPhotos);
 
       // Log filtering results
       console.log('[DISCOVER_PHOTO_FILTER_RESULT]', {
@@ -657,17 +673,17 @@ export const getDiscoverProfiles = query({
         userName: user.name,
         rawCount: rawPhotos.length,
         afterVerificationFilter: displayPhotos.length,
-        afterNsfwFilter: nonNsfwPhotos.length,
+        afterSafetyFilter: safePhotos.length,
         verificationFiltered: rawPhotos
           .filter((p) => p.photoType === 'verification_reference')
           .map((p) => ({ id: p._id, order: p.order })),
         nsfwFiltered: displayPhotos
-          .filter((p) => p.isNsfw)
+          .filter((p) => p.isNsfw || !(typeof p.url === 'string' && p.url.trim().length > 0))
           .map((p) => ({ id: p._id, order: p.order })),
-        finalPhotoIds: nonNsfwPhotos.map((p) => p._id),
+        finalPhotoIds: safePhotos.map((p) => p._id),
       });
 
-      if (nonNsfwPhotos.length === 0) continue; // at least 1 photo required
+      if (safePhotos.length === 0) continue; // at least 1 safe photo required
 
       const userAge = calculateAge(user.dateOfBirth);
       const theyLikedMe = usersWhoLikedMe.has(user._id as string);
@@ -701,11 +717,11 @@ export const getDiscoverProfiles = query({
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos: nonNsfwPhotos.sort((a, b) => a.order - b.order),
+        photos: safePhotos,
         photoBlurred: user.photoBlurred === true,
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
-        photoCount: nonNsfwPhotos.length,
+        photoCount: safePhotos.length,
         isIncognito: user.incognitoMode === true,
       });
     }

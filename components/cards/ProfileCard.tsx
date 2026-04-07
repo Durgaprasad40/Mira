@@ -22,6 +22,14 @@ import Animated, {
 import { cmToFeetInches } from '@/lib/utils';
 import { trackAction } from '@/lib/sentry';
 import { getDisplayBio, FALLBACK_BIO } from '@/lib/profileFallbacks';
+import { getRenderableProfilePhotos } from '@/lib/profileData';
+import {
+  DEBUG_PHOTO_RENDER,
+  DEBUG_DISCOVER_PLANNER,
+  DEBUG_CARD_PRESENCE,
+  DEBUG_CONTENT_RENDER,
+  DEBUG_P2_UI,
+} from '@/lib/debugFlags';
 
 // PERF: Max photos to prefetch when card becomes visible
 const PREFETCH_COUNT = 5;
@@ -131,15 +139,9 @@ const PhotoStack = memo(function PhotoStack({
   const visiblePhotos = photos.slice(windowStart, windowEnd);
   const indexOffset = windowStart; // Offset to map local index to global
 
-  if (__DEV__) {
-    console.log('[PHOTO_RENDER_DEBUG]', {
-      activeIndex,
-      totalPhotos: photos.length,
-      windowStart,
-      windowEnd,
-      visibleCount: visiblePhotos.length,
-      currentPhotoUrl: photos[activeIndex]?.url ? 'exists' : 'MISSING',
-    });
+  // LOG_NOISE_FIX: Gated behind DEBUG_PHOTO_RENDER flag (default: false)
+  if (__DEV__ && DEBUG_PHOTO_RENDER) {
+    console.log(`[PHOTO_RENDER] idx=${activeIndex}/${photos.length} win=${windowStart}-${windowEnd}`);
   }
 
   return (
@@ -231,19 +233,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     return (Date.now() - lastActive) < twentyFourHoursMs;
   }, [lastActive, isActiveNow]);
 
-  // [P1_CARD_PRESENCE] Debug logging for presence badge verification
+  // LOG_NOISE_FIX: Presence logging gated behind DEBUG_CARD_PRESENCE (default: false)
   useEffect(() => {
-    if (__DEV__ && showCarousel && !isPhase2) {
-      const timeSinceActive = lastActive ? Math.round((Date.now() - lastActive) / 60000) : null;
-      console.log('[P1_CARD_PRESENCE]', {
-        name,
-        lastActive,
-        timeSinceActiveMinutes: timeSinceActive,
-        isActiveNow,
-        isActiveToday,
-        renderedBadge: isActiveNow ? 'Online Now' : (isActiveToday ? 'Active Today' : 'None'),
-        showCarousel,
-      });
+    if (__DEV__ && DEBUG_CARD_PRESENCE && showCarousel && !isPhase2) {
+      const badge = isActiveNow ? 'online' : (isActiveToday ? 'today' : 'none');
+      console.log(`[PRESENCE] ${name}: ${badge}`);
     }
   }, [name, lastActive, isActiveNow, isActiveToday, showCarousel, isPhase2]);
 
@@ -329,7 +323,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   type Phase1ContentSlot =
     | 'identity'           // Photo 1: name, age, gender, badges, distance
     | 'identity_bio'       // Identity + bio (for 2-4 photo profiles)
-    | 'wave_content';      // Wave-distributed content units
+    | 'wave_content'       // Wave-distributed content units
+    | 'soft_fallback';     // Compact reinforcement for late photos when unique content exhausted
 
   // Get primary intent as a single elegant line
   const phase1IntentLine = useMemo(() => {
@@ -519,6 +514,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     // Wave distribution data
     waveUnits: DisplayUnit[];
     waveDensity: WaveDensity;
+    // Soft fallback data for late photos (compact reinforcement)
+    softFallback?: {
+      type: 'prompt' | 'interests' | 'intent' | 'bio' | 'cta';
+      promptSnippet?: string;  // Shortened prompt answer
+      interestChips?: { emoji: string; label: string }[];  // Top 2-3 interests
+      intentLine?: string;     // Relationship intent
+      bioSnippet?: string;     // First line of bio
+    };
   }
 
   // Helper: Convert prompt question to short label (4-5 words max)
@@ -737,57 +740,18 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // NO-EMPTY-SLIDES FALLBACK: Ensure we have enough content for all photos
-    // For 5+ photos, if units run out, cycle through best reusable content
-    // Priority: bio > prompts > relationship > interests
-    // ═══════════════════════════════════════════════════════════════════════
-    const contentSlidesNeeded = totalPhotos === 1 ? 1 : totalPhotos - 1; // P1 is identity for 2+ photos
-
-    // Build reusable content pool in priority order for cycling
-    const reusableUnits: DisplayUnit[] = [];
-    const bioUnit = units.find((u) => u.type === 'bio');
-    if (bioUnit) reusableUnits.push(bioUnit);
-    units.filter((u) => u.type === 'prompt').forEach((u) => reusableUnits.push(u));
-    const relUnit = units.find((u) => u.type === 'relationship');
-    if (relUnit) reusableUnits.push(relUnit);
-    units.filter((u) => u.type === 'interests').forEach((u) => reusableUnits.push(u));
-
-    if (units.length < contentSlidesNeeded && reusableUnits.length > 0) {
-      let fallbackIndex = 0;
-      let reuseIdx = 0;
-      while (units.length < contentSlidesNeeded) {
-        // Cycle through reusable units instead of repeating the same one
-        const unitToReuse = reusableUnits[reuseIdx % reusableUnits.length];
-        const reusedUnit: DisplayUnit = {
-          ...unitToReuse,
-          key: `${unitToReuse.key}_reuse_${fallbackIndex}`,
-          priority: priority++,
-        };
-        units.push(reusedUnit);
-        fallbackIndex++;
-        reuseIdx++;
-      }
-
-      if (__DEV__) {
-        console.log('[P1_WAVE_FALLBACK]', {
-          name,
-          photoCount: totalPhotos,
-          originalUnits: units.length - fallbackIndex,
-          reusedUnits: fallbackIndex,
-          reusablePoolSize: reusableUnits.length,
-        });
-      }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // TASK 2: PHOTO DISTRIBUTION ENGINE - Wave-based assignment
+    // STRICT UNIQUE-CONTENT PLANNER: NO cycling, NO repetition
+    // Each unit used AT MOST ONCE. Later photos fall back to identity-only.
+    // CORE RULE: Never repeat bio, prompts, interests, lifestyle, etc.
     // ═══════════════════════════════════════════════════════════════════════
     const usedUnitKeys = new Set<string>();
 
-    // Helper: Get next N unused units
+    // Helper: Get next N unused units (STRICT - NO cycling)
+    // When unique content exhausts, returns empty array (identity-only fallback)
     const getNextUnits = (count: number): DisplayUnit[] => {
       const result: DisplayUnit[] = [];
       let totalWeight = 0;
+
       for (const unit of units) {
         if (usedUnitKeys.has(unit.key)) continue;
         if (result.length >= count) break;
@@ -797,6 +761,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         totalWeight += unit.weight;
         usedUnitKeys.add(unit.key);
       }
+
+      // NO CYCLING - return only unique content
+      // Empty result means this photo will show identity-only
       return result;
     };
 
@@ -842,6 +809,67 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     };
 
     // ═══════════════════════════════════════════════════════════════════════
+    // SOFT FALLBACK BUILDER: Compact reinforcement for late photos
+    // Priority: prompt snippet > interests > intent > bio snippet > CTA
+    // This prevents "dead" late photos when unique content is exhausted
+    // ═══════════════════════════════════════════════════════════════════════
+    const buildSoftFallback = (): Phase1PhotoContentItem['softFallback'] | undefined => {
+      // Priority 1: Best prompt answer (shortened)
+      if (selectedPrompts.length > 0) {
+        const bestPrompt = selectedPrompts[0];
+        const snippet = bestPrompt.answer.length > 60
+          ? bestPrompt.answer.slice(0, 57) + '...'
+          : bestPrompt.answer;
+        return { type: 'prompt', promptSnippet: snippet };
+      }
+
+      // Priority 2: Top interests (2-3 chips)
+      if (activities && activities.length > 0) {
+        const topChips = activities.slice(0, 3).map(key => {
+          const activity = ACTIVITY_FILTERS.find(a => a.value === key);
+          return activity ? { emoji: activity.emoji, label: activity.label } : null;
+        }).filter(Boolean) as { emoji: string; label: string }[];
+        if (topChips.length > 0) {
+          return { type: 'interests', interestChips: topChips };
+        }
+      }
+
+      // Priority 3: Relationship intent
+      if (relationshipIntent && relationshipIntent.length > 0) {
+        const intentMap: Record<string, string> = {
+          serious_vibes: 'Looking for something real',
+          keep_it_casual: 'Keeping it casual',
+          exploring_vibes: 'Exploring connections',
+          see_where_it_goes: 'See where it goes',
+          open_to_vibes: 'Open to anything',
+          just_friends: 'Looking for friends',
+          open_to_anything: 'Open to all vibes',
+          single_parent: 'Single parent life',
+          new_to_dating: 'New to dating',
+        };
+        const intentLine = intentMap[relationshipIntent[0]] || null;
+        if (intentLine) {
+          return { type: 'intent', intentLine };
+        }
+      }
+
+      // Priority 4: Bio snippet (first line)
+      if (hasBio && bio) {
+        const firstLine = bio.split(/[.\n]/)[0].trim();
+        const snippet = firstLine.length > 50 ? firstLine.slice(0, 47) + '...' : firstLine;
+        if (snippet.length > 10) {
+          return { type: 'bio', bioSnippet: snippet };
+        }
+      }
+
+      // Priority 5: Minimal CTA
+      return { type: 'cta' };
+    };
+
+    // Pre-build the fallback once (used when unique content exhausts)
+    const softFallbackContent = buildSoftFallback();
+
+    // ═══════════════════════════════════════════════════════════════════════
     // DISTRIBUTION RULES BY PHOTO COUNT
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -885,7 +913,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       p1.waveDensity = 'low';
       contents.push(p1);
 
-      // Photo 2: Bio + remaining units (prompt + basics)
+      // Photo 2: Bio + remaining units (prompt + basics) - with soft fallback for sparse profiles
       const p2 = createEmptyContent();
       if (hasBio) {
         const bioUnit = units.find(u => u.key === 'bio');
@@ -897,8 +925,19 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       }
       const p2Units = getNextUnits(2);
       applyUnitsToContent(p2, p2Units);
-      p2.slotType = (hasBio || p2Units.length > 0) ? 'wave_content' : 'identity';
-      p2.waveDensity = (hasBio || p2Units.length >= 2) ? 'medium' : 'low';
+
+      if (hasBio || p2Units.length > 0) {
+        p2.slotType = 'wave_content';
+        p2.waveDensity = (hasBio || p2Units.length >= 2) ? 'medium' : 'low';
+      } else if (softFallbackContent) {
+        // Sparse profile - use soft fallback
+        p2.slotType = 'soft_fallback';
+        p2.softFallback = softFallbackContent;
+        p2.waveDensity = 'low';
+      } else {
+        p2.slotType = 'identity';
+        p2.waveDensity = 'low';
+      }
       contents.push(p2);
 
     } else if (totalPhotos === 3) {
@@ -912,7 +951,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       p1.waveDensity = 'low';
       contents.push(p1);
 
-      // Photo 2: Bio + prompt/basics
+      // Photo 2: Bio + prompt/basics - with soft fallback for sparse profiles
       const p2 = createEmptyContent();
       if (hasBio) {
         const bioUnit = units.find(u => u.key === 'bio');
@@ -924,16 +963,35 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       }
       const p2Units = getNextUnits(2);
       applyUnitsToContent(p2, p2Units);
-      p2.slotType = (hasBio || p2Units.length > 0) ? 'wave_content' : 'identity';
-      p2.waveDensity = 'medium';
+
+      if (hasBio || p2Units.length > 0) {
+        p2.slotType = 'wave_content';
+        p2.waveDensity = 'medium';
+      } else if (softFallbackContent) {
+        p2.slotType = 'soft_fallback';
+        p2.softFallback = softFallbackContent;
+        p2.waveDensity = 'low';
+      } else {
+        p2.slotType = 'identity';
+        p2.waveDensity = 'low';
+      }
       contents.push(p2);
 
-      // Photo 3: MEDIUM (remaining content)
+      // Photo 3: MEDIUM (remaining content) - with soft fallback
       const p3 = createEmptyContent();
       const p3Units = getNextUnits(2);
       applyUnitsToContent(p3, p3Units);
-      p3.slotType = p3Units.length > 0 ? 'wave_content' : 'identity';
-      p3.waveDensity = 'medium';
+      if (p3Units.length > 0) {
+        p3.slotType = 'wave_content';
+        p3.waveDensity = 'medium';
+      } else if (softFallbackContent) {
+        p3.slotType = 'soft_fallback';
+        p3.softFallback = softFallbackContent;
+        p3.waveDensity = 'low';
+      } else {
+        p3.slotType = 'identity';
+        p3.waveDensity = 'low';
+      }
       contents.push(p3);
 
     } else if (totalPhotos === 4) {
@@ -959,17 +1017,37 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       }
       const p2Units = getNextUnits(1); // Get 1 unit to pair with bio
       applyUnitsToContent(p2, p2Units);
-      p2.slotType = (hasBio || p2Units.length > 0) ? 'wave_content' : 'identity';
-      p2.waveDensity = 'medium';
+
+      if (hasBio || p2Units.length > 0) {
+        p2.slotType = 'wave_content';
+        p2.waveDensity = 'medium';
+      } else if (softFallbackContent) {
+        p2.slotType = 'soft_fallback';
+        p2.softFallback = softFallbackContent;
+        p2.waveDensity = 'low';
+      } else {
+        p2.slotType = 'identity';
+        p2.waveDensity = 'low';
+      }
       contents.push(p2);
 
-      // Photos 3-4: Distribute remaining units evenly (MEDIUM density)
+      // Photos 3-4: Distribute remaining units evenly - with soft fallback
       for (let i = 2; i < 4; i++) {
         const content = createEmptyContent();
         const photoUnits = getNextUnits(2);
         applyUnitsToContent(content, photoUnits);
-        content.slotType = photoUnits.length > 0 ? 'wave_content' : 'identity';
-        content.waveDensity = 'medium';
+
+        if (photoUnits.length > 0) {
+          content.slotType = 'wave_content';
+          content.waveDensity = 'medium';
+        } else if (softFallbackContent) {
+          content.slotType = 'soft_fallback';
+          content.softFallback = softFallbackContent;
+          content.waveDensity = 'low';
+        } else {
+          content.slotType = 'identity';
+          content.waveDensity = 'low';
+        }
         contents.push(content);
       }
 
@@ -1048,80 +1126,41 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       contents.push(p4);
 
       // Photo 5+: Remaining content (prompt3, etc.) - distribute evenly
+      // REDESIGN: Use soft fallback for late photos when unique content exhausts
       for (let i = 4; i < totalPhotos; i++) {
         const content = createEmptyContent();
         const photoUnits = getNextUnits(2); // Get up to 2 remaining units
         applyUnitsToContent(content, photoUnits);
         content.waveUnits = photoUnits;
-        content.slotType = photoUnits.length > 0 ? 'wave_content' : 'identity';
-        content.waveDensity = photoUnits.length >= 2 ? 'medium' : (photoUnits.length > 0 ? 'low' : 'low');
+
+        if (photoUnits.length > 0) {
+          // Has unique content - show it
+          content.slotType = 'wave_content';
+          content.waveDensity = photoUnits.length >= 2 ? 'medium' : 'low';
+        } else if (softFallbackContent) {
+          // No unique content - use soft fallback (compact reinforcement)
+          content.slotType = 'soft_fallback';
+          content.softFallback = softFallbackContent;
+          content.waveDensity = 'low';
+        } else {
+          // Truly empty profile - identity only
+          content.slotType = 'identity';
+          content.waveDensity = 'low';
+        }
         contents.push(content);
       }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // DEBUG LOGGING: P1_WAVE_UNITS_FULL, P1_WAVE_PLAN_FULL, P1_WAVE_FINAL_CHECK
-    // ═══════════════════════════════════════════════════════════════════════
-    if (__DEV__) {
-      // P1_WAVE_UNITS_FULL: Log available units with source data
-      console.log('[P1_WAVE_UNITS_FULL]', {
-        name,
-        photoCount: totalPhotos,
-        totalUnits: units.length,
-        unitKeys: units.map(u => u.key),
-        rawDataAvailable: {
-          hasBio,
-          promptCount: selectedPrompts.length,
-          hasBasics,
-          hasInterests,
-          lifestyleItems: lifestyleWithKeys.length,
-          interestItems: allInterestChips.length,
-          interestChunks: interestChunks.length,
-          relationshipIntentCount: relationshipIntent?.length ?? 0,
-        },
+    // LOG_NOISE_FIX: Planner debugging gated behind DEBUG_DISCOVER_PLANNER (default: false)
+    if (__DEV__ && DEBUG_DISCOVER_PLANNER) {
+      const plan = contents.map((c, idx) => {
+        if (c.slotType === 'identity') return `P${idx}:id`;
+        if (c.slotType === 'soft_fallback') return `P${idx}:soft(${c.softFallback?.type || 'cta'})`;
+        const keys = c.waveUnits.map(u => u.key).join('+') || (c.bio ? 'bio' : '');
+        return `P${idx}:${keys || 'empty'}`;
       });
-
-      // P1_WAVE_PLAN_FULL: Log distribution plan with slot assignments
-      const plan = contents.map((c, idx) => ({
-        photoIndex: idx,
-        slotType: c.slotType,
-        density: c.waveDensity,
-        assignedUnitKeys: c.waveUnits.map(u => u.key),
-        hasBio: !!c.bio,
-        promptCount: c.prompts.length,
-        lifestyleCount: c.lifestyle.length,
-        interestCount: c.interests.length,
-      }));
-      console.log('[P1_WAVE_PLAN_FULL]', {
-        name,
-        photoCount: totalPhotos,
-        is5Plus: totalPhotos >= 5,
-        plan,
-      });
-
-      // P1_WAVE_FINAL_CHECK: Verify no identity-only tail slides for 5+ photos
-      const identityOnlyTailSlides = plan.filter(
-        (p, idx) => idx > 0 && p.slotType === 'identity' && p.assignedUnitKeys.length === 0
-      );
-      if (totalPhotos >= 5 && identityOnlyTailSlides.length > 0) {
-        console.warn('[P1_WAVE_FINAL_CHECK] WARNING: Identity-only tail slides detected', {
-          name,
-          photoCount: totalPhotos,
-          identityOnlySlides: identityOnlyTailSlides.map(p => p.photoIndex),
-        });
-      } else {
-        console.log('[P1_WAVE_FINAL_CHECK]', {
-          name,
-          photoCount: totalPhotos,
-          totalUnits: units.length,
-          allSlidesHaveContent: identityOnlyTailSlides.length === 0,
-          plan: plan.map(p => ({
-            photoIndex: p.photoIndex,
-            slotType: p.slotType,
-            assignedUnitKeys: p.assignedUnitKeys,
-          })),
-        });
-      }
+      console.log(`[PLANNER] ${name} ${totalPhotos}p units=${units.length} => ${plan.join(' ')}`);
     }
 
     return contents;
@@ -1148,24 +1187,18 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // Phase-2: Get first intent label for identity slide
   const phase2IntentLabel = useMemo(() => {
     if (!isPhase2 || !privateIntentKeys || privateIntentKeys.length === 0) {
-      // [P2_UI_INTENT] Debug: No intent data
-      if (__DEV__ && isPhase2) {
-        console.log('[P2_UI_INTENT] No intent data', { name, privateIntentKeys });
+      // LOG_NOISE_FIX: Gated behind DEBUG_P2_UI
+      if (__DEV__ && DEBUG_P2_UI && isPhase2) {
+        console.log(`[P2_INTENT] ${name}: no intent`);
       }
       return null;
     }
     const category = PRIVATE_INTENT_CATEGORIES.find(c => c.key === privateIntentKeys[0]);
     const label = category?.label ?? null;
 
-    // [P2_UI_INTENT] Debug logging for intent resolution
-    if (__DEV__) {
-      console.log('[P2_UI_INTENT]', {
-        name,
-        intentKey: privateIntentKeys[0],
-        resolvedLabel: label,
-        allKeys: privateIntentKeys,
-        categoryFound: !!category,
-      });
+    // LOG_NOISE_FIX: Gated behind DEBUG_P2_UI
+    if (__DEV__ && DEBUG_P2_UI) {
+      console.log(`[P2_INTENT] ${name}: ${label || 'none'}`);
     }
 
     return label;
@@ -1202,9 +1235,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const [photoIndex, setPhotoIndex] = useState(0);
   // 7-1: Track image load errors to show placeholder on failure
   const [imageError, setImageError] = useState(false);
+  const failedPhotoIndexesRef = useRef<Set<number>>(new Set());
+  const displayPhotos = useMemo(() => getRenderableProfilePhotos(photos), [photos]);
 
   // Photo count needed for distribution logic
-  const photoCount = photos?.length || 0;
+  const photoCount = displayPhotos.length;
 
   // Get content for current photo (consumption-based, no repetition)
   // Note: phase1PhotoContents handles all slot distribution - no separate phase1ContentSlot needed
@@ -1297,15 +1332,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       }
     }
 
-    // [P2_UI_DISTRIBUTION] Debug logging
-    if (__DEV__) {
-      console.log('[P2_UI_DISTRIBUTION]', {
-        name,
-        photoCount,
-        availableContent,
-        distributed,
-        contentCount: availableContent.length,
-      });
+    // LOG_NOISE_FIX: Gated behind DEBUG_P2_UI
+    if (__DEV__ && DEBUG_P2_UI) {
+      console.log(`[P2_DIST] ${name} ${photoCount}p: ${distributed.join(',')}`);
     }
 
     return distributed;
@@ -1319,15 +1348,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     // Safe access - should always have a slot for each photoIndex
     const slot = phase2DistributedSlots[photoIndex] ?? phase2DistributedSlots[phase2DistributedSlots.length - 1] ?? 'fallback';
 
-    // [P2_UI_CONTENT_SLOT] Debug logging
-    if (__DEV__) {
-      console.log('[P2_UI_CONTENT_SLOT]', {
-        name,
-        photoIndex,
-        photoCount,
-        slot,
-        totalSlots: phase2DistributedSlots.length,
-      });
+    // LOG_NOISE_FIX: Gated behind DEBUG_P2_UI (fires per photo change, very noisy)
+    if (__DEV__ && DEBUG_P2_UI) {
+      console.log(`[P2_SLOT] ${name} P${photoIndex}: ${slot}`);
     }
 
     return slot;
@@ -1385,6 +1408,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   // 3B-2: Clamp photoIndex when photos array changes (prevents out-of-bounds)
   useEffect(() => {
+    failedPhotoIndexesRef.current.clear();
     if (photoIndex >= photoCount && photoCount > 0) {
       setPhotoIndex(photoCount - 1);
     } else if (photoCount === 0) {
@@ -1401,12 +1425,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // PHOTO_RENDER_FIX: Increased from 5 to 8 to support profiles with 6-8 photos
   const prefetchedRef = useRef(false);
   useEffect(() => {
-    if (prefetchedRef.current || !photos || photos.length === 0) return;
+    if (prefetchedRef.current || displayPhotos.length === 0) return;
     prefetchedRef.current = true;
 
     // Prefetch all photos up to 8 for profiles with many photos
     const MAX_PREFETCH = 8;
-    const toPrefetch = photos.slice(0, MAX_PREFETCH);
+    const toPrefetch = displayPhotos.slice(0, MAX_PREFETCH);
     toPrefetch.forEach((photo, index) => {
       if (photo?.url) {
         Image.prefetch(photo.url).catch((error) => {
@@ -1418,11 +1442,25 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         });
       }
     });
-  }, [photos]);
+  }, [displayPhotos]);
 
   // 3B-2: Safe access with clamping
   const safeIndex = Math.min(Math.max(0, photoIndex), Math.max(0, photoCount - 1));
-  const currentPhoto = photos?.[safeIndex] || photos?.[0];
+  const currentPhoto = displayPhotos[safeIndex] || displayPhotos[0];
+
+  const handleImageError = useCallback(() => {
+    failedPhotoIndexesRef.current.add(safeIndex);
+
+    if (photoCount > 1) {
+      const nextValidIndex = displayPhotos.findIndex((_, index) => !failedPhotoIndexesRef.current.has(index));
+      if (nextValidIndex >= 0 && nextValidIndex !== safeIndex) {
+        setPhotoIndex(nextValidIndex);
+        return;
+      }
+    }
+
+    setImageError(true);
+  }, [displayPhotos, photoCount, safeIndex]);
 
   const goNextPhoto = useCallback(() => {
     if (photoCount <= 1) return;
@@ -1460,7 +1498,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             contentFit="cover"
             cachePolicy="memory-disk"
             blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
-            onError={() => setImageError(true)}
+            onError={handleImageError}
           />
         ) : (
           <View style={[styles.gridImage, styles.gridPlaceholder]}>
@@ -1483,12 +1521,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       {/* Photo area fills entire card */}
       <View style={styles.photoContainer}>
         {/* PERF: Memoized photo stack for instant switching */}
-        {photos && photos.length > 0 ? (
+        {displayPhotos.length > 0 ? (
           <PhotoStack
-            photos={photos}
+            photos={displayPhotos}
             activeIndex={safeIndex}
             photoBlurred={photoBlurred}
-            onError={() => setImageError(true)}
+            onError={handleImageError}
           />
         ) : (
           // Premium placeholder for no-photo state
@@ -1812,26 +1850,23 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
             {/* ─────────────────────────────────────────────────────────────────────────
                 LAYER A: IDENTITY ROW (Name + Age + Gender)
-                - 1 photo: Always visible (only slide)
-                - 2-4 photos: Photo 1 only (reduce repetition for cleaner UX)
-                - 5+ photos: Always visible (persistent anchor for many photos)
+                REDESIGN: Always visible on ALL photos for consistent anchor
+                This provides a stable identity reference as users swipe through photos
                 ───────────────────────────────────────────────────────────────────────── */}
-            {(photoIndex === 0 || photoCount === 1 || photoCount >= 5) && (
-              <View style={styles.phase1NameRow}>
-                <Text style={styles.phase1Name}>{displayName}</Text>
-                <Text style={styles.phase1Age}>{age}</Text>
-                {/* Gender icon - subtle but visible */}
-                {gender && GENDER_ICONS[gender] && (
-                  <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}20` }]}>
-                    <Ionicons
-                      name={GENDER_ICONS[gender].icon as any}
-                      size={14}
-                      color={GENDER_ICONS[gender].color}
-                    />
-                  </View>
-                )}
-              </View>
-            )}
+            <View style={styles.phase1NameRow}>
+              <Text style={styles.phase1Name}>{displayName}</Text>
+              <Text style={styles.phase1Age}>{age}</Text>
+              {/* Gender icon - subtle but visible */}
+              {gender && GENDER_ICONS[gender] && (
+                <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}20` }]}>
+                  <Ionicons
+                    name={GENDER_ICONS[gender].icon as any}
+                    size={14}
+                    color={GENDER_ICONS[gender].color}
+                  />
+                </View>
+              )}
+            </View>
 
             {/* ─────────────────────────────────────────────────────────────────────────
                 LAYER B: PHOTO-1-ONLY METADATA
@@ -1900,17 +1935,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               BIO RENDER RULE: Bio ONLY renders from currentPhotoContent.bio (never direct bio prop)
               ═══════════════════════════════════════════════════════════════════════════ */}
 
-          {/* [P1_BIO_RENDER] Debug: Track bio render location */}
-          {__DEV__ && currentPhotoContent.bio && (() => {
-            console.log('[P1_BIO_RENDER]', {
-              photoIndex,
-              slotType: currentPhotoContent.slotType,
-              hasBio: !!currentPhotoContent.bio,
-              bioPreview: currentPhotoContent.bio?.slice(0, 30),
-              renderLocation: currentPhotoContent.slotType === 'identity_bio' ? 'identity_bio_slot' : 'wave_content_slot',
-            });
-            return null;
-          })()}
+          {/* LOG_NOISE_FIX: Bio render debugging removed - was extremely noisy */}
 
           {/* IDENTITY + BIO SLOT (for 2-4 photo profiles) */}
           {currentPhotoContent.slotType === 'identity_bio' && currentPhotoContent.bio && (
@@ -1996,6 +2021,66 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                currentPhotoContent.interests.length === 0 && (
                 <View style={styles.phase1ViewProfileCue}>
                   <Ionicons name="chevron-up" size={18} color="rgba(255,255,255,0.7)" />
+                  <Text style={styles.phase1ViewProfileText}>View full profile</Text>
+                </View>
+              )}
+            </Animated.View>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════════════════════
+              SOFT FALLBACK SLOT: Compact reinforcement for late photos
+              Shows lightweight recap content when unique content is exhausted
+              Visually lighter than wave_content to feel like continuity, not repetition
+              ═══════════════════════════════════════════════════════════════════════════ */}
+          {currentPhotoContent.slotType === 'soft_fallback' && currentPhotoContent.softFallback && (
+            <Animated.View
+              key={`p1-softfallback-${photoIndex}`}
+              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(180)}
+              exiting={FadeOut.duration(150)}
+              style={styles.phase1SoftFallbackSection}
+            >
+              {/* Prompt snippet - compact single-line */}
+              {currentPhotoContent.softFallback.type === 'prompt' && currentPhotoContent.softFallback.promptSnippet && (
+                <View style={styles.phase1SoftFallbackCard}>
+                  <Text style={styles.phase1SoftFallbackText} numberOfLines={2}>
+                    "{currentPhotoContent.softFallback.promptSnippet}"
+                  </Text>
+                </View>
+              )}
+
+              {/* Interest chips - compact 2-3 chips */}
+              {currentPhotoContent.softFallback.type === 'interests' && currentPhotoContent.softFallback.interestChips && (
+                <View style={styles.phase1SoftFallbackChipsRow}>
+                  {currentPhotoContent.softFallback.interestChips.map((chip, idx) => (
+                    <View key={`soft-interest-${idx}`} style={styles.phase1SoftFallbackChip}>
+                      <Text style={styles.phase1SoftFallbackChipText}>{chip.emoji} {chip.label}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {/* Intent line - single elegant line */}
+              {currentPhotoContent.softFallback.type === 'intent' && currentPhotoContent.softFallback.intentLine && (
+                <View style={styles.phase1SoftFallbackCard}>
+                  <Text style={styles.phase1SoftFallbackIntentText}>
+                    {currentPhotoContent.softFallback.intentLine}
+                  </Text>
+                </View>
+              )}
+
+              {/* Bio snippet - first line of bio */}
+              {currentPhotoContent.softFallback.type === 'bio' && currentPhotoContent.softFallback.bioSnippet && (
+                <View style={styles.phase1SoftFallbackCard}>
+                  <Text style={styles.phase1SoftFallbackText} numberOfLines={1}>
+                    {currentPhotoContent.softFallback.bioSnippet}
+                  </Text>
+                </View>
+              )}
+
+              {/* CTA - minimal view profile cue */}
+              {currentPhotoContent.softFallback.type === 'cta' && (
+                <View style={styles.phase1ViewProfileCue}>
+                  <Ionicons name="chevron-up" size={18} color="rgba(255,255,255,0.6)" />
                   <Text style={styles.phase1ViewProfileText}>View full profile</Text>
                 </View>
               )}
@@ -3424,6 +3509,58 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.8)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
+  },
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SOFT FALLBACK STYLES: Compact reinforcement for late photos
+  // Visually lighter than wave_content - feels like continuity, not repetition
+  // ═══════════════════════════════════════════════════════════════════════════
+  phase1SoftFallbackSection: {
+    marginTop: 10,
+  },
+  phase1SoftFallbackCard: {
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderLeftWidth: 2,
+    borderLeftColor: 'rgba(255,255,255,0.15)',
+  },
+  phase1SoftFallbackText: {
+    fontSize: 14,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.75)',
+    fontStyle: 'italic',
+    lineHeight: 20,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1SoftFallbackIntentText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.8)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  phase1SoftFallbackChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  phase1SoftFallbackChip: {
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  phase1SoftFallbackChipText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.75)',
+    textShadowColor: 'rgba(0,0,0,0.4)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   // View profile cue - REDESIGNED: subtle, minimal
   phase1ViewProfileCue: {

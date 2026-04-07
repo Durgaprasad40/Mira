@@ -39,3 +39,12 @@ export function filterProfilesByDistance<T extends ProfileWithDistance>(
 ): T[] {
   return profiles.filter((p) => isWithinAllowedDistance(p, maxDistanceKm));
 }
+
+/**
+ * Format a profile distance value for Phase-1 Discover UI.
+ * Backend distance values are stored and returned in kilometers.
+ */
+export function formatDiscoverDistanceKm(distance?: number | null): string | null {
+  if (typeof distance !== "number" || !Number.isFinite(distance)) return null;
+  return `${distance.toFixed(0)} km away`;
+}

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -45,6 +45,9 @@ import { useDemoStore } from '@/stores/demoStore';
 import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 import { Toast } from '@/components/ui/Toast';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+import { useInteractionStore } from '@/stores/interactionStore';
+import { formatDiscoverDistanceKm } from '@/lib/distanceRules';
+import { getRenderableProfilePhotos } from '@/lib/profileData';
 
 // Gender labels for "Looking for" display
 const GENDER_LABELS: Record<string, string> = {
@@ -55,13 +58,41 @@ const GENDER_LABELS: Record<string, string> = {
   other: 'Everyone',
 };
 
+function getVerificationBadgeState(profile: { isVerified?: boolean; verificationStatus?: string }) {
+  const status = profile.isVerified ? 'verified' : (profile.verificationStatus || 'unverified');
+
+  switch (status) {
+    case 'verified':
+      return {
+        label: 'Verified',
+        color: COLORS.success,
+        icon: 'shield-checkmark' as const,
+      };
+    case 'pending_auto':
+    case 'pending_manual':
+    case 'pending_verification':
+      return {
+        label: 'Verification pending',
+        color: COLORS.secondary,
+        icon: 'time-outline' as const,
+      };
+    default:
+      return {
+        label: 'Not verified',
+        color: COLORS.textMuted,
+        icon: 'alert-circle-outline' as const,
+      };
+  }
+}
+
 export default function ViewProfileScreen() {
-  const { id: userId, mode, confessionId, receiverId, fromChat } = useLocalSearchParams<{
+  const { id: userId, mode, confessionId, receiverId, fromChat, source } = useLocalSearchParams<{
     id: string;
     mode?: string;
     confessionId?: string;
     receiverId?: string;
     fromChat?: string;
+    source?: string;
   }>();
   const isPhase2 = mode === 'phase2';
 
@@ -87,6 +118,7 @@ export default function ViewProfileScreen() {
   const { userId: currentUserId, token } = useAuthStore();
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [showReportBlock, setShowReportBlock] = useState(false);
+  const setDiscoverProfileActionResult = useInteractionStore((s) => s.setDiscoverProfileActionResult);
 
   // Part E: Photo tap navigation ref
   const photoListRef = useRef<FlatList>(null);
@@ -195,6 +227,7 @@ export default function ViewProfileScreen() {
           bio: p.bio,
           city: p.city,
           isVerified: p.isVerified,
+          verificationStatus: p.isVerified ? 'verified' : 'unverified',
           distance: p.distance,
           photos: p.photos.map((photo, i) => ({ _id: `photo_${i}`, url: photo.url })),
           relationshipIntent: resolvedIntent,
@@ -217,9 +250,26 @@ export default function ViewProfileScreen() {
   // Use type assertion since Phase-1 and Phase-2 profiles have different shapes
   // The UI handles conditional display of fields appropriately
   const profile = (isDemoMode ? demoProfile : convexProfile) as any;
+  const displayPhotos = useMemo(() => getRenderableProfilePhotos(profile?.photos), [profile?.photos]);
+  const distanceLabel = useMemo(() => formatDiscoverDistanceKm(profile?.distance), [profile?.distance]);
+  const verificationBadge = useMemo(
+    () => getVerificationBadgeState({
+      isVerified: profile?.isVerified,
+      verificationStatus: profile?.verificationStatus,
+    }),
+    [profile?.isVerified, profile?.verificationStatus],
+  );
 
   // Part E: Photo tap navigation handlers
-  const totalPhotos = profile?.photos?.length ?? 0;
+  const totalPhotos = displayPhotos.length;
+
+  useEffect(() => {
+    if (currentPhotoIndex >= displayPhotos.length && displayPhotos.length > 0) {
+      setCurrentPhotoIndex(displayPhotos.length - 1);
+    } else if (displayPhotos.length === 0 && currentPhotoIndex !== 0) {
+      setCurrentPhotoIndex(0);
+    }
+  }, [currentPhotoIndex, displayPhotos.length]);
 
   const handlePhotoTapLeft = useCallback(() => {
     if (currentPhotoIndex > 0) {
@@ -261,11 +311,21 @@ export default function ViewProfileScreen() {
   const demoLikes = useDemoStore((s) => s.likes);
   const simulateMatch = useDemoStore((s) => s.simulateMatch);
 
+  const syncPhase1DiscoverAction = useCallback((action: 'like' | 'pass' | 'super_like') => {
+    if (source !== 'phase1_discover' || isPhase2 || !userId) return;
+    setDiscoverProfileActionResult({
+      profileId: userId,
+      action,
+      source: 'phase1_discover_profile',
+    });
+  }, [isPhase2, setDiscoverProfileActionResult, source, userId]);
+
   const handleSwipe = async (action: 'like' | 'pass' | 'super_like') => {
     if (!currentUserId || !userId) return;
 
     if (isDemoMode) {
       if (action === 'pass') {
+        syncPhase1DiscoverAction(action);
         router.back();
         return;
       }
@@ -280,6 +340,7 @@ export default function ViewProfileScreen() {
         const matchId = `match_${userId}`;
         // Pass mode param so match-celebration knows the phase context
         const modeParam = isPhase2 ? '&mode=phase2' : '';
+        syncPhase1DiscoverAction(action);
         safePush(router, `/(main)/match-celebration?matchId=${matchId}&userId=${userId}${modeParam}` as any, 'profile->matchCelebration');
       } else {
         // Regular like on someone NOT in our likes list — small random chance of instant match
@@ -287,8 +348,10 @@ export default function ViewProfileScreen() {
           simulateMatch(userId);
           const matchId = `match_${userId}`;
           const modeParam = isPhase2 ? '&mode=phase2' : '';
+          syncPhase1DiscoverAction(action);
           safePush(router, `/(main)/match-celebration?matchId=${matchId}&userId=${userId}${modeParam}` as any, 'profile->matchCelebration');
         } else {
+          syncPhase1DiscoverAction(action);
           router.back();
         }
       }
@@ -316,8 +379,10 @@ export default function ViewProfileScreen() {
         const modeParam = isPhase2 ? '&mode=phase2' : '';
         const convoId = (result as any).conversationId;
         const convoParam = isPhase2 && convoId ? `&conversationId=${convoId}` : '';
+        syncPhase1DiscoverAction(action);
         safePush(router, `/(main)/match-celebration?matchId=${result.matchId}&userId=${userId}${modeParam}${convoParam}` as any, 'profile->matchCelebration');
       } else {
+        syncPhase1DiscoverAction(action);
         router.back();
       }
     } catch {
@@ -402,7 +467,7 @@ export default function ViewProfileScreen() {
           });
         }
 
-        return profile.photos && profile.photos.length > 0 ? (
+        return displayPhotos.length > 0 ? (
           <View style={{ position: 'relative' }}>
             <FlatList
               ref={photoListRef}
@@ -415,7 +480,7 @@ export default function ViewProfileScreen() {
               snapToInterval={screenWidth}
               disableIntervalMomentum
               scrollEnabled={false} // Disable swipe, use tap navigation only
-              data={profile.photos}
+              data={displayPhotos}
               keyExtractor={(item, index) => item._id || `photo-${index}`}
               getItemLayout={(_, index) => ({
                 length: screenWidth,
@@ -450,15 +515,15 @@ export default function ViewProfileScreen() {
           </View>
         ) : null;
       })()}
-      {!(profile.photos && profile.photos.length > 0) && (
+      {displayPhotos.length === 0 && (
         <View style={[styles.photoPlaceholder, { height: 500 + insets.top, paddingTop: insets.top }]}>
           <Ionicons name="person" size={64} color={COLORS.textLight} />
         </View>
       )}
 
-      {profile.photos && profile.photos.length > 1 && (
+      {displayPhotos.length > 1 && (
         <View style={styles.photoIndicators}>
-          {profile.photos.map((_: any, index: number) => (
+          {displayPhotos.map((_: any, index: number) => (
             <View
               key={index}
               style={[
@@ -475,8 +540,8 @@ export default function ViewProfileScreen() {
           <Text style={styles.name}>
             {profile.name}, {age}
           </Text>
-          {profile.distance !== undefined && (
-            <Text style={styles.distance}>{profile.distance} mi away</Text>
+          {distanceLabel && (
+            <Text style={styles.distance}>{distanceLabel}</Text>
           )}
         </View>
 
@@ -492,10 +557,10 @@ export default function ViewProfileScreen() {
           return (
             <View style={styles.trustBadgeRow}>
               {/* Face Verified badge */}
-              <View style={[styles.trustBadge, { borderColor: '#22C55E40' }]}>
-                <Ionicons name="checkmark-circle" size={14} color="#22C55E" />
-                <Text style={[styles.trustBadgeText, { color: '#22C55E' }]}>
-                  {profile.isVerified ? 'Face Verified' : 'Unverified'}
+              <View style={[styles.trustBadge, { borderColor: verificationBadge.color + '40' }]}>
+                <Ionicons name={verificationBadge.icon} size={14} color={verificationBadge.color} />
+                <Text style={[styles.trustBadgeText, { color: verificationBadge.color }]}>
+                  {verificationBadge.label}
                 </Text>
               </View>
 
