@@ -480,17 +480,47 @@ export default function ViewProfileScreen() {
           )}
         </View>
 
-        {/* Trust Badges - SIMPLIFIED: Only show Face Verified badge */}
-        {/* Part C FIX: Removed Photos Added, Active Today, Profile Complete badges */}
-        {/* Only Verified badge is shown per product decision */}
-        <View style={styles.trustBadgeRow}>
-          <View style={[styles.trustBadge, { borderColor: '#22C55E40' }]}>
-            <Ionicons name="checkmark-circle" size={14} color="#22C55E" />
-            <Text style={[styles.trustBadgeText, { color: '#22C55E' }]}>
-              {profile.isVerified ? 'Face Verified' : 'Unverified'}
-            </Text>
-          </View>
-        </View>
+        {/* Trust Badges: Face Verified + Presence (Online Now / Active Today) */}
+        {/* Consistent with Discover card badges */}
+        {(() => {
+          // Presence badge logic (same as ProfileCard.tsx)
+          const now = Date.now();
+          const lastActive = profile.lastActive;
+          const isOnline = lastActive && (now - lastActive < 10 * 60 * 1000); // < 10 min
+          const isActiveToday = lastActive && (now - lastActive < 24 * 60 * 60 * 1000) && !isOnline; // < 24h, not online
+
+          return (
+            <View style={styles.trustBadgeRow}>
+              {/* Face Verified badge */}
+              <View style={[styles.trustBadge, { borderColor: '#22C55E40' }]}>
+                <Ionicons name="checkmark-circle" size={14} color="#22C55E" />
+                <Text style={[styles.trustBadgeText, { color: '#22C55E' }]}>
+                  {profile.isVerified ? 'Face Verified' : 'Unverified'}
+                </Text>
+              </View>
+
+              {/* Online Now badge (priority over Active Today) */}
+              {isOnline && (
+                <View style={[styles.trustBadge, { borderColor: '#22C55E40' }]}>
+                  <View style={styles.onlineDot} />
+                  <Text style={[styles.trustBadgeText, { color: '#22C55E' }]}>
+                    Online Now
+                  </Text>
+                </View>
+              )}
+
+              {/* Active Today badge (only if not online) */}
+              {isActiveToday && (
+                <View style={[styles.trustBadge, { borderColor: '#3B82F640' }]}>
+                  <Ionicons name="time-outline" size={14} color="#3B82F6" />
+                  <Text style={[styles.trustBadgeText, { color: '#3B82F6' }]}>
+                    Active Today
+                  </Text>
+                </View>
+              )}
+            </View>
+          );
+        })()}
 
         {/* ========== PHASE-2 SECTION ORDER: Bio → My Intent → Hobbies → Interests (NO Details) ========== */}
 
@@ -1073,6 +1103,12 @@ const styles = StyleSheet.create({
   trustBadgeText: {
     fontSize: 12,
     fontWeight: '600',
+  },
+  onlineDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#22C55E',
   },
   name: {
     fontSize: 28,
