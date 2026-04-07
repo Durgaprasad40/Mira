@@ -71,19 +71,7 @@ function parseDOBString(dobString: string): Date {
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
-/**
- * Parse backend full name into firstName/lastName for display
- */
-function parseFullName(fullName: string): { firstName: string; lastName: string } {
-  const parts = fullName.trim().split(/\s+/);
-  if (parts.length === 1) {
-    return { firstName: parts[0], lastName: '' };
-  }
-  return {
-    firstName: parts[0],
-    lastName: parts.slice(1).join(' ')
-  };
-}
+// IDENTITY SIMPLIFICATION: Single name field - no parsing needed
 
 // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
@@ -141,8 +129,7 @@ export default function ReviewScreen() {
   );
 
   const {
-    firstName,
-    lastName,
+    name, // IDENTITY SIMPLIFICATION: Single name field
     nickname,
     dateOfBirth,
     gender,
@@ -203,27 +190,18 @@ export default function ReviewScreen() {
   // Extract photos from currentUser (includes verification_reference)
   const backendPhotos = currentUser?.photos ?? [];
 
+  // IDENTITY SIMPLIFICATION: Single name field
   // Fallback to backend data if store is empty
-  // Parse backend name into firstName/lastName for display
-  const getDisplayNames = (): { firstName: string; lastName: string } => {
-    // Priority 1: Store values
-    if (firstName || lastName) {
-      return { firstName: firstName || '', lastName: lastName || '' };
-    }
-    // Priority 2: demoProfile values (demo mode)
-    if (demoProfile?.firstName || demoProfile?.lastName) {
-      return { firstName: demoProfile.firstName || '', lastName: demoProfile.lastName || '' };
-    }
-    // Priority 3: Parse from backend or demoProfile name
-    const backendName = onboardingStatus?.basicInfo?.name || demoProfile?.name || '';
-    if (backendName) {
-      return parseFullName(backendName);
-    }
-    return { firstName: '', lastName: '' };
+  const getDisplayName = (): string => {
+    // Priority 1: Store value
+    if (name) return name;
+    // Priority 2: demoProfile value (demo mode)
+    if (demoProfile?.name) return demoProfile.name;
+    // Priority 3: Backend value
+    if (onboardingStatus?.basicInfo?.name) return onboardingStatus.basicInfo.name;
+    return '';
   };
-  const displayNames = getDisplayNames();
-  const displayFirstName = displayNames.firstName || "Not set";
-  const displayLastName = displayNames.lastName || "—";
+  const displayName = getDisplayName() || "Not set";
   const displayNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "—";
   const displayDateOfBirth = dateOfBirth || onboardingStatus?.basicInfo?.dateOfBirth || demoProfile?.dateOfBirth || "";
   const displayGender = gender || onboardingStatus?.basicInfo?.gender || demoProfile?.gender || "";
@@ -232,21 +210,19 @@ export default function ReviewScreen() {
   React.useEffect(() => {
     if (__DEV__) {
       console.log('[REVIEW] basic info values:', {
-        displayFirstName,
-        displayLastName,
+        displayName,
         displayNickname,
         displayDateOfBirth,
         displayGender,
       });
       console.log('[REVIEW] basic info sources:', {
-        firstName: firstName ? 'store' : (demoProfile?.firstName ? 'demoProfile' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none')),
-        lastName: lastName ? 'store' : (demoProfile?.lastName ? 'demoProfile' : 'none'),
+        name: name ? 'store' : (demoProfile?.name ? 'demoProfile' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none')),
         nickname: nickname ? 'store' : (onboardingStatus?.basicInfo?.nickname ? 'backend' : 'none'),
         dateOfBirth: dateOfBirth ? 'store' : (onboardingStatus?.basicInfo?.dateOfBirth ? 'backend' : 'none'),
         gender: gender ? 'store' : (onboardingStatus?.basicInfo?.gender ? 'backend' : 'none'),
       });
     }
-  }, [firstName, lastName, nickname, dateOfBirth, gender, onboardingStatus, demoProfile, displayFirstName, displayLastName, displayNickname, displayDateOfBirth, displayGender]);
+  }, [name, nickname, dateOfBirth, gender, onboardingStatus, demoProfile, displayName, displayNickname, displayDateOfBirth, displayGender]);
 
   // PERFORMANCE LOG: Track photo rendering speed
   React.useEffect(() => {
@@ -358,12 +334,8 @@ export default function ReviewScreen() {
         };
 
         // Only include basic fields if they have values (don't overwrite with empty)
-        // Store firstName/lastName separately and construct name for backend compat
-        if (firstName && firstName.trim().length > 0) profileData.firstName = firstName.trim();
-        if (lastName && lastName.trim().length > 0) profileData.lastName = lastName.trim();
-        // Construct full name from firstName/lastName for backward compat
-        const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
-        if (fullName.length > 0) profileData.name = fullName;
+        // IDENTITY SIMPLIFICATION: Single name field
+        if (name && name.trim().length > 0) profileData.name = name.trim();
         if (nickname && nickname.length > 0) profileData.handle = nickname;
         if (dateOfBirth && dateOfBirth.length > 0) profileData.dateOfBirth = dateOfBirth;
         if (gender) profileData.gender = gender;
@@ -412,11 +384,10 @@ export default function ReviewScreen() {
       }
 
       // Prepare onboarding data
-      // Construct full name from firstName/lastName for backend
-      const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
+      // IDENTITY SIMPLIFICATION: Single name field
       const onboardingData: any = {
         userId: userId as Id<"users">,
-        name: fullName,
+        name: (name || '').trim(),
         dateOfBirth,
         gender: payloadGender,
         bio,
@@ -446,6 +417,8 @@ export default function ReviewScreen() {
         // FIX: Add missing fields from demo mode payload
         profilePrompts: profilePrompts.length > 0 ? profilePrompts : undefined,
         lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined,
+        // P0 FIX: Include lgbtqPreference for LGBTQ matching
+        lgbtqPreference: lgbtqPreference.length > 0 ? lgbtqPreference : undefined,
         // photoStorageIds omitted - photos already uploaded in additional-photos screen
       };
 
@@ -647,15 +620,11 @@ export default function ReviewScreen() {
           </TouchableOpacity>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>First Name:</Text>
-          <Text style={styles.infoValue}>{displayFirstName}</Text>
+          <Text style={styles.infoLabel}>Name:</Text>
+          <Text style={styles.infoValue}>{displayName}</Text>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Last Name:</Text>
-          <Text style={styles.infoValue}>{displayLastName}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>User ID:</Text>
+          <Text style={styles.infoLabel}>Nickname:</Text>
           <Text style={styles.infoValue}>@{displayNickname}</Text>
         </View>
         <View style={styles.infoRow}>

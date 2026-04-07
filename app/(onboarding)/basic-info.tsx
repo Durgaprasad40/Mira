@@ -67,31 +67,19 @@ function formatDOBToString(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
-// Parse backend full name into firstName/lastName
-function parseFullName(fullName: string): { firstName: string; lastName: string } {
-  const parts = fullName.trim().split(/\s+/);
-  if (parts.length === 1) {
-    return { firstName: parts[0], lastName: '' };
-  }
-  return {
-    firstName: parts[0],
-    lastName: parts.slice(1).join(' ')
-  };
-}
+// IDENTITY SIMPLIFICATION: Single name field, no parsing needed
 
 export default function BasicInfoScreen() {
   useScreenTrace("ONB_BASIC_INFO");
   const {
-    firstName,
-    lastName,
+    name,
     dateOfBirth,
     gender,
     lgbtqSelf,
     email,
     password,
     nickname,
-    setFirstName,
-    setLastName,
+    setName,
     setDateOfBirth,
     setGender,
     setNickname,
@@ -133,26 +121,20 @@ export default function BasicInfoScreen() {
   const genderFieldRef = useRef<View>(null);
 
   // Read-only mode state for displaying existing user data
-  const [displayFirstName, setDisplayFirstName] = useState("");
-  const [displayLastName, setDisplayLastName] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [displayDOB, setDisplayDOB] = useState("");
   const [displayGender, setDisplayGender] = useState<Gender | "">("");
   const [displayHandle, setDisplayHandle] = useState("");
   const [lgbtqError, setLgbtqError] = useState("");
 
-  // Refs for scroll-to-invalid behavior (additional refs for first/last name)
-  const firstNameFieldRef = useRef<View>(null);
-  const lastNameFieldRef = useRef<View>(null);
+  // Refs for scroll-to-invalid behavior
+  const nameFieldRef = useRef<View>(null);
 
-  // Guard ref to prevent re-prefilling firstName/lastName after user starts editing in editFromReview mode
+  // Guard ref to prevent re-prefilling name after user starts editing in editFromReview mode
   const hasPrefilledEditFromReviewRef = useRef(false);
 
-  // Nickname availability state (for new users)
-  const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
-  const [isNicknameAvailable, setIsNicknameAvailable] = useState<boolean | null>(null);
-  // P1-007 FIX: Track if availability check failed to show retry option
-  const [availabilityCheckFailed, setAvailabilityCheckFailed] = useState(false);
-  const availabilityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // IDENTITY SIMPLIFICATION: Nickname uniqueness check REMOVED
+  // Nickname is no longer required to be unique - userId is the only unique identifier
   const isMountedRef = useRef(true); // Track mounted state to ignore late async results
 
   // FIX: Handle Android back button when basic-info is root screen
@@ -200,44 +182,29 @@ export default function BasicInfoScreen() {
     console.log(`[BASIC]   demoProfile exists=${!!profile}`);
     if (profile) {
       console.log(`[BASIC]   demoProfile.name=${profile.name || '(empty)'}`);
-      console.log(`[BASIC]   demoProfile.firstName=${profile.firstName || '(empty)'}`);
-      console.log(`[BASIC]   demoProfile.lastName=${profile.lastName || '(empty)'}`);
       console.log(`[BASIC]   demoProfile.handle=${profile.handle || '(empty)'}`);
       console.log(`[BASIC]   demoProfile.dateOfBirth=${profile.dateOfBirth || '(empty)'}`);
       console.log(`[BASIC]   demoProfile.gender=${profile.gender || '(empty)'}`);
     }
-    console.log(`[BASIC]   onboardingStore.firstName=${firstName || '(empty)'}`);
-    console.log(`[BASIC]   onboardingStore.lastName=${lastName || '(empty)'}`);
+    console.log(`[BASIC]   onboardingStore.name=${name || '(empty)'}`);
     console.log(`[BASIC]   onboardingStore.nickname=${nickname || '(empty)'}`);
     console.log(`[BASIC]   onboardingStore.dateOfBirth=${dateOfBirth || '(empty)'}`);
     console.log(`[BASIC]   onboardingStore.gender=${gender || '(empty)'}`);
     console.log('[BASIC] ════════════════════════════════════════');
 
-    // Cleanup on unmount: clear timeout and mark as unmounted
+    // Cleanup on unmount
     return () => {
       isMountedRef.current = false;
-      if (availabilityTimeoutRef.current) {
-        clearTimeout(availabilityTimeoutRef.current);
-      }
     };
   }, []);
 
-  // STABILITY FIX (2026-03-04): Cancel pending checks when mode changes to prevent stale updates
-  useEffect(() => {
-    // Clear any pending nickname availability check when demo mode changes
-    if (availabilityTimeoutRef.current) {
-      clearTimeout(availabilityTimeoutRef.current);
-      availabilityTimeoutRef.current = null;
-    }
-    // Reset availability state to prevent stale results from different mode
-    setIsCheckingAvailability(false);
-    setIsNicknameAvailable(null);
-  }, [isDemoMode]);
+  // IDENTITY SIMPLIFICATION: Nickname availability check useEffect REMOVED
+  // Nickname is no longer required to be unique
 
   // Load existing data into display state OR detect recovery mode
   useEffect(() => {
     // Handle editFromReview mode: pre-fill all fields from demoProfile
-    // CRITICAL: Only prefill ONCE on entry, then let user freely edit firstName/lastName
+    // CRITICAL: Only prefill ONCE on entry, then let user freely edit name
     if (isEditFromReview && isDemoMode && demoHydrated && demoProfile) {
       // Guard: Only prefill once per editFromReview session
       if (hasPrefilledEditFromReviewRef.current) {
@@ -245,20 +212,10 @@ export default function BasicInfoScreen() {
       }
       hasPrefilledEditFromReviewRef.current = true;
       console.log('[BASIC] editFromReview mode - pre-filling ONCE from demoProfile');
-      // Parse name into firstName/lastName or use stored firstName/lastName
-      if (demoProfile.firstName || demoProfile.lastName) {
-        setDisplayFirstName(demoProfile.firstName || "");
-        setDisplayLastName(demoProfile.lastName || "");
-        // Populate the editable store fields for firstName/lastName
-        setFirstName(demoProfile.firstName || "");
-        setLastName(demoProfile.lastName || "");
-      } else if (demoProfile.name) {
-        const parsed = parseFullName(demoProfile.name);
-        setDisplayFirstName(parsed.firstName);
-        setDisplayLastName(parsed.lastName);
-        // Populate the editable store fields for firstName/lastName
-        setFirstName(parsed.firstName);
-        setLastName(parsed.lastName);
+      // Single name field
+      if (demoProfile.name) {
+        setDisplayName(demoProfile.name);
+        setName(demoProfile.name);
       }
       setDisplayDOB(demoProfile.dateOfBirth || "");
       setDisplayGender((demoProfile.gender as Gender) || "");
@@ -275,7 +232,7 @@ export default function BasicInfoScreen() {
     }
 
     // BUG FIX: Handle editFromReview mode in LIVE mode (non-demo)
-    // CRITICAL: Only prefill ONCE on entry, then let user freely edit firstName/lastName
+    // CRITICAL: Only prefill ONCE on entry, then let user freely edit name
     if (isEditFromReview && !isDemoMode && existingUserData) {
       // Guard: Only prefill once per editFromReview session
       if (hasPrefilledEditFromReviewRef.current) {
@@ -283,14 +240,10 @@ export default function BasicInfoScreen() {
       }
       hasPrefilledEditFromReviewRef.current = true;
       console.log('[BASIC] editFromReview LIVE mode - pre-filling ONCE from existingUserData');
-      // Parse name into firstName/lastName
+      // Single name field
       if (existingUserData.name) {
-        const parsed = parseFullName(existingUserData.name);
-        setDisplayFirstName(parsed.firstName);
-        setDisplayLastName(parsed.lastName);
-        // Populate the editable store fields for firstName/lastName
-        setFirstName(parsed.firstName);
-        setLastName(parsed.lastName);
+        setDisplayName(existingUserData.name);
+        setName(existingUserData.name);
       }
       setDisplayDOB(existingUserData.dateOfBirth || "");
       setDisplayGender((existingUserData.gender as Gender) || "");
@@ -304,11 +257,7 @@ export default function BasicInfoScreen() {
     if (isConfirmMode && isDemoMode && demoHydrated) {
       if (demoProfile) {
         // Check if ALL basic fields are present (strict check)
-        // Support both old `name` field and new firstName/lastName fields
-        const hasFirstName = !!demoProfile.firstName && demoProfile.firstName.trim().length > 0;
-        const hasLastName = !!demoProfile.lastName && demoProfile.lastName.trim().length > 0;
-        const hasLegacyName = !!demoProfile.name && demoProfile.name.trim().length > 0;
-        const hasName = (hasFirstName) || hasLegacyName; // firstName required, lastName optional
+        const hasName = !!demoProfile.name && demoProfile.name.trim().length > 0;
         const hasHandle = !!demoProfile.handle && demoProfile.handle.trim().length > 0;
         const hasDOB = !!demoProfile.dateOfBirth && demoProfile.dateOfBirth.length > 0;
         const hasGender = !!demoProfile.gender && demoProfile.gender.length > 0;
@@ -319,15 +268,7 @@ export default function BasicInfoScreen() {
         if (hasAllFields) {
           // ALL fields present → normal confirm mode (read-only)
           setIsRecoveryMode(false);
-          // Parse name into firstName/lastName
-          if (hasFirstName) {
-            setDisplayFirstName(demoProfile.firstName!);
-            setDisplayLastName(demoProfile.lastName || "");
-          } else if (hasLegacyName) {
-            const parsed = parseFullName(demoProfile.name!);
-            setDisplayFirstName(parsed.firstName);
-            setDisplayLastName(parsed.lastName);
-          }
+          setDisplayName(demoProfile.name!);
           setDisplayDOB(demoProfile.dateOfBirth!);
           setDisplayGender(demoProfile.gender as Gender);
           setDisplayHandle(demoProfile.handle!);
@@ -346,19 +287,9 @@ export default function BasicInfoScreen() {
           console.log('[BASIC] → recovery mode (some fields missing)');
 
           // Pre-populate onboardingStore from demoProfile's existing data
-          if (hasFirstName && !firstName) {
-            setFirstName(demoProfile.firstName!);
-            console.log(`[BASIC] pre-populated firstName="${demoProfile.firstName}" from demoProfile`);
-          }
-          if (hasLastName && !lastName) {
-            setLastName(demoProfile.lastName!);
-            console.log(`[BASIC] pre-populated lastName="${demoProfile.lastName}" from demoProfile`);
-          }
-          if (!hasFirstName && hasLegacyName && !firstName) {
-            const parsed = parseFullName(demoProfile.name!);
-            setFirstName(parsed.firstName);
-            setLastName(parsed.lastName);
-            console.log(`[BASIC] pre-populated firstName/lastName from legacy name="${demoProfile.name}"`);
+          if (hasName && !name) {
+            setName(demoProfile.name!);
+            console.log(`[BASIC] pre-populated name="${demoProfile.name}" from demoProfile`);
           }
           if (hasHandle && !nickname) {
             setNickname(demoProfile.handle!);
@@ -385,11 +316,9 @@ export default function BasicInfoScreen() {
         console.log('[BASIC] → recovery mode (no demoProfile exists)');
       }
     } else if (isConfirmMode && !isDemoMode && existingUserData) {
-      // Live mode: use query result - parse name into firstName/lastName
+      // Live mode: use query result - single name field
       if (existingUserData.name) {
-        const parsed = parseFullName(existingUserData.name);
-        setDisplayFirstName(parsed.firstName);
-        setDisplayLastName(parsed.lastName);
+        setDisplayName(existingUserData.name);
       }
       setDisplayDOB(existingUserData.dateOfBirth || "");
       setDisplayGender((existingUserData.gender as Gender) || "");
@@ -405,77 +334,8 @@ export default function BasicInfoScreen() {
   // BUG-002 FIX: Mutation for persisting basic info to onboarding draft
   const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
 
-  // P1-006 FIX: Track the handle being checked to prevent stale results
-  const checkingHandleRef = useRef<string | null>(null);
-
-  // Debounced nickname availability check (only for new users)
-  const checkNicknameAvailability = useCallback(async (handle: string) => {
-    // Clear any pending check
-    if (availabilityTimeoutRef.current) {
-      clearTimeout(availabilityTimeoutRef.current);
-    }
-
-    // Reset state if handle is too short
-    if (!handle || handle.length < 3) {
-      setIsCheckingAvailability(false);
-      setIsNicknameAvailable(null);
-      setAvailabilityCheckFailed(false); // P1-007 FIX: Reset failure state
-      checkingHandleRef.current = null;
-      return;
-    }
-
-    // Start checking indicator
-    setIsCheckingAvailability(true);
-    setIsNicknameAvailable(null);
-    setAvailabilityCheckFailed(false); // P1-007 FIX: Reset failure state
-    // P1-006 FIX: Track which handle we're checking
-    checkingHandleRef.current = handle;
-
-    // Log demo mode status for debugging
-    console.log(`[BASIC] EXPO_PUBLIC_DEMO_MODE=${process.env.EXPO_PUBLIC_DEMO_MODE}, isDemoMode=${isDemoMode}`);
-
-    // Debounce the actual check
-    availabilityTimeoutRef.current = setTimeout(async () => {
-      try {
-        console.log(`[BASIC] nickname=${handle} checking availability...`);
-
-        if (isDemoMode) {
-          // Demo mode: check against demoStore handles
-          const demoStore = useDemoStore.getState();
-          const profiles = Object.values(demoStore.demoProfiles);
-          const taken = profiles.some((p: any) => p.handle === handle);
-          console.log(`[BASIC] nickname=${handle} available=${!taken} (demo mode - checked local demoStore)`);
-          // P1-006 FIX: Only update state if still mounted AND handle hasn't changed
-          if (isMountedRef.current && checkingHandleRef.current === handle) {
-            setIsNicknameAvailable(!taken);
-          }
-        } else {
-          // Live mode: query Convex database for handle availability
-          console.log(`[BASIC] nickname=${handle} querying Convex checkHandleExists...`);
-          const result = await convex.query(api.auth.checkHandleExists, { handle });
-          const available = !result.exists;
-          console.log(`[BASIC] nickname=${handle} available=${available} (live mode - Convex DB, exists=${result.exists})`);
-          // P1-006 FIX: Only update state if still mounted AND handle hasn't changed
-          if (isMountedRef.current && checkingHandleRef.current === handle) {
-            setIsNicknameAvailable(available);
-          }
-        }
-      } catch (error) {
-        console.error('[BASIC] availability check error:', error);
-        // P1-006 FIX: Only update state if still mounted AND handle hasn't changed
-        // P1-007 FIX: Set failure state so user can retry
-        if (isMountedRef.current && checkingHandleRef.current === handle) {
-          setIsNicknameAvailable(null);
-          setAvailabilityCheckFailed(true);
-        }
-      } finally {
-        // P1-006 FIX: Only update state if still mounted AND handle hasn't changed
-        if (isMountedRef.current && checkingHandleRef.current === handle) {
-          setIsCheckingAvailability(false);
-        }
-      }
-    }, 400); // 400ms debounce
-  }, []);
+  // IDENTITY SIMPLIFICATION: Nickname availability check function REMOVED
+  // Nickname is no longer required to be unique - userId is the only unique identifier
 
   const calculateAge = (dob: string) => {
     if (!dob) return 0;
@@ -522,30 +382,18 @@ export default function BasicInfoScreen() {
   };
 
   // Validation rules for all required fields
+  // IDENTITY SIMPLIFICATION: Single name field, min 2 characters, NO uniqueness check for nickname
   const validationRules: Record<string, ValidationRule> = {
-    firstName: (value: string) => {
-      if (!value || value.trim().length < VALIDATION.FIRST_NAME_MIN_LENGTH) {
-        return `First name must be at least ${VALIDATION.FIRST_NAME_MIN_LENGTH} character`;
+    name: (value: string) => {
+      if (!value || value.trim().length < VALIDATION.NAME_MIN_LENGTH) {
+        return `Name must be at least ${VALIDATION.NAME_MIN_LENGTH} characters`;
       }
-      if (value.length > VALIDATION.FIRST_NAME_MAX_LENGTH) {
-        return `First name must be no more than ${VALIDATION.FIRST_NAME_MAX_LENGTH} characters`;
-      }
-      // Allow letters, spaces, hyphens, apostrophes
-      if (!/^[a-zA-Z\s\-']+$/.test(value)) {
-        return "First name can only contain letters, spaces, hyphens, and apostrophes";
-      }
-      return undefined;
-    },
-    lastName: (value: string) => {
-      if (!value || value.trim().length < VALIDATION.LAST_NAME_MIN_LENGTH) {
-        return `Last name must be at least ${VALIDATION.LAST_NAME_MIN_LENGTH} character`;
-      }
-      if (value.length > VALIDATION.LAST_NAME_MAX_LENGTH) {
-        return `Last name must be no more than ${VALIDATION.LAST_NAME_MAX_LENGTH} characters`;
+      if (value.length > VALIDATION.NAME_MAX_LENGTH) {
+        return `Name must be no more than ${VALIDATION.NAME_MAX_LENGTH} characters`;
       }
       // Allow letters, spaces, hyphens, apostrophes
       if (!/^[a-zA-Z\s\-']+$/.test(value)) {
-        return "Last name can only contain letters, spaces, hyphens, and apostrophes";
+        return "Name can only contain letters, spaces, hyphens, and apostrophes";
       }
       return undefined;
     },
@@ -558,6 +406,7 @@ export default function BasicInfoScreen() {
       if (!/^[a-z0-9_]+$/.test(value)) {
         return "Nickname can only contain letters, numbers, and underscores (no spaces or dots)";
       }
+      // IDENTITY SIMPLIFICATION: NO uniqueness check - nickname does not need to be unique
       return undefined;
     },
     dateOfBirth: (value: string) => {
@@ -580,24 +429,18 @@ export default function BasicInfoScreen() {
 
   // Handle Continue in READ-ONLY mode (existing user OR edit from Review)
   const handleReadOnlyContinue = () => {
-    // In editFromReview mode, firstName/lastName are editable - validate before saving
+    // In editFromReview mode, name is editable - validate before saving
     if (isEditFromReview) {
-      // Validate firstName and lastName
+      // Validate name
       const result = validateRequired(
-        { firstName, lastName },
-        {
-          firstName: validationRules.firstName,
-          lastName: validationRules.lastName,
-        }
+        { name },
+        { name: validationRules.name }
       );
 
       if (!result.ok) {
         setErrors(result.errors as Record<string, string>);
         setShowTopError(true);
-        const fieldRefs = {
-          firstName: firstNameFieldRef,
-          lastName: lastNameFieldRef,
-        };
+        const fieldRefs = { name: nameFieldRef };
         scrollToFirstInvalid(scrollRef, fieldRefs, result.firstInvalidKey as string);
         return;
       }
@@ -608,15 +451,11 @@ export default function BasicInfoScreen() {
 
       // Save changes (demo mode)
       if (isDemoMode && userId) {
-        // Construct full name for backend compat
-        const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
         useDemoStore.getState().saveDemoProfile(userId, {
-          firstName: firstName.trim(),
-          lastName: lastName.trim(),
-          name: fullName,
+          name: name.trim(),
           lgbtqSelf,
         });
-        console.log(`[BASIC] saved firstName/lastName and lgbtqSelf`);
+        console.log(`[BASIC] saved name and lgbtqSelf`);
       }
 
       if (__DEV__) console.log("[ONB] basic_info editFromReview → back to review");
@@ -638,9 +477,9 @@ export default function BasicInfoScreen() {
 
   // Handle Continue in RECOVERY mode (existing user with missing fields)
   const handleRecoveryContinue = () => {
-    // Run validation using the helper
+    // Run validation using the helper - single name field
     const result = validateRequired(
-      { firstName, lastName, nickname, dateOfBirth, gender },
+      { name, nickname, dateOfBirth, gender },
       validationRules
     );
 
@@ -649,8 +488,7 @@ export default function BasicInfoScreen() {
       setShowTopError(true);
       // Scroll to first invalid field
       const fieldRefs = {
-        firstName: firstNameFieldRef,
-        lastName: lastNameFieldRef,
+        name: nameFieldRef,
         nickname: nicknameFieldRef,
         dateOfBirth: dobFieldRef,
         gender: genderFieldRef,
@@ -669,13 +507,8 @@ export default function BasicInfoScreen() {
       const demoStore = useDemoStore.getState();
       const dataToSave: Record<string, string | string[]> = {};
 
-      // Only include non-empty values
-      // Store firstName/lastName separately and construct name for backend compat
-      if (firstName && firstName.trim().length > 0) dataToSave.firstName = firstName.trim();
-      if (lastName && lastName.trim().length > 0) dataToSave.lastName = lastName.trim();
-      // Construct full name for backend compatibility
-      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
-      if (fullName.length > 0) dataToSave.name = fullName;
+      // Only include non-empty values - single name field
+      if (name && name.trim().length > 0) dataToSave.name = name.trim();
       if (nickname && nickname.length > 0) dataToSave.handle = nickname;
       if (dateOfBirth && dateOfBirth.length > 0) dataToSave.dateOfBirth = dateOfBirth;
       if (gender) dataToSave.gender = gender;
@@ -700,9 +533,9 @@ export default function BasicInfoScreen() {
 
   // Handle Continue in EDIT mode (new signup) - first validates, then shows modal
   const handleNextWithConfirmation = () => {
-    // Run validation using the helper
+    // Run validation using the helper - single name field
     const result = validateRequired(
-      { firstName, lastName, nickname, dateOfBirth, gender },
+      { name, nickname, dateOfBirth, gender },
       validationRules
     );
 
@@ -711,8 +544,7 @@ export default function BasicInfoScreen() {
       setShowTopError(true);
       // Scroll to first invalid field
       const fieldRefs = {
-        firstName: firstNameFieldRef,
-        lastName: lastNameFieldRef,
+        name: nameFieldRef,
         nickname: nicknameFieldRef,
         dateOfBirth: dobFieldRef,
         gender: genderFieldRef,
@@ -721,19 +553,8 @@ export default function BasicInfoScreen() {
       return;
     }
 
-    // Additional async checks (nickname availability)
-    if (isCheckingAvailability) {
-      setErrors({ nickname: "Please wait while we check nickname availability" });
-      setShowTopError(true);
-      scrollToFirstInvalid(scrollRef, { nickname: nicknameFieldRef }, "nickname");
-      return;
-    }
-    if (isNicknameAvailable === false) {
-      setErrors({ nickname: "This nickname is already taken. Please choose another." });
-      setShowTopError(true);
-      scrollToFirstInvalid(scrollRef, { nickname: nicknameFieldRef }, "nickname");
-      return;
-    }
+    // IDENTITY SIMPLIFICATION: Nickname availability check REMOVED
+    // Nickname does not need to be unique - userId is the only unique identifier
 
     // Clear errors and show confirmation modal
     setErrors({});
@@ -798,12 +619,9 @@ export default function BasicInfoScreen() {
         }
         // BUG A FIX: Save basic info to demoProfiles immediately so it's available
         // if user logs out and back in before completing full onboarding
-        // Construct full name for backend compatibility
-        const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+        // IDENTITY SIMPLIFICATION: Single name field
         const dataToSave: Record<string, any> = {
-          firstName: firstName.trim(),
-          lastName: lastName.trim(),
-          name: fullName, // Backend compat
+          name: name.trim(),
           handle: nickname,
           dateOfBirth,
           gender: gender ?? undefined,
@@ -827,15 +645,14 @@ export default function BasicInfoScreen() {
       }
 
       // Live mode: register via Convex using central auth hook
-      // Construct full name from firstName + lastName for backend
-      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+      // IDENTITY SIMPLIFICATION: Single name field
 
       // H7 FIX: capturedAuthVersion already captured at start of handleNext
 
       const result = await submitEmailRegistration({
         email,
         password,
-        name: fullName,
+        name: name.trim(),
         handle: nickname,
         dateOfBirth,
         gender: gender!, // Validated above - gender is not null here
@@ -879,11 +696,12 @@ export default function BasicInfoScreen() {
         }
 
         // BUG-002 FIX: Persist basic info to onboarding draft (non-blocking)
+        // IDENTITY SIMPLIFICATION: Single name field
         upsertDraft({
           userId: result.userId,
           patch: {
             basicInfo: {
-              name: [firstName, lastName].filter(Boolean).join(" ").trim(),
+              name: name.trim(),
               handle: nickname,
               dateOfBirth,
               gender,
@@ -916,14 +734,13 @@ export default function BasicInfoScreen() {
   };
 
   // Values to display (read-only uses fetched data, edit uses store)
-  // CRITICAL: In editFromReview mode, firstName/lastName must use store values (editable)
-  const currentFirstName = (isReadOnly && !isEditFromReview) ? displayFirstName : firstName;
-  const currentLastName = (isReadOnly && !isEditFromReview) ? displayLastName : lastName;
+  // CRITICAL: In editFromReview mode, name must use store value (editable)
+  const currentName = (isReadOnly && !isEditFromReview) ? displayName : name;
   const currentDOB = isReadOnly ? displayDOB : dateOfBirth;
   const currentGender = isReadOnly ? displayGender : gender;
 
   // NEW EDIT RESTRICTION LOGIC:
-  // In editFromReview mode: firstName/lastName are EDITABLE, others are LOCKED
+  // In editFromReview mode: name is EDITABLE, others are LOCKED
   // In other modes (initial onboarding): ALL fields editable
   const isFieldLocked = (field: string): boolean => {
     if (!isEditFromReview) return false;
@@ -978,106 +795,50 @@ export default function BasicInfoScreen() {
         <Text style={styles.globalHelper}>You can edit this anytime later</Text>
       )}
 
-      {/* First Name field - always editable in editFromReview mode */}
-      <View ref={firstNameFieldRef} style={styles.field}>
+      {/* Name field - single field replaces firstName + lastName */}
+      <View ref={nameFieldRef} style={styles.field}>
         <Input
-          label="First Name"
-          value={currentFirstName}
+          label="Name"
+          value={currentName}
           onChangeText={(isReadOnly && !isEditFromReview) ? undefined : (text) => {
-            setFirstName(text);
-            clearFieldError("firstName");
+            setName(text);
+            clearFieldError("name");
           }}
-          placeholder="Your first name"
+          placeholder="Your name"
           autoCapitalize="words"
-          maxLength={VALIDATION.FIRST_NAME_MAX_LENGTH}
+          maxLength={VALIDATION.NAME_MAX_LENGTH}
           editable={!isReadOnly || isEditFromReview}
-          style={[(isReadOnly && !isEditFromReview) ? styles.disabledInput : undefined, errors.firstName ? styles.inputError : undefined]}
+          style={[(isReadOnly && !isEditFromReview) ? styles.disabledInput : undefined, errors.name ? styles.inputError : undefined]}
         />
         <Text style={styles.fieldHelper}>Shown on your profile</Text>
         {(!isReadOnly || isEditFromReview) && (
           <Text style={styles.hint}>
-            {firstName.length}/{VALIDATION.FIRST_NAME_MAX_LENGTH} characters
+            {name.length}/{VALIDATION.NAME_MAX_LENGTH} characters
           </Text>
         )}
-        {errors.firstName ? <Text style={styles.fieldError}>{errors.firstName}</Text> : null}
+        {errors.name ? <Text style={styles.fieldError}>{errors.name}</Text> : null}
       </View>
 
-      {/* Last Name field - always editable in editFromReview mode */}
-      <View ref={lastNameFieldRef} style={styles.field}>
-        <Input
-          label="Last Name"
-          value={currentLastName}
-          onChangeText={(isReadOnly && !isEditFromReview) ? undefined : (text) => {
-            setLastName(text);
-            clearFieldError("lastName");
-          }}
-          placeholder="Your last name"
-          autoCapitalize="words"
-          maxLength={VALIDATION.LAST_NAME_MAX_LENGTH}
-          editable={!isReadOnly || isEditFromReview}
-          style={[(isReadOnly && !isEditFromReview) ? styles.disabledInput : undefined, errors.lastName ? styles.inputError : undefined]}
-        />
-        <Text style={styles.fieldHelper}>Shown on your profile</Text>
-        {(!isReadOnly || isEditFromReview) && (
-          <Text style={styles.hint}>
-            {lastName.length}/{VALIDATION.LAST_NAME_MAX_LENGTH} characters
-          </Text>
-        )}
-        {errors.lastName ? <Text style={styles.fieldError}>{errors.lastName}</Text> : null}
-      </View>
-
-      {/* Nickname (User ID) field - LOCKED in editFromReview mode */}
+      {/* Nickname field - LOCKED in editFromReview mode */}
+      {/* IDENTITY SIMPLIFICATION: No uniqueness check, no "taken" indicator */}
       <View ref={nicknameFieldRef} style={styles.field}>
         <Input
-          label="Nickname (User ID)"
+          label="Nickname"
           value={isReadOnly ? (displayHandle || "—") : nickname}
           onChangeText={(isReadOnly || isFieldLocked('nickname')) ? undefined : (text) => {
             // Only allow alphanumeric and underscores, lowercase
             const sanitized = text.toLowerCase().replace(/[^a-z0-9_]/g, '');
             setNickname(sanitized);
             clearFieldError("nickname");
-            // Trigger availability check for new users
-            checkNicknameAvailability(sanitized);
           }}
-          placeholder="Choose a unique username"
+          placeholder="Choose a nickname"
           autoCapitalize="none"
           autoCorrect={false}
           maxLength={20}
           editable={!isReadOnly && !isFieldLocked('nickname')}
           style={[(isReadOnly || isFieldLocked('nickname')) ? styles.disabledInput : undefined, errors.nickname ? styles.inputError : undefined]}
         />
-        {/* Availability indicator (only for new users) */}
-        {!isReadOnly && !isFieldLocked('nickname') && nickname.length >= 3 && (
-          <View style={styles.availabilityRow}>
-            {isCheckingAvailability ? (
-              <>
-                <ActivityIndicator size="small" color={COLORS.textLight} />
-                <Text style={styles.availabilityChecking}>Checking...</Text>
-              </>
-            ) : isNicknameAvailable === true ? (
-              <>
-                <Ionicons name="checkmark-circle" size={16} color={COLORS.success} />
-                <Text style={styles.availabilitySuccess}>Available</Text>
-              </>
-            ) : isNicknameAvailable === false ? (
-              <>
-                <Ionicons name="close-circle" size={16} color={COLORS.error} />
-                <Text style={styles.availabilityError}>Taken</Text>
-              </>
-            ) : availabilityCheckFailed ? (
-              // P1-007 FIX: Show retry option when check fails
-              <TouchableOpacity
-                style={styles.availabilityRetry}
-                onPress={() => checkNicknameAvailability(nickname)}
-              >
-                <Ionicons name="alert-circle" size={16} color={COLORS.warning} />
-                <Text style={styles.availabilityWarning}>Check failed</Text>
-                <Text style={styles.availabilityRetryText}>Tap to retry</Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
-        )}
-        <Text style={styles.fieldHelper}>Your unique username on Mira</Text>
+        <Text style={styles.fieldHelper}>Your nickname on Mira</Text>
         {!isReadOnly && !isFieldLocked('nickname') && (
           <Text style={styles.hint}>
             Letters, numbers, and underscores only. {nickname.length}/20
@@ -1244,7 +1005,7 @@ export default function BasicInfoScreen() {
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Review your information</Text>
             <Text style={styles.modalMessage}>
-              Your Nickname, Date of Birth and Gender can't be changed later. First and Last Name can be edited anytime. Please make sure everything is correct.
+              Your Nickname, Date of Birth and Gender can't be changed later. Your Name can be edited anytime. Please make sure everything is correct.
             </Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity

@@ -17,7 +17,7 @@ import {
   Modal,
   Dimensions,
   ScrollView,
-  TextInput,
+  // PHASE-1 RESTRUCTURE: TextInput removed - bio no longer collected during onboarding
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
@@ -25,7 +25,8 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system/legacy';
-import { COLORS, VALIDATION } from '@/lib/constants';
+import { COLORS } from '@/lib/constants';
+// PHASE-1 RESTRUCTURE: VALIDATION removed - bio no longer collected during onboarding
 import { Button } from '@/components/ui';
 import { useOnboardingStore, DisplayPhotoVariant } from '@/stores/onboardingStore';
 import { useDemoStore } from '@/stores/demoStore';
@@ -101,7 +102,8 @@ async function persistPhoto(cacheUri: string): Promise<string> {
 
 export default function AdditionalPhotosScreen() {
   useScreenTrace("ONB_ADDITIONAL_PHOTOS");
-  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, bio, setBio, clearAllPhotos, verificationReferencePrimary } = useOnboardingStore();
+  // PHASE-1 RESTRUCTURE: Bio removed from onboarding flow
+  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, clearAllPhotos, verificationReferencePrimary } = useOnboardingStore();
   const { userId, token } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -310,14 +312,10 @@ export default function AdditionalPhotosScreen() {
   // Warning state for minimum photos
   const [showPhotoWarning, setShowPhotoWarning] = useState(false);
 
-  // Error state for bio validation
-  const [bioError, setBioError] = useState<string | null>(null);
+  // PHASE-1 RESTRUCTURE: Bio removed from onboarding - no bio error state needed
 
-  // DIRTY FLAG: Track if user has manually edited bio to prevent auto-refill loops
-  const [bioDirty, setBioDirty] = useState(false);
   // Track if initial prefill has already happened
   const didPrefillPhotos = React.useRef(false);
-  const didPrefillBio = React.useRef(false);
 
   // Prefill photos from demoProfiles - run ONCE on mount when data is ready
   useEffect(() => {
@@ -346,20 +344,7 @@ export default function AdditionalPhotosScreen() {
     }
   }, [demoHydrated, demoProfile, photos, setPhotoAtIndex]);
 
-  // Prefill bio from demoProfiles - run ONCE on mount if bio is empty and not dirty
-  useEffect(() => {
-    // Skip if already prefilled, dirty, or not in demo mode
-    if (didPrefillBio.current || bioDirty || !isDemoMode || !demoHydrated) return;
-    if (!demoProfile?.bio) return;
-    // Only prefill if current bio is empty
-    if (bio && bio.trim().length > 0) return;
-
-    // Mark as prefilled BEFORE setting to prevent re-runs
-    didPrefillBio.current = true;
-
-    setBio(demoProfile.bio);
-    console.log('[PHOTOS] prefilled bio from demoProfile');
-  }, [demoHydrated, demoProfile, bio, bioDirty, setBio]);
+  // PHASE-1 RESTRUCTURE: Bio prefill removed - bio no longer collected during onboarding
 
   // FIX 2: Removed redundant syncPhotosFromBackend on mount
   // The useQuery(api.photos.getUserPhotos) subscription at line 151-154 already provides
@@ -997,26 +982,20 @@ export default function AdditionalPhotosScreen() {
       });
     }
 
-    // Gate: bio is mandatory
-    const trimmedBio = bio.trim();
-    if (!trimmedBio) {
-      setBioError('Write your bio to continue.');
-      return;
-    }
+    // PHASE-1 RESTRUCTURE: Bio validation removed - bio no longer collected during onboarding
 
-    // Clear warnings/errors if we passed all checks
+    // Clear warnings if we passed all checks
     setShowPhotoWarning(false);
-    setBioError(null);
 
-    // SAVE-AS-YOU-GO: Persist photos + bio to demoProfiles immediately
+    // SAVE-AS-YOU-GO: Persist photos to demoProfiles immediately
+    // PHASE-1 RESTRUCTURE: Bio removed from save - no longer collected during onboarding
     if (isDemoMode && userId) {
       const validPhotos = photos.filter((p): p is string => typeof p === 'string' && p.length > 0);
       const demoStore = useDemoStore.getState();
       demoStore.saveDemoProfile(userId, {
         photos: validPhotos.map((uri) => ({ url: uri })),
-        bio: trimmedBio,
       });
-      console.log(`[PHOTOS] saved ${validPhotos.length} photos + bio to demoProfile`);
+      console.log(`[PHOTOS] saved ${validPhotos.length} photos to demoProfile`);
     }
 
     // CENTRAL EDIT HUB: Return to Review if editing from there
@@ -1026,14 +1005,14 @@ export default function AdditionalPhotosScreen() {
       return;
     }
 
-    // Skip bio screen - go directly to permissions
+    // PHASE-1 RESTRUCTURE: Go to preferences after additional-photos
     // CRITICAL: Navigation MUST happen unconditionally after validation passes
     if (__DEV__) {
-      console.log('[PHOTO_GATE] All validations passed. Navigating to permissions...');
-      console.log('[ONB] additional-photos → permissions (continue)');
+      console.log('[PHOTO_GATE] All validations passed. Navigating to preferences...');
+      console.log('[ONB] additional-photos → preferences (continue)');
     }
-    setStep('permissions');
-    router.push('/(onboarding)/permissions');
+    setStep('preferences');
+    router.push('/(onboarding)/preferences');
   };
 
   // Render unified photo grid (ALL slots 0-8, primary included)
@@ -1307,37 +1286,7 @@ export default function AdditionalPhotosScreen() {
           </TouchableOpacity>
         )}
 
-        {/* Bio Section */}
-        <View style={styles.bioSection}>
-          <Text style={styles.sectionTitle}>About You</Text>
-          <TextInput
-            style={[styles.bioInput, bioError && styles.bioInputError]}
-            value={bio}
-            onChangeText={(text) => {
-              setBio(text);
-              // Mark as dirty - user has manually edited
-              if (!bioDirty) setBioDirty(true);
-              // Clear error when user types
-              if (bioError) setBioError(null);
-            }}
-            placeholder="Write a short bio about yourself…"
-            placeholderTextColor={COLORS.textMuted}
-            multiline
-            numberOfLines={3}
-            maxLength={VALIDATION.BIO_MAX_LENGTH}
-            textAlignVertical="top"
-          />
-          <View style={styles.bioFooter}>
-            {bioError ? (
-              <Text style={styles.bioErrorText}>{bioError}</Text>
-            ) : (
-              <View />
-            )}
-            <Text style={styles.bioCharCount}>
-              {bio.length}/{VALIDATION.BIO_MAX_LENGTH}
-            </Text>
-          </View>
-        </View>
+        {/* PHASE-1 RESTRUCTURE: Bio section removed - bio no longer collected during onboarding */}
 
         {/* Privacy Options */}
         <View style={styles.privacySection}>

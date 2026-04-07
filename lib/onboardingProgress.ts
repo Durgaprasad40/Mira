@@ -8,26 +8,17 @@ import type { OnboardingStep } from '@/types';
 
 /**
  * Ordered list of onboarding steps for progress calculation.
- * Each screen/route gets its own entry for per-screen progress advancement.
+ * PHASE-1 RESTRUCTURE: Simplified to exactly 6 steps.
  * Excludes: welcome (pre-progress), tutorial (no progress bar shown).
+ * Pre-auth screens (email_phone, otp, password) are separate from onboarding progress.
  */
 export const ONBOARDING_PROGRESS_STEPS: OnboardingStep[] = [
-  'email_phone',
-  'otp',
-  'password',
-  'basic_info',
-  'consent',
-  'prompts_part1',     // NEW: Seed questions (identity, social battery, values)
-  'prompts_part2',     // NEW: Section prompts (builder, performer, seeker, grounded)
-  'profile_details',   // profile-details/index.tsx
-  'lifestyle',         // profile-details/lifestyle.tsx
-  'life_rhythm',       // profile-details/life-rhythm.tsx (city, social, sleep, travel, work, values)
-  'preferences',
-  'photo_upload',
-  'face_verification',
-  'additional_photos',
-  'permissions',
-  'review',            // Final step = 100%
+  'basic_info',        // Step 1: Name, DOB, gender
+  'photo_upload',      // Step 2: Primary photo upload
+  'face_verification', // Step 3: Face verification
+  'additional_photos', // Step 4: Additional photos + displayPhotoVariant
+  'preferences',       // Step 5: lookingFor, lgbtqPreference, relationshipIntent
+  'permissions',       // Step 6: Location permission → completeOnboarding
   // 'tutorial' excluded - tutorial screen doesn't show progress bar
 ];
 

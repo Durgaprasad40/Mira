@@ -16,6 +16,7 @@ import {
   TouchableOpacity,
   Alert,
   Platform,
+  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -23,21 +24,32 @@ import * as Location from "expo-location";
 import { COLORS } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
+import { useAuthStore } from "@/stores/authStore";
+import { useDemoStore } from "@/stores/demoStore";
+import { useDemoDmStore } from "@/stores/demoDmStore";
+import { isDemoMode } from "@/hooks/useConvex";
+import { useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import { Id } from "@/convex/_generated/dataModel";
 import { Ionicons } from "@expo/vector-icons";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { useScreenTrace } from "@/lib/devTrace";
 
 export default function PermissionsScreen() {
   useScreenTrace("ONB_PERMISSIONS");
-  const { setStep } = useOnboardingStore();
+  const { setStep, reset } = useOnboardingStore();
+  const { userId, token, setOnboardingCompleted } = useAuthStore();
   const router = useRouter();
   const [locationGranted, setLocationGranted] = useState(false);
-  // Notification permission state: 'pending' | 'granted' | 'denied' | 'unavailable'
-  const [notificationStatus, setNotificationStatus] = useState<'pending' | 'granted' | 'denied' | 'unavailable'>('pending');
+  // PHASE-1 RESTRUCTURE: Notification permission removed
 
   // P2 STABILITY: Busy flags to prevent concurrent permission requests
   const [isRequestingLocation, setIsRequestingLocation] = useState(false);
-  const [isRequestingNotifications, setIsRequestingNotifications] = useState(false);
+  // PHASE-1 RESTRUCTURE: isRequestingNotifications removed
+
+  // PHASE-1 RESTRUCTURE: completeOnboarding state
+  const [isCompleting, setIsCompleting] = useState(false);
+  const completeOnboardingMutation = useMutation(api.users.completeOnboarding);
 
   // P1 STABILITY: Track mounted state to prevent setState after unmount
   const isMountedRef = useRef(true);
@@ -78,40 +90,62 @@ export default function PermissionsScreen() {
     }
   };
 
-  const requestNotifications = () => {
-    // P2 STABILITY: Prevent concurrent permission requests
-    if (isRequestingNotifications || notificationStatus !== 'pending') return;
-    setIsRequestingNotifications(true);
+  // PHASE-1 RESTRUCTURE: Notification permission removed
 
-    // expo-notifications is not installed in this build
-    // PRIVACY FIX: Don't fake permission as granted - be honest about the limitation
-    Alert.alert(
-      "Notifications",
-      "Push notifications are not available in this beta build. You'll be able to enable notifications in a future update.",
-      [{
-        text: "OK",
-        onPress: () => {
-          // P1 STABILITY: Guard setState in Alert callback
-          if (isMountedRef.current) {
-            setNotificationStatus('unavailable');
-            setIsRequestingNotifications(false);
-          }
+  // PHASE-1 RESTRUCTURE: handleNext now calls completeOnboarding directly
+  const handleNext = async () => {
+    if (isCompleting || !isMountedRef.current) return;
+    setIsCompleting(true);
+
+    try {
+      // LIVE MODE: Call completeOnboarding mutation
+      if (!isDemoMode && userId && token) {
+        if (__DEV__) console.log('[ONB] permissions: calling completeOnboarding...');
+        await completeOnboardingMutation({
+          userId: userId as Id<"users">,
+          token,
+        });
+        if (__DEV__) console.log('[ONB] permissions: completeOnboarding success');
+      }
+
+      // Mark onboarding complete in auth store
+      setOnboardingCompleted(true);
+      reset();
+
+      // DEMO MODE: Handle demo-specific completion
+      if (isDemoMode) {
+        if (userId) {
+          useDemoStore.getState().setDemoOnboardingComplete(userId);
         }
-      }]
-    );
+        // OB-8 fix: Only clear DM data if store is empty (fresh onboarding)
+        const dmState = useDemoDmStore.getState();
+        const hasExistingData = Object.keys(dmState.conversations).length > 0;
+        if (!hasExistingData) {
+          useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });
+        }
+        // Seed demo profiles/matches/likes
+        useDemoStore.getState().seed();
+      }
+
+      // Navigate to tutorial
+      if (__DEV__) console.log('[ONB] permissions → tutorial (continue)');
+      if (isMountedRef.current) {
+        router.push("/(onboarding)/tutorial");
+      }
+    } catch (error) {
+      if (__DEV__) console.error('[ONB] permissions: completeOnboarding failed:', error);
+      Alert.alert("Error", "Failed to complete onboarding. Please try again.");
+      if (isMountedRef.current) {
+        setIsCompleting(false);
+      }
+    }
   };
 
-  const handleNext = () => {
-    if (__DEV__) console.log('[ONB] permissions → review (continue)');
-    setStep("review");
-    router.push("/(onboarding)/review");
-  };
-
-  // POST-VERIFICATION: Previous goes back
+  // PHASE-1 RESTRUCTURE: Previous goes back to preferences
   const handlePrevious = () => {
-    if (__DEV__) console.log('[ONB] permissions → bio (previous)');
-    setStep("bio");
-    router.push("/(onboarding)/bio");
+    if (__DEV__) console.log('[ONB] permissions → preferences (previous)');
+    setStep("preferences");
+    router.push("/(onboarding)/preferences");
   };
 
   return (
@@ -143,30 +177,7 @@ export default function PermissionsScreen() {
         />
       </View>
 
-      <View style={styles.permissionCard}>
-        <View style={styles.permissionHeader}>
-          <Ionicons name="notifications" size={32} color={COLORS.primary} />
-          <View style={styles.permissionInfo}>
-            <Text style={styles.permissionTitle}>Notifications</Text>
-            <Text style={styles.permissionDescription}>
-              Get notified about new matches, messages, and likes
-            </Text>
-          </View>
-        </View>
-        <Button
-          title={
-            notificationStatus === 'granted' ? "Granted ✓" :
-            notificationStatus === 'unavailable' ? "Not Available" :
-            notificationStatus === 'denied' ? "Denied" :
-            "Enable Notifications"
-          }
-          variant={notificationStatus === 'pending' ? "primary" : "outline"}
-          onPress={requestNotifications}
-          disabled={notificationStatus !== 'pending' || isRequestingNotifications}
-          loading={isRequestingNotifications}
-          style={styles.permissionButton}
-        />
-      </View>
+      {/* PHASE-1 RESTRUCTURE: Notification permission removed */}
 
       <View style={styles.infoBox}>
         <Ionicons name="information-circle" size={20} color={COLORS.primary} />
@@ -177,13 +188,15 @@ export default function PermissionsScreen() {
 
       <View style={styles.footer}>
         <Button
-          title="Continue"
+          title={isCompleting ? "Finishing..." : "Complete Setup"}
           variant="primary"
           onPress={handleNext}
+          disabled={isCompleting}
+          loading={isCompleting}
           fullWidth
         />
         <View style={styles.navRow}>
-          <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
+          <TouchableOpacity style={styles.navButton} onPress={handlePrevious} disabled={isCompleting}>
             <Text style={styles.navText}>Previous</Text>
           </TouchableOpacity>
         </View>

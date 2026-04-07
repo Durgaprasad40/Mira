@@ -159,9 +159,8 @@ interface OnboardingState {
   email: string;
   phone: string;
   password: string;
-  firstName: string;
-  lastName: string;
-  nickname: string; // User ID / handle
+  name: string; // Single name field (replaces firstName + lastName)
+  nickname: string; // User ID / handle - NO uniqueness requirement
   dateOfBirth: string;
   gender: Gender | null;
   lgbtqSelf: LgbtqOption[]; // "What am I?" - identity, optional, max 2
@@ -231,8 +230,7 @@ interface OnboardingState {
   setEmail: (email: string) => void;
   setPhone: (phone: string) => void;
   setPassword: (password: string) => void;
-  setFirstName: (firstName: string) => void;
-  setLastName: (lastName: string) => void;
+  setName: (name: string) => void; // Single name setter (replaces setFirstName + setLastName)
   setNickname: (nickname: string) => void;
   setDateOfBirth: (dob: string) => void;
   setGender: (gender: Gender) => void;
@@ -305,9 +303,8 @@ const initialState = {
   email: "",
   phone: "",
   password: "",
-  firstName: "",
-  lastName: "",
-  nickname: "",
+  name: "", // Single name field (replaces firstName + lastName)
+  nickname: "", // NO uniqueness requirement
   dateOfBirth: "",
   gender: null,
   lgbtqSelf: [] as LgbtqOption[],
@@ -410,16 +407,10 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
         set({ password });
       },
 
-      setFirstName: (firstName) => {
+      setName: (name) => {
         // LOOP FIX: Equality guard
-        if (get().firstName === firstName) return;
-        set({ firstName });
-      },
-
-      setLastName: (lastName) => {
-        // LOOP FIX: Equality guard
-        if (get().lastName === lastName) return;
-        set({ lastName });
+        if (get().name === name) return;
+        set({ name });
       },
 
       setNickname: (nickname) => {
@@ -774,18 +765,9 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
         const updates: Partial<OnboardingState> = {};
 
         // Basic Info - directly apply from draft (state is now reset)
-        // Parse backend 'name' into firstName/lastName for frontend display
+        // Single name field - no parsing needed
         if (draft.basicInfo) {
-          if (draft.basicInfo.name) {
-            const parts = draft.basicInfo.name.trim().split(/\s+/);
-            if (parts.length === 1) {
-              updates.firstName = parts[0];
-              updates.lastName = '';
-            } else {
-              updates.firstName = parts[0];
-              updates.lastName = parts.slice(1).join(' ');
-            }
-          }
+          if (draft.basicInfo.name) updates.name = draft.basicInfo.name;
           if (draft.basicInfo.handle) updates.nickname = draft.basicInfo.handle;
           if (draft.basicInfo.dateOfBirth) updates.dateOfBirth = draft.basicInfo.dateOfBirth;
           if (draft.basicInfo.gender) updates.gender = draft.basicInfo.gender;

@@ -6,10 +6,7 @@ export interface ProfileData {
   /** Phase-2 only: The user ID (distinct from profile doc _id) */
   userId?: string;
   name: string;
-  /** Phase-1: First name for explicit display (firstName + lastName) */
-  firstName?: string;
-  /** Phase-1: Last name for explicit display (firstName + lastName) */
-  lastName?: string;
+  // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
   age: number;
   bio?: string;
   city?: string;
@@ -60,9 +57,7 @@ export function toProfileData(p: any): ProfileData {
     // Phase-2 profiles have separate userId; Phase-1 uses id as userId
     userId: p.userId,
     name: p.name,
-    // Phase-1: Preserve firstName/lastName for explicit display
-    firstName: p.firstName,
-    lastName: p.lastName,
+    // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
     age: p.age,
     bio: p.bio,
     city: p.city,
