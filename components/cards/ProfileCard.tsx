@@ -1640,23 +1640,27 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             )}
 
             {/* ─────────────────────────────────────────────────────────────────────────
-                LAYER A: PERSISTENT IDENTITY (ALL PHOTOS)
-                Name + Age + Gender icon - always visible
+                LAYER A: IDENTITY ROW (Name + Age + Gender)
+                - 1 photo: Always visible (only slide)
+                - 2-4 photos: Photo 1 only (reduce repetition for cleaner UX)
+                - 5+ photos: Always visible (persistent anchor for many photos)
                 ───────────────────────────────────────────────────────────────────────── */}
-            <View style={styles.phase1NameRow}>
-              <Text style={styles.phase1Name}>{displayName}</Text>
-              <Text style={styles.phase1Age}>{age}</Text>
-              {/* Gender icon - subtle but visible */}
-              {gender && GENDER_ICONS[gender] && (
-                <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}20` }]}>
-                  <Ionicons
-                    name={GENDER_ICONS[gender].icon as any}
-                    size={14}
-                    color={GENDER_ICONS[gender].color}
-                  />
-                </View>
-              )}
-            </View>
+            {(photoIndex === 0 || photoCount === 1 || photoCount >= 5) && (
+              <View style={styles.phase1NameRow}>
+                <Text style={styles.phase1Name}>{displayName}</Text>
+                <Text style={styles.phase1Age}>{age}</Text>
+                {/* Gender icon - subtle but visible */}
+                {gender && GENDER_ICONS[gender] && (
+                  <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}20` }]}>
+                    <Ionicons
+                      name={GENDER_ICONS[gender].icon as any}
+                      size={14}
+                      color={GENDER_ICONS[gender].color}
+                    />
+                  </View>
+                )}
+              </View>
+            )}
 
             {/* ─────────────────────────────────────────────────────────────────────────
                 LAYER B: PHOTO-1-ONLY METADATA
