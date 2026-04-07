@@ -541,6 +541,7 @@ export const registerWithEmail = mutation({
       dateOfBirth,
       gender,
       lgbtqSelf: lgbtqSelf ?? [], // LGBTQ identity (optional, max 2)
+      lgbtqPreference: [], // P0 FIX: LGBTQ dating preference (optional, max 2)
       bio: "",
       isVerified: false,
       // 8B: Email starts unverified

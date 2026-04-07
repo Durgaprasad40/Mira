@@ -488,9 +488,23 @@ export const updateProfile = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    // BUGFIX #61: Bio length validation (max 300 chars)
-    if (bio !== undefined && bio.length > 300) {
-      throw new Error("Bio must be 300 characters or less");
+    // P2 VALIDATION: Bio length validation (max 500 chars - matches frontend)
+    if (bio !== undefined && bio.length > 500) {
+      throw new Error("Bio must be 500 characters or less");
+    }
+
+    // P2 VALIDATION: Height range (100-250 cm)
+    if (otherUpdates.height !== undefined) {
+      if (otherUpdates.height < 100 || otherUpdates.height > 250) {
+        throw new Error("Height must be between 100 and 250 cm");
+      }
+    }
+
+    // P2 VALIDATION: Weight range (30-300 kg)
+    if (otherUpdates.weight !== undefined) {
+      if (otherUpdates.weight < 30 || otherUpdates.weight > 300) {
+        throw new Error("Weight must be between 30 and 300 kg");
+      }
     }
 
     // Server-side validation: pets max 3
@@ -1478,6 +1492,14 @@ export const completeOnboarding = mutation({
       v.literal('transgender'),
       v.literal('prefer_not_to_say')
     ))),
+    // P0 FIX: Add lgbtqPreference for LGBTQ matching
+    lgbtqPreference: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))),
     photoStorageIds: v.optional(v.array(v.id("_storage"))),
   },
   handler: async (ctx, args) => {
@@ -1523,6 +1545,27 @@ export const completeOnboarding = mutation({
     // Server-side validation: pets max 3
     if (pets !== undefined && pets.length > 3) {
       throw new Error("You can select up to 3 pets only");
+    }
+
+    // P2 VALIDATION: Bio length validation (max 500 chars)
+    if (updates.bio !== undefined && (updates.bio as string).length > 500) {
+      throw new Error("Bio must be 500 characters or less");
+    }
+
+    // P2 VALIDATION: Height range (100-250 cm)
+    if (updates.height !== undefined) {
+      const h = updates.height as number;
+      if (h < 100 || h > 250) {
+        throw new Error("Height must be between 100 and 250 cm");
+      }
+    }
+
+    // P2 VALIDATION: Weight range (30-300 kg)
+    if (updates.weight !== undefined) {
+      const w = updates.weight as number;
+      if (w < 30 || w > 300) {
+        throw new Error("Weight must be between 30 and 300 kg");
+      }
     }
 
     // Filter out undefined values

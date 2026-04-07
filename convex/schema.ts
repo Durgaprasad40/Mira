@@ -23,6 +23,13 @@ export default defineSchema({
       v.literal('transgender'),
       v.literal('prefer_not_to_say')
     ))), // LGBTQ identity (optional, max 2)
+    lgbtqPreference: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))), // LGBTQ dating preference (optional, max 2)
 
     // Profile
     bio: v.string(),
