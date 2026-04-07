@@ -15,6 +15,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { COLORS } from "@/lib/constants";
 import { markTiming, markDuration } from "@/utils/startupTiming";
 import { startDiscoverPrefetch, clearDiscoverPrefetch } from "@/lib/discoverPrefetch";
+import { DEBUG_AUTH_BOOT } from "@/lib/debugFlags";
 
 // =============================================================================
 // BOOT STATE MACHINE
@@ -140,7 +141,7 @@ export default function Index() {
     // This prevents index.tsx from restoring auth when it remounts after logout
     const currentAuthState = useAuthStore.getState();
     if (currentAuthState.authVersion > 0 && !currentAuthState.token) {
-      if (__DEV__) console.log('[BOOT] Post-logout remount detected (authVersion > 0, no token), skipping cache load');
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[BOOT] post-logout remount, skip cache');
       setBootState(isDemoMode ? "DEMO_WELCOME" : "NO_AUTH");
       return;
     }
@@ -161,7 +162,7 @@ export default function Index() {
       // Logout could have occurred during the Promise.all wait
       const postLoadAuthState = useAuthStore.getState();
       if (postLoadAuthState.logoutInProgress || (postLoadAuthState.authVersion > 0 && !postLoadAuthState.token)) {
-        if (__DEV__) console.log('[BOOT] Logout detected after cache load, aborting auth restoration');
+        if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[BOOT] logout during cache load, abort');
         setBootState(isDemoMode ? "DEMO_WELCOME" : "NO_AUTH");
         return;
       }
@@ -225,7 +226,7 @@ export default function Index() {
     // If authVersion > 0 and no current token, logout happened - don't validate stale cache
     const currentAuthState = useAuthStore.getState();
     if (currentAuthState.authVersion > 0 && !currentAuthState.token) {
-      if (__DEV__) console.log('[BOOT] Post-logout state detected in validation, aborting');
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[BOOT] post-logout state in validation, abort');
       setBootState("NO_AUTH");
       return;
     }
@@ -234,8 +235,8 @@ export default function Index() {
     const capturedAuthVersion = currentAuthState.authVersion;
     const retryAttempt = validationRetryCount.current;
 
-    if (__DEV__) {
-      console.log(`[BOOT] Validating session, userId=${userId.substring(0, 10)}..., authVersion=${capturedAuthVersion}, attempt=${retryAttempt + 1}`);
+    if (__DEV__ && DEBUG_AUTH_BOOT) {
+      console.log(`[BOOT] validating: ${userId.substring(0, 8)}, v${capturedAuthVersion}, try${retryAttempt + 1}`);
     }
 
     const validate = async () => {
@@ -260,12 +261,12 @@ export default function Index() {
         // Check if logout happened during validation
         const currentState = useAuthStore.getState();
         if (currentState.logoutInProgress) {
-          if (__DEV__) console.log("[BOOT] Logout in progress, ignoring validation result");
+          if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] logout in progress, skip");
           setBootState("INVALID");
           return;
         }
         if (currentState.authVersion !== capturedAuthVersion) {
-          if (__DEV__) console.log(`[BOOT] authVersion changed (${capturedAuthVersion} -> ${currentState.authVersion}), ignoring validation result`);
+          if (__DEV__ && DEBUG_AUTH_BOOT) console.log(`[BOOT] authVersion changed ${capturedAuthVersion}->${currentState.authVersion}, skip`);
           setBootState("INVALID");
           return;
         }
@@ -273,7 +274,7 @@ export default function Index() {
         if (!status) {
           // User not found in database - THIS IS A TRUE INVALID SESSION
           // Clear stale auth and prefetch, route to welcome
-          if (__DEV__) console.log("[BOOT] User not found (null status), clearing auth - TRUE INVALID");
+          if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] user not found, clearing auth");
           await clearAuthBootCache();
           clearDiscoverPrefetch();
           setBootState("INVALID");
@@ -281,8 +282,8 @@ export default function Index() {
         }
 
         const backendOnboardingCompleted = status.onboardingCompleted ?? false;
-        if (__DEV__) {
-          console.log(`[BOOT] Validation success, onboardingCompleted=${backendOnboardingCompleted}`);
+        if (__DEV__ && DEBUG_AUTH_BOOT) {
+          console.log(`[BOOT] valid, onb=${backendOnboardingCompleted}`);
         }
 
         // Apply auth to store (setAuthenticatedSession will reject if logout or version mismatch)
@@ -294,7 +295,7 @@ export default function Index() {
         );
 
         if (!accepted) {
-          if (__DEV__) console.log("[BOOT] setAuthenticatedSession rejected (logout in progress)");
+          if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] setAuth rejected (logout)");
           setBootState("INVALID");
           return;
         }
@@ -306,8 +307,8 @@ export default function Index() {
           // FIX: Compute resume route from lastStepKey before setting state
           const lastStepKey = status.onboardingDraft?.progress?.lastStepKey;
           const resumeRoute = getOnboardingResumeRoute(lastStepKey);
-          if (__DEV__) {
-            console.log(`[BOOT] VALID_ONBOARD: lastStepKey=${lastStepKey}, resumeRoute=${resumeRoute}`);
+          if (__DEV__ && DEBUG_AUTH_BOOT) {
+            console.log(`[BOOT] onboard: step=${lastStepKey}, route=${resumeRoute}`);
           }
 
           // DATA-1 FIX: Hydrate onboarding store BEFORE navigation
@@ -317,9 +318,7 @@ export default function Index() {
 
           // Step 1: Hydrate from draft (resets store, applies saved progress)
           if (status.onboardingDraft) {
-            if (__DEV__) {
-              console.log('[BOOT] Pre-hydrating onboarding store from draft');
-            }
+            if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[BOOT] hydrating onb from draft');
             onbStore.hydrateFromDraft(status.onboardingDraft);
           } else {
             // No draft - just mark as hydrated
@@ -341,9 +340,7 @@ export default function Index() {
                 onbStore.setGender(gender as any);
               }
             }
-            if (__DEV__) {
-              console.log('[BOOT] Applied basicInfo from user document');
-            }
+            if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[BOOT] applied basicInfo');
           }
 
           setOnboardingResumeRoute(resumeRoute);
@@ -360,33 +357,22 @@ export default function Index() {
         // Check logout state
         const currentState = useAuthStore.getState();
         if (currentState.logoutInProgress || currentState.authVersion !== capturedAuthVersion) {
-          if (__DEV__) console.log("[BOOT] Logout during validation error handling, routing to welcome");
+          if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] logout during error handling");
           setOnboardingResumeRoute(null);
           setBootState("INVALID");
           return;
         }
 
         // TIMEOUT-FIX: Debug logging for timeout handling
-        if (__DEV__) {
-          console.log('[BOOT_TIMEOUT_DEBUG]', {
-            hasToken: !!token,
-            userId: userId?.substring(0, 10),
-            onboardingCompletedCached: cachedOnbComplete,
-            authVersion: capturedAuthVersion,
-            failureType: isTimeoutError ? 'TIMEOUT' : 'ERROR',
-            retryAttempt,
-            maxRetries: MAX_VALIDATION_RETRIES,
-            willRetry: isTimeoutError && retryAttempt < MAX_VALIDATION_RETRIES,
-          });
+        if (__DEV__ && DEBUG_AUTH_BOOT) {
+          console.log(`[BOOT] timeout_debug: type=${isTimeoutError ? 'TIMEOUT' : 'ERROR'}, try=${retryAttempt}, willRetry=${isTimeoutError && retryAttempt < MAX_VALIDATION_RETRIES}`);
         }
 
         if (isTimeoutError) {
           // TIMEOUT-FIX: Timeout is NOT the same as invalid session
           // Retry if we haven't exceeded max retries
           if (retryAttempt < MAX_VALIDATION_RETRIES) {
-            if (__DEV__) {
-              console.log(`[BOOT] Validation timeout, retrying (attempt ${retryAttempt + 2}/${MAX_VALIDATION_RETRIES + 1})`);
-            }
+            if (__DEV__ && DEBUG_AUTH_BOOT) console.log(`[BOOT] timeout, retry ${retryAttempt + 2}/${MAX_VALIDATION_RETRIES + 1}`);
             validationRetryCount.current = retryAttempt + 1;
             // Trigger retry by setting TIMEOUT_RETRY state
             setBootState("TIMEOUT_RETRY");
@@ -394,16 +380,14 @@ export default function Index() {
           }
 
           // All retries exhausted - but token exists, so trust cache if available
-          if (__DEV__) {
-            console.log(`[BOOT] All ${MAX_VALIDATION_RETRIES + 1} validation attempts timed out`);
-          }
+          if (__DEV__ && DEBUG_AUTH_BOOT) console.log(`[BOOT] all ${MAX_VALIDATION_RETRIES + 1} attempts timed out`);
 
           if (cachedOnbComplete) {
             // TIMEOUT-FIX: Trust cache for completed users after timeout
             // SessionValidator will catch truly invalid sessions later
             const accepted = useAuthStore.getState().setAuthenticatedSession(userId, token, true, capturedAuthVersion);
             if (accepted) {
-              if (__DEV__) console.log("[BOOT] Timeout exhausted, trusting cached onboardingCompleted=true, proceeding to home");
+              if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] timeout, trust cache onb=true->home");
               setBootState("VALID_HOME");
               return;
             }
@@ -412,10 +396,7 @@ export default function Index() {
           // TIMEOUT-FIX: Even without cached completion, keep trying
           // Show loading state, don't route to welcome
           // The user has a valid token - this is likely just network issues
-          if (__DEV__) {
-            console.log("[BOOT] Timeout exhausted, no cached completion - staying in loading state (NOT routing to welcome)");
-            console.log("[BOOT] Token exists, user should not be logged out due to timeout");
-          }
+          if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] timeout, no cache, staying in loading");
 
           // Keep in VALIDATING state to show loading UI
           // The bootStore safety timer will eventually kick in
@@ -424,7 +405,7 @@ export default function Index() {
           const accepted = useAuthStore.getState().setAuthenticatedSession(userId, token, false, capturedAuthVersion);
           if (accepted) {
             // Go to onboarding flow - safer than welcome
-            if (__DEV__) console.log("[BOOT] Timeout fallback: proceeding to onboarding flow (safer than welcome)");
+            if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] timeout fallback->onboarding");
             setOnboardingResumeRoute("/(onboarding)/basic-info");
             setBootState("VALID_ONBOARD");
           } else {
@@ -434,14 +415,14 @@ export default function Index() {
           return;
         }
 
-        // Non-timeout error (actual failure)
-        console.error("[BOOT] Validation failed (non-timeout):", error);
+        // Non-timeout error (actual failure) - KEEP this error log
+        console.error("[BOOT] Validation failed:", error);
 
         if (cachedOnbComplete) {
           // Trust cache for completed users (SessionValidator will catch truly invalid sessions)
           const accepted = useAuthStore.getState().setAuthenticatedSession(userId, token, true, capturedAuthVersion);
           if (accepted) {
-            if (__DEV__) console.log("[BOOT] Validation failed (non-timeout), trusting cached onboardingCompleted=true");
+            if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] error, trust cache->home");
             setBootState("VALID_HOME");
           } else {
             setBootState("INVALID");
@@ -451,13 +432,13 @@ export default function Index() {
           // This might be a network error, not necessarily invalid session
           // Still retry once for non-timeout errors too
           if (retryAttempt < 1) {
-            if (__DEV__) console.log("[BOOT] Non-timeout error, retrying once");
+            if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] error, retry once");
             validationRetryCount.current = retryAttempt + 1;
             setBootState("TIMEOUT_RETRY");
             return;
           }
           // After retry, if still failing with no cache, route to welcome
-          if (__DEV__) console.log("[BOOT] Validation failed, no cached completion, routing to welcome");
+          if (__DEV__ && DEBUG_AUTH_BOOT) console.log("[BOOT] error, no cache->welcome");
           setBootState("INVALID");
         }
       }
@@ -503,8 +484,8 @@ export default function Index() {
     const route = bootState === "VALID_ONBOARD" && onboardingResumeRoute
       ? onboardingResumeRoute
       : getRouteForState(bootState);
-    if (__DEV__) {
-      console.log(`[BOOT] Final state=${bootState}, navigating to ${route}`);
+    if (__DEV__ && DEBUG_AUTH_BOOT) {
+      console.log(`[BOOT] state=${bootState}, nav=${route}`);
     }
 
     // Use replace for all routes to prevent back navigation to boot screen

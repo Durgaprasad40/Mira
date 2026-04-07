@@ -4,6 +4,7 @@ import { Stack, useRouter, useSegments } from "expo-router";
 
 // P0-1 STABILITY FIX: Import Sentry for crash reporting
 import { initSentry, captureException, setUserContext, clearUserContext } from "@/lib/sentry";
+import { DEBUG_ONBOARDING_HYDRATION, DEBUG_BACKGROUND_LOCATION, DEBUG_STARTUP } from "@/lib/debugFlags";
 
 // Initialize Sentry FIRST, before any other code runs
 // This ensures we catch errors during app initialization
@@ -158,12 +159,10 @@ function ResetEpochChecker() {
     // NON-BLOCKING: Run async without awaiting - don't delay UI
     checkAndHandleResetEpoch(serverResetEpoch)
       .then((didClear) => {
-        if (didClear) {
-          console.log('[RESET_EPOCH] Demo caches cleared (no logout, no navigation)');
-        }
+        if (didClear && __DEV__ && DEBUG_STARTUP) console.log('[RESET_EPOCH] cleared');
       })
       .catch((error) => {
-        console.error('[RESET_EPOCH] Error during reset epoch check:', error);
+        console.error('[RESET_EPOCH] check error:', error);
       });
   }, [serverResetEpoch]);
 
@@ -501,15 +500,11 @@ function PhotoSyncManager() {
     // Call ensureCurrentUser mutation to create user record if missing
     (async () => {
       try {
-        if (__DEV__) console.log('[BOOTSTRAP] Ensuring Convex user exists for:', userId);
+        if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[BOOTSTRAP] ensuring user:', userId?.substring(0, 8));
         const result = await ensureUser({ authUserId: userId });
-        if (__DEV__) console.log('[BOOTSTRAP] User ensured, convexUserId:', result.userId);
-        // Note: result.userId is the Convex Id<"users"> for this authUserId
-        // We could optionally store it in authStore, but not needed since
-        // all queries/mutations handle the mapping automatically
+        if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[BOOTSTRAP] ensured:', result.userId?.substring(0, 8));
       } catch (error: any) {
         console.error('[BOOTSTRAP] Failed to ensure user:', error.message);
-        // Non-fatal: queries will handle missing user gracefully
       }
     })();
   }, [userId, authHydrated, ensureUser]);
@@ -609,8 +604,7 @@ function OnboardingDraftHydrator() {
 
     // P0 FIX #1: If no status found, mark hydration complete so screens don't wait indefinitely
     if (!onboardingStatus) {
-      if (__DEV__) console.log('[ONB_DRAFT] No onboarding status found');
-      // No status, but hydration attempt complete - mark as hydrated so screens don't wait
+      if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[ONB_DRAFT] no status');
       hydrateFromDraft(null);
       return;
     }
@@ -619,18 +613,13 @@ function OnboardingDraftHydrator() {
     // This must happen BEFORE user doc hydration so user doc can override stale draft data
     if (onboardingStatus.onboardingDraft) {
       const draft = onboardingStatus.onboardingDraft;
-      const draftKeys = Object.keys(draft).filter(
-        key => (draft as any)[key] != null
-      );
-      if (__DEV__) {
-        console.log(`[BASIC_HYDRATE] source=draft fields=${JSON.stringify(draftKeys)}`);
+      if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) {
+        const draftKeys = Object.keys(draft).filter(key => (draft as any)[key] != null);
+        console.log(`[BASIC_HYDRATE] draft fields=${draftKeys.length}`);
       }
       hydrateFromDraft(draft);
     } else {
-      if (__DEV__) {
-        console.log('[ONB_DRAFT] No draft found in Convex');
-      }
-      // Still call hydrateFromDraft with null to reset state properly
+      if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[ONB_DRAFT] no draft');
       hydrateFromDraft(null);
     }
 
@@ -664,44 +653,33 @@ function OnboardingDraftHydrator() {
         }
       }
 
-      if (__DEV__ && hydratedFields.length > 0) {
-        console.log(`[BASIC_HYDRATE] source=user (authoritative) fields=${JSON.stringify(hydratedFields)}`);
+      if (__DEV__ && DEBUG_ONBOARDING_HYDRATION && hydratedFields.length > 0) {
+        console.log(`[BASIC_HYDRATE] user fields=${hydratedFields.length}`);
       }
     }
 
     // Hydrate face verification status flags
     if (onboardingStatus.faceVerificationPassed) {
       setFaceVerificationPassed(true);
-      if (__DEV__) console.log('[ONB_DRAFT] Hydrated faceVerificationPassed=true');
     }
     if (onboardingStatus.faceVerificationPending) {
       setFaceVerificationPending(true);
-      if (__DEV__) console.log('[ONB_DRAFT] Hydrated faceVerificationPending=true');
     }
 
     // BUG FIX: Hydrate verification reference photo as primary display photo
-    // This ensures the reference photo is used as primary even when normalPhotoCount=0
     if (onboardingStatus.referencePhotoExists && onboardingStatus.verificationReferencePhotoId) {
       const store = useOnboardingStore.getState();
-      // Only hydrate if not already set (don't overwrite user changes)
       if (!store.verificationReferencePrimary) {
         store.setVerificationReferencePrimary({
           storageId: onboardingStatus.verificationReferencePhotoId,
-          url: '', // Will be fetched in UI via getUrl() if needed
+          url: '',
         });
-        if (__DEV__) {
-          console.log('[REF_PRIMARY] Hydrated verification reference photo', {
-            exists: true,
-            source: 'backend',
-            storageId: onboardingStatus.verificationReferencePhotoId.substring(0, 12) + '...',
-          });
-        }
+        if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[REF_PRIMARY] hydrated ref photo');
       }
     }
 
-    // P0 FIX #1: Only mark hydration complete AFTER all steps succeed
     hasHydratedRef.current = true;
-    if (__DEV__) console.log('[ONB_DRAFT] Hydration complete');
+    if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[ONB_DRAFT] complete');
   }, [userId, authHydrated, onboardingHydrated, onboardingStatus, hydrateFromDraft, setFaceVerificationPassed, setFaceVerificationPending]);
 
   return null;
@@ -777,15 +755,11 @@ function BackgroundLocationManager() {
 
     // Start background location (respects user's preferred mode)
     startBackgroundLocation().then((result) => {
-      if (__DEV__) {
-        console.log('[BG_MANAGER] Location initialized:', {
-          success: result.success,
-          effectiveMode: result.effectiveMode,
-          backgroundDenied: result.backgroundDenied,
-        });
+      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) {
+        console.log(`[BG_MANAGER] init: ${result.effectiveMode}, ok=${result.success}`);
       }
     }).catch((error) => {
-      console.warn('[BG_MANAGER] Failed to start location:', error?.message);
+      console.warn('[BG_MANAGER] start failed:', error?.message);
     });
   }, [userId, authHydrated]);
 
