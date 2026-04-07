@@ -285,7 +285,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // ═══════════════════════════════════════════════════════════════════════════
 
   // Display unit types for wave distribution
-  type DisplayUnitType = 'bio' | 'prompt' | 'basics' | 'interests';
+  type DisplayUnitType = 'bio' | 'prompt' | 'basics' | 'interests' | 'essentials' | 'relationship';
 
   interface DisplayUnit {
     key: string;
@@ -645,6 +645,60 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       });
     }
 
+    // Unit 7: Relationship Intent (priority 7)
+    // Display what user is looking for to help swipe decisions
+    if (relationshipIntent && relationshipIntent.length > 0) {
+      const intentLabels = relationshipIntent
+        .slice(0, 3)
+        .map((key) => {
+          const intent = RELATIONSHIP_INTENTS.find((r) => r.value === key);
+          return intent ? { emoji: intent.emoji || '💫', label: intent.label, key: `rel-${key}` } : null;
+        })
+        .filter(Boolean) as { emoji: string; label: string; key: string }[];
+
+      if (intentLabels.length > 0) {
+        units.push({
+          key: 'relationship',
+          type: 'relationship',
+          priority: priority++,
+          payload: { chips: intentLabels },
+          weight: 1,
+        });
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NO-EMPTY-SLIDES FALLBACK: Ensure we have enough content for all photos
+    // If totalPhotos > units.length + 1 (Photo 1 is identity-only for 2+ photos),
+    // reuse the best available content to prevent empty slides
+    // ═══════════════════════════════════════════════════════════════════════
+    const contentSlidesNeeded = totalPhotos === 1 ? 1 : totalPhotos - 1; // P1 is identity for 2+ photos
+    const bestReusableUnit = units.find((u) => u.type === 'bio') || units.find((u) => u.type === 'prompt') || units[0];
+
+    if (units.length < contentSlidesNeeded && bestReusableUnit) {
+      let fallbackIndex = 0;
+      while (units.length < contentSlidesNeeded) {
+        // Create a reusable version of the best content
+        const reusedUnit: DisplayUnit = {
+          ...bestReusableUnit,
+          key: `${bestReusableUnit.key}_reuse_${fallbackIndex}`,
+          priority: priority++,
+        };
+        units.push(reusedUnit);
+        fallbackIndex++;
+      }
+
+      if (__DEV__) {
+        console.log('[P1_WAVE_FALLBACK]', {
+          name,
+          photoCount: totalPhotos,
+          originalUnits: units.length - fallbackIndex,
+          reusedUnits: fallbackIndex,
+          reusedType: bestReusableUnit.type,
+        });
+      }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // TASK 2: PHOTO DISTRIBUTION ENGINE - Wave-based assignment
     // ═══════════════════════════════════════════════════════════════════════
@@ -692,6 +746,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             break;
           case 'interests':
             content.interests = unit.payload.chips;
+            break;
+          case 'relationship':
+            // Relationship intent displayed as interest-style chips
+            // Merge with existing interests if any
+            content.interests = [...content.interests, ...unit.payload.chips];
+            break;
+          case 'essentials':
+            // Essentials displayed as lifestyle-style items
+            content.lifestyle = [...content.lifestyle, ...unit.payload.items];
             break;
         }
       }

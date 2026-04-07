@@ -631,16 +631,19 @@ export const getDiscoverProfiles = query({
       // This ensures Discover shows the same photos as Edit Profile and Profile Tab
       const photos = rawPhotos.filter((p) => p.photoType !== 'verification_reference');
 
+      // Filter out NSFW photos - these should never be shown in Discover
+      const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
+
       console.log('[P1_CARD_PHOTOS] getDiscoverProfiles photo source', {
         userId: user._id,
         userName: user.name,
         rawCount: rawPhotos.length,
-        filteredCount: photos.length,
-        filteredOut: rawPhotos.length - photos.length,
-        photoIds: photos.map((p) => p._id),
+        afterVerificationFilter: photos.length,
+        afterNsfwFilter: nonNsfwPhotos.length,
+        filteredOut: rawPhotos.length - nonNsfwPhotos.length,
+        photoIds: nonNsfwPhotos.map((p) => p._id),
       });
 
-      const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
       if (nonNsfwPhotos.length === 0) continue; // at least 1 photo required
 
       const userAge = calculateAge(user.dateOfBirth);
@@ -675,7 +678,7 @@ export const getDiscoverProfiles = query({
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos: photos.sort((a, b) => a.order - b.order),
+        photos: nonNsfwPhotos.sort((a, b) => a.order - b.order),
         photoBlurred: user.photoBlurred === true,
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
@@ -1414,7 +1417,7 @@ export const getExploreCategoryProfiles = query({
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos: photos.sort((a, b) => a.order - b.order),
+        photos: nonNsfwPhotos.sort((a, b) => a.order - b.order),
         photoBlurred: user.photoBlurred === true,
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
