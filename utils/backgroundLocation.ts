@@ -21,6 +21,7 @@ import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../convex/_generated/api';
+import { DEBUG_BACKGROUND_LOCATION } from '@/lib/debugFlags';
 import {
   getPreferredLocationMode,
   getEffectiveLocationMode,
@@ -55,7 +56,7 @@ const CONVEX_URL = process.env.EXPO_PUBLIC_CONVEX_URL!;
  */
 TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
   if (error) {
-    console.log('[BG][ERROR]', error.message);
+    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] error:', error.message);
     return;
   }
 
@@ -63,43 +64,37 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
   const location = locations?.[0];
 
   if (!location?.coords) {
-    console.log('[BG][NO_COORDS]');
+    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] no coords');
     return;
   }
 
   const { latitude, longitude } = location.coords;
 
-  console.log('[BG][LOCATION]', {
-    lat: latitude.toFixed(6),
-    lng: longitude.toFixed(6),
-  });
+  if (__DEV__ && DEBUG_BACKGROUND_LOCATION) {
+    console.log(`[BG] loc: ${latitude.toFixed(4)},${longitude.toFixed(4)}`);
+  }
 
   try {
-    // Get auth userId from SecureStore
     const authUserId = await SecureStore.getItemAsync(USER_ID_KEY);
 
     if (!authUserId || !authUserId.trim()) {
-      console.log('[BG][NO_AUTH]');
+      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] no auth');
       return;
     }
 
-    // Create HTTP client (no React needed)
     const convex = new ConvexHttpClient(CONVEX_URL);
 
-    // Call publishLocation mutation
     const result = await convex.mutation(api.crossedPaths.publishLocation, {
       authUserId,
       latitude,
       longitude,
     });
 
-    if (result?.published) {
-      console.log('[BG][LOCATION_PUBLISHED]');
-    } else {
-      console.log('[BG][THROTTLED]', result?.reason);
+    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) {
+      console.log('[BG]', result?.published ? 'published' : `throttled:${result?.reason}`);
     }
   } catch (e: any) {
-    console.log('[BG][SEND_ERROR]', e?.message || e);
+    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] error:', e?.message || e);
   }
 });
 
@@ -120,28 +115,19 @@ export async function startBackgroundLocation(): Promise<{
   backgroundDenied?: boolean;
 }> {
   try {
-    // Get user's preferred mode
     const preferredMode = await getPreferredLocationMode();
-    console.log('[BG][MODE]', preferredMode);
+    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] mode:', preferredMode);
 
-    // Request permissions based on mode (handles fallback internally)
     const permResult = await requestLocationPermissions(preferredMode);
 
     if (!permResult.success) {
-      console.log('[BG][PERMISSION_FAILED]');
-      return {
-        success: false,
-        effectiveMode: 'foreground',
-      };
+      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] permission failed');
+      return { success: false, effectiveMode: 'foreground' };
     }
 
-    // If effective mode is foreground, ensure background task is stopped
     if (permResult.effectiveMode === 'foreground') {
       await stopBackgroundLocation();
-      console.log('[BG][FOREGROUND_MODE]', {
-        preferredMode,
-        backgroundDenied: permResult.backgroundDenied,
-      });
+      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] foreground mode');
       return {
         success: true,
         effectiveMode: 'foreground',
@@ -149,14 +135,13 @@ export async function startBackgroundLocation(): Promise<{
       };
     }
 
-    // Background mode with permission granted - start background task
     const isRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK);
 
     if (!isRunning) {
       await Location.startLocationUpdatesAsync(LOCATION_TASK, {
         accuracy: Location.Accuracy.Balanced,
-        timeInterval: 20 * 60 * 1000, // 20 minutes
-        distanceInterval: 200, // 200 meters
+        timeInterval: 20 * 60 * 1000,
+        distanceInterval: 200,
         showsBackgroundLocationIndicator: false,
         foregroundService: {
           notificationTitle: 'Mira',
@@ -164,23 +149,14 @@ export async function startBackgroundLocation(): Promise<{
           notificationColor: '#FF69B4',
         },
       });
-
-      console.log('[BG][STARTED]');
-    } else {
-      console.log('[BG][ALREADY_RUNNING]');
+      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] started');
     }
 
-    return {
-      success: true,
-      effectiveMode: 'background',
-    };
+    return { success: true, effectiveMode: 'background' };
   } catch (e: any) {
-    console.log('[BG][START_ERROR]', e?.message || e);
+    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] start error:', e?.message || e);
     await setEffectiveLocationMode('foreground');
-    return {
-      success: false,
-      effectiveMode: 'foreground',
-    };
+    return { success: false, effectiveMode: 'foreground' };
   }
 }
 
@@ -201,13 +177,12 @@ export async function startBackgroundLocationLegacy(): Promise<boolean> {
 export async function stopBackgroundLocation(): Promise<void> {
   try {
     const isRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK);
-
     if (isRunning) {
       await Location.stopLocationUpdatesAsync(LOCATION_TASK);
-      console.log('[BG][STOPPED]');
+      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] stopped');
     }
   } catch (e: any) {
-    console.log('[BG][STOP_ERROR]', e?.message || e);
+    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] stop error:', e?.message || e);
   }
 }
 
@@ -218,5 +193,5 @@ export async function stopBackgroundLocation(): Promise<void> {
 export async function cleanupBackgroundLocation(): Promise<void> {
   await stopBackgroundLocation();
   await clearLocationModeSettings();
-  console.log('[BG][CLEANUP_COMPLETE]');
+  if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] cleanup complete');
 }

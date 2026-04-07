@@ -36,6 +36,7 @@ import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useLocationStore, calculateDistanceKm } from '@/stores/locationStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { DEBUG_PRESENCE, DEBUG_LOCATION } from '@/lib/debugFlags';
 
 // Heartbeat interval: 60 seconds (tight for real-time "Online Now" feel)
 const HEARTBEAT_INTERVAL_MS = 60 * 1000;
@@ -74,14 +75,9 @@ export function usePresenceAndLocation() {
       lastHeartbeatRef.current = now;
       await heartbeatMutation({ authUserId: userId });
 
-      if (__DEV__) {
-        console.log('[PRESENCE] Heartbeat sent', {
-          userId: userId.slice(-8),
-          heartbeatAgeMs: 0,
-          resolvedStatus: 'online_now',
-          source: 'heartbeat_mutation',
-          appState: 'active',
-        });
+      // LOG_NOISE_FIX: Heartbeat logging gated behind DEBUG_PRESENCE (fires every 60s)
+      if (__DEV__ && DEBUG_PRESENCE) {
+        console.log(`[PRESENCE] heartbeat: ${userId.slice(-6)}`);
       }
     } catch (err) {
       // Silent failure - don't break app
@@ -93,8 +89,9 @@ export function usePresenceAndLocation() {
   const syncLocationToBackendIfNeeded = useCallback(async (force = false) => {
     if (isDemoMode || !userId) return;
     if (permissionStatus !== 'granted') {
-      if (__DEV__) {
-        console.log('[LOCATION_SYNC] Skipped: permission not granted');
+      // LOG_NOISE_FIX: Gated behind DEBUG_LOCATION
+      if (__DEV__ && DEBUG_LOCATION) {
+        console.log('[LOCATION] skip: no permission');
       }
       return;
     }
@@ -105,8 +102,9 @@ export function usePresenceAndLocation() {
     // Get current location
     const coords = getBestLocation();
     if (!coords) {
-      if (__DEV__) {
-        console.log('[LOCATION_SYNC] No location available');
+      // LOG_NOISE_FIX: Gated behind DEBUG_LOCATION
+      if (__DEV__ && DEBUG_LOCATION) {
+        console.log('[LOCATION] skip: no coords');
       }
       return;
     }
@@ -159,17 +157,14 @@ export function usePresenceAndLocation() {
       lastSyncTimeRef.current = now;
       lastSyncedCoordsRef.current = { lat: coords.latitude, lng: coords.longitude };
 
-      if (__DEV__) {
-        console.log('[LOCATION_SYNC] Backend updated', {
-          reason: syncReason,
-          lat: coords.latitude.toFixed(4),
-          lng: coords.longitude.toFixed(4),
-          permission: permissionStatus,
-        });
+      // LOG_NOISE_FIX: Gated behind DEBUG_LOCATION
+      if (__DEV__ && DEBUG_LOCATION) {
+        console.log(`[LOCATION] synced: ${syncReason}`);
       }
     } catch (err) {
+      // Keep warning - actual error is important
       if (__DEV__) {
-        console.warn('[LOCATION_SYNC] Failed', { error: String(err) });
+        console.warn('[LOCATION] sync failed:', String(err).slice(0, 50));
       }
     }
   }, [userId, permissionStatus, getBestLocation, updateLocationMutation]);
@@ -180,8 +175,9 @@ export function usePresenceAndLocation() {
 
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       if (nextAppState === 'active') {
-        if (__DEV__) {
-          console.log('[PRESENCE] App became active, sending heartbeat + syncing location');
+        // LOG_NOISE_FIX: App foreground is very frequent - gated
+        if (__DEV__ && DEBUG_PRESENCE) {
+          console.log('[PRESENCE] app active');
         }
         // App came to foreground - send heartbeat and sync location to backend
         sendHeartbeat();
