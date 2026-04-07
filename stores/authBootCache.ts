@@ -8,6 +8,7 @@
  */
 
 import * as SecureStore from 'expo-secure-store';
+import { DEBUG_AUTH_BOOT } from '@/lib/debugFlags';
 
 const TOKEN_KEY = 'mira_auth_token';
 const USER_ID_KEY = 'mira_auth_user_id';
@@ -51,8 +52,8 @@ export async function getAuthBootCache(): Promise<AuthBootCacheData> {
       const onboardingCompleted = onboardingCompletedStr === '1';
       const onboardingCompletedUpdatedAt = updatedAtStr ? parseInt(updatedAtStr, 10) : undefined;
 
-      if (__DEV__) {
-        console.log('[AUTH_BOOT] Token found in SecureStore, userId:', userId.substring(0, 10) + '...', 'onboardingCompleted:', onboardingCompleted);
+      if (__DEV__ && DEBUG_AUTH_BOOT) {
+        console.log(`[AUTH_BOOT] found: ${userId.substring(0, 8)}, onb=${onboardingCompleted}`);
       }
       return {
         isAuthenticated: true,
@@ -66,9 +67,7 @@ export async function getAuthBootCache(): Promise<AuthBootCacheData> {
       };
     }
 
-    if (__DEV__) {
-      console.log('[AUTH_BOOT] No token in SecureStore, returning default state');
-    }
+    if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH_BOOT] no token');
     return { ...DEFAULT_AUTH_BOOT };
   } catch (error: any) {
     // M-4: Differentiate SecureStore errors for better diagnostics
@@ -104,13 +103,9 @@ export async function saveAuthBootCache(
     if (opts?.onboardingCompleted !== undefined) {
       await SecureStore.setItemAsync(ONBOARDING_COMPLETED_KEY, opts.onboardingCompleted ? '1' : '0');
       await SecureStore.setItemAsync(ONBOARDING_UPDATED_AT_KEY, Date.now().toString());
-      if (__DEV__) {
-        console.log('[AUTH_BOOT] Saved token + onboardingCompleted to SecureStore, userId:', userId.substring(0, 10) + '...', 'onboardingCompleted:', opts.onboardingCompleted);
-      }
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log(`[AUTH_BOOT] saved: ${userId.substring(0, 8)}, onb=${opts.onboardingCompleted}`);
     } else {
-      if (__DEV__) {
-        console.log('[AUTH_BOOT] Saved token to SecureStore, userId:', userId.substring(0, 10) + '...');
-      }
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log(`[AUTH_BOOT] saved: ${userId.substring(0, 8)}`);
     }
     return true;
   } catch (error: any) {
@@ -156,9 +151,7 @@ export async function clearAuthBootCache(): Promise<void> {
       SecureStore.deleteItemAsync(ONBOARDING_COMPLETED_KEY),
       SecureStore.deleteItemAsync(ONBOARDING_UPDATED_AT_KEY),
     ]);
-    if (__DEV__) {
-      console.log('[AUTH_BOOT] Cleared token + onboardingCompleted from SecureStore');
-    }
+    if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH_BOOT] cleared');
   } catch (error: any) {
     // M-4: Differentiate SecureStore quota/storage errors
     if (__DEV__) {

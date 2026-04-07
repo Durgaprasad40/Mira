@@ -16,6 +16,7 @@ import {
   createEmptyPhotoSlots,
 } from "@/types";
 import { logPhotoRemoved, logPhotosCleared } from "@/lib/photoSafety";
+import { DEBUG_ONBOARDING_HYDRATION } from "@/lib/debugFlags";
 import {
   IdentityAnchorValue,
   SocialBatteryValue,
@@ -521,13 +522,7 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
       setVerificationPhoto: (uri) => set({ verificationPhotoUri: uri }),
 
       setVerificationReferencePrimary: (data) => {
-        if (__DEV__) {
-          console.log('[REF_PRIMARY] Setting verification reference primary:', {
-            exists: !!data,
-            hasUrl: !!data?.url,
-            hasStorageId: !!data?.storageId,
-          });
-        }
+        if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[REF_PRIMARY] set:', !!data);
         set({ verificationReferencePrimary: data });
       },
 
@@ -812,14 +807,6 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
           if (draft.lifestyle.insect) updates.insect = draft.lifestyle.insect;
           if (draft.lifestyle.kids) updates.kids = draft.lifestyle.kids;
           if (draft.lifestyle.religion) updates.religion = draft.lifestyle.religion;
-          // BUG FIX DEBUG: Trace religion hydration
-          if (__DEV__) {
-            console.log('[ONB_DRAFT] Lifestyle hydration:', {
-              hasLifestyle: !!draft.lifestyle,
-              religion: draft.lifestyle.religion ?? 'undefined',
-              religionSet: !!draft.lifestyle.religion,
-            });
-          }
         }
 
         // Life Rhythm
@@ -832,14 +819,6 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
             workStyle: draft.lifeRhythm.workStyle ?? null,
             coreValues: draft.lifeRhythm.coreValues ?? [],
           };
-          if (__DEV__) {
-            console.log('[ONB_DRAFT] Life Rhythm hydration:', {
-              city: draft.lifeRhythm.city ?? 'undefined',
-              socialRhythm: draft.lifeRhythm.socialRhythm ?? 'undefined',
-              sleepSchedule: draft.lifeRhythm.sleepSchedule ?? 'undefined',
-              coreValuesCount: draft.lifeRhythm.coreValues?.length ?? 0,
-            });
-          }
         }
 
         // Preferences
@@ -858,9 +837,7 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
 
         // Apply updates if any
         if (Object.keys(updates).length > 0) {
-          if (__DEV__) {
-            console.log('[ONB_DRAFT] Hydrated from Convex draft:', Object.keys(updates));
-          }
+          if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log(`[ONB_DRAFT] hydrated ${Object.keys(updates).length} fields`);
           set(updates);
         }
 

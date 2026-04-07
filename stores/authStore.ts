@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { markTiming } from "@/utils/startupTiming";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { isDemoMode } from "@/hooks/useConvex";
+import { DEBUG_AUTH_BOOT } from "@/lib/debugFlags";
 
 // =============================================================================
 // AUTH STORE - Single Source of Truth for Authentication State
@@ -167,24 +168,20 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     // GUARD 1: Reject if logout is in progress
     if (state.logoutInProgress) {
-      if (__DEV__) {
-        console.log('[AUTH] setAuthenticatedSession REJECTED - logout in progress');
-      }
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH] setAuth REJECTED - logout');
       return false;
     }
 
     // GUARD 2: Reject if authVersion changed (logout happened after async started)
     // This is the KEY guard that prevents ghost login after finishLogout()
     if (state.authVersion !== expectedAuthVersion) {
-      if (__DEV__) {
-        console.log(`[AUTH] setAuthenticatedSession REJECTED - authVersion mismatch (expected=${expectedAuthVersion}, current=${state.authVersion})`);
-      }
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log(`[AUTH] setAuth REJECTED - v${expectedAuthVersion}!=${state.authVersion}`);
       return false;
     }
 
     // GUARD 3: Reset dependent stores if switching users
     if (state.userId && state.userId !== userId) {
-      if (__DEV__) console.log('[AUTH] setAuthenticatedSession: userId changed, resetting stores');
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH] userId changed, reset');
       useOnboardingStore.getState().reset();
       try {
         const { usePrivateProfileStore } = require('@/stores/privateProfileStore');
@@ -192,8 +189,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       } catch {}
     }
 
-    if (__DEV__) {
-      console.log(`[AUTH] setAuthenticatedSession: userId=${userId.substring(0, 10)}..., onboardingCompleted=${onboardingCompleted}, authVersion=${expectedAuthVersion}`);
+    if (__DEV__ && DEBUG_AUTH_BOOT) {
+      console.log(`[AUTH] setAuth: ${userId.substring(0, 8)}, onb=${onboardingCompleted}, v${expectedAuthVersion}`);
     }
 
     // AUTH_READY_FIX: Set authReady=true now that validation is complete
@@ -209,9 +206,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       _sessionValidationError: null,
     });
 
-    if (__DEV__) {
-      console.log('[AUTH_READY] authReady=true, onboardingCompleted=', onboardingCompleted);
-    }
+    if (__DEV__ && DEBUG_AUTH_BOOT) console.log(`[AUTH_READY] onb=${onboardingCompleted}`);
 
     return true;
   },
@@ -220,18 +215,14 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     // P0-003 FIX: Prevent double logout - if already in progress, return false
     // This acts as a mutex to prevent concurrent logout execution
     if (get().logoutInProgress) {
-      if (__DEV__) {
-        console.log('[AUTH] beginLogout: already in progress, skipping');
-      }
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH] beginLogout: skip (in progress)');
       return false;
     }
 
     const currentVersion = get().authVersion;
     const newVersion = currentVersion + 1;
 
-    if (__DEV__) {
-      console.log(`[AUTH] beginLogout: authVersion ${currentVersion} -> ${newVersion}, logoutInProgress=true`);
-    }
+    if (__DEV__ && DEBUG_AUTH_BOOT) console.log(`[AUTH] beginLogout: v${currentVersion}->${newVersion}`);
 
     set({
       logoutInProgress: true,
@@ -242,9 +233,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   finishLogout: () => {
-    if (__DEV__) {
-      console.log('[AUTH] finishLogout: clearing all state');
-    }
+    if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH] finishLogout');
 
     set({
       userId: null,
@@ -281,9 +270,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     // P0-003 FIX: Check if logout already in progress (mutex)
     const didAcquireLock = get().beginLogout();
     if (!didAcquireLock) {
-      if (__DEV__) {
-        console.log('[AUTH] logout: skipped (already in progress)');
-      }
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH] logout: skip (in progress)');
       return; // Another logout is already running
     }
 
@@ -291,7 +278,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     try {
       const { clearAuthBootCache } = require('@/stores/authBootCache');
       await clearAuthBootCache();
-      if (__DEV__) console.log('[AUTH] logout: cleared SecureStore');
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH] logout: SecureStore');
     } catch (error) {
       if (__DEV__) console.error('[AUTH] logout: SecureStore cleanup failed:', error);
       // CRITICAL: SecureStore failed - we must still clear in-memory to prevent
@@ -303,21 +290,18 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     // STEP 3: Clear dependent stores (each wrapped in try-catch)
     // These are safe to fail - session is already invalidated
+    // LOG_NOISE_FIX: Verbose cleanup logs removed (not needed for normal operation)
 
     try {
       useOnboardingStore.getState()?.reset?.();
-      if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
     } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset onboardingStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: onboardingStore reset failed');
     }
 
     try {
       const { usePrivateProfileStore } = require('@/stores/privateProfileStore');
       usePrivateProfileStore.getState()?.resetPhase2?.();
-      if (__DEV__) console.log('[AUTH] logout: cleared privateProfileStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset privateProfileStore', error);
-    }
+    } catch {}
 
     try {
       const { usePrivateChatStore } = require('@/stores/privateChatStore');
@@ -328,46 +312,29 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         pendingDares: [],
         sentDares: [],
       });
-      if (__DEV__) console.log('[AUTH] logout: cleared privateChatStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset privateChatStore', error);
-    }
+    } catch {}
 
     if (isDemoMode) {
       try {
         const { useDemoStore } = require('@/stores/demoStore');
         useDemoStore.getState()?.demoLogout?.();
-        if (__DEV__) console.log('[AUTH] logout: called demoLogout()');
-      } catch (error) {
-        if (__DEV__) console.warn('[AUTH] logout: failed to call demoLogout', error);
-      }
+      } catch {}
     }
 
-    // P0-001 FIX: Reset demoDmStore to prevent cross-user DM leakage in demo mode
     try {
       const { useDemoDmStore } = require('@/stores/demoDmStore');
       useDemoDmStore.getState()?.reset?.();
-      if (__DEV__) console.log('[AUTH] logout: cleared demoDmStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset demoDmStore', error);
-    }
+    } catch {}
 
     try {
       const { useVerificationStore } = require('@/stores/verificationStore');
       useVerificationStore.getState()?.resetVerification?.();
-      if (__DEV__) console.log('[AUTH] logout: cleared verificationStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset verificationStore', error);
-    }
+    } catch {}
 
-    // P0-PRIVACY-FIX: Reset privacy settings to prevent cross-user leakage
     try {
       const { usePrivacyStore } = require('@/stores/privacyStore');
       usePrivacyStore.getState()?.resetPrivacy?.();
-      if (__DEV__) console.log('[AUTH] logout: cleared privacyStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset privacyStore', error);
-    }
+    } catch {}
 
     try {
       const { useConfessionStore } = require('@/stores/confessionStore');
@@ -375,7 +342,6 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       if (confessionState?.reset) {
         confessionState.reset();
       } else {
-        // P0-002 FIX: Clear ALL user-specific state including rate limits and block lists
         useConfessionStore.setState({
           seeded: false,
           confessions: [],
@@ -392,38 +358,23 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
           revealSkippedChats: {},
         });
       }
-      if (__DEV__) console.log('[AUTH] logout: cleared confessionStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset confessionStore', error);
-    }
+    } catch {}
 
     try {
       const { clearTodCache } = require('@/app/(main)/(private)/(tabs)/truth-or-dare');
       clearTodCache?.();
-      if (__DEV__) console.log('[AUTH] logout: cleared T&D cache');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to clear T&D cache', error);
-    }
+    } catch {}
 
     try {
       const { useChatTodStore } = require('@/stores/chatTodStore');
       useChatTodStore.setState({ games: {} });
-      if (__DEV__) console.log('[AUTH] logout: cleared chatTodStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to clear chatTodStore', error);
-    }
+    } catch {}
 
-    // P0-005 FIX: Reset Phase-2 active flag to prevent notification filtering for next user
     try {
       const { setPhase2Active } = require('@/hooks/useNotifications');
       setPhase2Active(false);
-      if (__DEV__) console.log('[AUTH] logout: reset Phase-2 active flag');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset Phase-2 active flag', error);
-    }
+    } catch {}
 
-    // P1 SECURITY: Reset discoverStore to prevent cross-user state bleed
-    // Daily like limits and session counters must not leak between users
     try {
       const { useDiscoverStore } = require('@/stores/discoverStore');
       useDiscoverStore.setState({
@@ -436,30 +387,18 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         lastRandomMatchAt: null,
         randomMatchShownThisSession: false,
       });
-      if (__DEV__) console.log('[AUTH] logout: cleared discoverStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset discoverStore', error);
-    }
+    } catch {}
 
-    // APP-P1-007 FIX: Clear blockStore to prevent cross-user blocked list bleed
     try {
       const { useBlockStore } = require('@/stores/blockStore');
       useBlockStore.getState().clearBlocks();
-      if (__DEV__) console.log('[AUTH] logout: cleared blockStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset blockStore', error);
-    }
+    } catch {}
 
-    // P0-002 FIX: Clear filterStore to prevent cross-user filter bleed
     try {
       const { useFilterStore } = require('@/stores/filterStore');
       useFilterStore.getState().clearFilters();
-      if (__DEV__) console.log('[AUTH] logout: cleared filterStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset filterStore', error);
-    }
+    } catch {}
 
-    // P0-002 FIX: Clear subscriptionStore to prevent cross-user subscription bleed
     try {
       const { useSubscriptionStore } = require('@/stores/subscriptionStore');
       useSubscriptionStore.setState({
@@ -477,28 +416,17 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         superLikesResetAt: 0,
         messagesResetAt: 0,
       });
-      if (__DEV__) console.log('[AUTH] logout: cleared subscriptionStore');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to reset subscriptionStore', error);
-    }
+    } catch {}
 
-    // P0-003 FIX: Stop GPS tracking to prevent battery drain and privacy leak
     try {
       const { useLocationStore } = require('@/stores/locationStore');
       useLocationStore.getState().stopLocationTracking();
-      if (__DEV__) console.log('[AUTH] logout: stopped location tracking');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to stop location tracking', error);
-    }
+    } catch {}
 
-    // PHASE 2: Stop background location tracking and clear settings on logout
     try {
       const { cleanupBackgroundLocation } = require('@/utils/backgroundLocation');
       await cleanupBackgroundLocation();
-      if (__DEV__) console.log('[AUTH] logout: cleaned up background location');
-    } catch (error) {
-      if (__DEV__) console.warn('[AUTH] logout: failed to cleanup background location', error);
-    }
+    } catch {}
 
     // STEP 4: Finish logout - clear in-memory state
     get().finishLogout();
