@@ -44,3 +44,4 @@ yarn-error.*
 convex/verificationProviders.ts
 *.backup
 build/
+convex/_generated
