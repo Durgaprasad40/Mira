@@ -327,17 +327,11 @@ export default function Index() {
           }
 
           // Step 2: Apply user document basicInfo (authoritative, overrides stale draft)
+          // IDENTITY SIMPLIFICATION: Single name field
           if (status.basicInfo) {
             const { name, nickname, dateOfBirth, gender } = status.basicInfo;
             if (name) {
-              const parts = name.trim().split(/\s+/);
-              if (parts.length === 1) {
-                onbStore.setFirstName(parts[0]);
-                onbStore.setLastName('');
-              } else {
-                onbStore.setFirstName(parts[0]);
-                onbStore.setLastName(parts.slice(1).join(' '));
-              }
+              onbStore.setName(name);
             }
             if (nickname) onbStore.setNickname(nickname);
             if (dateOfBirth) onbStore.setDateOfBirth(dateOfBirth);

@@ -21,6 +21,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { cmToFeetInches } from '@/lib/utils';
 import { trackAction } from '@/lib/sentry';
+import { getDisplayBio, FALLBACK_BIO } from '@/lib/profileFallbacks';
 
 // PERF: Max photos to prefetch when card becomes visible
 const PREFETCH_COUNT = 5;
@@ -47,10 +48,7 @@ const GENDER_ICONS: Record<string, { icon: string; color: string }> = {
 
 export interface ProfileCardProps {
   name: string;
-  /** Optional: First name for explicit display (Phase-1 uses firstName + lastName) */
-  firstName?: string;
-  /** Optional: Last name for explicit display (Phase-1 uses firstName + lastName) */
-  lastName?: string;
+  // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
   age: number;
   bio?: string;
   city?: string;
@@ -152,8 +150,7 @@ const PhotoStack = memo(function PhotoStack({
 
 export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   name,
-  firstName,
-  lastName,
+  // IDENTITY SIMPLIFICATION: firstName/lastName removed
   age,
   bio,
   city,
@@ -187,23 +184,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const isPhase2 = Array.isArray(privateIntentKeys) && privateIntentKeys.length > 0;
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // PHASE-1 NAME DISPLAY: Use firstName + lastName when available
-  // Phase-1 shows full name (first + last), Phase-2 uses nickname (name/handle)
+  // IDENTITY SIMPLIFICATION: Single `name` field for all phases
+  // Phase-1 shows full name, Phase-2 shows nickname (via name field)
   // ═══════════════════════════════════════════════════════════════════════════
   const displayName = useMemo(() => {
-    // Phase-2 uses the name field (which should be nickname/handle)
-    if (isPhase2) return name;
-
-    // Phase-1: Prefer firstName + lastName combination
-    if (firstName && lastName) {
-      return `${firstName} ${lastName}`.trim();
-    }
-    if (firstName) {
-      return firstName;
-    }
-    // Fallback to name prop if no firstName/lastName available
-    return name;
-  }, [isPhase2, name, firstName, lastName]);
+    return name || 'Anonymous';
+  }, [name]);
   const TC = dark ? INCOGNITO_COLORS : COLORS;
   const { height: windowHeight } = useWindowDimensions();
 

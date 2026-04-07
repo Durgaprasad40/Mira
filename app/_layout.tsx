@@ -642,17 +642,10 @@ function OnboardingDraftHydrator() {
       const hydratedFields: string[] = [];
 
       // P0 FIX #2: Always apply user doc data if present (user doc is authoritative, not draft)
-      // Remove the check for empty store fields - user doc should always win
+      // IDENTITY SIMPLIFICATION: Single name field
       if (name) {
-        const parts = name.trim().split(/\s+/);
-        if (parts.length === 1) {
-          store.setFirstName(parts[0]);
-          store.setLastName('');
-        } else {
-          store.setFirstName(parts[0]);
-          store.setLastName(parts.slice(1).join(' '));
-        }
-        hydratedFields.push('firstName', 'lastName');
+        store.setName(name);
+        hydratedFields.push('name');
       }
       if (nickname) {
         store.setNickname(nickname);

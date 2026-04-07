@@ -2,9 +2,9 @@
  * BasicInfoSection Component
  *
  * Extracted from edit-profile.tsx for maintainability.
- * Handles First name, Last name, and read-only fields (Nickname, Age, Gender).
+ * Handles Name and read-only fields (Nickname, Age, Gender).
  *
- * NO LOGIC CHANGES - Structure refactor only.
+ * IDENTITY SIMPLIFICATION: Single name field replaces firstName + lastName.
  */
 import React from 'react';
 import {
@@ -17,10 +17,9 @@ import { COLORS } from '@/lib/constants';
 import { Input } from '@/components/ui';
 
 interface BasicInfoSectionProps {
-  firstName: string;
-  lastName: string;
-  onChangeFirstName: (value: string) => void;
-  onChangeLastName: (value: string) => void;
+  // IDENTITY SIMPLIFICATION: Single name field
+  name: string;
+  onChangeName: (value: string) => void;
   currentUser: {
     handle?: string;
     nickname?: string;
@@ -30,10 +29,8 @@ interface BasicInfoSectionProps {
 }
 
 export function BasicInfoSection({
-  firstName,
-  lastName,
-  onChangeFirstName,
-  onChangeLastName,
+  name,
+  onChangeName,
   currentUser,
 }: BasicInfoSectionProps) {
   // Calculate age from DOB
@@ -55,32 +52,20 @@ export function BasicInfoSection({
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>Basic Info</Text>
-      {/* Row 1: First Name + Last Name side by side */}
-      <View style={styles.nameRow}>
-        <View style={styles.nameField}>
-          <Text style={styles.label}>First Name</Text>
-          <Input
-            placeholder="First"
-            value={firstName}
-            onChangeText={onChangeFirstName}
-            maxLength={20}
-            autoCapitalize="words"
-          />
-        </View>
-        <View style={styles.nameField}>
-          <Text style={styles.label}>Last Name</Text>
-          <Input
-            placeholder="Last"
-            value={lastName}
-            onChangeText={onChangeLastName}
-            maxLength={20}
-            autoCapitalize="words"
-          />
-        </View>
-      </View>
-      {/* Row 2: Nickname full width */}
+      {/* IDENTITY SIMPLIFICATION: Single Name field (full width) */}
       <View style={styles.inputRow}>
-        <Text style={styles.label}>Nickname / User ID</Text>
+        <Text style={styles.label}>Name</Text>
+        <Input
+          placeholder="Your name"
+          value={name}
+          onChangeText={onChangeName}
+          maxLength={40}
+          autoCapitalize="words"
+        />
+      </View>
+      {/* Nickname full width (read-only) */}
+      <View style={styles.inputRow}>
+        <Text style={styles.label}>Nickname</Text>
         <View style={styles.readOnlyField}>
           <Text style={styles.readOnlyText}>@{currentUser?.handle || currentUser?.nickname || '—'}</Text>
           <Ionicons name="lock-closed" size={14} color={COLORS.textMuted} />
@@ -113,14 +98,6 @@ const styles = StyleSheet.create({
   sectionTitle: { fontSize: 18, fontWeight: '600', color: COLORS.text, marginBottom: 8 },
   label: { fontSize: 14, fontWeight: '500', color: COLORS.text, marginBottom: 8 },
   inputRow: { marginBottom: 20 },
-  nameRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: 16,
-  },
-  nameField: {
-    flex: 1,
-  },
   compactRow: {
     flexDirection: 'row',
     gap: 12,

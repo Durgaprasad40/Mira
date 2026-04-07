@@ -34,6 +34,7 @@ import {
 } from '@/lib/constants';
 import { computeIntentCompat, getIntentCompatColor, getIntentMismatchWarning } from '@/lib/intentCompat';
 import { getTrustBadges } from '@/lib/trustBadges';
+import { getDisplayBio, hasDisplayablePrompts, FALLBACK_BIO } from '@/lib/profileFallbacks';
 import { Button, Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -494,10 +495,13 @@ export default function ViewProfileScreen() {
         {/* ========== PHASE-2 SECTION ORDER: Bio → My Intent → Hobbies → Interests (NO Details) ========== */}
 
         {/* Phase-2: Desire (Bio) - FIRST in Phase-2 */}
-        {isPhase2 && profile.bio && (
+        {/* P3 FALLBACK: Always show bio section with fallback */}
+        {isPhase2 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Desire (Bio)</Text>
-            <Text style={styles.bio}>{profile.bio}</Text>
+            <Text style={[styles.bio, !profile.bio && styles.bioFallback]}>
+              {getDisplayBio(profile.bio, true)}
+            </Text>
           </View>
         )}
 
@@ -598,9 +602,12 @@ export default function ViewProfileScreen() {
           const getPetLabel = (v: string) => PETS_OPTIONS.find(o => o.value === v)?.label || v;
 
           // Section visibility helpers
-          const hasBio = !!profile.bio;
-          const hasPrompts = profile.profilePrompts && profile.profilePrompts.length > 0;
-          const hasAbout = hasBio || hasPrompts;
+          // P3 FALLBACK: Use getDisplayBio for bio with fallback
+          const displayBio = getDisplayBio(profile.bio, true); // Always show fallback if no bio
+          const hasBio = !!profile.bio && profile.bio.trim().length > 0;
+          const hasPrompts = hasDisplayablePrompts(profile.profilePrompts);
+          // P3 FALLBACK: Always show About section (with fallback bio if needed)
+          const hasAbout = true; // Always show About with at least fallback bio
 
           const relIntent: string[] = profile.relationshipIntent || [];
           const hasLookingFor = relIntent.length > 0;
@@ -645,6 +652,7 @@ export default function ViewProfileScreen() {
           if (__DEV__) {
             console.log('[FULL_PROFILE_DATA]', {
               hasBio,
+              displayBio: displayBio?.slice(0, 30), // P3 FALLBACK: Log display bio preview
               promptCount: profile.profilePrompts?.length || 0,
               interestCount: profile.activities?.length || 0,
               hasLifestyle,
@@ -668,9 +676,10 @@ export default function ViewProfileScreen() {
               {hasAbout && (
                 <View style={styles.section}>
                   <Text style={styles.sectionTitle}>About</Text>
-                  {hasBio && <Text style={styles.bio}>{profile.bio}</Text>}
+                  {/* P3 FALLBACK: Show displayBio (with fallback) instead of profile.bio */}
+                  <Text style={[styles.bio, !hasBio && styles.bioFallback]}>{displayBio}</Text>
                   {hasPrompts && (
-                    <View style={hasBio ? { marginTop: 16 } : undefined}>
+                    <View style={{ marginTop: 16 }}>
                       {profile.profilePrompts.slice(0, 3).map((prompt: { question: string; answer: string }, idx: number) => (
                         <View key={idx} style={styles.promptCard}>
                           <Text style={styles.promptQuestion}>{prompt.question}</Text>
@@ -1087,6 +1096,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: COLORS.text,
     lineHeight: 24,
+  },
+  // P3 FALLBACK: Style for fallback bio text
+  bioFallback: {
+    fontStyle: 'italic',
+    color: COLORS.textMuted,
   },
   promptCard: {
     backgroundColor: COLORS.backgroundDark,

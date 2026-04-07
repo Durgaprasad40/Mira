@@ -18,7 +18,7 @@ import {
   Modal,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -83,6 +83,7 @@ import {
   PhotoVisibilitySection,
   PromptsSection,
   DetailsSection,
+  DETAILS_VALIDATION,
   LifestyleSection,
   LifeRhythmSection,
   EducationReligionSection,
@@ -99,6 +100,11 @@ export default function EditProfileScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
+  const params = useLocalSearchParams<{ scrollTo?: string }>();
+
+  // PROFILE COMPLETION: Scroll to section support
+  const scrollViewRef = useRef<ScrollView>(null);
+  const sectionRefs = useRef<Record<string, number>>({});
 
   // FIX 1: Track initialization to prevent infinite loop
   const hasInitializedRef = useRef(false);
@@ -138,6 +144,23 @@ export default function EditProfileScreen() {
     return () => clearTimeout(t);
   }, []);
 
+  // PROFILE COMPLETION: Scroll to section when navigating from completion card
+  useEffect(() => {
+    if (params.scrollTo && sectionRefs.current[params.scrollTo] !== undefined) {
+      // Delay to ensure layout is complete
+      const timer = setTimeout(() => {
+        const yOffset = sectionRefs.current[params.scrollTo!] || 0;
+        scrollViewRef.current?.scrollTo({ y: yOffset - 20, animated: true });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [params.scrollTo]);
+
+  // PROFILE COMPLETION: Helper to register section positions
+  const registerSectionPosition = useCallback((section: string, y: number) => {
+    sectionRefs.current[section] = y;
+  }, []);
+
   const updateProfile = useMutation(api.users.updateProfile);
   const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
   const upsertOnboardingDraft = useMutation(api.users.upsertOnboardingDraft);
@@ -171,11 +194,14 @@ export default function EditProfileScreen() {
   });
   const [activePromptSection, setActivePromptSection] = useState<SectionKey | null>(null);
 
-  // Basic Info fields (firstName/lastName editable, others read-only)
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName] = useState('');
+  // Basic Info fields (name editable, others read-only)
+  // IDENTITY SIMPLIFICATION: Single name field
+  const [displayNameField, setDisplayNameField] = useState('');
   const [height, setHeight] = useState('');
   const [weight, setWeight] = useState('');
+  // P2 VALIDATION: Height/weight error states
+  const [heightError, setHeightError] = useState<string | undefined>(undefined);
+  const [weightError, setWeightError] = useState<string | undefined>(undefined);
   const [smoking, setSmoking] = useState<string | null>(null);
   const [drinking, setDrinking] = useState<string | null>(null);
   const [kids, setKids] = useState<string | null>(null);
@@ -395,24 +421,14 @@ export default function EditProfileScreen() {
         }
       }
 
-      // Initialize firstName/lastName from profile
-      // Priority: demoProfile firstName/lastName > parse from name
+      // IDENTITY SIMPLIFICATION: Initialize single name field from profile
       const canonicalForNames = isDemoMode
         ? useDemoStore.getState().getCurrentProfile()
         : null;
-      if (canonicalForNames?.firstName || canonicalForNames?.lastName) {
-        setFirstName(canonicalForNames.firstName || '');
-        setLastName(canonicalForNames.lastName || '');
+      if (canonicalForNames?.name) {
+        setDisplayNameField(canonicalForNames.name);
       } else if (currentUser.name) {
-        // Parse name into firstName/lastName
-        const parts = currentUser.name.trim().split(/\s+/);
-        if (parts.length === 1) {
-          setFirstName(parts[0]);
-          setLastName('');
-        } else {
-          setFirstName(parts[0]);
-          setLastName(parts.slice(1).join(' '));
-        }
+        setDisplayNameField(currentUser.name);
       }
 
       // SLOT-BASED: Initialize from getCurrentProfile() (SINGLE SOURCE OF TRUTH)
@@ -1032,6 +1048,37 @@ export default function EditProfileScreen() {
       return;
     }
 
+    // P2 VALIDATION: Validate height/weight ranges
+    let hasValidationError = false;
+    if (height && height.trim()) {
+      const heightNum = parseInt(height);
+      if (heightNum < DETAILS_VALIDATION.HEIGHT_MIN || heightNum > DETAILS_VALIDATION.HEIGHT_MAX) {
+        setHeightError(`Height must be ${DETAILS_VALIDATION.HEIGHT_MIN}–${DETAILS_VALIDATION.HEIGHT_MAX} cm`);
+        hasValidationError = true;
+      } else {
+        setHeightError(undefined);
+      }
+    } else {
+      setHeightError(undefined);
+    }
+
+    if (weight && weight.trim()) {
+      const weightNum = parseInt(weight);
+      if (weightNum < DETAILS_VALIDATION.WEIGHT_MIN || weightNum > DETAILS_VALIDATION.WEIGHT_MAX) {
+        setWeightError(`Weight must be ${DETAILS_VALIDATION.WEIGHT_MIN}–${DETAILS_VALIDATION.WEIGHT_MAX} kg`);
+        hasValidationError = true;
+      } else {
+        setWeightError(undefined);
+      }
+    } else {
+      setWeightError(undefined);
+    }
+
+    if (hasValidationError) {
+      Alert.alert('Invalid Values', 'Please fix the highlighted fields.');
+      return;
+    }
+
     // Demo mode: persist to local demo store, skip Convex
     if (isDemoMode) {
       // SINGLE SOURCE OF TRUTH: Get canonical profile
@@ -1056,12 +1103,9 @@ export default function EditProfileScreen() {
       // Prompts - always include (empty array is valid)
       patch.profilePrompts = filledPrompts;
 
-      // Basic Info - firstName/lastName (editable)
-      if (firstName && firstName.trim()) patch.firstName = firstName.trim();
-      if (lastName && lastName.trim()) patch.lastName = lastName.trim();
-      // Construct full name for backend compatibility
-      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
-      if (fullName.length > 0) patch.name = fullName;
+      // Basic Info - name (editable)
+      // IDENTITY SIMPLIFICATION: Single name field
+      if (displayNameField && displayNameField.trim()) patch.name = displayNameField.trim();
 
       // Bio/About - only include if non-empty
       if (bio && bio.trim()) patch.bio = bio.trim();
@@ -1152,8 +1196,8 @@ export default function EditProfileScreen() {
         throw new Error('No session token available');
       }
 
-      // Construct full name from firstName/lastName
-      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+      // IDENTITY SIMPLIFICATION: Single name field
+      const fullName = (displayNameField || '').trim();
 
       // SURGICAL FIX: Determine if interests should be included in save
       // Only save interests if:
@@ -1342,6 +1386,7 @@ export default function EditProfileScreen() {
 
   return (
     <ScrollView
+      ref={scrollViewRef}
       style={[styles.container, { paddingTop: insets.top }]}
       contentContainerStyle={{ paddingBottom: insets.bottom + 80 }}
       showsVerticalScrollIndicator={false}
@@ -1426,29 +1471,30 @@ export default function EditProfileScreen() {
       </View>
 
       {/* Basic Info Section */}
+      {/* IDENTITY SIMPLIFICATION: Single name field */}
       <BasicInfoSection
-        firstName={firstName}
-        lastName={lastName}
-        onChangeFirstName={setFirstName}
-        onChangeLastName={setLastName}
+        name={displayNameField}
+        onChangeName={setDisplayNameField}
         currentUser={currentUser}
       />
 
-      {/* Photo Grid Section */}
-      <PhotoGridEditor
-        photoSlots={photoSlots}
-        failedSlots={failedSlots}
-        blurEnabled={blurEnabled}
-        blurredPhotos={blurredPhotos}
-        validPhotoCount={validPhotoCount}
-        onUploadPhoto={handleUploadPhoto}
-        onRemovePhoto={handleRemovePhoto}
-        onSetMainPhoto={handleSetMainPhoto}
-        onTogglePhotoBlur={handleTogglePhotoBlur}
-        onPreviewPhoto={setPreviewPhoto}
-        onImageError={handleImageError}
-        onPhotoLoad={handlePhotoLoad}
-      />
+      {/* Photo Grid Section - PROFILE COMPLETION: photos */}
+      <View onLayout={(e) => registerSectionPosition('photos', e.nativeEvent.layout.y)}>
+        <PhotoGridEditor
+          photoSlots={photoSlots}
+          failedSlots={failedSlots}
+          blurEnabled={blurEnabled}
+          blurredPhotos={blurredPhotos}
+          validPhotoCount={validPhotoCount}
+          onUploadPhoto={handleUploadPhoto}
+          onRemovePhoto={handleRemovePhoto}
+          onSetMainPhoto={handleSetMainPhoto}
+          onTogglePhotoBlur={handleTogglePhotoBlur}
+          onPreviewPhoto={setPreviewPhoto}
+          onImageError={handleImageError}
+          onPhotoLoad={handlePhotoLoad}
+        />
+      </View>
 
       {/* Photo Visibility Section */}
       <PhotoVisibilitySection
@@ -1456,38 +1502,46 @@ export default function EditProfileScreen() {
         onToggleBlur={handleBlurToggle}
       />
 
-      {/* About Section */}
-      <AboutSection
-        bio={bio}
-        onChangeBio={setBio}
-      />
+      {/* About Section - PROFILE COMPLETION: about */}
+      <View onLayout={(e) => registerSectionPosition('about', e.nativeEvent.layout.y)}>
+        <AboutSection
+          bio={bio}
+          onChangeBio={setBio}
+        />
+      </View>
 
-      {/* Prompts Section */}
-      <PromptsSection
-        expanded={expandedSection === 'prompts'}
-        onToggleExpand={() => toggleSection('prompts')}
-        sectionAnswers={sectionAnswers}
-        activePromptSection={activePromptSection}
-        onTogglePromptSection={togglePromptSection}
-        onSelectQuestion={handleSelectQuestion}
-        onUpdateSectionAnswer={handleUpdateSectionAnswer}
-      />
+      {/* Prompts Section - PROFILE COMPLETION: prompts */}
+      <View onLayout={(e) => registerSectionPosition('prompts', e.nativeEvent.layout.y)}>
+        <PromptsSection
+          expanded={expandedSection === 'prompts'}
+          onToggleExpand={() => toggleSection('prompts')}
+          sectionAnswers={sectionAnswers}
+          activePromptSection={activePromptSection}
+          onTogglePromptSection={togglePromptSection}
+          onSelectQuestion={handleSelectQuestion}
+          onUpdateSectionAnswer={handleUpdateSectionAnswer}
+        />
+      </View>
 
-      {/* Details Section */}
-      <DetailsSection
-        expanded={expandedSection === 'basicInfo'}
-        onToggleExpand={() => toggleSection('basicInfo')}
-        height={height}
-        weight={weight}
-        jobTitle={jobTitle}
-        company={company}
-        school={school}
-        onChangeHeight={setHeight}
-        onChangeWeight={setWeight}
-        onChangeJobTitle={setJobTitle}
-        onChangeCompany={setCompany}
-        onChangeSchool={setSchool}
-      />
+      {/* Details Section - PROFILE COMPLETION: details */}
+      <View onLayout={(e) => registerSectionPosition('details', e.nativeEvent.layout.y)}>
+        <DetailsSection
+          expanded={expandedSection === 'basicInfo'}
+          onToggleExpand={() => toggleSection('basicInfo')}
+          height={height}
+          weight={weight}
+          jobTitle={jobTitle}
+          company={company}
+          school={school}
+          onChangeHeight={(v) => { setHeight(v); setHeightError(undefined); }}
+          onChangeWeight={(v) => { setWeight(v); setWeightError(undefined); }}
+          onChangeJobTitle={setJobTitle}
+          onChangeCompany={setCompany}
+          onChangeSchool={setSchool}
+          heightError={heightError}
+          weightError={weightError}
+        />
+      </View>
 
       {/* Lifestyle Section */}
       <LifestyleSection
@@ -1535,20 +1589,22 @@ export default function EditProfileScreen() {
         getOptionLabel={getOptionLabel}
       />
 
-      {/* Education & Religion Section */}
-      <EducationReligionSection
-        expanded={expandedSection === 'educationReligion'}
-        onToggleExpand={() => toggleSection('educationReligion')}
-        education={education}
-        educationOther={educationOther}
-        religion={religion}
-        religionOther={religionOther}
-        onChangeEducation={setEducation}
-        onChangeEducationOther={setEducationOther}
-        onChangeReligion={setReligion}
-        onChangeReligionOther={setReligionOther}
-        getOptionLabel={getOptionLabel}
-      />
+      {/* Education & Religion Section - PROFILE COMPLETION: education */}
+      <View onLayout={(e) => registerSectionPosition('education', e.nativeEvent.layout.y)}>
+        <EducationReligionSection
+          expanded={expandedSection === 'educationReligion'}
+          onToggleExpand={() => toggleSection('educationReligion')}
+          education={education}
+          educationOther={educationOther}
+          religion={religion}
+          religionOther={religionOther}
+          onChangeEducation={setEducation}
+          onChangeEducationOther={setEducationOther}
+          onChangeReligion={setReligion}
+          onChangeReligionOther={setReligionOther}
+          getOptionLabel={getOptionLabel}
+        />
+      </View>
 
       {/* Footer with Save button - proper safe area spacing */}
       <View style={styles.footer}>

@@ -42,10 +42,7 @@ interface ProfileData {
   /** Original Convex ID for live profiles - used for type-safe mutations */
   _convexId?: Id<'users'>;
   name: string;
-  /** Phase-1: First name for explicit display (firstName + lastName) */
-  firstName?: string;
-  /** Phase-1: Last name for explicit display (firstName + lastName) */
-  lastName?: string;
+  // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
   age: number;
   bio?: string;
   city?: string;
@@ -177,9 +174,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
         .map((p) => ({
           id: p._id,
           name: p.name,
-          // Phase-1: Include firstName/lastName for explicit display
-          firstName: (p as any).firstName,
-          lastName: (p as any).lastName,
+          // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
           age: p.age,
           bio: p.bio,
           city: p.city,
@@ -214,9 +209,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
           id: p._id || p.id,
           _convexId: p._id as Id<'users'> | undefined, // Preserve original Convex ID
           name: p.name,
-          // Phase-1: Include firstName/lastName for explicit display (if available)
-          firstName: p.firstName,
-          lastName: p.lastName,
+          // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
           age: p.age,
           bio: p.bio,
           city: p.city,
@@ -656,8 +649,6 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
           <Animated.View style={[styles.nextCard, nextCardAnimatedStyle]}>
             <ProfileCard
               name={nextProfile.name}
-              firstName={nextProfile.firstName}
-              lastName={nextProfile.lastName}
               age={nextProfile.age}
               bio={nextProfile.bio}
               city={nextProfile.city}
@@ -685,8 +676,6 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
           >
             <ProfileCard
               name={currentProfile.name}
-              firstName={currentProfile.firstName}
-              lastName={currentProfile.lastName}
               age={currentProfile.age}
               bio={currentProfile.bio}
               city={currentProfile.city}
