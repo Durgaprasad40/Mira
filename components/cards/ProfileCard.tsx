@@ -724,7 +724,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         usedUnitKeys.add('prompt1');
       } else {
         // Priority 3: Use fallback bio
-        content.bio = getDisplayBio(bio, true);
+        content.bio = getDisplayBio(bio, true) ?? undefined;
         content.slotType = 'identity_bio';
         content.waveDensity = 'medium';
       }
@@ -1701,28 +1701,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 )}
 
                 {/* ─────────────────────────────────────────────────────────────────────────
-                    LAYER C: PHOTO-1 COMPACT PREVIEW
-                    Only for 2-4 photo profiles - shows prompt teaser
-                    5+ PHOTOS: NO prompt, NO bio on Photo 1 - identity only
-                    [P1_IDENTITY_GUARD] blocks prompt/bio for 5+ photos
+                    LAYER C: REMOVED - Wave distribution handles all content
+                    - 1 photo: Wave adds bio/prompt/fallback (ONE hook only)
+                    - 2-4 photos: Photo 1 = identity only (no content)
+                    - 5+ photos: Photo 1 = identity only (no content)
+                    Content now renders via identity_bio/wave_content slots below
                     ───────────────────────────────────────────────────────────────────────── */}
-                {photoCount < 5 && phase1BestPrompt && (
-                  <View style={styles.phase1CompactPreview}>
-                    <Text style={styles.phase1CompactBioText} numberOfLines={1}>
-                      {phase1BestPrompt.answer?.trim()}
-                    </Text>
-                  </View>
-                )}
-                {/* [P1_IDENTITY_GUARD] Log when blocking prompt for 5+ photos */}
-                {__DEV__ && photoCount >= 5 && phase1BestPrompt && (() => {
-                  console.log('[P1_IDENTITY_GUARD]', {
-                    photoCount,
-                    photoIndex: 0,
-                    action: 'BLOCKED_PROMPT_ON_PHOTO_1',
-                    reason: '5+ photos require identity-only Photo 1',
-                  });
-                  return null;
-                })()}
               </>
             )}
           </View>
