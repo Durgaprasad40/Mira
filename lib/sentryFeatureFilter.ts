@@ -11,6 +11,8 @@
  * - Filter by feature in Sentry dashboard: feature:deepconnect
  */
 
+import { DEBUG_SENTRY_VERBOSE } from './debugFlags';
+
 // ---------------------------------------------------------------------------
 // Feature Constants - ALL app features for tagging
 // ---------------------------------------------------------------------------
@@ -74,11 +76,10 @@ export const currentScreenRef: { current: string | null } = { current: null };
  * @param feature - Feature identifier (use SENTRY_FEATURES constants)
  */
 export function setCurrentFeature(feature: SentryFeature | null): void {
-  const previous = currentFeatureRef.current;
   currentFeatureRef.current = feature;
-
-  if (__DEV__ && feature !== previous) {
-    console.log('[SENTRY] Feature changed:', { from: previous, to: feature });
+  // DEBUG_SENTRY_VERBOSE: Restore feature change logs for deep diagnosis
+  if (__DEV__ && DEBUG_SENTRY_VERBOSE && feature) {
+    console.log(`[SENTRY] Feature: ${feature}`);
   }
 }
 
@@ -96,9 +97,9 @@ export function getCurrentFeature(): SentryFeature | null {
  */
 export function setCurrentScreen(screenName: string | null): void {
   currentScreenRef.current = screenName;
-
-  if (__DEV__ && screenName) {
-    console.log('[SENTRY] Screen:', screenName);
+  // DEBUG_SENTRY_VERBOSE: Restore screen change logs for deep diagnosis
+  if (__DEV__ && DEBUG_SENTRY_VERBOSE && screenName) {
+    console.log(`[SENTRY] Screen: ${screenName}`);
   }
 }
 

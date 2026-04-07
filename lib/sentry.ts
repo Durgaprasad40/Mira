@@ -33,6 +33,7 @@ import {
   SENTRY_FEATURES,
   type SentryFeature,
 } from './sentryFeatureFilter';
+import { DEBUG_SENTRY_VERBOSE } from './debugFlags';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -131,8 +132,10 @@ export function initSentry(): void {
       // Enable Sentry when DSN is configured
       enabled: true,
 
-      // Debug mode only in dev
-      debug: IS_DEV,
+      // DEBUG_SENTRY_VERBOSE toggle: when true, enables full native SDK debug output
+      // When false (default), suppresses "Sentry Logger [log]" spam
+      // Error capture works regardless of this setting
+      debug: DEBUG_SENTRY_VERBOSE,
 
       // Session tracking for crash-free rate
       enableAutoSessionTracking: true,
@@ -216,8 +219,40 @@ export function initSentry(): void {
         return event;
       },
 
-      // APP-WIDE: Accept all breadcrumbs, tag with feature
+      // APP-WIDE: Filter low-value breadcrumbs, tag with feature
+      // DEBUG_SENTRY_VERBOSE: bypass filtering for full diagnostic visibility
       beforeBreadcrumb(breadcrumb) {
+        // In verbose mode, keep all breadcrumbs for maximum visibility
+        if (!DEBUG_SENTRY_VERBOSE) {
+          // LOG_NOISE_FIX: Filter out low-value debug console breadcrumbs
+          if (breadcrumb.category === 'console' && breadcrumb.message) {
+            const msg = breadcrumb.message;
+            const debugTags = [
+              '[PRESENCE]',
+              '[LOCATION]',
+              '[PHOTO_RENDER]',
+              '[PLANNER]',
+              '[QUEUE]',
+              '[REFETCH]',
+              '[P1_',
+              '[P2_SLOT]',
+              '[P2_DIST]',
+              '[P2_INTENT]',
+              '[P2_DATA]',
+              '[SENTRY]',
+              'Sentry Logger',
+            ];
+            if (debugTags.some(tag => msg.includes(tag))) {
+              return null; // Drop this breadcrumb
+            }
+
+            // Truncate long messages
+            if (msg.length > 500) {
+              breadcrumb.message = msg.substring(0, 500) + '... [truncated]';
+            }
+          }
+        }
+
         // Tag breadcrumb with current feature
         const feature = getCurrentFeature();
         if (feature) {
@@ -225,13 +260,6 @@ export function initSentry(): void {
             ...breadcrumb.data,
             feature,
           };
-        }
-
-        // Limit console breadcrumb size
-        if (breadcrumb.category === 'console' && breadcrumb.message) {
-          if (breadcrumb.message.length > 500) {
-            breadcrumb.message = breadcrumb.message.substring(0, 500) + '... [truncated]';
-          }
         }
 
         return breadcrumb;
@@ -253,7 +281,7 @@ export function initSentry(): void {
     });
 
     if (IS_DEV) {
-      originalConsoleLog('[Sentry] Initialized - app-wide coverage enabled');
+      originalConsoleLog(`[Sentry] Initialized - debug=${DEBUG_SENTRY_VERBOSE ? 'VERBOSE' : 'off'}`);
     }
   } catch (error) {
     originalConsoleError('[Sentry] Failed to initialize:', error);
