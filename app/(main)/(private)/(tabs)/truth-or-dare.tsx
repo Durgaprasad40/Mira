@@ -1,17 +1,65 @@
+/*
+ * LOCKED (TRUTH OR DARE SCREEN)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - No logic/UI changes allowed
+ *
+ * UI REDESIGN v2: Premium dark theme with energetic feel
+ */
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, Platform,
+  RefreshControl, Platform, Animated, Pressable, Alert, Modal,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery } from 'convex/react';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 import { useScreenTrace } from '@/lib/devTrace';
+
+// Premium color palette - softer, more energetic dark theme
+const PREMIUM = {
+  // Softer dark backgrounds with depth
+  bgDeep: '#0D0D1A',      // Deepest layer
+  bgBase: '#141428',       // Main background
+  bgElevated: '#1C1C36',   // Card surface
+  bgHighlight: '#252545',  // Hover/active states
+
+  // Accent colors
+  coral: '#E94560',        // Primary accent (existing)
+  coralSoft: '#FF6B8A',    // Lighter coral for gradients
+  coralGlow: 'rgba(233, 69, 96, 0.25)', // Glow effect
+
+  // Type badges
+  truthPurple: '#7C6AEF',  // Refined purple for Truth
+  truthPurpleLight: '#9D8FFF',
+  dareOrange: '#FF7849',   // Warmer orange for Dare
+  dareOrangeLight: '#FF9A70',
+
+  // Text hierarchy
+  textPrimary: '#F5F5F7',  // Bright white for headlines
+  textSecondary: '#B8B8C7', // Softer for secondary
+  textMuted: '#6E6E82',    // Muted for metadata
+
+  // Borders and dividers
+  borderSubtle: 'rgba(255, 255, 255, 0.06)',
+  borderAccent: 'rgba(233, 69, 96, 0.3)',
+
+  // Gender accent colors (subtle)
+  genderFemale: '#FF8FA3',   // Soft pink
+  genderMale: '#7DB9FF',     // Soft blue
+  genderOther: '#B8B8C7',    // Neutral
+
+  // Shadows
+  shadowColor: '#000',
+};
 
 // Module-level cache for instant load across tab switches
 // M-001 FIX: Track cache for HMR cleanup
@@ -72,6 +120,7 @@ function getUrlPrefix(url?: string): string {
  * - Accept https/http always
  * - Accept file:// if NOT from unstable cache (ImagePicker cache)
  * - Reject content:// (not directly displayable)
+ * P0-003 FIX: Case-insensitive path matching for cross-device Android consistency
  */
 function isValidPhotoUrl(url?: string): boolean {
   if (!url) return false;
@@ -79,8 +128,10 @@ function isValidPhotoUrl(url?: string): boolean {
   if (url.startsWith('http://') || url.startsWith('https://')) return true;
   // Accept file:// if not from unstable cache
   if (url.startsWith('file://')) {
-    // Reject unstable ImagePicker cache paths
-    if (url.includes('/cache/ImagePicker/') || url.includes('/Cache/ImagePicker/')) {
+    // P0-003 FIX: Normalize to lowercase for case-insensitive matching
+    // Samsung uses /cache/ImagePicker/, OnePlus may use /Cache/ImagePicker/
+    const lowerUrl = url.toLowerCase();
+    if (lowerUrl.includes('/cache/imagepicker/')) {
       return false;
     }
     return true;
@@ -129,25 +180,47 @@ function getGenderIcon(gender?: string): keyof typeof Ionicons.glyphMap {
   return 'male-female';
 }
 
-/* ─── Skeleton Card (placeholder while loading) ─── */
+// Gender color helper
+function getGenderColor(gender?: string): string {
+  if (!gender) return PREMIUM.genderOther;
+  const g = gender.toLowerCase();
+  if (g === 'female') return PREMIUM.genderFemale;
+  if (g === 'male') return PREMIUM.genderMale;
+  return PREMIUM.genderOther;
+}
+
+/* ─── Skeleton Card (placeholder while loading) - Premium animated ─── */
 function SkeletonCard() {
+  const pulseAnim = useRef(new Animated.Value(0.4)).current;
+
+  useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.7, duration: 800, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 0.4, duration: 800, useNativeDriver: true }),
+      ])
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, [pulseAnim]);
+
   return (
     <View style={styles.skeletonCard}>
       <View style={styles.skeletonContent}>
         <View style={styles.skeletonHeader}>
-          <View style={styles.skeletonAvatar} />
-          <View style={styles.skeletonName} />
-          <View style={styles.skeletonPill} />
+          <Animated.View style={[styles.skeletonAvatar, { opacity: pulseAnim }]} />
+          <Animated.View style={[styles.skeletonName, { opacity: pulseAnim }]} />
+          <Animated.View style={[styles.skeletonPill, { opacity: pulseAnim }]} />
         </View>
-        <View style={styles.skeletonText} />
-        <View style={styles.skeletonTextShort} />
+        <Animated.View style={[styles.skeletonText, { opacity: pulseAnim }]} />
+        <Animated.View style={[styles.skeletonTextShort, { opacity: pulseAnim }]} />
       </View>
-      <View style={styles.skeletonButton} />
+      <Animated.View style={[styles.skeletonButton, { opacity: pulseAnim }]} />
     </View>
   );
 }
 
-/* ─── Compact Comment Preview Row ─── */
+/* ─── Compact Comment Preview Row - Premium styling ─── */
 function CommentPreviewRow({ answer }: { answer: any }) {
   const isMedia = answer.type === 'photo' || answer.type === 'video' || answer.type === 'voice';
   const displayName = answer.isAnonymous !== false ? 'Anonymous' : (answer.authorName || 'User');
@@ -155,7 +228,7 @@ function CommentPreviewRow({ answer }: { answer: any }) {
   return (
     <View style={styles.commentRow}>
       <View style={styles.commentAvatar}>
-        <Ionicons name="person" size={10} color={C.textLight} />
+        <Ionicons name="person" size={10} color={PREMIUM.textMuted} />
       </View>
       <Text style={styles.commentText} numberOfLines={1} ellipsizeMode="tail">
         <Text style={styles.commentName}>{displayName}</Text>
@@ -168,6 +241,33 @@ function CommentPreviewRow({ answer }: { answer: any }) {
           <Text style={styles.commentSnippet}>{answer.text || ''}</Text>
         )}
       </Text>
+    </View>
+  );
+}
+
+/* ─── Section Header Component - Premium styling ─── */
+function SectionHeader({ label, isTrending }: { label: string; isTrending: boolean }) {
+  if (isTrending) {
+    return (
+      <View style={styles.trendingSectionHeader}>
+        <LinearGradient
+          colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.trendingIconBg}
+        >
+          <Ionicons name="flame" size={12} color="#FFF" />
+        </LinearGradient>
+        <Text style={styles.trendingSectionLabel}>Trending</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.sectionHeaderContainer}>
+      <View style={styles.sectionDivider} />
+      <Text style={styles.sectionLabel}>{label}</Text>
+      <View style={styles.sectionDivider} />
     </View>
   );
 }
@@ -188,80 +288,197 @@ type TrendingPromptData = {
   ownerGender?: string;
 };
 
-/* ─── Trending Card (compact, no previews, "X answers" only) ─── */
+/* ─── Animated Press Wrapper for premium feel ─── */
+function AnimatedPressCard({
+  children,
+  onPress,
+  onLongPress,
+  style,
+  isTrending = false,
+}: {
+  children: React.ReactNode;
+  onPress: () => void;
+  onLongPress?: () => void;
+  style?: any;
+  isTrending?: boolean;
+}) {
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+
+  const handlePressIn = () => {
+    Animated.spring(scaleAnim, {
+      toValue: 0.98,
+      useNativeDriver: true,
+      speed: 50,
+      bounciness: 4,
+    }).start();
+  };
+
+  const handlePressOut = () => {
+    Animated.spring(scaleAnim, {
+      toValue: 1,
+      useNativeDriver: true,
+      speed: 50,
+      bounciness: 4,
+    }).start();
+  };
+
+  return (
+    <Pressable
+      onPress={onPress}
+      onLongPress={onLongPress}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      delayLongPress={400}
+    >
+      <Animated.View style={[style, { transform: [{ scale: scaleAnim }] }]}>
+        {children}
+      </Animated.View>
+    </Pressable>
+  );
+}
+
+/* ─── Trending Card (premium styling with glow accent) ─── */
+// P2-002 FIX: Accept promptId prop and call handlers with ID to avoid inline arrow functions in renderItem
 const TrendingCard = React.memo(function TrendingCard({
   prompt,
+  promptId,
   onOpenThread,
   onAddComment,
+  onLongPress,
+  isOwner,
 }: {
   prompt: TrendingPromptData;
-  onOpenThread: () => void;
-  onAddComment: () => void;
+  promptId: string;
+  onOpenThread: (id: string) => void;
+  onAddComment: (id: string) => void;
+  onLongPress?: (id: string) => void;
+  isOwner?: boolean;
 }) {
+  // P2-002: Stable callback references
+  const handleOpenThread = useCallback(() => onOpenThread(promptId), [onOpenThread, promptId]);
+  const handleAddComment = useCallback(() => onAddComment(promptId), [onAddComment, promptId]);
+  const handleLongPress = useCallback(() => onLongPress?.(promptId), [onLongPress, promptId]);
   const isTruth = prompt.type === 'truth';
   const isAnon = prompt.isAnonymous ?? true;
   const answerCount = prompt.answerCount ?? 0;
   const showPhoto = shouldShowPhoto(prompt);
+  const genderColor = getGenderColor(prompt.ownerGender);
+
+  const pillColors: readonly [string, string] = isTruth
+    ? [PREMIUM.truthPurple, PREMIUM.truthPurpleLight]
+    : [PREMIUM.dareOrange, PREMIUM.dareOrangeLight];
 
   return (
-    <TouchableOpacity style={styles.card} onPress={onOpenThread} activeOpacity={0.7}>
+    <AnimatedPressCard
+      onPress={handleOpenThread}
+      onLongPress={isOwner ? handleLongPress : undefined}
+      style={styles.trendingCard}
+      isTrending
+    >
+      {/* Accent glow border effect */}
+      <LinearGradient
+        colors={[isTruth ? 'rgba(124,106,239,0.15)' : 'rgba(255,120,73,0.15)', 'transparent']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.trendingGlow}
+      />
+
       {/* Card content wrapper */}
       <View style={styles.cardContent}>
-        {/* Header Row: LEFT = Identity, RIGHT = Type pill */}
+        {/* Header Row: Owner Identity */}
         <View style={styles.cardHeader}>
-          {/* LEFT: Owner Identity */}
           <View style={styles.ownerIdentity}>
             {showPhoto ? (
-              <OwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
+              <View style={styles.ownerPhotoWrapper}>
+                <OwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
+              </View>
             ) : (
               <View style={styles.ownerPhotoPlaceholder}>
-                <Ionicons name={isAnon ? 'eye-off' : 'person'} size={12} color={C.textLight} />
+                <Ionicons name={isAnon ? 'eye-off' : 'person'} size={14} color={PREMIUM.textMuted} />
               </View>
             )}
             <View style={styles.ownerInfo}>
-              <Text style={styles.ownerName} numberOfLines={1}>
+              <Text style={styles.ownerNamePremium} numberOfLines={1}>
                 {isAnon ? 'Anonymous' : (prompt.ownerName || 'User')}
-                {prompt.ownerAge ? `, ${prompt.ownerAge}` : ''}
               </Text>
-              {prompt.ownerGender && (
-                <Ionicons name={getGenderIcon(prompt.ownerGender)} size={11} color={C.textLight} />
+              {!isAnon && (prompt.ownerAge || prompt.ownerGender) && (
+                <View style={styles.ownerMeta}>
+                  {prompt.ownerAge && (
+                    <Text style={styles.ownerAge}>{prompt.ownerAge}</Text>
+                  )}
+                  {prompt.ownerGender && (
+                    <>
+                      <View style={[styles.genderDot, { backgroundColor: genderColor }]} />
+                      <Ionicons name={getGenderIcon(prompt.ownerGender)} size={11} color={genderColor} />
+                    </>
+                  )}
+                </View>
               )}
             </View>
           </View>
-
-          {/* RIGHT: Type pill */}
-          <View style={[styles.typePill, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
-            <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={10} color="#FFF" />
-            <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
-          </View>
         </View>
 
-        {/* Prompt text */}
-        <Text style={styles.promptText} numberOfLines={3}>{prompt.text}</Text>
+        {/* Prompt text - Hero element */}
+        <Text style={styles.promptTextHero} numberOfLines={3}>{prompt.text}</Text>
 
-        {/* Answer count */}
-        <Text style={styles.answerCountText}>
-          {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
-        </Text>
+        {/* Engagement row */}
+        <View style={styles.engagementRow}>
+          <View style={styles.answerBadge}>
+            <Ionicons name="chatbubble" size={11} color={PREMIUM.textMuted} />
+            <Text style={styles.answerCountText}>
+              {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
+            </Text>
+          </View>
+          <View style={styles.trendingBadge}>
+            <Ionicons name="flame" size={11} color={PREMIUM.coral} />
+            <Text style={styles.trendingBadgeText}>Hot</Text>
+          </View>
+        </View>
       </View>
 
-      {/* Big + button on right side */}
-      <TouchableOpacity
-        style={styles.addButton}
-        onPress={(e) => { e.stopPropagation(); onAddComment(); }}
-        activeOpacity={0.8}
-      >
-        <Ionicons name="add" size={22} color="#FFF" />
-      </TouchableOpacity>
-    </TouchableOpacity>
+      {/* Right column: Pill top, + button bottom */}
+      <View style={styles.cardRightColumn}>
+        <LinearGradient
+          colors={pillColors}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.typePillGradient}
+        >
+          <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={12} color="#FFF" />
+          <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+        </LinearGradient>
+
+        {/* Hide + button on own prompts - backend rejects own-prompt answers anyway */}
+        {!isOwner && (
+          <TouchableOpacity
+            style={styles.addButtonPremium}
+            onPress={(e) => { e.stopPropagation?.(); handleAddComment(); }}
+            activeOpacity={0.85}
+          >
+            <LinearGradient
+              colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.addButtonGradient}
+            >
+              <Ionicons name="add" size={22} color="#FFF" />
+            </LinearGradient>
+          </TouchableOpacity>
+        )}
+      </View>
+    </AnimatedPressCard>
   );
 });
 
-/* ─── Prompt Card (with comment previews) ─── */
+/* ─── Prompt Card (with comment previews) - Premium redesign ─── */
+// P2-002 FIX: Accept promptId prop and call handlers with ID to avoid inline arrow functions in renderItem
 const PromptCard = React.memo(function PromptCard({
   prompt,
+  promptId,
   onOpenThread,
   onAddComment,
+  onLongPress,
+  isOwner,
 }: {
   prompt: {
     _id: any;
@@ -281,53 +498,75 @@ const PromptCard = React.memo(function PromptCard({
     ownerGender?: string;
     answerCount?: number;
   };
-  onOpenThread: () => void;
-  onAddComment: () => void;
+  promptId: string;
+  onOpenThread: (id: string) => void;
+  onAddComment: (id: string) => void;
+  onLongPress?: (id: string) => void;
+  isOwner?: boolean;
 }) {
+  // P2-002: Stable callback references
+  const handleOpenThread = useCallback(() => onOpenThread(promptId), [onOpenThread, promptId]);
+  const handleAddComment = useCallback(() => onAddComment(promptId), [onAddComment, promptId]);
+  const handleLongPress = useCallback(() => onLongPress?.(promptId), [onLongPress, promptId]);
+
   const isTruth = prompt.type === 'truth';
   const isAnon = prompt.isAnonymous ?? true;
   const answerCount = prompt.totalAnswers ?? prompt.answerCount ?? 0;
   const previewCount = prompt.top2Answers?.length ?? 0;
   const showPhoto = shouldShowPhoto(prompt);
+  const genderColor = getGenderColor(prompt.ownerGender);
+
+  const pillColors: readonly [string, string] = isTruth
+    ? [PREMIUM.truthPurple, PREMIUM.truthPurpleLight]
+    : [PREMIUM.dareOrange, PREMIUM.dareOrangeLight];
 
   return (
-    <TouchableOpacity style={styles.card} onPress={onOpenThread} activeOpacity={0.7}>
+    <AnimatedPressCard
+      onPress={handleOpenThread}
+      onLongPress={isOwner ? handleLongPress : undefined}
+      style={styles.card}
+    >
       {/* Card content wrapper */}
       <View style={styles.cardContent}>
-        {/* Header Row: LEFT = Identity, RIGHT = Type pill */}
+        {/* Header Row: Owner Identity */}
         <View style={styles.cardHeader}>
-          {/* LEFT: Owner Identity */}
           <View style={styles.ownerIdentity}>
             {showPhoto ? (
-              <OwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
+              <View style={styles.ownerPhotoWrapper}>
+                <OwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
+              </View>
             ) : (
               <View style={styles.ownerPhotoPlaceholder}>
-                <Ionicons name={isAnon ? 'eye-off' : 'person'} size={12} color={C.textLight} />
+                <Ionicons name={isAnon ? 'eye-off' : 'person'} size={14} color={PREMIUM.textMuted} />
               </View>
             )}
             <View style={styles.ownerInfo}>
-              <Text style={styles.ownerName} numberOfLines={1}>
+              <Text style={styles.ownerNamePremium} numberOfLines={1}>
                 {isAnon ? 'Anonymous' : (prompt.ownerName || 'User')}
-                {prompt.ownerAge ? `, ${prompt.ownerAge}` : ''}
               </Text>
-              {prompt.ownerGender && (
-                <Ionicons name={getGenderIcon(prompt.ownerGender)} size={11} color={C.textLight} />
+              {!isAnon && (prompt.ownerAge || prompt.ownerGender) && (
+                <View style={styles.ownerMeta}>
+                  {prompt.ownerAge && (
+                    <Text style={styles.ownerAge}>{prompt.ownerAge}</Text>
+                  )}
+                  {prompt.ownerGender && (
+                    <>
+                      <View style={[styles.genderDot, { backgroundColor: genderColor }]} />
+                      <Ionicons name={getGenderIcon(prompt.ownerGender)} size={11} color={genderColor} />
+                    </>
+                  )}
+                </View>
               )}
             </View>
           </View>
-
-          {/* RIGHT: Type pill */}
-          <View style={[styles.typePill, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
-            <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={10} color="#FFF" />
-            <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
-          </View>
         </View>
 
-        {/* Prompt text */}
-        <Text style={styles.promptText} numberOfLines={3}>{prompt.text}</Text>
+        {/* Prompt text - Hero element */}
+        <Text style={styles.promptTextHero} numberOfLines={3}>{prompt.text}</Text>
 
         {/* Comment previews (up to 2) */}
-        {previewCount > 0 && (
+        {/* P1-006 FIX: Added optional chaining to prevent crash if top2Answers becomes undefined */}
+        {previewCount > 0 && prompt.top2Answers && (
           <View style={styles.previewSection}>
             {prompt.top2Answers.map((answer) => (
               <CommentPreviewRow key={answer._id} answer={answer} />
@@ -335,21 +574,48 @@ const PromptCard = React.memo(function PromptCard({
           </View>
         )}
 
-        {/* Answer count */}
-        <Text style={styles.answerCountText}>
-          {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
-        </Text>
+        {/* Engagement row */}
+        <View style={styles.engagementRow}>
+          <View style={styles.answerBadge}>
+            <Ionicons name="chatbubble" size={11} color={PREMIUM.textMuted} />
+            <Text style={styles.answerCountText}>
+              {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
+            </Text>
+          </View>
+        </View>
       </View>
 
-      {/* Big + button on right side */}
-      <TouchableOpacity
-        style={styles.addButton}
-        onPress={(e) => { e.stopPropagation(); onAddComment(); }}
-        activeOpacity={0.8}
-      >
-        <Ionicons name="add" size={22} color="#FFF" />
-      </TouchableOpacity>
-    </TouchableOpacity>
+      {/* Right column: Pill top, + button bottom */}
+      <View style={styles.cardRightColumn}>
+        <LinearGradient
+          colors={pillColors}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.typePillGradient}
+        >
+          <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={12} color="#FFF" />
+          <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+        </LinearGradient>
+
+        {/* Hide + button on own prompts - backend rejects own-prompt answers anyway */}
+        {!isOwner && (
+          <TouchableOpacity
+            style={styles.addButtonPremium}
+            onPress={(e) => { e.stopPropagation?.(); handleAddComment(); }}
+            activeOpacity={0.85}
+          >
+            <LinearGradient
+              colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.addButtonGradient}
+            >
+              <Ionicons name="add" size={22} color="#FFF" />
+            </LinearGradient>
+          </TouchableOpacity>
+        )}
+      </View>
+    </AnimatedPressCard>
   );
 });
 
@@ -396,8 +662,17 @@ export default function TruthOrDareScreen() {
 
   const userId = useAuthStore((s) => s.userId);
 
+  // Delete popup state
+  const [deletePopupPromptId, setDeletePopupPromptId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const deletePromptMutation = useMutation(api.truthDare.deleteMyPrompt);
+
   // Get trending prompts (1 Dare + 1 Truth)
-  const trendingDataQuery = useQuery(api.truthDare.getTrendingTruthAndDare);
+  // P1-006 FIX: Pass authUserId for block filtering in trending
+  const trendingDataQuery = useQuery(
+    api.truthDare.getTrendingTruthAndDare,
+    { authUserId: userId ?? undefined }
+  );
 
   // Get all prompts (sorted by engagement)
   const promptsDataQuery = useQuery(
@@ -490,6 +765,32 @@ export default function TruthOrDareScreen() {
     router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId, autoOpenComposer: 'new' } });
   }, [router]);
 
+  // Long-press to show delete popup (owner only)
+  const handleLongPressPrompt = useCallback((promptId: string) => {
+    setDeletePopupPromptId(promptId);
+  }, []);
+
+  // Handle delete confirmation
+  const handleDeletePrompt = useCallback(async () => {
+    if (!deletePopupPromptId || !userId) return;
+
+    setIsDeleting(true);
+    try {
+      await deletePromptMutation({ promptId: deletePopupPromptId, userId });
+      setDeletePopupPromptId(null);
+      Alert.alert('Deleted', 'Your post has been deleted.');
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to delete post.');
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [deletePopupPromptId, userId, deletePromptMutation]);
+
+  // Close delete popup
+  const handleCloseDeletePopup = useCallback(() => {
+    setDeletePopupPromptId(null);
+  }, []);
+
   type FeedItem =
     | { type: 'section'; label: string }
     | { type: 'trending'; prompt: TrendingPromptData }
@@ -521,31 +822,41 @@ export default function TruthOrDareScreen() {
     return items;
   }, [trendingData, normalPrompts]);
 
+  // P2-002 FIX: Pass promptId and stable callbacks to cards (no inline arrow functions)
   const renderItem = useCallback(({ item }: { item: FeedItem }) => {
     if (item.type === 'section') {
-      return <Text style={styles.sectionLabel}>{item.label}</Text>;
+      const isTrending = item.label.toLowerCase().includes('trending');
+      return <SectionHeader label={item.label} isTrending={isTrending} />;
     }
 
     if (item.type === 'trending') {
       const promptId = item.prompt._id as unknown as string;
+      const isOwner = (item.prompt as any).ownerUserId === userId;
       return (
         <TrendingCard
           prompt={item.prompt}
-          onOpenThread={() => openThread(promptId)}
-          onAddComment={() => openThreadForComment(promptId)}
+          promptId={promptId}
+          onOpenThread={openThread}
+          onAddComment={openThreadForComment}
+          onLongPress={handleLongPressPrompt}
+          isOwner={isOwner}
         />
       );
     }
 
     const promptId = item.prompt._id as unknown as string;
+    const isOwner = (item.prompt as any).ownerUserId === userId;
     return (
       <PromptCard
         prompt={item.prompt}
-        onOpenThread={() => openThread(promptId)}
-        onAddComment={() => openThreadForComment(promptId)}
+        promptId={promptId}
+        onOpenThread={openThread}
+        onAddComment={openThreadForComment}
+        onLongPress={handleLongPressPrompt}
+        isOwner={isOwner}
       />
     );
-  }, [openThread, openThreadForComment]);
+  }, [openThread, openThreadForComment, handleLongPressPrompt, userId]);
 
   const getKey = useCallback((item: FeedItem, idx: number) => {
     if (item.type === 'section') return `section_${idx}`;
@@ -559,9 +870,17 @@ export default function TruthOrDareScreen() {
   // Show skeleton cards while first load is happening
   if (isInitialLoading) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
+      <LinearGradient
+        colors={[PREMIUM.bgDeep, PREMIUM.bgBase]}
+        style={[styles.container, { paddingTop: insets.top }]}
+      >
         <View style={styles.header}>
-          <Ionicons name="flame" size={16} color={C.primary} />
+          <LinearGradient
+            colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+            style={styles.headerIconBg}
+          >
+            <Ionicons name="flame" size={14} color="#FFF" />
+          </LinearGradient>
           <Text style={styles.headerTitle}>Truth or Dare</Text>
         </View>
         <View style={styles.listContent}>
@@ -570,37 +889,67 @@ export default function TruthOrDareScreen() {
           <SkeletonCard />
         </View>
         <TouchableOpacity style={styles.fab} onPress={openCreateTod} activeOpacity={0.85}>
-          <Ionicons name="add" size={24} color="#FFF" />
+          <LinearGradient
+            colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+            style={styles.fabGradient}
+          >
+            <Ionicons name="add" size={26} color="#FFF" />
+          </LinearGradient>
         </TouchableOpacity>
-      </View>
+      </LinearGradient>
     );
   }
 
   // Empty state only after data has loaded and is actually empty
   if (prompts.length === 0 && promptsDataQuery !== undefined) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
+      <LinearGradient
+        colors={[PREMIUM.bgDeep, PREMIUM.bgBase]}
+        style={[styles.container, { paddingTop: insets.top }]}
+      >
         <View style={styles.header}>
-          <Ionicons name="flame" size={16} color={C.primary} />
+          <LinearGradient
+            colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+            style={styles.headerIconBg}
+          >
+            <Ionicons name="flame" size={14} color="#FFF" />
+          </LinearGradient>
           <Text style={styles.headerTitle}>Truth or Dare</Text>
         </View>
         <View style={styles.emptyState}>
-          <Ionicons name="help-circle-outline" size={48} color={C.textLight} />
+          <View style={styles.emptyIconContainer}>
+            <Ionicons name="help-circle-outline" size={52} color={PREMIUM.textMuted} />
+          </View>
           <Text style={styles.emptyTitle}>No active prompts</Text>
           <Text style={styles.emptySubtitle}>Be the first to create a Truth or Dare!</Text>
-          <TouchableOpacity style={styles.createFirstBtn} onPress={openCreateTod}>
-            <Ionicons name="add" size={18} color="#FFF" />
-            <Text style={styles.createFirstBtnText}>Create Post</Text>
+          <TouchableOpacity style={styles.createFirstBtn} onPress={openCreateTod} activeOpacity={0.85}>
+            <LinearGradient
+              colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.createFirstBtnGradient}
+            >
+              <Ionicons name="add" size={18} color="#FFF" />
+              <Text style={styles.createFirstBtnText}>Create Post</Text>
+            </LinearGradient>
           </TouchableOpacity>
         </View>
-      </View>
+      </LinearGradient>
     );
   }
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <LinearGradient
+      colors={[PREMIUM.bgDeep, PREMIUM.bgBase]}
+      style={[styles.container, { paddingTop: insets.top }]}
+    >
       <View style={styles.header}>
-        <Ionicons name="flame" size={16} color={C.primary} />
+        <LinearGradient
+          colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+          style={styles.headerIconBg}
+        >
+          <Ionicons name="flame" size={14} color="#FFF" />
+        </LinearGradient>
         <Text style={styles.headerTitle}>Truth or Dare</Text>
       </View>
 
@@ -613,7 +962,8 @@ export default function TruthOrDareScreen() {
           <RefreshControl
             refreshing={isRefreshing}
             onRefresh={onRefresh}
-            tintColor={C.primary}
+            tintColor={PREMIUM.coral}
+            colors={[PREMIUM.coral]}
           />
         }
         // Performance props
@@ -629,215 +979,581 @@ export default function TruthOrDareScreen() {
         onPress={openCreateTod}
         activeOpacity={0.85}
       >
-        <Ionicons name="add" size={24} color="#FFF" />
+        <LinearGradient
+          colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+          style={styles.fabGradient}
+        >
+          <Ionicons name="add" size={26} color="#FFF" />
+        </LinearGradient>
       </TouchableOpacity>
-    </View>
+
+      {/* Delete confirmation popup - compact and contextual */}
+      <Modal
+        visible={!!deletePopupPromptId}
+        transparent
+        animationType="fade"
+        onRequestClose={handleCloseDeletePopup}
+      >
+        <Pressable style={styles.deletePopupOverlay} onPress={handleCloseDeletePopup}>
+          <Pressable style={styles.deletePopupContainer} onPress={() => {}}>
+            <Text style={styles.deletePopupTitle}>Delete this post?</Text>
+            <Text style={styles.deletePopupSubtitle}>
+              This will permanently remove the post and all its comments.
+            </Text>
+            <View style={styles.deletePopupActions}>
+              <TouchableOpacity
+                style={styles.deletePopupCancelBtn}
+                onPress={handleCloseDeletePopup}
+                disabled={isDeleting}
+              >
+                <Text style={styles.deletePopupCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.deletePopupDeleteBtn}
+                onPress={handleDeletePrompt}
+                disabled={isDeleting}
+              >
+                {isDeleting ? (
+                  <Text style={styles.deletePopupDeleteText}>Deleting...</Text>
+                ) : (
+                  <>
+                    <Ionicons name="trash-outline" size={14} color="#FFF" />
+                    <Text style={styles.deletePopupDeleteText}>Delete</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.background },
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // PREMIUM DARK THEME - Energetic, Modern, Polished
+  // ═══════════════════════════════════════════════════════════════════════════════
 
+  container: {
+    flex: 1,
+  },
+
+  // ─── Header ───
   header: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 14, paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.surface,
-  },
-  headerTitle: { fontSize: 16, fontWeight: '700', color: C.text },
-
-  sectionLabel: {
-    fontSize: 11, fontWeight: '700', color: C.textLight,
-    textTransform: 'uppercase', letterSpacing: 0.5,
-    paddingHorizontal: 14, paddingTop: 12, paddingBottom: 4,
-  },
-
-  listContent: { paddingBottom: 96 },
-
-  // Card - compact layout with + button on right
-  card: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginHorizontal: 10, marginVertical: 4,
-    backgroundColor: C.surface, borderRadius: 12,
-    paddingLeft: 10, paddingRight: 6, paddingVertical: 10,
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: PREMIUM.borderSubtle,
+  },
+  headerIconBg: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+    letterSpacing: 0.3,
   },
 
-  // Card content (left side, takes most space)
+  // ─── Section Headers ───
+  sectionHeaderContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 20,
+    paddingBottom: 12,
+    gap: 12,
+  },
+  sectionDivider: {
+    flex: 1,
+    height: 1,
+    backgroundColor: PREMIUM.borderSubtle,
+  },
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: PREMIUM.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  trendingSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 10,
+    gap: 8,
+  },
+  trendingIconBg: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trendingSectionLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+    letterSpacing: 0.5,
+  },
+
+  listContent: {
+    paddingBottom: 100,
+    paddingTop: 4,
+  },
+
+  // ─── Normal Card - Premium styling ───
+  card: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    marginHorizontal: 12,
+    marginVertical: 6,
+    backgroundColor: PREMIUM.bgElevated,
+    borderRadius: 16,
+    paddingLeft: 14,
+    paddingRight: 10,
+    paddingVertical: 14,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
+    // Subtle shadow for depth
+    shadowColor: PREMIUM.shadowColor,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+
+  // ─── Trending Card - Distinct premium styling with glow ───
+  trendingCard: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    marginHorizontal: 12,
+    marginVertical: 6,
+    backgroundColor: PREMIUM.bgElevated,
+    borderRadius: 18,
+    paddingLeft: 14,
+    paddingRight: 10,
+    paddingVertical: 16,
+    borderWidth: 1.5,
+    borderColor: PREMIUM.borderAccent,
+    // Enhanced shadow for trending
+    shadowColor: PREMIUM.coral,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 5,
+    overflow: 'hidden',
+  },
+  trendingGlow: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 18,
+  },
+
+  // ─── Card Content ───
   cardContent: {
     flex: 1,
-    paddingRight: 8,
+    paddingRight: 10,
   },
-
-  // Header Row
   cardHeader: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginBottom: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
   },
 
-  // Owner Identity (LEFT side)
+  // ─── Owner Identity ───
   ownerIdentity: {
-    flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  ownerPhotoWrapper: {
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: PREMIUM.borderSubtle,
+    overflow: 'hidden',
   },
   ownerPhoto: {
-    width: 26, height: 26, borderRadius: 13, backgroundColor: C.accent,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: PREMIUM.bgHighlight,
   },
   ownerPhotoPlaceholder: {
-    width: 26, height: 26, borderRadius: 13, backgroundColor: C.accent,
-    alignItems: 'center', justifyContent: 'center',
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: PREMIUM.bgHighlight,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
   },
   ownerInfo: {
-    flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1,
+    flexDirection: 'column',
+    justifyContent: 'center',
+    gap: 2,
+    flex: 1,
   },
   ownerName: {
-    fontSize: 12, fontWeight: '600', color: C.text,
+    fontSize: 13,
+    fontWeight: '600',
+    color: PREMIUM.textSecondary,
+  },
+  ownerNamePremium: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+    letterSpacing: 0.2,
+  },
+  ownerMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  ownerAge: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: PREMIUM.textMuted,
+  },
+  genderDot: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    opacity: 0.7,
   },
 
-  // Type pill (RIGHT side)
-  typePill: {
-    flexDirection: 'row', alignItems: 'center', gap: 3,
-    paddingHorizontal: 7, paddingVertical: 3, borderRadius: 8,
-  },
-  typePillText: { fontSize: 9, fontWeight: '700', color: '#FFF' },
-
-  // Prompt text
-  promptText: {
-    fontSize: 14, fontWeight: '500', color: C.text, lineHeight: 19,
-    marginBottom: 6,
+  // ─── Card Right Column - Pill top, + bottom ───
+  cardRightColumn: {
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    height: '100%',
+    minHeight: 80,
+    paddingVertical: 2,
   },
 
-  // Comment preview section
+  // ─── Type Pills - Gradient styling ───
+  typePillGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 10,
+  },
+  typePillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFF',
+    letterSpacing: 0.3,
+  },
+
+  // ─── Prompt Text - Hero element ───
+  promptTextHero: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: PREMIUM.textPrimary,
+    lineHeight: 22,
+    marginBottom: 10,
+    letterSpacing: 0.2,
+  },
+
+  // ─── Engagement Row ───
+  engagementRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 4,
+  },
+  answerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  answerCountText: {
+    fontSize: 12,
+    color: PREMIUM.textMuted,
+    fontWeight: '500',
+  },
+  trendingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(233, 69, 96, 0.12)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  trendingBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: PREMIUM.coral,
+    letterSpacing: 0.5,
+  },
+
+  // ─── Comment Previews ───
   previewSection: {
-    gap: 3, marginBottom: 4,
+    gap: 6,
+    marginBottom: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: PREMIUM.borderSubtle,
   },
   commentRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   commentAvatar: {
-    width: 16, height: 16, borderRadius: 8, backgroundColor: C.accent,
-    alignItems: 'center', justifyContent: 'center',
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: PREMIUM.bgHighlight,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   commentText: {
-    flex: 1, fontSize: 11, color: C.text, lineHeight: 14,
+    flex: 1,
+    fontSize: 12,
+    color: PREMIUM.textSecondary,
+    lineHeight: 16,
   },
   commentName: {
-    fontWeight: '600', color: C.text,
+    fontWeight: '600',
+    color: PREMIUM.textPrimary,
   },
   commentSnippet: {
-    color: C.textLight,
+    color: PREMIUM.textMuted,
   },
   commentMedia: {
-    color: C.primary, fontWeight: '500',
+    color: PREMIUM.coral,
+    fontWeight: '600',
   },
 
-  // Answer count text
-  answerCountText: {
-    fontSize: 11, color: C.textLight, marginTop: 4,
+  // ─── Add Button - Premium gradient ───
+  addButtonPremium: {
+    marginLeft: 6,
+  },
+  addButtonGradient: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: PREMIUM.coral,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 4,
   },
 
-  // Big + button on right side of card
-  addButton: {
-    width: 38, height: 38, borderRadius: 19,
-    backgroundColor: C.primary,
-    alignItems: 'center', justifyContent: 'center',
-    marginLeft: 4,
-  },
-
-  // Empty state
+  // ─── Empty State ───
   emptyState: {
-    flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 12,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+    gap: 16,
   },
-  emptyTitle: { fontSize: 18, fontWeight: '600', color: C.text },
-  emptySubtitle: { fontSize: 14, color: C.textLight, textAlign: 'center' },
+  emptyIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: PREMIUM.bgElevated,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    color: PREMIUM.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
   createFirstBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: C.primary, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20,
-    marginTop: 8,
+    marginTop: 12,
+    borderRadius: 24,
+    overflow: 'hidden',
   },
-  createFirstBtnText: { fontSize: 14, fontWeight: '600', color: '#FFF' },
+  createFirstBtnGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+  },
+  createFirstBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFF',
+    letterSpacing: 0.3,
+  },
 
-  // FAB
+  // ─── FAB - Premium floating action button ───
   fab: {
     position: 'absolute',
-    right: 16,
-    bottom: 24,
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: C.primary,
-    justifyContent: 'center',
+    right: 18,
+    bottom: 28,
+    borderRadius: 28,
+    shadowColor: PREMIUM.coral,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  fabGradient: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    elevation: 6,
+    justifyContent: 'center',
   },
 
-  // Skeleton cards (loading placeholders)
+  // ─── Skeleton Cards - Animated loading placeholders ───
   skeletonCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginHorizontal: 10,
-    marginVertical: 4,
-    backgroundColor: C.surface,
-    borderRadius: 12,
-    paddingLeft: 10,
-    paddingRight: 6,
-    paddingVertical: 10,
+    marginHorizontal: 12,
+    marginVertical: 6,
+    backgroundColor: PREMIUM.bgElevated,
+    borderRadius: 16,
+    paddingLeft: 14,
+    paddingRight: 8,
+    paddingVertical: 14,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
   },
   skeletonContent: {
     flex: 1,
-    paddingRight: 8,
+    paddingRight: 10,
   },
   skeletonHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 12,
   },
   skeletonAvatar: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: C.accent,
-    opacity: 0.5,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: PREMIUM.bgHighlight,
   },
   skeletonName: {
-    width: 80,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: C.accent,
-    marginLeft: 8,
-    opacity: 0.5,
+    width: 90,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: PREMIUM.bgHighlight,
+    marginLeft: 10,
   },
   skeletonPill: {
-    width: 50,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: C.accent,
+    width: 60,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: PREMIUM.bgHighlight,
     marginLeft: 'auto',
-    opacity: 0.5,
   },
   skeletonText: {
     width: '100%',
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: C.accent,
-    marginBottom: 6,
-    opacity: 0.4,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: PREMIUM.bgHighlight,
+    marginBottom: 8,
   },
   skeletonTextShort: {
-    width: '60%',
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: C.accent,
-    opacity: 0.3,
+    width: '65%',
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: PREMIUM.bgHighlight,
   },
   skeletonButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: C.accent,
-    marginLeft: 4,
-    opacity: 0.5,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: PREMIUM.bgHighlight,
+    marginLeft: 6,
+  },
+
+  // ─── Delete Popup - Compact contextual menu ───
+  deletePopupOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  deletePopupContainer: {
+    backgroundColor: PREMIUM.bgElevated,
+    borderRadius: 16,
+    padding: 20,
+    width: 280,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  deletePopupTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  deletePopupSubtitle: {
+    fontSize: 13,
+    color: PREMIUM.textMuted,
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: 20,
+  },
+  deletePopupActions: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  deletePopupCancelBtn: {
+    flex: 1,
+    backgroundColor: PREMIUM.bgHighlight,
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  deletePopupCancelText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: PREMIUM.textSecondary,
+  },
+  deletePopupDeleteBtn: {
+    flex: 1,
+    backgroundColor: PREMIUM.coral,
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  deletePopupDeleteText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FFF',
   },
 });

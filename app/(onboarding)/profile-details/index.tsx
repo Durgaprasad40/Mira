@@ -67,9 +67,18 @@ export default function ProfileDetailsBasicScreen() {
 
   // Validation error state
   const [educationOtherError, setEducationOtherError] = useState<string | null>(null);
+  // P2 VALIDATION: Height/weight range validation
+  const [heightError, setHeightError] = useState<string | null>(null);
+  const [weightError, setWeightError] = useState<string | null>(null);
 
   // P1 STABILITY: Prevent double-submission on rapid taps
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // P2 VALIDATION: Constants for valid ranges
+  const HEIGHT_MIN = 100; // cm
+  const HEIGHT_MAX = 250; // cm
+  const WEIGHT_MIN = 30;  // kg
+  const WEIGHT_MAX = 300; // kg
 
   // STABILITY FIX: Wait for Convex hydration before rendering form
   // This prevents data loss when user navigates before hydration completes
@@ -129,12 +138,40 @@ export default function ProfileDetailsBasicScreen() {
     // P1 STABILITY: Prevent double-submission on rapid taps
     if (isSubmitting) return;
 
+    // P2 VALIDATION: Validate height range if provided
+    let hasError = false;
+    if (height !== null) {
+      if (height < HEIGHT_MIN || height > HEIGHT_MAX) {
+        setHeightError(`Height must be between ${HEIGHT_MIN} and ${HEIGHT_MAX} cm`);
+        hasError = true;
+      } else {
+        setHeightError(null);
+      }
+    } else {
+      setHeightError(null);
+    }
+
+    // P2 VALIDATION: Validate weight range if provided
+    if (weight !== null) {
+      if (weight < WEIGHT_MIN || weight > WEIGHT_MAX) {
+        setWeightError(`Weight must be between ${WEIGHT_MIN} and ${WEIGHT_MAX} kg`);
+        hasError = true;
+      } else {
+        setWeightError(null);
+      }
+    } else {
+      setWeightError(null);
+    }
+
     // Validate: if education is "other", educationOther must be non-empty
     if (education === 'other' && !educationOther.trim()) {
       setEducationOtherError('Please specify your education');
-      return;
+      hasError = true;
+    } else {
+      setEducationOtherError(null);
     }
-    setEducationOtherError(null);
+
+    if (hasError) return;
 
     setIsSubmitting(true);
 
@@ -257,18 +294,26 @@ export default function ProfileDetailsBasicScreen() {
             <Input
               label="Height (cm)"
               value={height ? height.toString() : ""}
-              onChangeText={(text) => setHeight(text ? parseInt(text) : null)}
+              onChangeText={(text) => {
+                setHeight(text ? parseInt(text) : null);
+                setHeightError(null); // Clear error on change
+              }}
               placeholder="Enter height in cm"
               keyboardType="numeric"
+              error={heightError || undefined}
             />
           </View>
           <View style={styles.field}>
             <Input
               label="Weight (kg) - Optional"
               value={weight ? weight.toString() : ""}
-              onChangeText={(text) => setWeight(text ? parseInt(text) : null)}
+              onChangeText={(text) => {
+                setWeight(text ? parseInt(text) : null);
+                setWeightError(null); // Clear error on change
+              }}
               placeholder="Enter weight (optional)"
               keyboardType="numeric"
+              error={weightError || undefined}
             />
           </View>
           <View style={styles.field}>

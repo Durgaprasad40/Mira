@@ -27,7 +27,9 @@ interface ConfessionChatModalProps {
   onBlock: () => void;
 }
 
-function formatTimeLeft(expiresAt: number): string {
+// P1-004 FIX: Guard against undefined/null expiresAt (legacy data or never-expiring)
+function formatTimeLeft(expiresAt: number | undefined | null): string {
+  if (expiresAt == null || !Number.isFinite(expiresAt)) return 'No expiry';
   const diff = expiresAt - Date.now();
   if (diff <= 0) return 'Expired';
   const hours = Math.floor(diff / (1000 * 60 * 60));
@@ -36,7 +38,9 @@ function formatTimeLeft(expiresAt: number): string {
   return `${minutes}m left`;
 }
 
-function formatTime(timestamp: number): string {
+// P1-004 FIX: Guard against undefined/null timestamp (legacy data)
+function formatTime(timestamp: number | undefined | null): string {
+  if (timestamp == null || !Number.isFinite(timestamp)) return '';
   const d = new Date(timestamp);
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }

@@ -89,6 +89,19 @@ export async function resolveUserIdByAuthId(
     return primary._id;
   }
 
+  // EMERGENCY FALLBACK: Try to find user by ID prefix match
+  // This handles cases where frontend has a truncated ID (data corruption issue)
+  // TODO: Remove this once the root cause of ID truncation is fixed
+  if (authUserId.length >= 8 && authUserId.length < 32) {
+    console.warn(`[resolveUserIdByAuthId] Attempting prefix match for truncated ID: ${authUserId}`);
+    const allUsers = await ctx.db.query("users").take(100);
+    const matchingUser = allUsers.find(u => (u._id as string).startsWith(authUserId));
+    if (matchingUser) {
+      console.log(`[resolveUserIdByAuthId] Found user by prefix match: ${matchingUser.name} (${matchingUser._id})`);
+      return matchingUser._id;
+    }
+  }
+
   // Not found
   return null;
 }
@@ -308,4 +321,211 @@ export async function validateSessionToken(
   }
 
   return session.userId;
+}
+
+// =============================================================================
+// PAIR ELIGIBILITY CHECK - ONE PAIR, ONE CONNECTION PER PHASE
+// =============================================================================
+// This is a CORE backend rule enforced globally.
+// If two users have EVER had a relationship in a phase, they are PERMANENTLY
+// INELIGIBLE for ANY new connection in that same phase.
+//
+// "Pair history" includes: matches, conversations, messages, likes, blocks,
+// confession connects, or any other prior interaction.
+// =============================================================================
+
+export type Phase = 'phase1' | 'phase2';
+
+/**
+ * Normalize a user pair to a consistent order for lookups.
+ * Returns [smaller, larger] based on string comparison.
+ */
+export function normalizePair(
+  userA: Id<"users">,
+  userB: Id<"users">
+): [Id<"users">, Id<"users">] {
+  const a = userA as string;
+  const b = userB as string;
+  return a < b ? [userA, userB] : [userB, userA];
+}
+
+/**
+ * Check if a pair of users is eligible for a new connection in a given phase.
+ *
+ * CORRECTED LOGIC:
+ * - Likes/swipes do NOT block eligibility (only matches do)
+ * - Blocks are phase-specific (Phase-1 blocks only affect Phase-1)
+ * - Backend is the source of truth
+ *
+ * Returns FALSE if ANY of the following exists for the pair:
+ * - Previous match (active or inactive)
+ * - Conversation created
+ * - Block records (Phase-1 only - no Phase-2 blocks table exists)
+ * - Confession connect records (Phase-1 only)
+ *
+ * Phase 1 tables: blocks, matches, conversations, confessionCommentConnects
+ * Phase 2 tables: privateMatches, privateConversations
+ *
+ * @param ctx - Convex query or mutation context
+ * @param userA - First user ID
+ * @param userB - Second user ID
+ * @param phase - 'phase1' or 'phase2'
+ * @returns true if eligible, false if pair has prior history
+ */
+export async function isPairEligibleForPhase(
+  ctx: QueryCtx | MutationCtx,
+  userA: Id<"users">,
+  userB: Id<"users">,
+  phase: Phase
+): Promise<boolean> {
+  // Same user check
+  if (userA === userB) return false;
+
+  if (phase === 'phase1') {
+    return isPairEligibleForPhase1(ctx, userA, userB);
+  } else {
+    return isPairEligibleForPhase2(ctx, userA, userB);
+  }
+}
+
+/**
+ * Phase-1 specific eligibility check.
+ * Checks: blocks, matches, conversations, confessionCommentConnects
+ * NOTE: Likes/swipes do NOT block eligibility - only completed connections do
+ */
+async function isPairEligibleForPhase1(
+  ctx: QueryCtx | MutationCtx,
+  userA: Id<"users">,
+  userB: Id<"users">
+): Promise<boolean> {
+  // Check Phase-1 blocks (bidirectional)
+  const blockCheck1 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userA).eq('blockedUserId', userB))
+    .first();
+  if (blockCheck1) return false;
+
+  const blockCheck2 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userB).eq('blockedUserId', userA))
+    .first();
+  if (blockCheck2) return false;
+
+  // Check matches (either direction, any status - active or inactive)
+  const match1 = await ctx.db
+    .query('matches')
+    .withIndex('by_users', (q) => q.eq('user1Id', userA).eq('user2Id', userB))
+    .first();
+  if (match1) return false;
+
+  const match2 = await ctx.db
+    .query('matches')
+    .withIndex('by_users', (q) => q.eq('user1Id', userB).eq('user2Id', userA))
+    .first();
+  if (match2) return false;
+
+  // NOTE: Likes are intentionally NOT checked here
+  // A single-sided like should not prevent future connection attempts
+
+  // Check confession comment connects (either direction)
+  const confessionConnect1 = await ctx.db
+    .query('confessionCommentConnects')
+    .withIndex('by_from_user', (q) => q.eq('fromUserId', userA))
+    .filter((q) => q.eq(q.field('toUserId'), userB))
+    .first();
+  if (confessionConnect1) return false;
+
+  const confessionConnect2 = await ctx.db
+    .query('confessionCommentConnects')
+    .withIndex('by_from_user', (q) => q.eq('fromUserId', userB))
+    .filter((q) => q.eq(q.field('toUserId'), userA))
+    .first();
+  if (confessionConnect2) return false;
+
+  // Check conversations (check if both users are participants)
+  const conversationsWithUserA = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user', (q) => q.eq('userId', userA))
+    .take(100);
+
+  for (const cp of conversationsWithUserA) {
+    const otherParticipant = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_conversation', (q) => q.eq('conversationId', cp.conversationId))
+      .filter((q) => q.eq(q.field('userId'), userB))
+      .first();
+    if (otherParticipant) return false;
+  }
+
+  // Pair is eligible
+  return true;
+}
+
+/**
+ * Phase-2 specific eligibility check.
+ * Checks: privateMatches, privateConversations
+ * NOTE: No Phase-2 blocks table exists - blocks are Phase-1 only
+ * NOTE: privateLikes do NOT block eligibility - only completed connections do
+ */
+async function isPairEligibleForPhase2(
+  ctx: QueryCtx | MutationCtx,
+  userA: Id<"users">,
+  userB: Id<"users">
+): Promise<boolean> {
+  // NOTE: No blocks check for Phase-2 - blocks table is Phase-1 only
+
+  // Check private matches (either direction, any status)
+  const privateMatch1 = await ctx.db
+    .query('privateMatches')
+    .withIndex('by_users', (q) => q.eq('user1Id', userA).eq('user2Id', userB))
+    .first();
+  if (privateMatch1) return false;
+
+  const privateMatch2 = await ctx.db
+    .query('privateMatches')
+    .withIndex('by_users', (q) => q.eq('user1Id', userB).eq('user2Id', userA))
+    .first();
+  if (privateMatch2) return false;
+
+  // NOTE: privateLikes are intentionally NOT checked here
+  // A single-sided like should not prevent future connection attempts
+
+  // Check private conversations (through participants)
+  const privateConvsWithUserA = await ctx.db
+    .query('privateConversationParticipants')
+    .withIndex('by_user', (q) => q.eq('userId', userA))
+    .take(100);
+
+  for (const cp of privateConvsWithUserA) {
+    const otherParticipant = await ctx.db
+      .query('privateConversationParticipants')
+      .withIndex('by_conversation', (q) => q.eq('conversationId', cp.conversationId))
+      .filter((q) => q.eq(q.field('userId'), userB))
+      .first();
+    if (otherParticipant) return false;
+  }
+
+  // P1-004 FIX: Check TOD (Truth or Dare) connections
+  // TOD creates Phase-1 conversations, but a connected TOD request means users
+  // have already interacted - should not reconnect in Phase-2 either
+  // Note: todConnectRequests uses string IDs, not Id<"users">
+  const userAStr = userA as string;
+  const userBStr = userB as string;
+
+  const todConnectAToB = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) => q.eq('fromUserId', userAStr).eq('toUserId', userBStr))
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  if (todConnectAToB) return false;
+
+  const todConnectBToA = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) => q.eq('fromUserId', userBStr).eq('toUserId', userAStr))
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  if (todConnectBToA) return false;
+
+  // Pair is eligible
+  return true;
 }

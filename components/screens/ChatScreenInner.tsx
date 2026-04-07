@@ -1,5 +1,15 @@
 /**
- * Shared chat UI used by both:
+ * LOCKED (PHASE-1 CHAT SCREEN INNER)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - P0 audit passed: backend connectivity verified, demo mode disabled
+ * - All messages via Convex messages backend
+ * - Delivery/read ticks from backend truth
+ * - Voice messages use storage URLs (not local paths)
+ *
+ * Used by both:
  *   - app/(main)/chat/[id].tsx            (standalone stack screen)
  *   - app/(main)/(tabs)/messages/chat/[conversationId].tsx  (inside Messages tab)
  *
@@ -22,6 +32,8 @@ import {
   InteractionManager,
   Image,
   Modal,
+  Animated,
+  Dimensions,
 } from 'react-native';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -55,6 +67,68 @@ import {
   getOtherUserIdFromMeta,
 } from '@/lib/threadsIntegrity';
 import { preloadVideos } from '@/lib/videoCache';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SKELETON LOADING - Chat loading placeholder
+// ═══════════════════════════════════════════════════════════════════════════
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+const SkeletonBubble = ({ isOwn, width }: { isOwn: boolean; width: number }) => {
+  const pulseAnim = React.useRef(new Animated.Value(0.4)).current;
+
+  React.useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.7, duration: 700, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+      ])
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, [pulseAnim]);
+
+  return (
+    <Animated.View
+      style={[
+        skeletonStyles.bubble,
+        isOwn ? skeletonStyles.ownBubble : skeletonStyles.otherBubble,
+        { width, opacity: pulseAnim },
+      ]}
+    />
+  );
+};
+
+const ChatLoadingSkeleton = () => (
+  <View style={skeletonStyles.container}>
+    <SkeletonBubble isOwn={false} width={SCREEN_WIDTH * 0.55} />
+    <SkeletonBubble isOwn={true} width={SCREEN_WIDTH * 0.45} />
+    <SkeletonBubble isOwn={false} width={SCREEN_WIDTH * 0.65} />
+    <SkeletonBubble isOwn={true} width={SCREEN_WIDTH * 0.5} />
+    <SkeletonBubble isOwn={false} width={SCREEN_WIDTH * 0.4} />
+  </View>
+);
+
+const skeletonStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    paddingHorizontal: 14,
+    paddingTop: 20,
+    gap: 12,
+    backgroundColor: COLORS.background,
+  },
+  bubble: {
+    height: 42,
+    borderRadius: 20,
+  },
+  ownBubble: {
+    alignSelf: 'flex-end',
+    backgroundColor: COLORS.primarySubtle,
+  },
+  otherBubble: {
+    alignSelf: 'flex-start',
+    backgroundColor: COLORS.backgroundDark,
+  },
+});
 
 /** Resolve the current demo user ID at call-time from authStore.
  *  Falls back to 'demo_user_1' for legacy data compatibility. */
@@ -94,11 +168,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [source, router]);
 
   // Open other user's profile when tapping avatar or name (with fromChat flag to hide action buttons)
-  const handleOpenProfile = useCallback((otherUserId: string | undefined) => {
+  // FIX 8: Pass mode='confession_comment' for mini profile when matchSource is 'confession_comment'
+  const handleOpenProfile = useCallback((otherUserId: string | undefined, matchSource?: string) => {
     if (otherUserId) {
+      const params: any = { id: otherUserId, fromChat: '1' };
+      // FIX 8: Mini profile for confession_comment matches
+      if (matchSource === 'confession_comment') {
+        params.mode = 'confession_comment';
+      }
       router.push({
         pathname: '/(main)/profile/[id]',
-        params: { id: otherUserId, fromChat: '1' },
+        params,
       });
     } else if (__DEV__) {
       console.warn('[P1ChatHeader] missing otherUserId', { convoId: conversationId });
@@ -177,6 +257,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // ── "Just unblocked" one-time banner state ──
   const [showJustUnblockedBanner, setShowJustUnblockedBanner] = useState(false);
 
+  // P1-FIX: Track if blocked alert has been shown this mount (prevents alert loop)
+  const hasShownBlockedAlertRef = useRef(false);
+
   // Check if this chat is with the just-unblocked user and show banner once
   useEffect(() => {
     if (justUnblockedUserId && otherUserIdFromMeta === justUnblockedUserId) {
@@ -188,11 +271,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // 5-3: Live re-check of blocked user status (not one-time)
   // Re-runs whenever blockedUserIds changes, even if chat is already open
+  // P1-FIX: Guard prevents alert loop from repeated navigation/deep links
   useEffect(() => {
     if (!isDemo) return;
 
     // Guard 1: Blocked user — re-check live when blockedUserIds changes
     if (otherUserIdFromMeta && isUserBlocked(otherUserIdFromMeta, blockedUserIds)) {
+      // P1-FIX: Only show alert once per mount to prevent stacking
+      if (hasShownBlockedAlertRef.current) return;
+      hasShownBlockedAlertRef.current = true;
+
       logDebugEvent('BLOCK_OR_REPORT', 'Blocked user chat navigation prevented');
       Alert.alert(
         'User Blocked',
@@ -299,6 +387,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [isExpiredChat]);
 
   const sendMessage = useMutation(api.messages.sendMessage);
+  const deleteMessageMutation = useMutation(api.messages.deleteMessage); // FEAT-2
   const markAsRead = useMutation(api.messages.markAsRead);
   const markAsDelivered = useMutation(api.messages.markAsDelivered); // MESSAGE-TICKS-FIX
   const updatePresence = useMutation(api.messages.updatePresence); // ONLINE-STATUS-FIX
@@ -372,7 +461,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // LIVE-TICK-DEBUG: Log when hash changes (tracks sender seeing tick updates)
     if (__DEV__) {
-      const lastMsg = recentMessages[recentMessages.length - 1];
+      const lastMsg = recentMessages[recentMessages.length - 1] as any;
       console.log('[LIVE-TICK-HASH] Hash computed:', {
         msgCount: recentMessages.length,
         lastMsgId: lastMsg?._id?.slice(-6),
@@ -439,6 +528,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const sendInviteMutation = useMutation(api.games.sendBottleSpinInvite);
   const respondToInviteMutation = useMutation(api.games.respondToBottleSpinInvite);
   const endGameMutation = useMutation(api.games.endBottleSpinGame);
+  // TD-LIFECYCLE: New mutations for proper session lifecycle
+  const startGameMutation = useMutation(api.games.startBottleSpinGame);
+  const cleanupExpiredMutation = useMutation(api.games.cleanupExpiredSession);
 
   // Get other user's ID for invite
   const otherUserId = activeConversation?.otherUser?.id;
@@ -446,26 +538,71 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Track cooldown state for inline UI feedback (instead of Alert spam)
   const [showCooldownMessage, setShowCooldownMessage] = useState(false);
   const [cooldownRemainingMin, setCooldownRemainingMin] = useState(0);
+  // TD-UX: Lightweight waiting toast for invitee (instead of full modal)
+  const [showWaitingForStartToast, setShowWaitingForStartToast] = useState(false);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // AUTO-CLOSE: Watch game session state changes for cross-device sync
+  // TD-LIFECYCLE: Watch game session state changes for cross-device sync
   // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (isDemo || !gameSession) return;
 
-    // Auto-close game modal when game is ended/rejected on either device
-    if (gameSession.state === 'cooldown' || gameSession.state === 'none') {
+    // TD-LIFECYCLE: Debug logging for session state
+    console.log('[TD_UI_STATE] Phase 1 session update:', {
+      phase: 'P1',
+      conversationId,
+      sessionId: gameSession.sessionId,
+      state: gameSession.state,
+      turnPhase: gameSession.turnPhase,
+      gameStartedAt: gameSession.gameStartedAt,
+      hasGameStarted: !!gameSession.gameStartedAt,
+    });
+
+    // Auto-close game modal when game is ended/rejected/expired on either device
+    if (gameSession.state === 'cooldown' || gameSession.state === 'none' || gameSession.state === 'expired') {
       if (showTruthDareGame) {
+        console.log('[TD_MODAL_GUARD] Phase 1: Closing modal - session ended/expired');
         setShowTruthDareGame(false);
+      }
+      if (showTruthDareInvite) {
+        setShowTruthDareInvite(false);
       }
     }
 
-    // Auto-open game modal when invite is accepted (for inviter)
+    // TD-LIFECYCLE: Handle expired session - cleanup and show message
+    if (gameSession.state === 'expired' && gameSession.endedReason && userId && conversationId) {
+      // Cleanup the expired session in backend
+      cleanupExpiredMutation({
+        authUserId: userId,
+        conversationId,
+        endedReason: gameSession.endedReason as 'invite_expired' | 'not_started' | 'timeout',
+      }).catch((err) => console.warn('[TD_CLEANUP] Failed:', err));
+
+      // Show appropriate system message (using sendMessage directly)
+      const messages: Record<string, string> = {
+        invite_expired: 'Truth or Dare invite expired',
+        not_started: 'Truth or Dare was not started in time',
+        timeout: 'Truth or Dare ended due to inactivity',
+      };
+      const msg = messages[gameSession.endedReason];
+      if (msg && !isDemo) {
+        // Send system message with marker
+        sendMessage({
+          conversationId: conversationId as any,
+          authUserId: userId,
+          content: `[SYSTEM:truthdare]${msg}`,
+          type: 'text',
+        }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
+      }
+    }
+
+    // TD-LIFECYCLE: Close invite modal when game becomes active
+    // Do NOT auto-open game modal - inviter must manually start
     if (gameSession.state === 'active') {
-      // Only auto-open if we have a pending invite modal open (inviter waiting)
       if (showTruthDareInvite) {
+        console.log('[TD_MODAL_GUARD] Phase 1: Closing invite modal - game accepted, waiting for manual start');
         setShowTruthDareInvite(false);
-        setShowTruthDareGame(true);
+        // DO NOT open game modal - inviter must click T/D button to start
       }
     }
 
@@ -473,18 +610,23 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (gameSession.state !== 'cooldown') {
       setShowCooldownMessage(false);
     }
-  }, [isDemo, gameSession?.state, showTruthDareGame, showTruthDareInvite]);
+  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.gameStartedAt, gameSession?.endedReason, showTruthDareGame, showTruthDareInvite, userId, conversationId, cleanupExpiredMutation, sendMessage]);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // AUTO-OPEN MODAL WHEN IT'S MY TURN TO CHOOSE
-  // This is the critical fix: when backend says it's my turn (choosing phase),
-  // automatically open the game modal so I can see Truth/Dare/Skip buttons.
+  // TD-LIFECYCLE: Auto-open modal ONLY when game has started and it's my turn
   // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (isDemo || !gameSession || !userId) return;
 
-    // Only care about active games in choosing phase
+    // Only care about active games that have been manually started
     if (gameSession.state !== 'active') return;
+    if (!gameSession.gameStartedAt) {
+      console.log('[TD_MODAL_GUARD] Phase 1: Blocked auto-open - game not started yet', {
+        state: gameSession.state,
+        gameStartedAt: gameSession.gameStartedAt,
+      });
+      return; // Game not started yet - do NOT auto-open
+    }
     if (gameSession.turnPhase !== 'choosing') return;
     if (!gameSession.currentTurnRole) return;
 
@@ -498,61 +640,135 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // Check if it's MY turn
     const isMyTurn = gameSession.currentTurnRole === myRole;
 
-    console.log('[BOTTLE_SPIN_AUTO_OPEN]', {
-      turnPhase: gameSession.turnPhase,
-      currentTurnRole: gameSession.currentTurnRole,
-      myRole,
-      isMyTurn,
-      modalCurrentlyOpen: showTruthDareGame,
-    });
-
     // If it's my turn and modal is closed, open it automatically
     if (isMyTurn && !showTruthDareGame) {
-      console.log('[BOTTLE_SPIN_AUTO_OPEN] Opening modal - it is my turn to choose!');
+      console.log('[TD_MODAL_GUARD] Phase 1: Auto-opening modal - my turn to choose');
       setShowTruthDareGame(true);
     }
-  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, userId, showTruthDareGame]);
+  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, gameSession?.gameStartedAt, userId, showTruthDareGame]);
 
-  // Handle T/D button press based on current state
-  const handleTruthDarePress = useCallback(() => {
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AUTO-CLOSE MODAL AFTER TRUTH/DARE/SKIP SELECTION
+  // When turnPhase becomes 'complete', show result briefly then close modal.
+  // Both devices see this since they watch the same backend state.
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (isDemo || !gameSession) return;
+
+    // Only auto-close when active game reaches 'complete' phase
+    if (gameSession.state !== 'active') return;
+    if (gameSession.turnPhase !== 'complete') return;
+
+    // Wait briefly to show result, then auto-close (fast, near-instant)
+    const timer = setTimeout(() => {
+      if (showTruthDareGame) {
+        console.log('[BOTTLE_SPIN_AUTO_CLOSE] Closing modal after T/D selection complete');
+        setShowTruthDareGame(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [isDemo, gameSession?.state, gameSession?.turnPhase, showTruthDareGame]);
+
+  // TD-LIFECYCLE: Handle T/D button press with manual start support
+  const handleTruthDarePress = useCallback(async () => {
     if (isDemo) {
       // Demo mode: skip invite flow, go directly to game
       setShowTruthDareGame(true);
       return;
     }
 
-    if (!gameSession) return;
+    if (!gameSession || !userId || !conversationId) return;
+
+    // Debug logging
+    console.log('[TD_MODAL_GUARD] Phase 1: T/D button pressed', {
+      state: gameSession.state,
+      turnPhase: gameSession.turnPhase,
+      gameStartedAt: gameSession.gameStartedAt,
+      hasGameStarted: !!gameSession.gameStartedAt,
+      amIInviter: gameSession.inviterId === userId,
+    });
 
     // Priority 1: Cooldown active - show inline message instead of Alert
     if (gameSession.state === 'cooldown') {
       const remainingMin = Math.ceil((gameSession.remainingMs || 0) / 60000);
       setCooldownRemainingMin(remainingMin);
       setShowCooldownMessage(true);
-      // Auto-hide after 3 seconds
       setTimeout(() => setShowCooldownMessage(false), 3000);
       return;
     }
 
-    // Priority 2: Active game exists
+    // Priority 2: Expired session - handled by useEffect, just return
+    if (gameSession.state === 'expired') {
+      return;
+    }
+
+    // Priority 3: Active game exists
     if (gameSession.state === 'active') {
+      const amIInviter = gameSession.inviterId === userId;
+      const hasGameStarted = !!gameSession.gameStartedAt;
+
+      // TD-LIFECYCLE: If game not started yet, handle based on role
+      if (!hasGameStarted) {
+        if (amIInviter) {
+          // Inviter: Start the game manually
+          console.log('[TD_MANUAL_START] Phase 1: Inviter starting game');
+          try {
+            const result = await startGameMutation({
+              authUserId: userId,
+              conversationId,
+            });
+            if (result.success) {
+              console.log('[TD_MANUAL_START] Phase 1: Game started successfully');
+              // Send system message using sendMessage directly
+              if (!isDemo) {
+                sendMessage({
+                  conversationId: conversationId as any,
+                  authUserId: userId,
+                  content: '[SYSTEM:truthdare]Game started!',
+                  type: 'text',
+                }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
+              }
+              setShowTruthDareGame(true);
+            } else {
+              console.warn('[TD_MANUAL_START] Phase 1: Failed to start game:', result);
+            }
+          } catch (err) {
+            console.error('[TD_MANUAL_START] Phase 1: Error starting game:', err);
+          }
+        } else {
+          // TD-UX: Invitee sees lightweight toast instead of full modal
+          console.log('[TD_UX] Phase 1: Invitee - showing waiting toast (not modal)');
+          setShowWaitingForStartToast(true);
+          setTimeout(() => setShowWaitingForStartToast(false), 3000);
+        }
+        return;
+      }
+
+      // Game is started - open the game modal normally
       setShowTruthDareGame(true);
       return;
     }
 
-    // Priority 3: Pending invite exists - no action (button is disabled or visual feedback)
+    // Priority 4: Pending invite exists - no action (button is disabled or visual feedback)
     if (gameSession.state === 'pending') {
-      // Invitee sees the invite card below chat
-      // Inviter sees "Waiting..." indicator - no action needed
       return;
     }
 
-    // Priority 4: No game - show invite modal
+    // Priority 5: No game - show invite modal
     setShowTruthDareInvite(true);
-  }, [isDemo, gameSession, userId]);
+  }, [isDemo, gameSession, userId, conversationId, startGameMutation, sendMessage]);
 
   // Send game invite
+  // INVITE-FIX: Handle "Invite already pending" error gracefully
   const handleSendInvite = useCallback(async () => {
     if (!userId || !conversationId || !otherUserId) return;
+
+    // INVITE-FIX: Don't send if invite is already pending
+    if (gameSession?.state === 'pending') {
+      setShowTruthDareInvite(false);
+      return;
+    }
 
     try {
       await sendInviteMutation({
@@ -573,11 +789,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         type: 'text',
       });
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to send invite');
+      // INVITE-FIX: Handle "Invite already pending" error gracefully
+      const errorMsg = error?.message || '';
+      if (errorMsg.toLowerCase().includes('already pending') || errorMsg.toLowerCase().includes('invite already')) {
+        // Show friendly message instead of error
+        Alert.alert(
+          'Invite Already Sent',
+          'A game invite is already pending. Wait for your match to respond.',
+          [{ text: 'OK', onPress: () => setShowTruthDareInvite(false) }]
+        );
+      } else {
+        Alert.alert('Error', errorMsg || 'Failed to send invite');
+      }
     }
-  }, [userId, conversationId, otherUserId, sendInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, otherUserId, gameSession?.state, sendInviteMutation, currentUser, sendMessage]);
 
-  // Respond to game invite
+  // TD-UX: Respond to game invite with clean acceptance flow
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
     if (!userId || !conversationId) return;
 
@@ -588,11 +815,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         accept,
       });
 
-      // Send system message about response (neutral phrasing)
-      const responderName = currentUser?.name || 'Someone';
+      // TD-UX: Clear acceptance message (NO "Game starting..." - inviter must start)
       const responseText = accept
-        ? `${responderName} is ready to play! Game starting...`
-        : `${responderName} declined the game invite`;
+        ? 'Invite accepted! Tap T/D to start'
+        : 'Invite declined';
       const markedMessage = `[SYSTEM:truthdare]${responseText}`;
       await sendMessage({
         conversationId: conversationId as any,
@@ -601,14 +827,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         type: 'text',
       });
 
-      // If accepted, open the game
-      if (accept) {
-        setShowTruthDareGame(true);
-      }
+      // TD-UX: Do NOT open modal on accept - inviter must tap T/D to start
+      // Modal will open only after startGame mutation succeeds
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to respond to invite');
     }
-  }, [userId, conversationId, respondToInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, respondToInviteMutation, sendMessage]);
 
   // End game (called from BottleSpinGame)
   const handleEndGame = useCallback(async () => {
@@ -754,7 +978,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
 
     // Get the latest message
-    const latestMsg = messages[messages.length - 1];
+    const latestMsg = messages[messages.length - 1] as any;
     const latestMsgId = latestMsg?._id;
 
     // Check if we have any unread messages from the other user
@@ -935,10 +1159,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }>(handoffKey);
 
     if (capturedMedia) {
-      // Set pending media to trigger secure photo sheet
       setPendingImageUri(capturedMedia.uri);
       setPendingMediaType(capturedMedia.type);
-      setPendingIsMirrored(capturedMedia.isMirrored === true); // Track front-camera video mirroring
+      setPendingIsMirrored(capturedMedia.isMirrored === true);
     }
   }, [isFocused, conversationId]);
 
@@ -1060,21 +1283,36 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [isDemo, activeConversation, conversationId, userId, addDemoMessage, generateUploadUrl, sendMessage]);
 
-  // Delete voice message (demo mode only)
-  const handleVoiceDelete = useCallback((messageId: string) => {
+  // FEAT-2: Delete voice message (supports both demo and live modes)
+  const handleVoiceDelete = useCallback(async (messageId: string) => {
     if (!conversationId) return;
+
     if (isDemo) {
       deleteDemoMessage(conversationId, messageId);
+      return;
     }
-    // TODO: Add Convex delete support when backend is ready
-  }, [isDemo, conversationId, deleteDemoMessage]);
+
+    // Live mode: call Convex mutation
+    if (!userId) {
+      console.warn('[ChatScreenInner] Cannot delete message: no userId');
+      return;
+    }
+
+    try {
+      await deleteMessageMutation({
+        messageId: messageId as any, // Cast to Id<'messages'>
+        authUserId: userId,
+      });
+    } catch (e) {
+      console.error('[ChatScreenInner] Failed to delete message:', e);
+      Alert.alert('Error', 'Failed to delete message. Please try again.');
+    }
+  }, [isDemo, conversationId, userId, deleteDemoMessage, deleteMessageMutation]);
 
   // Camera handler: navigate to camera-composer for photo/video capture
-  // This enables: photo/video toggle, 30s video limit, proper front camera handling
   const handleSendCamera = useCallback(() => {
     if (!activeConversation || !conversationId) return;
 
-    // Navigate to camera-composer in secure capture mode
     router.push({
       pathname: '/(main)/camera-composer',
       params: {
@@ -1120,7 +1358,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (!userId || !conversationId) return;
 
     const isVideo = pendingMediaType === 'video';
-    const isMirrored = pendingIsMirrored; // Capture before clearing
+    const isMirrored = pendingIsMirrored;
+
     setPendingImageUri(null);
     setPendingMediaType('photo'); // Reset for next time
     setPendingIsMirrored(false); // Reset mirrored flag
@@ -1139,23 +1378,28 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         const uniqueId = `secure_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
         const now = Date.now();
         // Calculate expiry duration in ms (for continuous video resume)
-        // timer=0 means "Once" (view once), otherwise timer is in seconds
-        const expiresDurationMs = options.timer > 0 ? options.timer * 1000 : 0;
+        // timer=-1 means "Normal" (no timer, not view-once)
+        // timer=0 means "View once" (view once)
+        // timer>0 means timed (seconds)
+        const effectiveTimer = options.timer === -1 ? 0 : options.timer;
+        const isViewOnce = options.timer === 0; // Only 0 = View once
+        const expiresDurationMs = effectiveTimer > 0 ? effectiveTimer * 1000 : 0;
 
         const protectedMedia = {
           localUri: imageUri,
           mediaType: isVideo ? 'video' as const : 'photo' as const,
-          timer: options.timer,
+          timer: effectiveTimer,
           expiresDurationMs, // Store for wall-clock based video resume
           viewingMode: options.viewingMode,
           screenshotAllowed: false,
-          viewOnce: options.timer === 0,
+          viewOnce: isViewOnce,
           watermark: false,
           isMirrored: isVideo && isMirrored, // Only videos need render-time flip
         };
 
         // Add to demoDmStore for chat list (bubble uses isProtected + protectedMedia for display)
         // For videos: use type 'video' and videoUri; for photos: use type 'image'
+        // BUGFIX: Pass the FULL protectedMedia object including localUri and mediaType
         addDemoMessage(conversationId, {
           _id: uniqueId,
           content: isVideo ? 'Secure Video' : 'Secure Photo',
@@ -1165,14 +1409,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           isProtected: true,
           // For videos, store in videoUri; for photos, the protectedMedia.localUri is used
           ...(isVideo ? { videoUri: imageUri } : {}),
-          protectedMedia: {
-            timer: options.timer,
-            viewingMode: options.viewingMode,
-            screenshotAllowed: false,
-            viewOnce: options.timer === 0,
-            watermark: false,
-            isMirrored: isVideo && isMirrored, // For bubble thumbnail flip
-          },
+          protectedMedia, // Use full object with localUri and mediaType
         });
 
         // Add to privateChatStore for viewer (has full schema with localUri)
@@ -1235,13 +1472,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // HOLD-TAP-FIX: Pass viewMode to backend for consistent rendering
       // VIDEO-FIX: Pass mediaType to distinguish photo vs video
       // VIDEO-MIRROR-FIX: Pass isMirrored for front-camera video correction
+      // MEDIA-OPTIONS-FIX: timer=-1 means Normal (no timer, not view-once)
+      const effectiveTimerConvex = options.timer === -1 ? 0 : options.timer;
+      const isViewOnceConvex = options.timer === 0; // Only 0 = View once
       await sendProtectedImage({
         conversationId: conversationId as any,
         authUserId: userId,
         imageStorageId: storageId,
-        timer: options.timer,
+        timer: effectiveTimerConvex,
         screenshotAllowed: false, // Phase-1 default: no screenshots
-        viewOnce: options.timer === 0, // "Once" timer = view once
+        viewOnce: isViewOnceConvex,
         watermark: false, // Phase-1 default: no watermark
         viewMode: options.viewingMode, // HOLD-TAP-FIX: Store the actual viewing mode
         mediaType: isVideo ? 'video' : 'image', // VIDEO-FIX: Pass correct media type
@@ -1364,15 +1604,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   if (!activeConversation) {
     const isLoading = !isDemo && conversation === undefined;
     return (
-      <View style={styles.loadingContainer}>
+      <View style={styles.container}>
         {isLoading ? (
-          <>
-            <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.loadingText}>Opening chat…</Text>
-          </>
+          <ChatLoadingSkeleton />
         ) : (
-          <>
-            <Ionicons name="chatbubble-ellipses-outline" size={48} color={COLORS.textLight} />
+          <View style={styles.loadingContainer}>
+            <Text style={styles.notFoundEmoji}>💬</Text>
             <Text style={styles.loadingText}>Chat not found</Text>
             <TouchableOpacity
               style={styles.errorBackButton}
@@ -1380,7 +1617,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             >
               <Text style={styles.errorBackText}>Go Back</Text>
             </TouchableOpacity>
-          </>
+          </View>
         )}
       </View>
     );
@@ -1391,9 +1628,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const otherUser = activeConversation.otherUser;
   if (!otherUser || !otherUser.name) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Loading chat...</Text>
+      <View style={styles.container}>
+        <ChatLoadingSkeleton />
       </View>
     );
   }
@@ -1408,70 +1644,104 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const messagesRemaining = isDemo ? 999999 : (currentUser?.messagesRemaining || 0);
 
+  // CONFESSION CHAT PRIVACY: Check if other user is anonymous (from confession chat)
+  const isOtherUserAnonymous = !isDemo && (activeConversation.otherUser as any).isAnonymous === true;
+  const isConfessionChat = !isDemo && (activeConversation as any).isConfessionChat === true;
+
   return (
     <View style={styles.container}>
-      {/* LOCKED: P1 chat header avatar + open profile. Do not modify without explicit approval. */}
+      {/* CONFESSION CHAT BANNER: Show safety notice for anonymous confession chats */}
+      {isConfessionChat && (
+        <View style={[styles.confessionBanner, { paddingTop: insets.top + 8 }]}>
+          <View style={styles.confessionBannerInner}>
+            <Ionicons name="eye-off" size={14} color={COLORS.primary} />
+            <Text style={styles.confessionBannerText}>Anonymous Chat from Confess</Text>
+          </View>
+          <Text style={styles.confessionBannerHint}>Be kind. Do not share personal info.</Text>
+        </View>
+      )}
       {/* Header — sits above KAV (does not move when keyboard opens) */}
-      <View style={[styles.header, { paddingTop: insets.top }]}>
+      <View style={[styles.header, !isConfessionChat && { paddingTop: insets.top }]}>
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
-        {/* Avatar with presence dot - tappable to open profile */}
-        <TouchableOpacity
-          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
-          style={styles.avatarButton}
-          activeOpacity={0.7}
-        >
-          <View style={styles.avatarContainer}>
-            {activeConversation.otherUser.photoUrl ? (
-              <Image
-                source={{ uri: activeConversation.otherUser.photoUrl }}
-                style={styles.headerAvatar}
-              />
-            ) : (
-              <View style={styles.headerAvatarPlaceholder}>
-                <Text style={styles.headerAvatarInitials}>{avatarInitials}</Text>
+        {/* Avatar with presence dot - tappable to open profile (disabled for anonymous users) */}
+        {isOtherUserAnonymous ? (
+          // PRIVACY: Non-tappable anonymous avatar
+          <View style={styles.avatarButton}>
+            <View style={styles.avatarContainer}>
+              <View style={[styles.headerAvatarPlaceholder, styles.headerAvatarAnonymous]}>
+                <Ionicons name="eye-off" size={18} color={COLORS.textMuted} />
               </View>
-            )}
-            {/* PRESENCE-DOT: Online indicator on avatar */}
-            {(() => {
-              const lastActive = activeConversation.otherUser.lastActive ?? 0;
-              const isOnline = Date.now() - lastActive < 60_000;
-              return (
-                <View style={[
-                  styles.presenceDot,
-                  isOnline ? styles.presenceDotOnline : styles.presenceDotOffline,
-                ]} />
-              );
-            })()}
+            </View>
           </View>
-        </TouchableOpacity>
-        {/* Name + status - tappable to open profile */}
-        <TouchableOpacity
-          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
-          style={styles.headerInfo}
-          activeOpacity={0.7}
-        >
-          {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
-          <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
-            {activeConversation.otherUser.name}
-          </Text>
-          {/* ONLINE-STATUS-FIX: Show "Online" for very recent activity */}
-          <Text style={styles.headerStatus}>
-            {(() => {
-              const lastActive = activeConversation.otherUser.lastActive ?? 0;
-              const now = Date.now();
-              const diff = now - lastActive;
-              // Online: within 1 minute (likely still in app)
-              if (diff < 60_000) return 'Online';
-              // Active now: within 5 minutes
-              if (diff < 5 * 60_000) return 'Active now';
-              // Recently active: anything else with valid timestamp
-              if (lastActive > 0) return 'Recently active';
-              return 'Offline';
-            })()}
-          </Text>
-        </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            onPress={() => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}
+            style={styles.avatarButton}
+            activeOpacity={0.7}
+          >
+            <View style={styles.avatarContainer}>
+              {activeConversation.otherUser.photoUrl ? (
+                <Image
+                  source={{ uri: activeConversation.otherUser.photoUrl }}
+                  style={styles.headerAvatar}
+                />
+              ) : (
+                <View style={styles.headerAvatarPlaceholder}>
+                  <Text style={styles.headerAvatarInitials}>{avatarInitials}</Text>
+                </View>
+              )}
+              {/* PRESENCE-DOT: Online indicator on avatar */}
+              {(() => {
+                const lastActive = activeConversation.otherUser.lastActive ?? 0;
+                const isOnline = Date.now() - lastActive < 60_000;
+                return (
+                  <View style={[
+                    styles.presenceDot,
+                    isOnline ? styles.presenceDotOnline : styles.presenceDotOffline,
+                  ]} />
+                );
+              })()}
+            </View>
+          </TouchableOpacity>
+        )}
+        {/* Name + status - tappable to open profile (disabled for anonymous users) */}
+        {isOtherUserAnonymous ? (
+          // PRIVACY: Non-tappable anonymous name display
+          <View style={styles.headerInfo}>
+            <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
+              Anonymous
+            </Text>
+            <Text style={styles.headerStatus}>From a confession</Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            onPress={() => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}
+            style={styles.headerInfo}
+            activeOpacity={0.7}
+          >
+            {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
+            <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
+              {activeConversation.otherUser.name}
+            </Text>
+            {/* ONLINE-STATUS-FIX: Show "Online" for very recent activity */}
+            <Text style={styles.headerStatus}>
+              {(() => {
+                const lastActive = activeConversation.otherUser.lastActive ?? 0;
+                const now = Date.now();
+                const diff = now - lastActive;
+                // Online: within 1 minute (likely still in app)
+                if (diff < 60_000) return 'Online';
+                // Active now: within 5 minutes
+                if (diff < 5 * 60_000) return 'Active now';
+                // Recently active: anything else with valid timestamp
+                if (lastActive > 0) return 'Recently active';
+                return 'Offline';
+              })()}
+            </Text>
+          </TouchableOpacity>
+        )}
         {/* Right section: T/D button + menu with stable spacing */}
         <View style={styles.headerRightSection}>
         {/* Truth/Dare game button - only for matched users (non-pre-match) */}
@@ -1490,17 +1760,30 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               !isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId && styles.truthDareButtonWaiting,
               // Dim button during cooldown
               !isDemo && gameSession?.state === 'cooldown' && styles.truthDareButtonCooldown,
+              // TD-UX: Special "ready to start" style for inviter when accepted but not started
+              !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId && styles.truthDareButtonReadyToStart,
+              // Green for active game that's already started
+              !isDemo && gameSession?.state === 'active' && !!gameSession?.gameStartedAt && styles.truthDareButtonActive,
             ]}>
               <Ionicons name="wine" size={18} color={COLORS.white} />
-              <Text style={styles.truthDareLabel}>
-                {/* Show status on button */}
+              <Text style={[
+                styles.truthDareLabel,
+                !isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId && styles.truthDareLabelWaiting,
+              ]} numberOfLines={1}>
+                {/* TD-UX: Show contextual status on button */}
                 {!isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId
-                  ? 'Wait'
-                  : 'T/D'}
+                  ? 'Sent'
+                  : !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId
+                    ? 'Start!'
+                    : 'T/D'}
               </Text>
               {/* Pending invite indicator (for invitee) */}
               {gameSession?.state === 'pending' && gameSession?.inviteeId === userId && (
                 <View style={styles.truthDareBadge} />
+              )}
+              {/* TD-UX: Badge dot for inviter when ready to start */}
+              {!isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId && (
+                <View style={styles.truthDareStartBadge} />
               )}
             </View>
           </TouchableOpacity>
@@ -1521,6 +1804,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           <Ionicons name="timer-outline" size={16} color={COLORS.warning} />
           <Text style={styles.cooldownBannerText}>
             Cooldown: wait {cooldownRemainingMin} min{cooldownRemainingMin !== 1 ? 's' : ''} before playing again
+          </Text>
+        </View>
+      )}
+
+      {/* TD-UX: Waiting for inviter to start banner (for invitee) */}
+      {showWaitingForStartToast && (
+        <View style={styles.waitingStartBanner}>
+          <Ionicons name="hourglass-outline" size={16} color="#2E7D32" />
+          <Text style={styles.waitingStartBannerText}>
+            Waiting for {activeConversation?.otherUser?.name || 'them'} to start the game
           </Text>
         </View>
       )}
@@ -1568,12 +1861,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               msgSenderId === currentUserId
             );
 
-            // AVATAR GROUPING: Determine if this is the last message in a sender group
-            // Show avatar only on the LAST message of consecutive messages from the same sender
-            const nextMessage = displayMessages[index + 1];
-            const isLastInGroup = !nextMessage || nextMessage.senderId !== item.senderId;
-            // Show avatar only for received messages (not own) and only on last in group
-            const showAvatar = !isMessageOwn && isLastInGroup;
+            // AVATAR GROUPING: Show avatar on FIRST message of each incoming group
+            // Check if previous message is from different sender (or doesn't exist)
+            // This puts avatar at TOP of visual group (WhatsApp/Slack style)
+            const prevMessage = displayMessages[index - 1];
+            const isFirstInGroup = !prevMessage || prevMessage.senderId !== item.senderId;
+            // Show avatar only for received messages (not own) and only on first in group
+            const showAvatar = !isMessageOwn && isFirstInGroup;
 
             // SECURE-MEDIA-FIX: Merge backend viewMode into protectedMedia for consistent mode
             // This ensures both sender and receiver use the same viewMode from the single source of truth
@@ -1621,21 +1915,33 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               onProtectedMediaExpire={handleProtectedMediaExpire}
               // L2 FIX: Voice delete only works in demo mode
               onVoiceDelete={isDemo ? handleVoiceDelete : undefined}
-              // AVATAR GROUPING: Pass grouping info for Instagram/Tinder style layout
+              // AVATAR GROUPING: Pass grouping info for WhatsApp/Slack style layout
               showAvatar={showAvatar}
-              avatarUrl={activeConversation.otherUser.photoUrl}
-              isLastInGroup={isLastInGroup}
-              // PROFILE-TAP: Avatar tap opens profile
-              onAvatarPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+              avatarUrl={isOtherUserAnonymous ? undefined : activeConversation.otherUser.photoUrl ?? undefined}
+              isLastInGroup={isFirstInGroup}
+              // PROFILE-TAP: Avatar tap opens profile (disabled for anonymous users)
+              onAvatarPress={isOtherUserAnonymous ? undefined : () => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}
             />
           );
           }}
           ListEmptyComponent={
             <View style={styles.emptyChat}>
-              <Ionicons name="chatbubble-outline" size={40} color={COLORS.border} />
-              <Text style={styles.emptyChatText}>
-                Say hello to {activeConversation.otherUser.name}!
+              <View style={styles.emptyChatIconContainer}>
+                <Text style={styles.emptyChatEmoji}>💬</Text>
+              </View>
+              <Text style={styles.emptyChatText}>Start the conversation</Text>
+              <Text style={styles.emptyChatHint}>
+                Say hi 👋 or send something interesting
               </Text>
+              {/* Match context hint for new conversations */}
+              {!activeConversation.isPreMatch && !isOtherUserAnonymous && (
+                <View style={styles.matchContextBadge}>
+                  <Ionicons name="heart" size={12} color={COLORS.primary} />
+                  <Text style={styles.matchContextText}>
+                    You matched with {activeConversation.otherUser.name}
+                  </Text>
+                </View>
+              )}
             </View>
           }
           contentContainerStyle={{
@@ -1844,11 +2150,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.background,
+    padding: 24,
+  },
+  notFoundEmoji: {
+    fontSize: 56,
+    marginBottom: 8,
   },
   loadingText: {
-    fontSize: 16,
-    color: COLORS.textLight,
-    marginTop: 12,
+    fontSize: 17,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 8,
   },
   errorBackButton: {
     marginTop: 20,
@@ -1957,15 +2269,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
     backgroundColor: COLORS.secondary,
-    paddingHorizontal: 8,
+    paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 14,
     gap: 4,
+    minWidth: 52, // Prevent shrinking
   },
   truthDareLabel: {
     fontSize: 11,
     fontWeight: '700' as const,
     color: COLORS.white,
+    flexShrink: 0,
+  },
+  truthDareLabelWaiting: {
+    fontSize: 10,
   },
   truthDareButtonWithBadge: {
     position: 'relative' as const,
@@ -1989,6 +2306,26 @@ const styles = StyleSheet.create({
     opacity: 0.5,
     backgroundColor: COLORS.textMuted,
   },
+  // TD-UX: Special style for inviter when accepted but not started
+  truthDareButtonReadyToStart: {
+    backgroundColor: '#E67E22', // Orange - attention-grabbing
+    borderWidth: 2,
+    borderColor: '#F39C12',
+  },
+  truthDareButtonActive: {
+    backgroundColor: '#27AE60', // Green for active game
+  },
+  truthDareStartBadge: {
+    position: 'absolute' as const,
+    top: -2,
+    right: -2,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#F39C12', // Orange badge
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
+  },
   cooldownBanner: {
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
@@ -2002,6 +2339,23 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500' as const,
     color: COLORS.warning || '#FF9800',
+  },
+  // TD-UX: Waiting for inviter to start banner
+  waitingStartBanner: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    gap: 8,
+    backgroundColor: '#E8F5E9', // Light green tint
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#81C784',
+  },
+  waitingStartBannerText: {
+    fontSize: 13,
+    fontWeight: '500' as const,
+    color: '#2E7D32', // Dark green
   },
   // Truth/Dare Invite Modal styles
   tdInviteOverlay: {
@@ -2087,15 +2441,53 @@ const styles = StyleSheet.create({
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EMPTY STATE - Friendly, engaging, clear CTA
+  // ═══════════════════════════════════════════════════════════════════════════
   emptyChat: {
     alignItems: 'center',
-    padding: 24,
+    padding: 32,
+    paddingTop: 48,
+  },
+  emptyChatIconContainer: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: COLORS.primary + '12',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  emptyChatEmoji: {
+    fontSize: 32,
   },
   emptyChatText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  emptyChatHint: {
     fontSize: 15,
     color: COLORS.textMuted,
-    marginTop: 12,
     textAlign: 'center',
+    lineHeight: 22,
+  },
+  matchContextBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: COLORS.primary + '10',
+    borderRadius: 16,
+  },
+  matchContextText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: COLORS.primary,
   },
   expiredBanner: {
     flexDirection: 'row',
@@ -2124,5 +2516,31 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     color: COLORS.success,
+  },
+  // CONFESSION CHAT: Anonymous privacy styles
+  confessionBanner: {
+    backgroundColor: 'rgba(233, 30, 99, 0.08)',
+    paddingBottom: 8,
+    paddingHorizontal: 16,
+  },
+  confessionBannerInner: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    gap: 6,
+  },
+  confessionBannerText: {
+    fontSize: 13,
+    fontWeight: '600' as const,
+    color: COLORS.primary,
+  },
+  confessionBannerHint: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    textAlign: 'center' as const,
+    marginTop: 2,
+  },
+  headerAvatarAnonymous: {
+    backgroundColor: COLORS.backgroundDark,
   },
 });

@@ -5,10 +5,10 @@ import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
 
-// ALLOWED_RELATIONSHIP_INTENTS: Schema-safe values (excludes UI-only values like single_parent, just_18)
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
-  'long_term', 'short_term', 'fwb', 'figuring_out',
-  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+  'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes',
+  'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
 ]);
 
 // Sanitize relationshipIntent to only include schema-valid values
@@ -20,6 +20,12 @@ function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | un
     console.warn('[SANITIZE] Removed invalid relationshipIntent values:', removed);
   }
   return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function getSafeProfilePhotos<T extends { url?: string; isNsfw?: boolean; order: number }>(photos: T[]): T[] {
+  return photos
+    .filter((photo) => !photo.isNsfw && typeof photo.url === "string" && photo.url.trim().length > 0)
+    .sort((a, b) => a.order - b.order);
 }
 
 // Get current user profile
@@ -39,14 +45,21 @@ export const getCurrentUser = query({
     if (!user) return null;
 
     // Get user's photos
-    const photos = await ctx.db
+    const allPhotos = await ctx.db
       .query("photos")
       .withIndex("by_user_order", (q) => q.eq("userId", convexUserId))
       .collect();
 
+    // PHOTO SOURCE FIX: Filter out verification_reference photos
+    // These are private verification photos, NOT display photos
+    // This ensures getCurrentUser returns the same photos as getUserPhotos
+    // for consistent photo counts across Edit Profile, Profile Tab, and Discover
+    const photos = allPhotos.filter((p) => p.photoType !== 'verification_reference');
+    const safePhotos = getSafeProfilePhotos(photos);
+
     return {
       ...user,
-      photos: photos.sort((a, b) => a.order - b.order),
+      photos: safePhotos,
     };
   },
 });
@@ -93,11 +106,48 @@ export const getUserById = query({
 
     if (reverseBlocked) return null;
 
+    // P0-004 FIX: Block profile lookup for anonymous confession participants
+    // If the requested user is an anonymousParticipantId in any conversation with the viewer,
+    // deny the profile lookup to protect their identity
+    const anonymousConversation = await ctx.db
+      .query("conversations")
+      .filter((q) =>
+        q.and(
+          q.eq(q.field("anonymousParticipantId"), args.userId),
+          q.or(
+            q.eq(q.field("participants"), [args.userId, args.viewerId]),
+            q.eq(q.field("participants"), [args.viewerId, args.userId])
+          )
+        )
+      )
+      .first();
+
+    if (anonymousConversation) {
+      // The requested user is anonymous in a conversation with the viewer
+      // Deny the profile lookup to protect their identity
+      return null;
+    }
+
     // Get photos
-    const photos = await ctx.db
+    const allPhotos = await ctx.db
       .query("photos")
       .withIndex("by_user_order", (q) => q.eq("userId", args.userId))
       .collect();
+
+    // PHOTO SOURCE FIX: Filter out verification_reference photos
+    // This ensures getUserById returns the same photos as getDiscoverProfiles
+    // for consistent photo counts between Discover card and opened profile
+    const photos = allPhotos.filter((p) => p.photoType !== 'verification_reference');
+    const safePhotos = getSafeProfilePhotos(photos);
+
+    console.log('[P1_PROFILE_PHOTOS] getUserById photo source', {
+      userId: args.userId,
+      allPhotosCount: allPhotos.length,
+      filteredCount: photos.length,
+      filteredOut: allPhotos.length - photos.length,
+      safeCount: safePhotos.length,
+      photoIds: safePhotos.map((p) => p._id),
+    });
 
     // Calculate distance if both have location
     const viewer = await ctx.db.get(args.viewerId);
@@ -116,7 +166,81 @@ export const getUserById = query({
       );
     }
 
-    // Return public profile data
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HARDENING FIX 3: CHECK FOR CONFESSION_COMMENT MATCH - RETURN MINI PROFILE
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Check if there's a confession_comment match between these users
+    // If so, return limited profile data to prevent data leaks
+    const confessionCommentMatch = await ctx.db
+      .query("matches")
+      .withIndex("by_user1", (q) => q.eq("user1Id", args.userId))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field("user2Id"), args.viewerId),
+          q.eq(q.field("matchSource"), "confession_comment" as any)
+        )
+      )
+      .first();
+
+    const reverseConfessionCommentMatch = !confessionCommentMatch
+      ? await ctx.db
+          .query("matches")
+          .withIndex("by_user1", (q) => q.eq("user1Id", args.viewerId))
+          .filter((q) =>
+            q.and(
+              q.eq(q.field("user2Id"), args.userId),
+              q.eq(q.field("matchSource"), "confession_comment" as any)
+            )
+          )
+          .first()
+      : null;
+
+    const isConfessionCommentMatch = !!(confessionCommentMatch || reverseConfessionCommentMatch);
+
+    if (isConfessionCommentMatch) {
+      // MINI PROFILE: Return limited data for confession_comment matches
+      // Only expose: name (first name only), age, gender, one blurred photo
+      const firstName = user.name?.split(" ")[0] || "Anonymous";
+      // ORDER-BASED PRIMARY: First photo by order is primary (photos are pre-sorted by order)
+      const primaryPhoto = safePhotos[0];
+
+      return {
+        id: user._id,
+        name: firstName, // First name only
+        age: calculateAge(user.dateOfBirth),
+        gender: user.gender,
+        // Limited fields - all others are undefined/hidden
+        bio: undefined,
+        height: undefined,
+        smoking: undefined,
+        drinking: undefined,
+        kids: undefined,
+        education: undefined,
+        religion: undefined,
+        jobTitle: undefined,
+        company: undefined,
+        school: undefined,
+        isVerified: user.isVerified,
+        verificationStatus: user.verificationStatus || "unverified",
+        city: user.city, // City is okay to show
+        distance,
+        lastActive: undefined, // Hide last active for privacy
+        lookingFor: undefined,
+        relationshipIntent: undefined,
+        activities: undefined,
+        profilePrompts: [], // No prompts
+        photos: primaryPhoto
+          ? [{ ...primaryPhoto, isBlurred: true }] // Single blurred photo
+          : [],
+        photoBlurred: true, // Force blur
+        isConfessionCommentProfile: true, // Flag for UI to show mini profile notice
+      };
+    }
+
+    // Return full public profile data
+    // Extract lifeRhythm from onboardingDraft for Deeper Traits section
+    const lifeRhythm = user.onboardingDraft?.lifeRhythm;
+
     return {
       id: user._id,
       name: user.name,
@@ -126,6 +250,8 @@ export const getUserById = query({
       height: user.height,
       smoking: user.smoking,
       drinking: user.drinking,
+      exercise: user.exercise, // Added for Lifestyle section
+      pets: user.pets, // Added for Lifestyle section
       kids: user.kids,
       education: user.education,
       religion: user.religion,
@@ -141,8 +267,14 @@ export const getUserById = query({
       relationshipIntent: user.relationshipIntent,
       activities: user.activities,
       profilePrompts: user.profilePrompts ?? [],
-      photos: photos.sort((a, b) => a.order - b.order),
+      photos: safePhotos,
       photoBlurred: user.photoBlurred === true,
+      // Deeper Traits from lifeRhythm (onboardingDraft)
+      sleepSchedule: lifeRhythm?.sleepSchedule,
+      socialRhythm: lifeRhythm?.socialRhythm,
+      travelStyle: lifeRhythm?.travelStyle,
+      workStyle: lifeRhythm?.workStyle,
+      coreValues: lifeRhythm?.coreValues,
     };
   },
 });
@@ -154,37 +286,53 @@ export const updateProfilePrompts = mutation({
     prompts: v.array(v.object({
       question: v.string(),
       answer: v.string(),
+      section: v.optional(v.string()), // BUGFIX: Include section for reliable hydration
     })),
   },
   handler: async (ctx, args) => {
+    console.log('[PROMPTS_BACKEND] updateProfilePrompts called with', args.prompts.length, 'prompts');
+    args.prompts.forEach((p, i) => {
+      console.log(`[PROMPTS_BACKEND] Received[${i}]: section=${p.section ?? 'NONE'}, question="${p.question.substring(0, 40)}...", answerLen=${p.answer.length}`);
+    });
+
     // SESSION AUTH: Validate token and get userId (same pattern as photos.ts)
     const userId = await validateSessionToken(ctx, args.token);
     if (!userId) {
+      console.log('[PROMPTS_BACKEND] FAILED: Invalid session token');
       throw new Error('Unauthorized: invalid or expired session');
     }
 
     const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    if (!user) {
+      console.log('[PROMPTS_BACKEND] FAILED: User not found for userId:', userId);
+      throw new Error("User not found");
+    }
 
     // BUGFIX #62: Reject empty prompts after trimming whitespace
     for (const prompt of args.prompts) {
       const trimmedQuestion = prompt.question.trim();
       const trimmedAnswer = prompt.answer.trim();
       if (trimmedQuestion.length === 0) {
+        console.log('[PROMPTS_BACKEND] FAILED: Empty question after trim');
         throw new Error("Prompt question cannot be empty");
       }
       if (trimmedAnswer.length === 0) {
+        console.log('[PROMPTS_BACKEND] FAILED: Empty answer after trim');
         throw new Error("Prompt answer cannot be empty");
       }
     }
 
     // Exactly 4 prompts (one per section), answer max 200 chars
+    // BUGFIX: Include section field for reliable hydration
     const cleaned = args.prompts.slice(0, 4).map((p) => ({
       question: p.question.trim().slice(0, 100),
       answer: p.answer.trim().slice(0, 200),
+      ...(p.section && { section: p.section }), // Preserve section if provided
     }));
 
+    console.log('[PROMPTS_BACKEND] Saving', cleaned.length, 'cleaned prompts to profilePrompts field');
     await ctx.db.patch(userId, { profilePrompts: cleaned });
+    console.log('[PROMPTS_BACKEND] SUCCESS: Saved prompts for user:', userId);
     return { success: true };
   },
 });
@@ -259,43 +407,42 @@ export const updateProfile = mutation({
     jobTitle: v.optional(v.string()),
     company: v.optional(v.string()),
     school: v.optional(v.string()),
+    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
+    // BUGFIX: Accept all 70 activities (matching schema.ts and ACTIVITY_FILTERS)
     activities: v.optional(
       v.array(
         v.union(
-          v.literal("coffee"),
-          v.literal("date_night"),
-          v.literal("sports"),
-          v.literal("movies"),
-          v.literal("free_tonight"),
-          v.literal("foodie"),
-          v.literal("gym_partner"),
-          v.literal("concerts"),
-          v.literal("travel"),
-          v.literal("outdoors"),
-          v.literal("art_culture"),
-          v.literal("gaming"),
-          v.literal("nightlife"),
-          v.literal("brunch"),
-          v.literal("study_date"),
-          v.literal("this_weekend"),
-          v.literal("beach_pool"),
-          v.literal("road_trip"),
-          v.literal("photography"),
-          v.literal("volunteering"),
+          // Original 20 activities
+          v.literal("coffee"), v.literal("date_night"), v.literal("sports"), v.literal("movies"), v.literal("free_tonight"),
+          v.literal("foodie"), v.literal("gym_partner"), v.literal("concerts"), v.literal("travel"), v.literal("outdoors"),
+          v.literal("art_culture"), v.literal("gaming"), v.literal("nightlife"), v.literal("brunch"), v.literal("study_date"),
+          v.literal("this_weekend"), v.literal("beach_pool"), v.literal("road_trip"), v.literal("photography"), v.literal("volunteering"),
+          // Additional 50 activities (matching frontend ACTIVITY_FILTERS)
+          v.literal("late_night_talks"), v.literal("street_food"), v.literal("home_cooking"), v.literal("baking"), v.literal("healthy_eating"),
+          v.literal("weekend_getaways"), v.literal("long_drives"), v.literal("city_exploring"), v.literal("beach_vibes"), v.literal("mountain_views"),
+          v.literal("nature_walks"), v.literal("sunset_views"), v.literal("hiking"), v.literal("camping"), v.literal("stargazing"),
+          v.literal("gardening"), v.literal("gym"), v.literal("yoga"), v.literal("running"), v.literal("cycling"),
+          v.literal("meditation"), v.literal("pilates"), v.literal("music_lover"), v.literal("live_concerts"), v.literal("singing"),
+          v.literal("podcasts"), v.literal("binge_watching"), v.literal("thrillers"), v.literal("documentaries"), v.literal("anime"),
+          v.literal("k_dramas"), v.literal("board_games"), v.literal("chess"), v.literal("escape_rooms"), v.literal("drawing"),
+          v.literal("painting"), v.literal("writing"), v.literal("journaling"), v.literal("diy_projects"), v.literal("reading"),
+          v.literal("personal_growth"), v.literal("learning_new_skills"), v.literal("mindfulness"), v.literal("tech_enthusiast"), v.literal("startups"),
+          v.literal("coding"), v.literal("community_service"), v.literal("sustainability"), v.literal("plant_parenting"),
         ),
       ),
     ),
@@ -350,9 +497,23 @@ export const updateProfile = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    // BUGFIX #61: Bio length validation (max 300 chars)
-    if (bio !== undefined && bio.length > 300) {
-      throw new Error("Bio must be 300 characters or less");
+    // P2 VALIDATION: Bio length validation (max 500 chars - matches frontend)
+    if (bio !== undefined && bio.length > 500) {
+      throw new Error("Bio must be 500 characters or less");
+    }
+
+    // P2 VALIDATION: Height range (100-250 cm)
+    if (otherUpdates.height !== undefined) {
+      if (otherUpdates.height < 100 || otherUpdates.height > 250) {
+        throw new Error("Height must be between 100 and 250 cm");
+      }
+    }
+
+    // P2 VALIDATION: Weight range (30-300 kg)
+    if (otherUpdates.weight !== undefined) {
+      if (otherUpdates.weight < 30 || otherUpdates.weight > 300) {
+        throw new Error("Weight must be between 30 and 300 kg");
+      }
     }
 
     // Server-side validation: pets max 3
@@ -391,17 +552,19 @@ export const updatePreferences = mutation({
         ),
       ),
     ),
+    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -430,6 +593,13 @@ export const updatePreferences = mutation({
   },
   handler: async (ctx, args) => {
     const { userId, minAge, maxAge, maxDistance, ...otherUpdates } = args;
+
+    // DEBUG: Log relationship category save
+    console.log('[RelationshipCategorySave] updatePreferences', {
+      source: 'updatePreferences',
+      userId,
+      relationshipIntent: args.relationshipIntent,
+    });
 
     // BUGFIX #37: Age bounds validation
     if (minAge !== undefined) {
@@ -470,7 +640,28 @@ export const updatePreferences = mutation({
       }
     }
 
+    // REAL-TIME SYNC FIX: When relationshipIntent changes, force category refresh
+    // This ensures Explore category visibility updates immediately, not after 28-48h
+    const intentChanged = args.relationshipIntent !== undefined;
+    if (intentChanged) {
+      cleanUpdates.assignedDiscoverCategory = undefined;
+      cleanUpdates.discoverCategoryAssignedAt = undefined;
+      console.log('[CategoryRefresh] Cleared category assignment due to relationshipIntent change', {
+        userId,
+        newIntent: args.relationshipIntent,
+      });
+    }
+
     await ctx.db.patch(userId, cleanUpdates);
+
+    // REAL-TIME SYNC FIX: Immediately reassign category after preference change
+    // This ensures the user appears in the correct category without delay
+    if (intentChanged) {
+      await ctx.scheduler.runAfter(0, internal.discoverCategories.assignCategory, {
+        userId,
+      });
+    }
+
     return { success: true };
   },
 });
@@ -501,6 +692,31 @@ export const updateLocation = mutation({
     });
 
     return { success: true };
+  },
+});
+
+// Heartbeat - updates lastActive for presence (Online Now / Active Today)
+// Called periodically when app is in foreground to keep user marked as "online"
+// PRESENCE FIX: This mutation enables accurate "Online now" display on Discover cards
+export const heartbeat = mutation({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { authUserId } = args;
+
+    // Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false, reason: 'user_not_found' };
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(userId, {
+      lastActive: now,
+    });
+
+    return { success: true, lastActive: now };
   },
 });
 
@@ -1226,17 +1442,19 @@ export const completeOnboarding = mutation({
         ),
       ),
     ),
+    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -1270,11 +1488,21 @@ export const completeOnboarding = mutation({
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
     // FIX: Add missing validators for profilePrompts and lgbtqSelf
+    // BUGFIX: Include section for reliable hydration
     profilePrompts: v.optional(v.array(v.object({
       question: v.string(),
       answer: v.string(),
+      section: v.optional(v.string()), // builder | performer | seeker | grounded
     }))),
     lgbtqSelf: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))),
+    // P0 FIX: Add lgbtqPreference for LGBTQ matching
+    lgbtqPreference: v.optional(v.array(v.union(
       v.literal('gay'),
       v.literal('lesbian'),
       v.literal('bisexual'),
@@ -1326,6 +1554,27 @@ export const completeOnboarding = mutation({
     // Server-side validation: pets max 3
     if (pets !== undefined && pets.length > 3) {
       throw new Error("You can select up to 3 pets only");
+    }
+
+    // P2 VALIDATION: Bio length validation (max 500 chars)
+    if (updates.bio !== undefined && (updates.bio as string).length > 500) {
+      throw new Error("Bio must be 500 characters or less");
+    }
+
+    // P2 VALIDATION: Height range (100-250 cm)
+    if (updates.height !== undefined) {
+      const h = updates.height as number;
+      if (h < 100 || h > 250) {
+        throw new Error("Height must be between 100 and 250 cm");
+      }
+    }
+
+    // P2 VALIDATION: Weight range (30-300 kg)
+    if (updates.weight !== undefined) {
+      const w = updates.weight as number;
+      if (w < 30 || w > 300) {
+        throw new Error("Weight must be between 30 and 300 kg");
+      }
     }
 
     // Filter out undefined values
@@ -1838,6 +2087,13 @@ export const upsertOnboardingDraft = mutation({
     patch: v.any(), // Accepts partial draft updates
   },
   handler: async (ctx, args) => {
+    // DEBUG: Log relationship category save
+    console.log('[RelationshipCategorySave] upsertOnboardingDraft', {
+      source: 'upsertOnboardingDraft',
+      userId: args.userId,
+      relationshipIntent: args.patch?.preferences?.relationshipIntent,
+    });
+
     // MUTATION: can create
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
 
@@ -2311,14 +2567,23 @@ export const getMyBlockedUsers = query({
       .collect();
 
     // Fetch basic info for each blocked user
+    // PHASE-2 IDENTITY FIX: Use Phase-2 nickname, never real name
     const blockedUsers = await Promise.all(
       blocks.map(async (block) => {
         const user = await ctx.db.get(block.blockedUserId);
         if (!user) return null;
+
+        // Get Phase-2 nickname from private profile
+        const privateProfile = await ctx.db
+          .query('userPrivateProfiles')
+          .withIndex('by_user', (q) => q.eq('userId', block.blockedUserId))
+          .first();
+        const nickname = privateProfile?.displayName || 'Anonymous';
+
         return {
           blockId: block._id,
           blockedUserId: block.blockedUserId,
-          displayName: user.name || 'Unknown',
+          displayName: nickname,
           blockedAt: block.createdAt,
         };
       })
@@ -2400,7 +2665,6 @@ export const getMyReports = query({
  * - deviceFingerprints
  * - behaviorFlags
  * - userStrikes
- * - revealRequests
  * - todAnswers
  * - todConnectRequests
  * - todPrivateMedia
@@ -2486,10 +2750,7 @@ export const devWipeAllUserData = mutation({
     await wipeTable('confessionReactions');
     await wipeTable('confessionNotifications');
 
-    // 7. Reveal requests
-    await wipeTable('revealRequests');
-
-    // 8. Chat rooms
+    // 7. Chat rooms
     await wipeTable('chatRoomMembers');
 
     // 9. Verification and security

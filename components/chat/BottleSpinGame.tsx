@@ -49,8 +49,10 @@ interface BottleSpinGameProps {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // V4 CLEAN UI MODE - Single source of truth for render decisions
+// SPIN-TURN-FIX: Added 'waiting_for_spin' for non-turn-owner
+// TD-LIFECYCLE: Added 'waiting_for_start' for invitee waiting for inviter to start
 // ═══════════════════════════════════════════════════════════════════════════
-type UIMode = 'idle' | 'spinning_local' | 'choosing_for_me' | 'choosing_for_other' | 'complete';
+type UIMode = 'idle' | 'waiting_for_spin' | 'waiting_for_start' | 'spinning_local' | 'choosing_for_me' | 'choosing_for_other' | 'complete';
 
 export function BottleSpinGame({
   visible,
@@ -83,24 +85,75 @@ export function BottleSpinGame({
   );
   const setTurnMutation = useMutation(api.games.setBottleSpinTurn);
 
+  // ROLE-FIX: Log raw gameSession for debugging
+  if (__DEV__ && visible && gameSession) {
+    console.log('[BOTTLE_SPIN_SESSION_DEBUG] Raw gameSession:', JSON.stringify(gameSession, null, 2));
+  }
+
   // Extract backend values (only when session is active)
   const isSessionActive = gameSession?.state === 'active';
   const backendTurnRole = isSessionActive ? gameSession.currentTurnRole : undefined;
   const backendTurnPhase = isSessionActive ? gameSession.turnPhase : undefined;
+  // SPIN-TURN-FIX: Extract spinTurnRole from backend
+  const backendSpinTurnRole = isSessionActive ? gameSession.spinTurnRole : undefined;
   const inviterId = isSessionActive ? gameSession.inviterId : undefined;
   const inviteeId = isSessionActive ? gameSession.inviteeId : undefined;
+  // TD-LIFECYCLE: Extract gameStartedAt for manual start check
+  const gameStartedAt = isSessionActive ? gameSession.gameStartedAt : undefined;
+  const hasGameStarted = !!gameStartedAt;
+  // NOTE: lastSelectedRole and consecutiveSelectedCount are handled entirely in backend
+  // Frontend does NOT need these values - all random selection logic is backend-only
 
   // ═══════════════════════════════════════════════════════════════════════════
   // ROLE DETERMINATION - Am I inviter or invitee?
   // ═══════════════════════════════════════════════════════════════════════════
   // inviterId is the auth ID stored when invite was sent
   // userId is my auth ID passed from parent
-  const amIInviter = Boolean(inviterId && userId === inviterId);
-  const amIInvitee = Boolean(inviteeId && userId === inviteeId);
+  // ROLE-FIX: Normalize IDs for comparison (trim whitespace, ensure string)
+  const normalizeId = (id: string | undefined): string => {
+    if (!id) return '';
+    return String(id).trim();
+  };
+  const normalizedUserId = normalizeId(userId);
+  const normalizedInviterId = normalizeId(inviterId);
+  const normalizedInviteeId = normalizeId(inviteeId);
+
+  // ROLE-FIX: Log exact comparison values to debug ID mismatch
+  if (__DEV__ && visible && isSessionActive) {
+    console.log('[BOTTLE_SPIN_ROLE_DEBUG] ID comparison:', {
+      userId_raw: userId,
+      userId_normalized: normalizedUserId,
+      inviterId_raw: inviterId,
+      inviterId_normalized: normalizedInviterId,
+      inviteeId_raw: inviteeId,
+      inviteeId_normalized: normalizedInviteeId,
+      inviterMatch_raw: userId === inviterId,
+      inviterMatch_normalized: normalizedUserId === normalizedInviterId,
+      inviteeMatch_raw: userId === inviteeId,
+      inviteeMatch_normalized: normalizedUserId === normalizedInviteeId,
+    });
+  }
+  // ROLE-FIX: Use normalized comparison for robustness
+  const amIInviter = Boolean(normalizedInviterId && normalizedUserId === normalizedInviterId);
+  const amIInvitee = Boolean(normalizedInviteeId && normalizedUserId === normalizedInviteeId);
   const myRole: 'inviter' | 'invitee' | null = amIInviter ? 'inviter' : (amIInvitee ? 'invitee' : null);
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // SPIN TURN OWNERSHIP - SPIN-TURN-FIX
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Determine if it's my turn to spin (only relevant in idle phase)
+  const currentSpinTurnRole = backendSpinTurnRole || 'inviter'; // Default to inviter if not set
+  const isMySpinTurn = myRole === currentSpinTurnRole;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ANIMATION LOCK - Disable all actions during spin animation
+  // ═══════════════════════════════════════════════════════════════════════════
+  const isAnimationLocked = isSpinningLocally || backendTurnPhase === 'spinning';
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // UI MODE DERIVATION - THE SINGLE SOURCE OF TRUTH FOR RENDERING
+  // SPIN-TURN-FIX: Added 'waiting_for_spin' when it's not my turn
+  // TD-LIFECYCLE: Added 'waiting_for_start' when game hasn't started yet
   // ═══════════════════════════════════════════════════════════════════════════
   const uiMode: UIMode = (() => {
     // Priority 1: Local spinning animation takes precedence
@@ -108,8 +161,33 @@ export function BottleSpinGame({
       return 'spinning_local';
     }
 
-    // Priority 2: No active session = idle
+    // Priority 2: No active session = idle (button still shown but backend will reject)
     if (!isSessionActive) {
+      return 'idle';
+    }
+
+    // TD-LIFECYCLE Priority 2.5: Game not started yet - invitee waits for inviter
+    // If session is active but gameStartedAt is not set, show waiting state for invitee
+    if (!hasGameStarted && amIInvitee) {
+      if (__DEV__) {
+        console.log('[TD_LIFECYCLE] Invitee waiting for game to start:', {
+          hasGameStarted,
+          gameStartedAt,
+          amIInvitee,
+        });
+      }
+      return 'waiting_for_start';
+    }
+
+    // TD-LIFECYCLE: If inviter and game not started, show idle (they can start)
+    if (!hasGameStarted && amIInviter) {
+      if (__DEV__) {
+        console.log('[TD_LIFECYCLE] Inviter can start game:', {
+          hasGameStarted,
+          gameStartedAt,
+          amIInviter,
+        });
+      }
       return 'idle';
     }
 
@@ -134,43 +212,66 @@ export function BottleSpinGame({
       return 'spinning_local'; // Show spinning UI even if we're not the spinner
     }
 
+    // Priority 6: Idle phase - check spin turn ownership
+    // SPIN-TURN-FIX: Show waiting state if not my spin turn
+    if (backendTurnPhase === 'idle' || backendTurnPhase === undefined) {
+      // ROLE-FIX: Log uiMode decision for debugging
+      if (__DEV__) {
+        console.log('[BOTTLE_SPIN_UIMODE_DECISION] Idle phase check:', {
+          isMySpinTurn,
+          myRole,
+          currentSpinTurnRole,
+          backendSpinTurnRole,
+          hasGameStarted,
+          decision: (!isMySpinTurn && myRole) ? 'waiting_for_spin' : 'idle',
+        });
+      }
+      if (!isMySpinTurn && myRole) {
+        return 'waiting_for_spin';
+      }
+      return 'idle';
+    }
+
     // Default: idle
     return 'idle';
   })();
 
   // ═══════════════════════════════════════════════════════════════════════════
   // DEBUG LOGGING - Comprehensive state trace for both devices
+  // SPIN-TURN-FIX: Added spin turn ownership logging
+  // FIX: Removed gameSession object reference from deps to prevent array size issues
   // ═══════════════════════════════════════════════════════════════════════════
+  // Derive gameSession state as primitive for stable dependency
+  const gameSessionState = gameSession?.state ?? 'unknown';
+
   useEffect(() => {
-    if (visible) {
-      console.log('[BOTTLE_SPIN_V4_DEBUG]', {
-        // Session info
-        sessionState: gameSession?.state,
+    if (visible && __DEV__) {
+      console.log('[BOTTLE_SPIN_DEBUG] State trace:', {
+        // Session info (primitives only)
+        gameSessionState,
         isSessionActive,
         // IDs
-        userId,
-        inviterId,
-        inviteeId,
+        myUserId: userId,
+        inviterId: inviterId ?? 'none',
+        inviteeId: inviteeId ?? 'none',
         // Role determination
-        amIInviter,
-        amIInvitee,
-        myRole,
+        myRole: myRole ?? 'none',
         // Backend turn state
-        backendTurnRole,
-        backendTurnPhase,
+        backendTurnRole: backendTurnRole ?? 'none',
+        backendTurnPhase: backendTurnPhase ?? 'none',
+        // SPIN-TURN-FIX: Spin turn ownership
+        backendSpinTurnRole: backendSpinTurnRole ?? 'none',
+        currentSpinTurnRole,
+        isMySpinTurn,
         // Local state
         isSpinningLocally,
-        chosenOption,
+        isAnimationLocked,
         // DERIVED UI MODE
         uiMode,
-        // Render branch that will be active
-        renderBranch: uiMode === 'choosing_for_me' ? 'CHOOSER_BUTTONS' :
-                      uiMode === 'choosing_for_other' ? 'OBSERVER_UI' :
-                      uiMode === 'spinning_local' ? 'SPINNING' :
-                      uiMode === 'complete' ? 'COMPLETE' : 'IDLE',
       });
     }
-  }, [visible, gameSession, isSessionActive, userId, inviterId, inviteeId, amIInviter, amIInvitee, myRole, backendTurnRole, backendTurnPhase, isSpinningLocally, chosenOption, uiMode]);
+  // FIX: Fixed dependency array - only primitive values, stable count (15 items)
+  }, [visible, gameSessionState, isSessionActive, userId, inviterId, inviteeId, myRole, backendTurnRole, backendTurnPhase, backendSpinTurnRole, currentSpinTurnRole, isMySpinTurn, isSpinningLocally, isAnimationLocked, uiMode]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SKIP TRACKING
@@ -245,8 +346,24 @@ export function BottleSpinGame({
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SPIN BOTTLE
+  // RANDOM-TARGET-FIX: ALL random selection happens in BACKEND, not frontend
+  // Frontend only reads the result from backend and animates accordingly
+  // This ensures both devices always show the same selection (no desync)
   // ═══════════════════════════════════════════════════════════════════════════
   const spinBottle = useCallback(async () => {
+    // VERIFICATION LOG: Spin attempt
+    if (__DEV__) {
+      console.log('[BOTTLE_SPIN] Spin attempt:', {
+        isSpinningLocally,
+        isAnimationLocked,
+        isSessionActive,
+        myRole,
+        currentSpinTurnRole,
+        isMySpinTurn,
+        backendSpinTurnRole,
+      });
+    }
+
     if (isSpinningLocally) return;
 
     // Guard: Only spin if session is active
@@ -261,41 +378,52 @@ export function BottleSpinGame({
       return;
     }
 
+    if (!userId || !conversationId) {
+      console.warn('[BOTTLE_SPIN] Cannot spin - missing userId or conversationId');
+      return;
+    }
+
     setIsSpinningLocally(true);
     setChosenOption(null);
 
-    // Notify backend
-    if (userId && conversationId) {
-      try {
-        await setTurnMutation({
-          authUserId: userId,
-          conversationId,
-          currentTurnRole: undefined,
-          turnPhase: 'spinning',
-        });
-      } catch (error) {
-        console.error('[BOTTLE_SPIN] Failed to set spinning state:', error);
-      }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // BACKEND-ONLY RANDOM SELECTION
+    // Call backend with 'spinning' phase - backend generates random selection
+    // and returns it. NO Math.random() in frontend for target selection!
+    // ═══════════════════════════════════════════════════════════════════════════
+    let selectedRole: 'inviter' | 'invitee';
+    try {
+      const result = await setTurnMutation({
+        authUserId: userId,
+        conversationId,
+        currentTurnRole: undefined,
+        turnPhase: 'spinning',
+      });
+      // Backend returns the randomly selected target
+      selectedRole = result.selectedTargetRole as 'inviter' | 'invitee';
+      console.log('[BOTTLE_SPIN] Backend selected target:', { selectedRole });
+    } catch (error) {
+      console.error('[BOTTLE_SPIN] Failed to get spin result from backend:', error);
+      setIsSpinningLocally(false);
+      return;
     }
 
     const spinSession = spinSessionRef.current;
 
-    // Random spin
+    // Calculate animation direction based on backend selection (NO local random for selection)
+    const landsOnMe = selectedRole === myRole;
+
+    // Only use random for visual animation variation (not selection)
     const fullRotations = 3 + Math.floor(Math.random() * 4);
-    const landsOnMe = Math.random() < 0.5;
     const finalAngle = landsOnMe ? 0 : 180;
     const totalRotation = fullRotations * 360 + finalAngle;
+    const animDuration = 3000 + Math.random() * 1000;
 
-    // Determine which ROLE the bottle landed on
-    const selectedRole: 'inviter' | 'invitee' = landsOnMe
-      ? myRole // Landed on me = my role
-      : (myRole === 'inviter' ? 'invitee' : 'inviter'); // Landed on other = opposite role
-
-    console.log('[BOTTLE_SPIN] Spin result:', { landsOnMe, myRole, selectedRole });
+    console.log('[BOTTLE_SPIN] Animation direction:', { landsOnMe, myRole, selectedRole });
 
     Animated.timing(spinAnim, {
       toValue: totalRotation,
-      duration: 3000 + Math.random() * 1000,
+      duration: animDuration,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
     }).start(async () => {
@@ -307,19 +435,17 @@ export function BottleSpinGame({
       currentRotation.current = totalRotation % 360;
       setIsSpinningLocally(false);
 
-      // Update backend with the selected ROLE
-      if (userId && conversationId) {
-        try {
-          await setTurnMutation({
-            authUserId: userId,
-            conversationId,
-            currentTurnRole: selectedRole,
-            turnPhase: 'choosing',
-          });
-          console.log('[BOTTLE_SPIN] Set turn state:', { selectedRole, turnPhase: 'choosing' });
-        } catch (error) {
-          console.error('[BOTTLE_SPIN] Failed to set turn state:', error);
-        }
+      // Transition to choosing phase (backend already knows the selected target)
+      try {
+        await setTurnMutation({
+          authUserId: userId,
+          conversationId,
+          currentTurnRole: selectedRole, // Use the backend-selected role
+          turnPhase: 'choosing',
+        });
+        console.log('[BOTTLE_SPIN] Set choosing phase:', { selectedRole });
+      } catch (error) {
+        console.error('[BOTTLE_SPIN] Failed to set choosing state:', error);
       }
 
       // Haptic feedback
@@ -329,13 +455,11 @@ export function BottleSpinGame({
         // Haptics not available
       }
 
-      // Send system message
-      if (onSendResultMessage) {
-        const selectedName = landsOnMe ? currentUserName : otherUserName;
-        onSendResultMessage(`Bottle landed on ${selectedName}!`);
-      }
+      // NOTE: "Bottle landed on X" message intentionally NOT sent to chat
+      // to keep thread clean. Users see visual result in game modal.
+      // Only meaningful messages (chose Truth/Dare/Skip) are persisted.
     });
-  }, [isSpinningLocally, isSessionActive, myRole, userId, inviterId, inviteeId, conversationId, setTurnMutation, spinAnim, currentUserName, otherUserName, onSendResultMessage]);
+  }, [isSpinningLocally, isSessionActive, myRole, userId, inviterId, inviteeId, conversationId, setTurnMutation, spinAnim, currentSpinTurnRole, isMySpinTurn, backendSpinTurnRole, isAnimationLocked]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // HANDLE CHOICE (Truth/Dare/Skip)
@@ -425,8 +549,14 @@ export function BottleSpinGame({
   });
 
   // Determine which user badge should be highlighted based on backend turn role
+  // Choosing phase highlights (existing)
   const isCurrentUserSelected = backendTurnPhase === 'choosing' && backendTurnRole === myRole;
   const isOtherUserSelected = backendTurnPhase === 'choosing' && backendTurnRole !== myRole && backendTurnRole !== undefined;
+
+  // SPIN-TURN-FIX: Spin turn highlights for idle phase
+  const isIdleOrWaiting = backendTurnPhase === 'idle' || backendTurnPhase === undefined;
+  const showMySpinTurnBadge = isIdleOrWaiting && isMySpinTurn && myRole !== null;
+  const showOtherSpinTurnBadge = isIdleOrWaiting && !isMySpinTurn && myRole !== null;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // RENDER: CHOOSER BUTTONS (Truth/Dare/Skip) - Horizontal row layout
@@ -473,6 +603,34 @@ export function BottleSpinGame({
         <Text style={styles.resultName}>{otherUserName}</Text>
         {' '}is choosing...
       </Text>
+    </View>
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RENDER: WAITING FOR SPIN (other user's turn to spin) - SPIN-TURN-FIX
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderWaitingForSpin = () => (
+    <View style={styles.waitingContainer}>
+      <View style={styles.waitingContent}>
+        <Ionicons name="hourglass-outline" size={18} color={COLORS.textLight} />
+        <Text style={styles.waitingText}>
+          Waiting for <Text style={styles.waitingName}>{otherUserName}</Text> to spin
+        </Text>
+      </View>
+    </View>
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TD-LIFECYCLE: RENDER: WAITING FOR START (invitee waiting for inviter to start game)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderWaitingForStart = () => (
+    <View style={styles.waitingContainer}>
+      <View style={styles.waitingContent}>
+        <Ionicons name="time-outline" size={18} color={COLORS.textLight} />
+        <Text style={styles.waitingText}>
+          Waiting for <Text style={styles.waitingName}>{otherUserName}</Text> to start
+        </Text>
+      </View>
     </View>
   );
 
@@ -528,8 +686,12 @@ export function BottleSpinGame({
               <Ionicons name="wine" size={18} color={COLORS.secondary} />
               <Text style={styles.title}>Spin the Bottle</Text>
             </View>
-            <TouchableOpacity onPress={handleClose} style={styles.closeButton}>
-              <Ionicons name="close" size={22} color={COLORS.text} />
+            <TouchableOpacity
+              onPress={handleClose}
+              style={[styles.closeButton, isAnimationLocked && styles.buttonDisabled]}
+              disabled={isAnimationLocked}
+            >
+              <Ionicons name="close" size={22} color={isAnimationLocked ? COLORS.textMuted : COLORS.text} />
             </TouchableOpacity>
           </View>
 
@@ -540,15 +702,20 @@ export function BottleSpinGame({
               <View style={[
                 styles.userBadge,
                 isCurrentUserSelected && styles.userBadgeSelected,
+                showMySpinTurnBadge && styles.userBadgeSpinTurn,
               ]}>
                 <Text style={[
                   styles.userName,
                   isCurrentUserSelected && styles.userNameSelected,
+                  showMySpinTurnBadge && styles.userNameSpinTurn,
                 ]}>
                   {currentUserName}
                 </Text>
                 {isCurrentUserSelected && (
                   <Text style={styles.turnText}>Your turn!</Text>
+                )}
+                {showMySpinTurnBadge && (
+                  <Text style={styles.spinTurnText}>Your turn to spin</Text>
                 )}
               </View>
             </View>
@@ -573,15 +740,20 @@ export function BottleSpinGame({
               <View style={[
                 styles.userBadge,
                 isOtherUserSelected && styles.userBadgeSelected,
+                showOtherSpinTurnBadge && styles.userBadgeSpinTurnOther,
               ]}>
                 <Text style={[
                   styles.userName,
                   isOtherUserSelected && styles.userNameSelected,
+                  showOtherSpinTurnBadge && styles.userNameSpinTurnOther,
                 ]}>
                   {otherUserName}
                 </Text>
                 {isOtherUserSelected && (
                   <Text style={styles.turnText}>Their turn!</Text>
+                )}
+                {showOtherSpinTurnBadge && (
+                  <Text style={styles.spinTurnTextOther}>Their turn to spin</Text>
                 )}
               </View>
             </View>
@@ -607,6 +779,12 @@ export function BottleSpinGame({
               <Text style={styles.spinningText}>Spinning...</Text>
             </View>
           )}
+
+          {/* WAITING_FOR_SPIN: Show waiting text - SPIN-TURN-FIX */}
+          {uiMode === 'waiting_for_spin' && renderWaitingForSpin()}
+
+          {/* TD-LIFECYCLE: WAITING_FOR_START: Invitee waiting for inviter to start */}
+          {uiMode === 'waiting_for_start' && renderWaitingForStart()}
 
           {/* CHOOSING_FOR_ME: I must choose - show Truth/Dare/Skip buttons */}
           {uiMode === 'choosing_for_me' && renderChooserButtons()}
@@ -634,9 +812,20 @@ export function BottleSpinGame({
               <Text style={styles.skipsText}>Skips: {skipsRemaining}/{MAX_SKIPS}</Text>
             </View>
 
-            <TouchableOpacity style={styles.endGameButton} onPress={handleEndGamePress}>
-              <Ionicons name="close-circle-outline" size={14} color="#E57373" style={{ marginRight: 4 }} />
-              <Text style={styles.endGameText}>End Game</Text>
+            <TouchableOpacity
+              style={[styles.endGameButton, isAnimationLocked && styles.endGameButtonDisabled]}
+              onPress={handleEndGamePress}
+              disabled={isAnimationLocked}
+            >
+              <Ionicons
+                name="close-circle-outline"
+                size={14}
+                color={isAnimationLocked ? COLORS.textMuted : '#E57373'}
+                style={{ marginRight: 4 }}
+              />
+              <Text style={[styles.endGameText, isAnimationLocked && styles.endGameTextDisabled]}>
+                End Game
+              </Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -715,6 +904,9 @@ const styles = StyleSheet.create({
   closeButton: {
     padding: 2,
   },
+  buttonDisabled: {
+    opacity: 0.4,
+  },
   gameArea: {
     alignItems: 'center',
     paddingVertical: 10,
@@ -747,6 +939,33 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: COLORS.secondary,
+    marginTop: 2,
+  },
+  // SPIN-TURN-FIX: Spin turn highlight styles
+  userBadgeSpinTurn: {
+    backgroundColor: COLORS.secondary + '20',
+    borderColor: COLORS.secondary,
+  },
+  userNameSpinTurn: {
+    color: COLORS.secondary,
+  },
+  spinTurnText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: COLORS.secondary,
+    marginTop: 2,
+  },
+  userBadgeSpinTurnOther: {
+    backgroundColor: COLORS.textMuted + '15',
+    borderColor: COLORS.textMuted + '40',
+  },
+  userNameSpinTurnOther: {
+    color: COLORS.textLight,
+  },
+  spinTurnTextOther: {
+    fontSize: 10,
+    fontWeight: '500',
+    color: COLORS.textMuted,
     marginTop: 2,
   },
   bottleContainer: {
@@ -836,6 +1055,30 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: COLORS.textLight,
+  },
+  // SPIN-TURN-FIX: Waiting for spin styles
+  waitingContainer: {
+    height: CONTENT_AREA_HEIGHT,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  waitingContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 12,
+  },
+  waitingText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.textLight,
+  },
+  waitingName: {
+    fontWeight: '600',
+    color: COLORS.text,
   },
   choiceContainer: {
     height: CONTENT_AREA_HEIGHT,
@@ -981,6 +1224,14 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#E57373',
     fontWeight: '600',
+  },
+  endGameButtonDisabled: {
+    opacity: 0.4,
+    backgroundColor: 'rgba(150, 150, 150, 0.1)',
+    borderColor: 'rgba(150, 150, 150, 0.2)',
+  },
+  endGameTextDisabled: {
+    color: COLORS.textMuted,
   },
   // End Game confirmation modal
   confirmOverlay: {

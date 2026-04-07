@@ -52,7 +52,7 @@ const C = INCOGNITO_COLORS;
 
 export interface ChatTodUser {
   id: string;
-  name: string;
+  displayName: string; // PHASE-2 IDENTITY FIX: Use nickname, not real name
   avatarUrl?: string;
 }
 
@@ -123,10 +123,11 @@ export function ChatTodOverlay({
   }, [game, conversationId, users, initGame]);
 
   // Convert users to BottleSpin format
+  // PHASE-2 IDENTITY FIX: Use displayName for nickname
   const bottleUsers: [BottleSpinUser, BottleSpinUser] = useMemo(
     () => [
-      { id: users[0].id, name: users[0].name, avatarUrl: users[0].avatarUrl },
-      { id: users[1].id, name: users[1].name, avatarUrl: users[1].avatarUrl },
+      { id: users[0].id, name: users[0].displayName, avatarUrl: users[0].avatarUrl },
+      { id: users[1].id, name: users[1].displayName, avatarUrl: users[1].avatarUrl },
     ],
     [users]
   );
@@ -208,7 +209,7 @@ export function ChatTodOverlay({
       text: game.promptText,
       type: game.promptType,
       ownerUserId: game.chooserUserId || '',
-      ownerName: users.find((u) => u.id === game.chooserUserId)?.name || 'Anonymous',
+      ownerName: users.find((u) => u.id === game.chooserUserId)?.displayName || 'Anonymous',
       ownerPhotoUrl: users.find((u) => u.id === game.chooserUserId)?.avatarUrl,
       createdAt: Date.now(),
       answerCount: 0,
@@ -360,7 +361,7 @@ export function ChatTodOverlay({
                 <>
                   <Text style={styles.phaseTitle}>Your turn!</Text>
                   <Text style={styles.phaseHint}>
-                    Choose Truth or Dare for {otherUser.name}
+                    Choose Truth or Dare for {otherUser.displayName}
                   </Text>
 
                   <View style={styles.choiceRow}>
@@ -397,7 +398,7 @@ export function ChatTodOverlay({
                 </>
               ) : (
                 <>
-                  <Text style={styles.phaseTitle}>{otherUser.name}'s turn</Text>
+                  <Text style={styles.phaseTitle}>{otherUser.displayName}'s turn</Text>
                   <Text style={styles.phaseHint}>
                     Waiting for them to choose Truth or Dare...
                   </Text>
@@ -423,7 +424,7 @@ export function ChatTodOverlay({
                     Write your {game.promptType}
                   </Text>
                   <Text style={styles.phaseHint}>
-                    Ask {otherUser.name} anything
+                    Ask {otherUser.displayName} anything
                   </Text>
 
                   <TextInput
@@ -457,7 +458,7 @@ export function ChatTodOverlay({
                 </>
               ) : (
                 <>
-                  <Text style={styles.phaseTitle}>{otherUser.name} is writing</Text>
+                  <Text style={styles.phaseTitle}>{otherUser.displayName} is writing</Text>
                   <Text style={styles.phaseHint}>
                     They're creating a {game.promptType} for you...
                   </Text>
@@ -486,7 +487,7 @@ export function ChatTodOverlay({
                   </View>
 
                   <Text style={styles.promptDisplay}>{game.promptText}</Text>
-                  <Text style={styles.promptFrom}>— from {otherUser.name}</Text>
+                  <Text style={styles.promptFrom}>— from {otherUser.displayName}</Text>
 
                   {/* Answer Type Selector */}
                   <View style={styles.answerTypeRow}>
@@ -582,7 +583,7 @@ export function ChatTodOverlay({
                   </View>
                   <Text style={styles.promptDisplay}>{game.promptText}</Text>
                   <Text style={styles.phaseHint}>
-                    Waiting for {otherUser.name} to answer...
+                    Waiting for {otherUser.displayName} to answer...
                   </Text>
                   <View style={styles.waitingIndicator}>
                     <Ionicons name="hourglass" size={32} color={C.textLight} />
@@ -598,7 +599,7 @@ export function ChatTodOverlay({
               <Ionicons name="checkmark-circle" size={64} color={C.primary} />
               <Text style={styles.completeTitle}>Round Complete!</Text>
               <Text style={styles.completeHint}>
-                You can now chat freely with {otherUser.name}
+                You can now chat freely with {otherUser.displayName}
               </Text>
 
               {/* Show last answer summary */}

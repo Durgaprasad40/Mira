@@ -3,6 +3,7 @@ import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_gen
 import { Id } from './_generated/dataModel';
 import { softMaskText } from './softMask';
 import { resolveUserIdByAuthId } from './helpers';
+import { tryEarnCoinInDm } from './coinEarning';
 
 // Phase-2: Helper to check if user has any active chatRoom readOnly penalty
 async function hasActiveChatRoomPenalty(
@@ -235,10 +236,42 @@ export const sendMessage = mutation({
       createdAt: now,
     });
 
+    // SEC-4 FIX: Post-insert block verification to close race condition
+    // If a block was created between pre-check and insert, delete the message
+    if (recipientId && await isBlockedBidirectional(ctx, senderId, recipientId)) {
+      await ctx.db.delete(messageId);
+      throw new Error('Cannot send message');
+    }
+
     // Update conversation last message time
-    await ctx.db.patch(conversationId, {
+    // Anti-spam: Track initiator and recipient engagement for room-scoped threads
+    const conversationUpdate: {
+      lastMessageAt: number;
+      initiatorId?: any;
+      hasRecipientEngaged?: boolean;
+      expiresAt?: number;
+    } = {
       lastMessageAt: now,
-    });
+    };
+
+    // If this is a room-scoped conversation (sourceRoomId set)
+    if (conversation.sourceRoomId) {
+      // Set initiatorId on first message (if not already set)
+      if (!conversation.initiatorId) {
+        conversationUpdate.initiatorId = senderId;
+      }
+      // If sender is NOT the initiator, mark recipient as engaged
+      else if (conversation.initiatorId !== senderId && !conversation.hasRecipientEngaged) {
+        conversationUpdate.hasRecipientEngaged = true;
+      }
+
+      // Thread expiry: 1 hour after last message
+      // Every message extends the thread's life by 1 hour
+      const ONE_HOUR_MS = 60 * 60 * 1000;
+      conversationUpdate.expiresAt = now + ONE_HOUR_MS;
+    }
+
+    await ctx.db.patch(conversationId, conversationUpdate);
 
     // C1/C2/C3-REPAIR: Update recipient's unreadCount via recomputation (race-safe)
     // recipientId already defined from D1 blocking check above
@@ -247,6 +280,22 @@ export const sendMessage = mutation({
       await upsertParticipantUnreadCount(ctx, conversationId, recipientId);
       // Also ensure sender has a row (will have 0 unread since they just sent)
       await upsertParticipantUnreadCount(ctx, conversationId, senderId);
+    }
+
+    // ANTI-SPAM COIN REWARD: Award coin only if anti-spam rules pass
+    // Rules enforced by tryEarnCoinInDm:
+    // - Two-way interaction required (recipient messaged recently)
+    // - 12-second cooldown between coin earnings
+    // - Max 20 coins/hour per conversation
+    // - Spam messages (short/repeated) don't earn
+    if (recipientId && type === 'text') {
+      await tryEarnCoinInDm({
+        ctx,
+        senderId,
+        recipientId,
+        conversationId,
+        messageText: maskedContent,
+      });
     }
 
     // Create notification for recipient
@@ -417,6 +466,22 @@ export const sendPreMatchMessage = mutation({
     await upsertParticipantUnreadCount(ctx, conversation._id, toUserId);
     await upsertParticipantUnreadCount(ctx, conversation._id, fromUserId);
 
+    // ANTI-SPAM COIN REWARD: Award coin only if anti-spam rules pass
+    // Rules enforced by tryEarnCoinInDm:
+    // - Two-way interaction required (recipient messaged recently)
+    // - 12-second cooldown between coin earnings
+    // - Max 20 coins/hour per conversation
+    // - Spam messages (short/repeated) don't earn
+    if (msgType === 'text') {
+      await tryEarnCoinInDm({
+        ctx,
+        senderId: fromUserId,
+        recipientId: toUserId,
+        conversationId: conversation._id,
+        messageText: maskedContent,
+      });
+    }
+
     // 9-5: Notify recipient with TTL and dedupe
     // M1 FIX: Privacy-safe notification body - never expose message content
     const dedupeKey = `message:${conversation._id}:unread`;
@@ -451,25 +516,21 @@ export const sendPreMatchMessage = mutation({
 });
 
 // Get messages in a conversation
-// SYNC-FIX: Accept authUserId string for consistent identity resolution across devices
+// P0-AUTH-FIX: Require authUserId and resolve server-side only (matches sendMessage pattern)
 export const getMessages = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.optional(v.id('users')), // Legacy support
-    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
+    userId: v.optional(v.id('users')), // IGNORED: Legacy compat only, never used
+    authUserId: v.string(), // P0-AUTH-FIX: Required, resolved server-side
     limit: v.optional(v.number()),
     before: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, limit = 50, before } = args;
+    const { conversationId, authUserId, limit = 50, before } = args;
 
-    // SYNC-FIX: Resolve user ID consistently using auth helper
-    let userId: Id<'users'> | undefined = args.userId;
-    if (!userId && args.authUserId) {
-      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
-      userId = resolved ?? undefined;
-    }
-
+    // P0-AUTH-FIX: Always resolve identity server-side from authUserId
+    // Never trust client-provided userId - it is ignored even if passed
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return [];
     }
@@ -708,6 +769,8 @@ export const markAllAsDelivered = mutation({
 
     // Find all messages sent TO this user that are not yet delivered
     // Query all conversations this user is part of
+    // SEC-6 NOTE: Access validation is enforced by the by_user index - we only get
+    // conversations where this userId is a participant. No additional validation needed.
     const participations = await ctx.db
       .query('conversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
@@ -737,6 +800,67 @@ export const markAllAsDelivered = mutation({
   },
 });
 
+/**
+ * FEAT-2: Delete a message from a private DM conversation.
+ * Only the sender can delete their own messages.
+ * Hard deletes the message (privacy-first: users expect true deletion).
+ */
+export const deleteMessage = mutation({
+  args: {
+    messageId: v.id('messages'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { messageId, authUserId } = args;
+
+    // Resolve auth ID to user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Get the message
+    const message = await ctx.db.get(messageId);
+    if (!message) {
+      // Message already deleted or doesn't exist
+      return { success: true, alreadyDeleted: true };
+    }
+
+    // Verify sender owns this message
+    if (message.senderId !== userId) {
+      throw new Error('Unauthorized: you can only delete your own messages');
+    }
+
+    // Verify user is part of the conversation
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      throw new Error('Unauthorized: conversation not found or access denied');
+    }
+
+    // Delete any associated storage (images, voice, etc.)
+    if (message.imageStorageId) {
+      try {
+        await ctx.storage.delete(message.imageStorageId);
+      } catch (e) {
+        // Storage may already be deleted, continue
+        console.warn('[deleteMessage] Failed to delete image storage:', e);
+      }
+    }
+    if (message.audioStorageId) {
+      try {
+        await ctx.storage.delete(message.audioStorageId);
+      } catch (e) {
+        console.warn('[deleteMessage] Failed to delete audio storage:', e);
+      }
+    }
+
+    // Hard delete the message
+    await ctx.db.delete(messageId);
+
+    return { success: true };
+  },
+});
+
 // ONLINE-STATUS-FIX: Update user's lastActive timestamp
 // Called periodically while user is in a conversation to show "Online" status
 export const updatePresence = mutation({
@@ -761,24 +885,20 @@ export const updatePresence = mutation({
 });
 
 // Get conversation by ID
-// SYNC-FIX: Accept authUserId string for consistent identity resolution across devices
+// P0-AUTH-FIX: Require authUserId and resolve server-side only (matches sendMessage pattern)
 export const getConversation = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.optional(v.id('users')), // Legacy support
-    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
+    userId: v.optional(v.id('users')), // IGNORED: Legacy compat only, never used
+    authUserId: v.string(), // P0-AUTH-FIX: Required, resolved server-side
   },
   handler: async (ctx, args) => {
-    const { conversationId } = args;
+    const { conversationId, authUserId } = args;
     const now = Date.now();
 
-    // SYNC-FIX: Resolve user ID consistently using auth helper
-    let userId: Id<'users'> | undefined = args.userId;
-    if (!userId && args.authUserId) {
-      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
-      userId = resolved ?? undefined;
-    }
-
+    // P0-AUTH-FIX: Always resolve identity server-side from authUserId
+    // Never trust client-provided userId - it is ignored even if passed
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return null;
     }
@@ -809,6 +929,22 @@ export const getConversation = query({
         .withIndex('by_user', (q) => q.eq('userId', otherUserId))
         .filter((q) => q.eq(q.field('isPrimary'), true))
         .first();
+
+      // BUG FIX: Fallback to any photo if no isPrimary photo exists
+      // Same pattern as likes.ts to handle edge cases where isPrimary flag is not set
+      if (!photo) {
+        photo = await ctx.db
+          .query('photos')
+          .withIndex('by_user', (q) => q.eq('userId', otherUserId))
+          .first();
+      }
+    }
+
+    // BUG FIX: Resolve photo URL at query time using ctx.storage.getUrl
+    // Stored URLs can expire; always fetch fresh URL from storage
+    let resolvedPhotoUrl: string | null = null;
+    if (photo?.storageId) {
+      resolvedPhotoUrl = await ctx.storage.getUrl(photo.storageId);
     }
 
     // Check if this is an expired confession-based conversation
@@ -817,9 +953,17 @@ export const getConversation = query({
       ? conversation.expiresAt <= now
       : false;
 
+    // FIX 8: Get matchSource to determine if this is a confession_comment match
+    let matchSource: string | undefined;
+    if (conversation.matchId) {
+      const match = await ctx.db.get(conversation.matchId);
+      matchSource = (match as any)?.matchSource;
+    }
+
     return {
       id: conversation._id,
       matchId: conversation.matchId,
+      matchSource, // FIX 8: Include matchSource for mini profile mode
       isPreMatch: conversation.isPreMatch,
       createdAt: conversation.createdAt,
       isConfessionChat,
@@ -829,7 +973,7 @@ export const getConversation = query({
         id: otherUserId,
         // PRIVACY FIX: Return anonymous display info if user should be anonymous
         name: isOtherUserAnonymous ? 'Anonymous' : otherUser.name,
-        photoUrl: isOtherUserAnonymous ? undefined : photo?.url,
+        photoUrl: isOtherUserAnonymous ? undefined : resolvedPhotoUrl,
         lastActive: isOtherUserAnonymous ? undefined : otherUser.lastActive,
         isVerified: isOtherUserAnonymous ? false : otherUser.isVerified,
         isAnonymous: isOtherUserAnonymous, // Flag for UI to show anonymous avatar
@@ -866,8 +1010,22 @@ export const getConversations = query({
       .filter((c) => {
         // Must be a participant
         if (!c.participants.includes(userId)) return false;
-        // Filter out expired confession-based conversations
-        if (c.confessionId && c.expiresAt && c.expiresAt <= now) return false;
+
+        // Filter out expired conversations (confession-based OR room-scoped threads)
+        // Room-scoped threads expire 1 hour after last message
+        if (c.expiresAt && c.expiresAt <= now) return false;
+
+        // Anti-spam: For room-scoped threads, hide from recipient until they engage
+        // - If I'm NOT the initiator AND recipient hasn't engaged yet, hide from my inbox
+        // - This prevents spam: one-sided outgoing messages don't clutter recipient's inbox
+        if (c.sourceRoomId && c.initiatorId) {
+          const amInitiator = c.initiatorId === userId;
+          // If I'm not the initiator and haven't engaged yet, hide this thread from my inbox
+          if (!amInitiator && !c.hasRecipientEngaged) {
+            return false;
+          }
+        }
+
         return true;
       })
       .slice(0, limit);
@@ -949,6 +1107,39 @@ export const getConversations = query({
     const userMap = new Map(otherUserIds.map((id, i) => [id, users[i]]));
     const photoMap = new Map(otherUserIds.map((id, i) => [id, photos[i]]));
 
+    // BUG FIX: Fallback to any photo for users without isPrimary photo
+    // Same pattern as likes.ts to handle edge cases where isPrimary flag is not set
+    const usersWithoutPrimaryPhoto = otherUserIds.filter((id, i) => !photos[i]);
+    if (usersWithoutPrimaryPhoto.length > 0) {
+      const fallbackPhotos = await Promise.all(
+        usersWithoutPrimaryPhoto.map((id) =>
+          ctx.db
+            .query('photos')
+            .withIndex('by_user', (q) => q.eq('userId', id))
+            .first()
+        )
+      );
+      // Update photoMap with fallback photos
+      usersWithoutPrimaryPhoto.forEach((id, i) => {
+        if (fallbackPhotos[i]) {
+          photoMap.set(id, fallbackPhotos[i]);
+        }
+      });
+    }
+
+    // BUG FIX: Resolve photo URLs at query time using ctx.storage.getUrl
+    // Stored URLs can expire; always fetch fresh URLs from storage
+    const photoUrlMap = new Map<string, string | null>();
+    const usersWithPhotos = Array.from(photoMap.entries()).filter(([_, photo]) => photo?.storageId);
+    if (usersWithPhotos.length > 0) {
+      const resolvedUrls = await Promise.all(
+        usersWithPhotos.map(([_, photo]) => ctx.storage.getUrl(photo!.storageId))
+      );
+      usersWithPhotos.forEach(([odId], i) => {
+        photoUrlMap.set(odId as string, resolvedUrls[i]);
+      });
+    }
+
     // Build result
     const result = [];
     for (let i = 0; i < userConversations.length; i++) {
@@ -962,9 +1153,11 @@ export const getConversations = query({
       const otherUser = userMap.get(otherUserId);
       if (!otherUser || !otherUser.isActive) continue;
 
-      const photo = photoMap.get(otherUserId);
+      const resolvedPhotoUrl = photoUrlMap.get(otherUserId as string) ?? null;
       const lastMessage = lastMessages[i];
-      const unreadCount = unreadCounts[i]?.length || 0;
+      // P0-008 FIX: Filter unread messages by COUNTABLE_MESSAGE_TYPES (same as computeUnreadCountFromMessages)
+      // System messages should not count toward the unread badge
+      const unreadCount = (unreadCounts[i] || []).filter((m) => COUNTABLE_MESSAGE_TYPES.includes(m.type)).length;
 
       // PRIVACY FIX: Check if the other user should be shown anonymously
       // This happens when they're the confession author on an anonymous confession
@@ -979,7 +1172,7 @@ export const getConversations = query({
           id: otherUserId,
           // PRIVACY FIX: Return anonymous display info if user should be anonymous
           name: isOtherUserAnonymous ? 'Anonymous' : otherUser.name,
-          photoUrl: isOtherUserAnonymous ? undefined : photo?.url,
+          photoUrl: isOtherUserAnonymous ? undefined : resolvedPhotoUrl,
           lastActive: isOtherUserAnonymous ? undefined : otherUser.lastActive,
           isVerified: isOtherUserAnonymous ? false : otherUser.isVerified,
           photoBlurred: isOtherUserAnonymous ? false : otherUser.photoBlurred === true,

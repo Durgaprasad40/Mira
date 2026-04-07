@@ -21,7 +21,7 @@ import {
 import { useRouter, usePathname } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useQuery } from "convex/react";
+import { useQuery, useMutation } from "convex/react";
 import * as FileSystem from "expo-file-system/legacy";
 import { api } from "@/convex/_generated/api";
 import { INCOGNITO_COLORS } from "@/lib/constants";
@@ -166,22 +166,14 @@ async function persistPhotoUris(uris: string[]): Promise<string[]> {
     }
 
     // Copy cache file to persistent storage
+    // P2-004 FIX: Removed pre-check to avoid TOCTOU race condition
+    // Instead, we attempt the copy and handle failures gracefully
     try {
-      // Verify source exists - MUST use fullUri
-      if (__DEV__) console.log("[PersistPhotos] Checking source:", fullUri);
-      const sourceInfo = await FileSystem.getInfoAsync(fullUri);
-      if (!sourceInfo.exists) {
-        if (__DEV__) console.warn("[PersistPhotos] Source missing (short):", short);
-        // Still add to results so fallback works
-        results.push(fullUri);
-        continue;
-      }
-
       // Generate filename and destination path
       const filename = fullUri.split("/").pop() || `p1_${Date.now()}.jpg`;
       const dest = destDir + filename;
 
-      // Check if already copied
+      // Check if already copied (destination exists = already persisted)
       const destInfo = await FileSystem.getInfoAsync(dest);
       if (destInfo.exists) {
         if (__DEV__) console.log("[PersistPhotos] Already exists:", dest);
@@ -189,18 +181,27 @@ async function persistPhotoUris(uris: string[]): Promise<string[]> {
         continue;
       }
 
-      // Copy to persistent storage - MUST use fullUri
-      await FileSystem.copyAsync({ from: fullUri, to: dest });
+      // P2-004 FIX: Attempt copy directly without pre-checking source
+      // This eliminates the TOCTOU window where source could disappear
+      try {
+        await FileSystem.copyAsync({ from: fullUri, to: dest });
 
-      // Verify copy succeeded
-      const check = await FileSystem.getInfoAsync(dest);
-      if (__DEV__) {
-        console.log("[PersistPhotos] Copied:", { from: short, dest, exists: check.exists });
-      }
+        // Verify copy succeeded
+        const check = await FileSystem.getInfoAsync(dest);
+        if (__DEV__) {
+          console.log("[PersistPhotos] Copied:", { from: short, dest, exists: check.exists });
+        }
 
-      if (check.exists) {
-        results.push(dest);
-      } else {
+        if (check.exists) {
+          results.push(dest);
+        } else {
+          // Copy silently failed, keep original URI as fallback
+          results.push(fullUri);
+        }
+      } catch (copyErr) {
+        // P2-004 FIX: Source file disappeared or copy failed
+        // Gracefully fallback to original URI - UI will handle missing image
+        if (__DEV__) console.warn("[PersistPhotos] Copy failed (TOCTOU or missing):", short, copyErr);
         results.push(fullUri);
       }
     } catch (err) {
@@ -246,16 +247,33 @@ export default function Phase2OnboardingTerms() {
   // Navigation guard: prevent double-tap on X button
   const isExitingRef = useRef(false);
 
-  // O-001 FIX: Track mount state to prevent setState after unmount
+  // P0-002 FIX: Track mount state to prevent setState after unmount
+  // Must reset to true on each mount (not just initial) to handle component remounting
   const mountedRef = useRef(true);
   useEffect(() => {
+    // P0-002 FIX: Reset to true on mount/remount so state updates work after re-entering
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
   }, []);
 
+  // P0-002 FIX: Restore onboarding progress from AsyncStorage on mount
+  useEffect(() => {
+    const restore = async () => {
+      const restored = await usePrivateProfileStore.getState().restoreOnboardingProgress();
+      if (restored && __DEV__) {
+        console.log('[P2 ONBOARDING] Previous progress restored');
+      }
+    };
+    restore();
+  }, []);
+
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
   const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
+
+  // P0-003 FIX: Mutation to persist consent timestamp to backend
+  const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
   // Handle X/Cancel button - explicit exit from Phase-2 onboarding
   const handleExitOnboarding = () => {
@@ -319,15 +337,45 @@ export default function Phase2OnboardingTerms() {
       .filter((p: any): p is { url: string } => p !== null);
   };
 
-  const canContinue = rulesChecked && screenshotChecked && !isProcessing;
+  // P1-006 FIX: Track loading state to prevent false "No profile found" error
+  // useQuery returns undefined while loading, actual data (or null) when complete
+  const isUserLoading = !isDemoMode && userId && convexUser === undefined;
+  const canContinue = rulesChecked && screenshotChecked && !isProcessing && !isUserLoading;
 
   const handleContinue = async () => {
     if (isProcessing) return;
+    // P1-006 FIX: Guard against Continue press while user query is loading
+    if (isUserLoading) return;
     setIsProcessing(true);
 
     try {
       // Mark terms accepted
-      setAcceptedTermsAt(Date.now());
+      const consentTimestamp = Date.now();
+      setAcceptedTermsAt(consentTimestamp);
+
+      // P0-003 FINAL FIX: Persist consent timestamp to backend (BLOCKING)
+      // Legal compliance: consent MUST be recorded in Convex before proceeding
+      // This prevents any scenario where user proceeds without backend consent record
+      if (!isDemoMode && userId) {
+        try {
+          await updatePrivateProfile({
+            authUserId: userId,
+            consentAcceptedAt: consentTimestamp,
+          });
+        } catch (error) {
+          // Consent persistence failed - block progression and allow retry
+          if (__DEV__) {
+            console.error('[P2 ONBOARDING] CRITICAL: Failed to persist consent timestamp:', error);
+          }
+          setIsProcessing(false);
+          Alert.alert(
+            'Consent Recording Failed',
+            'Unable to record your consent. Please check your connection and try again.',
+            [{ text: 'OK' }]
+          );
+          return; // Exit early - do not proceed without consent record
+        }
+      }
 
       // Get Phase-1 profile data from Convex or demo
       const phase1User = isDemoMode ? demoUser : convexUser;
@@ -361,6 +409,7 @@ export default function Phase2OnboardingTerms() {
         canonicalProfile = {
           userId: convexUser._id as string,
           name: convexUser.name,
+          handle: convexUser.handle, // Phase-1 nickname for Phase-2 displayName
           dateOfBirth: convexUser.dateOfBirth,
           gender: convexUser.gender,
           activities: convexUser.activities,
@@ -426,6 +475,7 @@ export default function Phase2OnboardingTerms() {
       // Build Phase-1 data object with SLOT-BASED photos
       const phase1Data: Phase1ProfileData = {
         name: canonicalProfile.name || phase1User?.name || '',
+        handle: canonicalProfile.handle || '', // Phase-1 nickname (live mode only)
         photoSlots: validatedSlots, // Pass full PhotoSlots9
         photos: validatedSlots.filter(Boolean).map((url) => ({ url: url! })), // Legacy compat
         dateOfBirth: canonicalProfile.dateOfBirth || phase1User?.dateOfBirth || '',
@@ -444,6 +494,9 @@ export default function Phase2OnboardingTerms() {
       // FIX P2-DATA-001: Import data BEFORE navigation to prevent race condition
       // NOTE: This imports profile info (name, age, gender, etc.) - photos are selected in next step
       importPhase1Data(phase1Data);
+
+      // P0-002 FIX: Save onboarding progress to AsyncStorage
+      await usePrivateProfileStore.getState().saveOnboardingProgress();
 
       // P2-PHOTO-001 FIX: Navigate to photo selection screen instead of auto-importing all photos
       // User will explicitly select which Phase-1 photos to import into Phase-2
@@ -480,11 +533,16 @@ export default function Phase2OnboardingTerms() {
           <View style={styles.iconContainer}>
             <Ionicons name="shield-checkmark" size={48} color={C.primary} />
           </View>
-          <Text style={styles.welcomeTitle}>Welcome to Private Mode</Text>
+          <Text style={styles.welcomeTitle}>Before you enter…</Text>
           <Text style={styles.welcomeSubtitle}>
-            Create a fresh, separate identity for your private connections.
-            Your Phase-2 profile is completely independent from your main profile.
+            This is a more private space.{'\n'}
+            Be respectful and genuine.{'\n'}
+            Only real interactions are allowed.
           </Text>
+          <View style={styles.trustLine}>
+            <Ionicons name="lock-closed" size={14} color={C.primary} />
+            <Text style={styles.trustLineText}>Your privacy and safety come first</Text>
+          </View>
         </View>
 
         {/* Terms Section */}
@@ -647,10 +705,25 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   welcomeSubtitle: {
-    fontSize: 14,
+    fontSize: 15,
     color: C.textLight,
     textAlign: "center",
-    lineHeight: 20,
+    lineHeight: 24,
+  },
+  trustLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: C.primary + "10",
+    borderRadius: 20,
+  },
+  trustLineText: {
+    fontSize: 13,
+    fontWeight: "500",
+    color: C.primary,
   },
 
   // Terms section

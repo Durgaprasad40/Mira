@@ -7,12 +7,17 @@ import {
   TouchableOpacity,
   Modal,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { useBlockStore } from '@/stores/blockStore';
+import { useAuthStore } from '@/stores/authStore';
+import { Id } from '@/convex/_generated/dataModel';
 
 // Report reasons
 const REPORT_REASONS = [
@@ -23,15 +28,30 @@ const REPORT_REASONS = [
   { id: 'other', label: 'Other', icon: 'ellipsis-horizontal-outline' as const },
 ];
 
+// P0-001 FIX: Map frontend reason IDs to backend expected values
+const REASON_MAP: Record<string, 'harassment' | 'spam' | 'inappropriate_photos' | 'fake_profile' | 'other'> = {
+  'harassment': 'harassment',
+  'spam': 'spam',
+  'inappropriate': 'inappropriate_photos',
+  'fake': 'fake_profile',
+  'other': 'other',
+};
+
 export default function ReportUserScreen() {
   const router = useRouter();
+  const userId = useAuthStore((s) => s.userId);
 
   // Get blocked users from store
   const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
 
+  // P0-001 FIX: Add mutation for reporting users
+  const reportUserMutation = useMutation(api.users.reportUser);
+
   // Modal state for reason selection
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [showReasonModal, setShowReasonModal] = useState(false);
+  // P0-001 FIX: Add loading state to prevent double submission
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const formatBlockedDate = (timestamp: number): string => {
     const now = Date.now();
@@ -50,24 +70,54 @@ export default function ReportUserScreen() {
     setShowReasonModal(true);
   };
 
-  const handleSelectReason = (reasonId: string) => {
-    setShowReasonModal(false);
-    setSelectedUserId(null);
+  // P0-001 FIX: Actually call backend mutation when submitting report
+  const handleSelectReason = async (reasonId: string) => {
+    if (!userId || !selectedUserId || isSubmitting) return;
 
-    // Show success confirmation
-    Alert.alert(
-      'Report Submitted',
-      'Thank you for your report. Our team will review it.',
-      [
-        {
-          text: 'OK',
-          onPress: () => {
-            // Navigate back to Safety screen
-            router.back();
+    const backendReason = REASON_MAP[reasonId];
+    if (!backendReason) {
+      Alert.alert('Error', 'Invalid report reason');
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const result = await reportUserMutation({
+        authUserId: userId,
+        reportedUserId: selectedUserId as Id<'users'>,
+        reason: backendReason,
+      });
+
+      setShowReasonModal(false);
+      setSelectedUserId(null);
+
+      if (result.success === false) {
+        Alert.alert('Error', result.error === 'cannot_report_self'
+          ? 'You cannot report yourself'
+          : 'Failed to submit report. Please try again.');
+        return;
+      }
+
+      // Show success confirmation
+      Alert.alert(
+        'Report Submitted',
+        'Thank you for your report. Our team will review it.',
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              router.back();
+            },
           },
-        },
-      ]
-    );
+        ]
+      );
+    } catch (error) {
+      console.error('[ReportUser] Failed to submit report:', error);
+      Alert.alert('Error', 'Failed to submit report. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleCloseModal = () => {
@@ -152,22 +202,31 @@ export default function ReportUserScreen() {
               Why are you reporting this user?
             </Text>
 
-            <View style={styles.reasonList}>
-              {REPORT_REASONS.map((reason) => (
-                <TouchableOpacity
-                  key={reason.id}
-                  style={styles.reasonItem}
-                  onPress={() => handleSelectReason(reason.id)}
-                  activeOpacity={0.7}
-                >
-                  <View style={styles.reasonIcon}>
-                    <Ionicons name={reason.icon} size={22} color={COLORS.text} />
-                  </View>
-                  <Text style={styles.reasonLabel}>{reason.label}</Text>
-                  <Ionicons name="chevron-forward" size={18} color={COLORS.textLight} />
-                </TouchableOpacity>
-              ))}
-            </View>
+            {/* P0-001 FIX: Show loading indicator during submission */}
+            {isSubmitting ? (
+              <View style={styles.loadingContainer}>
+                <ActivityIndicator size="large" color={COLORS.primary} />
+                <Text style={styles.loadingText}>Submitting report...</Text>
+              </View>
+            ) : (
+              <View style={styles.reasonList}>
+                {REPORT_REASONS.map((reason) => (
+                  <TouchableOpacity
+                    key={reason.id}
+                    style={styles.reasonItem}
+                    onPress={() => handleSelectReason(reason.id)}
+                    activeOpacity={0.7}
+                    disabled={isSubmitting}
+                  >
+                    <View style={styles.reasonIcon}>
+                      <Ionicons name={reason.icon} size={22} color={COLORS.text} />
+                    </View>
+                    <Text style={styles.reasonLabel}>{reason.label}</Text>
+                    <Ionicons name="chevron-forward" size={18} color={COLORS.textLight} />
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
           </View>
         </View>
       </Modal>
@@ -336,5 +395,16 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '500',
     color: COLORS.text,
+  },
+  // P0-001 FIX: Loading styles for report submission
+  loadingContainer: {
+    padding: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
   },
 });

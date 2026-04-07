@@ -62,6 +62,20 @@ interface PrivateChatState {
   removeConversation: (conversationId: string) => void;
   /** Remove a conversation by participant ID (for block/unmatch) */
   removeConversationByParticipant: (participantId: string) => void;
+  /**
+   * P1-003 FIX: Reconcile local conversations with backend truth.
+   * - Adds new backend conversations missing locally
+   * - Updates existing conversations with backend metadata
+   * - Removes local conversations no longer in backend
+   * - Cleans up orphaned messages for removed conversations
+   */
+  reconcileConversations: (backendConversations: IncognitoConversation[]) => void;
+  /**
+   * P2-006 FIX: Reconcile unlocked users with backend conversation participants.
+   * Removes any locally unlocked user that no longer has an active conversation.
+   * @param validParticipantIds - Set of participant IDs that have active backend conversations
+   */
+  reconcileUnlockedUsers: (validParticipantIds: Set<string>) => void;
 
   // Truth or Dare
   pendingDares: PendingDare[];
@@ -209,6 +223,146 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
         messages: remainingMessages,
         unlockedUsers: s.unlockedUsers.filter((u) => u.id !== participantId),
       };
+    }),
+
+  // P1-003 FIX: Full bidirectional sync with backend
+  reconcileConversations: (backendConversations) =>
+    set((s) => {
+      const backendIds = new Set(backendConversations.map((c) => c.id));
+      const localIds = new Set(s.conversations.map((c) => c.id));
+      const localById = new Map(s.conversations.map((c) => [c.id, c]));
+
+      // Find conversations to remove (in local but not in backend)
+      const toRemove = s.conversations.filter((c) => !backendIds.has(c.id));
+
+      // Find conversations to add (in backend but not in local)
+      const toAdd = backendConversations.filter((c) => !localIds.has(c.id));
+
+      // P2-PERF: Find conversations that ACTUALLY changed (deep compare key fields)
+      // Only update if backend data differs from local data
+      const toUpdate: typeof backendConversations = [];
+      for (const bc of backendConversations) {
+        if (!localIds.has(bc.id)) continue; // New item, handled by toAdd
+        const local = localById.get(bc.id);
+        if (!local) continue;
+        // Compare backend-authoritative fields only
+        const hasChanges =
+          local.lastMessage !== bc.lastMessage ||
+          local.lastMessageAt !== bc.lastMessageAt ||
+          local.unreadCount !== bc.unreadCount ||
+          local.participantName !== bc.participantName ||
+          local.participantPhotoUrl !== bc.participantPhotoUrl ||
+          local.participantAge !== bc.participantAge ||
+          // PHOTO-BLUR-FIX: Detect blur flag changes
+          local.isPhotoBlurred !== bc.isPhotoBlurred ||
+          local.canViewClearPhoto !== bc.canViewClearPhoto ||
+          // PRESENCE: Detect lastActive changes
+          local.participantLastActive !== bc.participantLastActive;
+        if (hasChanges) {
+          toUpdate.push(bc);
+        }
+      }
+
+      // P2-PERF: Early exit if no actual changes needed
+      if (toRemove.length === 0 && toAdd.length === 0 && toUpdate.length === 0) {
+        return s;
+      }
+
+      // P2-PERF: Create lookup for items to update
+      const toUpdateIds = new Set(toUpdate.map((c) => c.id));
+      const toUpdateById = new Map(toUpdate.map((c) => [c.id, c]));
+
+      // Build new conversations array
+      let updatedConversations = s.conversations
+        // Remove conversations no longer in backend
+        .filter((c) => backendIds.has(c.id))
+        // Update existing conversations with backend metadata (only if changed)
+        .map((c) => {
+          if (!toUpdateIds.has(c.id)) return c;
+          const backendConvo = toUpdateById.get(c.id);
+          if (!backendConvo) return c;
+          // Update backend-authoritative fields (lastMessage, unreadCount, etc.)
+          return {
+            ...c,
+            lastMessage: backendConvo.lastMessage,
+            lastMessageAt: backendConvo.lastMessageAt,
+            unreadCount: backendConvo.unreadCount,
+            participantName: backendConvo.participantName,
+            participantPhotoUrl: backendConvo.participantPhotoUrl,
+            participantAge: backendConvo.participantAge,
+            // PHOTO-BLUR-FIX: Sync blur flags from backend
+            isPhotoBlurred: backendConvo.isPhotoBlurred,
+            canViewClearPhoto: backendConvo.canViewClearPhoto,
+            // PRESENCE: Sync lastActive for online status
+            participantLastActive: backendConvo.participantLastActive,
+          };
+        });
+
+      // Add new conversations from backend
+      updatedConversations = [...toAdd, ...updatedConversations];
+
+      // P1-006 FIX: Smart message cleanup - preserve local-only messages
+      // Only delete regular messages for removed conversations, keep:
+      // - ToD/system messages (senderId === 'tod' or 'system')
+      // - Pending secure media (isProtected with local file URI)
+      const remainingMessages = { ...s.messages };
+      const removedParticipantIds: string[] = [];
+
+      for (const removed of toRemove) {
+        const conversationMessages = remainingMessages[removed.id];
+        if (conversationMessages && conversationMessages.length > 0) {
+          // Filter to keep local-only messages
+          const localOnlyMessages = conversationMessages.filter((m) => {
+            // Keep ToD/system messages
+            if (m.senderId === 'tod' || m.senderId === 'system') return true;
+            // Keep pending secure media (has local file URI, not yet uploaded)
+            if (m.isProtected && m.protectedMedia?.localUri?.startsWith('file://')) return true;
+            // Delete everything else
+            return false;
+          });
+
+          if (localOnlyMessages.length > 0) {
+            // Keep conversation messages with only local-only content
+            remainingMessages[removed.id] = localOnlyMessages;
+          } else {
+            // No local-only messages, safe to delete
+            delete remainingMessages[removed.id];
+          }
+        }
+        removedParticipantIds.push(removed.participantId);
+      }
+
+      // Clean up unlocked users for removed conversations
+      const updatedUnlockedUsers = s.unlockedUsers.filter(
+        (u) => !removedParticipantIds.includes(u.id)
+      );
+
+      if (__DEV__) {
+        console.log(
+          `[P1-003 Reconcile] added=${toAdd.length} removed=${toRemove.length} updated=${toUpdateIds.size}`
+        );
+      }
+
+      return {
+        conversations: updatedConversations,
+        messages: remainingMessages,
+        unlockedUsers: updatedUnlockedUsers,
+      };
+    }),
+
+  // P2-006 FIX: Explicit unlocked users reconciliation
+  reconcileUnlockedUsers: (validParticipantIds) =>
+    set((s) => {
+      const before = s.unlockedUsers.length;
+      const updated = s.unlockedUsers.filter((u) => validParticipantIds.has(u.id));
+      const removed = before - updated.length;
+
+      if (removed > 0 && __DEV__) {
+        console.log(`[P2-006 Reconcile] Removed ${removed} stale unlocked users`);
+      }
+
+      if (removed === 0) return s;
+      return { unlockedUsers: updated };
     }),
 
   pendingDares: isDemoMode ? DEMO_PENDING_DARES : [],

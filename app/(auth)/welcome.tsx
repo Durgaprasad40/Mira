@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import { useRef } from "react";
+import { useRef, useState, useEffect } from "react";
 import { View, Text, StyleSheet, ActivityIndicator } from "react-native";
 import { Button } from "@/components/ui";
 import { useRouter, Redirect, useSegments } from "expo-router";
@@ -17,6 +17,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
+
+// P1-021 FIX: Timeout for demo hydration to prevent frozen screen
+const DEMO_HYDRATION_TIMEOUT_MS = 5000;
 
 // =============================================================================
 // WELCOME SCREEN - Auth Entry Point
@@ -52,6 +55,22 @@ export default function WelcomeScreen() {
   // Single-fire guard to prevent repeated redirects
   const didRedirectRef = useRef(false);
 
+  // P1-021 FIX: Track hydration timeout to prevent frozen screen
+  const [hydrationTimedOut, setHydrationTimedOut] = useState(false);
+  useEffect(() => {
+    if (isDemoMode && !demoStoreHydrated) {
+      const timer = setTimeout(() => {
+        setHydrationTimedOut(true);
+        console.warn('[AUTH_WELCOME] P1-021: Demo hydration timeout after 5s');
+      }, DEMO_HYDRATION_TIMEOUT_MS);
+      return () => clearTimeout(timer);
+    }
+    // Reset timeout flag if hydration completes
+    if (demoStoreHydrated) {
+      setHydrationTimedOut(false);
+    }
+  }, [demoStoreHydrated]);
+
   // ==========================================================================
   // GUARD: Only process redirect logic if on auth path
   // ==========================================================================
@@ -68,6 +87,30 @@ export default function WelcomeScreen() {
   // ==========================================================================
 
   if (isDemoMode && !demoStoreHydrated) {
+    // P1-021 FIX: Show error and proceed option if hydration times out
+    if (hydrationTimedOut) {
+      return (
+        <LinearGradient
+          colors={[COLORS.primary, COLORS.secondary]}
+          style={styles.container}
+        >
+          <View style={styles.content}>
+            <Ionicons name="cloud-offline-outline" size={48} color={COLORS.white} />
+            <Text style={[styles.title, { fontSize: 24, marginTop: 16 }]}>Demo Loading Slow</Text>
+            <Text style={styles.subtitle}>
+              Demo data is taking longer than expected. You can continue anyway.
+            </Text>
+            <Button
+              title="Continue Anyway"
+              variant="outline"
+              onPress={() => setHydrationTimedOut(false)}
+              style={{ marginTop: 20, borderColor: COLORS.white }}
+              textStyle={{ color: COLORS.white }}
+            />
+          </View>
+        </LinearGradient>
+      );
+    }
     return (
       <LinearGradient
         colors={[COLORS.primary, COLORS.secondary]}
@@ -201,15 +244,19 @@ export default function WelcomeScreen() {
           onPress={handleCreateAccount}
           fullWidth
           style={{
-            backgroundColor: "#00000000",
-            borderWidth: 2,
-            borderColor: COLORS.white,
+            backgroundColor: "rgba(255, 255, 255, 0.12)",
+            borderWidth: 1.5,
+            borderColor: "rgba(255, 255, 255, 0.9)",
             elevation: 0,
-            marginBottom: 12,
+            marginBottom: 14,
+            borderRadius: 14,
+            paddingVertical: 16,
           }}
           textStyle={{
             color: COLORS.white,
             fontWeight: "600",
+            fontSize: 17,
+            letterSpacing: 0.3,
           }}
         />
         <Button
@@ -225,15 +272,18 @@ export default function WelcomeScreen() {
           }}
           fullWidth
           style={{
-            backgroundColor: "#00000000",
-            borderWidth: 2,
-            borderColor: COLORS.white,
+            backgroundColor: "transparent",
+            borderWidth: 1.5,
+            borderColor: "rgba(255, 255, 255, 0.5)",
             elevation: 0,
-            marginBottom: 16,
+            marginBottom: 18,
+            borderRadius: 14,
+            paddingVertical: 14,
           }}
           textStyle={{
-            color: COLORS.white,
-            fontWeight: "600",
+            color: "rgba(255, 255, 255, 0.9)",
+            fontWeight: "500",
+            fontSize: 15,
           }}
         />
         <Text style={styles.terms}>
@@ -252,50 +302,58 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    padding: 24,
+    padding: 28,
   },
   iconContainer: {
-    marginBottom: 24,
+    marginBottom: 28,
   },
   title: {
-    fontSize: 48,
-    fontWeight: "bold",
+    fontSize: 52,
+    fontWeight: "700",
     color: COLORS.white,
-    marginBottom: 8,
+    marginBottom: 10,
+    letterSpacing: -1,
   },
   subtitle: {
-    fontSize: 18,
+    fontSize: 19,
     color: COLORS.white,
-    opacity: 0.9,
+    opacity: 0.92,
     marginBottom: 48,
+    fontWeight: "400",
+    letterSpacing: 0.2,
   },
   features: {
     width: "100%",
-    gap: 16,
+    gap: 14,
   },
   feature: {
     flexDirection: "row",
     alignItems: "center",
     gap: 16,
-    backgroundColor: COLORS.white + "20",
-    padding: 16,
-    borderRadius: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.15)",
+    paddingVertical: 18,
+    paddingHorizontal: 20,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.1)",
   },
   featureText: {
     fontSize: 16,
     color: COLORS.white,
     fontWeight: "500",
+    letterSpacing: 0.1,
   },
   buttonContainer: {
     width: "100%",
     padding: 24,
-    paddingBottom: 40,
+    paddingBottom: 44,
   },
   terms: {
     fontSize: 12,
     color: COLORS.white,
     textAlign: "center",
-    opacity: 0.8,
+    opacity: 0.75,
     lineHeight: 18,
+    letterSpacing: 0.1,
   },
 });

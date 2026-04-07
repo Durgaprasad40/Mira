@@ -111,8 +111,8 @@ export default function ProfileVisibilityScreen() {
             </Text>
             <Text style={styles.statusDescription}>
               {isPaused
-                ? 'Your profile is hidden from Desire Land'
-                : 'Others can find you in Desire Land'}
+                ? 'Your profile is hidden from Deep Connect'
+                : 'Others can find you in Deep Connect'}
             </Text>
           </View>
         </View>
@@ -123,7 +123,7 @@ export default function ProfileVisibilityScreen() {
             <View style={styles.toggleInfo}>
               <Text style={styles.toggleTitle}>Pause Profile</Text>
               <Text style={styles.toggleDescription}>
-                Hide your profile from Desire Land without deleting your account.
+                Hide your profile from Deep Connect without deleting your account.
               </Text>
             </View>
             {isSaving ? (
@@ -150,7 +150,7 @@ export default function ProfileVisibilityScreen() {
           <View style={styles.infoRow}>
             <Ionicons name="eye-off-outline" size={20} color={C.textLight} />
             <Text style={styles.infoText}>
-              You won't appear in others' Desire Land feed while paused
+              You won't appear in others' Deep Connect feed while paused
             </Text>
           </View>
           <View style={styles.infoRow}>

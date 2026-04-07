@@ -17,6 +17,7 @@ import { useAuthStore, useSubscriptionStore } from '@/stores';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
+import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 
 export default function PreMatchMessageScreen() {
   const router = useRouter();
@@ -129,7 +130,7 @@ export default function PreMatchMessageScreen() {
 
       <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer}>
         <View style={styles.targetUserCard}>
-          <Avatar uri={targetUser.photos?.[0]?.url} size={64} />
+          <Avatar uri={getPrimaryPhotoUrl(targetUser.photos)} size={64} />
           <Text style={styles.targetUserName}>{targetUser.name}</Text>
           <Text style={styles.targetUserSubtext}>
             Send a message to stand out!{isDemoMode ? '' : ` (Uses 1 of your ${canSend?.remaining || 0} weekly messages)`}

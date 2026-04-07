@@ -5,14 +5,30 @@ import {
   StyleSheet,
   Dimensions,
   ActivityIndicator,
-  Animated,
-  PanResponder,
   TouchableOpacity,
   InteractionManager,
   ScrollView,
   Modal,
   Easing,
+  Animated as RNAnimated, // Keep for star burst animation only
 } from "react-native";
+import { Image } from "expo-image";
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  withTiming,
+  withDelay,
+  withSequence,
+  interpolate,
+  runOnJS,
+  Extrapolation,
+  FadeIn,
+  FadeOut,
+  SlideInDown,
+} from "react-native-reanimated";
+import { BlurView } from "expo-blur";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { LoadingGuard } from "@/components/safety";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery, useMutation } from "convex/react";
@@ -24,9 +40,11 @@ import { useAuthStore } from "@/stores/authStore";
 import { useDiscoverStore } from "@/stores/discoverStore";
 import { useFilterStore } from "@/stores/filterStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
+import { WelcomeOverlay, SwipeGuidanceHint, SkeletonCard } from "@/components/ui";
 import { isDemoMode } from "@/hooks/useConvex";
+import { getDiscoverPrefetch, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
 import { useNotifications } from "@/hooks/useNotifications";
-import { DEMO_PROFILES, getDemoCurrentUser, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
+import { DEMO_PROFILES, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
 import { useBlockStore } from "@/stores/blockStore";
 import { router } from "expo-router";
@@ -37,16 +55,21 @@ import { useInteractionStore } from "@/stores/interactionStore";
 import { asUserId } from "@/convex/id";
 import { ProfileData, toProfileData } from "@/lib/profileData";
 import { rankProfiles } from "@/lib/rankProfiles";
-import { getProfileCompleteness, NUDGE_MESSAGES } from "@/lib/profileCompleteness";
-import { ProfileNudge } from "@/components/ui/ProfileNudge";
+import { sortProfilesByScore } from "@/lib/profileRanking";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
+// usePrivateChatStore - read-only for retention UI hints (conversations count)
 import { usePrivateChatStore } from "@/stores/privateChatStore";
+import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
-import type { IncognitoConversation, ConnectionSource } from "@/types";
+import { useLocationStore } from "@/stores/locationStore";
+// REMOVED: IncognitoConversation, ConnectionSource types - no longer needed after disabling local conversation creation
 import type { Id } from "@/convex/_generated/dataModel";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
+import * as Haptics from 'expo-haptics';
+import { trackAction, setFeatureAndScreen, SENTRY_FEATURES } from '@/lib/sentry';
+import { DEBUG_DISCOVER_QUEUE, DEBUG_P2_PROFILE } from '@/lib/debugFlags';
 
 // Type for swipe actions
 type SwipeAction = 'like' | 'pass' | 'super_like';
@@ -55,37 +78,25 @@ import { log } from "@/utils/logger";
 // Demo mode match rate (20% for realistic testing)
 const DEMO_MATCH_RATE = 0.2;
 
-/** Create Phase 2 private conversation for match. Returns true if new, false if duplicate. */
+/**
+ * Handle Phase 2 match event. Returns true if new match, false if duplicate.
+ *
+ * NOTE: Conversation is now created by backend (privateSwipes.ts).
+ * Frontend only tracks idempotency and logs the event.
+ * Frontend must reflect backend state, not create local conversations.
+ */
 function handlePhase2Match(profile: { id: string; name: string; age?: number; photoUrl?: string }): boolean {
   // Check idempotency via shared session module
   if (!markPhase2Matched(profile.id)) {
     return false;
   }
 
-  const conversationId = `ic_desire_${profile.id}`;
-  const conversation: IncognitoConversation = {
-    id: conversationId,
-    participantId: profile.id,
-    participantName: profile.name,
-    participantAge: profile.age ?? 0,
-    participantPhotoUrl: profile.photoUrl ?? '',
-    lastMessage: 'Matched! Start chatting.',
-    lastMessageAt: Date.now(),
-    unreadCount: 0,
-    connectionSource: 'desire' as ConnectionSource,
-  };
+  // DISABLED: Local conversation creation removed - backend now handles this
+  // Frontend should fetch conversations from backend (privateConversations table)
+  // usePrivateChatStore.getState().createConversation(...);
+  // usePrivateChatStore.getState().unlockUser(...);
 
-  usePrivateChatStore.getState().createConversation(conversation);
-  usePrivateChatStore.getState().unlockUser({
-    id: profile.id,
-    username: profile.name,
-    photoUrl: profile.photoUrl ?? '',
-    age: profile.age ?? 0,
-    source: 'tod',
-    unlockedAt: Date.now(),
-  });
-
-  log.info('[MATCH]', 'private', { name: profile.name });
+  log.info('[MATCH]', 'phase2-backend', { name: profile.name });
   return true;
 }
 
@@ -97,18 +108,28 @@ const EMPTY_ARRAY: any[] = [];
 const STAR_COUNT = 8;
 const STAR_COLORS = ['#FFD700', '#FFA500', '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
 
+
 interface StarBurstAnimationProps {
   visible: boolean;
   onComplete: () => void;
 }
 
 function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
+  // P1-002 FIX: Track mounted state to prevent stale callback after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const animations = useRef(
     Array.from({ length: STAR_COUNT }, () => ({
-      scale: new Animated.Value(0),
-      opacity: new Animated.Value(1),
-      translateX: new Animated.Value(0),
-      translateY: new Animated.Value(0),
+      scale: new RNAnimated.Value(0),
+      opacity: new RNAnimated.Value(1),
+      translateX: new RNAnimated.Value(0),
+      translateY: new RNAnimated.Value(0),
     }))
   ).current;
 
@@ -130,30 +151,30 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
       const targetX = Math.cos(angle) * distance;
       const targetY = Math.sin(angle) * distance;
 
-      return Animated.sequence([
-        Animated.delay(i * 30), // Stagger each star
-        Animated.parallel([
-          Animated.timing(anim.scale, {
+      return RNAnimated.sequence([
+        RNAnimated.delay(i * 30), // Stagger each star
+        RNAnimated.parallel([
+          RNAnimated.timing(anim.scale, {
             toValue: 1,
             duration: 150,
             easing: Easing.out(Easing.back(2)),
             useNativeDriver: true,
           }),
-          Animated.timing(anim.translateX, {
+          RNAnimated.timing(anim.translateX, {
             toValue: targetX,
             duration: 500,
             easing: Easing.out(Easing.cubic),
             useNativeDriver: true,
           }),
-          Animated.timing(anim.translateY, {
+          RNAnimated.timing(anim.translateY, {
             toValue: targetY,
             duration: 500,
             easing: Easing.out(Easing.cubic),
             useNativeDriver: true,
           }),
-          Animated.sequence([
-            Animated.delay(200),
-            Animated.timing(anim.opacity, {
+          RNAnimated.sequence([
+            RNAnimated.delay(200),
+            RNAnimated.timing(anim.opacity, {
               toValue: 0,
               duration: 300,
               useNativeDriver: true,
@@ -163,9 +184,12 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
       ]);
     });
 
-    const compositeAnimation = Animated.parallel(starAnimations);
+    const compositeAnimation = RNAnimated.parallel(starAnimations);
     compositeAnimation.start(() => {
-      onComplete();
+      // P1-002 FIX: Only call onComplete if still mounted
+      if (isMountedRef.current) {
+        onComplete();
+      }
     });
 
     // DL-014: Stop animation on unmount to prevent stale callback
@@ -179,7 +203,7 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
   return (
     <View style={starBurstStyles.container} pointerEvents="none">
       {animations.map((anim, i) => (
-        <Animated.View
+        <RNAnimated.View
           key={i}
           style={[
             starBurstStyles.star,
@@ -196,10 +220,10 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
           ]}
         >
           <Ionicons name="star" size={24} color={STAR_COLORS[i % STAR_COLORS.length]} />
-        </Animated.View>
+        </RNAnimated.View>
       ))}
       {/* Center star pulse */}
-      <Animated.View
+      <RNAnimated.View
         style={[
           starBurstStyles.centerStar,
           {
@@ -209,7 +233,7 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
         ]}
       >
         <Ionicons name="star" size={48} color="#FFD700" />
-      </Animated.View>
+      </RNAnimated.View>
     </View>
   );
 }
@@ -238,6 +262,68 @@ const starBurstStyles = StyleSheet.create({
 
 const HEADER_H = 44;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ANIMATED ACTION BUTTON - Micro-interaction feedback for action buttons
+// ═══════════════════════════════════════════════════════════════════════════
+const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
+
+interface AnimatedActionButtonProps {
+  onPress: () => void;
+  style: any;
+  children: React.ReactNode;
+  disabled?: boolean;
+  feedbackScale?: number;
+  hapticType?: 'light' | 'medium' | 'none';
+}
+
+function AnimatedActionButton({
+  onPress,
+  style,
+  children,
+  disabled = false,
+  feedbackScale = 0.92,
+  hapticType = 'light',
+}: AnimatedActionButtonProps) {
+  const scale = useSharedValue(1);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  const handlePressIn = useCallback(() => {
+    scale.value = withSpring(feedbackScale, { damping: 15, stiffness: 400 });
+  }, [scale, feedbackScale]);
+
+  const handlePressOut = useCallback(() => {
+    scale.value = withSpring(1, { damping: 15, stiffness: 400 });
+  }, [scale]);
+
+  const handlePress = useCallback(() => {
+    // Trigger haptic feedback
+    if (hapticType !== 'none') {
+      Haptics.impactAsync(
+        hapticType === 'medium'
+          ? Haptics.ImpactFeedbackStyle.Medium
+          : Haptics.ImpactFeedbackStyle.Light
+      );
+    }
+    onPress();
+  }, [onPress, hapticType]);
+
+  return (
+    <AnimatedTouchable
+      style={[style, animatedStyle]}
+      onPress={handlePress}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      disabled={disabled}
+      activeOpacity={0.9}
+    >
+      {children}
+    </AnimatedTouchable>
+  );
+}
+
 export interface DiscoverCardStackProps {
   /** 'dark' applies INCOGNITO_COLORS to background/header only; card UI stays identical */
   theme?: "light" | "dark";
@@ -251,9 +337,37 @@ export interface DiscoverCardStackProps {
   externalProfiles?: any[];
   /** Hide the built-in header (caller renders its own). */
   hideHeader?: boolean;
+  /** Category ID when used from Explore - shows "Why this profile" tag */
+  exploreCategoryId?: string;
+  /** Callback when user swipes through all profiles in stack */
+  onStackEmpty?: () => void;
 }
 
-export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader }: DiscoverCardStackProps) {
+// "Why this profile" tag labels based on category
+const CATEGORY_TAG_LABELS: Record<string, string> = {
+  serious_vibes: "Looking for something serious",
+  keep_it_casual: "Looking for casual",
+  exploring_vibes: "Still figuring it out",
+  see_where_it_goes: "Open to more",
+  open_to_vibes: "Flexible on commitment",
+  just_friends: "Looking for friends",
+  open_to_anything: "Open to anything",
+  single_parent: "Single parent",
+  new_to_dating: "New to dating",
+  nearby: "Close to you",
+  online_now: "Online now",
+  active_today: "Active today",
+  free_tonight: "Free tonight",
+  coffee_date: "Loves coffee",
+  nature_lovers: "Nature lover",
+  binge_watchers: "Binge watcher",
+  fitness_buffs: "Fitness enthusiast",
+  foodies: "Food lover",
+  pet_lovers: "Pet lover",
+  creative_souls: "Creative soul",
+};
+
+export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader, exploreCategoryId, onStackEmpty }: DiscoverCardStackProps) {
   const dark = theme === "dark";
   const isPhase2 = mode === "phase2";
   const C = dark ? INCOGNITO_COLORS : COLORS;
@@ -261,6 +375,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
+
+  // LIVE_LOCATION: Get cached location refresh for screen focus events
+  const refreshLocationCached = useLocationStore((s) => s.refreshLocationCached);
+  // AUTH_READY_FIX: Wait for auth to be fully validated before running queries
+  const authReady = useAuthStore((s) => s.authReady);
+  const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [showNotificationPopover, setShowNotificationPopover] = useState(false);
@@ -273,6 +393,86 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Super-like star-burst animation state
   const [showSuperLikeAnimation, setShowSuperLikeAnimation] = useState(false);
   const clearSuperLikeAnimation = useCallback(() => setShowSuperLikeAnimation(false), []);
+
+  // P2_MATCH: Match celebration state for Phase-2
+  const [phase2MatchCelebration, setPhase2MatchCelebration] = useState<{
+    visible: boolean;
+    matchedProfile: { name: string; photoUrl?: string; conversationId?: string } | null;
+  }>({ visible: false, matchedProfile: null });
+
+  // Read-only: existing conversations count for match reminder (no new queries)
+  const privateConversationsCount = usePrivateChatStore((s) => s.conversations.length);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PHASE TRANSITION OVERLAY (Phase-2 Entry Experience)
+  // Shows once per component mount when entering Deep Connect
+  // ══════════════════════════════════════════════════════════════════════════
+  const [showPhaseTransition, setShowPhaseTransition] = useState(isPhase2);
+  const phaseTransitionShownRef = useRef(false);
+  const phaseTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Auto-dismiss after hold duration
+  useEffect(() => {
+    if (!isPhase2 || phaseTransitionShownRef.current) {
+      setShowPhaseTransition(false);
+      return;
+    }
+    // Mark as shown immediately to prevent re-triggers
+    phaseTransitionShownRef.current = true;
+    // Auto-dismiss after 1.4 seconds
+    phaseTransitionTimerRef.current = setTimeout(() => {
+      setShowPhaseTransition(false);
+    }, 1400);
+    return () => {
+      if (phaseTransitionTimerRef.current) {
+        clearTimeout(phaseTransitionTimerRef.current);
+      }
+    };
+  }, [isPhase2]);
+
+  // Tap to skip handler
+  const dismissPhaseTransition = useCallback(() => {
+    if (phaseTransitionTimerRef.current) {
+      clearTimeout(phaseTransitionTimerRef.current);
+    }
+    setShowPhaseTransition(false);
+  }, []);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // FIRST-TIME USER EXPERIENCE OVERLAYS
+  // Shows welcome message and swipe guidance on first entry
+  // ══════════════════════════════════════════════════════════════════════════
+  const [showWelcomeOverlay, setShowWelcomeOverlay] = useState(false);
+  const [showSwipeGuidance, setShowSwipeGuidance] = useState(false);
+  const welcomeShownRef = useRef(false);
+  const swipeGuidanceShownRef = useRef(false);
+
+  // Show welcome overlay on first entry (Phase-1 only, Phase-2 has its own transition)
+  useEffect(() => {
+    if (!isPhase2 && !welcomeShownRef.current && onboardingCompleted) {
+      welcomeShownRef.current = true;
+      setShowWelcomeOverlay(true);
+    }
+  }, [isPhase2, onboardingCompleted]);
+
+  // Show swipe guidance after welcome (or phase transition for Phase-2)
+  useEffect(() => {
+    // For Phase-1: show after welcome overlay dismisses
+    // For Phase-2: show after phase transition dismisses
+    const shouldShowGuidance = !swipeGuidanceShownRef.current && (
+      (!isPhase2 && !showWelcomeOverlay && welcomeShownRef.current) ||
+      (isPhase2 && !showPhaseTransition && phaseTransitionShownRef.current)
+    );
+
+    if (shouldShowGuidance) {
+      swipeGuidanceShownRef.current = true;
+      // Small delay to let the main content appear first
+      const timer = setTimeout(() => {
+        setShowSwipeGuidance(true);
+      }, 200);
+      return () => clearTimeout(timer);
+    }
+  }, [isPhase2, showWelcomeOverlay, showPhaseTransition]);
 
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
@@ -292,6 +492,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const incSwipe = useDiscoverStore((s) => s.incSwipe);
   const maybeTriggerRandomMatch = useDiscoverStore((s) => s.maybeTriggerRandomMatch);
 
+  // Engagement triggers - swipe progress tracking
+  const trackSwipe = useExplorePrefsStore((s) => s.trackSwipe);
+  const shouldShowSwipeProgress = useExplorePrefsStore((s) => s.shouldShowSwipeProgress);
+
   // Reset daily limits if new day
   useEffect(() => {
     checkAndResetIfNewDay();
@@ -301,11 +505,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const navigatingRef = useRef(false);
   // ── Focus guard: tracks whether this screen is the active tab ──
   const isFocusedRef = useRef(true);
-  // ── Track in-flight animation so we can cancel on blur ──
-  const activeAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
   // ── Swipe lock: prevents re-entrant swipes while animation + processing is in flight ──
   // Acquired in animateSwipe, released after advanceCard + match logic complete.
   const swipeLockRef = useRef(false);
+  // LIVE_LOCATION: Prevent duplicate location refresh requests during focus
+  const isRefreshingLocationRef = useRef(false);
 
   // ── RACE CONDITION FIX: Swipe ID for deterministic lock ownership ──
   // Each swipe gets a unique ID. Only the callback holding the current ID can release the lock.
@@ -331,6 +535,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const releaseSwipeLock = useCallback((id: number): void => {
     if (swipeIdRef.current === id) {
       swipeLockRef.current = false;
+      // P2-001 FIX: Apply pending filter reset after swipe completes
+      if (pendingFilterResetRef.current) {
+        pendingFilterResetRef.current = false;
+        setIndex(0);
+        visibleQueueRef.current = [];
+        consumedIdsRef.current.clear();
+      }
     }
     // else: stale callback from old swipe — ignore silently
   }, []);
@@ -339,6 +550,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
+
+    // Set Sentry feature context for Phase-2 error tracking
+    if (isPhase2) {
+      setFeatureAndScreen(SENTRY_FEATURES.PHASE2_DISCOVER, 'DiscoverCardStack');
+    }
+
     return () => {
       mountedRef.current = false;
       // Clean up locks so a future remount starts fresh
@@ -350,15 +567,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         randomMatchTimerRef.current = null;
       }
     };
-  }, []);
+  }, [isPhase2]);
 
-  // Overlay refs + animated value (no React re-renders during drag)
+  // Overlay refs + shared values (no React re-renders during drag)
   const overlayDirectionRef = useRef<"left" | "right" | "up" | null>(null);
-  const overlayOpacityAnim = useRef(new Animated.Value(0)).current;
+  const overlayOpacity = useSharedValue(0);
   const [overlayDirection, setOverlayDirection] = useState<"left" | "right" | "up" | null>(null);
 
   // Stand Out result from route screen
   const standOutResult = useInteractionStore((s) => s.standOutResult);
+  const discoverProfileActionResult = useInteractionStore((s) => s.discoverProfileActionResult);
+  const setDiscoverProfileActionResult = useInteractionStore((s) => s.setDiscoverProfileActionResult);
 
   // Notifications
   const { unseenCount } = useNotifications();
@@ -391,17 +610,214 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Profile data — memoize args to prevent Convex re-subscriptions
   const convexUserId = asUserId(userId);
   const skipInternalQuery = !!externalProfiles;
-  // retryKey in deps forces re-evaluation on retry (even if args unchanged, Convex re-subscribes)
+
+  // FIRST_MOUNT_FIX: Track userId availability and force query re-subscription
+  // On first mount, userId might not be available yet (auth store not hydrated)
+  // When it becomes available, we need to force the query to re-subscribe
+  const userIdTrackingRef = useRef<{ prev: string | null | undefined; firstMount: boolean }>({
+    prev: undefined,
+    firstMount: true,
+  });
+  const [queryTrigger, setQueryTrigger] = useState(0);
+
+  useEffect(() => {
+    const { prev, firstMount } = userIdTrackingRef.current;
+
+    // CASE 1: First mount with valid userId - trigger immediately
+    if (firstMount && userId && convexUserId) {
+      setQueryTrigger(1);
+      userIdTrackingRef.current.firstMount = false;
+    }
+    // CASE 2: userId became available after mount (was undefined/null, now has value)
+    else if (!prev && userId && convexUserId) {
+      setQueryTrigger(t => t + 1);
+    }
+
+    userIdTrackingRef.current.prev = userId;
+    userIdTrackingRef.current.firstMount = false;
+  }, [userId, convexUserId, isPhase2]);
+
+  // PHASE-2 ISOLATION FIX: Use separate queries for Phase-1 and Phase-2
+  // Phase-1 uses discover.getDiscoverProfiles (users table)
+  // Phase-2 uses privateDiscover.getProfiles (userPrivateProfiles table with isSetupComplete check)
+
+  // Phase-1 discover query args (skip if Phase-2 mode)
   const discoverArgs = useMemo(
     () =>
-      !isDemoMode && convexUserId && !skipInternalQuery
+      !isDemoMode && convexUserId && !skipInternalQuery && !isPhase2
         ? { userId: convexUserId, sortBy: (sortBy || "recommended") as any, limit: 20 }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [convexUserId, skipInternalQuery, retryKey, sortBy],
+    [convexUserId, skipInternalQuery, retryKey, sortBy, isPhase2],
   );
-  const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
-  const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
+  const phase1Profiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
+
+  // PERF: Consume prefetched Discover profiles (from index.tsx parallel fetch)
+  // This provides instant first render while useQuery subscription is setting up.
+  // Ref ensures we only check for prefetch once (safe for StrictMode double-render).
+  const prefetchCheckedRef = useRef(false);
+  const prefetchResultRef = useRef<any[] | null>(null);
+
+  // Check for prefetch on first render only (Phase-1, non-demo, no external profiles)
+  // CRITICAL: NEVER use prefetch for Phase-2 - it's Phase-1 only
+  if (!prefetchCheckedRef.current) {
+    prefetchCheckedRef.current = true;
+    if (!isPhase2 && userId && !isDemoMode && !skipInternalQuery) {
+      const authVersion = useAuthStore.getState().authVersion;
+      const prefetched = getDiscoverPrefetch(userId, authVersion);
+      // EMPTY_PREFETCH_FIX: Only use prefetch if it has actual profiles
+      // Empty prefetch should NOT be used - let the live query handle it
+      if (prefetched !== null && prefetched.length > 0) {
+        prefetchResultRef.current = prefetched;
+        markPrefetchUsed();
+      } else if (prefetched !== null && prefetched.length === 0) {
+        // Empty prefetch - clear it immediately to prevent interference
+        clearUsedPrefetch();
+      }
+    }
+  }
+
+  // Use prefetch while useQuery is loading (undefined), then switch to query result
+  // EMPTY_PREFETCH_FIX: Only use prefetch if it has actual profiles
+  // If prefetch is empty, treat as if no prefetch exists - let live query handle it
+  const hasValidPrefetch = Array.isArray(prefetchResultRef.current) && prefetchResultRef.current.length > 0;
+  const phase1ProfilesWithPrefetch = phase1Profiles ?? (hasValidPrefetch ? prefetchResultRef.current : null);
+
+  // Clear prefetch cache once useQuery returns real data (subscription is active)
+  useEffect(() => {
+    if (phase1Profiles !== undefined && prefetchResultRef.current !== null) {
+      // Query has returned - clear prefetch to free memory
+      clearUsedPrefetch();
+      prefetchResultRef.current = null;
+    }
+  }, [phase1Profiles]);
+
+  // Phase-2 private discover query args (skip if Phase-1 mode)
+  // CRITICAL: This queries userPrivateProfiles table which requires isSetupComplete=true
+  // AUTH_FIX: Pass authUserId for fallback resolution when server auth fails
+  // FIRST_MOUNT_FIX: queryTrigger forces re-subscription when userId becomes available
+  // AUTH_READY_FIX: Wait for authReady before querying to ensure onboardingCompleted is correct
+  // FLICKER_FIX: Use stable ref so once auth is ready, it stays ready (no query skip toggle)
+  const stableAuthReadyRef = useRef(false);
+  const rawAuthReady = authReady && onboardingCompleted;
+
+  // Once auth becomes ready, lock it (prevents transient flicker back to not-ready)
+  if (rawAuthReady && !stableAuthReadyRef.current) {
+    stableAuthReadyRef.current = true;
+  }
+  // Reset stable flag if user explicitly logs out (userId becomes null)
+  if (!userId && stableAuthReadyRef.current) {
+    stableAuthReadyRef.current = false;
+  }
+
+  const isAuthReadyForQuery = stableAuthReadyRef.current;
+
+  // FLICKER_FIX: Debug log for auth state stability
+  if (__DEV__ && isPhase2) {
+    console.log('[DISCOVER_READY]', {
+      authReady,
+      onboardingCompleted,
+      rawAuthReady,
+      stableReady: stableAuthReadyRef.current,
+      isAuthReadyForQuery,
+      userId: userId?.slice(0, 10) ?? 'null',
+    });
+  }
+
+  // P1-002 FIX: Only pass authUserId and limit - userId was removed from validator
+  const privateDiscoverArgs = useMemo(
+    () =>
+      !isDemoMode && convexUserId && !skipInternalQuery && isPhase2 && isAuthReadyForQuery
+        ? { authUserId: userId ?? undefined, limit: 50 }
+        : "skip" as const,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [convexUserId, userId, skipInternalQuery, retryKey, isPhase2, queryTrigger, isAuthReadyForQuery],
+  );
+
+  const phase2Profiles = useQuery(api.privateDiscover.getProfiles, privateDiscoverArgs);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VIEWER PROFILE QUERY - For computing common points with candidates
+  // ═══════════════════════════════════════════════════════════════════════════
+  const viewerProfileArgs = useMemo(
+    () => userId && !isPhase2 ? { userId } : "skip" as const,
+    [userId, isPhase2]
+  );
+  const viewerProfile = useQuery(api.users.getCurrentUser, viewerProfileArgs);
+
+  // Use the correct profiles based on mode
+  // PERF: For Phase-1, use prefetch-aware variable that provides data during initial query loading
+  const convexProfiles = isPhase2 ? phase2Profiles : phase1ProfilesWithPrefetch;
+
+  // FIRST_LOAD_FIX: Track if Phase-2 query has ever returned profiles
+  // This prevents showing empty state when Convex returns cached empty result on first mount
+  // The query subscription will update with real data shortly after
+  const phase2HasEverHadProfilesRef = useRef(false);
+  const phase2FirstQueryTimeRef = useRef<number | null>(null);
+
+  // Track when we first start the query
+  if (isPhase2 && privateDiscoverArgs !== "skip" && phase2FirstQueryTimeRef.current === null) {
+    phase2FirstQueryTimeRef.current = Date.now();
+  }
+
+  // Mark that we've seen profiles
+  if (isPhase2 && phase2Profiles !== undefined && phase2Profiles.length > 0) {
+    phase2HasEverHadProfilesRef.current = true;
+  }
+
+  // Reset the flags when user changes (new session)
+  const phase2ProfilesUserRef = useRef<string | null>(null);
+  if (userId !== phase2ProfilesUserRef.current) {
+    phase2ProfilesUserRef.current = userId;
+    phase2HasEverHadProfilesRef.current = false;
+    phase2FirstQueryTimeRef.current = null;
+  }
+
+  // FIRST_LOAD_FIX: Grace period for treating empty as loading (max 5 seconds)
+  // After grace period, if still empty, show empty state (user genuinely has no profiles to see)
+  const FIRST_LOAD_GRACE_PERIOD_MS = 5000;
+  const [, forceUpdate] = useState(0);
+  const isWithinGracePeriod = phase2FirstQueryTimeRef.current !== null &&
+    (Date.now() - phase2FirstQueryTimeRef.current) < FIRST_LOAD_GRACE_PERIOD_MS;
+
+  // Force re-render when grace period expires to transition from loading to empty state
+  useEffect(() => {
+    if (!isPhase2 || isDemoMode) return;
+    if (phase2HasEverHadProfilesRef.current) return; // Already have profiles
+    if (phase2Profiles === undefined) return; // Still truly loading
+    if (phase2Profiles?.length > 0) return; // Have profiles now
+
+    // We have empty result and haven't seen profiles - set timeout to force re-render after grace period
+    const remaining = phase2FirstQueryTimeRef.current
+      ? FIRST_LOAD_GRACE_PERIOD_MS - (Date.now() - phase2FirstQueryTimeRef.current)
+      : FIRST_LOAD_GRACE_PERIOD_MS;
+
+    if (remaining <= 0) return; // Already past grace period
+
+    const timer = setTimeout(() => {
+      forceUpdate(n => n + 1);
+    }, remaining + 100); // Small buffer
+
+    return () => clearTimeout(timer);
+  }, [isPhase2, phase2Profiles, isDemoMode]);
+
+  // P1-003 FIX: Track explicit loading state to distinguish undefined (loading) from [] (empty results)
+  // useQuery returns: undefined = still loading, [] = loaded but empty
+  // FIRST_LOAD_FIX: Also treat empty result as "loading" if we've never seen profiles before (within grace period)
+  // This handles the case where Convex returns cached empty array on first mount
+  // EMPTY_PREFETCH_FIX: Simpler logic - if query active but no profiles ever seen, keep loading
+  const isPhase2QueryLoading = isPhase2 && !isDemoMode && privateDiscoverArgs !== "skip" && (
+    phase2Profiles === undefined ||
+    (phase2Profiles?.length === 0 && !phase2HasEverHadProfilesRef.current && isWithinGracePeriod)
+  );
+
+  // EMPTY_PREFETCH_FIX: For Phase-2, ensure convexProfiles is only used if it has data
+  // If Phase-2 query returns empty but we haven't seen profiles, treat as undefined (loading)
+  const effectiveConvexProfiles = isPhase2 && phase2Profiles?.length === 0 && !phase2HasEverHadProfilesRef.current && isWithinGracePeriod
+    ? undefined  // Treat as loading
+    : convexProfiles;
+
+  const profilesSafe = effectiveConvexProfiles ?? EMPTY_ARRAY;
 
   // CRITICAL: useMemo prevents new array/object references on every render.
   // Without this, DEMO_PROFILES.map() creates new objects each render,
@@ -413,6 +829,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // (blocked users, matched users, swiped users should not appear in explore categories)
       const filtered = externalProfiles.filter((p: any) => !excludedSet.has(p._id ?? p.id));
       const mapped = filtered.map(toProfileData);
+
       // Demo mode: preserve array order for deterministic Discover feed
       return isDemoMode ? mapped : rankProfiles(mapped);
     }
@@ -496,13 +913,85 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
       }));
     }
+
+    // PHASE-2 ISOLATION FIX: Map Phase-2 profiles to ProfileData format
+    // Phase-2 profiles from privateDiscover.getProfiles have different field names
+    // SOFT_MATCH_FIX: Allow profiles without photos - use placeholder
+    if (isPhase2) {
+      // SOFT_MATCH_FIX: Debug logging for profile counts
+      const withPhotos = profilesSafe.filter((p: any) => p.blurredPhotoUrls?.length > 0).length;
+      const withoutPhotos = profilesSafe.filter((p: any) => !p.blurredPhotoUrls?.length).length;
+      const incomplete = profilesSafe.filter((p: any) => !p.isSetupComplete).length;
+      if (__DEV__) {
+        console.log('[PHASE2_DISCOVER_FE] Profile stats:', { total: profilesSafe.length, withPhotos, withoutPhotos, incomplete });
+      }
+
+      return profilesSafe.map((p: any) => {
+        // SOFT_MATCH_FIX: If no photos, pass empty array - ProfileCard shows placeholder
+        const photoUrls = p.blurredPhotoUrls ?? [];
+        const photos = photoUrls.map((url: string) => ({ url }));
+
+        // LOG_NOISE_FIX: Gated behind DEBUG_P2_PROFILE
+        if (__DEV__ && DEBUG_P2_PROFILE) {
+          console.log(`[P2_DATA] ${p.displayName}(${p.userId?.slice?.(-6)}) ${photoUrls.length}p`);
+        }
+
+        return toProfileData({
+          _id: p._id,
+          id: p.userId, // Phase-2 uses userId as the primary identifier for matching
+          userId: p.userId,
+          // P0-002 FIX: Use displayName only for Phase-2 profiles
+          name: p.displayName || 'Anonymous',
+          age: p.age,
+          city: p.city,
+          bio: p.privateBio,
+          photos,
+          activities: p.hobbies ?? [],
+          isVerified: p.isVerified ?? false,
+          privateIntentKeys: p.intentKeys ?? [],
+          privateIntentKey: p.intentKeys?.[0],
+          // PHASE2_PARITY: Include gender for identity display
+          gender: p.gender,
+          // PHASE2_PARITY: Use actual lastActive if available, else fallback
+          lastActive: p.lastActive ?? (Date.now() - 2 * 60 * 60 * 1000),
+          createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+          // SOFT_MATCH_FIX: Pass through completeness flags
+          isSetupComplete: p.isSetupComplete ?? false,
+          hasPhotos: p.hasPhotos ?? (photoUrls.length > 0),
+          // PREMIUM_CARD: Lifestyle data for photo-index reveal
+          height: p.height ?? null,
+          smoking: p.smoking ?? null,
+          drinking: p.drinking ?? null,
+          // PREMIUM_CARD: Profile prompts for photo-index reveal
+          profilePrompts: p.promptAnswers ?? [],
+        });
+      });
+    }
+
+    // Phase-1: use standard mapping
     return rankProfiles(profilesSafe.map(toProfileData));
   }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
 
   // Drop profiles with no valid primary photo — prevents blank Discover cards
+  // SOFT_MATCH_FIX: For Phase-2, allow profiles without photos (ProfileCard shows placeholder)
   const validProfiles = useMemo(
-    () => latestProfiles.filter((p) => (p.photos?.length ?? 0) > 0 && !!p.photos?.[0]?.url),
-    [latestProfiles],
+    () => {
+      if (isPhase2) {
+        // Phase-2: Allow ALL profiles - ProfileCard will show placeholder for no photos
+        // This implements the 90/10 soft matching rule
+        if (__DEV__) {
+          const withPhotos = latestProfiles.filter((p) => p.photos?.length > 0).length;
+          const withoutPhotos = latestProfiles.length - withPhotos;
+          console.log('[PHASE2_DISCOVER_FE] Soft match: all', latestProfiles.length, 'profiles kept (', withPhotos, 'with photos,', withoutPhotos, 'without)');
+        }
+        return latestProfiles;
+      }
+      // Phase-1: Require at least one renderable photo, not just a valid first slot
+      return latestProfiles.filter(
+        (p) => Array.isArray(p.photos) && p.photos.some((photo) => typeof photo?.url === "string" && photo.url.length > 0)
+      );
+    },
+    [latestProfiles, isPhase2],
   );
 
   // Keep last non-empty profiles to prevent blank-frame flicker
@@ -511,11 +1000,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const stableUserIdRef = useRef<string | null>(null);
   if (userId !== stableUserIdRef.current) {
     // User changed — clear stale cache to prevent showing old user's excluded profiles
-    stableProfilesRef.current = [];
+    // FLICKER_FIX: Only clear if there WAS a previous user (not first mount)
+    if (stableUserIdRef.current !== null) {
+      stableProfilesRef.current = [];
+      if (__DEV__ && isPhase2) {
+        console.log('[DISCOVER_RESET] reason=user_changed, prev=', stableUserIdRef.current?.slice(0, 10), 'new=', userId?.slice(0, 10));
+      }
+    }
     stableUserIdRef.current = userId;
   }
   if (validProfiles.length > 0) {
     stableProfilesRef.current = validProfiles;
+  }
+  // FLICKER_FIX: Log when falling back to stable cache
+  const usingStableCache = validProfiles.length === 0 && stableProfilesRef.current.length > 0;
+  if (__DEV__ && isPhase2 && usingStableCache) {
+    console.log('[DISCOVER_GUARD] Using stable cache:', stableProfilesRef.current.length, 'profiles (validProfiles was empty)');
   }
   const profilesRaw = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
 
@@ -542,6 +1042,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Reset index when filter changes (always show first matching profile)
   const prevFilterRef = useRef<string>(JSON.stringify([]));
+  // P2-001 FIX: Track pending filter change to apply after swipe completes
+  const pendingFilterResetRef = useRef<boolean>(false);
   useEffect(() => {
     const filterKey = JSON.stringify(intentFilters);
     if (isPhase2 && prevFilterRef.current !== filterKey) {
@@ -551,6 +1053,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         // Also reset queue when filter changes
         visibleQueueRef.current = [];
         consumedIdsRef.current.clear();
+        pendingFilterResetRef.current = false;
+      } else {
+        // P2-001 FIX: Mark that filter changed during swipe, will apply after swipe completes
+        pendingFilterResetRef.current = true;
       }
       // Track Phase-2 intent filter selection (use first key for backward compat)
       trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
@@ -569,17 +1075,73 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const visibleQueueRef = useRef<string[]>([]); // Profile IDs in queue
   const consumedIdsRef = useRef<Set<string>>(new Set()); // Profiles already swiped
 
+  // P2_CARD_FIX: State trigger to force re-render when queue transitions from empty to populated
+  // Refs don't trigger re-renders, so we need this state to ensure the card appears on first load
+  const [queueVersion, setQueueVersion] = useState(0);
+
+  // P2_REFETCH_FIX: Track retry attempts to prevent infinite loops
+  const refetchRetryCountRef = useRef(0);
+  const MAX_REFETCH_RETRIES = 2;
+
   // Source profiles for queue refill (use filtered for Phase-2, regular for Phase-1)
-  const sourceProfiles = isPhase2 ? filteredProfiles : profiles;
+  const baseProfiles = isPhase2 ? filteredProfiles : profiles;
+
+  // INVISIBLE RANKING: Sort profiles by score (activity + completeness + stable random)
+  // This is invisible to users - no UI changes, just better ordering
+  const sourceProfiles = useMemo(
+    () => sortProfilesByScore(baseProfiles),
+    [baseProfiles]
+  );
 
   // Build a map from profile ID to profile data for O(1) lookup
+  // FLICKER_FIX: Don't clear map when sourceProfiles is transiently empty
+  // This prevents the card from disappearing when query/state briefly resets
   const profileMapRef = useRef<Map<string, ProfileData>>(new Map());
   useMemo(() => {
+    // FLICKER_FIX: Only update map if we have profiles - don't clear on empty
+    if (sourceProfiles.length === 0) {
+      if (__DEV__ && isPhase2 && profileMapRef.current.size > 0) {
+        console.log('[DISCOVER_GUARD] Ignored empty sourceProfiles overwrite, keeping', profileMapRef.current.size, 'profiles in map');
+      }
+      return; // Keep existing map data
+    }
+    // Have new profiles - update the map
     profileMapRef.current.clear();
     for (const p of sourceProfiles) {
       profileMapRef.current.set(p.id, p);
     }
-  }, [sourceProfiles]);
+  }, [sourceProfiles, isPhase2]);
+
+  const sanitizeQueue = useCallback(() => {
+    if (isPhase2) return false;
+
+    const currentQueue = visibleQueueRef.current;
+    if (currentQueue.length === 0) return false;
+
+    const validIds = new Set(sourceProfiles.map((p) => p.id));
+    const consumed = consumedIdsRef.current;
+    const seen = new Set<string>();
+    const sanitizedQueue: string[] = [];
+
+    for (const id of currentQueue) {
+      if (seen.has(id)) continue;
+      if (!validIds.has(id)) continue;
+      if (consumed.has(id)) continue;
+      if (id === userId) continue;
+      seen.add(id);
+      sanitizedQueue.push(id);
+    }
+
+    const changed =
+      sanitizedQueue.length !== currentQueue.length ||
+      sanitizedQueue.some((id, idx) => id !== currentQueue[idx]);
+
+    if (changed) {
+      visibleQueueRef.current = sanitizedQueue;
+    }
+
+    return changed;
+  }, [isPhase2, sourceProfiles, userId]);
 
   /**
    * Refill the visible queue from source profiles.
@@ -589,10 +1151,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
    * - Not the current user
    */
   const refillQueue = useCallback(() => {
+    const sanitized = sanitizeQueue();
     const queue = visibleQueueRef.current;
     const consumed = consumedIdsRef.current;
     const needed = QUEUE_SIZE - queue.length;
-    if (needed <= 0) return;
+    if (needed <= 0) return sanitized;
 
     const queueSet = new Set(queue);
     const toAdd: string[] = [];
@@ -607,9 +1170,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
 
     if (toAdd.length > 0) {
+      const wasEmpty = queue.length === 0;
       visibleQueueRef.current = [...queue, ...toAdd];
+
+      // P2_CARD_FIX: Force re-render when queue transitions from empty to populated
+      // This ensures the first card renders on first open
+      if (wasEmpty) {
+        // LOG_NOISE_FIX: Gated behind DEBUG_DISCOVER_QUEUE
+        if (__DEV__ && DEBUG_DISCOVER_QUEUE && isPhase2) {
+          console.log(`[QUEUE] init: added ${toAdd.length} profiles`);
+        }
+        setQueueVersion(v => v + 1);
+      }
+      return true;
     }
-  }, [sourceProfiles, userId]);
+    return sanitized;
+  }, [sanitizeQueue, sourceProfiles, userId, isPhase2]);
 
   /**
    * Advance the queue after swipe completion.
@@ -628,15 +1204,76 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     // Refill queue with next available profiles
     refillQueue();
-  }, [refillQueue]);
+
+    // LOG_NOISE_FIX: Queue state logging gated behind DEBUG_DISCOVER_QUEUE
+    const newQueueLength = visibleQueueRef.current.length;
+    if (__DEV__ && DEBUG_DISCOVER_QUEUE && isPhase2) {
+      console.log(`[QUEUE] len=${newQueueLength} consumed=${consumedIdsRef.current.size}`);
+    }
+
+    // P2_REFETCH_FIX: If queue is empty after refill, trigger retry mechanism
+    if (newQueueLength === 0 && isPhase2) {
+      if (refetchRetryCountRef.current < MAX_REFETCH_RETRIES) {
+        refetchRetryCountRef.current++;
+        // LOG_NOISE_FIX: Keep refetch logs as they indicate important state transitions
+        if (__DEV__ && DEBUG_DISCOVER_QUEUE) {
+          console.log(`[REFETCH] retry ${refetchRetryCountRef.current}/${MAX_REFETCH_RETRIES}`);
+        }
+        // Force a queueVersion bump after a short delay to trigger re-render
+        // This gives the Convex subscription time to update with new profiles
+        setTimeout(() => {
+          // Re-run refillQueue with potentially updated sourceProfiles
+          refillQueue();
+          // If still empty, bump version to force UI update
+          if (visibleQueueRef.current.length === 0) {
+            setQueueVersion(v => v + 1);
+          }
+        }, 500);
+      } else if (__DEV__ && DEBUG_DISCOVER_QUEUE) {
+        console.log('[REFETCH] exhausted - no more profiles');
+      }
+    }
+  }, [refillQueue, isPhase2, sourceProfiles]);
 
   // Refill queue when source data changes AND no swipe is in progress
   // This ensures the queue is populated but doesn't change mid-swipe
   useEffect(() => {
     // Don't refill during active swipe
     if (swipeLockRef.current) return;
-    refillQueue();
-  }, [sourceProfiles, refillQueue]);
+
+    // P2_REFETCH_FIX: Cleanup consumed IDs that are no longer in sourceProfiles
+    // This handles the case where backend has removed swiped profiles from results
+    if (sourceProfiles.length > 0) {
+      const sourceIdSet = new Set(sourceProfiles.map(p => p.id));
+      const consumed = consumedIdsRef.current;
+      const toRemove: string[] = [];
+      for (const id of consumed) {
+        if (!sourceIdSet.has(id)) {
+          toRemove.push(id);
+        }
+      }
+      if (toRemove.length > 0) {
+        for (const id of toRemove) {
+          consumed.delete(id);
+        }
+        // LOG_NOISE_FIX: Gated cleanup log
+        if (__DEV__ && DEBUG_DISCOVER_QUEUE && isPhase2) {
+          console.log(`[QUEUE] cleanup: removed ${toRemove.length} stale IDs`);
+        }
+      }
+    }
+
+    const queueChanged = refillQueue();
+
+    if (!isPhase2 && queueChanged) {
+      setIndex((prev) => prev + 1);
+    }
+
+    // P2_REFETCH_FIX: If queue is now populated, reset retry count
+    if (visibleQueueRef.current.length > 0) {
+      refetchRetryCountRef.current = 0;
+    }
+  }, [sourceProfiles, refillQueue, isPhase2]);
 
   // Reset queue when user changes (prevents showing stale profiles)
   const prevUserIdRef = useRef<string | null>(null);
@@ -650,10 +1287,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [userId]);
 
   // Get current/next from the STABLE QUEUE (not from live array indices)
+  // P2_CARD_FIX: queueVersion dependency ensures this re-computes after queue populates
   const currentQueueId = visibleQueueRef.current[0];
   const nextQueueId = visibleQueueRef.current[1];
   const queueCurrent = currentQueueId ? profileMapRef.current.get(currentQueueId) : undefined;
   const queueNext = nextQueueId ? profileMapRef.current.get(nextQueueId) : undefined;
+
+  // LOG_NOISE_FIX: Very noisy log - removed (fires every render)
 
   // ── Demo auto-replenish: re-inject profiles when pool is exhausted ──
   // Guard ref prevents the effect from firing twice before the store update
@@ -678,39 +1318,29 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     consumedIdsRef.current.clear();
   }, [profiles.length, externalProfiles]);
 
-  // Profile completeness nudge (main Discover only, not explore categories)
-  const { dismissedNudges, dismissNudge } = useDemoStore(useShallow((s) => ({
-    dismissedNudges: s.dismissedNudges,
-    dismissNudge: s.dismissNudge,
-  })));
-  const currentUserForNudge = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : "skip" as const,
-  );
-  const currentUser = isDemoMode ? getDemoCurrentUser() : currentUserForNudge;
-  const nudgeStatus = currentUser
-    ? getProfileCompleteness({
-        photoCount: Array.isArray(currentUser.photos) ? currentUser.photos.length : 0,
-        bioLength: currentUser.bio?.length ?? 0,
-      })
-    : 'complete';
-  const showNudge =
-    !hideHeader &&
-    !externalProfiles &&
-    nudgeStatus !== 'complete' &&
-    !dismissedNudges.includes('discover');
-  const NUDGE_H = 38;
+  // Profile completion nudge DISABLED on Discover screen
+  // Nudges should only appear on Profile/Edit Profile screens (not swiping context)
 
+  // Phase-1 swipe mutation (shared likes.ts)
   const swipeMutation = useMutation(api.likes.swipe);
+  // Phase-2 swipe mutation (isolated privateSwipes.ts) - STRICT ISOLATION
+  const phase2SwipeMutation = useMutation(api.privateSwipes.swipe);
   // Phase-2 only: Impression recording for ranking system
   const recordImpressionsMutation = useMutation(api.privateDiscover.recordDesireLandImpressions);
 
-  // Two-pan alternating approach
-  const panA = useRef(new Animated.ValueXY()).current;
-  const panB = useRef(new Animated.ValueXY()).current;
+  // Two-pan alternating approach with Reanimated shared values
+  const panAX = useSharedValue(0);
+  const panAY = useSharedValue(0);
+  const panBX = useSharedValue(0);
+  const panBY = useSharedValue(0);
   const activeSlotRef = useRef<0 | 1>(0);
+  // SharedValue mirror of activeSlotRef for worklet access (refs cannot be read in worklets)
+  const activeSlotShared = useSharedValue<0 | 1>(0);
   const [activeSlot, setActiveSlot] = useState<0 | 1>(0);
-  const getActivePan = () => (activeSlotRef.current === 0 ? panA : panB);
+
+  // Helper to get the active pan shared values (for JS thread use only)
+  const getActivePanX = () => (activeSlotRef.current === 0 ? panAX : panBX);
+  const getActivePanY = () => (activeSlotRef.current === 0 ? panAY : panBY);
 
   // ── Focus effect: cancel animations on blur, reset nav lock on focus ──
   // Uses useIsFocused() (a single boolean) + idempotent ref guard.
@@ -729,42 +1359,102 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       isFocusedRef.current = true;
       navigatingRef.current = false;
       swipeLockRef.current = false;
+
+      // SCREEN_FOCUS_REFRESH: Two-step location refresh for instant distance UX
+      // Step 1: Returns cached location immediately (fast UX)
+      // Step 2: If cache stale (20-45s), triggers silent background freshen
+      if (!isRefreshingLocationRef.current) {
+        isRefreshingLocationRef.current = true;
+        refreshLocationCached({ allowBackgroundFreshen: true }).finally(() => {
+          isRefreshingLocationRef.current = false;
+        });
+        if (__DEV__) {
+          console.log('[SCREEN_FOCUS_REFRESH]', isPhase2 ? 'DeepConnect' : 'Discover', 'focus gained');
+        }
+      }
     } else {
       isFocusedRef.current = false;
       // RACE FIX: Increment swipeId to invalidate any in-flight async callbacks
       // from the previous focus session. Their releaseSwipeLock(oldId) calls will no-op.
       swipeIdRef.current += 1;
       swipeLockRef.current = false;
-      if (activeAnimationRef.current) {
-        activeAnimationRef.current.stop();
-        activeAnimationRef.current = null;
-      }
-      panA.setValue({ x: 0, y: 0 });
-      panB.setValue({ x: 0, y: 0 });
-      overlayOpacityAnim.setValue(0);
+      // Reset all shared values on blur
+      panAX.value = 0;
+      panAY.value = 0;
+      panBX.value = 0;
+      panBY.value = 0;
+      overlayOpacity.value = 0;
       overlayDirectionRef.current = null;
     }
-  // panA, panB, overlayOpacityAnim are useRef().current — stable across renders,
-  // so only isFocused drives this effect.
+  // Shared values are stable across renders, so only isFocused drives this effect.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFocused]);
 
-  const activePan = activeSlot === 0 ? panA : panB;
+  // Get current active pan values based on slot
+  const activePanX = activeSlot === 0 ? panAX : panBX;
+  const activePanY = activeSlot === 0 ? panAY : panBY;
 
-  const rotation = activePan.x.interpolate({
-    inputRange: [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
-    outputRange: [`-${SWIPE_CONFIG.ROTATION_ANGLE}deg`, "0deg", `${SWIPE_CONFIG.ROTATION_ANGLE}deg`],
-    extrapolate: "clamp",
+  // Card animated style - runs on UI thread (premium rotation + position)
+  const cardAnimatedStyle = useAnimatedStyle(() => {
+    // Premium rotation: subtle tilt based on horizontal drag
+    const rotation = interpolate(
+      activePanX.value,
+      [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
+      [-SWIPE_CONFIG.ROTATION_ANGLE, 0, SWIPE_CONFIG.ROTATION_ANGLE],
+      Extrapolation.CLAMP
+    );
+    // Slight scale reduction when dragging for depth feel
+    const dragDistance = Math.sqrt(
+      activePanX.value * activePanX.value + activePanY.value * activePanY.value
+    );
+    const scale = interpolate(
+      dragDistance,
+      [0, SCREEN_WIDTH * 0.5],
+      [1, 0.98],
+      Extrapolation.CLAMP
+    );
+    return {
+      transform: [
+        { translateX: activePanX.value },
+        { translateY: activePanY.value },
+        { rotate: `${rotation}deg` },
+        { scale },
+      ],
+    };
   });
 
-  const cardStyle = {
-    transform: [{ translateX: activePan.x }, { translateY: activePan.y }, { rotate: rotation }, { scale: 1 }],
-  } as const;
-
-  const nextScale = activePan.x.interpolate({
-    inputRange: [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
-    outputRange: [1, 0.95, 1],
-    extrapolate: "clamp",
+  // Next card animated style - premium stack depth effect
+  // Card behind scales up and moves up as top card is dragged away
+  const nextCardAnimatedStyle = useAnimatedStyle(() => {
+    const dragDistance = Math.abs(activePanX.value) + Math.abs(activePanY.value) * 0.5;
+    // Scale from 0.94 → 1.0 as top card moves away
+    const scale = interpolate(
+      dragDistance,
+      [0, SCREEN_WIDTH * 0.4],
+      [SWIPE_CONFIG.NEXT_CARD_SCALE, 1],
+      Extrapolation.CLAMP
+    );
+    // Translate up slightly as it scales
+    const translateY = interpolate(
+      dragDistance,
+      [0, SCREEN_WIDTH * 0.4],
+      [SWIPE_CONFIG.NEXT_CARD_OFFSET_Y, 0],
+      Extrapolation.CLAMP
+    );
+    // Slight opacity increase for polish
+    const opacity = interpolate(
+      dragDistance,
+      [0, SCREEN_WIDTH * 0.3],
+      [0.92, 1],
+      Extrapolation.CLAMP
+    );
+    return {
+      transform: [
+        { scale },
+        { translateY },
+      ],
+      opacity,
+    };
   });
 
   // STABLE QUEUE: Use queue-based current/next instead of index-based access
@@ -772,6 +1462,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const displayProfiles = isPhase2 ? filteredProfiles : profiles; // Keep for compatibility
   const current = queueCurrent; // From stable queue
   const next = queueNext; // From stable queue
+
+  // Track when stack becomes empty (for onStackEmpty callback)
+  const hadProfilesRef = useRef(false);
+  const stackEmptyCalledRef = useRef(false);
+  useEffect(() => {
+    if (current) {
+      hadProfilesRef.current = true;
+      stackEmptyCalledRef.current = false;
+    } else if (hadProfilesRef.current && !stackEmptyCalledRef.current && onStackEmpty) {
+      stackEmptyCalledRef.current = true;
+      onStackEmpty();
+    }
+  }, [current, onStackEmpty]);
 
   // Trust badges — memoized per profile to avoid allocation each render
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -849,40 +1552,92 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   currentRef.current = current;
 
   // Stable callback for opening profile — uses ref so it never changes identity
-  // Both Phase-1 and Phase-2 use the same route for viewing OTHER users' profiles
-  // (private-profile is only for your OWN Phase-2 tab, not for viewing others)
-  // Pass mode param so profile view can show Phase-2 specific content
+  // Phase-1 and Phase-2 now use SEPARATE routes for profile viewing
   const openProfileCb = useCallback(() => {
     const c = currentRef.current;
     if (!c) return;
+
+    // LOG_NOISE_FIX: Removed verbose profile open log
+
+    // Track profile opened for user journey replay
     if (isPhase2) {
-      // Phase-2: pass mode (intentKeys are read from profile in the detail view)
-      router.push(`/(main)/profile/${c.id}?mode=phase2` as any);
-    } else {
-      // Phase-1: no params needed
-      router.push(`/(main)/profile/${c.id}` as any);
+      trackAction('profile_opened', {
+        userId: (c.userId || c.id)?.slice(-8),
+        name: c.name,
+      });
     }
-  }, [isPhase2]);
+
+    if (isPhase2) {
+      // Phase-2: Use dedicated Phase-2 profile route (no Phase-1 leakage)
+      // ISOLATION FIX: Use p2-profile to avoid URL collision with Phase-1 profile
+      const profileUserId = c.userId || c.id; // Prefer userId, fallback to id
+      router.push(`/(main)/(private)/p2-profile/${profileUserId}` as any);
+    } else {
+      // Phase-1: mark Discover as the source so profile actions can sync the deck
+      router.push(`/(main)/profile/${c.id}?source=phase1_discover` as any);
+    }
+  }, [isPhase2, mode]);
+
+  useEffect(() => {
+    if (!discoverProfileActionResult || isPhase2) return;
+    if (discoverProfileActionResult.source !== "phase1_discover_profile") return;
+
+    const { profileId } = discoverProfileActionResult;
+    const queueBefore = visibleQueueRef.current;
+
+    if (!queueBefore.includes(profileId) && consumedIdsRef.current.has(profileId)) {
+      setDiscoverProfileActionResult(null);
+      return;
+    }
+
+    let queueChanged = false;
+    consumedIdsRef.current.add(profileId);
+    const queueAfterRemoval = queueBefore.filter((id) => id !== profileId);
+    queueChanged = queueAfterRemoval.length !== queueBefore.length;
+    visibleQueueRef.current = queueAfterRemoval;
+    if (refillQueue()) {
+      queueChanged = true;
+    }
+    if (queueChanged) {
+      setIndex((prev) => prev + 1);
+    }
+    setDiscoverProfileActionResult(null);
+  }, [discoverProfileActionResult, isPhase2, refillQueue, setDiscoverProfileActionResult]);
 
   const resetPosition = useCallback(() => {
-    const currentPan = getActivePan();
-    Animated.spring(currentPan, {
-      toValue: { x: 0, y: 0 },
-      friction: 6,
-      tension: 80,
-      useNativeDriver: true,
-    }).start();
+    const currentPanX = getActivePanX();
+    const currentPanY = getActivePanY();
+    // Premium spring animation: snappy bounce-back with subtle overshoot
+    currentPanX.value = withSpring(0, {
+      damping: SWIPE_CONFIG.SPRING_DAMPING,
+      stiffness: SWIPE_CONFIG.SPRING_STIFFNESS,
+      mass: 0.8,
+    });
+    currentPanY.value = withSpring(0, {
+      damping: SWIPE_CONFIG.SPRING_DAMPING,
+      stiffness: SWIPE_CONFIG.SPRING_STIFFNESS,
+      mass: 0.8,
+    });
     overlayDirectionRef.current = null;
-    overlayOpacityAnim.setValue(0);
+    // Fade out overlay smoothly
+    overlayOpacity.value = withTiming(0, { duration: 150 });
     setOverlayDirection(null);
-  }, [panA, panB, overlayOpacityAnim]);
+  }, [panAX, panAY, panBX, panBY, overlayOpacity]);
 
   const advanceCard = useCallback(() => {
     const newSlot: 0 | 1 = activeSlotRef.current === 0 ? 1 : 0;
     activeSlotRef.current = newSlot;
-    const newPan = newSlot === 0 ? panA : panB;
-    newPan.setValue({ x: 0, y: 0 });
-    overlayOpacityAnim.setValue(0);
+    // Keep SharedValue in sync for worklet access
+    activeSlotShared.value = newSlot;
+    // Reset the new active slot's pan values
+    if (newSlot === 0) {
+      panAX.value = 0;
+      panAY.value = 0;
+    } else {
+      panBX.value = 0;
+      panBY.value = 0;
+    }
+    overlayOpacity.value = 0;
     overlayDirectionRef.current = null;
     setOverlayDirection(null);
     setActiveSlot(newSlot);
@@ -890,23 +1645,36 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // STABLE QUEUE: Advance the queue after swipe
     // This removes front card, promotes back -> front, and refills from source
     advanceQueue();
+
+    // Engagement trigger: Track swipe and show progress toast (Task 3)
+    trackSwipe();
+    if (shouldShowSwipeProgress()) {
+      Toast.show("You're exploring fast 🔥");
+    }
     // Old pan is reset in the useEffect below, AFTER React has re-rendered
     // with the new activeSlot. This prevents a 1-frame flicker where the
     // swiped-away card snaps back to center before the slot switch renders.
-  }, [panA, panB, overlayOpacityAnim, advanceQueue]);
+  }, [panAX, panAY, panBX, panBY, overlayOpacity, activeSlotShared, advanceQueue, trackSwipe, shouldShowSwipeProgress]);
 
   // Reset the now-inactive pan AFTER React commits the new activeSlot.
   // This avoids the race where requestAnimationFrame fires before the
   // batched state update, causing the old card to flash at center.
   useEffect(() => {
-    const oldPan = activeSlot === 0 ? panB : panA;
-    oldPan.setValue({ x: 0, y: 0 });
-  }, [activeSlot, panA, panB]);
+    if (activeSlot === 0) {
+      panBX.value = 0;
+      panBY.value = 0;
+    } else {
+      panAX.value = 0;
+      panAY.value = 0;
+    }
+  }, [activeSlot, panAX, panAY, panBX, panBY]);
 
   const handleSwipe = useCallback(
     async (direction: "left" | "right" | "up", message?: string, swipeId?: number) => {
       // RACE FIX: Use provided swipeId, or current if not provided (backward compat)
       const activeSwipeId = swipeId ?? swipeIdRef.current;
+      // P1-001 FIX: Track if release was deferred to prevent double-release in finally
+      let releaseDeferredToCallback = false;
 
       // Guard: unmounted or unfocused
       if (!mountedRef.current || !isFocusedRef.current) { releaseSwipeLock(activeSwipeId); return; }
@@ -925,6 +1693,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // ★ ALWAYS advance card FIRST — this guarantees the index moves
       // regardless of match/navigation/error below.
       advanceCard();
+
+      // Task 3: Light haptic feedback on swipe
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
       // F2-A: Track swipe for random match control
       incSwipe();
@@ -987,6 +1758,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             // Defer navigation so advanceCard's setState commits first
             // RACE FIX: Capture swipeId in closure so deferred callback releases correct lock
             const deferredSwipeId = activeSwipeId;
+            // P1-001 FIX: Mark that release will happen in deferred callback
+            releaseDeferredToCallback = true;
             InteractionManager.runAfterInteractions(() => {
               if (!mountedRef.current || !isFocusedRef.current) {
                 releaseSwipeLock(deferredSwipeId);
@@ -1016,20 +1789,44 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
         if (!convexUserId) { releaseSwipeLock(activeSwipeId); return; }
         const action: SwipeAction = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
+
+        // Track swipe action for user journey replay
+        if (isPhase2) {
+          trackAction(`swipe_${action}`, {
+            profileId: swipedProfile.id?.slice(-8),
+            name: swipedProfile.name,
+          });
+        }
+
         // B5 fix: wrap mutation in Promise.race with 6s timeout to prevent stuck swipe lock
         const SWIPE_TIMEOUT_MS = 6000;
         const timeoutPromise = new Promise<null>((_, reject) =>
           setTimeout(() => reject(new Error("Swipe timed out")), SWIPE_TIMEOUT_MS)
         );
-        const result = await Promise.race([
-          swipeMutation({
-            token: token!,
-            toUserId: swipedProfile.id as Id<'users'>,
-            action,
-            message: message,
-          }),
-          timeoutPromise,
-        ]);
+
+        // PHASE-2 ISOLATION: Use separate mutation path for Phase-2 (Desire Land)
+        // Phase-2 writes to privateLikes/privateMatches/privateConversations
+        // Phase-1 writes to likes/matches/conversations (shared tables)
+        // P2-SWIPE-FIX: Phase-2 profiles have userId (from users table) separate from id (profile doc _id)
+        const phase2UserId = swipedProfile.userId || swipedProfile.id;
+        // LOG_NOISE_FIX: Removed verbose swipe log
+        const swipePromise = isPhase2
+          ? phase2SwipeMutation({
+              token: token!,
+              toUserId: phase2UserId as Id<'users'>,
+              action,
+              message: message,
+            })
+          : swipeMutation({
+              token: token!,
+              toUserId: swipedProfile.id as Id<'users'>,
+              action,
+              message: message,
+            });
+
+        const result = await Promise.race([swipePromise, timeoutPromise]);
+
+        // LOG_NOISE_FIX: Match logging moved to trackAction/analytics
 
         // Guard: check mounted/focused before navigating on match
         if (!mountedRef.current || !isFocusedRef.current) return;
@@ -1044,6 +1841,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             });
             if (isNewMatch) {
               trackEvent({ name: 'match_created', otherUserId: swipedProfile.id });
+              // Premium haptic: Strong feedback for match celebration
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              // P2_MATCH: Show match celebration
+              setPhase2MatchCelebration({
+                visible: true,
+                matchedProfile: {
+                  name: swipedProfile.name,
+                  photoUrl: swipedProfile.photos?.[0]?.url,
+                  conversationId: (result as any)?.conversationId,
+                },
+              });
             }
             releaseSwipeLock(activeSwipeId);
             return;
@@ -1055,6 +1863,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           // 3B-4: Defer swipe lock release until after navigation initiated
           // RACE FIX: Capture swipeId in closure so deferred callback releases correct lock
           const deferredSwipeId = activeSwipeId;
+          // P1-001 FIX: Mark that release will happen in deferred callback
+          releaseDeferredToCallback = true;
           InteractionManager.runAfterInteractions(() => {
             if (!mountedRef.current || !isFocusedRef.current) {
               releaseSwipeLock(deferredSwipeId);
@@ -1085,10 +1895,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           Toast.show("Something went wrong. Please try again.");
         }
       } finally {
-        releaseSwipeLock(activeSwipeId);
+        // P1-001 FIX: Only release here if not deferred to callback
+        if (!releaseDeferredToCallback) {
+          releaseSwipeLock(activeSwipeId);
+        }
       }
     },
-    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch, releaseSwipeLock],
+    [convexUserId, swipeMutation, phase2SwipeMutation, isPhase2, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch, releaseSwipeLock],
   );
 
   const animateSwipe = useCallback(
@@ -1103,22 +1916,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // ★ RACE FIX: Acquire swipe lock and capture unique ID for this swipe lifecycle
       const swipeId = acquireSwipeLock();
 
-      const currentPan = getActivePan();
+      const currentPanX = getActivePanX();
+      const currentPanY = getActivePanY();
       const targetX = direction === "left" ? -SCREEN_WIDTH * 1.5 : direction === "right" ? SCREEN_WIDTH * 1.5 : 0;
       const targetY = direction === "up" ? -SCREEN_HEIGHT * 1.5 : 0;
       const speed = Math.abs(velocity || 0);
       const duration = speed > 1.5 ? 120 : speed > 0.5 ? 180 : 250;
 
       setOverlayDirection(direction);
-      overlayOpacityAnim.setValue(1);
+      overlayOpacity.value = 1;
 
-      const anim = Animated.parallel([
-        Animated.timing(currentPan.x, { toValue: targetX, duration, useNativeDriver: true }),
-        Animated.timing(currentPan.y, { toValue: targetY, duration, useNativeDriver: true }),
-      ]);
-      activeAnimationRef.current = anim;
-      anim.start(({ finished }) => {
-        activeAnimationRef.current = null;
+      // Callback to run after animation completes
+      const onAnimationComplete = (finished: boolean) => {
         if (!finished) {
           // Animation was interrupted (blur/unmount) — release lock only if we still own it
           releaseSwipeLock(swipeId);
@@ -1132,9 +1941,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
         // Pass swipeId to handleSwipe so it can release the correct lock
         handleSwipeRef.current(direction, undefined, swipeId);
+      };
+
+      // Use withTiming for smooth animation on UI thread
+      currentPanX.value = withTiming(targetX, { duration }, (finished) => {
+        // Only call completion callback once (from X animation)
+        if (finished !== undefined) {
+          runOnJS(onAnimationComplete)(finished);
+        }
       });
+      currentPanY.value = withTiming(targetY, { duration });
     },
-    [panA, panB, overlayOpacityAnim, hasReachedLikeLimit, hasReachedStandOutLimit, acquireSwipeLock, releaseSwipeLock],
+    [panAX, panAY, panBX, panBY, overlayOpacity, hasReachedLikeLimit, hasReachedStandOutLimit, acquireSwipeLock, releaseSwipeLock],
   );
 
   // Stable refs so the panResponder (created once) always calls the latest version
@@ -1143,56 +1961,102 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const animateSwipeRef = useRef(animateSwipe);
   animateSwipeRef.current = animateSwipe;
 
+  // P0-001 FIX: Stable ref for handlePanEnd to prevent panGesture recreation on dependency changes
+  const handlePanEndRef = useRef<(dx: number, dy: number, vx: number, vy: number) => void>(() => {});
+
+  // WORKLET FIX: Stable wrapper that never changes identity - avoids "Tried to modify key `current`" warning
+  // The wrapper reads handlePanEndRef.current at call time, so the ref object isn't captured in worklet closure
+  const onPanEndWrapper = useCallback((dx: number, dy: number, vx: number, vy: number) => {
+    handlePanEndRef.current(dx, dy, vx, vy);
+  }, []); // Empty deps - this function identity never changes
+
   const thresholdX = SCREEN_WIDTH * SWIPE_CONFIG.SWIPE_THRESHOLD_X;
   const thresholdY = SCREEN_HEIGHT * SWIPE_CONFIG.SWIPE_THRESHOLD_Y;
   const velocityX = SWIPE_CONFIG.SWIPE_VELOCITY_X;
   const velocityY = SWIPE_CONFIG.SWIPE_VELOCITY_Y;
 
-  // PanResponder created ONCE (empty deps). Uses refs for all callback logic
-  // so it always calls the latest handleSwipe/animateSwipe without recreation.
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gs) => {
-          // Don't claim touches if navigating, unfocused, or swipe in flight
-          if (navigatingRef.current || !isFocusedRef.current || swipeLockRef.current) return false;
-          return Math.abs(gs.dx) > 8 || Math.abs(gs.dy) > 8;
-        },
-        // Allow other responders (e.g. tab bar) to take over
-        onPanResponderTerminationRequest: () => true,
-        onPanResponderGrant: () => {},
-        onPanResponderMove: (_, gs) => {
-          getActivePan().setValue({ x: gs.dx, y: gs.dy });
-          const absX = Math.abs(gs.dx);
-          const absY = Math.abs(gs.dy);
-          if (gs.dy < -15 && absY > absX) overlayDirectionRef.current = "up";
-          else if (gs.dx < -10) overlayDirectionRef.current = "left";
-          else if (gs.dx > 10) overlayDirectionRef.current = "right";
-          else overlayDirectionRef.current = null;
-          overlayOpacityAnim.setValue(Math.min(Math.max(absX, absY) / 60, 1));
-          const newDir = overlayDirectionRef.current;
-          setOverlayDirection((prev) => (prev === newDir ? prev : newDir));
-        },
-        onPanResponderRelease: (_, gs) => {
-          // If screen lost focus during drag, or swipe already in flight, just reset
-          if (navigatingRef.current || !isFocusedRef.current || swipeLockRef.current) { resetPosition(); return; }
-          if (gs.dx < -thresholdX || gs.vx < -velocityX) { animateSwipeRef.current("left", gs.vx); return; }
-          if (gs.dx > thresholdX  || gs.vx > velocityX)  { animateSwipeRef.current("right", gs.vx); return; }
-          if (gs.dy < -thresholdY || gs.vy < -velocityY)  {
-            // Up swipe triggers Stand Out screen instead of instant swipe
-            resetPosition();
-            const c = currentRef.current;
-            if (!hasReachedStandOutLimit() && c) {
-              router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsRemaining()}` as any);
-            }
-            return;
-          }
-          resetPosition();
-        },
-        onPanResponderTerminate: () => resetPosition(),
+  // JS callbacks to be called from UI thread via runOnJS
+  const updateOverlayDirection = useCallback((newDir: "left" | "right" | "up" | null) => {
+    if (overlayDirectionRef.current !== newDir) {
+      overlayDirectionRef.current = newDir;
+      setOverlayDirection(newDir);
+    }
+  }, []);
+
+  const handlePanEnd = useCallback((dx: number, dy: number, vx: number, vy: number) => {
+    // If screen lost focus during drag, or swipe already in flight, just reset
+    if (navigatingRef.current || !isFocusedRef.current || swipeLockRef.current) {
+      resetPosition();
+      return;
+    }
+    if (dx < -thresholdX || vx < -velocityX) {
+      animateSwipeRef.current("left", vx);
+      return;
+    }
+    if (dx > thresholdX || vx > velocityX) {
+      animateSwipeRef.current("right", vx);
+      return;
+    }
+    if (dy < -thresholdY || vy < -velocityY) {
+      // Up swipe triggers Stand Out screen instead of instant swipe
+      resetPosition();
+      const c = currentRef.current;
+      if (!hasReachedStandOutLimit() && c) {
+        router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsRemaining()}` as any);
+      }
+      return;
+    }
+    resetPosition();
+  }, [thresholdX, thresholdY, velocityX, velocityY, resetPosition, hasReachedStandOutLimit, standOutsRemaining]);
+
+  // P0-001 FIX: Keep handlePanEndRef in sync with latest handlePanEnd
+  handlePanEndRef.current = handlePanEnd;
+
+  // Gesture.Pan() runs on UI thread - replaces PanResponder for better performance
+  const panGesture = useMemo(() =>
+    Gesture.Pan()
+      .minDistance(8)
+      .onStart(() => {
+        // Don't claim gestures if navigating, unfocused, or swipe in flight
+        // Note: This check is on UI thread, refs are read synchronously
+      })
+      .onUpdate((event) => {
+        // Update pan position directly (UI thread)
+        // Use activeSlotShared (SharedValue) instead of activeSlotRef (ref can't be read in worklet)
+        const currentPanX = activeSlotShared.value === 0 ? panAX : panBX;
+        const currentPanY = activeSlotShared.value === 0 ? panAY : panBY;
+        currentPanX.value = event.translationX;
+        currentPanY.value = event.translationY;
+
+        // Calculate overlay opacity (UI thread)
+        const absX = Math.abs(event.translationX);
+        const absY = Math.abs(event.translationY);
+        overlayOpacity.value = Math.min(Math.max(absX, absY) / 60, 1);
+
+        // Calculate new direction
+        let newDir: "left" | "right" | "up" | null = null;
+        if (event.translationY < -15 && absY > absX) newDir = "up";
+        else if (event.translationX < -10) newDir = "left";
+        else if (event.translationX > 10) newDir = "right";
+
+        // Update React state only when direction changes (via JS thread)
+        runOnJS(updateOverlayDirection)(newDir);
+      })
+      .onEnd((event) => {
+        // Handle pan end via JS thread (threshold checks, navigation, etc.)
+        // WORKLET FIX: Pass stable wrapper function - avoids capturing ref object in worklet closure
+        runOnJS(onPanEndWrapper)(
+          event.translationX,
+          event.translationY,
+          event.velocityX / 1000, // Convert to roughly same scale as old PanResponder
+          event.velocityY / 1000
+        );
+      })
+      .onFinalize(() => {
+        // Gesture was cancelled/interrupted
       }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [panA, panB, overlayOpacityAnim, resetPosition, thresholdX, thresholdY, velocityX, velocityY],
+    // P0-001 FIX: Using stable ref pattern - onPanEndWrapper has empty deps so it never changes
+    [panAX, panAY, panBX, panBY, activeSlotShared, overlayOpacity, updateOverlayDirection, onPanEndWrapper]
   );
 
   // Handle stand-out result from route screen
@@ -1225,16 +2089,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     setShowSuperLikeAnimation(true);
 
     // Animate the card out (up direction)
-    const currentPan = getActivePan();
+    const currentPanY = getActivePanY();
     const targetY = -SCREEN_HEIGHT * 1.5;
 
     setOverlayDirection("up");
-    overlayOpacityAnim.setValue(1);
+    overlayOpacity.value = 1;
 
-    const anim = Animated.timing(currentPan.y, { toValue: targetY, duration: 250, useNativeDriver: true });
-    activeAnimationRef.current = anim;
-    anim.start(({ finished }) => {
-      activeAnimationRef.current = null;
+    // Callback to run after animation completes
+    const onStandOutAnimComplete = (finished: boolean) => {
       if (!finished) {
         releaseSwipeLock(swipeId);
         return;
@@ -1245,11 +2107,25 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       }
       // Pass swipeId to handleSwipe so it can release the correct lock
       handleSwipeRef.current("up", msg || undefined, swipeId);
+    };
+
+    // Use withTiming for smooth animation on UI thread
+    currentPanY.value = withTiming(targetY, { duration: 250 }, (finished) => {
+      if (finished !== undefined) {
+        runOnJS(onStandOutAnimComplete)(finished);
+      }
     });
-  }, [standOutResult, acquireSwipeLock, releaseSwipeLock]);
+  }, [standOutResult, acquireSwipeLock, releaseSwipeLock, overlayOpacity, panAY, panBY]);
 
   // Loading state — non-demo only; skip when using external profiles
-  const isDiscoverLoading = !isDemoMode && !externalProfiles && !convexProfiles;
+  // P1-003 FIX: Include explicit Phase-2 query loading check to prevent false empty state
+  // FIRST_LOAD_FIX: Also show loading when auth is not ready (userId undefined in Phase-2)
+  // This prevents empty state flash on first load when auth hasn't hydrated yet
+  // EMPTY_PREFETCH_FIX: Use effectiveConvexProfiles for Phase-2 to treat empty as loading
+  // AUTH_READY_FIX: Show loading until authReady && onboardingCompleted for Phase-2
+  const isAuthPending = isPhase2 && !isDemoMode && (!userId || !isAuthReadyForQuery);
+  const isDiscoverLoading = !isDemoMode && !externalProfiles && (!effectiveConvexProfiles || isPhase2QueryLoading || isAuthPending);
+
   if (isDiscoverLoading) {
     return (
       <LoadingGuard
@@ -1258,10 +2134,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         title="Finding people for you…"
         subtitle="This is taking longer than expected. Check your connection and try again."
       >
-        <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-          <ActivityIndicator size="large" color={C.primary} />
-          <Text style={[styles.loadingText, dark && { color: INCOGNITO_COLORS.textLight }]}>Finding people for you...</Text>
-        </View>
+        {/* Show skeleton card for instant visual feedback */}
+        <SkeletonCard dark={dark} />
       </LoadingGuard>
     );
   }
@@ -1287,27 +2161,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
             <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-            {!isPhase2 ? (
-              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-                <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-                {unseenCount > 0 && (
-                  <View style={styles.bellBadge}>
-                    <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.headerBtn} />
-            )}
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              {unseenCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
           </View>
         )}
         <View style={[styles.center, { flex: 1 }]}>
           <Text style={styles.emptyEmoji}>✨</Text>
-          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles right now</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>We're finding people for you</Text>
           <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
             {isDemoMode
-              ? "You may have swiped through the demo deck or your filters are strict."
-              : "Check back soon — we'll bring you more people as they join."}
+              ? "You may have swiped through the demo deck. Try adjusting your preferences."
+              : "New people are joining every day. Try adjusting your preferences to see more."}
           </Text>
           {isDemoMode && (
             <>
@@ -1397,27 +2267,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
             <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-            {!isPhase2 ? (
-              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-                <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-                {unseenCount > 0 && (
-                  <View style={styles.bellBadge}>
-                    <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.headerBtn} />
-            )}
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              {unseenCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
           </View>
         )}
         <View style={[styles.center, { flex: 1 }]}>
           <Text style={styles.emptyEmoji}>🎉</Text>
-          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>You've seen everyone</Text>
           <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
             {isDemoMode
-              ? "You've swiped through the demo deck. Reset to see everyone again!"
-              : "You've seen everyone available right now."}
+              ? "Great job! Reset the deck or adjust your preferences to see more."
+              : "Check back soon for new people, or try different preferences."}
           </Text>
           {isDemoMode && (
             <>
@@ -1458,19 +2324,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
-          {!isPhase2 ? (
-            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-              {unseenCount > 0 && (
-                <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          ) : (
-            <View style={styles.headerBtn} />
-          )}
+          <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            {unseenCount > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
         </View>
 
         <View style={styles.limitContainer}>
@@ -1495,11 +2356,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     );
   }
 
-  // Layout: card fills from header to bottom of content area
-  const cardTop = hideHeader ? 0 : insets.top + HEADER_H + (showNudge ? NUDGE_H : 0);
-  const actionRowBottom = Math.max(insets.bottom, 12);
-  // Leave room for the action bar so card content (bio) isn't hidden behind the buttons.
-  const cardBottom = actionRowBottom + 72;
+  // FIX 10: Layout with safe area compliance across devices
+  const cardTop = hideHeader ? 0 : insets.top + HEADER_H;
+  // Ensure minimum 16px from bottom edge, respecting safe areas (Samsung, OnePlus, etc.)
+  const actionRowBottom = Math.max(insets.bottom, 16);
+  // Leave room for action bar so card content isn't hidden (76px for larger buttons)
+  const cardBottom = actionRowBottom + 76;
 
   const likesLeft = likesRemaining();
   const standOutsLeft = standOutsRemaining();
@@ -1513,30 +2375,30 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
-          {!isPhase2 ? (
-            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-              {unseenCount > 0 && (
-                <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          ) : (
-            <View style={styles.headerBtn} />
-          )}
+          <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            {unseenCount > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
         </View>
       )}
 
-
-      {/* Profile completeness nudge */}
-      {/* DL-015: Runtime guard with optional chaining for safety */}
-      {showNudge && NUDGE_MESSAGES[nudgeStatus]?.discover && (
-        <ProfileNudge
-          message={NUDGE_MESSAGES[nudgeStatus].discover}
-          onDismiss={() => dismissNudge('discover')}
-        />
+      {/* Match Reminder - Phase-2 only, shows if user has existing Deep Connects */}
+      {isPhase2 && privateConversationsCount > 0 && (
+        <TouchableOpacity
+          style={[styles.matchReminderPill, { top: cardTop + 8 }]}
+          onPress={() => router.push("/(main)/(private)/(tabs)/chats" as any)}
+          activeOpacity={0.6}
+        >
+          <Text style={styles.matchReminderText}>
+            {privateConversationsCount === 1
+              ? "You have a Deep Connect waiting"
+              : `${privateConversationsCount} Deep Connects waiting`}
+          </Text>
+        </TouchableOpacity>
       )}
 
       {/* Card Area (fills between header and tab bar) */}
@@ -1544,7 +2406,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         {/* Back card */}
         {next && (
           <Animated.View
-            style={[styles.card, { zIndex: 0, transform: [{ scale: nextScale }] }]}
+            style={[styles.card, { zIndex: 0 }, nextCardAnimatedStyle]}
           >
             <ProfileCard
               name={next.name}
@@ -1554,58 +2416,100 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               isVerified={next.isVerified}
               distance={next.distance}
               photos={next.photos}
+              photoBlurred={next.photoBlurred}
               trustBadges={nextBadges}
               profilePrompt={next.profilePrompts?.[0]}
+              profilePrompts={next.profilePrompts}
               theme={isPhase2 ? "dark" : "light"}
               privateIntentKeys={next.privateIntentKeys ?? (next as any).intentKeys ?? (next.privateIntentKey ? [next.privateIntentKey] : [])}
               isIncognito={next.isIncognito}
+              activities={next.activities}
+              gender={next.gender}
+              lookingFor={next.lookingFor}
+              relationshipIntent={next.relationshipIntent}
+              viewerProfile={!isPhase2 && viewerProfile ? {
+                activities: viewerProfile.activities,
+                relationshipIntent: viewerProfile.relationshipIntent,
+                lookingFor: viewerProfile.lookingFor,
+                smoking: viewerProfile.smoking,
+                drinking: viewerProfile.drinking,
+                height: viewerProfile.height,
+              } : undefined}
+              height={next.height}
+              smoking={next.smoking}
+              drinking={next.drinking}
             />
           </Animated.View>
         )}
-        {/* Top card */}
+        {/* Top card - wrapped in GestureDetector for UI thread gesture handling */}
         {current && (
-          <Animated.View style={[styles.card, { zIndex: 1 }, cardStyle]} {...panResponder.panHandlers}>
-            <ProfileCard
-              name={current.name}
-              age={current.age}
-              bio={current.bio}
-              city={current.city}
-              isVerified={current.isVerified}
-              distance={current.distance}
-              photos={current.photos}
-              trustBadges={currentBadges}
-              profilePrompt={current.profilePrompts?.[0]}
-              showCarousel
-              onOpenProfile={openProfileCb}
-              theme={isPhase2 ? "dark" : "light"}
-              privateIntentKeys={current.privateIntentKeys ?? (current as any).intentKeys ?? (current.privateIntentKey ? [current.privateIntentKey] : [])}
-              isIncognito={current.isIncognito}
-            />
-            <SwipeOverlay direction={overlayDirection} opacity={overlayOpacityAnim} />
-          </Animated.View>
+          <GestureDetector gesture={panGesture}>
+            <Animated.View style={[styles.card, { zIndex: 1 }, cardAnimatedStyle]}>
+              <ProfileCard
+                name={current.name}
+                age={current.age}
+                bio={current.bio}
+                city={current.city}
+                isVerified={current.isVerified}
+                distance={current.distance}
+                photos={current.photos}
+                photoBlurred={current.photoBlurred}
+                trustBadges={currentBadges}
+                profilePrompt={current.profilePrompts?.[0]}
+                profilePrompts={current.profilePrompts}
+                showCarousel
+                onOpenProfile={openProfileCb}
+                theme={isPhase2 ? "dark" : "light"}
+                privateIntentKeys={current.privateIntentKeys ?? (current as any).intentKeys ?? (current.privateIntentKey ? [current.privateIntentKey] : [])}
+                isIncognito={current.isIncognito}
+                exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
+                lastActive={current.lastActive ?? (current as any).lastActiveAt}
+                activities={current.activities}
+                gender={current.gender}
+                lookingFor={current.lookingFor}
+                relationshipIntent={current.relationshipIntent}
+                viewerProfile={!isPhase2 && viewerProfile ? {
+                  activities: viewerProfile.activities,
+                  relationshipIntent: viewerProfile.relationshipIntent,
+                  lookingFor: viewerProfile.lookingFor,
+                  smoking: viewerProfile.smoking,
+                  drinking: viewerProfile.drinking,
+                  height: viewerProfile.height,
+                } : undefined}
+                height={current.height}
+                smoking={current.smoking}
+                drinking={current.drinking}
+              />
+              <SwipeOverlay direction={overlayDirection} opacity={overlayOpacity} dark={dark} />
+            </Animated.View>
+          </GestureDetector>
         )}
 
         {/* Super-like star-burst animation */}
         <StarBurstAnimation visible={showSuperLikeAnimation} onComplete={clearSuperLikeAnimation} />
       </View>
 
-      {/* 3-Button Action Bar */}
-      <View style={[styles.actions, { bottom: actionRowBottom }]} pointerEvents="box-none">
-        {/* Skip (X) */}
-        <TouchableOpacity
-          style={[styles.actionButton, styles.skipBtn]}
+      {/* ══════════════════════════════════════════════════════════════════════════
+          PREMIUM 3-BUTTON ACTION BAR
+          Floating, semi-transparent, with premium shadows and spacing
+          ══════════════════════════════════════════════════════════════════════════ */}
+      <View style={[styles.actions, styles.premiumActions, { bottom: Math.max(actionRowBottom, 16) }]} pointerEvents="box-none">
+        {/* Skip (X) - Light feedback */}
+        <AnimatedActionButton
+          style={[styles.actionButton, styles.premiumSkipBtn]}
           onPress={() => animateSwipeRef.current("left")}
-          activeOpacity={0.7}
+          feedbackScale={0.92}
+          hapticType="light"
         >
-          <Ionicons name="close" size={30} color="#F44336" />
-        </TouchableOpacity>
+          <Ionicons name="close" size={28} color="#F44336" />
+        </AnimatedActionButton>
 
-        {/* Stand Out (star) */}
-        <TouchableOpacity
+        {/* Stand Out (star) - Medium feedback */}
+        <AnimatedActionButton
           style={[
             styles.actionButton,
-            styles.standOutBtn,
-            hasReachedStandOutLimit() && styles.actionBtnDisabled,
+            styles.premiumStandOutBtn,
+            hasReachedStandOutLimit() && styles.premiumBtnDisabled,
           ]}
           onPress={() => {
             const c = currentRef.current;
@@ -1614,22 +2518,24 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             }
           }}
           disabled={hasReachedStandOutLimit()}
-          activeOpacity={0.7}
+          feedbackScale={0.9}
+          hapticType="medium"
         >
-          <Ionicons name="star" size={24} color={COLORS.white} />
-          <View style={styles.standOutBadge}>
-            <Text style={styles.standOutBadgeText}>{standOutsLeft}</Text>
+          <Ionicons name="star" size={22} color={COLORS.white} />
+          <View style={styles.premiumStandOutBadge}>
+            <Text style={styles.premiumStandOutBadgeText}>{standOutsLeft}</Text>
           </View>
-        </TouchableOpacity>
+        </AnimatedActionButton>
 
-        {/* Like (heart) */}
-        <TouchableOpacity
-          style={[styles.actionButton, styles.likeBtn]}
+        {/* Like (heart) - Medium feedback with stronger scale */}
+        <AnimatedActionButton
+          style={[styles.actionButton, styles.premiumLikeBtn]}
           onPress={() => animateSwipeRef.current("right")}
-          activeOpacity={0.7}
+          feedbackScale={0.9}
+          hapticType="medium"
         >
-          <Ionicons name="heart" size={30} color={COLORS.white} />
-        </TouchableOpacity>
+          <Ionicons name="heart" size={28} color={COLORS.white} />
+        </AnimatedActionButton>
       </View>
 
       {/* Notification Popover */}
@@ -1638,6 +2544,54 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         onClose={() => setShowNotificationPopover(false)}
         anchorTop={insets.top + HEADER_H + 8}
       />
+
+      {/* ══════════════════════════════════════════════════════════════════════════
+          PHASE TRANSITION OVERLAY (Phase-2 Entry Experience)
+          Premium entry moment when entering Deep Connect
+          ══════════════════════════════════════════════════════════════════════════ */}
+      {showPhaseTransition && (
+        <TouchableOpacity
+          style={StyleSheet.absoluteFill}
+          activeOpacity={1}
+          onPress={dismissPhaseTransition}
+        >
+          <Animated.View
+            entering={FadeIn.duration(180)}
+            exiting={FadeOut.duration(250)}
+            style={styles.phaseTransitionOverlay}
+          >
+            {/* Gradient overlay for depth */}
+            <View style={styles.phaseTransitionGradient} />
+
+            {/* Centered intro text */}
+            <Animated.View
+              entering={FadeIn.delay(80).duration(300)}
+              style={styles.phaseTransitionContent}
+            >
+              <Animated.Text
+                entering={FadeIn.delay(120).duration(350)}
+                style={styles.phaseTransitionTitle}
+              >
+                Deep Connect
+              </Animated.Text>
+              <Animated.Text
+                entering={FadeIn.delay(220).duration(350)}
+                style={styles.phaseTransitionSubtitle}
+              >
+                More private. More real.
+              </Animated.Text>
+            </Animated.View>
+
+            {/* Subtle tap hint */}
+            <Animated.Text
+              entering={FadeIn.delay(600).duration(400)}
+              style={styles.phaseTransitionSkipHint}
+            >
+              tap to continue
+            </Animated.Text>
+          </Animated.View>
+        </TouchableOpacity>
+      )}
 
       {/* Random Match Popup (F2-D) */}
       <Modal
@@ -1686,6 +2640,132 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           </View>
         </View>
       </Modal>
+
+      {/* P2_MATCH: Premium Deep Connect Match Celebration */}
+      {phase2MatchCelebration.visible && phase2MatchCelebration.matchedProfile && (
+        <Modal
+          visible
+          transparent
+          statusBarTranslucent
+          animationType="none"
+          onRequestClose={() => setPhase2MatchCelebration({ visible: false, matchedProfile: null })}
+        >
+          {/* Premium full-screen backdrop */}
+          <Animated.View
+            entering={FadeIn.duration(300)}
+            exiting={FadeOut.duration(200)}
+            style={styles.p2MatchFullScreen}
+          >
+            {/* Blur background for premium feel */}
+            <BlurView intensity={40} tint="dark" style={StyleSheet.absoluteFill} />
+
+            {/* Gradient overlay for depth */}
+            <View style={styles.p2MatchGradientOverlay} />
+
+            {/* Celebration content */}
+            <Animated.View
+              entering={FadeIn.delay(150).duration(400)}
+              style={styles.p2MatchContent}
+            >
+              {/* Decorative glow ring */}
+              <View style={styles.p2MatchGlowRing} />
+
+              {/* Premium avatar composition */}
+              <Animated.View
+                entering={FadeIn.delay(200).duration(500).springify()}
+                style={styles.p2MatchAvatarSection}
+              >
+                {/* Heart icon above */}
+                <View style={styles.p2MatchFloatingHeart}>
+                  <Ionicons name="heart" size={28} color="#9b59b6" />
+                </View>
+
+                {/* Profile photo with premium frame */}
+                <View style={styles.p2MatchPremiumFrame}>
+                  <View style={styles.p2MatchInnerFrame}>
+                    {phase2MatchCelebration.matchedProfile.photoUrl ? (
+                      <Image
+                        source={{ uri: phase2MatchCelebration.matchedProfile.photoUrl }}
+                        style={styles.p2MatchPremiumAvatar}
+                        blurRadius={12}
+                        contentFit="cover"
+                      />
+                    ) : (
+                      <View style={[styles.p2MatchPremiumAvatar, styles.p2MatchAvatarPlaceholder]}>
+                        <Ionicons name="person" size={48} color="rgba(255,255,255,0.4)" />
+                      </View>
+                    )}
+                  </View>
+                  {/* Accent ring */}
+                  <View style={styles.p2MatchAccentRing} />
+                </View>
+              </Animated.View>
+
+              {/* Premium typography */}
+              <Animated.View
+                entering={FadeIn.delay(350).duration(400)}
+                style={styles.p2MatchTextSection}
+              >
+                <Text style={styles.p2MatchPremiumTitle}>It's a connection 🔥</Text>
+                <Text style={styles.p2MatchPremiumSubtitle}>
+                  You and {phase2MatchCelebration.matchedProfile.name} share a connection
+                </Text>
+              </Animated.View>
+
+              {/* Premium action buttons */}
+              <Animated.View
+                entering={FadeIn.delay(500).duration(400)}
+                style={styles.p2MatchPremiumActions}
+              >
+                <TouchableOpacity
+                  style={styles.p2MatchStartChatBtn}
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    const convoId = phase2MatchCelebration.matchedProfile?.conversationId;
+                    setPhase2MatchCelebration({ visible: false, matchedProfile: null });
+                    if (convoId) {
+                      router.push(`/(main)/incognito-chat?id=${convoId}` as any);
+                    }
+                  }}
+                >
+                  <View style={styles.p2MatchBtnGradient}>
+                    <Ionicons name="chatbubble-ellipses" size={20} color="#FFF" />
+                    <Text style={styles.p2MatchStartChatText}>Start Chat</Text>
+                  </View>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.p2MatchKeepExploringBtn}
+                  activeOpacity={0.7}
+                  onPress={() => setPhase2MatchCelebration({ visible: false, matchedProfile: null })}
+                >
+                  <Text style={styles.p2MatchKeepExploringText}>Keep Exploring</Text>
+                </TouchableOpacity>
+              </Animated.View>
+            </Animated.View>
+          </Animated.View>
+        </Modal>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════════════
+          FIRST-TIME USER EXPERIENCE OVERLAYS
+          ══════════════════════════════════════════════════════════════════════════ */}
+
+      {/* Welcome Overlay - Phase-1 only (Phase-2 has its own transition) */}
+      <WelcomeOverlay
+        visible={showWelcomeOverlay}
+        onDismiss={() => setShowWelcomeOverlay(false)}
+        dark={dark}
+        title="You're in"
+        subtitle="Welcome to Mira"
+      />
+
+      {/* Swipe Guidance Hint - shows after welcome/transition */}
+      <SwipeGuidanceHint
+        visible={showSwipeGuidance}
+        onDismiss={() => setShowSwipeGuidance(false)}
+        dark={dark}
+      />
     </View>
   );
 }
@@ -1707,17 +2787,35 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: COLORS.textLight,
   },
-  emptyEmoji: { fontSize: 56, marginBottom: 16 },
-  emptyTitle: { fontSize: 22, fontWeight: "700", color: COLORS.text, marginBottom: 8, textAlign: "center" },
-  emptySubtitle: { fontSize: 15, color: COLORS.textLight, textAlign: "center", lineHeight: 22 },
+  // FIX 9: Premium empty state styles - minimal and polished
+  emptyEmoji: {
+    fontSize: 72,
+    marginBottom: 24,
+  },
+  emptyTitle: {
+    fontSize: 26,
+    fontWeight: "700",
+    color: COLORS.text,
+    marginBottom: 12,
+    textAlign: "center",
+    letterSpacing: -0.5,
+  },
+  emptySubtitle: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    textAlign: "center",
+    lineHeight: 24,
+    paddingHorizontal: 32,
+    maxWidth: 320,
+  },
 
-  // Compact Header
+  // Premium Compact Header
   header: {
     flexDirection: "row",
     alignItems: "flex-end",
     justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingBottom: 8,
+    paddingHorizontal: 20,
+    paddingBottom: 10,
     backgroundColor: COLORS.background,
     zIndex: 10,
   },
@@ -1727,17 +2825,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     position: "relative",
+    borderRadius: 22,
   },
   headerLogo: {
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: "800",
     color: COLORS.primary,
-    letterSpacing: 1,
+    letterSpacing: 1.5,
   },
   bellBadge: {
     position: "absolute",
-    top: 0,
-    right: -2,
+    top: 2,
+    right: 0,
     minWidth: 18,
     height: 18,
     borderRadius: 9,
@@ -1745,8 +2844,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 4,
-    borderWidth: 1.5,
+    borderWidth: 2,
     borderColor: COLORS.background,
+    shadowColor: COLORS.error,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 2,
   },
   bellBadgeText: {
     fontSize: 10,
@@ -1770,7 +2874,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
 
-  // 3-Button Action Bar
+  // 3-Button Action Bar (base)
   actions: {
     position: "absolute",
     left: 0,
@@ -1828,6 +2932,83 @@ const styles = StyleSheet.create({
   standOutBadgeText: {
     fontSize: 11,
     fontWeight: "700",
+    color: "#2196F3",
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // PREMIUM ACTION BAR STYLES
+  // Floating, semi-transparent, with premium shadows and spacing
+  // ══════════════════════════════════════════════════════════════════════════════
+  // FIX 4: Improved button positioning and feel
+  premiumActions: {
+    gap: 28,
+    paddingHorizontal: 24,
+    paddingBottom: 4, // Raise buttons slightly
+  },
+  premiumSkipBtn: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: "rgba(255,255,255,0.95)",
+    // Softer shadow
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 5,
+    borderWidth: 1,
+    borderColor: "rgba(244,67,54,0.12)",
+  },
+  premiumStandOutBtn: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: "#2196F3",
+    position: "relative",
+    // Softer colored shadow
+    shadowColor: "#2196F3",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  premiumLikeBtn: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: COLORS.primary,
+    // Softer colored shadow
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  premiumBtnDisabled: {
+    opacity: 0.35,
+    shadowOpacity: 0.08,
+  },
+  premiumStandOutBadge: {
+    position: "absolute",
+    top: -6,
+    right: -6,
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: COLORS.white,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#2196F3",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  premiumStandOutBadgeText: {
+    fontSize: 11,
+    fontWeight: "800",
     color: "#2196F3",
   },
 
@@ -1976,5 +3157,283 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "500",
     color: COLORS.textLight,
+  },
+
+  // P2_MATCH: Phase-2 Match Celebration styles
+  p2MatchOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.8)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  p2MatchSheet: {
+    backgroundColor: INCOGNITO_COLORS.surface,
+    borderRadius: 24,
+    padding: 32,
+    alignItems: "center",
+    width: "100%",
+    maxWidth: 320,
+  },
+  p2MatchAvatarContainer: {
+    position: "relative",
+    marginBottom: 20,
+  },
+  p2MatchAvatar: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    borderWidth: 4,
+    borderColor: INCOGNITO_COLORS.primary,
+  },
+  p2MatchAvatarPlaceholder: {
+    backgroundColor: INCOGNITO_COLORS.background,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  p2MatchHeartBadge: {
+    position: "absolute",
+    bottom: -5,
+    right: -5,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: INCOGNITO_COLORS.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 3,
+    borderColor: INCOGNITO_COLORS.surface,
+  },
+  p2MatchTitle: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: INCOGNITO_COLORS.text,
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  p2MatchSubtitle: {
+    fontSize: 15,
+    color: INCOGNITO_COLORS.textLight,
+    textAlign: "center",
+    marginBottom: 28,
+  },
+  p2MatchActions: {
+    width: "100%",
+    gap: 12,
+  },
+  p2MatchPrimaryBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: INCOGNITO_COLORS.primary,
+    paddingVertical: 14,
+    borderRadius: 12,
+  },
+  p2MatchPrimaryText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#FFF",
+  },
+  p2MatchSecondaryBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 14,
+  },
+  p2MatchSecondaryText: {
+    fontSize: 15,
+    fontWeight: "500",
+    color: INCOGNITO_COLORS.textLight,
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PREMIUM MATCH CELEBRATION (Phase-2 Deep Connect)
+  // ══════════════════════════════════════════════════════════════════════════
+  p2MatchFullScreen: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  p2MatchGradientOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0, 0, 0, 0.75)",
+  },
+  p2MatchContent: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 32,
+    paddingVertical: 48,
+    width: "100%",
+    maxWidth: 340,
+  },
+  p2MatchGlowRing: {
+    position: "absolute",
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+    backgroundColor: "transparent",
+    borderWidth: 2,
+    borderColor: "rgba(155, 89, 182, 0.15)",
+    top: "50%",
+    marginTop: -140,
+  },
+  p2MatchAvatarSection: {
+    alignItems: "center",
+    marginBottom: 28,
+  },
+  p2MatchFloatingHeart: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "rgba(155, 89, 182, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+  },
+  p2MatchPremiumFrame: {
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: "rgba(155, 89, 182, 0.15)",
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  p2MatchInnerFrame: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: INCOGNITO_COLORS.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  p2MatchPremiumAvatar: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+  },
+  p2MatchAccentRing: {
+    position: "absolute",
+    width: 148,
+    height: 148,
+    borderRadius: 74,
+    borderWidth: 2,
+    borderColor: "rgba(155, 89, 182, 0.4)",
+    borderStyle: "dashed",
+  },
+  p2MatchTextSection: {
+    alignItems: "center",
+    marginBottom: 32,
+  },
+  p2MatchPremiumTitle: {
+    fontSize: 28,
+    fontWeight: "700",
+    color: "#FFFFFF",
+    letterSpacing: -0.5,
+    marginBottom: 10,
+    textAlign: "center",
+  },
+  p2MatchPremiumSubtitle: {
+    fontSize: 16,
+    color: "rgba(255, 255, 255, 0.7)",
+    textAlign: "center",
+    lineHeight: 24,
+  },
+  p2MatchPremiumActions: {
+    width: "100%",
+    gap: 14,
+  },
+  p2MatchStartChatBtn: {
+    width: "100%",
+    borderRadius: 16,
+    overflow: "hidden",
+  },
+  p2MatchBtnGradient: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: "#9b59b6",
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+  },
+  p2MatchStartChatText: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#FFFFFF",
+    letterSpacing: 0.3,
+  },
+  p2MatchKeepExploringBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 14,
+  },
+  p2MatchKeepExploringText: {
+    fontSize: 15,
+    fontWeight: "500",
+    color: "rgba(255, 255, 255, 0.6)",
+  },
+
+  // Match Reminder Pill (Phase-2 Only)
+  matchReminderPill: {
+    position: "absolute",
+    alignSelf: "center",
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    zIndex: 5,
+  },
+  matchReminderText: {
+    fontSize: 12,
+    fontWeight: "500",
+    color: "rgba(255, 255, 255, 0.4)",
+    letterSpacing: 0.2,
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PHASE TRANSITION OVERLAY (Phase-2 Entry Experience)
+  // ══════════════════════════════════════════════════════════════════════════
+  phaseTransitionOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0, 0, 0, 0.88)",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 100,
+  },
+  phaseTransitionGradient: {
+    ...StyleSheet.absoluteFillObject,
+    // Subtle radial-like gradient effect using layered background
+    backgroundColor: "transparent",
+    // Top-to-bottom subtle gradient simulation
+    borderTopWidth: 0,
+    opacity: 0.3,
+  },
+  phaseTransitionContent: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  phaseTransitionTitle: {
+    fontSize: 32,
+    fontWeight: "300",
+    color: "#FFFFFF",
+    letterSpacing: 1.5,
+    marginBottom: 12,
+    textAlign: "center",
+  },
+  phaseTransitionSubtitle: {
+    fontSize: 16,
+    fontWeight: "400",
+    color: "rgba(255, 255, 255, 0.55)",
+    letterSpacing: 0.5,
+    textAlign: "center",
+  },
+  phaseTransitionSkipHint: {
+    position: "absolute",
+    bottom: 80,
+    fontSize: 12,
+    fontWeight: "400",
+    color: "rgba(255, 255, 255, 0.25)",
+    letterSpacing: 0.3,
   },
 });

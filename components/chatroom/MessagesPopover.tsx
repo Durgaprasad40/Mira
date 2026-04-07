@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { GENDER_COLORS } from '@/lib/responsive';
 import { DemoDM } from '@/lib/demoData';
 
 const C = INCOGNITO_COLORS;
@@ -41,16 +42,19 @@ export default function MessagesPopover({
     [onOpenChat]
   );
 
-  const renderRow = ({ item }: { item: DemoDM }) => (
+  const renderRow = ({ item }: { item: DemoDM }) => {
+    // AVATAR-BORDER-FIX: Use gender-based colors for consistency
+    const ringColor = GENDER_COLORS[item.peerGender || 'default'];
+    return (
     <TouchableOpacity
       style={styles.row}
       onPress={() => handleRowPress(item)}
       activeOpacity={0.7}
     >
       {item.peerAvatar ? (
-        <Image source={{ uri: item.peerAvatar }} style={styles.avatar} />
+        <Image source={{ uri: item.peerAvatar }} style={[styles.avatar, { borderColor: ringColor }]} />
       ) : (
-        <View style={styles.avatarPlaceholder}>
+        <View style={[styles.avatarPlaceholder, { borderColor: ringColor }]}>
           <Ionicons name="person" size={14} color={C.textLight} />
         </View>
       )}
@@ -71,6 +75,7 @@ export default function MessagesPopover({
       </TouchableOpacity>
     </TouchableOpacity>
   );
+  };
 
   if (!visible) return null;
 
@@ -96,7 +101,7 @@ export default function MessagesPopover({
                 size={28}
                 color={C.textLight}
               />
-              <Text style={styles.emptyText}>No messages yet</Text>
+              <Text style={styles.emptyText}>No active private chats</Text>
             </View>
           ) : (
             <FlatList
@@ -154,6 +159,8 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 17,
+    // AVATAR-BORDER-FIX: Add border for gender-based color
+    borderWidth: 2,
   },
   avatarPlaceholder: {
     width: 34,
@@ -162,6 +169,8 @@ const styles = StyleSheet.create({
     backgroundColor: C.accent,
     alignItems: 'center',
     justifyContent: 'center',
+    // AVATAR-BORDER-FIX: Add border for gender-based color
+    borderWidth: 2,
   },
   name: {
     flex: 1,

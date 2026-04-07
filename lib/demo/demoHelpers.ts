@@ -31,11 +31,12 @@ const BIOS = [
   'Chai over coffee, always. Come fight me.',
 ];
 
+// CURRENT 9 RELATIONSHIP CATEGORIES
 const RELATIONSHIP_INTENTS = [
-  ['long_term'],
-  ['figuring_out'],
-  ['new_friends'],
-  ['short_to_long'],
+  ['serious_vibes'],
+  ['exploring_vibes'],
+  ['just_friends'],
+  ['see_where_it_goes'],
   ['open_to_anything'],
 ];
 

@@ -1,10 +1,13 @@
 /*
- * LOCKED (PHASE-1 TAB)
+ * LOCKED (TABS LAYOUT - CONFESSIONS PRELOAD)
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- * Nearby tab is the only Phase-1 tab currently unlocked.
+ *
+ * LOCKED LOGIC:
+ * - Prefetch query for listConfessions with sortBy: 'trending'
+ * - Ensures Confessions tab feels instant (data cached before tab open)
  */
 import { useEffect, useRef, useMemo, useCallback } from "react";
-import { Tabs, useRouter, useFocusEffect } from "expo-router";
+import { Tabs, useRouter, usePathname, useSegments, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -18,6 +21,7 @@ import { useDemoDmStore } from "@/stores/demoDmStore";
 import { useConfessionStore } from "@/stores/confessionStore";
 import { useLocationStore } from "@/stores/locationStore";
 import { usePrivateProfileStore } from "@/stores/privateProfileStore";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useBootStore } from "@/stores/bootStore";
 import { asUserId } from "@/convex/id";
 import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/safety";
@@ -29,6 +33,8 @@ export default function MainTabsLayout() {
   markTiming('first_tab');
 
   const router = useRouter();
+  const pathname = usePathname();
+  const segments = useSegments();
   const locationPrewarmed = useRef(false);
   const fetchLastKnownOnly = useLocationStore((s) => s.fetchLastKnownOnly);
 
@@ -87,6 +93,13 @@ export default function MainTabsLayout() {
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
+  // PRELOAD: Prefetch confessions data so Confessions tab feels instant
+  // Convex caches query results - when tab opens, data is already available
+  useQuery(
+    api.confessions.listConfessions,
+    !isDemoMode ? { sortBy: 'trending' as const } : 'skip'
+  );
+
   // Demo mode: use store for tagged count (count confessions targeting current user)
   const demoTaggedCount = useConfessionStore((s) => {
     if (!isDemoMode) return 0;
@@ -95,6 +108,26 @@ export default function MainTabsLayout() {
   });
 
   const taggedBadgeCount = isDemoMode ? demoTaggedCount : (convexTaggedCount || 0);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P2-PROFILE-BADGE: Phase 2 unread badge for Profile tab
+  // Shows count of Phase 2 conversations with unread messages
+  // Note: This does NOT mix internal notification systems - only reflects badge
+  // ═══════════════════════════════════════════════════════════════════════════
+  const phase2Conversations = usePrivateChatStore((s) => s.conversations);
+  const phase2UnreadCount = useMemo(() => {
+    // Count conversations WITH unread (not total messages)
+    return phase2Conversations.filter(c => (c.unreadCount || 0) > 0).length;
+  }, [phase2Conversations]);
+
+  // DEBUG: Log Profile tab badge computation
+  if (__DEV__ && phase2UnreadCount > 0) {
+    console.log('[PROFILE_TAB_BADGE_DEBUG]', {
+      phase1Count: 0, // Phase 1 doesn't have a separate notification count here
+      phase2Count: phase2UnreadCount,
+      profileTabBadgeCount: phase2UnreadCount,
+    });
+  }
 
   // Query deletion state for Private tab entry gating (non-demo mode)
   const privateDeletionState = useQuery(
@@ -164,23 +197,70 @@ export default function MainTabsLayout() {
     }
     didRouteToPrivateRef.current = true;
 
+    // BUG FIX: Get current location for debug logging and duplicate navigation check
+    const currentPath = pathname || '';
+    const currentSegments = segments.join('/');
+
     // Determine effective deletion status (server in non-demo, local in demo)
     const effectiveDeletionStatus = isDemoMode
       ? localDeletionStatus
       : (privateDeletionState?.status ?? localDeletionStatus);
 
-    // Check deletion state FIRST - if pending, go to recovery screen
+    // Determine target route
+    let targetRoute = '';
     if (effectiveDeletionStatus === 'pending_deletion') {
-      if (__DEV__) console.log('[PRIVATE TAP] pressed -> Recovery (deletion pending)');
-      router.replace('/(main)/private-recovery' as any);
-    }
-    // Otherwise, navigate based on onboarding completion
-    else if (phase2OnboardingCompleted) {
-      if (__DEV__) console.log('[PRIVATE TAP] pressed -> Phase-2 tabs');
-      router.replace('/(main)/(private)/(tabs)' as any);
+      targetRoute = '/(main)/private-recovery';
+    } else if (phase2OnboardingCompleted) {
+      // BUG FIX: Navigate to concrete screen (desire-land) instead of group path
+      targetRoute = '/(main)/(private)/(tabs)/desire-land';
     } else {
-      if (__DEV__) console.log('[PRIVATE TAP] pressed -> onboarding (direct)');
-      router.replace('/(main)/phase2-onboarding' as any);
+      targetRoute = '/(main)/phase2-onboarding';
+    }
+
+    // BUG FIX: Avoid duplicate navigation if already at target
+    if (currentPath === targetRoute || currentSegments.includes('(private)/(tabs)')) {
+      if (__DEV__) console.log('[PRIVATE TAP] ignored: already in Phase-2', { currentPath, currentSegments });
+      didRouteToPrivateRef.current = false; // Reset guard immediately
+      return;
+    }
+
+    // BUG FIX: Add try/catch with debug logging
+    if (__DEV__) {
+      console.log('[PRIVATE TAP] Navigation attempt:', {
+        from: currentPath,
+        fromSegments: currentSegments,
+        to: targetRoute,
+        reason: effectiveDeletionStatus === 'pending_deletion' ? 'recovery' : phase2OnboardingCompleted ? 'phase2' : 'onboarding',
+      });
+    }
+
+    try {
+      // Check deletion state FIRST - if pending, go to recovery screen
+      if (effectiveDeletionStatus === 'pending_deletion') {
+        if (__DEV__) console.log('[PRIVATE TAP] pressed -> Recovery (deletion pending)');
+        router.replace(targetRoute as any);
+      }
+      // Otherwise, navigate based on onboarding completion
+      else if (phase2OnboardingCompleted) {
+        if (__DEV__) console.log('[PRIVATE TAP] pressed -> Phase-2 tabs (desire-land)');
+        router.replace(targetRoute as any);
+      } else {
+        if (__DEV__) console.log('[PRIVATE TAP] pressed -> onboarding (direct)');
+        router.replace(targetRoute as any);
+      }
+
+      // BUG FIX: Log post-navigation state
+      setTimeout(() => {
+        if (__DEV__) {
+          console.log('[PRIVATE TAP] Post-navigation:', {
+            targetRoute,
+          });
+        }
+      }, 100);
+    } catch (error) {
+      if (__DEV__) console.error('[PRIVATE TAP] Navigation failed:', error);
+      didRouteToPrivateRef.current = false; // Reset guard on error
+      return;
     }
 
     // N-001/C-004: Reset guard after navigation settles (allows future taps after returning)
@@ -271,6 +351,10 @@ export default function MainTabsLayout() {
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="person" size={size} color={color} />
             ),
+            // P2-PROFILE-BADGE: Show Phase 2 unread count on Profile tab
+            // This reflects unread private messages without mixing internal systems
+            tabBarBadge: phase2UnreadCount > 0 ? phase2UnreadCount : undefined,
+            tabBarBadgeStyle: { backgroundColor: '#9B7DC4', fontSize: 10 },
           }}
         />
       </Tabs>

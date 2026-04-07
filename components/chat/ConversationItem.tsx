@@ -1,9 +1,8 @@
-import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { useMemo, useRef, useCallback, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Animated } from 'react-native';
+import Reanimated, { FadeIn } from 'react-native-reanimated';
 import { Image } from 'expo-image';
-import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
-import { Badge } from '@/components/ui';
+import { COLORS, FONT_SIZE, FONT_WEIGHT, moderateScale } from '@/lib/constants';
 import { DEMO_PROFILES } from '@/lib/demoData';
 
 interface ConversationItemProps {
@@ -38,6 +37,47 @@ export function ConversationItem({
   onPress,
   onAvatarPress,
 }: ConversationItemProps) {
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const highlightAnim = useRef(new Animated.Value(0)).current;
+  const hasUnread = unreadCount > 0;
+
+  // Subtle highlight pulse for new/unread messages on mount
+  useEffect(() => {
+    if (hasUnread) {
+      // Brief pulse: 0 → 1 → 0 to highlight the row
+      Animated.sequence([
+        Animated.timing(highlightAnim, {
+          toValue: 1,
+          duration: 150,
+          useNativeDriver: false, // backgroundColor doesn't support native driver
+        }),
+        Animated.timing(highlightAnim, {
+          toValue: 0,
+          duration: 400,
+          useNativeDriver: false,
+        }),
+      ]).start();
+    }
+  }, []);
+
+  // Press feedback animation (subtle, no bounce)
+  const handlePressIn = useCallback(() => {
+    Animated.timing(scaleAnim, {
+      toValue: 0.98,
+      duration: 80,
+      useNativeDriver: true,
+    }).start();
+  }, [scaleAnim]);
+
+  const handlePressOut = useCallback(() => {
+    Animated.timing(scaleAnim, {
+      toValue: 1,
+      duration: 100,
+      useNativeDriver: true,
+    }).start();
+  }, [scaleAnim]);
+
+  // Format time - cleaner, more compact
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
     const now = new Date();
@@ -46,14 +86,15 @@ export function ConversationItem({
     const days = Math.floor(hours / 24);
 
     if (days > 7) {
-      return date.toLocaleDateString();
+      // Short date format
+      return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     } else if (days > 0) {
-      return `${days}d ago`;
+      return `${days}d`;
     } else if (hours > 0) {
-      return `${hours}h ago`;
+      return `${hours}h`;
     } else {
       const minutes = Math.floor(diff / (1000 * 60));
-      return minutes > 0 ? `${minutes}m ago` : 'Just now';
+      return minutes > 0 ? `${minutes}m` : 'Now';
     }
   };
 
@@ -102,74 +143,138 @@ export function ConversationItem({
     return 'New message';
   };
 
-  return (
-    <TouchableOpacity style={styles.container} onPress={onPress} activeOpacity={0.7}>
-      <TouchableOpacity
-        style={styles.avatarContainer}
-        onPress={onAvatarPress}
-        activeOpacity={onAvatarPress ? 0.7 : 1}
-        disabled={!onAvatarPress}
-      >
-        {resolvedPhotoUrl ? (
-          <Image
-            source={{ uri: resolvedPhotoUrl }}
-            style={styles.avatar}
-            contentFit="cover"
-            blurRadius={otherUser.photoBlurred ? 20 : undefined}
-          />
-        ) : (
-          <View style={[styles.avatar, styles.avatarPlaceholder]}>
-            <Text style={styles.avatarInitials}>{avatarInitials}</Text>
-          </View>
-        )}
-{/* TASK-1: Removed verified badge checkmark from Messages list avatars */}
-        {isPreMatch && (
-          <View style={styles.preMatchBadge}>
-            <Text style={styles.preMatchText}>Pre-Match</Text>
-          </View>
-        )}
-      </TouchableOpacity>
+  // Interpolate highlight animation for subtle background pulse
+  const highlightBgColor = highlightAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [
+      hasUnread ? COLORS.primarySubtle : COLORS.background,
+      COLORS.primary + '20', // Slightly more vibrant pulse
+    ],
+  });
 
-      <View style={styles.content}>
-        <View style={styles.header}>
-          <Text style={styles.name} numberOfLines={1}>
-            {otherUser.name}
-          </Text>
-          {lastMessage && (
-            <Text style={styles.time}>{formatTime(lastMessage.createdAt)}</Text>
+  // Entry animation for new items
+  const enteringAnimation = FadeIn.duration(200);
+
+  return (
+    <Reanimated.View entering={enteringAnimation}>
+      <TouchableOpacity
+        style={styles.container}
+        onPress={onPress}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        activeOpacity={1}
+      >
+        <Animated.View style={[
+          styles.innerContainer,
+          { transform: [{ scale: scaleAnim }] },
+          hasUnread && { backgroundColor: highlightBgColor },
+        ]}>
+          {/* Avatar Section */}
+        <TouchableOpacity
+          style={styles.avatarContainer}
+          onPress={onAvatarPress}
+          activeOpacity={onAvatarPress ? 0.7 : 1}
+          disabled={!onAvatarPress}
+        >
+          {resolvedPhotoUrl ? (
+            <Image
+              source={{ uri: resolvedPhotoUrl }}
+              style={styles.avatar}
+              contentFit="cover"
+              blurRadius={otherUser.photoBlurred ? 20 : undefined}
+            />
+          ) : (
+            <View style={[styles.avatar, styles.avatarPlaceholder]}>
+              <Text style={styles.avatarInitials}>{avatarInitials}</Text>
+            </View>
           )}
+          {/* Online indicator could go here */}
+          {isPreMatch && (
+            <View style={styles.preMatchBadge}>
+              <Text style={styles.preMatchText}>Pre-Match</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+
+        {/* Content Section */}
+        <View style={styles.content}>
+          {/* Top row: Name + Time */}
+          <View style={styles.header}>
+            <Text
+              style={[styles.name, hasUnread && styles.nameUnread]}
+              numberOfLines={1}
+            >
+              {otherUser.name}
+            </Text>
+            {lastMessage && (
+              <Text style={styles.time}>
+                {formatTime(lastMessage.createdAt)}
+              </Text>
+            )}
+          </View>
+
+          {/* Bottom row: Message preview + Unread indicator */}
+          <View style={styles.messageRow}>
+            <Text
+              style={[styles.message, hasUnread && styles.unreadMessage]}
+              numberOfLines={1}
+            >
+              {getMessagePreview()}
+            </Text>
+            {hasUnread && (
+              <View style={styles.unreadDot}>
+                {unreadCount > 1 && (
+                  <Text style={styles.unreadDotText}>
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </Text>
+                )}
+              </View>
+            )}
+          </View>
         </View>
-        <View style={styles.messageRow}>
-          <Text
-            style={[styles.message, unreadCount > 0 && styles.unreadMessage]}
-            numberOfLines={1}
-          >
-            {getMessagePreview()}
-          </Text>
-          {unreadCount > 0 && <Badge count={unreadCount} />}
-        </View>
-      </View>
-    </TouchableOpacity>
+        </Animated.View>
+      </TouchableOpacity>
+    </Reanimated.View>
   );
 }
 
+// Responsive avatar size (48-52px range for comfortable touch)
+const AVATAR_SIZE = moderateScale(52, 0.3);
+
 const styles = StyleSheet.create({
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONTAINER - Clean, modern chat row
+  // ═══════════════════════════════════════════════════════════════════════════
   container: {
-    flexDirection: 'row',
-    padding: 16,
     backgroundColor: COLORS.background,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
   },
+  containerUnread: {
+    // Subtle highlight for unread chats (proper theme constant)
+    backgroundColor: COLORS.primarySubtle,
+  },
+  innerContainer: {
+    flexDirection: 'row',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    // Use spacing instead of visible divider for premium feel
+    marginBottom: 1,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AVATAR - Circular profile image (48-52px)
+  // ═══════════════════════════════════════════════════════════════════════════
   avatarContainer: {
     position: 'relative',
-    marginRight: 12,
+    marginRight: 14,
+    flexShrink: 0,
   },
   avatar: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
     backgroundColor: COLORS.backgroundDark,
+    flexShrink: 0,
   },
   avatarPlaceholder: {
     alignItems: 'center',
@@ -177,11 +282,10 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   avatarInitials: {
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.bold,
     color: COLORS.white,
   },
-  // TASK-1: Removed verifiedBadge style (badge removed from Messages list)
   preMatchBadge: {
     position: 'absolute',
     top: -4,
@@ -190,15 +294,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 8,
+    flexShrink: 0,
   },
   preMatchText: {
-    fontSize: 10,
-    fontWeight: '600',
+    fontSize: 9,
+    fontWeight: FONT_WEIGHT.bold,
     color: COLORS.white,
+    letterSpacing: 0.3,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONTENT - Text hierarchy: Name (bold) > Message (light) > Time (subtle)
+  // ═══════════════════════════════════════════════════════════════════════════
   content: {
     flex: 1,
     justifyContent: 'center',
+    minWidth: 0, // Enable text truncation
   },
   header: {
     flexDirection: 'row',
@@ -211,25 +322,52 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.text,
     flex: 1,
+    flexShrink: 1,
+    letterSpacing: -0.2,
+  },
+  nameUnread: {
+    fontWeight: '700',
+    color: COLORS.text,
   },
   time: {
     fontSize: 12,
-    color: COLORS.textLight,
+    color: COLORS.textMuted,
     marginLeft: 8,
+    flexShrink: 0,
   },
   messageRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
   },
   message: {
     fontSize: 14,
     color: COLORS.textLight,
     flex: 1,
     marginRight: 8,
+    flexShrink: 1,
+    lineHeight: 20,
   },
   unreadMessage: {
     fontWeight: '600',
     color: COLORS.text,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UNREAD INDICATOR - Subtle dot with optional count
+  // ═══════════════════════════════════════════════════════════════════════════
+  unreadDot: {
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+    flexShrink: 0,
+  },
+  unreadDotText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.white,
   },
 });

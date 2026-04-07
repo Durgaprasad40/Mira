@@ -292,6 +292,7 @@ export async function uploadPhotoToBackend(
         isPrimary,
         hasFace: true, // Assume all profile photos have faces (verification happens separately)
         token, // Pass session token for auth validation
+        slotOrder: slotIndex, // Use client-specified slot position (0-8)
       });
 
       if (__DEV__) {

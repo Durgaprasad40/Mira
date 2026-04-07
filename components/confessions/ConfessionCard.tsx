@@ -1,16 +1,41 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useCallback } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
   Alert,
+  Pressable,
 } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  withSpring,
+} from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
-import { ConfessionMood } from '@/types';
+
+// Animated pressable for card
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+import {
+  COLORS,
+  SPACING,
+  SIZES,
+  FONT_SIZE,
+  FONT_WEIGHT,
+  HAIRLINE,
+  moderateScale,
+} from '@/lib/constants';
+import { ConfessionMood, ConfessionAuthorVisibility } from '@/types';
 import ReactionBar, { EmojiCount } from './ReactionBar';
+
+// Blur radius for blur_photo mode
+const BLUR_PHOTO_RADIUS = 20;
+
+// Responsive avatar size
+const AVATAR_SIZE = moderateScale(22, 0.3);
 
 interface ReplyPreview {
   text: string;
@@ -32,6 +57,7 @@ interface ConfessionCardProps {
   id: string;
   text: string;
   isAnonymous: boolean;
+  authorVisibility?: ConfessionAuthorVisibility; // New 3-mode visibility
   mood: ConfessionMood;
   topEmojis: EmojiCount[];
   userEmoji: string | null;
@@ -55,7 +81,6 @@ interface ConfessionCardProps {
   onPress?: () => void;
   onReact: () => void; // opens emoji picker
   onToggleEmoji?: (emoji: string) => void; // directly toggle a specific emoji
-  onReplyAnonymously?: () => void;
   onReport?: () => void;
   onViewProfile?: () => void; // one-time profile preview for tagged receivers
   onLongPress?: () => void; // for author manual delete
@@ -64,8 +89,11 @@ interface ConfessionCardProps {
   onAuthorPress?: () => void; // tap author identity to open full profile preview
 }
 
-function getTimeAgo(timestamp: number): string {
+// P1-004 FIX: Guard against undefined/null timestamp (legacy data)
+function getTimeAgo(timestamp: number | undefined | null): string {
+  if (timestamp == null || !Number.isFinite(timestamp)) return 'just now';
   const diff = Date.now() - timestamp;
+  if (diff < 0) return 'just now'; // Future timestamp protection
   const minutes = Math.floor(diff / 60000);
   if (minutes < 1) return 'just now';
   if (minutes < 60) return `${minutes}m ago`;
@@ -78,6 +106,7 @@ function getTimeAgo(timestamp: number): string {
 export default function ConfessionCard({
   text,
   isAnonymous,
+  authorVisibility,
   topEmojis,
   userEmoji,
   replyCount,
@@ -99,7 +128,6 @@ export default function ConfessionCard({
   onPress,
   onReact,
   onToggleEmoji,
-  onReplyAnonymously,
   onReport,
   onViewProfile,
   onLongPress,
@@ -107,11 +135,47 @@ export default function ConfessionCard({
   onConnect,
   onAuthorPress,
 }: ConfessionCardProps) {
-  // Privacy-safe tag display logic
+  // ══════════════════════════════════════════════════════════════════════════
+  // CARD PRESS ANIMATION - Subtle scale feedback (no haptic spam)
+  // ══════════════════════════════════════════════════════════════════════════
+  const cardScale = useSharedValue(1);
+
+  const cardAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: cardScale.value }],
+  }));
+
+  const handlePressIn = useCallback(() => {
+    cardScale.value = withTiming(0.985, { duration: 60 });
+  }, [cardScale]);
+
+  const handlePressOut = useCallback(() => {
+    cardScale.value = withTiming(1, { duration: 150 });
+  }, [cardScale]);
+
+  const handleCardPress = useCallback(() => {
+    // No haptic for card tap (minor action, opens thread)
+    onPress?.();
+  }, [onPress]);
+
+  const handleCardLongPress = useCallback(() => {
+    // Haptic only for long press (meaningful action - delete/report)
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    } catch {}
+    onLongPress?.();
+  }, [onLongPress]);
+
+  // Determine effective visibility mode (backward compat: use isAnonymous if authorVisibility not set)
+  const effectiveVisibility: ConfessionAuthorVisibility = authorVisibility || (isAnonymous ? 'anonymous' : 'open');
+  const isFullyAnonymous = effectiveVisibility === 'anonymous';
+  const isBlurPhoto = effectiveVisibility === 'blur_photo';
+  // Tag display logic - show actual tagged user name to all viewers
+  // Author remains anonymous, but target is visible
   const getTagDisplayText = (): string | null => {
     if (!taggedUserId) return null;
     if (viewerId === taggedUserId) return 'You';
-    if (viewerId === authorId && taggedUserName) return taggedUserName;
+    // Show actual name to all viewers if available
+    if (taggedUserName) return taggedUserName;
     return 'Someone';
   };
   const tagDisplayText = getTagDisplayText();
@@ -120,12 +184,13 @@ export default function ConfessionCard({
     onReport?.();
   };
 
-  // Build display name with age and gender for non-anonymous confessions
+  // Build display name with age and gender based on visibility mode
   const getDisplayName = (): string => {
-    if (isAnonymous) return 'Anonymous';
+    if (isFullyAnonymous) return 'Anonymous';
     if (!authorName) return 'Someone';
 
     let name = authorName;
+    // For blur_photo and open modes, show age and gender
     if (authorAge) {
       name += `, ${authorAge}`;
     }
@@ -139,38 +204,57 @@ export default function ConfessionCard({
   // Check if we have a tappable tag to display
   const hasTag = taggedUserId && taggedUserName;
 
-  // Non-anonymous confessions can have tappable author area
-  const isAuthorTappable = !isAnonymous && authorId && onAuthorPress;
+  // Non-anonymous confessions can have tappable author area (open and blur_photo modes)
+  const isAuthorTappable = !isFullyAnonymous && authorId && onAuthorPress;
 
-  // Render the author identity content
+  // Render the author identity content based on visibility mode
   const renderAuthorIdentity = () => (
     <>
-      {!isAnonymous && authorPhotoUrl ? (
+      {/* Photo rendering based on visibility mode */}
+      {isFullyAnonymous ? (
+        // Anonymous: no photo, just icon
+        <View style={[styles.avatar, styles.avatarAnonymous]}>
+          <Ionicons name="eye-off" size={SIZES.icon.xs} color={COLORS.textMuted} />
+        </View>
+      ) : isBlurPhoto && authorPhotoUrl ? (
+        // Blur photo: show blurred image
+        <Image
+          source={{ uri: authorPhotoUrl }}
+          style={styles.avatarImage}
+          contentFit="cover"
+          blurRadius={BLUR_PHOTO_RADIUS}
+        />
+      ) : authorPhotoUrl ? (
+        // Open: show clear photo
         <Image
           source={{ uri: authorPhotoUrl }}
           style={styles.avatarImage}
           contentFit="cover"
         />
       ) : (
-        <View style={[styles.avatar, isAnonymous && styles.avatarAnonymous]}>
-          <Ionicons
-            name={isAnonymous ? 'eye-off' : 'person'}
-            size={12}
-            color={isAnonymous ? COLORS.textMuted : COLORS.primary}
-          />
+        // No photo available: show person icon
+        <View style={styles.avatar}>
+          <Ionicons name="person" size={SIZES.icon.xs} color={COLORS.primary} />
         </View>
       )}
-      <Text style={[styles.authorName, !isAnonymous && styles.authorNamePublic]}>{displayName}</Text>
+      <Text style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>{displayName}</Text>
+      {/* Blur indicator badge */}
+      {isBlurPhoto && (
+        <View style={styles.blurBadge}>
+          <Ionicons name="eye-off-outline" size={SIZES.icon.xs - 2} color={COLORS.textMuted} />
+        </View>
+      )}
     </>
   );
 
   return (
-    <TouchableOpacity
-      style={[styles.card, isTaggedForMe && styles.cardHighlighted]}
-      onPress={onPress}
-      onLongPress={onLongPress}
+    <AnimatedPressable
+      style={[styles.card, isTaggedForMe && styles.cardHighlighted, cardAnimatedStyle]}
+      onPress={handleCardPress}
+      onLongPress={handleCardLongPress}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
       delayLongPress={700}
-      activeOpacity={0.8}
     >
       {/* Author row */}
       <View style={styles.authorRow}>
@@ -193,7 +277,7 @@ export default function ConfessionCard({
         <Text style={styles.timeAgo}>{getTimeAgo(createdAt)}</Text>
         {isTaggedForMe && (
           <View style={styles.forYouBadge}>
-            <Ionicons name="heart" size={9} color={COLORS.primary} />
+            <Ionicons name="heart" size={FONT_SIZE.xxs} color={COLORS.primary} />
             <Text style={styles.forYouText}>For you</Text>
           </View>
         )}
@@ -202,13 +286,14 @@ export default function ConfessionCard({
             <Text style={styles.expiredText}>Expired</Text>
           </View>
         )}
-        <View style={{ flex: 1 }} />
+        <View style={styles.headerSpacer} />
         {onReport && (
           <TouchableOpacity
+            style={styles.menuButton}
             onPress={handleMenu}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
-            <Ionicons name="ellipsis-horizontal" size={14} color={COLORS.textMuted} />
+            <Ionicons name="ellipsis-horizontal" size={SIZES.icon.sm} color={COLORS.textMuted} />
           </TouchableOpacity>
         )}
       </View>
@@ -232,68 +317,25 @@ export default function ConfessionCard({
         )}
       </Text>
 
-      {/* Tagged user display (non-clickable, privacy-safe) */}
+      {/* Tagged user display - tappable to open profile */}
       {tagDisplayText && (
-        <View style={styles.taggedRow}>
-          <Ionicons name="heart" size={12} color={COLORS.primary} />
+        <TouchableOpacity
+          style={styles.taggedRow}
+          onPress={(e) => {
+            e.stopPropagation?.();
+            onTagPress?.();
+          }}
+          disabled={!onTagPress}
+          activeOpacity={onTagPress ? 0.7 : 1}
+        >
+          <Ionicons name="heart" size={SIZES.icon.xs} color={COLORS.primary} />
           <Text style={styles.taggedLabel}>Confess-to:</Text>
-          <Text style={styles.taggedName}>{tagDisplayText}</Text>
-        </View>
-      )}
-
-      {/* View Profile button for tagged receivers (one-time use) */}
-      {isTaggedForMe && onViewProfile && (
-        <TouchableOpacity
-          style={[
-            styles.viewProfileButton,
-            previewUsed && styles.viewProfileButtonUsed,
-          ]}
-          onPress={previewUsed ? undefined : onViewProfile}
-          activeOpacity={previewUsed ? 1 : 0.7}
-          disabled={previewUsed}
-        >
-          <Ionicons
-            name={previewUsed ? 'checkmark-circle' : 'eye-outline'}
-            size={14}
-            color={previewUsed ? COLORS.textMuted : COLORS.primary}
-          />
-          <Text
-            style={[
-              styles.viewProfileText,
-              previewUsed && styles.viewProfileTextUsed,
-            ]}
-          >
-            {previewUsed ? 'Preview used' : 'View their profile'}
-          </Text>
+          <Text style={[styles.taggedName, onTagPress && styles.taggedNameTappable]}>{tagDisplayText}</Text>
         </TouchableOpacity>
       )}
 
-      {/* Connect button - ONLY for the tagged user */}
-      {isTaggedForMe && onConnect && (
-        <TouchableOpacity
-          style={[
-            styles.connectButton,
-            isConnected && styles.connectButtonConnected,
-          ]}
-          onPress={isConnected ? undefined : onConnect}
-          activeOpacity={isConnected ? 1 : 0.7}
-          disabled={isConnected}
-        >
-          <Ionicons
-            name={isConnected ? 'checkmark-circle' : 'chatbubbles-outline'}
-            size={14}
-            color={isConnected ? COLORS.textMuted : COLORS.white}
-          />
-          <Text
-            style={[
-              styles.connectButtonText,
-              isConnected && styles.connectButtonTextConnected,
-            ]}
-          >
-            {isConnected ? 'Chat unlocked' : 'Accept & start chat'}
-          </Text>
-        </TouchableOpacity>
-      )}
+      {/* NOTE: View Profile and Connect buttons removed from homepage cards.
+          Actions now only appear inside the thread screen for cleaner UX. */}
 
       {/* Emoji Reactions */}
       <View style={styles.reactionBarWrap}>
@@ -320,7 +362,8 @@ export default function ConfessionCard({
               </Text>
             </View>
           ))}
-          {replyCount > 2 && (
+          {/* Show "View all" only if more replies than previews shown */}
+          {replyCount > replyPreviews.length && (
             <TouchableOpacity onPress={onPress}>
               <Text style={styles.viewAllReplies}>
                 View all {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
@@ -330,87 +373,78 @@ export default function ConfessionCard({
         </View>
       )}
 
-      {/* Footer */}
-      <View style={styles.footer}>
-        {/* For own confessions: show non-tappable reply count, let taps bubble to card */}
-        {authorId && viewerId && authorId === viewerId ? (
+      {/* Footer - only show reply count if no previews displayed (avoids duplicate) */}
+      {replyPreviews.length === 0 && replyCount > 0 && (
+        <View style={styles.footer}>
           <View style={styles.footerButton} pointerEvents="none">
-            <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
+            <Ionicons name="chatbubble-outline" size={SIZES.icon.sm - 2} color={COLORS.textMuted} />
             <Text style={styles.footerCount}>{replyCount}</Text>
             <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
           </View>
-        ) : (
-          <TouchableOpacity
-            style={styles.footerButton}
-            onPress={(e) => {
-              e.stopPropagation?.();
-              onReplyAnonymously?.();
-            }}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
-            <Text style={styles.footerCount}>{replyCount}</Text>
-            <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-    </TouchableOpacity>
+        </View>
+      )}
+    </AnimatedPressable>
   );
 }
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: COLORS.white,
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingTop: 10,
-    paddingBottom: 8,
-    marginHorizontal: 10,
-    marginVertical: 4,
+    backgroundColor: COLORS.background,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 14,
+    marginHorizontal: 12,
+    marginVertical: 6,
+    // Shadow for iOS
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    // Elevation for Android (proper cross-platform shadow)
+    elevation: 3,
   },
   cardHighlighted: {
-    backgroundColor: 'rgba(255,107,107,0.04)', // Subtle pink tint
-    borderWidth: 1,
-    borderColor: 'rgba(255,107,107,0.15)', // Soft border
+    // Keep white background, add subtle left accent only
+    borderLeftWidth: HAIRLINE * 3,
+    borderLeftColor: COLORS.primary,
   },
   forYouBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
-    backgroundColor: 'rgba(255,107,107,0.1)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    marginLeft: 4,
+    gap: SPACING.xxs,
+    backgroundColor: 'rgba(255,107,107,0.08)',
+    paddingHorizontal: SPACING.xs + 1,
+    paddingVertical: SPACING.xxs,
+    borderRadius: SIZES.radius.xs,
+    marginLeft: SPACING.xs,
+    flexShrink: 0, // Prevent badge from shrinking
   },
   forYouText: {
-    fontSize: 10,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.xxs,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.primary,
+    letterSpacing: 0.1,
   },
   authorRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: 6,
+    gap: 8,
+    marginBottom: 10,
+    minHeight: 26,
   },
   avatar: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
     backgroundColor: 'rgba(255,107,107,0.12)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   avatarImage: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
   },
   avatarAnonymous: {
     backgroundColor: 'rgba(153,153,153,0.12)',
@@ -418,89 +452,116 @@ const styles = StyleSheet.create({
   authorIdentity: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: SPACING.xs, // Clean spacing
+    flexShrink: 1,
   },
   authorIdentityTappable: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingVertical: 2,
-    paddingRight: 4,
-    borderRadius: 6,
+    gap: SPACING.xs, // Clean spacing
+    paddingVertical: SPACING.xxs,
+    paddingRight: SPACING.xs,
+    borderRadius: SIZES.radius.xs,
+    flexShrink: 1,
   },
   authorName: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '600',
-    color: COLORS.text,
+    color: COLORS.textLight,
+    flexShrink: 1,
   },
   authorNamePublic: {
     color: COLORS.primary,
   },
+  blurBadge: {
+    marginLeft: 6,
+    padding: 3,
+    backgroundColor: 'rgba(153,153,153,0.12)',
+    borderRadius: 4,
+  },
   timeAgo: {
-    fontSize: 11,
+    fontSize: 12,
     color: COLORS.textMuted,
+    flexShrink: 0,
+  },
+  headerSpacer: {
+    flex: 1,
+    minWidth: SPACING.xs, // Minimum spacing
+  },
+  menuButton: {
+    flexShrink: 0,
+    minWidth: moderateScale(24, 0.3),
+    minHeight: moderateScale(24, 0.3),
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   expiredBadge: {
     backgroundColor: 'rgba(153,153,153,0.15)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    marginLeft: 4,
+    paddingHorizontal: SPACING.xs + 2,
+    paddingVertical: SPACING.xxs,
+    borderRadius: SIZES.radius.xs,
+    marginLeft: SPACING.xs,
   },
   expiredText: {
-    fontSize: 10,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.textMuted,
   },
   confessionText: {
-    fontSize: 13,
-    fontWeight: '600',
-    lineHeight: 18,
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 24,
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 14,
+    letterSpacing: 0.1,
+    // Text wrapping safety - works with card padding for proper line length
   },
   tagLink: {
     color: COLORS.primary,
-    fontWeight: '700',
+    fontWeight: FONT_WEIGHT.semibold, // Lighter than bold for Android
     textDecorationLine: 'underline',
   },
   taggedRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    marginBottom: 8,
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    backgroundColor: 'rgba(255,107,107,0.06)',
-    borderRadius: 6,
+    gap: SPACING.xs + 1,
+    marginBottom: SPACING.xs + 2, // Tightened from SPACING.sm
+    paddingVertical: SPACING.xxs + 1, // Tightened from SPACING.xs + 1
+    paddingHorizontal: SPACING.sm + 2,
+    backgroundColor: 'rgba(255,107,107,0.05)',
+    borderRadius: SIZES.radius.sm,
     alignSelf: 'flex-start',
   },
   taggedLabel: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     color: COLORS.textMuted,
+    fontWeight: FONT_WEIGHT.medium,
   },
   taggedName: {
-    fontSize: 11,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold, // Lighter than bold for Android
     color: COLORS.primary,
+  },
+  taggedNameTappable: {
+    textDecorationLine: 'underline',
   },
   viewProfileButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: SPACING.xs + 2,
     alignSelf: 'flex-start',
     backgroundColor: 'rgba(255,107,107,0.1)',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    marginBottom: 8,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.sm,
+    marginBottom: SPACING.sm,
   },
   viewProfileButtonUsed: {
     backgroundColor: 'rgba(153,153,153,0.1)',
   },
   viewProfileText: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.primary,
   },
   viewProfileTextUsed: {
@@ -509,79 +570,82 @@ const styles = StyleSheet.create({
   connectButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: SPACING.xs + 2,
     alignSelf: 'flex-start',
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    marginBottom: 8,
+    paddingHorizontal: SPACING.md + 2,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.sm,
+    marginBottom: SPACING.sm,
   },
   connectButtonConnected: {
     backgroundColor: 'rgba(153,153,153,0.1)',
   },
   connectButtonText: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.white,
   },
   connectButtonTextConnected: {
     color: COLORS.textMuted,
   },
   reactionBarWrap: {
-    marginBottom: 6,
+    marginBottom: 8,
+    marginTop: 2,
   },
   replyPreviewSection: {
-    marginBottom: 6,
-    gap: 4,
+    marginBottom: SPACING.xs + 2,
+    gap: SPACING.xs,
   },
   replyPreviewRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingLeft: 4,
+    gap: SPACING.xs + 2,
+    paddingLeft: SPACING.xs,
   },
   replyPreviewAvatar: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
+    width: moderateScale(16, 0.3),
+    height: moderateScale(16, 0.3),
+    borderRadius: moderateScale(8, 0.3),
     backgroundColor: 'rgba(153,153,153,0.1)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   replyPreviewText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
     flex: 1,
   },
   viewAllReplies: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.medium, // Lighter than semibold for Android
     color: COLORS.primary,
-    paddingLeft: 26,
-    marginTop: 2,
+    paddingLeft: moderateScale(26, 0.3),
+    marginTop: SPACING.xxs,
   },
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 16,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopWidth: 1,
     borderTopColor: COLORS.border,
-    paddingTop: 6,
-    marginTop: 4,
+    paddingTop: 12,
+    marginTop: 6,
   },
   footerButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 2,
   },
   footerCount: {
-    fontSize: 11,
+    fontSize: 13,
     color: COLORS.textMuted,
     fontWeight: '500',
   },
   footerLabel: {
-    fontSize: 11,
+    fontSize: 13,
     color: COLORS.textMuted,
   },
 });

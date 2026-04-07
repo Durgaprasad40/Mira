@@ -1,10 +1,15 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch } from 'react-native';
+import React, { useState, useCallback } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import { Toast } from '@/components/ui/Toast';
 
 const C = INCOGNITO_COLORS;
 
@@ -34,17 +39,50 @@ export default function SafetyScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const whoCanMessageMe = usePrivateProfileStore((s) => s.whoCanMessageMe);
-  const safeMode = usePrivateProfileStore((s) => s.safeMode);
+  // Auth and backend mutation
+  const { userId } = useAuthStore();
+  const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
-  const setWhoCanMessageMe = usePrivateProfileStore((s) => s.setWhoCanMessageMe);
+  const safeMode = usePrivateProfileStore((s) => s.safeMode);
   const setSafeMode = usePrivateProfileStore((s) => s.setSafeMode);
 
   const [expandedTip, setExpandedTip] = useState<string | null>(null);
 
+  // P0-001 FIX: Track saving state to prevent double-toggles and show loading
+  const [isSaving, setIsSaving] = useState(false);
+
   const toggleTip = (tipKey: string) => {
     setExpandedTip(expandedTip === tipKey ? null : tipKey);
   };
+
+  // P0-001 FIX: Handle Safe Mode toggle - waits for backend confirmation before updating UI
+  const handleSafeModeChange = useCallback(async (enabled: boolean) => {
+    if (isSaving) return; // Prevent double-toggle while saving
+
+    if (isDemoMode) {
+      setSafeMode(enabled);
+      return;
+    }
+
+    if (!userId) {
+      Toast.show('Please sign in to change settings.');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await updatePrivateProfile({
+        authUserId: userId,
+        safeMode: enabled,
+      });
+      setSafeMode(enabled);
+    } catch (error) {
+      if (__DEV__) console.error('[PrivateSafety] Backend sync failed:', error);
+      Toast.show('Failed to save setting. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
+  }, [isSaving, setSafeMode, userId, updatePrivateProfile]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -58,58 +96,35 @@ export default function SafetyScreen() {
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Messaging Controls */}
+        {/* Safe Mode Section */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Messaging Controls</Text>
+          <Text style={styles.sectionTitle}>Protection</Text>
 
-          {/* Who Can Message Me */}
-          <View style={styles.settingSection}>
-            <Text style={styles.settingLabel}>Who can message me</Text>
-            <Text style={styles.settingDescription}>
-              Control who can start conversations with you
-            </Text>
-            <View style={styles.segmentedControl}>
-              <TouchableOpacity
-                style={[styles.segment, whoCanMessageMe === 'everyone' && styles.segmentActive]}
-                onPress={() => setWhoCanMessageMe('everyone')}
-              >
-                <Text style={[styles.segmentText, whoCanMessageMe === 'everyone' && styles.segmentTextActive]}>
-                  Everyone
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.segment, whoCanMessageMe === 'matches' && styles.segmentActive]}
-                onPress={() => setWhoCanMessageMe('matches')}
-              >
-                <Text style={[styles.segmentText, whoCanMessageMe === 'matches' && styles.segmentTextActive]}>
-                  Matches
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.segment, whoCanMessageMe === 'verified' && styles.segmentActive]}
-                onPress={() => setWhoCanMessageMe('verified')}
-              >
-                <Text style={[styles.segmentText, whoCanMessageMe === 'verified' && styles.segmentTextActive]}>
-                  Verified
-                </Text>
-              </TouchableOpacity>
+          {/* Safe Mode Toggle */}
+          <View style={styles.safeModeCard}>
+            <View style={styles.safeModeRow}>
+              <View style={styles.safeModeInfo}>
+                <View style={[styles.safeModeIcon, safeMode && styles.safeModeIconActive]}>
+                  <Ionicons name="shield-checkmark" size={22} color={safeMode ? '#FFF' : C.text} />
+                </View>
+                <View style={styles.safeModeTextContainer}>
+                  <Text style={styles.safeModeTitle}>Safe Mode</Text>
+                  <Text style={styles.safeModeDescription}>
+                    Filter harmful or suspicious messages automatically
+                  </Text>
+                </View>
+              </View>
+              {isSaving ? (
+                <ActivityIndicator size="small" color={C.primary} />
+              ) : (
+                <Switch
+                  value={safeMode}
+                  onValueChange={handleSafeModeChange}
+                  trackColor={{ false: C.border, true: C.primary }}
+                  thumbColor="#FFF"
+                />
+              )}
             </View>
-          </View>
-
-          {/* Safe Mode */}
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Safe Mode</Text>
-              <Text style={styles.toggleDescription}>
-                Enhanced filtering and protection from harmful content
-              </Text>
-            </View>
-            <Switch
-              value={safeMode}
-              onValueChange={setSafeMode}
-              trackColor={{ false: C.border, true: C.primary }}
-              thumbColor="#FFF"
-            />
           </View>
         </View>
 
@@ -119,39 +134,13 @@ export default function SafetyScreen() {
 
           {/* Blocked Users */}
           <TouchableOpacity
-            style={styles.navRow}
-            onPress={() => router.push('/(main)/(private)/settings/blocked-users')}
+            style={[styles.navRow, styles.navRowLast]}
+            onPress={() => router.push('/(main)/(private)/settings/phase2-blocked-users')}
             activeOpacity={0.7}
           >
             <View style={styles.navRowLeft}>
               <Ionicons name="ban-outline" size={22} color={C.text} />
               <Text style={styles.navRowTitle}>Blocked Users</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
-          </TouchableOpacity>
-
-          {/* My Reports */}
-          <TouchableOpacity
-            style={styles.navRow}
-            onPress={() => router.push('/(main)/(private)/settings/my-reports')}
-            activeOpacity={0.7}
-          >
-            <View style={styles.navRowLeft}>
-              <Ionicons name="flag-outline" size={22} color={C.text} />
-              <Text style={styles.navRowTitle}>My Reports</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
-          </TouchableOpacity>
-
-          {/* Safety Support */}
-          <TouchableOpacity
-            style={[styles.navRow, styles.navRowLast]}
-            onPress={() => router.push('/(main)/(private)/settings/safety-support')}
-            activeOpacity={0.7}
-          >
-            <View style={styles.navRowLeft}>
-              <Ionicons name="heart-outline" size={22} color={C.text} />
-              <Text style={styles.navRowTitle}>Safety Support</Text>
             </View>
             <Ionicons name="chevron-forward" size={20} color={C.textLight} />
           </TouchableOpacity>
@@ -265,65 +254,50 @@ const styles = StyleSheet.create({
     color: C.textLight,
     marginBottom: 12,
   },
-  settingSection: {
-    marginBottom: 16,
-  },
-  settingLabel: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: C.text,
-    marginBottom: 4,
-  },
-  settingDescription: {
-    fontSize: 13,
-    color: C.textLight,
-    lineHeight: 18,
-    marginBottom: 12,
-  },
-  segmentedControl: {
-    flexDirection: 'row',
+  // Safe Mode card styles
+  safeModeCard: {
     backgroundColor: C.surface,
-    borderRadius: 10,
-    padding: 4,
+    borderRadius: 14,
+    overflow: 'hidden',
+    marginTop: 8,
   },
-  segment: {
-    flex: 1,
-    paddingVertical: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 8,
-  },
-  segmentActive: {
-    backgroundColor: C.primary,
-  },
-  segmentText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: C.textLight,
-  },
-  segmentTextActive: {
-    color: '#FFF',
-  },
-  toggleRow: {
+  safeModeRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 12,
+    padding: 14,
   },
-  toggleInfo: {
+  safeModeInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
     flex: 1,
-    marginRight: 16,
+    marginRight: 12,
   },
-  toggleTitle: {
+  safeModeIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: C.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  safeModeIconActive: {
+    backgroundColor: C.primary,
+  },
+  safeModeTextContainer: {
+    flex: 1,
+  },
+  safeModeTitle: {
     fontSize: 16,
-    fontWeight: '500',
+    fontWeight: '600',
     color: C.text,
     marginBottom: 2,
   },
-  toggleDescription: {
+  safeModeDescription: {
     fontSize: 13,
     color: C.textLight,
-    lineHeight: 18,
+    lineHeight: 17,
   },
   tipRow: {
     flexDirection: 'row',

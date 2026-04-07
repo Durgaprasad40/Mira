@@ -2,7 +2,7 @@
   "expo": {
     "name": "Mira",
     "slug": "mira-app",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -30,6 +30,11 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#FF6B6B"
+      },
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyDfe8ugMWyttDV47k8tTvPnnQpazJmUllo"
+        }
       },
       "edgeToEdgeEnabled": false,
       "softwareKeyboardLayoutMode": "resize",
@@ -81,7 +86,19 @@
         }
       ],
       "@react-native-community/datetimepicker",
-      "expo-video"
+      "expo-video",
+      [
+        "react-native-maps",
+        {
+          "apiKey": "AIzaSyDfe8ugMWyttDV47k8tTvPnnQpazJmUllo"
+        }
+      ],
+      [
+        "./plugins/withGoogleMapsApiKey.js",
+        {
+          "apiKey": "AIzaSyDfe8ugMWyttDV47k8tTvPnnQpazJmUllo"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

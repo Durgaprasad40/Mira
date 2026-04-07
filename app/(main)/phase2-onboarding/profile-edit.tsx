@@ -27,7 +27,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { useRouter, useFocusEffect } from 'expo-router';
+import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -73,6 +73,10 @@ export default function Phase2ProfileEdit() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const desireInputRef = useRef<TextInput>(null);
+
+  // Check if opened from review screen (Step 5)
+  const { fromReview } = useLocalSearchParams<{ fromReview?: string }>();
+  const isFromReview = fromReview === 'true';
 
   // P2-003 FIX: Ref guard to prevent double-tap navigation
   const isContinuingRef = useRef(false);
@@ -153,6 +157,13 @@ export default function Phase2ProfileEdit() {
   const photoBlurSlots = usePrivateProfileStore((s) => s.photoBlurSlots);
   const togglePhotoBlurSlot = usePrivateProfileStore((s) => s.togglePhotoBlurSlot);
   const setPhotoBlurSlots = usePrivateProfileStore((s) => s.setPhotoBlurSlots);
+
+  // P2-002 FIX: Sync photoSlots to store whenever they change
+  // This preserves photo changes even when user navigates back without pressing Continue
+  useEffect(() => {
+    const photoUrls = photoSlots.filter((uri): uri is string => uri !== null);
+    setSelectedPhotos([], photoUrls);
+  }, [photoSlots, setSelectedPhotos]);
   const [mainPhotoSlot, setMainPhotoSlot] = useState<number>(0);
   const [previewSlot, setPreviewSlot] = useState<number | null>(null);
   // Note: isProcessing moved above with useFocusEffect for FIX #2
@@ -343,9 +354,17 @@ export default function Phase2ProfileEdit() {
       setSelectedPhotos([], photoUrls);
 
       // B2-HIGH FIX: Delay navigation after keyboard dismiss to prevent Android crash
-      setTimeout(() => {
+      setTimeout(async () => {
         try {
-          router.push('/(main)/phase2-onboarding/prompts' as any);
+          // P0-002 FIX: Save onboarding progress before navigating
+          await usePrivateProfileStore.getState().saveOnboardingProgress();
+
+          // FIX: If opened from review, go back to review instead of continuing to next step
+          if (isFromReview) {
+            router.back();
+          } else {
+            router.push('/(main)/phase2-onboarding/prompts' as any);
+          }
         } catch (navError) {
           // STABILITY: Reset guards if navigation throws
           isContinuingRef.current = false;
@@ -360,7 +379,7 @@ export default function Phase2ProfileEdit() {
       if (isMountedRef.current) setIsProcessing(false);
       if (__DEV__) console.error('[profile-edit] handleContinue error:', e);
     }
-  }, [canContinue, isProcessing, photoSlots, setSelectedPhotos, router]);
+  }, [canContinue, isProcessing, photoSlots, setSelectedPhotos, router, isFromReview]);
 
   // Desire hint
   const getDesireHint = () => {
@@ -383,7 +402,10 @@ export default function Phase2ProfileEdit() {
         <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Edit Profile</Text>
+        <View style={styles.headerTitleContainer}>
+          <Text style={styles.headerTitle}>Create your private profile</Text>
+          <Text style={styles.headerHelper}>This is separate from your main profile</Text>
+        </View>
         {/* P2-PHOTO-001: Updated step number for 5-step flow */}
         <Text style={styles.stepLabel}>Step 3 of 5</Text>
       </View>
@@ -457,7 +479,7 @@ export default function Phase2ProfileEdit() {
             </Text>
           </View>
           <Text style={[styles.sectionSubtitle, !canContinueIntents && styles.countWarning]}>
-            Select {PHASE2_MIN_INTENTS}-{PHASE2_MAX_INTENTS} intents
+            Choose {PHASE2_MIN_INTENTS}-{PHASE2_MAX_INTENTS} — be honest, it helps us match you better
           </Text>
 
           <View style={styles.intentGrid}>
@@ -632,9 +654,9 @@ export default function Phase2ProfileEdit() {
 
         {/* Section D: Desire */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Desire</Text>
+          <Text style={styles.sectionTitle}>Your Desire</Text>
           <Text style={styles.sectionSubtitle}>
-            Share what you're looking for in a private connection.
+            Share what you're seeking — this helps others understand you better
           </Text>
 
           <TouchableOpacity
@@ -693,9 +715,9 @@ export default function Phase2ProfileEdit() {
           ) : (
             <>
               <Text style={[styles.continueBtnText, !canContinue && styles.continueBtnTextDisabled]}>
-                Continue to Review
+                {isFromReview ? 'Save & Return' : 'Continue to Review'}
               </Text>
-              <Ionicons name="arrow-forward" size={18} color={canContinue ? '#FFF' : C.textLight} />
+              <Ionicons name={isFromReview ? 'checkmark-circle' : 'arrow-forward'} size={18} color={canContinue ? '#FFF' : C.textLight} />
             </>
           )}
         </TouchableOpacity>
@@ -751,9 +773,11 @@ const styles = StyleSheet.create({
   scrollView: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.surface,
+    paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: C.surface,
   },
-  headerTitle: { fontSize: 18, fontWeight: '700', color: C.text },
+  headerTitleContainer: { flex: 1, marginHorizontal: 12 },
+  headerTitle: { fontSize: 16, fontWeight: '700', color: C.text },
+  headerHelper: { fontSize: 11, color: C.textLight, marginTop: 2 },
   stepLabel: { fontSize: 12, color: C.textLight },
   section: { paddingHorizontal: SCREEN_PADDING, paddingTop: 20 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },

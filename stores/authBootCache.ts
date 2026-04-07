@@ -72,11 +72,13 @@ export async function getAuthBootCache(): Promise<AuthBootCacheData> {
     return { ...DEFAULT_AUTH_BOOT };
   } catch (error: any) {
     // M-4: Differentiate SecureStore errors for better diagnostics
-    const msg = error?.message || String(error);
-    if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
-      console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (read):', msg);
-    } else {
-      console.error('[AUTH_BOOT] Failed to read from SecureStore:', error);
+    if (__DEV__) {
+      const msg = error?.message || String(error);
+      if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
+        console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (read):', msg);
+      } else {
+        console.error('[AUTH_BOOT] Failed to read from SecureStore:', error);
+      }
     }
     return { ...DEFAULT_AUTH_BOOT };
   }
@@ -86,12 +88,14 @@ export async function getAuthBootCache(): Promise<AuthBootCacheData> {
  * Save auth token, userId, and optionally onboardingCompleted to SecureStore.
  * Call ONLY after confirmed auth success (user clicked Continue, login succeeded).
  * @param opts.onboardingCompleted - If provided, persists onboarding completion flag
+ * @returns true if save succeeded, false if save failed (ghost session risk)
+ * P1-022 FIX: Returns boolean to indicate success/failure for caller to handle
  */
 export async function saveAuthBootCache(
   token: string,
   userId: string,
   opts?: { onboardingCompleted?: boolean }
-): Promise<void> {
+): Promise<boolean> {
   try {
     await SecureStore.setItemAsync(TOKEN_KEY, token);
     await SecureStore.setItemAsync(USER_ID_KEY, userId);
@@ -108,17 +112,18 @@ export async function saveAuthBootCache(
         console.log('[AUTH_BOOT] Saved token to SecureStore, userId:', userId.substring(0, 10) + '...');
       }
     }
+    return true;
   } catch (error: any) {
     // STABILITY FIX: C-3 - SecureStore save failure must not leave partial cache
     // M-4: Differentiate SecureStore quota/storage errors
-    const msg = error?.message || String(error);
-    const isQuotaError = msg.includes('quota') || msg.includes('storage') || msg.includes('full');
-    if (isQuotaError) {
-      console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (save):', msg);
-    } else {
-      console.error('[AUTH_BOOT] Failed to save to SecureStore:', error);
-    }
     if (__DEV__) {
+      const msg = error?.message || String(error);
+      const isQuotaError = msg.includes('quota') || msg.includes('storage') || msg.includes('full');
+      if (isQuotaError) {
+        console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (save):', msg);
+      } else {
+        console.error('[AUTH_BOOT] Failed to save to SecureStore:', error);
+      }
       console.warn('[AUTH_BOOT_CACHE] SecureStore save failed - cleaning up partial state:', error);
     }
     // Clean up any partial cache to prevent ghost login sessions
@@ -132,6 +137,8 @@ export async function saveAuthBootCache(
     } catch {
       // Cleanup failed - nothing more we can do
     }
+    // P1-022 FIX: Return false to indicate failure
+    return false;
   }
 }
 
@@ -154,11 +161,13 @@ export async function clearAuthBootCache(): Promise<void> {
     }
   } catch (error: any) {
     // M-4: Differentiate SecureStore quota/storage errors
-    const msg = error?.message || String(error);
-    if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
-      console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (clear):', msg);
-    } else {
-      console.error('[AUTH_BOOT] Failed to clear SecureStore:', error);
+    if (__DEV__) {
+      const msg = error?.message || String(error);
+      if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
+        console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (clear):', msg);
+      } else {
+        console.error('[AUTH_BOOT] Failed to clear SecureStore:', error);
+      }
     }
     // C2/C3 FIX: Re-throw so caller knows cleanup failed
     throw error;

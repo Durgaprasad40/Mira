@@ -20,6 +20,25 @@
  */
 
 import { Id } from './_generated/dataModel';
+import { getProfileCompletionBoost } from './utils/profileBoost';
+import {
+  getPolishScore,
+  createPolishContext,
+  PolishContext,
+  DISCOVER_POLISH_CONFIG,
+} from './utils/discoverPolish';
+import {
+  getActivityBoost,
+  ACTIVITY_BOOST_CONFIG,
+} from './utils/activityBoost';
+import {
+  getTrustAdjustment,
+  TRUST_SCORE_CONFIG,
+} from './utils/trustScore';
+import {
+  getIntentRefinement,
+  INTENT_REFINEMENT_CONFIG,
+} from './utils/intentRefinement';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -147,6 +166,8 @@ const BOOSTS = {
   theyLikedMe: 25,  // Small boost for mutual interest signal
   isBoosted: 20,    // Paid boost
   verified: 15,     // Verification trust boost (NOT a hard filter)
+  // Profile completion boost is 0-4 (applied via getProfileCompletionBoost)
+  // NOT included here - calculated dynamically per candidate
 };
 
 // Fallback: minimum strong signals required
@@ -172,16 +193,17 @@ export function compatibilityScore(
   const candidateActivities = candidate.activities ?? [];
   const userActivities = currentUser.activities ?? [];
 
-  // 1. Relationship intent alignment (0-30)
+  // 1. Relationship intent alignment (0-30) - CURRENT 9 RELATIONSHIP CATEGORIES
   const intentCompat: Record<string, string[]> = {
-    long_term: ['long_term', 'short_to_long'],
-    short_term: ['short_term', 'long_to_short', 'fwb'],
-    fwb: ['fwb', 'short_term'],
-    figuring_out: ['figuring_out', 'open_to_anything'],
-    short_to_long: ['short_to_long', 'long_term', 'short_term'],
-    long_to_short: ['long_to_short', 'short_term'],
-    new_friends: ['new_friends', 'open_to_anything'],
-    open_to_anything: ['open_to_anything', 'figuring_out', 'new_friends'],
+    serious_vibes: ['serious_vibes', 'see_where_it_goes'],
+    keep_it_casual: ['keep_it_casual', 'open_to_vibes'],
+    exploring_vibes: ['exploring_vibes', 'open_to_anything', 'new_to_dating'],
+    see_where_it_goes: ['see_where_it_goes', 'serious_vibes'],
+    open_to_vibes: ['open_to_vibes', 'keep_it_casual'],
+    just_friends: ['just_friends', 'open_to_anything'],
+    open_to_anything: ['open_to_anything', 'exploring_vibes', 'just_friends'],
+    single_parent: ['single_parent', 'serious_vibes', 'exploring_vibes'],
+    new_to_dating: ['new_to_dating', 'exploring_vibes', 'open_to_anything'],
   };
 
   let bestIntent = 0;
@@ -356,11 +378,17 @@ export function trustPenalty(
 
 /**
  * Calculate the final ranking score for a candidate.
+ *
+ * @param candidate - The candidate profile
+ * @param currentUser - The viewing user
+ * @param trustSignals - Trust/safety data
+ * @param polishContext - Optional polish context for repeat/exposure adjustments
  */
 export function calculateRankScore(
   candidate: CandidateProfile,
   currentUser: CurrentUser,
-  trustSignals: TrustSignals
+  trustSignals: TrustSignals,
+  polishContext?: PolishContext
 ): number {
   // Component scores (0-100 each)
   const compatibility = compatibilityScore(candidate, currentUser);
@@ -388,13 +416,42 @@ export function calculateRankScore(
   if (candidate.isBoosted) score += BOOSTS.isBoosted;
   if (candidate.isVerified) score += BOOSTS.verified;
 
-  // Apply trust penalty (soft penalty, not hard filter)
-  const penalty = trustPenalty(
-    candidate.id,
-    trustSignals.aggregateReportCounts,
-    trustSignals.aggregateBlockCounts
+  // Apply profile completion boost (0-4 points)
+  // ADDITIVE ONLY - does NOT dominate base score
+  // Includes new user protection (min +1 for users < 48h old)
+  const completionBoost = getProfileCompletionBoost(candidate);
+  score += completionBoost;
+
+  // Apply trust adjustment (soft trust layer, -8 to +2)
+  // - Boosts verified users with clean records (+1 to +2)
+  // - Penalizes users with multiple unique reports/blocks (-2 to -8)
+  // - Single report = NO penalty (anti-abuse)
+  // - New users = neutral (0)
+  const trustAdjust = getTrustAdjustment(candidate);
+  score += trustAdjust;
+
+  // Apply polish adjustment (repeat penalty + exposure boost)
+  // LIGHTWEIGHT: ±3 points max (clamped), does NOT dominate base score
+  if (polishContext) {
+    const polishAdjustment = getPolishScore(candidate, polishContext);
+    score += polishAdjustment;
+  }
+
+  // Apply activity boost (recent activity + reply behavior + conversation continuation)
+  // LIGHTWEIGHT: 0-3 points, rewards engagement without enabling gaming
+  // New users get +1 baseline, inactive users get +0 (neutral, not penalty)
+  const activityBoost = getActivityBoost(candidate);
+  score += activityBoost;
+
+  // Apply intent refinement (relationship intent compatibility layer)
+  // ADDITIVE: -5 to +5 points, refines intent matching beyond base compatibility
+  // Normalizes legacy values, handles multi-select with best-match logic
+  // Missing data = 0 (neutral), does NOT dominate base score
+  const intentRefinement = getIntentRefinement(
+    currentUser.relationshipIntent,
+    candidate.relationshipIntent
   );
-  score -= penalty;
+  score += intentRefinement;
 
   return score;
 }
@@ -404,25 +461,59 @@ export function calculateRankScore(
 // ---------------------------------------------------------------------------
 
 /**
- * Fisher-Yates shuffle for uniform random ordering.
+ * P1-001 FIX: Seeded PRNG for deterministic shuffle
+ * Uses a simple mulberry32 algorithm for fast, deterministic random numbers.
+ * Same seed = same sequence of random numbers.
+ */
+function createSeededRandom(seed: number): () => number {
+  let state = seed;
+  return function() {
+    state |= 0;
+    state = (state + 0x6D2B79F5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * P1-001 FIX: Generate seed from userId + date
+ * Same user on same day = same seed = deterministic ordering
+ */
+function generateDailySeed(userId: string): number {
+  const day = Math.floor(Date.now() / (1000 * 60 * 60 * 24));
+  let hash = day;
+  for (let i = 0; i < userId.length; i++) {
+    hash = ((hash << 5) - hash + userId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+/**
+ * P1-001 FIX: Deterministic Fisher-Yates shuffle using seeded PRNG.
+ * Same userId on same day = same shuffle order for consistent UX.
  * Returns a new shuffled array without modifying the original.
  */
-function fisherYatesShuffle<T>(array: T[]): T[] {
+function seededFisherYatesShuffle<T>(array: T[], userId: string): T[] {
+  const seed = generateDailySeed(userId);
+  const random = createSeededRandom(seed);
   const result = [...array];
   for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(random() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
 }
 
 /**
- * Mix ranked candidates with exploration pool.
- * 80% from top-ranked, 20% from random exploration.
+ * P1-001 FIX: Mix ranked candidates with exploration pool using deterministic shuffle.
+ * 80% from top-ranked, 20% from seeded random exploration.
+ * @param viewerId - Used for seeded shuffle (same user = same order daily)
  */
 export function applyExplorationMix(
   sortedCandidates: CandidateProfile[],
-  limit: number
+  limit: number,
+  viewerId: string
 ): CandidateProfile[] {
   if (sortedCandidates.length <= limit) {
     return sortedCandidates;
@@ -434,13 +525,13 @@ export function applyExplorationMix(
   // Top ranked candidates
   const ranked = sortedCandidates.slice(0, rankedCount);
 
-  // Exploration pool: random selection from remaining
+  // Exploration pool: SEEDED random selection from remaining (P1-001 FIX)
   const remaining = sortedCandidates.slice(rankedCount);
   const exploration: CandidateProfile[] = [];
 
   if (remaining.length > 0 && explorationCount > 0) {
-    // Shuffle remaining for random exploration
-    const shuffled = fisherYatesShuffle(remaining);
+    // P1-001 FIX: Use seeded shuffle for deterministic ordering
+    const shuffled = seededFisherYatesShuffle(remaining, viewerId);
     exploration.push(...shuffled.slice(0, explorationCount));
   }
 
@@ -575,26 +666,53 @@ export function qualifiesForFallback(
  * @param trustSignals - Trust/safety data
  * @param limit - Number of results to return
  * @param useFallback - Whether to include fallback pool
+ * @param recentlyShownIds - Optional set of recently shown profile IDs (for polish)
  */
 export function rankDiscoverCandidates(
   candidates: CandidateProfile[],
   currentUser: CurrentUser,
   trustSignals: TrustSignals,
   limit: number,
-  useFallback: boolean = false
+  useFallback: boolean = false,
+  recentlyShownIds?: Set<string>
 ): RankingResult {
-  // Calculate scores for all candidates
-  const scoredCandidates = candidates.map(candidate => ({
+  const poolSize = candidates.length;
+
+  // STABILIZATION FIX: Same-session hard guard
+  // Skip candidates shown in current session IF pool is large enough
+  // This prevents immediate repetition while ensuring small pools still work
+  let eligibleCandidates = candidates;
+  if (recentlyShownIds && recentlyShownIds.size > 0 && poolSize > DISCOVER_POLISH_CONFIG.smallPoolThreshold) {
+    const filtered = candidates.filter(c => !recentlyShownIds.has(c.id));
+
+    // Safety: Only use filtered list if we have enough candidates left
+    // Ensures feed never becomes empty due to this filter
+    if (filtered.length >= Math.min(limit, poolSize * 0.5)) {
+      eligibleCandidates = filtered;
+    }
+    // else: fall back to full candidate list (allow resurfacing)
+  }
+
+  // Create polish context for repeat/exposure adjustments
+  // LIGHTWEIGHT: ±3 points max (clamped), preserves ranking integrity
+  const polishContext = createPolishContext(
+    currentUser._id,
+    eligibleCandidates.length,
+    recentlyShownIds
+  );
+
+  // Calculate scores for all eligible candidates (with polish adjustments)
+  const scoredCandidates = eligibleCandidates.map(candidate => ({
     candidate,
-    score: calculateRankScore(candidate, currentUser, trustSignals),
+    score: calculateRankScore(candidate, currentUser, trustSignals, polishContext),
   }));
 
   // Sort by score (descending)
   scoredCandidates.sort((a, b) => b.score - a.score);
 
-  // Apply exploration mix
+  // P1-001 FIX: Apply exploration mix with viewerId for deterministic daily ordering
   const sortedCandidates = scoredCandidates.map(s => s.candidate);
-  const mixed = applyExplorationMix(sortedCandidates, limit);
+  const mixed = applyExplorationMix(sortedCandidates, limit, currentUser._id);
 
   const exhausted = mixed.length < limit;
   let fallbackUsed = false;
@@ -619,7 +737,11 @@ export function rankDiscoverCandidates(
 export const DISCOVER_RANKING_CONFIG = {
   weights: RANKING_WEIGHTS,
   explorationRatio: EXPLORATION_RATIO,
-  trustPenalty: TRUST_PENALTY,
+  trustPenalty: TRUST_PENALTY, // Legacy - kept for backward compatibility
+  trust: TRUST_SCORE_CONFIG,   // New trust adjustment system (-8 to +2)
   boosts: BOOSTS,
   fallbackMinSignals: FALLBACK_MIN_SIGNALS,
+  polish: DISCOVER_POLISH_CONFIG,
+  activity: ACTIVITY_BOOST_CONFIG,
+  intentRefinement: INTENT_REFINEMENT_CONFIG, // Intent refinement layer (-5 to +5)
 };

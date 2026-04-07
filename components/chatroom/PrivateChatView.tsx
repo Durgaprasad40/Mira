@@ -1,3 +1,9 @@
+/**
+ * Private Chat View (DM)
+ *
+ * Real-time 1:1 messaging component for Chat Room DMs.
+ * DM-ID-FIX: Now uses Convex backend for persistent, synced messages.
+ */
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   View,
@@ -8,216 +14,521 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Platform,
-  SafeAreaView,
+  ActivityIndicator,
+  InteractionManager,
+  LayoutChangeEvent,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
+  Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useQuery, useMutation } from 'convex/react';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import {
-  DemoDM,
-  DemoPrivateMessage,
-  DEMO_PRIVATE_MESSAGES,
-  DEMO_CURRENT_USER,
-} from '@/lib/demoData';
+import { GENDER_COLORS } from '@/lib/responsive';
+import { api } from '@/convex/_generated/api';
+import { useAuthStore } from '@/stores/authStore';
+import { useChatThemeColors } from '@/stores/chatThemeStore';
 import MediaMessage from '@/components/chat/MediaMessage';
 import ChatComposer from './ChatComposer';
 import AttachmentPopup from './AttachmentPopup';
 import DoodleCanvas from './DoodleCanvas';
 import VideoPlayerModal from './VideoPlayerModal';
 import ImagePreviewModal from './ImagePreviewModal';
-import SecureMediaViewer from './SecureMediaViewer';
-import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
+import DmAudioBubble from './DmAudioBubble';
+// DM-UX-FIX: SecureMediaViewer removed - DM uses tap-to-view
+import { shouldShowTimestamp } from '@/utils/chatTime';
+import { uploadMediaToConvex } from '@/lib/uploadUtils';
+import { useVoiceRecorder, VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
+import { preloadVideos } from '@/lib/videoCache';
+import { Image as ExpoImage } from 'expo-image';
+import type { Id } from '@/convex/_generated/dataModel';
 
 const C = INCOGNITO_COLORS;
 
-function getDemoPrivateMessages(dm: DemoDM): DemoPrivateMessage[] {
-  if (DEMO_PRIVATE_MESSAGES[dm.id]?.length) {
-    return DEMO_PRIVATE_MESSAGES[dm.id];
-  }
-  const now = Date.now();
-  return [
-    { id: `${dm.id}_1`, dmId: dm.id, senderId: dm.peerId, senderName: dm.peerName, text: 'Hey! Thanks for connecting.', createdAt: now - 1000 * 60 * 30 },
-    { id: `${dm.id}_me1`, dmId: dm.id, senderId: DEMO_CURRENT_USER.id, senderName: 'You', text: 'Hi! Nice to meet you here.', createdAt: now - 1000 * 60 * 28 },
-    { id: `${dm.id}_2`, dmId: dm.id, senderId: dm.peerId, senderName: dm.peerName, text: 'So what do you do?', createdAt: now - 1000 * 60 * 22 },
-    { id: `${dm.id}_me2`, dmId: dm.id, senderId: DEMO_CURRENT_USER.id, senderName: 'You', text: 'I work in tech. How about you?', createdAt: now - 1000 * 60 * 18 },
-    { id: `${dm.id}_3`, dmId: dm.id, senderId: dm.peerId, senderName: dm.peerName, text: 'Same here! I am a designer. What a coincidence.', createdAt: now - 1000 * 60 * 12 },
-    { id: `${dm.id}_me3`, dmId: dm.id, senderId: DEMO_CURRENT_USER.id, senderName: 'You', text: 'That is cool! We should chat more.', createdAt: now - 1000 * 60 * 8 },
-    { id: `${dm.id}_4`, dmId: dm.id, senderId: dm.peerId, senderName: dm.peerName, text: 'Definitely! What are you up to this weekend?', createdAt: now - 1000 * 60 * 3 },
-  ];
+// DM info for display (peer details)
+interface DmInfo {
+  id: string;
+  peerId: string;
+  peerName: string;
+  peerAvatar?: string;
+  peerGender?: 'male' | 'female' | 'other';
 }
 
 interface PrivateChatViewProps {
-  dm: DemoDM;
+  dm: DmInfo;
+  /** Convex thread ID for backend sync */
+  threadId?: Id<'chatRoomDmThreads'>;
   onBack: () => void;
   topInset?: number;
-  /** When true, rendered inside a modal sheet - adjusts layout accordingly */
+  /** When true, rendered inside a modal/sheet - simple flex layout (no internal keyboard handling) */
   isModal?: boolean;
-  /** When true (and isModal), keyboard is currently visible - parent handles positioning */
-  keyboardVisible?: boolean;
+  /** Called after message is sent successfully - used by ChatSheet to dismiss keyboard */
+  onSendComplete?: () => void;
+  /** When true, hides back button (ChatSheet has its own close X) */
+  hideBackButton?: boolean;
+  /** When true, rendered inside ChatSheet - adjusts header styling */
+  isInSheet?: boolean;
+  /** Called to close the sheet (X button in header) - passed from ChatSheet */
+  onSheetClose?: () => void;
+  /** Whether keyboard is open and sheet is in full-screen mode */
+  isKeyboardOpen?: boolean;
+  /** Safe area top inset - for header padding when sheet is full-screen */
+  safeAreaTop?: number;
 }
 
-export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = false, keyboardVisible = false }: PrivateChatViewProps) {
+// Message type from Convex query
+interface DmMessage {
+  id: string;
+  threadId: string;
+  senderId: string;
+  senderName: string;
+  senderAvatar?: string;
+  text?: string;
+  type: string;
+  mediaUrl?: string;
+  readAt?: number;
+  createdAt: number;
+  isMe: boolean;
+}
+
+export default function PrivateChatView({
+  dm,
+  threadId,
+  onBack,
+  topInset = 0,
+  isModal = false,
+  onSendComplete,
+  hideBackButton = false,
+  isInSheet = false,
+  onSheetClose,
+  isKeyboardOpen = false,
+  safeAreaTop = 0,
+}: PrivateChatViewProps) {
   const flatListRef = useRef<FlatList>(null);
   const [headerHeight, setHeaderHeight] = useState(0);
-  const [messages, setMessages] = useState<DemoPrivateMessage[]>(
-    () => getDemoPrivateMessages(dm)
-  );
+  const insets = useSafeAreaInsets();
+
   const [inputText, setInputText] = useState('');
   const [attachmentVisible, setAttachmentVisible] = useState(false);
   const [doodleVisible, setDoodleVisible] = useState(false);
   const [videoPlayerUri, setVideoPlayerUri] = useState('');
   const [imagePreviewUri, setImagePreviewUri] = useState('');
 
-  // Secure media viewer state (hold-to-view for video)
-  const [secureMediaUri, setSecureMediaUri] = useState('');
-  const [secureMediaType, setSecureMediaType] = useState<'image' | 'video'>('image');
-  const [isHoldingSecureMedia, setIsHoldingSecureMedia] = useState(false);
+  // Auth
+  const authUserId = useAuthStore((s) => s.userId);
 
-  // Android modal keyboard fix: track keyboard height manually
-  const [kbHeight, setKbHeight] = useState(0);
+  // THEME: Get current chat theme colors
+  const themeColors = useChatThemeColors();
 
-  const isNearBottomRef = useRef(true);
+  // ==========================================================================
+  // UNIFIED BOTTOM-ANCHOR SCROLL STRATEGY
+  // ==========================================================================
+  // Rule: Always show the latest message UNLESS user manually scrolled away.
+  //
+  // Events that trigger scroll-to-latest (if not scrolled away):
+  // - Thread open/reopen
+  // - Message sent (always scrolls, resets scrolled-away state)
+  // - Keyboard opens
+  // - Keyboard closes
+  // - Content size changes (new messages arrive)
+  // - Layout size changes (sheet resize)
+  //
+  // User scrolled away detection:
+  // - onScrollBeginDrag: user started manual scroll
+  // - If scroll position is NOT near bottom after drag, mark as scrolled away
+  // - Reset when: user scrolls back to bottom, sends message, or thread reopens
+  // ==========================================================================
 
-  // P2-AUD-001/002/003: Refs for scroll-related timeouts to enable cleanup
-  const initialScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const sendScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Track content and layout dimensions for accurate scrolling
+  const contentHeightRef = useRef(0);
+  const layoutHeightRef = useRef(0);
 
+  // Track scroll position to detect if user is near bottom
+  const scrollOffsetRef = useRef(0);
+
+  // Track if user has manually scrolled away from bottom
+  // When true, auto-scroll is suppressed until reset condition
+  const userScrolledAwayRef = useRef(false);
+
+  // Track if we've completed initial scroll (prevents duplicate initial scrolls)
+  const hasInitialScrolledRef = useRef(false);
+
+  // Track if user is currently dragging (manual scroll in progress)
+  const isDraggingRef = useRef(false);
+
+  // Refs for scroll-related timeouts
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Threshold: how close to bottom counts as "at bottom" (in pixels)
+  const NEAR_BOTTOM_THRESHOLD = 50;
+
+  // DM-ID-FIX: Use Convex query for real-time messages
+  const messagesResult = useQuery(
+    api.chatRooms.getDmMessages,
+    threadId && authUserId
+      ? { authUserId, threadId }
+      : 'skip'
+  );
+  const messages = messagesResult?.messages ?? [];
+
+  // DM-ID-FIX: Mutations for sending and marking read
+  const sendDmMessage = useMutation(api.chatRooms.sendDmMessage);
+  const markDmMessagesRead = useMutation(api.chatRooms.markDmMessagesRead);
+  // DM-MEDIA-FIX: Mutation for generating upload URL for media messages
+  const generateUploadUrl = useMutation(api.chatRooms.generateUploadUrl);
+
+  // Mark messages as read when opening DM
   useEffect(() => {
-    if (messages.length > 0) {
-      initialScrollTimeoutRef.current = setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: false });
-      }, 100);
-    }
-  }, []);
-
-  // Android modal: track keyboard height for composer positioning
-  useEffect(() => {
-    if (Platform.OS !== 'android' || !isModal) return;
-    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
-      setKbHeight(e.endCoordinates.height);
-    });
-    const hideSub = Keyboard.addListener('keyboardDidHide', () => {
-      setKbHeight(0);
-    });
-    return () => {
-      showSub.remove();
-      hideSub.remove();
-    };
-  }, [isModal]);
-
-  // Scroll to end when keyboard opens (WhatsApp behavior)
-  useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const sub = Keyboard.addListener(showEvent, () => {
-      if (isNearBottomRef.current) {
-        requestAnimationFrame(() => {
-          flatListRef.current?.scrollToEnd({ animated: true });
-        });
-      }
-    });
-    return () => sub.remove();
-  }, []);
-
-  const handleContentSizeChange = useCallback(() => {
-    if (isNearBottomRef.current) {
-      requestAnimationFrame(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
+    if (threadId && authUserId) {
+      markDmMessagesRead({ authUserId, threadId }).catch((err) => {
+        if (__DEV__) console.warn('[DM] Failed to mark messages read:', err);
       });
     }
+  }, [threadId, authUserId, markDmMessagesRead]);
+
+  // CHAT_SHEET: Clear draft when switching to a different user
+  // This ensures text isn't carried across different chat partners
+  useEffect(() => {
+    setInputText('');
+  }, [dm.peerId]);
+
+  // THREAD-REOPEN: Reset scroll state when DM changes (new thread or reopen)
+  useEffect(() => {
+    hasInitialScrolledRef.current = false;
+    userScrolledAwayRef.current = false; // Fresh start = anchored to bottom
+    scrollOffsetRef.current = 0;
+  }, [dm.peerId]);
+
+  // ==========================================================================
+  // HELPER: Check if currently near bottom
+  // ==========================================================================
+  const isNearBottom = useCallback((): boolean => {
+    const contentHeight = contentHeightRef.current;
+    const layoutHeight = layoutHeightRef.current;
+    const scrollOffset = scrollOffsetRef.current;
+
+    if (contentHeight <= layoutHeight) {
+      // All content fits in view - always "at bottom"
+      return true;
+    }
+
+    const maxOffset = contentHeight - layoutHeight;
+    const distanceFromBottom = maxOffset - scrollOffset;
+    return distanceFromBottom <= NEAR_BOTTOM_THRESHOLD;
+  }, [NEAR_BOTTOM_THRESHOLD]);
+
+  // ==========================================================================
+  // CORE: Scroll to latest message
+  // ==========================================================================
+  // force=true: Always scroll (used after send, initial open)
+  // force=false: Only scroll if user hasn't scrolled away
+  const scrollToLatest = useCallback((animated: boolean = false, force: boolean = false): boolean => {
+    // Check if we should scroll
+    if (!force && userScrolledAwayRef.current) {
+      if (__DEV__) {
+        console.log('[SCROLL_SKIP] User scrolled away, not auto-scrolling');
+      }
+      return true; // Return true to indicate "handled" (just skipped)
+    }
+
+    const contentHeight = contentHeightRef.current;
+    const layoutHeight = layoutHeightRef.current;
+
+    if (contentHeight > 0 && layoutHeight > 0) {
+      if (contentHeight > layoutHeight) {
+        // Calculate exact offset to show bottom of content
+        const offset = contentHeight - layoutHeight;
+        flatListRef.current?.scrollToOffset({ offset, animated });
+        scrollOffsetRef.current = offset; // Update tracked position
+
+        if (__DEV__) {
+          console.log('[SCROLL_TO_LATEST]', {
+            contentHeight: Math.round(contentHeight),
+            layoutHeight: Math.round(layoutHeight),
+            offset: Math.round(offset),
+            animated,
+            forced: force,
+          });
+        }
+      }
+      // Content fits in view - no scroll needed, but dimensions are valid
+      return true;
+    }
+
+    // Dimensions not ready
+    if (__DEV__) {
+      console.log('[SCROLL_WAITING]', { contentHeight, layoutHeight });
+    }
+    return false;
   }, []);
 
-  const handleScroll = useCallback((e: any) => {
-    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
-    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
-    isNearBottomRef.current = distanceFromBottom < 80;
-  }, []);
+  // ==========================================================================
+  // HELPER: Retry scroll until dimensions are valid
+  // ==========================================================================
+  const scrollWithRetry = useCallback((animated: boolean, force: boolean, maxAttempts: number = 10) => {
+    // Clear any pending scroll
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+    }
 
-  const handleSend = useCallback(() => {
-    const trimmed = inputText.trim();
-    if (!trimmed) return;
-
-    const newMsg: DemoPrivateMessage = {
-      id: `pm_me_${Date.now()}`,
-      dmId: dm.id,
-      senderId: DEMO_CURRENT_USER.id,
-      senderName: 'You',
-      text: trimmed,
-      createdAt: Date.now(),
+    const attempt = (n: number) => {
+      const success = scrollToLatest(animated, force);
+      if (!success && n < maxAttempts) {
+        scrollTimeoutRef.current = setTimeout(() => attempt(n + 1), 80);
+      } else if (success && !hasInitialScrolledRef.current) {
+        // Verification scroll for initial
+        scrollTimeoutRef.current = setTimeout(() => {
+          scrollToLatest(animated, force);
+          hasInitialScrolledRef.current = true;
+          if (__DEV__) console.log('[SCROLL_COMPLETE] Initial scroll done');
+        }, 100);
+      }
     };
 
-    setMessages((prev) => [...prev, newMsg]);
-    setInputText('');
-    sendScrollTimeoutRef.current = setTimeout(() => {
-      flatListRef.current?.scrollToEnd({ animated: true });
-    }, 50);
-  }, [inputText, dm.id]);
+    // Start after interactions settle
+    InteractionManager.runAfterInteractions(() => {
+      scrollTimeoutRef.current = setTimeout(() => attempt(1), 30);
+    });
+  }, [scrollToLatest]);
 
-  const handleSendMedia = useCallback(
-    (uri: string, mediaType: 'image' | 'video') => {
-      const labelMap = { image: 'Photo', video: 'Video' };
-      const newMsg: DemoPrivateMessage = {
-        id: `pm_me_${Date.now()}`,
-        dmId: dm.id,
-        senderId: DEMO_CURRENT_USER.id,
-        senderName: 'You',
-        text: `[${labelMap[mediaType]}]`,
-        type: mediaType,
-        mediaUrl: uri,
-        createdAt: Date.now(),
-      };
-      setMessages((prev) => [...prev, newMsg]);
-      sendScrollTimeoutRef.current = setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 50);
-    },
-    [dm.id]
-  );
+  // ==========================================================================
+  // EVENT: Initial thread open / messages load
+  // ==========================================================================
+  useEffect(() => {
+    if (messages.length > 0 && !hasInitialScrolledRef.current) {
+      // Force scroll on initial open (ignore userScrolledAway)
+      scrollWithRetry(false, true, 10);
+    }
+  }, [messages.length > 0, scrollWithRetry]);
 
+  // ==========================================================================
+  // EVENT: Keyboard open - scroll to keep latest visible
+  // ==========================================================================
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
 
-  // Ref for cleanup of setTimeout to avoid setState after unmount
-  const secureMediaTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const sub = Keyboard.addListener(showEvent, () => {
+      // Scroll if not scrolled away (don't force)
+      scrollWithRetry(false, false, 5);
+    });
 
+    return () => sub.remove();
+  }, [scrollWithRetry]);
+
+  // ==========================================================================
+  // EVENT: Keyboard close - scroll to keep latest visible
+  // ==========================================================================
+  useEffect(() => {
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const sub = Keyboard.addListener(hideEvent, () => {
+      // Wait for sheet animation, then scroll if not scrolled away
+      InteractionManager.runAfterInteractions(() => {
+        if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
+        scrollTimeoutRef.current = setTimeout(() => {
+          scrollWithRetry(true, false, 8);
+        }, 150);
+      });
+    });
+
+    return () => sub.remove();
+  }, [scrollWithRetry]);
+
+  // ==========================================================================
   // Cleanup on unmount
+  // ==========================================================================
   useEffect(() => {
     return () => {
-      if (initialScrollTimeoutRef.current) {
-        clearTimeout(initialScrollTimeoutRef.current);
-        initialScrollTimeoutRef.current = null;
-      }
-      if (sendScrollTimeoutRef.current) {
-        clearTimeout(sendScrollTimeoutRef.current);
-        sendScrollTimeoutRef.current = null;
-      }
-      if (secureMediaTimeoutRef.current) {
-        clearTimeout(secureMediaTimeoutRef.current);
-        secureMediaTimeoutRef.current = null;
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+        scrollTimeoutRef.current = null;
       }
     };
   }, []);
 
-  // Secure media hold handlers (for BOTH image and video - DM matches GROUP style)
-  const handleSecureMediaHoldStart = useCallback((mediaUrl: string, type: 'image' | 'video') => {
-    if (__DEV__) console.log('[SECURE] dm_media hold_start', { type });
-    setSecureMediaUri(mediaUrl);
-    setSecureMediaType(type);
-    setIsHoldingSecureMedia(true);
-  }, []);
+  // ==========================================================================
+  // HANDLER: Content size change - new messages may have arrived
+  // ==========================================================================
+  const handleContentSizeChange = useCallback((width: number, height: number) => {
+    const prevHeight = contentHeightRef.current;
+    contentHeightRef.current = height;
 
-  const handleSecureMediaHoldEnd = useCallback(() => {
-    if (__DEV__) console.log('[SECURE] dm_media hold_end');
-    setIsHoldingSecureMedia(false);
-    // Keep URI set so viewer can fade out gracefully, then clear
-    if (secureMediaTimeoutRef.current) {
-      clearTimeout(secureMediaTimeoutRef.current);
+    // If content grew (new messages) and we haven't scrolled away, scroll to bottom
+    if (height > prevHeight && !userScrolledAwayRef.current) {
+      scrollToLatest(false, false);
     }
-    secureMediaTimeoutRef.current = setTimeout(() => {
-      setSecureMediaUri('');
-      secureMediaTimeoutRef.current = null;
-    }, 100);
+
+    // Handle initial scroll if dimensions just became valid
+    if (!hasInitialScrolledRef.current && height > 0 && layoutHeightRef.current > 0) {
+      scrollToLatest(false, true);
+    }
+  }, [scrollToLatest]);
+
+  // ==========================================================================
+  // HANDLER: Layout change - visible area may have changed
+  // ==========================================================================
+  const handleLayout = useCallback((e: LayoutChangeEvent) => {
+    const newHeight = e.nativeEvent.layout.height;
+    const prevHeight = layoutHeightRef.current;
+    layoutHeightRef.current = newHeight;
+
+    // If layout changed and we're not scrolled away, maintain bottom anchor
+    if (prevHeight > 0 && newHeight !== prevHeight && !userScrolledAwayRef.current) {
+      scrollToLatest(false, false);
+    }
+
+    // Handle initial scroll if dimensions just became valid
+    if (prevHeight === 0 && newHeight > 0 && contentHeightRef.current > 0 && !hasInitialScrolledRef.current) {
+      scrollToLatest(false, true);
+    }
+  }, [scrollToLatest]);
+
+  // ==========================================================================
+  // HANDLER: Scroll events - track position and detect manual scroll
+  // ==========================================================================
+  const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const offset = e.nativeEvent.contentOffset.y;
+    scrollOffsetRef.current = offset;
+
+    // If user is dragging, check if they've scrolled away from bottom
+    if (isDraggingRef.current) {
+      const nearBottom = isNearBottom();
+      if (!nearBottom) {
+        userScrolledAwayRef.current = true;
+        if (__DEV__) console.log('[SCROLL_AWAY] User scrolled away from bottom');
+      } else if (userScrolledAwayRef.current && nearBottom) {
+        // User scrolled back to bottom - reset the flag
+        userScrolledAwayRef.current = false;
+        if (__DEV__) console.log('[SCROLL_RETURN] User scrolled back to bottom');
+      }
+    }
+  }, [isNearBottom]);
+
+  // ==========================================================================
+  // HANDLER: Drag begin - user started manual scroll
+  // ==========================================================================
+  const handleScrollBeginDrag = useCallback(() => {
+    isDraggingRef.current = true;
   }, []);
 
-  // Pre-compute showTimestamp for each message to avoid messages dependency in renderItem
-  type EnrichedMessage = DemoPrivateMessage & { showTimestamp: boolean };
+  // ==========================================================================
+  // HANDLER: Drag end - user finished manual scroll
+  // ==========================================================================
+  const handleScrollEndDrag = useCallback(() => {
+    isDraggingRef.current = false;
+
+    // Final check: if user ended near bottom, reset scrolled-away state
+    if (isNearBottom()) {
+      userScrolledAwayRef.current = false;
+    }
+  }, [isNearBottom]);
+
+  // ==========================================================================
+  // HANDLER: Momentum end - scroll animation finished
+  // ==========================================================================
+  const handleMomentumScrollEnd = useCallback(() => {
+    // Final position check after momentum scroll
+    if (isNearBottom()) {
+      userScrolledAwayRef.current = false;
+    }
+  }, [isNearBottom]);
+
+  // DM-ID-FIX: Send message via Convex mutation
+  // UNIFIED-SCROLL: Send always resets scroll state and forces scroll to latest
+  const handleSend = useCallback(async () => {
+    const trimmed = inputText.trim();
+    if (!trimmed || !threadId || !authUserId) return;
+
+    setInputText('');
+
+    try {
+      await sendDmMessage({
+        authUserId,
+        threadId,
+        text: trimmed,
+        type: 'text',
+      });
+
+      // CHAT_SHEET: Notify parent that send is complete
+      onSendComplete?.();
+
+      // UNIFIED-SCROLL: User sent a message = they want to see it
+      // Reset scrolled-away state and force scroll to latest
+      userScrolledAwayRef.current = false;
+
+      InteractionManager.runAfterInteractions(() => {
+        // Force scroll to show sent message (with retry)
+        const attemptSendScroll = (attempt: number) => {
+          const success = scrollToLatest(false, true); // force=true
+          if (!success && attempt < 5) {
+            setTimeout(() => attemptSendScroll(attempt + 1), 50);
+          }
+        };
+        setTimeout(() => attemptSendScroll(1), 50);
+      });
+    } catch (error) {
+      if (__DEV__) console.error('[DM] Failed to send message:', error);
+      // Restore input on error
+      setInputText(trimmed);
+    }
+  }, [inputText, threadId, authUserId, sendDmMessage, onSendComplete, scrollToLatest]);
+
+  // DM-MEDIA-FIX: Full media upload implementation for DMs
+  const handleSendMedia = useCallback(
+    async (uri: string, mediaType: 'image' | 'video' | 'doodle' | 'audio') => {
+      if (!threadId || !authUserId) return;
+
+      try {
+        // Step 1: Upload media to Convex storage
+        const uploadHint = mediaType === 'video' ? 'video' : mediaType === 'audio' ? 'audio' : 'photo';
+        const storageId = await uploadMediaToConvex(
+          uri,
+          () => generateUploadUrl({}),
+          uploadHint
+        );
+
+        // Step 2: Send DM message with storage ID
+        // Backend will resolve storageId to mediaUrl
+        await sendDmMessage({
+          authUserId,
+          threadId,
+          type: mediaType,
+          mediaStorageId: storageId,
+        });
+
+        // Scroll to show the new message
+        scrollToLatest(true, true);
+
+        // Notify parent if needed (e.g., for ChatSheet keyboard handling)
+        onSendComplete?.();
+      } catch (error) {
+        if (__DEV__) console.error('[DM] Media send failed:', error);
+      }
+    },
+    [threadId, authUserId, generateUploadUrl, sendDmMessage, scrollToLatest, onSendComplete]
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // DM-AUDIO-FIX: Voice recording support for 1-on-1 DM
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleVoiceRecordingComplete = useCallback(
+    async (result: VoiceRecorderResult) => {
+      if (!result.audioUri) return;
+      // Reuse existing handleSendMedia with 'audio' type
+      await handleSendMedia(result.audioUri, 'audio');
+    },
+    [handleSendMedia]
+  );
+
+  const { toggleRecording, isRecording, elapsedMs } = useVoiceRecorder({
+    onRecordingComplete: handleVoiceRecordingComplete,
+    onError: (msg) => Alert.alert('Recording Error', msg),
+  });
+
+  // Enrich messages with showTimestamp
+  type EnrichedMessage = DmMessage & { showTimestamp: boolean };
   const enrichedMessages = useMemo<EnrichedMessage[]>(() => {
     return messages.map((msg, index) => {
       const prevMessage = index > 0 ? messages[index - 1] : undefined;
@@ -228,40 +539,118 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
     });
   }, [messages]);
 
-  // Stable keyExtractor
+  // MEDIA-INSTANT-FIX: Preload all media for instant open
+  useEffect(() => {
+    if (messages.length === 0) return;
+
+    // Collect media URLs from recent messages (last 15 for good coverage)
+    const recentMessages = messages.slice(-15);
+    const videoUrls: string[] = [];
+    const imageUrls: string[] = [];
+
+    for (const msg of recentMessages) {
+      const url = msg.mediaUrl;
+      if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+        continue;
+      }
+
+      if (msg.type === 'video') {
+        videoUrls.push(url);
+      } else if (msg.type === 'image' || msg.type === 'doodle') {
+        imageUrls.push(url);
+      }
+      // Audio is handled by audioPlayerStore when played
+    }
+
+    // Preload videos to file system cache
+    if (videoUrls.length > 0) {
+      const uniqueUrls = [...new Set(videoUrls)];
+      if (__DEV__) console.log('[DM] Preloading', uniqueUrls.length, 'videos');
+      preloadVideos(uniqueUrls, 2);
+    }
+
+    // Prefetch images/doodles to expo-image cache
+    if (imageUrls.length > 0) {
+      const uniqueUrls = [...new Set(imageUrls)];
+      if (__DEV__) console.log('[DM] Prefetching', uniqueUrls.length, 'images');
+      ExpoImage.prefetch(uniqueUrls);
+    }
+  }, [messages]);
+
   const keyExtractor = useCallback((item: EnrichedMessage) => item.id, []);
+
+  // DM-UX-FIX: Handle tap-to-view for media (not hold-to-view)
+  const handleMediaTap = useCallback((mediaUrl: string, mediaType: 'image' | 'video' | 'doodle') => {
+    if (mediaType === 'video') {
+      setVideoPlayerUri(mediaUrl);
+    } else {
+      // Images and doodles open in image preview
+      setImagePreviewUri(mediaUrl);
+    }
+  }, []);
 
   const renderMessage = useCallback(
     ({ item }: { item: EnrichedMessage }) => {
-      const isMe = item.senderId === DEMO_CURRENT_USER.id;
-      const isMedia = (item.type === 'image' || item.type === 'video') && item.mediaUrl;
-      const showTime = item.showTimestamp;
+      const isMe = item.isMe;
+      // DM-SECURE-FIX: Include doodle in media check
+      const isMedia = (item.type === 'image' || item.type === 'video' || item.type === 'doodle') && item.mediaUrl;
+      const isDoodle = item.type === 'doodle';
+      // AUDIO-UX-FIX: Check for audio message
+      const isAudio = item.type === 'audio' && item.mediaUrl;
 
-      // DM media uses secure mode for BOTH image and video (matches GROUP style)
-      // - Small blurred preview with "Hold to view"
-      // - Hold to reveal, release to lock
-      // - No tap-to-fullscreen
+      // DM-SECURE-FIX: Photo/Video = blurred + tap-to-view (pass messageId + onPress)
+      // Doodle = not blurred, normal display (no messageId)
       const mediaProps = isMedia
         ? {
-            messageId: item.id, // Enable secure mode (blurred + hold-to-view)
+            // For photo/video: include messageId to enable blur, onPress for tap-to-view
+            // For doodle: no messageId (shows without blur)
+            ...(isDoodle ? {} : { messageId: item.id }),
             mediaUrl: item.mediaUrl!,
-            type: item.type as 'image' | 'video',
-            onHoldStart: () => handleSecureMediaHoldStart(item.mediaUrl!, item.type as 'image' | 'video'),
-            onHoldEnd: handleSecureMediaHoldEnd,
+            type: item.type as 'image' | 'video' | 'doodle',
+            onPress: () => handleMediaTap(item.mediaUrl!, item.type as 'image' | 'video' | 'doodle'),
           }
         : null;
 
+      // Determine bubble content
+      const renderBubbleContent = () => {
+        if (mediaProps) {
+          return <MediaMessage {...mediaProps} />;
+        }
+        if (isAudio) {
+          return (
+            <DmAudioBubble
+              messageId={item.id}
+              audioUrl={item.mediaUrl!}
+              isMe={isMe}
+              bubbleColor={isMe ? themeColors.bubbleMe : themeColors.bubbleOther}
+            />
+          );
+        }
+        return (
+          <Text
+            style={[
+              isMe ? styles.bubbleMeText : styles.bubbleOtherText,
+              { color: isMe ? themeColors.bubbleMeText : themeColors.bubbleOtherText },
+            ]}
+          >
+            {item.text}
+          </Text>
+        );
+      };
+
+      // DM-UX-FIX: No timestamps in 1-on-1 DM
+      // THEME: Apply dynamic bubble colors from theme
       if (isMe) {
         return (
           <View style={styles.rowMe}>
-            <View style={styles.bubbleMe}>
-              {mediaProps ? (
-                <MediaMessage {...mediaProps} />
-              ) : (
-                <Text style={styles.bubbleMeText}>{item.text}</Text>
-              )}
-              {showTime && <Text style={styles.timeMe}>{formatTime(item.createdAt)}</Text>}
-            </View>
+            {isAudio ? (
+              // Audio has its own bubble styling
+              renderBubbleContent()
+            ) : (
+              <View style={[styles.bubbleMe, { backgroundColor: themeColors.bubbleMe }]}>
+                {renderBubbleContent()}
+              </View>
+            )}
           </View>
         );
       }
@@ -271,178 +660,240 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
           {dm.peerAvatar ? (
             <Image source={{ uri: dm.peerAvatar }} style={styles.avatar} />
           ) : (
-            <View style={styles.avatarPlaceholder}>
-              <Ionicons name="person" size={12} color={C.textLight} />
+            <View style={[styles.avatarPlaceholder, { backgroundColor: themeColors.surface }]}>
+              <Ionicons name="person" size={12} color={themeColors.textLight} />
             </View>
           )}
-          <View style={styles.bubbleOther}>
-            {mediaProps ? (
-              <MediaMessage {...mediaProps} />
-            ) : (
-              <Text style={styles.bubbleOtherText}>{item.text}</Text>
-            )}
-            {showTime && <Text style={styles.timeOther}>{formatTime(item.createdAt)}</Text>}
-          </View>
+          {isAudio ? (
+            // Audio has its own bubble styling
+            renderBubbleContent()
+          ) : (
+            <View style={[styles.bubbleOther, { backgroundColor: themeColors.bubbleOther }]}>
+              {renderBubbleContent()}
+            </View>
+          )}
         </View>
       );
     },
-    [dm.peerAvatar, handleSecureMediaHoldStart, handleSecureMediaHoldEnd]
+    [dm.peerAvatar, handleMediaTap, themeColors]
   );
 
+  // Show loading state while messages are loading
+  const isLoading = messagesResult === undefined && threadId;
+
   return (
-    <View style={styles.container}>
-      {/* Header */}
+    <View style={[styles.container, { backgroundColor: themeColors.dmBackground }]}>
+      {/* [CHAT_SHEET_HEADER] Header row with avatar, name, and X button */}
+      {/* When keyboard is open, sheet is full-screen - add safe area top padding
+          to keep header content below status bar. */}
       <View
         onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}
-        style={[styles.header, topInset > 0 && { paddingTop: topInset + 8 }]}
+        style={[
+          styles.header,
+          topInset > 0 && !isInSheet && { paddingTop: topInset + 8 },
+          isInSheet && styles.sheetHeader,
+          // Fixed header padding in sheet mode - does NOT change on keyboard open
+          // This keeps the top stable instead of extending when typing
+        ]}
       >
-        <TouchableOpacity
-          onPress={onBack}
-          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-        >
-          <Ionicons name="arrow-back" size={24} color={C.text} />
-        </TouchableOpacity>
+        {/* Back button - hidden when in ChatSheet */}
+        {!hideBackButton && (
+          <TouchableOpacity
+            onPress={onBack}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+        )}
         {dm.peerAvatar ? (
-          <Image source={{ uri: dm.peerAvatar }} style={styles.headerAvatar} />
+          <Image
+            source={{ uri: dm.peerAvatar }}
+            style={[
+              styles.headerAvatar,
+              { borderColor: GENDER_COLORS[dm.peerGender || 'other'] },
+            ]}
+          />
         ) : (
-          <View style={styles.headerAvatarPlaceholder}>
+          <View
+            style={[
+              styles.headerAvatarPlaceholder,
+              { borderColor: GENDER_COLORS[dm.peerGender || 'other'] },
+            ]}
+          >
             <Ionicons name="person" size={16} color={C.textLight} />
           </View>
         )}
-        <Text style={styles.headerName}>{dm.peerName}</Text>
+        <Text style={styles.headerName} numberOfLines={1}>{dm.peerName}</Text>
         <View style={{ flex: 1 }} />
+
+        {/* X close button - only when in sheet mode */}
+        {isInSheet && onSheetClose && (
+          <TouchableOpacity
+            style={styles.sheetCloseButton}
+            onPress={onSheetClose}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="close" size={20} color={C.textLight} />
+          </TouchableOpacity>
+        )}
       </View>
 
-      {/* Content area - Modal: simple flex layout, Android handles resize */}
+      {/* Content area - flex: 1 fills space between header and screen bottom */}
       {isModal ? (
-        // Modal mode: NO KAV, NO keyboard listeners
-        // Android softwareKeyboardLayoutMode="resize" handles everything
+        // Sheet/Modal mode: Explicit flex column layout
+        // Structure: messages (flex: 1) + composer (auto height at bottom)
+        // ChatSheet handles keyboard by translating the entire sheet upward
         <View style={styles.modalContent}>
-          {/* Messages area - flex:1, auto-resizes when keyboard opens */}
-          <FlatList
-            ref={flatListRef}
-            style={styles.messagesList}
-            data={enrichedMessages}
-            keyExtractor={keyExtractor}
-            renderItem={renderMessage}
-            contentContainerStyle={{
-              flexGrow: 1,
-              justifyContent: 'flex-end' as const,
-              paddingHorizontal: 12,
-              paddingTop: 6,
-              paddingBottom: 10,
-            }}
-            onContentSizeChange={handleContentSizeChange}
-            onScroll={handleScroll}
-            scrollEventThrottle={16}
-            showsVerticalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-            removeClippedSubviews={Platform.OS === 'android'}
-            maxToRenderPerBatch={10}
-            windowSize={10}
-            initialNumToRender={15}
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
-                <Text style={styles.emptyText}>Start a conversation</Text>
+          {/* Messages area - flex: 1 fills available space, pushes composer to bottom */}
+          <View style={styles.messagesContainer}>
+            {isLoading ? (
+              <View style={styles.loadingContainer}>
+                <ActivityIndicator size="large" color={C.accent} />
               </View>
-            }
-          />
+            ) : (
+              <FlatList
+                ref={flatListRef}
+                style={styles.messagesList}
+                data={enrichedMessages}
+                keyExtractor={keyExtractor}
+                renderItem={renderMessage}
+                contentContainerStyle={{
+                  flexGrow: 1,
+                  justifyContent: 'flex-end' as const,
+                  paddingHorizontal: 12,
+                  paddingTop: 6,
+                }}
+                onLayout={handleLayout}
+                onContentSizeChange={handleContentSizeChange}
+                onScroll={handleScroll}
+                onScrollBeginDrag={handleScrollBeginDrag}
+                onScrollEndDrag={handleScrollEndDrag}
+                onMomentumScrollEnd={handleMomentumScrollEnd}
+                scrollEventThrottle={16}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                removeClippedSubviews={Platform.OS === 'android'}
+                maxToRenderPerBatch={10}
+                windowSize={10}
+                initialNumToRender={15}
+                ListEmptyComponent={
+                  <View style={styles.emptyContainer}>
+                    <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
+                    <Text style={styles.emptyText}>No messages yet. Start the conversation.</Text>
+                  </View>
+                }
+              />
+            )}
+          </View>
 
-          {/* Input wrapper - with bottom padding for gesture bar + keyboard */}
-          <View style={[styles.inputWrapper, kbHeight > 0 && { marginBottom: kbHeight }]}>
+          {/* Composer - auto height, anchored at bottom of sheet */}
+          <View style={styles.inputWrapper}>
             <ChatComposer
               value={inputText}
               onChangeText={setInputText}
               onSend={handleSend}
               onPlusPress={() => setAttachmentVisible(true)}
+              onMicPress={toggleRecording}
+              isRecording={isRecording}
+              elapsedMs={elapsedMs}
             />
           </View>
         </View>
       ) : (
-        // Non-modal: use internal KeyboardAvoidingView
         <KeyboardAvoidingView
           style={{ flex: 1 }}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           keyboardVerticalOffset={headerHeight}
         >
-          <FlatList
-            ref={flatListRef}
-            data={enrichedMessages}
-            keyExtractor={keyExtractor}
-            renderItem={renderMessage}
-            contentContainerStyle={{
-              flexGrow: 1,
-              justifyContent: 'flex-end' as const,
-              paddingTop: 6,
-              paddingBottom: 0,
-            }}
-            onContentSizeChange={handleContentSizeChange}
-            onScroll={handleScroll}
-            scrollEventThrottle={16}
-            showsVerticalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-            keyboardDismissMode="interactive"
-            removeClippedSubviews={Platform.OS === 'android'}
-            maxToRenderPerBatch={10}
-            windowSize={10}
-            initialNumToRender={15}
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
-                <Text style={styles.emptyText}>Start a conversation</Text>
-              </View>
-            }
-          />
-          <ChatComposer
-            value={inputText}
-            onChangeText={setInputText}
-            onSend={handleSend}
-            onPlusPress={() => setAttachmentVisible(true)}
-          />
+          {isLoading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color={C.accent} />
+            </View>
+          ) : (
+            <FlatList
+              ref={flatListRef}
+              data={enrichedMessages}
+              keyExtractor={keyExtractor}
+              renderItem={renderMessage}
+              contentContainerStyle={{
+                flexGrow: 1,
+                justifyContent: 'flex-end' as const,
+                paddingTop: 6,
+                paddingBottom: 0,
+              }}
+              onLayout={handleLayout}
+              onContentSizeChange={handleContentSizeChange}
+              onScroll={handleScroll}
+              onScrollBeginDrag={handleScrollBeginDrag}
+              onScrollEndDrag={handleScrollEndDrag}
+              onMomentumScrollEnd={handleMomentumScrollEnd}
+              scrollEventThrottle={16}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="interactive"
+              removeClippedSubviews={Platform.OS === 'android'}
+              maxToRenderPerBatch={10}
+              windowSize={10}
+              initialNumToRender={15}
+              ListEmptyComponent={
+                <View style={styles.emptyContainer}>
+                  <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
+                  <Text style={styles.emptyText}>No messages yet. Start the conversation.</Text>
+                </View>
+              }
+            />
+          )}
+          <View style={{ paddingBottom: insets.bottom }}>
+            <ChatComposer
+              value={inputText}
+              onChangeText={setInputText}
+              onSend={handleSend}
+              onPlusPress={() => setAttachmentVisible(true)}
+              onMicPress={toggleRecording}
+              isRecording={isRecording}
+              elapsedMs={elapsedMs}
+            />
+          </View>
         </KeyboardAvoidingView>
       )}
 
-      {/* Attachment popup */}
-      <AttachmentPopup
-        visible={attachmentVisible}
-        onClose={() => setAttachmentVisible(false)}
-        onImageCaptured={(uri) => handleSendMedia(uri, 'image')}
-        onGalleryImage={(uri) => handleSendMedia(uri, 'image')}
-        onVideoSelected={(uri) => handleSendMedia(uri, 'video')}
-        onDoodlePress={() => setDoodleVisible(true)}
-      />
+      {/* MODAL CONTAINER: Absolutely positioned to not affect flex layout */}
+      {/* These modals were consuming ~80px in the flex layout, causing the gap */}
+      <View style={styles.modalOverlayContainer} pointerEvents="box-none">
+        {/* Attachment popup */}
+        <AttachmentPopup
+          visible={attachmentVisible}
+          onClose={() => setAttachmentVisible(false)}
+          onImageCaptured={(uri) => handleSendMedia(uri, 'image')}
+          onGalleryImage={(uri) => handleSendMedia(uri, 'image')}
+          onVideoSelected={(uri) => handleSendMedia(uri, 'video')}
+          onDoodlePress={() => setDoodleVisible(true)}
+        />
 
-      {/* Doodle canvas */}
-      <DoodleCanvas
-        visible={doodleVisible}
-        onClose={() => setDoodleVisible(false)}
-        onSend={(uri) => handleSendMedia(uri, 'image')}
-      />
+        {/* Doodle canvas */}
+        {/* DM-UX-FIX: Send doodles as 'doodle' type (not 'image') so they render without blur */}
+        <DoodleCanvas
+          visible={doodleVisible}
+          onClose={() => setDoodleVisible(false)}
+          onSend={(uri) => handleSendMedia(uri, 'doodle')}
+        />
 
-      {/* Video player */}
-      <VideoPlayerModal
-        visible={!!videoPlayerUri}
-        videoUri={videoPlayerUri}
-        onClose={() => setVideoPlayerUri('')}
-      />
+        {/* Video player */}
+        <VideoPlayerModal
+          visible={!!videoPlayerUri}
+          videoUri={videoPlayerUri}
+          onClose={() => setVideoPlayerUri('')}
+        />
 
-      {/* Image preview */}
-      <ImagePreviewModal
-        visible={!!imagePreviewUri}
-        imageUri={imagePreviewUri}
-        onClose={() => setImagePreviewUri('')}
-      />
+        {/* Image preview */}
+        <ImagePreviewModal
+          visible={!!imagePreviewUri}
+          imageUri={imagePreviewUri}
+          onClose={() => setImagePreviewUri('')}
+        />
 
-      {/* Secure media viewer (hold-to-view for video) */}
-      <SecureMediaViewer
-        visible={!!secureMediaUri}
-        mediaUri={secureMediaUri}
-        type={secureMediaType}
-        isHolding={isHoldingSecureMedia}
-        onClose={handleSecureMediaHoldEnd}
-        onHoldStart={() => setIsHoldingSecureMedia(true)}
-      />
+        {/* DM-UX-FIX: SecureMediaViewer removed - DM now uses tap-to-view with ImagePreviewModal/VideoPlayerModal */}
+      </View>
     </View>
   );
 }
@@ -450,22 +901,39 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: C.background,
+    // DM-VISUAL-FIX: Use purple-tinted background to distinguish DM from group chat
+    backgroundColor: C.dmBackground,
   },
-  // ── Modal mode styles (fullscreen, Android handles keyboard) ──
+  // Absolutely positioned container for modals - does NOT affect flex layout
+  // This fixes the 80px gap that was caused by modals consuming space in the column layout
+  modalOverlayContainer: {
+    ...StyleSheet.absoluteFillObject,
+    pointerEvents: 'box-none',
+  },
+  // Modal/sheet content: flex column, fills available space
   modalContent: {
     flex: 1,
+    flexDirection: 'column',
   },
+  // Messages container: flex: 1 fills space, pushes composer to bottom
+  messagesContainer: {
+    flex: 1,
+  },
+  // FlatList fills the messages container
   messagesList: {
     flex: 1,
   },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  // Composer wrapper: auto height, stays at bottom due to flex layout above
+  // NO padding - composer must touch sheet bottom directly
   inputWrapper: {
-    paddingHorizontal: 0,
-    paddingTop: 0,
-    paddingBottom: Platform.OS === 'android' ? 16 : 8, // Extra padding for gesture bar
     borderTopWidth: 1,
     borderTopColor: C.accent,
-    backgroundColor: C.background,
+    backgroundColor: C.surface, // Match composer background for seamless appearance
   },
   header: {
     flexDirection: 'row',
@@ -477,15 +945,36 @@ const styles = StyleSheet.create({
     borderBottomColor: C.accent,
     gap: 10,
   },
+  // Sheet-specific header: slightly more padding at top for visual balance
+  // Solid background to prevent bleed-through near X button
+  sheetHeader: {
+    paddingTop: 12,
+    paddingBottom: 10,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    backgroundColor: C.surface,
+    overflow: 'hidden',
+  },
+  // X close button in header (right side)
+  sheetCloseButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   headerAvatar: {
     width: 32,
     height: 32,
     borderRadius: 16,
+    borderWidth: 2,
   },
   headerAvatarPlaceholder: {
     width: 32,
     height: 32,
     borderRadius: 16,
+    borderWidth: 2,
     backgroundColor: C.accent,
     alignItems: 'center',
     justifyContent: 'center',
@@ -495,7 +984,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: C.text,
   },
-  // ── Other user: left-aligned ──
   rowOther: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -530,13 +1018,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     color: C.text,
   },
-  timeOther: {
-    fontSize: 10,
-    color: C.textLight,
-    marginTop: 4,
-    alignSelf: 'flex-end',
-  },
-  // ── My messages: right-aligned ──
+  // DM-UX-FIX: timeOther removed - no timestamps in 1-on-1 DM
   rowMe: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
@@ -555,12 +1037,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     color: C.text,
   },
-  timeMe: {
-    fontSize: 10,
-    color: C.textLight,
-    marginTop: 4,
-    alignSelf: 'flex-end',
-  },
+  // DM-UX-FIX: timeMe removed - no timestamps in 1-on-1 DM
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',

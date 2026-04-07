@@ -17,7 +17,19 @@ export const getByUserId = query({
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', args.userId))
       .first();
-    return profile;
+
+    if (!profile) return null;
+
+    // PHASE-2 PRIVACY FIX: Always use handle from users table, never stored displayName
+    // This ensures old records with full names stored are overridden at read time
+    // Phase-2 must NEVER expose first name or last name
+    const user = await ctx.db.get(args.userId);
+    const safeDisplayName = user?.handle || 'Anonymous';
+
+    return {
+      ...profile,
+      displayName: safeDisplayName,
+    };
   },
 });
 
@@ -237,12 +249,33 @@ export const updateFieldsByAuthId = mutation({
     privateBio: v.optional(v.string()),
     privateIntentKeys: v.optional(v.array(v.string())),
     isPrivateEnabled: v.optional(v.boolean()),
+    // Phase-1 imported fields (editable in Phase-2)
+    hobbies: v.optional(v.array(v.string())),
     // Phase-2 Onboarding Step 3: Prompt answers
     promptAnswers: v.optional(v.array(v.object({
       promptId: v.string(),
       question: v.string(),
       answer: v.string(),
     }))),
+    // Per-photo blur state (9 slots)
+    photoBlurSlots: v.optional(v.array(v.boolean())),
+    // P0-1 FIX: Privacy settings
+    hideFromDeepConnect: v.optional(v.boolean()),
+    hideAge: v.optional(v.boolean()),
+    hideDistance: v.optional(v.boolean()),
+    disableReadReceipts: v.optional(v.boolean()),
+    // P0-2 FIX: Safe Mode setting
+    safeMode: v.optional(v.boolean()),
+    // P0-1 FIX: Notification settings
+    notificationsEnabled: v.optional(v.boolean()),
+    notificationCategories: v.optional(v.object({
+      deepConnect: v.optional(v.boolean()),
+      privateMessages: v.optional(v.boolean()),
+      chatRooms: v.optional(v.boolean()),
+      truthOrDare: v.optional(v.boolean()),
+    })),
+    // P0-003 FIX: Consent timestamp persistence
+    consentAcceptedAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
@@ -284,6 +317,62 @@ export const updateFieldsByAuthId = mutation({
 });
 
 /**
+ * Update per-photo blur slots for Phase-2 profile.
+ * CRITICAL: This is the backend persistence for per-photo blur feature.
+ * Each slot (0-8) corresponds to a photo position.
+ * true = photo is blurred to other users, false = photo is visible.
+ */
+export const updatePhotoBlurSlots = mutation({
+  args: {
+    authUserId: v.string(),
+    photoBlurSlots: v.array(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    // Validate array length (max 9 slots)
+    if (args.photoBlurSlots.length > 9) {
+      console.warn('[PRIVATE_PROFILE] updatePhotoBlurSlots: invalid length');
+      return { success: false, error: 'invalid_length' };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      console.warn('[PRIVATE_PROFILE] updatePhotoBlurSlots: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      console.warn('[PRIVATE_PROFILE] updatePhotoBlurSlots: deletion pending');
+      return { success: false, error: 'deletion_pending' };
+    }
+
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    if (!existing) {
+      console.warn('[PRIVATE_PROFILE] updatePhotoBlurSlots: profile not found');
+      return { success: false, error: 'profile_not_found' };
+    }
+
+    // Ensure array has exactly 9 elements (pad with false if shorter)
+    const normalizedSlots = Array.from({ length: 9 }, (_, i) =>
+      args.photoBlurSlots[i] ?? false
+    );
+
+    await ctx.db.patch(existing._id, {
+      photoBlurSlots: normalizedSlots,
+      updatedAt: Date.now(),
+    });
+
+    console.log('[PRIVATE_PROFILE] updatePhotoBlurSlots: success');
+    return { success: true };
+  },
+});
+
+/**
  * Get private profile by auth user ID (string).
  * Resolves auth ID to Convex user ID internally.
  * Used by Phase-2 Profile tab to load backend data.
@@ -319,7 +408,19 @@ export const getByAuthUserId = query({
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .first();
-    return profile;
+
+    if (!profile) return null;
+
+    // PHASE-2 PRIVACY FIX: Always use handle from users table, never stored displayName
+    // This ensures old records with full names stored are overridden at read time
+    // Phase-2 must NEVER expose first name or last name
+    const user = await ctx.db.get(userId);
+    const safeDisplayName = user?.handle || 'Anonymous';
+
+    return {
+      ...profile,
+      displayName: safeDisplayName,
+    };
   },
 });
 

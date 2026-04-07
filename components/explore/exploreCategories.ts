@@ -14,11 +14,10 @@ export type ExploreCategory = {
 // HELPER FUNCTIONS
 // ============================================
 
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 const KNOWN_INTENTS = new Set([
-  "long_term", "long_term_partner", "long_term_open_to_short",
-  "short_term_open_to_long", "short_term_fun", "short_term",
-  "new_friends", "figuring_out", "non_monogamy", "leading_to_marriage",
-  "fwb", "short_to_long", "open_to_anything", "single_parent", "just_18",
+  "serious_vibes", "keep_it_casual", "exploring_vibes", "see_where_it_goes",
+  "open_to_vibes", "just_friends", "open_to_anything", "single_parent", "new_to_dating",
 ]);
 
 const getIntents = (p: any): string[] => {
@@ -87,62 +86,64 @@ const TILE_COLORS = {
 
 // ============================================
 // RELATIONSHIP CATEGORIES (9 canonical goals)
-// Matches RELATIONSHIP_INTENTS in constants.ts
+// IDs match backend CATEGORY_IDS exactly
 // ============================================
+// RELATIONSHIP TILES - predicates use CURRENT 9 RELATIONSHIP CATEGORIES
+// Category ID === relationshipIntent value (unified naming)
 const RELATIONSHIP_TILES: ExploreCategory[] = [
   {
-    id: "long_term",
+    id: "serious_vibes",
     label: "Serious Vibes",
     title: "Serious Vibes",
     icon: "💑",
     color: TILE_COLORS.pink,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "long_term", "long_term_partner", "long_term_open_to_short"),
+    predicate: (p) => hasIntent(p, "serious_vibes", "see_where_it_goes"),
   },
   {
-    id: "short_term",
+    id: "keep_it_casual",
     label: "Keep It Casual",
     title: "Keep It Casual",
     icon: "🎉",
     color: TILE_COLORS.orange,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "short_term_fun", "short_term", "fwb"),
+    predicate: (p) => hasIntent(p, "keep_it_casual", "open_to_vibes"),
   },
   {
-    id: "figuring_out",
+    id: "exploring_vibes",
     label: "Exploring Vibes",
     title: "Exploring Vibes",
     icon: "🤔",
     color: TILE_COLORS.sky,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "figuring_out"),
+    predicate: (p) => hasIntent(p, "exploring_vibes", "open_to_anything"),
   },
   {
-    id: "short_to_long",
+    id: "see_where_it_goes",
     label: "See Where It Goes",
     title: "See Where It Goes",
     icon: "📈",
     color: TILE_COLORS.indigo,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "short_term_open_to_long", "short_to_long"),
+    predicate: (p) => hasIntent(p, "see_where_it_goes", "serious_vibes"),
   },
   {
-    id: "long_to_short",
+    id: "open_to_vibes",
     label: "Open to Vibes",
     title: "Open to Vibes",
     icon: "📉",
     color: TILE_COLORS.purple,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "long_to_short", "long_term_open_to_short"),
+    predicate: (p) => hasIntent(p, "open_to_vibes", "keep_it_casual"),
   },
   {
-    id: "new_friends",
+    id: "just_friends",
     label: "Just Friends",
     title: "Just Friends",
     icon: "👋",
     color: TILE_COLORS.teal,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "new_friends"),
+    predicate: (p) => hasIntent(p, "just_friends", "open_to_anything"),
   },
   {
     id: "open_to_anything",
@@ -151,7 +152,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "✨",
     color: TILE_COLORS.gold,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "open_to_anything"),
+    predicate: (p) => hasIntent(p, "open_to_anything", "exploring_vibes"),
   },
   {
     id: "single_parent",
@@ -163,25 +164,25 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     predicate: (p) => hasIntent(p, "single_parent"),
   },
   {
-    id: "just_18",
+    id: "new_to_dating",
     label: "New to Dating",
     title: "New to Dating",
     icon: "🌱",
-    color: TILE_COLORS.lime,
+    color: TILE_COLORS.mint,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "just_18"),
+    predicate: (p) => hasIntent(p, "new_to_dating"),
   },
 ];
 
 // ============================================
 // RIGHT NOW CATEGORIES (4 activity signals)
-// These are Explore-only signals, not Relationship Goals
+// IDs match backend CATEGORY_IDS exactly
 // ============================================
 const RIGHT_NOW_TILES: ExploreCategory[] = [
   {
-    id: "near_me",
-    label: "Near Me",
-    title: "Near Me",
+    id: "nearby",
+    label: "Nearby",
+    title: "Nearby",
     icon: "📍",
     color: TILE_COLORS.emerald,
     kind: "relationship",
@@ -218,6 +219,7 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
 
 // ============================================
 // INTEREST CATEGORIES (7 tiles)
+// IDs match backend CATEGORY_IDS exactly
 // ============================================
 const INTEREST_TILES: ExploreCategory[] = [
   {

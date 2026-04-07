@@ -254,24 +254,28 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 10,
+    letterSpacing: -0.5,
   },
   subtitle: {
     fontSize: 16,
     color: COLORS.textLight,
     marginBottom: 32,
-    lineHeight: 22,
+    lineHeight: 24,
   },
   authOptionsContainer: {
-    gap: 12,
+    gap: 14,
   },
   authOption: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
-    borderRadius: 12,
+    paddingVertical: 18,
+    paddingHorizontal: 18,
+    borderRadius: 14,
     backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
   authOptionDisabled: {
     opacity: 0.5,
@@ -279,7 +283,7 @@ const styles = StyleSheet.create({
   authOptionContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 14,
   },
   authOptionTextContainer: {
     flexDirection: 'column',
@@ -288,21 +292,23 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '500',
     color: COLORS.text,
+    letterSpacing: 0.1,
   },
   authOptionLabelDisabled: {
     color: COLORS.textLight,
   },
   authOptionNote: {
     fontSize: 12,
-    color: COLORS.textLight,
-    marginTop: 2,
+    color: COLORS.textMuted,
+    marginTop: 3,
   },
   loadingContainer: {
-    marginTop: 24,
+    marginTop: 28,
     alignItems: 'center',
   },
   loadingText: {
     fontSize: 14,
     color: COLORS.textLight,
+    fontWeight: '500',
   },
 });

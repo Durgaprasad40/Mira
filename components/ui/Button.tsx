@@ -1,13 +1,20 @@
 import React from 'react';
 import {
-  TouchableOpacity,
   Text,
   StyleSheet,
   ActivityIndicator,
   ViewStyle,
   TextStyle,
 } from 'react-native';
-import { COLORS } from '@/lib/constants';
+import {
+  COLORS,
+  SPACING,
+  SIZES,
+  FONT_SIZE,
+  FONT_WEIGHT,
+  HAIRLINE,
+} from '@/lib/constants';
+import { AnimatedPressable } from './AnimatedPressable';
 
 interface ButtonProps {
   title: string;
@@ -85,11 +92,11 @@ export function Button({
   };
 
   return (
-    <TouchableOpacity
+    <AnimatedPressable
       style={[...getButtonStyle(), style]}
       onPress={onPress}
       disabled={disabled || loading}
-      activeOpacity={0.8}
+      disableAnimation={loading}
     >
       {loading ? (
         <ActivityIndicator
@@ -102,7 +109,7 @@ export function Button({
           <Text style={[...getTextStyle(), textStyle]}>{title}</Text>
         </>
       )}
-    </TouchableOpacity>
+    </AnimatedPressable>
   );
 }
 
@@ -111,34 +118,38 @@ const baseStyles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 12,
-    gap: 8,
+    borderRadius: SIZES.radius.md,
+    gap: SPACING.sm,
+    minHeight: SIZES.touchTarget, // Accessibility: minimum touch target
   },
   text: {
-    fontWeight: '600',
+    fontWeight: FONT_WEIGHT.semibold,
   },
 
-  // Sizes
+  // Sizes - using responsive spacing
   small: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.base,
+    minHeight: SIZES.button.sm,
   },
   medium: {
-    paddingVertical: 14,
-    paddingHorizontal: 24,
+    paddingVertical: SPACING.md + 2,
+    paddingHorizontal: SPACING.xl,
+    minHeight: SIZES.button.md,
   },
   large: {
-    paddingVertical: 18,
-    paddingHorizontal: 32,
+    paddingVertical: SPACING.base + 2,
+    paddingHorizontal: SPACING.xxl,
+    minHeight: SIZES.button.lg,
   },
   smallText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
   },
   mediumText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
   },
   largeText: {
-    fontSize: 18,
+    fontSize: FONT_SIZE.xl,
   },
 
   // Variants
@@ -156,7 +167,7 @@ const baseStyles = StyleSheet.create({
   },
   outline: {
     backgroundColor: 'transparent',
-    borderWidth: 2,
+    borderWidth: HAIRLINE * 2, // Slightly thicker for visibility
     borderColor: COLORS.primary,
   },
   outlineText: {

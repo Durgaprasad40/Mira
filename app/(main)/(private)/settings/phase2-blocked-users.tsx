@@ -2,27 +2,25 @@
  * Phase-2 Blocked Users Settings Screen
  *
  * Displays list of users the current user has blocked.
- * Allows unblocking users from this screen.
+ * Read-only view - blocks are permanent.
  */
-import React, { useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery, useMutation } from 'convex/react';
+import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { Id } from '@/convex/_generated/dataModel';
 
 const C = INCOGNITO_COLORS;
 
@@ -31,48 +29,11 @@ export default function BlockedUsersScreen() {
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
 
-  const [unblockingId, setUnblockingId] = useState<string | null>(null);
-
   // Fetch blocked users
   const blockedData = useQuery(
     api.users.getMyBlockedUsers,
     !isDemoMode && userId ? { authUserId: userId } : 'skip'
   );
-
-  const unblockUser = useMutation(api.users.unblockUser);
-
-  const handleUnblock = async (blockedUserId: string, displayName: string) => {
-    if (!userId || unblockingId) return;
-
-    Alert.alert(
-      'Unblock User',
-      `Are you sure you want to unblock ${displayName}? They will be able to find you in Desire Land again.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Unblock',
-          style: 'destructive',
-          onPress: async () => {
-            setUnblockingId(blockedUserId);
-            try {
-              // C2 SECURITY: Use authUserId for server-side validation
-              await unblockUser({
-                authUserId: userId,
-                blockedUserId: blockedUserId as Id<'users'>,
-              });
-            } catch (error) {
-              if (__DEV__) {
-                console.error('[BlockedUsers] Unblock error:', error);
-              }
-              Alert.alert('Error', 'Failed to unblock user. Please try again.');
-            } finally {
-              setUnblockingId(null);
-            }
-          },
-        },
-      ]
-    );
-  };
 
   const formatDate = (timestamp: number) => {
     const date = new Date(timestamp);
@@ -102,7 +63,7 @@ export default function BlockedUsersScreen() {
         <View style={styles.infoBanner}>
           <Ionicons name="information-circle-outline" size={20} color={C.textLight} />
           <Text style={styles.infoText}>
-            Blocked users cannot find you in Desire Land or send you messages.
+            Blocked users cannot find you in Deep Connect or send you messages. Blocks are permanent.
           </Text>
         </View>
 
@@ -141,17 +102,6 @@ export default function BlockedUsersScreen() {
                     </Text>
                   </View>
                 </View>
-                <TouchableOpacity
-                  style={styles.unblockBtn}
-                  onPress={() => handleUnblock(user.blockedUserId, user.displayName)}
-                  disabled={unblockingId === user.blockedUserId}
-                >
-                  {unblockingId === user.blockedUserId ? (
-                    <ActivityIndicator size="small" color={C.primary} />
-                  ) : (
-                    <Text style={styles.unblockText}>Unblock</Text>
-                  )}
-                </TouchableOpacity>
               </View>
             ))}
           </View>
@@ -257,18 +207,5 @@ const styles = StyleSheet.create({
   blockedDate: {
     fontSize: 12,
     color: C.textLight,
-  },
-  unblockBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 16,
-    backgroundColor: C.surface,
-    minWidth: 70,
-    alignItems: 'center',
-  },
-  unblockText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: C.primary,
   },
 });

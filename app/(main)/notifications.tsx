@@ -21,6 +21,9 @@ interface NotificationSection {
   data: AppNotification[];
 }
 
+// DEFENSIVE: Types that must NEVER render in notification screens (safety net if upstream filtering fails)
+const BELL_RENDER_EXCLUDED = new Set(['message', 'new_message']);
+
 export default function NotificationsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -173,13 +176,14 @@ export default function NotificationsScreen() {
         }
         break;
       case 'crossed_paths': {
-        // FROZEN (2026-03-06): Nearby feature disabled for stability
-        // Redirect to home instead of nearby to prevent crashes
+        // Navigate to crossed-paths screen
         router.push({
-          pathname: '/(main)/(tabs)/home',
+          pathname: '/(main)/crossed-paths',
           params: {
             source: 'notification',
             notificationId: notification._id,
+            // If notification contains userId, pass it for potential highlighting
+            ...(notification.data?.userId && { highlightUserId: notification.data.userId }),
           },
         } as any);
         break;
@@ -323,7 +327,9 @@ export default function NotificationsScreen() {
     </TouchableOpacity>
   );
 
-  const groupedNotifications = groupNotifications(notifications);
+  // DEFENSIVE: Filter out message types at render level (safety net), then group
+  const safeNotifications = notifications.filter((n) => !BELL_RENDER_EXCLUDED.has(n.type));
+  const groupedNotifications = groupNotifications(safeNotifications);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>

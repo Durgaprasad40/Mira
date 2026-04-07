@@ -22,9 +22,10 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Platform,
+  LayoutChangeEvent,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import {
@@ -51,6 +52,12 @@ type SectionKey = 'section1' | 'section2' | 'section3' | 'section4';
 export default function Phase2PromptsScreen() {
   const router = useRouter();
   const isNavigating = useRef(false);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const inputLayoutRef = useRef<{ y: number; height: number } | null>(null);
+
+  // Check if opened from review screen (Step 5)
+  const { fromReview } = useLocalSearchParams<{ fromReview?: string }>();
+  const isFromReview = fromReview === 'true';
 
   // Store
   const promptAnswers = usePrivateProfileStore((s) => s.promptAnswers);
@@ -66,8 +73,37 @@ export default function Phase2PromptsScreen() {
   const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
   const [draftAnswer, setDraftAnswer] = useState('');
 
+  // Track selected sub-question per text section (Q2/Q3)
+  // Only the selected sub-question shows its input area
+  const [selectedSubQuestion, setSelectedSubQuestion] = useState<{
+    section2: string | null;
+    section3: string | null;
+  }>({ section2: null, section3: null });
+
   // Validation error state
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  // Track input height for auto-grow
+  const [inputHeight, setInputHeight] = useState(40);
+
+  // Scroll to input when focused (fixes keyboard overlap on Android)
+  const handleInputFocus = useCallback(() => {
+    // Delay slightly to let keyboard appear
+    setTimeout(() => {
+      if (inputLayoutRef.current && scrollViewRef.current) {
+        scrollViewRef.current.scrollTo({
+          y: inputLayoutRef.current.y - 100, // Scroll with some padding above
+          animated: true,
+        });
+      }
+    }, 300);
+  }, []);
+
+  // Track input container layout for scroll targeting
+  const handleInputLayout = useCallback((event: LayoutChangeEvent) => {
+    const { y, height } = event.nativeEvent.layout;
+    inputLayoutRef.current = { y, height };
+  }, []);
 
   // Helper: get answer for a prompt
   const getAnswer = useCallback((promptId: string): string | undefined => {
@@ -100,6 +136,77 @@ export default function Phase2PromptsScreen() {
     setExpandedSection((prev) => (prev === section ? null : section));
     setEditingPrompt(null);
     setDraftAnswer('');
+    // P2-003 FIX: Clear validation error when changing sections
+    setValidationError(null);
+    // Reset selected sub-question when collapsing
+    if (expandedSection === section) {
+      setSelectedSubQuestion({ section2: null, section3: null });
+    }
+    Keyboard.dismiss();
+  };
+
+  // Handle selecting a sub-question in Q2/Q3 (Phase-1 style)
+  // When user taps a sub-question, select it and show its input
+  // If another sub-question was previously answered in same section, it gets replaced
+  const handleSelectSubQuestion = (
+    sectionKey: 'section2' | 'section3',
+    promptId: string,
+    question: string
+  ) => {
+    // Update selected sub-question for this section
+    setSelectedSubQuestion((prev) => ({
+      ...prev,
+      [sectionKey]: promptId,
+    }));
+
+    // Load existing answer if any
+    const existingAnswer = getAnswer(promptId) || '';
+    setEditingPrompt(promptId);
+    setDraftAnswer(existingAnswer);
+
+    // P2-003 FIX: Clear validation error when switching sub-questions
+    setValidationError(null);
+
+    // Reset input height to compact (will grow if existing answer is long)
+    setInputHeight(existingAnswer ? 60 : 40);
+  };
+
+  // Save text answer for Q2/Q3 (clears other answers in same section - only 1 allowed)
+  const saveTextAnswerForSection = (
+    sectionKey: 'section2' | 'section3',
+    promptId: string,
+    question: string,
+    sectionPrompts: readonly { id: string; question: string }[]
+  ) => {
+    const trimmed = draftAnswer.trim();
+
+    // Validation: require minimum length
+    if (trimmed.length > 0 && trimmed.length < PHASE2_PROMPT_MIN_TEXT_LENGTH) {
+      // Don't save if too short - show validation feedback
+      setValidationError(`Answer must be at least ${PHASE2_PROMPT_MIN_TEXT_LENGTH} characters`);
+      return;
+    }
+
+    // Clear any other answers in the same section first (only 1 answer allowed)
+    sectionPrompts.forEach((p) => {
+      if (p.id !== promptId) {
+        removePromptAnswer(p.id);
+      }
+    });
+
+    if (trimmed.length >= PHASE2_PROMPT_MIN_TEXT_LENGTH) {
+      setPromptAnswer(promptId, question, trimmed);
+      setValidationError(null);
+    } else if (trimmed.length === 0) {
+      removePromptAnswer(promptId);
+      setValidationError(null);
+    }
+
+    // FIX: Reset selected sub-question so UI closes the input area
+    setSelectedSubQuestion((prev) => ({ ...prev, [sectionKey]: null }));
+    setEditingPrompt(null);
+    setDraftAnswer('');
+    setInputHeight(40); // Reset to compact
     Keyboard.dismiss();
   };
 
@@ -138,7 +245,7 @@ export default function Phase2PromptsScreen() {
   };
 
   // Validate all sections and continue
-  const handleContinue = () => {
+  const handleContinue = async () => {
     if (isNavigating.current) return;
 
     // Validation: at least 1 answered per section
@@ -167,8 +274,16 @@ export default function Phase2PromptsScreen() {
     setValidationError(null);
     isNavigating.current = true;
 
-    // Navigate to Step 4 (review)
-    router.push('/(main)/phase2-onboarding/profile-setup' as any);
+    // P0-002 FIX: Save onboarding progress before navigating
+    await usePrivateProfileStore.getState().saveOnboardingProgress();
+
+    // FIX: If opened from review, go back to review instead of pushing again
+    if (isFromReview) {
+      router.back();
+    } else {
+      // Navigate to Step 5 (review)
+      router.push('/(main)/phase2-onboarding/profile-setup' as any);
+    }
 
     // Reset navigation lock after delay
     setTimeout(() => {
@@ -220,68 +335,141 @@ export default function Phase2PromptsScreen() {
     </View>
   );
 
-  // Render Text Input Section (Section 2/3)
-  const renderTextSection = (sectionPrompts: readonly { id: string; question: string }[]) => (
-    <View style={styles.sectionContent}>
-      {sectionPrompts.map((prompt) => {
-        const currentAnswer = getAnswer(prompt.id);
-        const isEditing = editingPrompt === prompt.id;
-        const hasAnswer = currentAnswer && currentAnswer.trim().length > 0;
+  // Render Text Input Section (Section 2/3) - Phase-1 Style
+  // Sub-questions shown as collapsed list with radio buttons
+  // Tap a sub-question to select it and reveal its input area
+  // Only ONE answer allowed per section
+  const renderTextSection = (
+    sectionKey: 'section2' | 'section3',
+    sectionPrompts: readonly { id: string; question: string }[]
+  ) => {
+    const selectedId = selectedSubQuestion[sectionKey];
+    // Find the answered prompt in this section (if any)
+    const answeredPrompt = sectionPrompts.find((p) => {
+      const answer = getAnswer(p.id);
+      return answer && answer.trim().length > 0;
+    });
 
-        return (
-          <View key={prompt.id} style={styles.promptCard}>
-            <Text style={styles.promptQuestion}>{prompt.question}</Text>
+    return (
+      <View style={styles.sectionContent}>
+        <Text style={styles.subQuestionHint}>Choose a question to answer (pick one):</Text>
+        {sectionPrompts.map((prompt) => {
+          const currentAnswer = getAnswer(prompt.id);
+          const isSelected = selectedId === prompt.id;
+          const hasAnswer = currentAnswer && currentAnswer.trim().length > 0;
+          const isEditing = editingPrompt === prompt.id;
+          // Show checkmark if this prompt has a saved valid answer
+          const hasValidAnswer = hasAnswer && currentAnswer.trim().length >= PHASE2_PROMPT_MIN_TEXT_LENGTH;
 
-            {isEditing ? (
-              <View style={styles.textInputContainer}>
-                <TextInput
-                  style={styles.textInput}
-                  value={draftAnswer}
-                  onChangeText={setDraftAnswer}
-                  placeholder="Type your answer..."
-                  placeholderTextColor={COLORS.textMuted}
-                  multiline
-                  maxLength={PHASE2_PROMPT_MAX_TEXT_LENGTH}
-                  autoFocus
+          return (
+            <View key={prompt.id} style={styles.subQuestionContainer}>
+              {/* Sub-question row with radio button */}
+              <TouchableOpacity
+                style={[styles.subQuestionRow, isSelected && styles.subQuestionRowSelected]}
+                onPress={() => handleSelectSubQuestion(sectionKey, prompt.id, prompt.question)}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name={isSelected ? 'radio-button-on' : 'radio-button-off'}
+                  size={20}
+                  color={isSelected ? COLORS.primary : COLORS.textMuted}
                 />
-                <Text style={styles.charCount}>
-                  {draftAnswer.length}/{PHASE2_PROMPT_MAX_TEXT_LENGTH}
-                  {draftAnswer.length > 0 && draftAnswer.length < PHASE2_PROMPT_MIN_TEXT_LENGTH && (
-                    <Text style={styles.minRequired}> (min {PHASE2_PROMPT_MIN_TEXT_LENGTH})</Text>
-                  )}
+                <Text
+                  style={[styles.subQuestionText, isSelected && styles.subQuestionTextSelected]}
+                  numberOfLines={isSelected ? undefined : 2}
+                >
+                  {prompt.question}
                 </Text>
-                <View style={styles.textButtonRow}>
-                  <TouchableOpacity style={styles.cancelButton} onPress={cancelTextEdit}>
-                    <Text style={styles.cancelButtonText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
+                {hasValidAnswer && !isSelected && (
+                  <Ionicons name="checkmark-circle" size={18} color={COLORS.success} />
+                )}
+              </TouchableOpacity>
+
+              {/* Input area - only shown when this sub-question is selected */}
+              {isSelected && (
+                <View
+                  style={styles.subQuestionInputContainer}
+                  onLayout={handleInputLayout}
+                >
+                  <TextInput
                     style={[
-                      styles.saveButton,
-                      draftAnswer.trim().length < PHASE2_PROMPT_MIN_TEXT_LENGTH && draftAnswer.trim().length > 0 && styles.saveButtonDisabled,
+                      styles.subQuestionInput,
+                      { height: Math.max(40, Math.min(inputHeight, 120)) }, // Compact with auto-grow, max 120
                     ]}
-                    onPress={() => saveTextAnswer(prompt.id, prompt.question)}
-                    disabled={draftAnswer.trim().length > 0 && draftAnswer.trim().length < PHASE2_PROMPT_MIN_TEXT_LENGTH}
-                  >
-                    <Text style={styles.saveButtonText}>Save</Text>
-                  </TouchableOpacity>
+                    value={draftAnswer}
+                    onChangeText={setDraftAnswer}
+                    onContentSizeChange={(e) => {
+                      // Auto-grow input as user types
+                      setInputHeight(e.nativeEvent.contentSize.height);
+                    }}
+                    onFocus={handleInputFocus}
+                    placeholder="Type your answer..."
+                    placeholderTextColor={COLORS.textMuted}
+                    multiline
+                    maxLength={PHASE2_PROMPT_MAX_TEXT_LENGTH}
+                    autoFocus
+                    scrollEnabled={inputHeight > 120} // Enable scroll when at max height
+                  />
+                  <View style={styles.subQuestionInputFooter}>
+                    <View style={styles.charCountRow}>
+                      {draftAnswer.length > 0 && draftAnswer.length < PHASE2_PROMPT_MIN_TEXT_LENGTH && (
+                        <Text style={styles.minRequired}>
+                          {PHASE2_PROMPT_MIN_TEXT_LENGTH - draftAnswer.length} more chars
+                        </Text>
+                      )}
+                      <Text style={styles.charCount}>
+                        {draftAnswer.length}/{PHASE2_PROMPT_MAX_TEXT_LENGTH}
+                      </Text>
+                    </View>
+                    <View style={styles.textButtonRow}>
+                      <TouchableOpacity
+                        style={styles.cancelButton}
+                        onPress={() => {
+                          setSelectedSubQuestion((prev) => ({ ...prev, [sectionKey]: null }));
+                          setEditingPrompt(null);
+                          setDraftAnswer('');
+                          setInputHeight(40); // Reset to compact
+                          Keyboard.dismiss();
+                        }}
+                      >
+                        <Text style={styles.cancelButtonText}>Cancel</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.saveButton,
+                          draftAnswer.trim().length < PHASE2_PROMPT_MIN_TEXT_LENGTH &&
+                            draftAnswer.trim().length > 0 &&
+                            styles.saveButtonDisabled,
+                        ]}
+                        onPress={() =>
+                          saveTextAnswerForSection(sectionKey, prompt.id, prompt.question, sectionPrompts)
+                        }
+                        disabled={
+                          draftAnswer.trim().length > 0 &&
+                          draftAnswer.trim().length < PHASE2_PROMPT_MIN_TEXT_LENGTH
+                        }
+                      >
+                        <Text style={styles.saveButtonText}>Save</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
                 </View>
-              </View>
-            ) : hasAnswer ? (
-              <TouchableOpacity style={styles.answeredContainer} onPress={() => startTextEdit(prompt.id)}>
-                <Text style={styles.answeredText} numberOfLines={3}>{currentAnswer}</Text>
-                <Ionicons name="pencil" size={16} color={COLORS.primary} />
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity style={styles.addAnswerButton} onPress={() => startTextEdit(prompt.id)}>
-                <Ionicons name="add-circle-outline" size={20} color={COLORS.primary} />
-                <Text style={styles.addAnswerText}>Add your answer</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        );
-      })}
-    </View>
-  );
+              )}
+
+              {/* Show saved answer preview when not selected */}
+              {!isSelected && hasValidAnswer && (
+                <View style={styles.savedAnswerPreview}>
+                  <Text style={styles.savedAnswerText} numberOfLines={2}>
+                    {currentAnswer}
+                  </Text>
+                </View>
+              )}
+            </View>
+          );
+        })}
+      </View>
+    );
+  };
 
   // Render collapsible section header
   const renderSectionHeader = (
@@ -436,8 +624,8 @@ export default function Phase2PromptsScreen() {
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <KeyboardAvoidingView
         style={styles.keyboardView}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'padding'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
         {/* Header */}
         <View style={styles.header}>
@@ -449,15 +637,17 @@ export default function Phase2PromptsScreen() {
         </View>
 
         <ScrollView
+          ref={scrollViewRef}
           style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
+          keyboardDismissMode="interactive"
         >
           {/* Title */}
-          <Text style={styles.title}>Tell us about yourself</Text>
+          <Text style={styles.title}>Express yourself</Text>
           <Text style={styles.subtitle}>
-            Answer at least 1 question in each section to continue.
+            This helps others understand you better. Answer at least 1 question per section.
           </Text>
 
           {/* Validation Error */}
@@ -474,16 +664,16 @@ export default function Phase2PromptsScreen() {
             {expandedSection === 'section1' && renderSection1()}
           </View>
 
-          {/* Section 2: Text Input */}
+          {/* Section 2: Text Input (1 answer only) */}
           <View style={styles.section}>
-            {renderSectionHeader('Question 2', 'section2', section2Count, PHASE2_SECTION2_PROMPTS.length)}
-            {expandedSection === 'section2' && renderTextSection(PHASE2_SECTION2_PROMPTS)}
+            {renderSectionHeader('Question 2', 'section2', Math.min(section2Count, 1), 1)}
+            {expandedSection === 'section2' && renderTextSection('section2', PHASE2_SECTION2_PROMPTS)}
           </View>
 
-          {/* Section 3: Text Input */}
+          {/* Section 3: Text Input (1 answer only) */}
           <View style={styles.section}>
-            {renderSectionHeader('Question 3', 'section3', section3Count, PHASE2_SECTION3_PROMPTS.length)}
-            {expandedSection === 'section3' && renderTextSection(PHASE2_SECTION3_PROMPTS)}
+            {renderSectionHeader('Question 3', 'section3', Math.min(section3Count, 1), 1)}
+            {expandedSection === 'section3' && renderTextSection('section3', PHASE2_SECTION3_PROMPTS)}
           </View>
 
           {/* Section 4: Preference Strength */}
@@ -499,7 +689,7 @@ export default function Phase2PromptsScreen() {
         {/* Footer */}
         <View style={styles.footer}>
           <Button
-            title="Continue"
+            title={isFromReview ? 'Save & Return' : 'Continue'}
             variant="primary"
             onPress={handleContinue}
             fullWidth
@@ -757,5 +947,84 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
     backgroundColor: COLORS.background,
+  },
+  // Phase-1 style sub-question styles for Q2/Q3
+  subQuestionHint: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    marginBottom: 12,
+    fontWeight: '500',
+  },
+  subQuestionContainer: {
+    marginBottom: 8,
+  },
+  subQuestionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.background,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    gap: 10,
+  },
+  subQuestionRowSelected: {
+    backgroundColor: COLORS.primary + '10',
+    borderColor: COLORS.primary,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+  },
+  subQuestionText: {
+    fontSize: 14,
+    color: COLORS.text,
+    flex: 1,
+    lineHeight: 20,
+  },
+  subQuestionTextSelected: {
+    fontWeight: '500',
+    color: COLORS.primary,
+  },
+  subQuestionInputContainer: {
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderTopWidth: 0,
+    borderColor: COLORS.primary,
+    borderBottomLeftRadius: 10,
+    borderBottomRightRadius: 10,
+    padding: 12,
+  },
+  subQuestionInput: {
+    fontSize: 14,
+    color: COLORS.text,
+    // Height is now controlled dynamically via inline style for auto-grow
+    // Starts compact (40px), grows up to 120px max
+    textAlignVertical: 'top',
+    lineHeight: 20,
+    padding: 0,
+  },
+  subQuestionInputFooter: {
+    marginTop: 8,
+  },
+  charCountRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  savedAnswerPreview: {
+    marginLeft: 30,
+    marginTop: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: COLORS.background,
+    borderRadius: 6,
+    borderLeftWidth: 2,
+    borderLeftColor: COLORS.success,
+  },
+  savedAnswerText: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    lineHeight: 18,
   },
 });

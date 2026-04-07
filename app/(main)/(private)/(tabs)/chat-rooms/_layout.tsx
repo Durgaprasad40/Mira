@@ -1,3 +1,13 @@
+/*
+ * UNLOCKED FOR AUDIT (PRIVATE CHAT ROOMS LAYOUT)
+ * Temporarily unlocked for deep audit and bug-fixing work.
+ *
+ * STATUS:
+ * - Under active audit
+ * - Fixes allowed during audit period
+ * - Will be re-locked after audit completion
+ */
+
 /**
  * Chat Rooms Tab Stack Layout
  *

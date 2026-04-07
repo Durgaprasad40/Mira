@@ -2,6 +2,9 @@
  * DEV-only structured logging for onboarding, tabs, and navigation.
  * All logs are NO-OP in production builds.
  *
+ * VERBOSE MODE: Set DEV_TRACE_VERBOSE = true to enable detailed logging.
+ * Default is false to reduce console noise.
+ *
  * Usage:
  *   trace("EVENT_NAME", { key: value })
  *   traceOnce("key", "EVENT_NAME", { ... })  // logs once per session
@@ -13,6 +16,9 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { usePathname, useSegments } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
+
+// VERBOSE MODE: Set to true only when debugging navigation/onboarding issues
+const DEV_TRACE_VERBOSE = false;
 
 // Session ID generated once per app launch
 const SESSION_ID = __DEV__ ? `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}` : '';
@@ -53,10 +59,10 @@ function formatPayload(payload?: Record<string, unknown>): string {
 }
 
 /**
- * Core trace function - DEV only
+ * Core trace function - DEV only, gated by DEV_TRACE_VERBOSE
  */
 export function trace(event: string, payload?: Record<string, unknown>): void {
-  if (!__DEV__) return;
+  if (!__DEV__ || !DEV_TRACE_VERBOSE) return;
   const p = formatPayload(payload);
   console.log(`[TRACE] {t:${elapsed()}, sid:${SESSION_ID}, ev:${event}${p ? ', ' + p.slice(1, -1) : ''}}`);
 }
@@ -85,9 +91,10 @@ export function traceDedupe(key: string, ms: number, event: string, payload?: Re
 
 /**
  * Dump onboarding summary - formatted multi-line for readability
+ * This is always enabled (not gated by DEV_TRACE_VERBOSE) as it's a key debug tool
  */
 export function dumpOnboardingSummary(trigger: string, summary: Record<string, unknown>): void {
-  if (!__DEV__) return;
+  if (!__DEV__ || !DEV_TRACE_VERBOSE) return;
   console.log(`\n[ONBOARDING SUMMARY] trigger=${trigger}, sid=${SESSION_ID}, t=${elapsed()}ms`);
   console.log('----------------------------------------');
   for (const [k, v] of Object.entries(summary)) {
@@ -99,6 +106,8 @@ export function dumpOnboardingSummary(trigger: string, summary: Record<string, u
 /**
  * Hook: Log route/pathname changes
  * Call at top of a layout component
+ *
+ * Pass scope="SKIP" to suppress logging (useful for shared routes)
  */
 export function useRouteTrace(
   scope: string,
@@ -111,6 +120,9 @@ export function useRouteTrace(
   const prevPathRef = useRef<string | null>(null);
 
   useEffect(() => {
+    // Skip logging when scope is "SKIP" (shared routes, etc.)
+    if (scope === 'SKIP') return;
+
     if (pathname === prevPathRef.current) return;
     prevPathRef.current = pathname;
 

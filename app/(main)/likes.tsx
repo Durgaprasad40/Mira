@@ -19,6 +19,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_PROFILES } from '@/lib/demoData';
 import { Toast } from '@/components/ui/Toast';
 import { useDemoStore } from '@/stores/demoStore';
+import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 
 const { width } = Dimensions.get('window');
 const CARD_WIDTH = (width - 48) / 2;
@@ -62,7 +63,7 @@ export default function LikesScreen() {
         createdAt: Date.now() - 1000 * 60 * 60 * (i + 1),
         name: p.name,
         age: p.age,
-        photoUrl: p.photos[0]?.url ?? '',
+        photoUrl: getPrimaryPhotoUrl(p.photos) ?? '',
         isBlurred: false,
       });
     }

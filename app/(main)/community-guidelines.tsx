@@ -5,10 +5,10 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { COLORS } from '@/lib/constants';
 
 interface GuidelineSection {
@@ -88,16 +88,17 @@ export default function CommunityGuidelinesScreen() {
   const router = useRouter();
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color={COLORS.text} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Community Guidelines</Text>
-        <View style={{ width: 24 }} />
-      </View>
+    <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.background }}>
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Community Guidelines</Text>
+          <View style={{ width: 24 }} />
+        </View>
 
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <Text style={styles.intro}>
           Mira is built on respect, consent, and safety. These guidelines
           apply to all areas of the app including profiles, messages, chat rooms,
@@ -127,7 +128,8 @@ export default function CommunityGuidelinesScreen() {
           </Text>
         </View>
       </ScrollView>
-    </View>
+      </View>
+    </SafeAreaView>
   );
 }
 
@@ -141,7 +143,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,

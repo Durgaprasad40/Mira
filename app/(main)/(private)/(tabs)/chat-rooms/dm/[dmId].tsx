@@ -1,3 +1,13 @@
+/*
+ * UNLOCKED FOR AUDIT (PRIVATE DM ROUTE - ORPHANED)
+ * Temporarily unlocked for deep audit and bug-fixing work.
+ *
+ * STATUS:
+ * - Under active audit (note: currently orphaned)
+ * - Fixes allowed during audit period
+ * - Will be re-locked after audit completion
+ */
+
 // ⚠️ ORPHANED ROUTE
 // This route is currently unused.
 // Private Chat uses modal inside [roomId].tsx.
@@ -32,6 +42,8 @@ import { Ionicons } from '@expo/vector-icons';
 import PrivateChatView from '@/components/chatroom/PrivateChatView';
 import { useChatRoomDmStore } from '@/stores/chatRoomDmStore';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import * as Sentry from '@sentry/react-native';
+import { setCurrentFeature, SENTRY_FEATURES } from '@/lib/sentry';
 
 const C = INCOGNITO_COLORS;
 const SCREEN_HEIGHT = Dimensions.get('window').height;
@@ -40,16 +52,36 @@ const SHEET_HEIGHT = SCREEN_HEIGHT * 0.55;
 export default function ChatRoomDmScreen() {
   const router = useRouter();
 
-  // P2 STABILITY: Warn in dev mode that this route is orphaned
-  useEffect(() => {
-    if (__DEV__) {
-      console.warn('[ChatRoomDmScreen] Unused dm route mounted - Private Chat uses Modal in [roomId].tsx');
-    }
-  }, []);
-
   // Get active DM from store (set before navigation)
   const activeDm = useChatRoomDmStore((s) => s.activeDm);
   const clearActiveDm = useChatRoomDmStore((s) => s.clearActiveDm);
+
+  // P1-009 FIX: Immediately redirect orphaned route back to chat rooms
+  // This route is unused - Private Chat uses Modal in [roomId].tsx
+  useEffect(() => {
+    if (__DEV__) {
+      console.warn('[ChatRoomDmScreen] Orphaned route - redirecting to chat rooms');
+    }
+    // Clear any stale DM state and redirect
+    clearActiveDm();
+    router.replace('/(main)/(private)/(tabs)/chat-rooms');
+  }, [clearActiveDm, router]);
+
+  // SENTRY-FILTER: Set feature tag on mount, clear on unmount
+  useEffect(() => {
+    // Set current feature to chat_rooms for Sentry filtering
+    setCurrentFeature(SENTRY_FEATURES.CHAT_ROOMS);
+    Sentry.setTag('feature', SENTRY_FEATURES.CHAT_ROOMS);
+    Sentry.setContext('chat_rooms', {
+      screen: 'dm',
+      dmId: activeDm?.id,
+    });
+
+    return () => {
+      // Clear feature on unmount
+      setCurrentFeature(null);
+    };
+  }, [activeDm?.id]);
 
   // Handle back navigation - clears store and goes back to chat room
   const handleBack = useCallback(() => {
@@ -107,13 +139,12 @@ export default function ChatRoomDmScreen() {
           {/* Drag handle */}
           <View style={styles.handle} />
 
-          {/* Chat content - no KAV needed, system resizes window */}
+          {/* Chat content - uses KeyboardAvoidingView internally */}
           <PrivateChatView
             dm={activeDm}
             onBack={handleBack}
             topInset={0}
             isModal={true}
-            keyboardVisible={false}
           />
         </View>
       </View>

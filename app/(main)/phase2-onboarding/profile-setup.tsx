@@ -24,6 +24,7 @@ import {
   Dimensions,
   Modal,
   Pressable,
+  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -142,6 +143,7 @@ export default function Phase2Review() {
 
   // Preview state
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Navigation guard: prevent double-tap on complete
   const isCompletingRef = useRef(false);
@@ -181,106 +183,125 @@ export default function Phase2Review() {
     setPreviewIndex(null);
   }, []);
 
-  // Navigation handlers
+  // Navigation handlers - pass fromReview=true so edit screens return here after save
   const handleEditProfile = useCallback(() => {
-    router.push('/(main)/phase2-onboarding/profile-edit' as any);
+    router.push('/(main)/phase2-onboarding/profile-edit?fromReview=true' as any);
   }, [router]);
 
   // P2-UX-001 FIX: Dedicated handler for Looking For edit
   const handleEditLookingFor = useCallback(() => {
-    router.push('/(main)/phase2-onboarding/looking-for-edit' as any);
+    router.push('/(main)/phase2-onboarding/looking-for-edit?fromReview=true' as any);
   }, [router]);
 
   // Handler for editing prompts (Step 3)
   const handleEditPrompts = useCallback(() => {
-    router.push('/(main)/phase2-onboarding/prompts' as any);
+    router.push('/(main)/phase2-onboarding/prompts?fromReview=true' as any);
   }, [router]);
 
   // Handle completion
-  const handleComplete = useCallback(() => {
+  const handleComplete = useCallback(async () => {
     if (!canComplete) return;
     if (isCompletingRef.current) return; // Prevent double-tap
     isCompletingRef.current = true;
+    setIsSubmitting(true);
 
-    // Call completeSetup - this sets isSetupComplete + phase2OnboardingCompleted in local store
-    completeSetup();
-
-    // STABILITY FIX: Persist Phase-2 data to Convex (durable across restarts)
+    // P2-001/P2-002 FIX: Await backend mutations and handle errors
+    // Only proceed with navigation if backend succeeds
     if (!isDemoMode && userId) {
-      // 1. Set phase2 onboarding completed flag
-      setPhase2CompletedMutation({ userId: userId as any })
-        .then((result) => {
-          if (__DEV__) {
-            console.log('[Phase2Review] Convex phase2OnboardingCompleted set:', result);
-          }
-        })
-        .catch((err) => {
-          console.warn('[Phase2Review] Failed to persist phase2OnboardingCompleted to Convex:', err);
+      try {
+        // 1. Set phase2 onboarding completed flag
+        const completedResult = await setPhase2CompletedMutation({ userId: userId as any });
+        if (__DEV__) {
+          console.log('[Phase2Review] Convex phase2OnboardingCompleted set:', completedResult);
+        }
+
+        // 2. Persist the full private profile data
+        // IMPORTANT: Only store backend URLs (https), not local file:// URIs
+        const backendPhotoUrls = selectedPhotoUrls.filter(
+          (url) => typeof url === 'string' && url.startsWith('http')
+        );
+
+        const profileResult = await upsertPrivateProfileMutation({
+          authUserId: userId,
+          displayName: displayName || 'User',
+          age: storeAge || 0,
+          gender: gender || '',
+          privateBio: privateBio.trim(),
+          privateIntentKeys: intentKeys,
+          privatePhotoUrls: backendPhotoUrls,
+          isSetupComplete: true,
+          // Profile details (imported from Phase-1)
+          height: height ?? null,
+          weight: weight ?? null,
+          smoking: smoking ?? null,
+          drinking: drinking ?? null,
+          education: education ?? null,
+          religion: religion ?? null,
+          // Phase-2 Step 3: Persist prompt answers to backend
+          promptAnswers: promptAnswers.map((p) => ({
+            promptId: p.promptId,
+            question: p.question,
+            answer: p.answer,
+          })),
+          // Phase-2 Preference Strength (only if complete)
+          ...(preferenceStrength.smoking && preferenceStrength.drinking && preferenceStrength.intent
+            ? {
+                preferenceStrength: {
+                  smoking: preferenceStrength.smoking,
+                  drinking: preferenceStrength.drinking,
+                  intent: preferenceStrength.intent,
+                },
+              }
+            : {}),
         });
 
-      // 2. Persist the full private profile data
-      // IMPORTANT: Only store backend URLs (https), not local file:// URIs
-      const backendPhotoUrls = selectedPhotoUrls.filter(
-        (url) => typeof url === 'string' && url.startsWith('http')
-      );
+        if (__DEV__) {
+          console.log('[Phase2Review] Convex privateProfile upserted:', profileResult, {
+            photoCount: backendPhotoUrls.length,
+            intentCount: intentKeys.length,
+          });
+        }
 
-      upsertPrivateProfileMutation({
-        authUserId: userId,
-        displayName: displayName || 'User',
-        age: storeAge || 0,
-        gender: gender || '',
-        privateBio: privateBio.trim(),
-        privateIntentKeys: intentKeys,
-        privatePhotoUrls: backendPhotoUrls,
-        isSetupComplete: true,
-        // Profile details (imported from Phase-1)
-        height: height ?? null,
-        weight: weight ?? null,
-        smoking: smoking ?? null,
-        drinking: drinking ?? null,
-        education: education ?? null,
-        religion: religion ?? null,
-        // Phase-2 Step 3: Persist prompt answers to backend
-        promptAnswers: promptAnswers.map((p) => ({
-          promptId: p.promptId,
-          question: p.question,
-          answer: p.answer,
-        })),
-        // Phase-2 Preference Strength (only if complete)
-        ...(preferenceStrength.smoking && preferenceStrength.drinking && preferenceStrength.intent
-          ? {
-              preferenceStrength: {
-                smoking: preferenceStrength.smoking,
-                drinking: preferenceStrength.drinking,
-                intent: preferenceStrength.intent,
-              },
-            }
-          : {}),
-      })
-        .then((result) => {
-          if (__DEV__) {
-            console.log('[Phase2Review] Convex privateProfile upserted:', result, {
-              photoCount: backendPhotoUrls.length,
-              intentCount: intentKeys.length,
-            });
-          }
-        })
-        .catch((err) => {
-          // Best effort - log but don't crash
-          console.warn('[Phase2Review] Failed to persist privateProfile to Convex:', err);
+        // Backend succeeded - now update local store and navigate
+        completeSetup();
+
+        if (__DEV__) {
+          console.log('[Phase2Review] Setup complete:', {
+            intentCount: intentKeys.length,
+            desireLength: privateBio.trim().length,
+            photoCount,
+          });
+        }
+
+        // Navigate to Phase-2 private tabs (desire-land is the first tab)
+        router.replace('/(main)/(private)/(tabs)/desire-land' as any);
+      } catch (err) {
+        // P2-001: Show user-facing error
+        console.warn('[Phase2Review] Backend mutation failed:', err);
+        Alert.alert(
+          'Error',
+          'Something went wrong. Please try again.',
+          [{ text: 'OK' }]
+        );
+        // P2-002: Reset state to allow retry
+        isCompletingRef.current = false;
+        setIsSubmitting(false);
+      }
+    } else {
+      // Demo mode - no backend, just complete locally
+      completeSetup();
+
+      if (__DEV__) {
+        console.log('[Phase2Review] Setup complete (demo mode):', {
+          intentCount: intentKeys.length,
+          desireLength: privateBio.trim().length,
+          photoCount,
         });
-    }
+      }
 
-    if (__DEV__) {
-      console.log('[Phase2Review] Setup complete:', {
-        intentCount: intentKeys.length,
-        desireLength: privateBio.trim().length,
-        photoCount,
-      });
+      // Navigate to Phase-2 private tabs (desire-land is the first tab)
+      router.replace('/(main)/(private)/(tabs)/desire-land' as any);
     }
-
-    // Navigate to Phase-2 private tabs
-    router.replace('/(main)/(private)/(tabs)' as any);
   }, [
     canComplete, completeSetup, intentKeys, privateBio, photoCount, router,
     userId, setPhase2CompletedMutation, upsertPrivateProfileMutation,
@@ -298,7 +319,7 @@ export default function Phase2Review() {
         >
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Review & Desire</Text>
+        <Text style={styles.headerTitle}>Review Profile</Text>
         {/* P2-PHOTO-001: Updated step number for 5-step flow */}
         <Text style={styles.stepLabel}>Step 5 of 5</Text>
       </View>
@@ -310,9 +331,9 @@ export default function Phase2Review() {
       >
         {/* === SECTION A: Review Title === */}
         <View style={styles.section}>
-          <Text style={styles.mainTitle}>Review your profile</Text>
+          <Text style={styles.mainTitle}>Almost there</Text>
           <Text style={styles.mainSubtitle}>
-            This is how your private profile will appear to others.
+            Review your private profile before entering. You can always edit this later.
           </Text>
         </View>
 
@@ -388,7 +409,7 @@ export default function Phase2Review() {
             <View style={styles.warningBanner}>
               <Ionicons name="alert-circle" size={16} color="#FF6B6B" />
               <Text style={styles.warningText}>
-                Complete all fields to continue
+                Please complete the missing fields
               </Text>
             </View>
           )}
@@ -531,9 +552,9 @@ export default function Phase2Review() {
 
         {/* === SECTION F: Info Note === */}
         <View style={styles.infoNote}>
-          <Ionicons name="information-circle-outline" size={18} color={C.textLight} />
+          <Ionicons name="lock-closed" size={18} color={C.primary} />
           <Text style={styles.infoNoteText}>
-            After completing setup, you can edit your profile anytime from Phase-2 settings.
+            Your private profile is separate and secure. You can edit anytime from settings.
           </Text>
         </View>
 
@@ -553,18 +574,18 @@ export default function Phase2Review() {
           </Text>
         )}
         <TouchableOpacity
-          style={[styles.completeBtn, !canComplete && styles.completeBtnDisabled]}
+          style={[styles.completeBtn, (!canComplete || isSubmitting) && styles.completeBtnDisabled]}
           onPress={handleComplete}
-          disabled={!canComplete}
+          disabled={!canComplete || isSubmitting}
           activeOpacity={0.8}
         >
-          <Text style={[styles.completeBtnText, !canComplete && styles.completeBtnTextDisabled]}>
-            Enter Private Mode
+          <Text style={[styles.completeBtnText, (!canComplete || isSubmitting) && styles.completeBtnTextDisabled]}>
+            {isSubmitting ? 'Saving...' : 'Enter Private Mode'}
           </Text>
           <Ionicons
-            name="checkmark-circle"
+            name={isSubmitting ? 'hourglass-outline' : 'checkmark-circle'}
             size={20}
-            color={canComplete ? '#FFFFFF' : C.textLight}
+            color={canComplete && !isSubmitting ? '#FFFFFF' : C.textLight}
           />
         </TouchableOpacity>
       </View>

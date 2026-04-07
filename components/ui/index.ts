@@ -4,3 +4,6 @@ export { Chip } from './Chip';
 export { Avatar } from './Avatar';
 export { Badge } from './Badge';
 export { Toast, ToastHost } from './Toast';
+export { WelcomeOverlay } from './WelcomeOverlay';
+export { SwipeGuidanceHint } from './SwipeGuidanceHint';
+export { SkeletonCard } from './SkeletonCard';

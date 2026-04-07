@@ -13,6 +13,7 @@ import { Video, ResizeMode } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { InAppMediaCamera, MediaCaptureResult } from './InAppMediaCamera';
 import type { TodPrompt } from '@/types';
@@ -20,6 +21,14 @@ import type { TodPrompt } from '@/types';
 const C = INCOGNITO_COLORS;
 const MAX_TEXT_CHARS = 400;
 const MAX_AUDIO_SEC = 60;
+
+// P2-001: Media file size limits (in bytes)
+const MAX_PHOTO_SIZE_MB = 10;
+const MAX_VIDEO_SIZE_MB = 50;
+const MAX_AUDIO_SIZE_MB = 5;
+const MAX_PHOTO_SIZE = MAX_PHOTO_SIZE_MB * 1024 * 1024;
+const MAX_VIDEO_SIZE = MAX_VIDEO_SIZE_MB * 1024 * 1024;
+const MAX_AUDIO_SIZE = MAX_AUDIO_SIZE_MB * 1024 * 1024;
 
 // Identity modes matching backend
 export type IdentityMode = 'anonymous' | 'no_photo' | 'profile';
@@ -44,6 +53,8 @@ interface UnifiedAnswerComposerProps {
   existingIdentityMode?: IdentityMode;
   /** Whether this is a new answer (show identity picker) or edit (hide picker) */
   isNewAnswer: boolean;
+  /** VISUAL MEDIA LOCK: If true, photo/video has been viewed and cannot be replaced/removed */
+  visualMediaLocked?: boolean;
   onClose: () => void;
   /** Called when user submits */
   onSubmit: (params: {
@@ -63,6 +74,7 @@ export function UnifiedAnswerComposer({
   initialAttachment,
   existingIdentityMode,
   isNewAnswer,
+  visualMediaLocked,
   onClose,
   onSubmit,
   isSubmitting,
@@ -96,6 +108,9 @@ export function UnifiedAnswerComposer({
 
   // In-app media camera state (unified photo+video)
   const [showMediaCamera, setShowMediaCamera] = useState(false);
+
+  // P1-001: Media confirmation modal state
+  const [showMediaConfirmModal, setShowMediaConfirmModal] = useState(false);
 
   // Refs
   const recordingRef = useRef<Audio.Recording | null>(null);
@@ -217,6 +232,13 @@ export function UnifiedAnswerComposer({
       // M-007 FIX: Use ref for latest duration to avoid stale closure
       const finalSeconds = recordSecondsRef.current;
       if (uri && finalSeconds > 0) {
+        // P2-001: Validate audio file size before attaching
+        const fileSize = await getFileSizeBytes(uri);
+        if (!validateMediaSize(fileSize, 'audio')) {
+          console.log(`[T/D Composer] Voice recording rejected: size ${fileSize} exceeds limit`);
+          return; // Size validation failed, don't attach
+        }
+
         setAttachment({
           kind: 'audio',
           uri,
@@ -224,7 +246,7 @@ export function UnifiedAnswerComposer({
           durationMs: finalSeconds * 1000,
         });
         setMediaRemoved(false);
-        console.log(`[T/D Composer] Voice recorded: ${finalSeconds}s`);
+        console.log(`[T/D Composer] Voice recorded: ${finalSeconds}s, size: ${fileSize}`);
       }
     } catch (error) {
       console.error('[T/D Composer] Stop recording error:', error);
@@ -268,6 +290,45 @@ export function UnifiedAnswerComposer({
     }
   };
 
+  // P2-001: Helper to get file size and validate
+  const getFileSizeBytes = async (uri: string): Promise<number | null> => {
+    try {
+      const info = await FileSystem.getInfoAsync(uri);
+      if (info.exists && 'size' in info) {
+        return info.size;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  // P2-001: Validate file size before attaching
+  const validateMediaSize = (sizeBytes: number | null | undefined, kind: 'photo' | 'video' | 'audio'): boolean => {
+    if (sizeBytes === null || sizeBytes === undefined) {
+      // Can't determine size, allow it but log warning
+      console.warn('[T/D COMPOSER] Could not determine file size, allowing upload');
+      return true;
+    }
+
+    const limits = {
+      photo: { max: MAX_PHOTO_SIZE, label: `${MAX_PHOTO_SIZE_MB}MB` },
+      video: { max: MAX_VIDEO_SIZE, label: `${MAX_VIDEO_SIZE_MB}MB` },
+      audio: { max: MAX_AUDIO_SIZE, label: `${MAX_AUDIO_SIZE_MB}MB` },
+    };
+
+    const limit = limits[kind];
+    if (sizeBytes > limit.max) {
+      const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(1);
+      Alert.alert(
+        'File Too Large',
+        `This ${kind} is ${sizeMB}MB, which exceeds the ${limit.label} limit. Please choose a smaller file.`
+      );
+      return false;
+    }
+    return true;
+  };
+
   // Gallery picker - picks both photos and videos
   const pickFromGallery = async () => {
     try {
@@ -282,11 +343,24 @@ export function UnifiedAnswerComposer({
 
       const asset = result.assets[0];
       const isVideo = asset.type === 'video';
+      const kind = isVideo ? 'video' : 'photo';
+
+      // P2-001: Validate file size before attaching
+      // Use asset.fileSize if available, otherwise fetch it
+      let fileSize = asset.fileSize;
+      if (fileSize === undefined || fileSize === null) {
+        fileSize = await getFileSizeBytes(asset.uri) ?? undefined;
+      }
+
+      if (!validateMediaSize(fileSize, kind)) {
+        return; // Size validation failed, don't attach
+      }
+
       const mime = isVideo ? 'video/mp4' : 'image/jpeg';
       const durationMs = asset.duration ? Math.round(asset.duration) : undefined;
 
       setAttachment({
-        kind: isVideo ? 'video' : 'photo',
+        kind,
         uri: asset.uri,
         mime,
         durationMs,
@@ -299,9 +373,9 @@ export function UnifiedAnswerComposer({
         ? asset.uri.substring(0, Math.min(15, asset.uri.length))
         : asset.uri.substring(0, Math.min(20, slashIdx + 1));
       console.log('[T/D COMPOSER] gallery_pick', {
-        kind: isVideo ? 'video' : 'photo',
+        kind,
         uriPrefix,
-        fileSize: asset.fileSize,
+        fileSize,
         durationMs,
       });
     } catch (error) {
@@ -315,8 +389,15 @@ export function UnifiedAnswerComposer({
   }, []);
 
   // Handle media captured from in-app camera
-  const handleMediaCaptured = useCallback((result: MediaCaptureResult) => {
+  const handleMediaCaptured = useCallback(async (result: MediaCaptureResult) => {
     setShowMediaCamera(false);
+
+    // P2-001: Validate file size before attaching
+    const fileSize = await getFileSizeBytes(result.uri);
+    if (!validateMediaSize(fileSize, result.kind)) {
+      return; // Size validation failed, don't attach
+    }
+
     setAttachment({
       kind: result.kind,
       uri: result.uri,
@@ -331,10 +412,20 @@ export function UnifiedAnswerComposer({
       isFrontCamera: result.isFrontCamera,
       uriPrefix,
       durationMs: result.durationMs,
+      fileSize,
     });
   }, []);
 
   const removeAttachment = () => {
+    // VISUAL MEDIA LOCK: Don't allow removing locked photo/video
+    if (visualMediaLocked && attachment && (attachment.kind === 'photo' || attachment.kind === 'video')) {
+      Alert.alert(
+        'Media Locked',
+        'This photo/video has been viewed and cannot be removed. You can still edit text or add audio.'
+      );
+      return;
+    }
+
     if (soundRef.current) {
       soundRef.current.unloadAsync().catch(() => {});
       soundRef.current = null;
@@ -365,13 +456,34 @@ export function UnifiedAnswerComposer({
     onClose();
   }, [onClose, attachment, text]);
 
+  // P1-001: Actual submit logic (extracted for reuse)
+  // P1-005 FIX: Include voice messages in visibility handling
+  const executeSubmit = useCallback(async () => {
+    const trimmedText = text.trim();
+    const hasMedia = !!attachment;
+
+    console.log('[T/D COMPOSER] submit_execute', {
+      attachmentKind: attachment?.kind ?? 'none',
+      identityMode,
+      mediaVisibility: hasMedia ? mediaVisibility : 'n/a',
+    });
+
+    await onSubmit({
+      text: trimmedText,
+      attachment,
+      removeMedia: mediaRemoved && !attachment,
+      identityMode,
+      mediaVisibility: hasMedia ? mediaVisibility : undefined,
+    });
+  }, [text, attachment, mediaRemoved, identityMode, mediaVisibility, onSubmit]);
+
   const handleSubmit = useCallback(async () => {
     // Validate: text is MANDATORY, media is optional
     const trimmedText = text.trim();
     const hasText = trimmedText.length >= 1;
     const hasAttachment = !!attachment;
 
-    // Only pass mediaVisibility for photo/video attachments
+    // P1-005 FIX: Track all media types for visibility
     const hasPhotoOrVideo = attachment && (attachment.kind === 'photo' || attachment.kind === 'video');
 
     console.log('[T/D COMPOSER] submit_start', {
@@ -379,7 +491,7 @@ export function UnifiedAnswerComposer({
       hasAttachment,
       attachmentKind: attachment?.kind ?? 'none',
       identityMode,
-      mediaVisibility: hasPhotoOrVideo ? mediaVisibility : 'n/a',
+      mediaVisibility: hasAttachment ? mediaVisibility : 'n/a',
       removeMedia: false,
     });
 
@@ -388,16 +500,22 @@ export function UnifiedAnswerComposer({
       return;
     }
 
-    // M-008 FIX: Consistent payload shape - text is always non-empty string
-    // (guaranteed by validation above), never undefined or empty string
-    await onSubmit({
-      text: trimmedText,
-      attachment,
-      removeMedia: mediaRemoved && !attachment,
-      identityMode,
-      mediaVisibility: hasPhotoOrVideo ? mediaVisibility : undefined,
-    });
-  }, [text, attachment, mediaRemoved, identityMode, mediaVisibility, onSubmit]);
+    // P1-001: Show confirmation modal for photo/video before submitting
+    // Voice messages skip confirmation but still use visibility setting
+    if (hasPhotoOrVideo) {
+      setShowMediaConfirmModal(true);
+      return;
+    }
+
+    // No photo/video (including voice) - submit directly
+    await executeSubmit();
+  }, [text, attachment, identityMode, mediaVisibility, executeSubmit]);
+
+  // P1-001: Handle media confirmation
+  const handleMediaConfirmSend = useCallback(async () => {
+    setShowMediaConfirmModal(false);
+    await executeSubmit();
+  }, [executeSubmit]);
 
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60);
@@ -413,7 +531,8 @@ export function UnifiedAnswerComposer({
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
-      <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      {/* P1-004 FIX: Add 'height' behavior for Android to prevent keyboard overlap */}
+      <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={styles.sheet}>
           {/* Header */}
           <View style={styles.header}>
@@ -473,7 +592,8 @@ export function UnifiedAnswerComposer({
 
                 {attachment.kind === 'photo' && (() => {
                   const shouldUnmirror = attachment.isFrontCamera === true;
-                  console.log(`[T/D Composer] previewRender kind=photo isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
+                  // P3-004: Gate noisy render-time log with __DEV__
+                  if (__DEV__) console.log(`[T/D Composer] previewRender kind=photo isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
                   return (
                     <TouchableOpacity
                       style={styles.mediaPreview}
@@ -485,16 +605,24 @@ export function UnifiedAnswerComposer({
                         <Ionicons name="expand-outline" size={24} color="#FFF" />
                         <Text style={styles.mediaLabel}>Tap to preview</Text>
                       </View>
-                      <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
-                        <Ionicons name="close-circle" size={28} color="#FFF" />
-                      </TouchableOpacity>
+                      {/* VISUAL MEDIA LOCK: Show lock icon instead of remove when locked */}
+                      {visualMediaLocked ? (
+                        <View style={styles.lockedMediaBadge}>
+                          <Ionicons name="lock-closed" size={16} color="#FFF" />
+                        </View>
+                      ) : (
+                        <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
+                          <Ionicons name="close-circle" size={28} color="#FFF" />
+                        </TouchableOpacity>
+                      )}
                     </TouchableOpacity>
                   );
                 })()}
 
                 {attachment.kind === 'video' && (() => {
                   const shouldUnmirror = attachment.isFrontCamera === true;
-                  console.log(`[T/D Composer] previewRender kind=video isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
+                  // P3-004: Gate noisy render-time log with __DEV__
+                  if (__DEV__) console.log(`[T/D Composer] previewRender kind=video isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
                   return (
                     <TouchableOpacity
                       style={styles.mediaPreview}
@@ -512,9 +640,16 @@ export function UnifiedAnswerComposer({
                         <Ionicons name="play-circle" size={48} color="#FFF" />
                         <Text style={styles.mediaLabel}>Tap to preview</Text>
                       </View>
-                      <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
-                        <Ionicons name="close-circle" size={28} color="#FFF" />
-                      </TouchableOpacity>
+                      {/* VISUAL MEDIA LOCK: Show lock icon instead of remove when locked */}
+                      {visualMediaLocked ? (
+                        <View style={styles.lockedMediaBadge}>
+                          <Ionicons name="lock-closed" size={16} color="#FFF" />
+                        </View>
+                      ) : (
+                        <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
+                          <Ionicons name="close-circle" size={28} color="#FFF" />
+                        </TouchableOpacity>
+                      )}
                     </TouchableOpacity>
                   );
                 })()}
@@ -532,17 +667,32 @@ export function UnifiedAnswerComposer({
               </View>
             )}
 
+            {/* VISUAL MEDIA LOCK: Warning when photo/video is locked */}
+            {visualMediaLocked && attachment && (attachment.kind === 'photo' || attachment.kind === 'video') && (
+              <View style={styles.mediaLockedWarning}>
+                <Ionicons name="lock-closed" size={14} color="#F59E0B" />
+                <Text style={styles.mediaLockedText}>
+                  Photo/video already viewed and locked. You can still edit text or audio.
+                </Text>
+              </View>
+            )}
+
             {/* Attachment buttons */}
             {!attachment && !isRecording && (
               <View style={styles.attachmentButtons}>
-                <TouchableOpacity style={styles.attachBtn} onPress={pickFromGallery}>
-                  <Ionicons name="images-outline" size={22} color="#00B894" />
-                  <Text style={styles.attachBtnText}>Gallery</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.attachBtn} onPress={openMediaCamera}>
-                  <Ionicons name="camera-outline" size={22} color="#E94560" />
-                  <Text style={styles.attachBtnText}>Camera</Text>
-                </TouchableOpacity>
+                {/* VISUAL MEDIA LOCK: Hide Gallery/Camera when visual media is locked */}
+                {!visualMediaLocked && (
+                  <>
+                    <TouchableOpacity style={styles.attachBtn} onPress={pickFromGallery}>
+                      <Ionicons name="images-outline" size={22} color="#00B894" />
+                      <Text style={styles.attachBtnText}>Gallery</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.attachBtn} onPress={openMediaCamera}>
+                      <Ionicons name="camera-outline" size={22} color="#E94560" />
+                      <Text style={styles.attachBtnText}>Camera</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
                 <TouchableOpacity style={styles.attachBtn} onPress={startRecording}>
                   <Ionicons name="mic-outline" size={22} color="#FF9800" />
                   <Text style={styles.attachBtnText}>Voice</Text>
@@ -551,6 +701,7 @@ export function UnifiedAnswerComposer({
             )}
 
             {/* Identity Picker - only show for new answers */}
+            {/* P1-003 FIX: Simplified identity options with clearer descriptions */}
             {isNewAnswer && (
               <View style={styles.identitySection}>
                 <View style={styles.identityHeader}>
@@ -558,7 +709,7 @@ export function UnifiedAnswerComposer({
                   <Text style={styles.identityTitle}>Your identity</Text>
                 </View>
                 <View style={styles.identityOptions}>
-                  {/* Anonymous (DEFAULT) */}
+                  {/* Anonymous (DEFAULT) - P1-003: Clearer description */}
                   <TouchableOpacity
                     style={[styles.identityOption, identityMode === 'anonymous' && styles.identityOptionActive]}
                     onPress={() => setIdentityMode('anonymous')}
@@ -567,29 +718,18 @@ export function UnifiedAnswerComposer({
                       {identityMode === 'anonymous' && <View style={styles.radioInner} />}
                     </View>
                     <Ionicons name="eye-off" size={16} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
-                    <Text style={[styles.identityText, identityMode === 'anonymous' && { color: C.primary }]}>
-                      Anonymous
-                    </Text>
+                    <View style={styles.identityTextContainer}>
+                      <Text style={[styles.identityText, identityMode === 'anonymous' && { color: C.primary }]}>
+                        Anonymous
+                      </Text>
+                      <Text style={styles.identitySubtext}>Hidden identity</Text>
+                    </View>
                     <View style={styles.defaultBadge}>
                       <Text style={styles.defaultBadgeText}>Default</Text>
                     </View>
                   </TouchableOpacity>
 
-                  {/* No photo */}
-                  <TouchableOpacity
-                    style={[styles.identityOption, identityMode === 'no_photo' && styles.identityOptionActive]}
-                    onPress={() => setIdentityMode('no_photo')}
-                  >
-                    <View style={styles.radioOuter}>
-                      {identityMode === 'no_photo' && <View style={styles.radioInner} />}
-                    </View>
-                    <Ionicons name="person-outline" size={16} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
-                    <Text style={[styles.identityText, identityMode === 'no_photo' && { color: C.primary }]}>
-                      No photo
-                    </Text>
-                  </TouchableOpacity>
-
-                  {/* Profile */}
+                  {/* Profile - P1-003: Moved up, more prominent */}
                   <TouchableOpacity
                     style={[styles.identityOption, identityMode === 'profile' && styles.identityOptionActive]}
                     onPress={() => setIdentityMode('profile')}
@@ -598,16 +738,42 @@ export function UnifiedAnswerComposer({
                       {identityMode === 'profile' && <View style={styles.radioInner} />}
                     </View>
                     <Ionicons name="person" size={16} color={identityMode === 'profile' ? C.primary : C.textLight} />
-                    <Text style={[styles.identityText, identityMode === 'profile' && { color: C.primary }]}>
-                      Show profile
-                    </Text>
+                    <View style={styles.identityTextContainer}>
+                      <Text style={[styles.identityText, identityMode === 'profile' && { color: C.primary }]}>
+                        Show profile
+                      </Text>
+                      <Text style={styles.identitySubtext}>Name, age, photo visible</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* No photo - P1-003: Clearer description, moved to last position */}
+                  <TouchableOpacity
+                    style={[styles.identityOption, identityMode === 'no_photo' && styles.identityOptionActive]}
+                    onPress={() => setIdentityMode('no_photo')}
+                  >
+                    <View style={styles.radioOuter}>
+                      {identityMode === 'no_photo' && <View style={styles.radioInner} />}
+                    </View>
+                    <Ionicons name="person-outline" size={16} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
+                    <View style={styles.identityTextContainer}>
+                      <Text style={[styles.identityText, identityMode === 'no_photo' && { color: C.primary }]}>
+                        Name only
+                      </Text>
+                      <Text style={styles.identitySubtext}>Photo blurred</Text>
+                    </View>
                   </TouchableOpacity>
                 </View>
 
-                {/* Media Visibility Selector - only for photo/video on new answers */}
-                {(attachment?.kind === 'photo' || attachment?.kind === 'video') && (
+                {/* Media Visibility Selector - for photo/video/voice on new answers */}
+                {/* P1-005 FIX: Include voice messages in visibility options */}
+                {/* P1-002 FIX: Clearer labels with icons */}
+                {attachment && (
                   <View style={styles.visibilitySection}>
                     <View style={styles.visibilitySeparator} />
+                    <View style={styles.visibilityHeader}>
+                      <Ionicons name="eye-outline" size={14} color={C.textLight} />
+                      <Text style={styles.visibilityTitle}>Who can view your {attachment.kind === 'audio' ? 'voice message' : attachment.kind}?</Text>
+                    </View>
                     <View style={styles.visibilitySegmented}>
                       <TouchableOpacity
                         style={[
@@ -616,10 +782,16 @@ export function UnifiedAnswerComposer({
                         ]}
                         onPress={() => setMediaVisibility('private')}
                       >
+                        <Ionicons
+                          name="lock-closed"
+                          size={14}
+                          color={mediaVisibility === 'private' ? '#FFF' : C.textLight}
+                          style={styles.segmentIcon}
+                        />
                         <Text style={[
                           styles.segmentBtnText,
                           mediaVisibility === 'private' && styles.segmentBtnTextActive,
-                        ]}>Private</Text>
+                        ]}>Just them</Text>
                       </TouchableOpacity>
                       <TouchableOpacity
                         style={[
@@ -628,16 +800,22 @@ export function UnifiedAnswerComposer({
                         ]}
                         onPress={() => setMediaVisibility('public')}
                       >
+                        <Ionicons
+                          name="people"
+                          size={14}
+                          color={mediaVisibility === 'public' ? '#FFF' : C.textLight}
+                          style={styles.segmentIcon}
+                        />
                         <Text style={[
                           styles.segmentBtnText,
                           mediaVisibility === 'public' && styles.segmentBtnTextActive,
-                        ]}>View all</Text>
+                        ]}>Everyone</Text>
                       </TouchableOpacity>
                     </View>
                     <Text style={styles.visibilityHelperText}>
                       {mediaVisibility === 'private'
-                        ? 'Only visible to the prompt owner'
-                        : 'Visible to everyone'}
+                        ? 'Only the prompt creator can view this'
+                        : 'Anyone viewing this thread can see it'}
                     </Text>
                   </View>
                 )}
@@ -716,6 +894,52 @@ export function UnifiedAnswerComposer({
           onClose={() => setShowMediaCamera(false)}
           onMediaCaptured={handleMediaCaptured}
         />
+
+        {/* P1-001: Media Confirmation Modal - Shows visibility choice clearly */}
+        <Modal
+          visible={showMediaConfirmModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowMediaConfirmModal(false)}
+        >
+          <View style={styles.mediaConfirmOverlay}>
+            <View style={styles.mediaConfirmSheet}>
+              <View style={styles.mediaConfirmHeader}>
+                <Ionicons
+                  name={mediaVisibility === 'private' ? 'lock-closed' : 'people'}
+                  size={32}
+                  color={mediaVisibility === 'private' ? '#00B894' : '#E94560'}
+                />
+              </View>
+              <Text style={styles.mediaConfirmTitle}>
+                {mediaVisibility === 'private' ? 'Send to prompt creator?' : 'Share with everyone?'}
+              </Text>
+              <Text style={styles.mediaConfirmMessage}>
+                {mediaVisibility === 'private'
+                  ? 'Only the prompt creator will be able to view your media. They can view it once.'
+                  : 'Anyone viewing this thread will be able to see your media. Each person can view it once.'}
+              </Text>
+              <View style={styles.mediaConfirmButtons}>
+                <TouchableOpacity
+                  style={styles.mediaConfirmCancelBtn}
+                  onPress={() => setShowMediaConfirmModal(false)}
+                >
+                  <Text style={styles.mediaConfirmCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.mediaConfirmSendBtn,
+                    mediaVisibility === 'private' && styles.mediaConfirmSendBtnPrivate,
+                  ]}
+                  onPress={handleMediaConfirmSend}
+                >
+                  <Ionicons name="send" size={16} color="#FFF" style={{ marginRight: 6 }} />
+                  <Text style={styles.mediaConfirmSendText}>Send</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -789,6 +1013,35 @@ const styles = StyleSheet.create({
   mediaLabel: { fontSize: 13, color: '#FFF', fontWeight: '600', marginTop: 4 },
   removeMediaBtn: { position: 'absolute', top: 8, right: 8 },
 
+  // VISUAL MEDIA LOCK: Locked badge and warning styles
+  lockedMediaBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(245,158,11,0.9)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mediaLockedWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(245,158,11,0.15)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
+  },
+  mediaLockedText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#F59E0B',
+    fontWeight: '500',
+  },
+
   // Recording indicator
   recordingIndicator: {
     flexDirection: 'row',
@@ -851,12 +1104,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingVertical: 6,
+    paddingVertical: 8,
     paddingHorizontal: 6,
     borderRadius: 8,
   },
   identityOptionActive: { backgroundColor: C.primary + '10' },
-  identityText: { flex: 1, fontSize: 13, color: C.text, fontWeight: '500' },
+  // P1-003 FIX: Added container for text + subtext
+  identityTextContainer: { flex: 1 },
+  identityText: { fontSize: 13, color: C.text, fontWeight: '500' },
+  identitySubtext: { fontSize: 11, color: C.textLight, marginTop: 1 },
   radioOuter: {
     width: 18,
     height: 18,
@@ -876,25 +1132,36 @@ const styles = StyleSheet.create({
   defaultBadgeText: { fontSize: 9, fontWeight: '700', color: C.primary },
 
   // Media visibility selector (segmented control)
+  // P1-002 FIX: Added header styles for clearer visibility section
   visibilitySection: { marginTop: 4 },
   visibilitySeparator: {
     height: 1,
     backgroundColor: C.background,
     marginVertical: 8,
   },
+  visibilityHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
+  },
+  visibilityTitle: { fontSize: 12, fontWeight: '600', color: C.textLight },
   visibilitySegmented: {
     flexDirection: 'row',
     gap: 8,
   },
   segmentBtn: {
     flex: 1,
-    paddingVertical: 8,
+    flexDirection: 'row',
+    paddingVertical: 10,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: C.textLight + '40',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 6,
   },
+  segmentIcon: { marginRight: 2 },
   segmentBtnActive: {
     backgroundColor: C.primary,
     borderColor: C.primary,
@@ -960,5 +1227,73 @@ const styles = StyleSheet.create({
   fullscreenMedia: {
     width: '100%',
     height: '80%',
+  },
+
+  // P1-001: Media confirmation modal
+  mediaConfirmOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  mediaConfirmSheet: {
+    backgroundColor: C.background,
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 320,
+  },
+  mediaConfirmHeader: {
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  mediaConfirmTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: C.text,
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  mediaConfirmMessage: {
+    fontSize: 14,
+    color: C.textLight,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  mediaConfirmButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  mediaConfirmCancelBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: C.surface,
+    alignItems: 'center',
+  },
+  mediaConfirmCancelText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text,
+  },
+  mediaConfirmSendBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // P1-001: Green color for private/secure sends
+  mediaConfirmSendBtnPrivate: {
+    backgroundColor: '#00B894',
+  },
+  mediaConfirmSendText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FFF',
   },
 });

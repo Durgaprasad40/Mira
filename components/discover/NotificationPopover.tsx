@@ -24,6 +24,9 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const POPOVER_WIDTH = Math.min(SCREEN_WIDTH - 32, 360);
 const POPOVER_MAX_HEIGHT = SCREEN_HEIGHT * 0.6;
 
+// DEFENSIVE: Types that must NEVER render in bell popover (safety net if upstream filtering fails)
+const BELL_RENDER_EXCLUDED = new Set(['message', 'new_message']);
+
 interface NotificationPopoverProps {
   visible: boolean;
   onClose: () => void;
@@ -41,13 +44,16 @@ export function NotificationPopover({
 }: NotificationPopoverProps) {
   const { notifications, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
 
-  // Mark all as seen when popover opens
+  // BUGFIX: Do NOT mark all as read when popover opens.
+  // Notifications should only be marked read when user explicitly:
+  // 1) Taps a specific notification (handled in handleNotificationPress)
+  // 2) Presses "Mark Read" button in header
+  // Only cleanup expired notifications on open.
   useEffect(() => {
     if (visible) {
-      markAllSeen();
       cleanupExpiredNotifications();
     }
-  }, [visible, markAllSeen, cleanupExpiredNotifications]);
+  }, [visible, cleanupExpiredNotifications]);
 
   const handleNotificationPress = (notification: AppNotification) => {
     if (!notification.isRead) {
@@ -109,6 +115,32 @@ export function NotificationPopover({
       case 'subscription':
         router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);
         break;
+      case 'tod_connect':
+      case 'comment_connect':
+        // Phase-2 T/D and Comment Connect: Navigate to the Phase-2 chat
+        if (notification.data?.conversationId) {
+          router.push(`/(main)/incognito-chat?id=${notification.data.conversationId}&${notifParams}${dedupeParam}` as any);
+        }
+        break;
+      // P1-001 FIX: Phase-2 match notification - navigate to Phase-2 chat
+      case 'phase2_match':
+        if (notification.data?.conversationId) {
+          router.push(`/(main)/incognito-chat?id=${notification.data.conversationId}&${notifParams}${dedupeParam}` as any);
+        }
+        break;
+      // P1-001 FIX: Phase-2 like notification - navigate to Phase-2 likes screen
+      case 'phase2_like':
+        router.push({
+          pathname: '/(main)/(private)/(tabs)/desire',
+          params: {
+            focus: 'likes',
+            profileId: notification.data?.otherUserId,
+            source: 'notification',
+            notificationId: notification._id,
+            dedupeKey: notification.dedupeKey,
+          },
+        } as any);
+        break;
       default:
         break;
     }
@@ -138,6 +170,15 @@ export function NotificationPopover({
         return 'information-circle';
       case 'subscription':
         return 'card';
+      case 'tod_connect':
+        return 'flame';
+      case 'comment_connect':
+        return 'chatbubble-ellipses';
+      // P1-001 FIX: Phase-2 notification icons
+      case 'phase2_match':
+        return 'heart';
+      case 'phase2_like':
+        return 'heart-outline';
       default:
         return 'notifications';
     }
@@ -164,6 +205,15 @@ export function NotificationPopover({
         return '#607D8B';
       case 'system':
         return '#2196F3';
+      case 'tod_connect':
+        return '#FF7849'; // T/D orange flame color
+      case 'comment_connect':
+        return '#7C6AEF'; // Phase-2 purple accent
+      // P1-001 FIX: Phase-2 notification colors
+      case 'phase2_match':
+        return '#7C6AEF'; // Phase-2 purple accent for match
+      case 'phase2_like':
+        return '#9B7EF0'; // Phase-2 lighter purple for like
       default:
         return COLORS.textLight;
     }
@@ -214,8 +264,10 @@ export function NotificationPopover({
     </TouchableOpacity>
   );
 
-  // Limit to most recent 5 notifications for popover
-  const displayNotifications = notifications.slice(0, 5);
+  // DEFENSIVE: Filter out message types at render level (safety net), then limit to 5
+  const displayNotifications = notifications
+    .filter((n) => !BELL_RENDER_EXCLUDED.has(n.type))
+    .slice(0, 5);
 
   return (
     <Modal

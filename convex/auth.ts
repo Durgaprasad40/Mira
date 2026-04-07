@@ -541,6 +541,7 @@ export const registerWithEmail = mutation({
       dateOfBirth,
       gender,
       lgbtqSelf: lgbtqSelf ?? [], // LGBTQ identity (optional, max 2)
+      lgbtqPreference: [], // P0 FIX: LGBTQ dating preference (optional, max 2)
       bio: "",
       isVerified: false,
       // 8B: Email starts unverified
@@ -1358,10 +1359,12 @@ export const getOrCreateUserByIdentity = mutation({
     // -------------------------------------------------------------------------
     let existingUser = null;
 
-    if (email) {
+    // P0-007 FIX: Normalize email for consistent lookup
+    const normalizedEmailLookup = email?.toLowerCase().trim();
+    if (normalizedEmailLookup) {
       existingUser = await ctx.db
         .query("users")
-        .withIndex("by_email", (q) => q.eq("email", email))
+        .withIndex("by_email", (q) => q.eq("email", normalizedEmailLookup))
         .first();
     }
 
@@ -1826,10 +1829,12 @@ export const checkIdentityExists = query({
 
     let user = null;
 
-    if (email) {
+    // P0-007 FIX: Normalize email for consistent lookup
+    const normalizedEmail = email?.toLowerCase().trim();
+    if (normalizedEmail) {
       user = await ctx.db
         .query("users")
-        .withIndex("by_email", (q) => q.eq("email", email))
+        .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
         .first();
     } else if (phone) {
       user = await ctx.db
@@ -2216,9 +2221,11 @@ export const checkPhoneExists = query({
 export const checkEmailExists = query({
   args: { email: v.string() },
   handler: async (ctx, args) => {
+    // P0-007 FIX: Normalize email for consistent lookup
+    const normalizedEmail = args.email.toLowerCase().trim();
     const user = await ctx.db
       .query("users")
-      .withIndex("by_email", (q) => q.eq("email", args.email))
+      .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
       .first();
     if (!user) return { exists: false };
     return { exists: true };

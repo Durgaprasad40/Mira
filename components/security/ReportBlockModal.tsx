@@ -7,6 +7,11 @@ import {
   Modal,
   TextInput,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
+  Keyboard,
+  Pressable,
+  BackHandler,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useMutation } from "convex/react";
@@ -14,8 +19,10 @@ import { api } from "@/convex/_generated/api";
 import { COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
+import { useAuthStore } from "@/stores/authStore";
 import { Toast } from "@/components/ui/Toast";
 import { trackEvent } from "@/lib/analytics";
+import { useEffect } from "react";
 
 interface Props {
   visible: boolean;
@@ -24,12 +31,19 @@ interface Props {
   reportedUserName: string;
   currentUserId: string;
   conversationId?: string;
-  matchId?: string; // For unmatch functionality
+  matchId?: string;
   onBlockSuccess?: () => void;
   onUnmatchSuccess?: () => void;
 }
 
-type ActionType = 'unmatch' | 'uncrush' | 'block' | 'report' | 'spam' | 'scam' | 'other';
+type ActionType = 'unmatch' | 'uncrush' | 'block' | 'report' | 'inappropriate' | 'other';
+type ViewState = 'main' | 'report' | 'other';
+
+// Report reason options (simplified for messages context)
+const REPORT_REASONS = [
+  { key: 'inappropriate', label: 'Inappropriate Content', icon: 'warning-outline' as const },
+  { key: 'other', label: 'Other', icon: 'ellipsis-horizontal' as const },
+];
 
 export function ReportBlockModal({
   visible,
@@ -42,12 +56,42 @@ export function ReportBlockModal({
   onBlockSuccess,
   onUnmatchSuccess,
 }: Props) {
-  const [showOtherInput, setShowOtherInput] = useState(false);
+  const [viewState, setViewState] = useState<ViewState>('main');
   const [otherReason, setOtherReason] = useState("");
 
   const blockMutation = useMutation(api.users.blockUser);
   const reportMutation = useMutation(api.users.reportUser);
   const unmatchMutation = useMutation(api.matches.unmatch);
+  const uncrushMutation = useMutation(api.likes.uncrush);
+
+  // Handle Android back button - navigate within views before closing
+  useEffect(() => {
+    if (!visible) return;
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (viewState === 'other') {
+        Keyboard.dismiss();
+        setOtherReason("");
+        setViewState('report');
+        return true; // Prevent default back behavior
+      } else if (viewState === 'report') {
+        setViewState('main');
+        return true;
+      }
+      // viewState === 'main' - let modal close
+      return false;
+    });
+
+    return () => backHandler.remove();
+  }, [visible, viewState]);
+
+  // Reset state when modal closes
+  useEffect(() => {
+    if (!visible) {
+      setViewState('main');
+      setOtherReason("");
+    }
+  }, [visible]);
 
   // Track action with standard payload
   const logAction = (action: ActionType, reason?: string) => {
@@ -70,12 +114,26 @@ export function ReportBlockModal({
   };
 
   const resetAndClose = () => {
-    setShowOtherInput(false);
+    Keyboard.dismiss();
+    setViewState('main');
     setOtherReason("");
     onClose();
   };
 
-  // Unmatch: confirm dialog then remove match (separate from block)
+  // Handle modal close request (Android back when on main view)
+  const handleRequestClose = () => {
+    if (viewState === 'other') {
+      Keyboard.dismiss();
+      setOtherReason("");
+      setViewState('report');
+    } else if (viewState === 'report') {
+      setViewState('main');
+    } else {
+      resetAndClose();
+    }
+  };
+
+  // Unmatch: confirm dialog then remove match
   const handleUnmatch = () => {
     Alert.alert(
       "Unmatch?",
@@ -88,7 +146,6 @@ export function ReportBlockModal({
           onPress: async () => {
             logAction('unmatch');
             if (isDemoMode) {
-              // Demo mode: remove match and conversation
               useDemoStore.getState().removeMatch(reportedUserId);
               Toast.show(`Unmatched with ${reportedUserName}`);
               resetAndClose();
@@ -96,14 +153,12 @@ export function ReportBlockModal({
               return;
             }
 
-            // Convex mode: call unmatch mutation
             if (!matchId) {
               Alert.alert("Error", "Cannot unmatch: match information not available.");
               return;
             }
 
             try {
-              // AUTH FIX: Pass authUserId for server-side resolution
               await unmatchMutation({
                 matchId: matchId as any,
                 authUserId: currentUserId,
@@ -129,20 +184,38 @@ export function ReportBlockModal({
         { text: "Cancel", style: "cancel" },
         {
           text: "Yes",
-          onPress: () => {
+          onPress: async () => {
             logAction('uncrush');
             if (isDemoMode) {
               useDemoStore.getState().removeLike(reportedUserId);
+              Toast.show(`Removed crush on ${reportedUserName}`);
+              resetAndClose();
+              return;
             }
-            Toast.show(`Removed crush on ${reportedUserName}`);
-            resetAndClose();
+
+            const token = useAuthStore.getState().token;
+            if (!token) {
+              Alert.alert("Error", "Session expired. Please log in again.");
+              return;
+            }
+
+            try {
+              await uncrushMutation({
+                token,
+                targetUserId: reportedUserId as any,
+              });
+              Toast.show(`Removed crush on ${reportedUserName}`);
+              resetAndClose();
+            } catch (error: any) {
+              Alert.alert("Error", error.message || "Failed to remove crush.");
+            }
           },
         },
       ]
     );
   };
 
-  // Block: keep existing behavior
+  // Block: persist to backend AND update local store
   const handleBlock = async () => {
     logAction('block');
     if (isDemoMode) {
@@ -158,6 +231,8 @@ export function ReportBlockModal({
         authUserId: currentUserId,
         blockedUserId: reportedUserId as any,
       });
+      const { useBlockStore } = await import('@/stores/blockStore');
+      useBlockStore.getState().blockUser(reportedUserId);
       resetAndClose();
       Toast.show(`${reportedUserName} blocked`);
       onBlockSuccess?.();
@@ -166,9 +241,27 @@ export function ReportBlockModal({
     }
   };
 
-  // Report: submit to backend
-  const handleReport = async () => {
-    logAction('report');
+  // Open report reasons view
+  const handleReportPress = () => {
+    setViewState('report');
+  };
+
+  // Handle report reason selection
+  const handleReportReason = async (reasonKey: string) => {
+    if (reasonKey === 'other') {
+      setViewState('other');
+      return;
+    }
+
+    const reasonMap: Record<string, { reason: string; description?: string }> = {
+      'inappropriate': { reason: 'inappropriate_photos' },
+    };
+
+    const reportData = reasonMap[reasonKey];
+    if (!reportData) return;
+
+    logAction(reasonKey as ActionType);
+
     if (isDemoMode) {
       Toast.show("Report submitted");
       resetAndClose();
@@ -179,63 +272,14 @@ export function ReportBlockModal({
       await reportMutation({
         authUserId: currentUserId,
         reportedUserId: reportedUserId as any,
-        reason: 'inappropriate_photos',
+        reason: reportData.reason as any,
+        ...(reportData.description ? { description: reportData.description } : {}),
       });
       Toast.show("Report submitted");
       resetAndClose();
     } catch (error: any) {
       Alert.alert("Error", error.message || "Failed to submit report.");
     }
-  };
-
-  // Spam: submit to backend
-  const handleSpam = async () => {
-    logAction('spam');
-    if (isDemoMode) {
-      Toast.show("Marked as spam");
-      resetAndClose();
-      return;
-    }
-
-    try {
-      await reportMutation({
-        authUserId: currentUserId,
-        reportedUserId: reportedUserId as any,
-        reason: 'spam',
-      });
-      Toast.show("Marked as spam");
-      resetAndClose();
-    } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to submit report.");
-    }
-  };
-
-  // Scam: submit to backend (maps to 'other' with description)
-  const handleScam = async () => {
-    logAction('scam');
-    if (isDemoMode) {
-      Toast.show("Reported as scam");
-      resetAndClose();
-      return;
-    }
-
-    try {
-      await reportMutation({
-        authUserId: currentUserId,
-        reportedUserId: reportedUserId as any,
-        reason: 'other',
-        description: 'Scam/fraudulent behavior',
-      });
-      Toast.show("Reported as scam");
-      resetAndClose();
-    } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to submit report.");
-    }
-  };
-
-  // Other: open text input modal
-  const handleOtherPress = () => {
-    setShowOtherInput(true);
   };
 
   // Submit Other reason
@@ -248,7 +292,7 @@ export function ReportBlockModal({
     logAction('other', trimmed);
 
     if (isDemoMode) {
-      Toast.show("Feedback submitted");
+      Toast.show("Report submitted");
       resetAndClose();
       return;
     }
@@ -260,33 +304,26 @@ export function ReportBlockModal({
         reason: 'other',
         description: trimmed,
       });
-      Toast.show("Feedback submitted");
+      Toast.show("Report submitted");
       resetAndClose();
     } catch (error: any) {
       Alert.alert("Error", error.message || "Failed to submit report.");
     }
   };
 
-  const handleOtherCancel = () => {
-    setShowOtherInput(false);
-    setOtherReason("");
+  const handleBack = () => {
+    Keyboard.dismiss();
+    if (viewState === 'other') {
+      setOtherReason("");
+      setViewState('report');
+    } else if (viewState === 'report') {
+      setViewState('main');
+    }
   };
 
-  // Main action sheet
+  // Main action sheet - minimal top-level options
   const renderMain = () => (
     <View style={styles.content}>
-      {/* Unmatch - only show if there's a matchId (matched users) */}
-      {matchId && (
-        <>
-          <TouchableOpacity style={styles.actionRow} onPress={handleUnmatch}>
-            <Ionicons name="close-circle-outline" size={20} color={COLORS.textLight} />
-            <Text style={styles.actionText}>Unmatch</Text>
-          </TouchableOpacity>
-          <View style={styles.divider} />
-        </>
-      )}
-
-      {/* Uncrush */}
       <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>
         <Ionicons name="heart-dislike-outline" size={20} color={COLORS.textLight} />
         <Text style={styles.actionText}>Uncrush</Text>
@@ -294,7 +331,6 @@ export function ReportBlockModal({
 
       <View style={styles.divider} />
 
-      {/* Block */}
       <TouchableOpacity style={styles.actionRow} onPress={handleBlock}>
         <Ionicons name="ban" size={20} color={COLORS.error} />
         <Text style={[styles.actionText, { color: COLORS.error }]}>Block</Text>
@@ -302,47 +338,68 @@ export function ReportBlockModal({
 
       <View style={styles.divider} />
 
-      {/* Report */}
-      <TouchableOpacity style={styles.actionRow} onPress={handleReport}>
+      <TouchableOpacity style={styles.actionRow} onPress={handleReportPress}>
         <Ionicons name="flag-outline" size={20} color={COLORS.warning} />
         <Text style={[styles.actionText, { color: COLORS.warning }]}>Report</Text>
+        <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} style={styles.chevron} />
       </TouchableOpacity>
 
-      <View style={styles.divider} />
-
-      {/* Spam */}
-      <TouchableOpacity style={styles.actionRow} onPress={handleSpam}>
-        <Ionicons name="megaphone-outline" size={20} color={COLORS.textLight} />
-        <Text style={styles.actionText}>Spam</Text>
-      </TouchableOpacity>
-
-      <View style={styles.divider} />
-
-      {/* Scam */}
-      <TouchableOpacity style={styles.actionRow} onPress={handleScam}>
-        <Ionicons name="alert-circle-outline" size={20} color={COLORS.textLight} />
-        <Text style={styles.actionText}>Scam</Text>
-      </TouchableOpacity>
-
-      <View style={styles.divider} />
-
-      {/* Other */}
-      <TouchableOpacity style={styles.actionRow} onPress={handleOtherPress}>
-        <Ionicons name="ellipsis-horizontal" size={20} color={COLORS.textLight} />
-        <Text style={styles.actionText}>Other</Text>
-      </TouchableOpacity>
-
-      {/* Cancel */}
       <TouchableOpacity style={styles.cancelButton} onPress={resetAndClose}>
         <Text style={styles.cancelText}>Cancel</Text>
       </TouchableOpacity>
     </View>
   );
 
-  // Other input modal (nested within the same overlay)
+  // Report reasons list
+  const renderReportReasons = () => (
+    <View style={styles.content}>
+      <View style={styles.reportHeader}>
+        <TouchableOpacity onPress={handleBack} style={styles.backButton}>
+          <Ionicons name="chevron-back" size={22} color={COLORS.text} />
+        </TouchableOpacity>
+        <Text style={styles.reportTitle}>Report {reportedUserName}</Text>
+        <View style={styles.backButton} />
+      </View>
+
+      <Text style={styles.reportSubtitle}>Why are you reporting this user?</Text>
+
+      {REPORT_REASONS.map((reason, index) => (
+        <React.Fragment key={reason.key}>
+          {index > 0 && <View style={styles.divider} />}
+          <TouchableOpacity
+            style={styles.actionRow}
+            onPress={() => handleReportReason(reason.key)}
+          >
+            <Ionicons name={reason.icon} size={20} color={COLORS.textLight} />
+            <Text style={styles.actionText}>{reason.label}</Text>
+            {reason.key === 'other' && (
+              <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} style={styles.chevron} />
+            )}
+          </TouchableOpacity>
+        </React.Fragment>
+      ))}
+
+      <TouchableOpacity style={styles.cancelButton} onPress={resetAndClose}>
+        <Text style={styles.cancelText}>Cancel</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  // Other input view - fixed height layout that works with keyboard
   const renderOtherInput = () => (
-    <View style={styles.otherInputContainer}>
-      <Text style={styles.otherTitle}>Tell us more</Text>
+    <View style={styles.otherContainer}>
+      {/* Header */}
+      <View style={styles.reportHeader}>
+        <TouchableOpacity onPress={handleBack} style={styles.backButton}>
+          <Ionicons name="chevron-back" size={22} color={COLORS.text} />
+        </TouchableOpacity>
+        <Text style={styles.reportTitle}>Other Reason</Text>
+        <View style={styles.backButton} />
+      </View>
+
+      <Text style={styles.otherSubtitle}>Please describe the issue</Text>
+
+      {/* Input area */}
       <TextInput
         style={styles.otherInput}
         placeholder="Enter your reason..."
@@ -354,59 +411,89 @@ export function ReportBlockModal({
         autoFocus
         autoComplete="off"
         textContentType="none"
-        importantForAutofill="noExcludeDescendants"
       />
+
+      <Text style={styles.charCount}>{otherReason.length}/300</Text>
+
+      {/* Buttons */}
       <View style={styles.otherButtons}>
-        <TouchableOpacity style={styles.otherCancelBtn} onPress={handleOtherCancel}>
-          <Text style={styles.otherCancelText}>Cancel</Text>
+        <TouchableOpacity style={styles.otherCancelBtn} onPress={handleBack}>
+          <Text style={styles.otherCancelText}>Back</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.otherSubmitBtn, !otherReason.trim() && styles.otherSubmitDisabled]}
           onPress={handleOtherSubmit}
           disabled={!otherReason.trim()}
         >
-          <Text style={styles.otherSubmitText}>Submit</Text>
+          <Text style={styles.otherSubmitText}>Submit Report</Text>
         </TouchableOpacity>
       </View>
     </View>
   );
+
+  // Render the current view
+  const renderCurrentView = () => {
+    switch (viewState) {
+      case 'report':
+        return renderReportReasons();
+      case 'other':
+        return renderOtherInput();
+      default:
+        return renderMain();
+    }
+  };
 
   return (
     <Modal
       visible={visible}
       transparent
       animationType="slide"
-      onRequestClose={resetAndClose}
+      onRequestClose={handleRequestClose}
     >
-      <TouchableOpacity
-        style={styles.overlay}
-        activeOpacity={1}
-        onPress={resetAndClose}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.modalContainer}
       >
-        <TouchableOpacity
-          style={styles.sheet}
-          activeOpacity={1}
-          onPress={() => {}}
-        >
+        {/* Backdrop - tap to close (only on main view) */}
+        <Pressable
+          style={styles.backdrop}
+          onPress={() => {
+            if (viewState === 'main') {
+              resetAndClose();
+            } else if (viewState === 'report') {
+              setViewState('main');
+            } else {
+              // On 'other' view, dismiss keyboard but don't close
+              Keyboard.dismiss();
+            }
+          }}
+        />
+
+        {/* Sheet content */}
+        <View style={styles.sheet}>
           <View style={styles.handle} />
-          {showOtherInput ? renderOtherInput() : renderMain()}
-        </TouchableOpacity>
-      </TouchableOpacity>
+          {renderCurrentView()}
+        </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: {
+  modalContainer: {
     flex: 1,
-    justifyContent: "flex-end",
+    justifyContent: 'flex-end',
+  },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: COLORS.overlay,
   },
   sheet: {
     backgroundColor: COLORS.background,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    paddingBottom: 40,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+    maxHeight: '80%',
   },
   handle: {
     width: 40,
@@ -432,6 +519,10 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "500",
     color: COLORS.text,
+    flex: 1,
+  },
+  chevron: {
+    marginLeft: 'auto',
   },
   divider: {
     height: 1,
@@ -446,18 +537,44 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: COLORS.textLight,
   },
-  // Other input styles
-  otherInputContainer: {
+  // Report reasons header
+  reportHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
     paddingHorizontal: 20,
-    paddingTop: 8,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  reportTitle: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: COLORS.text,
+    textAlign: 'center',
+    flex: 1,
+  },
+  reportSubtitle: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 20,
+  },
+  // Other input styles
+  otherContainer: {
     paddingBottom: 8,
   },
-  otherTitle: {
-    fontSize: 17,
-    fontWeight: "600",
-    color: COLORS.text,
-    textAlign: "center",
-    marginBottom: 12,
+  otherSubtitle: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 20,
   },
   otherInput: {
     borderWidth: 1,
@@ -466,13 +583,24 @@ const styles = StyleSheet.create({
     padding: 12,
     fontSize: 15,
     color: COLORS.text,
-    minHeight: 80,
+    minHeight: 100,
+    maxHeight: 150,
     textAlignVertical: "top",
+    marginHorizontal: 20,
+    backgroundColor: COLORS.background,
+  },
+  charCount: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    textAlign: 'right',
+    marginTop: 4,
     marginBottom: 16,
+    paddingHorizontal: 20,
   },
   otherButtons: {
     flexDirection: "row",
     gap: 12,
+    paddingHorizontal: 20,
   },
   otherCancelBtn: {
     flex: 1,

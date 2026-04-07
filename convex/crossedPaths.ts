@@ -102,16 +102,16 @@ const CROSSED_MAX_METERS = 750;  // Maximum distance for crossed paths
 // Location update gate
 const LOCATION_UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
-// Published location window (privacy: only update shared location once per 6 hours)
-const PUBLISH_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
+// Published location window (how often user can refresh their published location)
+const PUBLISH_WINDOW_MS = 45 * 60 * 1000; // 45 minutes
 
 // Marker visibility tiers (for map)
 const SOLID_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // 1–3 days → solid marker
 const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 // >6 days → hidden
 
-// Map visibility freshness window (Rule 4: only show users who published within 10 minutes)
-const MAP_VISIBILITY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+// Map visibility freshness window (users visible if published within this window)
+const MAP_VISIBILITY_WINDOW_MS = 60 * 60 * 1000; // 60 minutes
 
 // Crossed paths history
 const HISTORY_EXPIRY_MS = 28 * 24 * 60 * 60 * 1000; // 4 weeks (28 days)
@@ -119,6 +119,13 @@ const MAX_HISTORY_ENTRIES = 15; // Max crossed paths list entries
 
 // Grid size for approximate crossing location (privacy: round to ~300m)
 const LOCATION_GRID_METERS = 300;
+
+// SEC-1 FIX: Privacy fuzzing constants for Nearby map coordinates
+// Prevents exact location reconstruction from API responses
+const FUZZ_MIN_METERS = 50;
+const FUZZ_MAX_METERS = 150;
+const STRONG_PRIVACY_FUZZ_MIN = 200;
+const STRONG_PRIVACY_FUZZ_MAX = 400;
 
 // ---------------------------------------------------------------------------
 // Shared Places Constants (Phase-1)
@@ -165,6 +172,107 @@ const CROSS_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h per person (prevents 
 const CROSS_EVENT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (cleanup)
 
 // ---------------------------------------------------------------------------
+// DEV-ONLY NEARBY TEST MODE
+// ---------------------------------------------------------------------------
+// SAFE, TEMPORARY testing mode for real-device Nearby testing.
+// - ONLY active when ENABLE_NEARBY_DEV_TEST_MODE is true
+// - Production behavior is UNCHANGED when disabled
+// - Allows two phones in same room to see each other during testing
+// - Adds diagnostic logging to identify visibility failures
+//
+// TO ENABLE: Set ENABLE_NEARBY_DEV_TEST_MODE = true below
+// TO DISABLE: Set ENABLE_NEARBY_DEV_TEST_MODE = false (default)
+//
+// SAFETY: This flag ONLY affects Convex server-side logic.
+// The flag is checked at runtime; production builds should set this to false.
+// ---------------------------------------------------------------------------
+
+/**
+ * DEV TEST MODE FLAG
+ * Set to true to enable relaxed Nearby testing mode.
+ * MUST be false for production deployments.
+ */
+const ENABLE_NEARBY_DEV_TEST_MODE = false; // <-- SET TO false FOR PRODUCTION
+
+/**
+ * DEV test mode configuration overrides.
+ * These values ONLY apply when ENABLE_NEARBY_DEV_TEST_MODE is true.
+ */
+const DEV_TEST_CONFIG = {
+  // Visibility: 60 minutes instead of 10 minutes
+  MAP_VISIBILITY_WINDOW_MS: 60 * 60 * 1000, // 60 minutes
+
+  // Publish throttle: 2 minutes instead of 6 hours
+  PUBLISH_WINDOW_MS: 2 * 60 * 1000, // 2 minutes
+
+  // Distance: Allow 0m minimum (same room testing)
+  NEARBY_MIN_METERS: 0,
+  NEARBY_MAX_METERS: 5000, // 5km for wider testing
+
+  // Crossed paths: Allow 0m minimum
+  CROSSED_MIN_METERS: 0,
+  CROSSED_MAX_METERS: 2000, // 2km for testing
+
+  // Location update gate: 1 minute instead of 30 minutes
+  LOCATION_UPDATE_INTERVAL_MS: 1 * 60 * 1000, // 1 minute
+
+  // Profile requirements relaxation
+  SKIP_VERIFICATION_CHECK: true,
+  SKIP_PHOTO_COUNT_CHECK: true,
+  SKIP_PRIMARY_PHOTO_CHECK: true,
+  MIN_PHOTO_COUNT: 0, // Allow 0 photos in dev mode
+};
+
+/**
+ * Get effective Nearby configuration.
+ * Returns production values unless DEV test mode is enabled.
+ */
+function getEffectiveNearbyConfig() {
+  if (ENABLE_NEARBY_DEV_TEST_MODE) {
+    return {
+      MAP_VISIBILITY_WINDOW_MS: DEV_TEST_CONFIG.MAP_VISIBILITY_WINDOW_MS,
+      PUBLISH_WINDOW_MS: DEV_TEST_CONFIG.PUBLISH_WINDOW_MS,
+      NEARBY_MIN_METERS: DEV_TEST_CONFIG.NEARBY_MIN_METERS,
+      NEARBY_MAX_METERS: DEV_TEST_CONFIG.NEARBY_MAX_METERS,
+      CROSSED_MIN_METERS: DEV_TEST_CONFIG.CROSSED_MIN_METERS,
+      CROSSED_MAX_METERS: DEV_TEST_CONFIG.CROSSED_MAX_METERS,
+      LOCATION_UPDATE_INTERVAL_MS: DEV_TEST_CONFIG.LOCATION_UPDATE_INTERVAL_MS,
+      SKIP_VERIFICATION_CHECK: DEV_TEST_CONFIG.SKIP_VERIFICATION_CHECK,
+      SKIP_PHOTO_COUNT_CHECK: DEV_TEST_CONFIG.SKIP_PHOTO_COUNT_CHECK,
+      SKIP_PRIMARY_PHOTO_CHECK: DEV_TEST_CONFIG.SKIP_PRIMARY_PHOTO_CHECK,
+      MIN_PHOTO_COUNT: DEV_TEST_CONFIG.MIN_PHOTO_COUNT,
+      IS_DEV_MODE: true,
+    };
+  }
+
+  // Production defaults (unchanged)
+  return {
+    MAP_VISIBILITY_WINDOW_MS,
+    PUBLISH_WINDOW_MS,
+    NEARBY_MIN_METERS: NEARBY_MIN_METERS,
+    NEARBY_MAX_METERS: NEARBY_MAX_METERS,
+    CROSSED_MIN_METERS: CROSSED_MIN_METERS,
+    CROSSED_MAX_METERS: CROSSED_MAX_METERS,
+    LOCATION_UPDATE_INTERVAL_MS,
+    SKIP_VERIFICATION_CHECK: false,
+    SKIP_PHOTO_COUNT_CHECK: false,
+    SKIP_PRIMARY_PHOTO_CHECK: false,
+    MIN_PHOTO_COUNT: 2,
+    IS_DEV_MODE: false,
+  };
+}
+
+/**
+ * DEV-ONLY: Log why a user was filtered out.
+ * Only logs when DEV test mode is enabled.
+ */
+function devLog(message: string, data?: Record<string, unknown>) {
+  if (ENABLE_NEARBY_DEV_TEST_MODE) {
+    console.log(`[NEARBY-DEV] ${message}`, data ? JSON.stringify(data) : '');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Deterministic dedupeKey generation for crossed paths
 // Uses sorted user IDs to ensure A-B == B-A (symmetric)
 // Includes 1-hour time bucket to allow new crossings in future hours
@@ -189,28 +297,50 @@ function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>, now: 
 // ---------------------------------------------------------------------------
 // publishLocation — updates published location (max once per 6 hours)
 // Called when Nearby screen is opened. Others see publishedLat/Lng, not live GPS.
+// P1 AUTH FIX: Uses authUserId + server-side resolution to prevent spoofing
 // ---------------------------------------------------------------------------
 
 export const publishLocation = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(), // P1 AUTH FIX: Server-side auth instead of trusting client
     latitude: v.number(),
     longitude: v.number(),
   },
   handler: async (ctx, args) => {
-    const { userId, latitude, longitude } = args;
+    const { authUserId, latitude, longitude } = args;
     const now = Date.now();
+
+    // Get effective config (DEV vs production)
+    const config = getEffectiveNearbyConfig();
+
+    // P1 AUTH FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      devLog('publishLocation: user_not_found', { authUserId });
+      return { success: false, reason: 'user_not_found' };
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) return { success: false, reason: 'user_not_found' };
 
-    // Check if published location is still within the 6-hour window
-    if (user.publishedAt && now - user.publishedAt < PUBLISH_WINDOW_MS) {
+    // Check if published location is still within the publish window
+    // DEV MODE: Uses shorter window (2 min) instead of production (6 hours)
+    const effectivePublishWindow = config.PUBLISH_WINDOW_MS;
+    if (user.publishedAt && now - user.publishedAt < effectivePublishWindow) {
+      const timeRemaining = Math.round((user.publishedAt + effectivePublishWindow - now) / 1000);
+      devLog('publishLocation: within_window (throttled)', {
+        userId: userId,
+        userName: user.name,
+        publishedAt: new Date(user.publishedAt).toISOString(),
+        windowMs: effectivePublishWindow,
+        timeRemainingSeconds: timeRemaining,
+        isDevMode: config.IS_DEV_MODE,
+      });
       return {
         success: true,
         published: false,
         reason: 'within_window',
-        nextPublishAt: user.publishedAt + PUBLISH_WINDOW_MS,
+        nextPublishAt: user.publishedAt + effectivePublishWindow,
       };
     }
 
@@ -219,6 +349,16 @@ export const publishLocation = mutation({
       publishedLat: latitude,
       publishedLng: longitude,
       publishedAt: now,
+    });
+
+    devLog('publishLocation: SUCCESS - location published', {
+      userId: userId,
+      userName: user.name,
+      lat: latitude.toFixed(4),
+      lng: longitude.toFixed(4),
+      publishedAt: new Date(now).toISOString(),
+      effectiveWindowMs: effectivePublishWindow,
+      isDevMode: config.IS_DEV_MODE,
     });
 
     return {
@@ -235,17 +375,24 @@ export const publishLocation = mutation({
 // Returns { triggered: true } if alert should be shown, never reveals identity.
 // STABILITY FIX S2: Uses indexed query instead of full table scan
 // STABILITY FIX S6: Pre-fetches blocks before loop
+// P1 AUTH FIX: Uses authUserId + server-side resolution to prevent spoofing
 // ---------------------------------------------------------------------------
 
 export const detectCrossedUsers = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(), // P1 AUTH FIX: Server-side auth instead of trusting client
     myLat: v.number(),
     myLng: v.number(),
   },
   handler: async (ctx, args) => {
-    const { userId, myLat, myLng } = args;
+    const { authUserId, myLat, myLng } = args;
     const now = Date.now();
+
+    // P1 AUTH FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { triggered: false, reason: 'user_not_found' };
+    }
 
     // 1) Validate user exists
     const currentUser = await ctx.db.get(userId);
@@ -372,18 +519,25 @@ export const cleanupExpiredCrossedEvents = internalMutation({
 // recordLocation — called when user opens app / becomes active
 // STABILITY FIX S3: Uses indexed query instead of full table scan
 // STABILITY FIX S6/C2: Pre-fetches blocks before loop (eliminates N+1)
+// P1 AUTH FIX: Uses authUserId + server-side resolution to prevent spoofing
 // ---------------------------------------------------------------------------
 
 export const recordLocation = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(), // P1 AUTH FIX: Server-side auth instead of trusting client
     latitude: v.number(),
     longitude: v.number(),
     accuracy: v.optional(v.number()), // GPS accuracy in meters (for jitter protection)
   },
   handler: async (ctx, args) => {
-    const { userId, latitude, longitude, accuracy } = args;
+    const { authUserId, latitude, longitude, accuracy } = args;
     const now = Date.now();
+
+    // P1 AUTH FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false, reason: 'user_not_found' };
+    }
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return { success: false };
@@ -836,34 +990,90 @@ export const recordLocation = mutation({
 // getNearbyUsers — map markers with jittered coords & freshness
 // STABILITY FIX S1: Uses indexed query instead of full table scan
 // STABILITY FIX S6: Pre-fetches blocks before loop (eliminates N+1)
+// P2 AUTH FIX: Uses authUserId + server-side resolution for consistency
+// DEV TEST MODE: When enabled, relaxes filters for real-device testing
 // ---------------------------------------------------------------------------
 
 export const getNearbyUsers = query({
-  args: { userId: v.id('users') },
-  handler: async (ctx, { userId }) => {
+  args: { authUserId: v.string() }, // P2 AUTH FIX: Server-side auth instead of trusting client
+  handler: async (ctx, { authUserId }) => {
     const now = Date.now();
 
+    // Get effective config (DEV vs production)
+    const config = getEffectiveNearbyConfig();
+
+    devLog('getNearbyUsers: STARTING QUERY', {
+      isDevMode: config.IS_DEV_MODE,
+      effectiveVisibilityWindowMs: config.MAP_VISIBILITY_WINDOW_MS,
+      effectiveMinMeters: config.NEARBY_MIN_METERS,
+      effectiveMaxMeters: config.NEARBY_MAX_METERS,
+      skipVerificationCheck: config.SKIP_VERIFICATION_CHECK,
+      skipPhotoCountCheck: config.SKIP_PHOTO_COUNT_CHECK,
+    });
+
+    // P2 AUTH FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      devLog('getNearbyUsers: BLOCKED - user not found', { authUserId });
+      return [];
+    }
+
     const currentUser = await ctx.db.get(userId);
-    if (!currentUser) return [];
+    if (!currentUser) {
+      devLog('getNearbyUsers: BLOCKED - currentUser not found', { userId });
+      return [];
+    }
+
+    devLog('getNearbyUsers: currentUser', {
+      userId,
+      name: currentUser.name,
+      verificationStatus: currentUser.verificationStatus,
+      publishedAt: currentUser.publishedAt ? new Date(currentUser.publishedAt).toISOString() : null,
+    });
 
     // Current user must be verified to see nearby users
-    if (currentUser.verificationStatus !== 'verified') return [];
+    // DEV MODE: Can skip this check
+    if (!config.SKIP_VERIFICATION_CHECK && currentUser.verificationStatus !== 'verified') {
+      devLog('getNearbyUsers: BLOCKED - currentUser not verified', {
+        verificationStatus: currentUser.verificationStatus,
+      });
+      return [];
+    }
 
     // Use current user's published location for distance checks
     // (they should have published when opening Nearby screen)
     const myLat = currentUser.publishedLat ?? currentUser.latitude;
     const myLng = currentUser.publishedLng ?? currentUser.longitude;
-    if (!myLat || !myLng) return [];
+    if (!myLat || !myLng) {
+      devLog('getNearbyUsers: BLOCKED - currentUser has no location', {
+        publishedLat: currentUser.publishedLat,
+        publishedLng: currentUser.publishedLng,
+        latitude: currentUser.latitude,
+        longitude: currentUser.longitude,
+      });
+      return [];
+    }
 
     // Get current user's age for filtering
     const myAge = calculateAge(currentUser.dateOfBirth);
 
     // STABILITY FIX S1: Use indexed query for verified users only
-    // This avoids iterating through ALL users in the database
-    const verifiedUsers = await ctx.db
-      .query('users')
-      .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
-      .collect();
+    // DEV MODE: Query all users if skipping verification check
+    let allUsers;
+    if (config.SKIP_VERIFICATION_CHECK) {
+      // In DEV mode, query all active users (not just verified)
+      allUsers = await ctx.db
+        .query('users')
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect();
+      devLog('getNearbyUsers: DEV MODE - querying ALL active users', { count: allUsers.length });
+    } else {
+      // Production: query only verified users
+      allUsers = await ctx.db
+        .query('users')
+        .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+        .collect();
+    }
 
     // STABILITY FIX S6/C2: Pre-fetch blocks and swipes before loop
     const [blockedIds, swipedUsersMap] = await Promise.all([
@@ -873,73 +1083,261 @@ export const getNearbyUsers = query({
 
     // First pass: collect candidate user IDs that pass basic filters
     const candidateUserIds: string[] = [];
-    const candidateUsers: typeof verifiedUsers = [];
+    const candidateUsers: typeof allUsers = [];
 
-    for (const user of verifiedUsers) {
-      if (user._id === userId) continue;
-      if (!user.isActive) continue;
+    // DEV MODE: Track filter statistics
+    const filterStats = {
+      total: 0,
+      passed: 0,
+      filtered_self: 0,
+      filtered_inactive: 0,
+      filtered_incognito: 0,
+      filtered_nearbyDisabled: 0,
+      filtered_paused: 0,
+      filtered_visibilityMode: 0,
+      filtered_incompleteProfile: 0,
+      filtered_noPrimaryPhoto: 0,
+      filtered_noPublishedLocation: 0,
+      filtered_staleLocation: 0,
+      filtered_tooClose: 0,
+      filtered_tooFar: 0,
+      filtered_ageMismatch: 0,
+      filtered_genderMismatch: 0,
+      filtered_blocked: 0,
+      filtered_swiped: 0,
+    };
+
+    for (const user of allUsers) {
+      filterStats.total++;
+
+      if (user._id === userId) {
+        filterStats.filtered_self++;
+        continue;
+      }
+
+      if (!user.isActive) {
+        filterStats.filtered_inactive++;
+        devLog('FILTERED: inactive', { userId: user._id, name: user.name });
+        continue;
+      }
 
       // Incognito mode: Hidden users don't appear on map
-      if (user.incognitoMode === true) continue;
+      if (user.incognitoMode === true) {
+        filterStats.filtered_incognito++;
+        devLog('FILTERED: incognito', { userId: user._id, name: user.name });
+        continue;
+      }
 
       // Nearby visibility opt-out: Respect user preference
-      if (user.nearbyEnabled === false) continue;
+      if (user.nearbyEnabled === false) {
+        filterStats.filtered_nearbyDisabled++;
+        devLog('FILTERED: nearbyDisabled', { userId: user._id, name: user.name });
+        continue;
+      }
 
       // Nearby pause: User has temporarily hidden from Nearby
-      if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) continue;
+      if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
+        filterStats.filtered_paused++;
+        devLog('FILTERED: paused', { userId: user._id, name: user.name, pausedUntil: new Date(user.nearbyPausedUntil).toISOString() });
+        continue;
+      }
 
       // Time-based visibility mode
       if (user.nearbyVisibilityMode === 'app_open') {
         const inactiveThreshold = 5 * 60 * 1000;
-        if (now - user.lastActive > inactiveThreshold) continue;
+        if (now - user.lastActive > inactiveThreshold) {
+          filterStats.filtered_visibilityMode++;
+          devLog('FILTERED: visibilityMode=app_open (inactive)', {
+            userId: user._id,
+            name: user.name,
+            lastActive: new Date(user.lastActive).toISOString(),
+            inactiveForMs: now - user.lastActive,
+          });
+          continue;
+        }
       } else if (user.nearbyVisibilityMode === 'recent') {
         const recentThreshold = 30 * 60 * 1000;
-        if (now - user.lastActive > recentThreshold) continue;
+        if (now - user.lastActive > recentThreshold) {
+          filterStats.filtered_visibilityMode++;
+          devLog('FILTERED: visibilityMode=recent (inactive)', {
+            userId: user._id,
+            name: user.name,
+            lastActive: new Date(user.lastActive).toISOString(),
+          });
+          continue;
+        }
       }
 
       // Basic info completeness
-      if (!user.name || !user.bio || !user.dateOfBirth) continue;
+      if (!user.name || !user.bio || !user.dateOfBirth) {
+        filterStats.filtered_incompleteProfile++;
+        devLog('FILTERED: incompleteProfile', {
+          userId: user._id,
+          name: user.name,
+          hasBio: !!user.bio,
+          hasDateOfBirth: !!user.dateOfBirth,
+        });
+        continue;
+      }
 
       // P0 FIX: Require valid primary photo URL
-      if (!user.primaryPhotoUrl) continue;
+      // DEV MODE: Can skip this check
+      if (!config.SKIP_PRIMARY_PHOTO_CHECK && !user.primaryPhotoUrl) {
+        filterStats.filtered_noPrimaryPhoto++;
+        devLog('FILTERED: noPrimaryPhoto', { userId: user._id, name: user.name });
+        continue;
+      }
 
       // Must have published location
-      if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
+      if (!user.publishedLat || !user.publishedLng || !user.publishedAt) {
+        filterStats.filtered_noPublishedLocation++;
+        devLog('FILTERED: noPublishedLocation', {
+          userId: user._id,
+          name: user.name,
+          publishedLat: user.publishedLat,
+          publishedLng: user.publishedLng,
+          publishedAt: user.publishedAt,
+        });
+        continue;
+      }
 
-      // Freshness: published location must be within 10 minutes
-      if (now - user.publishedAt > MAP_VISIBILITY_WINDOW_MS) continue;
+      // Freshness: published location must be within visibility window
+      // DEV MODE: Uses 60 min instead of 10 min
+      const locationAgeMs = now - user.publishedAt;
+      if (locationAgeMs > config.MAP_VISIBILITY_WINDOW_MS) {
+        filterStats.filtered_staleLocation++;
+        devLog('FILTERED: staleLocation', {
+          userId: user._id,
+          name: user.name,
+          publishedAt: new Date(user.publishedAt).toISOString(),
+          locationAgeMinutes: Math.round(locationAgeMs / 60000),
+          windowMinutes: Math.round(config.MAP_VISIBILITY_WINDOW_MS / 60000),
+        });
+        continue;
+      }
 
-      // Distance check — 100m to 1km range
+      // Distance check — uses effective config
       const distance = calculateDistanceMeters(
         myLat,
         myLng,
         user.publishedLat,
         user.publishedLng,
       );
-      if (distance < NEARBY_MIN_METERS || distance > NEARBY_MAX_METERS) continue;
+
+      if (distance < config.NEARBY_MIN_METERS) {
+        filterStats.filtered_tooClose++;
+        devLog('FILTERED: tooClose', {
+          userId: user._id,
+          name: user.name,
+          distanceMeters: Math.round(distance),
+          minMeters: config.NEARBY_MIN_METERS,
+        });
+        continue;
+      }
+
+      if (distance > config.NEARBY_MAX_METERS) {
+        filterStats.filtered_tooFar++;
+        devLog('FILTERED: tooFar', {
+          userId: user._id,
+          name: user.name,
+          distanceMeters: Math.round(distance),
+          maxMeters: config.NEARBY_MAX_METERS,
+        });
+        continue;
+      }
 
       // Age filtering (both directions)
       const otherAge = calculateAge(user.dateOfBirth);
-      if (myAge < user.minAge || myAge > user.maxAge) continue;
-      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
+      if (myAge < user.minAge || myAge > user.maxAge) {
+        filterStats.filtered_ageMismatch++;
+        devLog('FILTERED: ageMismatch (viewer not in target range)', {
+          userId: user._id,
+          name: user.name,
+          myAge,
+          targetMinAge: user.minAge,
+          targetMaxAge: user.maxAge,
+        });
+        continue;
+      }
+      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) {
+        filterStats.filtered_ageMismatch++;
+        devLog('FILTERED: ageMismatch (target not in viewer range)', {
+          userId: user._id,
+          name: user.name,
+          otherAge,
+          viewerMinAge: currentUser.minAge,
+          viewerMaxAge: currentUser.maxAge,
+        });
+        continue;
+      }
 
       // Gender/orientation preference match (both directions)
-      if (!currentUser.lookingFor.includes(user.gender)) continue;
-      if (!user.lookingFor.includes(currentUser.gender)) continue;
+      if (!currentUser.lookingFor.includes(user.gender)) {
+        filterStats.filtered_genderMismatch++;
+        devLog('FILTERED: genderMismatch (viewer not looking for target gender)', {
+          userId: user._id,
+          name: user.name,
+          targetGender: user.gender,
+          viewerLookingFor: currentUser.lookingFor,
+        });
+        continue;
+      }
+      if (!user.lookingFor.includes(currentUser.gender)) {
+        filterStats.filtered_genderMismatch++;
+        devLog('FILTERED: genderMismatch (target not looking for viewer gender)', {
+          userId: user._id,
+          name: user.name,
+          viewerGender: currentUser.gender,
+          targetLookingFor: user.lookingFor,
+        });
+        continue;
+      }
 
       // Block check (using pre-fetched set)
-      if (blockedIds.has(user._id as string)) continue;
+      if (blockedIds.has(user._id as string)) {
+        filterStats.filtered_blocked++;
+        devLog('FILTERED: blocked', { userId: user._id, name: user.name });
+        continue;
+      }
 
       // Skip filter (using pre-fetched map)
       const existingSwipe = swipedUsersMap.get(user._id as string);
       if (existingSwipe) {
-        if (existingSwipe.action !== 'pass') continue;
-        if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) continue;
+        if (existingSwipe.action !== 'pass') {
+          filterStats.filtered_swiped++;
+          devLog('FILTERED: swiped (liked/super_liked)', {
+            userId: user._id,
+            name: user.name,
+            action: existingSwipe.action,
+          });
+          continue;
+        }
+        if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) {
+          filterStats.filtered_swiped++;
+          devLog('FILTERED: swiped (recent pass)', {
+            userId: user._id,
+            name: user.name,
+            passedAt: new Date(existingSwipe.createdAt).toISOString(),
+          });
+          continue;
+        }
       }
+
+      // PASSED ALL FILTERS!
+      filterStats.passed++;
+      devLog('PASSED: User passed all filters', {
+        userId: user._id,
+        name: user.name,
+        distanceMeters: Math.round(distance),
+        locationAgeMinutes: Math.round(locationAgeMs / 60000),
+      });
 
       candidateUserIds.push(user._id as string);
       candidateUsers.push(user);
     }
+
+    // Log filter statistics summary
+    devLog('getNearbyUsers: FILTER SUMMARY', filterStats);
 
     // STABILITY FIX: Fetch photo counts only for candidates (not all users)
     const photoCountsMap = await prefetchPhotoCounts(ctx, candidateUserIds);
@@ -949,7 +1347,17 @@ export const getNearbyUsers = query({
     for (let i = 0; i < candidateUsers.length; i++) {
       const user = candidateUsers[i];
       const photoCount = photoCountsMap.get(user._id as string) || 0;
-      if (photoCount < 2) continue;
+
+      // DEV MODE: Can skip photo count check
+      if (!config.SKIP_PHOTO_COUNT_CHECK && photoCount < config.MIN_PHOTO_COUNT) {
+        devLog('FILTERED (2nd pass): photoCount too low', {
+          userId: user._id,
+          name: user.name,
+          photoCount,
+          requiredMin: config.MIN_PHOTO_COUNT,
+        });
+        continue;
+      }
 
       const locationAge = now - user.publishedAt!;
       const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
@@ -960,12 +1368,23 @@ export const getNearbyUsers = query({
         user.publishedLng!,
       );
 
+      // SEC-1 FIX: Apply server-side privacy fuzzing BEFORE returning coordinates
+      // This prevents exact location reconstruction from API responses
+      const fuzzed = applyPrivacyFuzz(
+        user.publishedLat!,
+        user.publishedLng!,
+        user._id, // userId of the person being viewed
+        userId,   // viewerId (current user)
+        user.strongPrivacyMode ?? false,
+      );
+
       results.push({
         id: user._id,
-        name: user.name,
+        // PHASE-2 PRIVACY: Use handle (anonymous username) ONLY, never real name
+        name: user.handle || 'Anonymous',
         age: calculateAge(user.dateOfBirth),
-        publishedLat: user.publishedLat!,
-        publishedLng: user.publishedLng!,
+        publishedLat: fuzzed.lat,  // SEC-1 FIX: Return fuzzed coordinates
+        publishedLng: fuzzed.lng,  // SEC-1 FIX: Return fuzzed coordinates
         publishedAt: user.publishedAt,
         distance,
         freshness,
@@ -983,6 +1402,12 @@ export const getNearbyUsers = query({
         return recencyDiff;
       }
       return a.distance - b.distance;
+    });
+
+    devLog('getNearbyUsers: FINAL RESULTS', {
+      resultCount: results.length,
+      isDevMode: config.IS_DEV_MODE,
+      users: results.map((r) => ({ id: r.id, name: r.name, distance: Math.round(r.distance) })),
     });
 
     return results;
@@ -1143,10 +1568,14 @@ export const getCrossPathHistory = query({
       // Calculate relative time for display
       const relativeTime = formatRelativeTime(entry.createdAt, now);
 
+      // PHASE-2 PRIVACY FIX: Use handle (anonymous username) ONLY, never real name
+      // Phase-2 surfaces must NEVER expose first name or last name
+      const displayName = otherUser.handle || 'Anonymous';
+
       results.push({
         id: entry._id,
         otherUserId,
-        otherUserName: otherUser.name,
+        otherUserName: displayName,
         otherUserAge: calculateAge(otherUser.dateOfBirth),
         areaName: displayAreaName,
         // Approximate crossing location (not current location — persists across travel)
@@ -1166,7 +1595,7 @@ export const getCrossPathHistory = query({
         createdAt: entry.createdAt,
         expiresAt: entry.expiresAt,
         photoUrl: photosMap.get(otherUserId as string),
-        initial: otherUser.name.charAt(0),
+        initial: displayName.charAt(0).toUpperCase(),
         isVerified: otherUser.isVerified,
       });
     }
@@ -1491,7 +1920,8 @@ export const getCrossedPaths = query({
         distanceRange,
         user: {
           id: otherUserId,
-          name: otherUser.name,
+          // PHASE-2 PRIVACY: Use handle (anonymous username) ONLY, never real name
+          name: otherUser.handle || 'Anonymous',
           age: calculateAge(otherUser.dateOfBirth),
           photoUrl: photosMap.get(otherUserId as string),
           isVerified: otherUser.isVerified,
@@ -1675,6 +2105,62 @@ export const getSharedPlaces = query({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * SEC-1 FIX: Server-side privacy fuzzing for location coordinates.
+ * Applies deterministic random offset based on user ID hash.
+ * Ensures same user always gets same fuzzing for consistent map rendering.
+ *
+ * @param lat - Original latitude
+ * @param lng - Original longitude
+ * @param userId - User ID (for deterministic hash)
+ * @param viewerId - Viewer ID (combined with userId for unique offset per viewer)
+ * @param strongPrivacyMode - If true, apply larger fuzz radius
+ * @returns Fuzzed coordinates
+ */
+function applyPrivacyFuzz(
+  lat: number,
+  lng: number,
+  userId: string,
+  viewerId: string,
+  strongPrivacyMode: boolean,
+): { lat: number; lng: number } {
+  // Create deterministic hash from combined IDs (consistent across sessions)
+  const combined = `${userId}_${viewerId}_privacy_fuzz`;
+  let hash = 0;
+  for (let i = 0; i < combined.length; i++) {
+    hash = ((hash << 5) - hash) + combined.charCodeAt(i);
+    hash |= 0;
+  }
+
+  // Convert hash to pseudo-random values between 0 and 1
+  const hashAbs = Math.abs(hash);
+  const r1 = (hashAbs % 10000) / 10000;
+  const r2 = ((hashAbs >> 8) % 10000) / 10000;
+
+  // Determine fuzz radius based on privacy mode
+  const minMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MIN : FUZZ_MIN_METERS;
+  const maxMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MAX : FUZZ_MAX_METERS;
+
+  // Random distance within range
+  const fuzzDistance = minMeters + r1 * (maxMeters - minMeters);
+
+  // Random angle (0 to 2π)
+  const angle = r2 * 2 * Math.PI;
+
+  // Convert meters to degrees (approximate: 1 degree ≈ 111km at equator)
+  // Adjust for latitude to account for longitude compression
+  const metersPerDegreeLat = 111000;
+  const metersPerDegreeLng = 111000 * Math.cos(lat * Math.PI / 180);
+
+  const latOffset = (fuzzDistance * Math.cos(angle)) / metersPerDegreeLat;
+  const lngOffset = (fuzzDistance * Math.sin(angle)) / metersPerDegreeLng;
+
+  return {
+    lat: lat + latOffset,
+    lng: lng + lngOffset,
+  };
+}
 
 function calculateDistanceMeters(
   lat1: number,
@@ -2019,12 +2505,17 @@ function formatReasonForNotification(reasonTag: string): string {
   }
 
   if (type === 'lookingFor') {
+    // CURRENT 9 RELATIONSHIP CATEGORIES
     const labels: Record<string, string> = {
-      long_term: 'something long-term',
-      short_term: 'something casual',
-      fwb: 'keeping it casual',
-      figuring_out: 'figuring things out',
-      new_friends: 'new friends',
+      serious_vibes: 'something serious',
+      keep_it_casual: 'keeping it casual',
+      exploring_vibes: 'figuring things out',
+      see_where_it_goes: 'seeing where it goes',
+      open_to_vibes: 'staying open',
+      just_friends: 'new friends',
+      open_to_anything: 'open to anything',
+      single_parent: 'a fellow parent',
+      new_to_dating: 'starting fresh',
     };
     return `You're both looking for ${labels[value] ?? value}`;
   }

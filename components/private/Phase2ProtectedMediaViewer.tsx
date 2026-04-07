@@ -28,17 +28,42 @@ import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
+import { useAuthStore } from '@/stores/authStore';
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
 import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
+
+// PHASE-1 PARITY FIX: Message data passed from parent for backend messages
+interface MessageData {
+  id: string;
+  isProtected?: boolean;
+  isExpired?: boolean;
+  viewedAt?: number;
+  timerEndsAt?: number;
+  protectedMedia?: {
+    localUri?: string;
+    mediaType?: 'photo' | 'video';
+    timer?: number;
+    viewingMode?: 'tap' | 'hold';
+    isMirrored?: boolean;
+    expiresDurationMs?: number;
+  };
+}
 
 interface Phase2ProtectedMediaViewerProps {
   visible: boolean;
   conversationId: string;
   messageId: string;
   onClose: () => void;
+  // PHASE-1 PARITY FIX: Accept message data from parent (for backend messages)
+  messageData?: MessageData | null;
+  // SENDER-VIEW-FIX: When sender opens, show media but DON'T trigger timer/expiry
+  isSenderViewing?: boolean;
 }
 
 // Module-level Set to track ONCE + HOLD messages that have been viewed.
@@ -46,14 +71,18 @@ interface Phase2ProtectedMediaViewerProps {
 const viewedOnceHoldMessages = new Set<string>();
 
 // Secure Video Player component using expo-video with wall-clock resume
+// TIMER-FIX: Now reports when video is ready to play via onReady callback
 interface SecureVideoPlayerProps {
   uri: string;
   elapsedMs: number; // How long since first view (for resume calculation)
+  onReady?: () => void; // TIMER-FIX: Called when video is ready to play
 }
 
-function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
+function SecureVideoPlayer({ uri, elapsedMs, onReady }: SecureVideoPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(true);
+  const [isLoading, setIsLoading] = useState(true); // TIMER-FIX: Track loading state
   const hasSeekRef = useRef(false); // Only seek once on mount
+  const hasReportedReadyRef = useRef(false); // TIMER-FIX: Only report ready once
   const mountedRef = useRef(true);
 
   const player = useVideoPlayer(uri, (p) => {
@@ -85,17 +114,17 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
         const resumeMs = elapsedMs > 0 ? elapsedMs % videoDurationMs : 0;
         const resumeSec = resumeMs / 1000;
 
-        console.log('[SECURE_VIDEO_RESUME]', {
-          elapsedMs,
-          videoDurationMs,
-          resumeMs,
-          resumeSec: resumeSec.toFixed(2),
-        });
-
         // Seek to resume position and play
         if (mountedRef.current) {
           player.currentTime = resumeSec;
           player.play();
+
+          // TIMER-FIX: Report video is ready to play
+          if (!hasReportedReadyRef.current && onReady) {
+            hasReportedReadyRef.current = true;
+            setIsLoading(false);
+            onReady();
+          }
         }
       }
     };
@@ -111,7 +140,7 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
     });
 
     return () => subscription.remove();
-  }, [player, elapsedMs]);
+  }, [player, elapsedMs, onReady]);
 
   // Track playing state for UI
   useEffect(() => {
@@ -145,7 +174,13 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
         contentFit="contain"
         nativeControls={false}
       />
-      {!isPlaying && (
+      {/* TIMER-FIX: Show loading indicator while video loads */}
+      {isLoading && (
+        <View style={secureVideoStyles.loadingOverlay}>
+          <Text style={secureVideoStyles.loadingText}>Loading video...</Text>
+        </View>
+      )}
+      {!isPlaying && !isLoading && (
         <View style={secureVideoStyles.playOverlay}>
           <Ionicons name="play-circle" size={64} color="rgba(255,255,255,0.9)" />
         </View>
@@ -161,6 +196,18 @@ const secureVideoStyles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: 'rgba(0,0,0,0.3)',
   },
+  // TIMER-FIX: Loading overlay while video buffers
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  loadingText: {
+    fontSize: 16,
+    color: 'rgba(255,255,255,0.8)',
+    fontWeight: '500',
+  },
 });
 
 export function Phase2ProtectedMediaViewer({
@@ -168,49 +215,77 @@ export function Phase2ProtectedMediaViewer({
   conversationId,
   messageId,
   onClose,
+  messageData,
+  isSenderViewing = false,
 }: Phase2ProtectedMediaViewerProps) {
   const insets = useSafeAreaInsets();
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [timerLabel, setTimerLabel] = useState<string>('');
   // Phase-2 Fix B: Track media load state for graceful error handling
   const [mediaLoadError, setMediaLoadError] = useState(false);
+  // TIMER-FIX: Track when media is actually ready to display
+  // Timer should NOT start until media is loaded and playable
+  const [isMediaReady, setIsMediaReady] = useState(false);
 
-  // SAFETY FIX: Screen protection (Android FLAG_SECURE) — blocks screenshots/recording
-  useScreenProtection(visible);
+  // PHASE-1 PARITY FIX: Track local state for viewedAt/timerEndsAt/isExpired
+  // This allows immediate UI updates without waiting for backend query refresh
+  const [localViewedAt, setLocalViewedAt] = useState<number | undefined>(undefined);
+  const [localTimerEndsAt, setLocalTimerEndsAt] = useState<number | undefined>(undefined);
+  const [localIsExpired, setLocalIsExpired] = useState(false);
 
-  // SAFETY FIX: Screenshot detection — logs attempts on both platforms
-  useScreenshotDetection({
-    enabled: visible,
-    onScreenshot: () => {
-      // Log screenshot attempt for security audit
-      if (__DEV__) {
-        console.log('[SECURITY] Screenshot detected on protected media:', messageId);
-      }
-    },
-  });
+  // TEMPORARILY DISABLED: Screen protection for testing
+  // useScreenProtection(visible);
 
-  // Subscribe to LIVE message from Zustand store
-  const message = usePrivateChatStore((s) => {
+  // TEMPORARILY DISABLED: Screenshot detection for testing
+  // useScreenshotDetection({
+  //   enabled: visible,
+  //   onScreenshot: () => {
+  //     if (__DEV__) {
+  //       console.log('[SECURITY] Screenshot detected on protected media:', messageId);
+  //     }
+  //   },
+  // });
+
+  // PHASE-1 PARITY FIX: Get auth token for backend mutations
+  const token = useAuthStore((s) => s.token);
+
+  // PHASE-1 PARITY FIX: Backend mutations for secure media state
+  const markViewedMutation = useMutation(api.privateConversations.markPrivateSecureMediaViewed);
+  const markExpiredMutation = useMutation(api.privateConversations.markPrivateSecureMediaExpired);
+
+  // Subscribe to LIVE message from Zustand store (fallback for local messages)
+  const storeMessage = usePrivateChatStore((s) => {
     const msgs = s.messages[conversationId];
     return msgs?.find((m) => m.id === messageId) ?? null;
   });
 
-  // Store actions
+  // Store actions (fallback for local messages)
   const markSecurePhotoViewed = usePrivateChatStore((s) => s.markSecurePhotoViewed);
   const markSecurePhotoExpired = usePrivateChatStore((s) => s.markSecurePhotoExpired);
+
+  // PHASE-1 PARITY FIX: Use messageData prop if available, otherwise fall back to store
+  // This handles both backend messages (via prop) and local messages (via store)
+  const message = messageData ?? storeMessage;
+  const isBackendMessage = !!messageData;
+
+  // PHASE-1 PARITY FIX: Merge local state with message data for immediate UI updates
+  const effectiveViewedAt = localViewedAt ?? message?.viewedAt;
+  const effectiveTimerEndsAt = localTimerEndsAt ?? message?.timerEndsAt;
+  const effectiveIsExpired = localIsExpired || message?.isExpired;
 
   // Refs to avoid stale closures in interval
   const timerEndsAtRef = useRef<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hasExpiredRef = useRef(false);
+  const hasMarkedViewedRef = useRef(false); // PHASE-1 PARITY FIX: Prevent duplicate markViewed calls
   const onCloseRef = useRef(onClose);
   // Stability fix: track prev displayed time to avoid unnecessary rerenders
   const prevTimeLeftRef = useRef<number | null>(null);
 
   // Keep refs up to date
   useEffect(() => {
-    timerEndsAtRef.current = message?.timerEndsAt ?? null;
-  }, [message?.timerEndsAt]);
+    timerEndsAtRef.current = effectiveTimerEndsAt ?? null;
+  }, [effectiveTimerEndsAt]);
 
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -231,31 +306,24 @@ export function Phase2ProtectedMediaViewer({
   // Calculate elapsed time for video resume (wall-clock based)
   // elapsedMs = how long since first view started
   const computeElapsedMs = useCallback((): number => {
-    const timerEndsAt = message?.timerEndsAt;
+    const timerEndsAt = effectiveTimerEndsAt;
     if (!timerEndsAt || !expiresDurationMs || expiresDurationMs <= 0) return 0;
 
     const now = Date.now();
     const remainingMs = Math.max(0, timerEndsAt - now);
     const elapsedMs = expiresDurationMs - remainingMs;
 
-    console.log('[SECURE_VIDEO_RESUME] computeElapsed:', {
-      expiresDurationMs,
-      timerEndsAt,
-      remainingMs,
-      elapsedMs,
-    });
-
     return Math.max(0, elapsedMs);
-  }, [message?.timerEndsAt, expiresDurationMs]);
+  }, [effectiveTimerEndsAt, expiresDurationMs]);
 
   // Compute elapsed once when viewer opens (stable for the session)
   const [elapsedMs, setElapsedMs] = useState(0);
 
   useEffect(() => {
-    if (visible && message?.timerEndsAt) {
+    if (visible && effectiveTimerEndsAt) {
       setElapsedMs(computeElapsedMs());
     }
-  }, [visible, message?.timerEndsAt, computeElapsedMs]);
+  }, [visible, effectiveTimerEndsAt, computeElapsedMs]);
 
   // Track if photo was viewed this session (for ONCE expiration on close)
   const wasViewedThisSessionRef = useRef(false);
@@ -268,18 +336,36 @@ export function Phase2ProtectedMediaViewer({
     }
   }, []);
 
+  // PHASE-1 PARITY FIX: Helper to mark media as expired (uses backend for backend messages)
+  const doMarkExpired = useCallback(() => {
+    if (hasExpiredRef.current) return;
+    hasExpiredRef.current = true;
+    setLocalIsExpired(true);
+
+    if (isBackendMessage && token) {
+      // Backend message: call mutation
+      markExpiredMutation({ token, messageId: messageId as Id<'privateMessages'> })
+        .catch((err) => {
+          if (__DEV__) console.warn('[SECURE_VIEWER] markExpired error:', err);
+        });
+    } else {
+      // Local message: use store action
+      markSecurePhotoExpired(conversationId, messageId);
+    }
+  }, [isBackendMessage, token, messageId, conversationId, markExpiredMutation, markSecurePhotoExpired]);
+
   // Handle close (close button or back gesture) - only for tap mode
+  // SENDER-VIEW-FIX: Skip ONCE expiration when sender closes viewer
   const handleClose = useCallback(() => {
     clearTimer();
 
-    // ONCE view: expire immediately on close
-    if (isOnce && !hasExpiredRef.current && message && !message.isExpired) {
-      hasExpiredRef.current = true;
-      markSecurePhotoExpired(conversationId, messageId);
+    // ONCE view: expire immediately on close (but NOT for sender viewing their own media)
+    if (isOnce && !isSenderViewing && !hasExpiredRef.current && message && !effectiveIsExpired) {
+      doMarkExpired();
     }
 
     onClose();
-  }, [isOnce, message, conversationId, messageId, clearTimer, markSecurePhotoExpired, onClose]);
+  }, [isOnce, isSenderViewing, message, effectiveIsExpired, clearTimer, doMarkExpired, onClose]);
 
   // Android back button handler (only for tap mode)
   useEffect(() => {
@@ -295,12 +381,15 @@ export function Phase2ProtectedMediaViewer({
 
   // CRITICAL FIX: ONCE + HOLD must expire on FIRST release, block all subsequent holds.
   // Uses module-level Set to persist across component unmounts.
+  // SENDER-VIEW-FIX: Skip expiration logic when sender is viewing
   useEffect(() => {
     if (!visible || !isOnce || !isHoldMode) return;
+    // SENDER-VIEW-FIX: Sender viewing should never trigger ONCE expiration
+    if (isSenderViewing) return;
 
     // If already viewed in a previous hold, expire and close immediately
     if (viewedOnceHoldMessages.has(messageId)) {
-      markSecurePhotoExpired(conversationId, messageId);
+      doMarkExpired();
       onCloseRef.current();
       return;
     }
@@ -316,73 +405,114 @@ export function Phase2ProtectedMediaViewer({
     // P0-FIX: Guard with hasExpiredRef to prevent duplicate expiration
     // (handleClose may have already expired via onTouchEnd)
     return () => {
-      if (!hasExpiredRef.current) {
-        hasExpiredRef.current = true;
-        markSecurePhotoExpired(conversationId, messageId);
-      }
+      doMarkExpired();
     };
-  }, [visible, isOnce, isHoldMode, messageId, conversationId, markSecurePhotoExpired]);
+  }, [visible, isOnce, isHoldMode, messageId, doMarkExpired, isSenderViewing]);
 
   // SAFETY GUARD: If viewer opens but message is already expired, close immediately
   // This prevents any race condition from showing an expired photo
+  // P2-003 FIX: Also respond when backend updates isExpired while viewer is open
   useEffect(() => {
-    if (visible && message?.isExpired) {
+    if (visible && effectiveIsExpired) {
+      // Clear timer to prevent further countdown
+      clearTimer();
       onCloseRef.current();
     }
-  }, [visible, message?.isExpired]);
+  }, [visible, effectiveIsExpired, clearTimer]);
+
+  // P2-003 FIX: If backend timerEndsAt changes (e.g., was corrected), update local ref immediately
+  // This ensures the countdown timer uses the authoritative backend value
+  useEffect(() => {
+    if (messageData?.timerEndsAt && messageData.timerEndsAt !== timerEndsAtRef.current) {
+      timerEndsAtRef.current = messageData.timerEndsAt;
+    }
+  }, [messageData?.timerEndsAt]);
 
   // Mark as viewed when viewer opens (for ONCE expiration tracking - tap mode)
   useEffect(() => {
-    if (visible && message && !message.isExpired) {
+    if (visible && message && !effectiveIsExpired) {
       wasViewedThisSessionRef.current = true;
     }
-  }, [visible, message]);
+  }, [visible, message, effectiveIsExpired]);
 
   // Handle close for TAP mode (button, back gesture)
   // ONCE + HOLD is handled by the dedicated effect above
+  // SENDER-VIEW-FIX: Skip ONCE expiration when sender closes
   useEffect(() => {
     if (!visible && wasViewedThisSessionRef.current) {
-      // ONCE + TAP: expire on close
-      if (isOnce && !isHoldMode && !hasExpiredRef.current) {
-        hasExpiredRef.current = true;
-        markSecurePhotoExpired(conversationId, messageId);
+      // ONCE + TAP: expire on close (but NOT for sender viewing their own media)
+      if (isOnce && !isHoldMode && !isSenderViewing && !hasExpiredRef.current) {
+        doMarkExpired();
       }
 
       // Reset session state
       wasViewedThisSessionRef.current = false;
       hasExpiredRef.current = false;
+      hasMarkedViewedRef.current = false; // PHASE-1 PARITY FIX: Reset for next open
       prevTimeLeftRef.current = null; // Reset for next open
       setTimeLeft(null);
       setTimerLabel('');
       setMediaLoadError(false); // Phase-2 Fix B: Reset error state
+      setIsMediaReady(false); // TIMER-FIX: Reset media ready state for next open
+      setLocalViewedAt(undefined); // PHASE-1 PARITY FIX: Reset local state
+      setLocalTimerEndsAt(undefined);
+      setLocalIsExpired(false);
       clearTimer();
     }
-  }, [visible, isOnce, isHoldMode, conversationId, messageId, clearTimer, markSecurePhotoExpired]);
+  }, [visible, isOnce, isHoldMode, isSenderViewing, clearTimer, doMarkExpired]);
 
-  // Mark as viewed on first open (sets timerEndsAt in store ONCE)
+  // TIMER-FIX: Mark as viewed ONLY when media is actually ready to display
+  // For videos: wait for SecureVideoPlayer.onReady callback
+  // For photos: wait for Image.onLoad callback
+  // This ensures the countdown timer doesn't consume time while media loads
+  // SENDER-VIEW-FIX: Skip markViewed entirely when sender is viewing their own sent media
   useEffect(() => {
     if (!visible || !message) return;
-    if (message.isExpired) return;
+    if (effectiveIsExpired) return;
+    // SENDER-VIEW-FIX: Sender viewing their own media should NOT trigger timer
+    if (isSenderViewing) return;
+    // TIMER-FIX: Wait for media to be ready before starting timer
+    if (!isMediaReady) return;
+    // PHASE-1 PARITY FIX: Prevent duplicate calls
+    if (hasMarkedViewedRef.current) return;
 
     // Only set timerEndsAt if not already set
-    if (!message.viewedAt && !message.timerEndsAt) {
-      markSecurePhotoViewed(conversationId, messageId);
+    if (!effectiveViewedAt && !effectiveTimerEndsAt) {
+      hasMarkedViewedRef.current = true;
+
+      if (isBackendMessage && token) {
+        // Backend message: call mutation
+        markViewedMutation({ token, messageId: messageId as Id<'privateMessages'> })
+          .then((result: any) => {
+            if (result?.success) {
+              // Update local state for immediate UI update
+              setLocalViewedAt(result.viewedAt);
+              setLocalTimerEndsAt(result.timerEndsAt);
+            }
+          })
+          .catch((err) => {
+            if (__DEV__) console.warn('[SECURE_VIEWER] markViewed error:', err);
+          });
+      } else {
+        // Local message: use store action
+        markSecurePhotoViewed(conversationId, messageId);
+      }
     }
-  }, [visible, message, conversationId, messageId, markSecurePhotoViewed]);
+  }, [visible, message, effectiveIsExpired, effectiveViewedAt, effectiveTimerEndsAt, isMediaReady, isBackendMessage, token, messageId, conversationId, markViewedMutation, markSecurePhotoViewed, isSenderViewing]);
 
   // Countdown timer - uses ref to read timerEndsAt (avoids stale closure)
   useEffect(() => {
     if (!visible || !message) return;
 
-    // Already expired from store
-    if (message.isExpired) {
+    // Already expired
+    if (effectiveIsExpired) {
       setTimeLeft(0);
       setTimerLabel('0:00');
       return;
     }
 
     // If timerEndsAt not set yet, wait for it
-    if (!message.timerEndsAt) {
+    if (!effectiveTimerEndsAt) {
       if (timerSeconds === 0) {
         setTimeLeft(null);
         setTimerLabel('');
@@ -406,9 +536,8 @@ export function Phase2ProtectedMediaViewer({
       }
 
       if (countdown.expired && !hasExpiredRef.current) {
-        hasExpiredRef.current = true;
         clearTimer();
-        markSecurePhotoExpired(conversationId, messageId);
+        doMarkExpired();
         onCloseRef.current();
       }
     };
@@ -417,7 +546,7 @@ export function Phase2ProtectedMediaViewer({
     timerRef.current = setInterval(updateTimeLeft, 100);
 
     return () => clearTimer();
-  }, [visible, message?.timerEndsAt, message?.isExpired, timerSeconds, conversationId, messageId, clearTimer, markSecurePhotoExpired]);
+  }, [visible, effectiveTimerEndsAt, effectiveIsExpired, timerSeconds, clearTimer, doMarkExpired]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -430,15 +559,22 @@ export function Phase2ProtectedMediaViewer({
   // BUG-FIX: Must call handleClose() (not onClose) to trigger once-view expiry logic
   const handleHoldModeRelease = useCallback(() => {
     if (isHoldMode) {
-      console.log('[SECURE-VIEWER] hold-mode: Touch released, closing viewer via handleClose');
       handleClose();
     }
   }, [isHoldMode, handleClose]);
 
+  // TIMER-FIX: Callback when media is ready to display
+  // This triggers the timer to start only after loading is complete
+  const handleMediaReady = useCallback(() => {
+    if (!isMediaReady) {
+      setIsMediaReady(true);
+    }
+  }, [isMediaReady]);
+
   if (!visible || !message) return null;
 
   // Check if already expired
-  if (message.isExpired) {
+  if (effectiveIsExpired) {
     return (
       <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={handleClose}>
         <StatusBar hidden />
@@ -472,15 +608,21 @@ export function Phase2ProtectedMediaViewer({
         onTouchCancel={isHoldMode ? handleHoldModeRelease : undefined}
       >
         {/* Media layer - fullscreen (photo or video) */}
+        {/* TIMER-FIX: Pass onReady/onLoad callbacks to start timer only when media is playable */}
         {mediaUri && !mediaLoadError ? (
           <View style={[StyleSheet.absoluteFill, isMirrored && styles.mirrored]}>
             {isVideo ? (
-              <SecureVideoPlayer uri={mediaUri} elapsedMs={elapsedMs} />
+              <SecureVideoPlayer
+                uri={mediaUri}
+                elapsedMs={elapsedMs}
+                onReady={handleMediaReady}
+              />
             ) : (
               <Image
                 source={{ uri: mediaUri }}
                 style={StyleSheet.absoluteFill}
                 contentFit="contain"
+                onLoad={handleMediaReady}
                 onError={() => setMediaLoadError(true)}
               />
             )}

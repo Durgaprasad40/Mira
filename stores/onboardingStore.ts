@@ -74,6 +74,11 @@ function normalizePhotos(input: unknown): PhotoSlots9 {
     return result;
   }
 
+  // P1-001 FIX: Warn if photos array exceeds slot capacity (DEV only)
+  if (__DEV__ && input.length > 9) {
+    console.warn(`[ONB_STORE] normalizePhotos: ${input.length} photos provided, only first 9 will be used`);
+  }
+
   // ✅ PRODUCTION FIX: Copy ALL URIs without filtering
   // Previous code used isValidPhotoUri() which DELETED photos - removed for data safety
   for (let i = 0; i < Math.min(input.length, 9); i++) {
@@ -85,6 +90,57 @@ function normalizePhotos(input: unknown): PhotoSlots9 {
   }
 
   return result;
+}
+
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
+const ALLOWED_RELATIONSHIP_INTENTS = new Set([
+  'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes',
+  'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
+]);
+
+// Legacy → Current mapping for relationshipIntent values
+// These old values may exist in cached drafts or older user profiles
+const LEGACY_INTENT_MAP: Record<string, string> = {
+  'long_term': 'serious_vibes',
+  'short_term': 'keep_it_casual',
+  'fwb': 'keep_it_casual',
+  'figuring_out': 'exploring_vibes',
+  'short_to_long': 'see_where_it_goes',
+  'long_to_short': 'see_where_it_goes',
+  'casual': 'keep_it_casual',
+  'serious': 'serious_vibes',
+  'marriage': 'serious_vibes',
+  'friendship': 'just_friends',
+  'open': 'open_to_anything',
+};
+
+/**
+ * Normalize relationshipIntent values from backend draft.
+ * Maps legacy values to current schema and filters invalid values.
+ */
+function normalizeRelationshipIntent(arr: unknown): RelationshipIntent[] {
+  if (!arr || !Array.isArray(arr)) return [];
+
+  // Step 1: Map legacy values to current valid values
+  const mapped = arr.map(v => {
+    const strVal = typeof v === 'string' ? v : String(v);
+    return LEGACY_INTENT_MAP[strVal] || strVal;
+  });
+
+  // Step 2: Filter to only valid values
+  const sanitized = mapped.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+
+  // Step 3: Deduplicate
+  const deduped = [...new Set(sanitized)] as RelationshipIntent[];
+
+  if (__DEV__ && (arr.length !== deduped.length || arr.some((v, i) => v !== mapped[i]))) {
+    console.log('[ONB_STORE] relationshipIntent normalization:', {
+      original: arr,
+      mapped,
+      final: deduped,
+    });
+  }
+  return deduped;
 }
 
 // LGBTQ identity options (max 2 selections)
@@ -103,9 +159,8 @@ interface OnboardingState {
   email: string;
   phone: string;
   password: string;
-  firstName: string;
-  lastName: string;
-  nickname: string; // User ID / handle
+  name: string; // Single name field (replaces firstName + lastName)
+  nickname: string; // User ID / handle - NO uniqueness requirement
   dateOfBirth: string;
   gender: Gender | null;
   lgbtqSelf: LgbtqOption[]; // "What am I?" - identity, optional, max 2
@@ -133,7 +188,7 @@ interface OnboardingState {
 
   displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
   bio: string;
-  profilePrompts: { question: string; answer: string }[]; // Legacy prompt system
+  profilePrompts: { question: string; answer: string; section?: string }[]; // Section-based prompts
 
   // ═══════════════════════════════════════════════════════════════════════════════
   // NEW PROMPT SYSTEM V2 (2-Page Structure)
@@ -175,8 +230,7 @@ interface OnboardingState {
   setEmail: (email: string) => void;
   setPhone: (phone: string) => void;
   setPassword: (password: string) => void;
-  setFirstName: (firstName: string) => void;
-  setLastName: (lastName: string) => void;
+  setName: (name: string) => void; // Single name setter (replaces setFirstName + setLastName)
   setNickname: (nickname: string) => void;
   setDateOfBirth: (dob: string) => void;
   setGender: (gender: Gender) => void;
@@ -249,9 +303,8 @@ const initialState = {
   email: "",
   phone: "",
   password: "",
-  firstName: "",
-  lastName: "",
-  nickname: "",
+  name: "", // Single name field (replaces firstName + lastName)
+  nickname: "", // NO uniqueness requirement
   dateOfBirth: "",
   gender: null,
   lgbtqSelf: [] as LgbtqOption[],
@@ -317,28 +370,66 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
   _convexHydrated: false,
 
   // No-op for compatibility
-  setHasHydrated: (state) => set({ _hasHydrated: true }),
+  setHasHydrated: (state) => {
+    // LOOP FIX: Equality guard
+    if (get()._hasHydrated === true) return;
+    set({ _hasHydrated: true });
+  },
 
   // Set convex hydration complete
-  setConvexHydrated: () => set({ _convexHydrated: true }),
+  setConvexHydrated: () => {
+    // LOOP FIX: Equality guard
+    if (get()._convexHydrated === true) return;
+    set({ _convexHydrated: true });
+  },
 
-      setStep: (step) => set({ currentStep: step }),
+      setStep: (step) => {
+        // LOOP FIX: Equality guard
+        if (get().currentStep === step) return;
+        set({ currentStep: step });
+      },
 
-      setEmail: (email) => set({ email }),
+      setEmail: (email) => {
+        // LOOP FIX: Equality guard
+        if (get().email === email) return;
+        set({ email });
+      },
 
-      setPhone: (phone) => set({ phone }),
+      setPhone: (phone) => {
+        // LOOP FIX: Equality guard
+        if (get().phone === phone) return;
+        set({ phone });
+      },
 
-      setPassword: (password) => set({ password }),
+      setPassword: (password) => {
+        // LOOP FIX: Equality guard
+        if (get().password === password) return;
+        set({ password });
+      },
 
-      setFirstName: (firstName) => set({ firstName }),
+      setName: (name) => {
+        // LOOP FIX: Equality guard
+        if (get().name === name) return;
+        set({ name });
+      },
 
-      setLastName: (lastName) => set({ lastName }),
+      setNickname: (nickname) => {
+        // LOOP FIX: Equality guard
+        if (get().nickname === nickname) return;
+        set({ nickname });
+      },
 
-      setNickname: (nickname) => set({ nickname }),
+      setDateOfBirth: (dateOfBirth) => {
+        // LOOP FIX: Equality guard
+        if (get().dateOfBirth === dateOfBirth) return;
+        set({ dateOfBirth });
+      },
 
-      setDateOfBirth: (dateOfBirth) => set({ dateOfBirth }),
-
-      setGender: (gender) => set({ gender }),
+      setGender: (gender) => {
+        // LOOP FIX: Equality guard
+        if (get().gender === gender) return;
+        set({ gender });
+      },
 
       setLgbtqSelf: (lgbtqSelf) => set({ lgbtqSelf: lgbtqSelf.slice(0, 2) }),
 
@@ -577,31 +668,34 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
           lifeRhythm: { ...state.lifeRhythm, coreValues: coreValues.slice(0, 3) },
         })),
 
+      // P1-002 FIX: Use atomic set() callback to prevent race conditions on rapid toggles
       toggleLifeRhythmCoreValue: (value) => {
-        const state = useOnboardingStore.getState();
-        const currentValues = state.lifeRhythm.coreValues;
-        if (currentValues.includes(value)) {
-          // Remove value
-          set({
+        let success = true;
+        set((state) => {
+          const currentValues = state.lifeRhythm.coreValues;
+          if (currentValues.includes(value)) {
+            // Remove value
+            return {
+              lifeRhythm: {
+                ...state.lifeRhythm,
+                coreValues: currentValues.filter((v) => v !== value),
+              },
+            };
+          }
+          // Check max 3 limit
+          if (currentValues.length >= 3) {
+            success = false;
+            return state; // Return unchanged state
+          }
+          // Add value
+          return {
             lifeRhythm: {
               ...state.lifeRhythm,
-              coreValues: currentValues.filter((v) => v !== value),
+              coreValues: [...currentValues, value],
             },
-          });
-          return true;
-        }
-        // Check max 3 limit
-        if (currentValues.length >= 3) {
-          return false; // Max 3 selections reached
-        }
-        // Add value
-        set({
-          lifeRhythm: {
-            ...state.lifeRhythm,
-            coreValues: [...currentValues, value],
-          },
+          };
         });
-        return true;
+        return success;
       },
 
       // ═══════════════════════════════════════════════════════════════════════════════
@@ -671,18 +765,9 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
         const updates: Partial<OnboardingState> = {};
 
         // Basic Info - directly apply from draft (state is now reset)
-        // Parse backend 'name' into firstName/lastName for frontend display
+        // Single name field - no parsing needed
         if (draft.basicInfo) {
-          if (draft.basicInfo.name) {
-            const parts = draft.basicInfo.name.trim().split(/\s+/);
-            if (parts.length === 1) {
-              updates.firstName = parts[0];
-              updates.lastName = '';
-            } else {
-              updates.firstName = parts[0];
-              updates.lastName = parts.slice(1).join(' ');
-            }
-          }
+          if (draft.basicInfo.name) updates.name = draft.basicInfo.name;
           if (draft.basicInfo.handle) updates.nickname = draft.basicInfo.handle;
           if (draft.basicInfo.dateOfBirth) updates.dateOfBirth = draft.basicInfo.dateOfBirth;
           if (draft.basicInfo.gender) updates.gender = draft.basicInfo.gender;
@@ -760,7 +845,10 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
         // Preferences
         if (draft.preferences) {
           if (draft.preferences.lookingFor) updates.lookingFor = draft.preferences.lookingFor;
-          if (draft.preferences.relationshipIntent) updates.relationshipIntent = draft.preferences.relationshipIntent;
+          // STABILITY FIX: Normalize legacy relationshipIntent values from backend draft
+          if (draft.preferences.relationshipIntent) {
+            updates.relationshipIntent = normalizeRelationshipIntent(draft.preferences.relationshipIntent);
+          }
           if (draft.preferences.activities) updates.activities = draft.preferences.activities;
           if (draft.preferences.minAge !== undefined) updates.minAge = draft.preferences.minAge;
           if (draft.preferences.maxAge !== undefined) updates.maxAge = draft.preferences.maxAge;

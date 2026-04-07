@@ -5,6 +5,7 @@ import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 
 import { useAuthStore } from "@/stores/authStore";
 import { useBootStore } from "@/stores/bootStore";
+import { useOnboardingStore } from "@/stores/onboardingStore";
 import { getBootCache } from "@/stores/bootCache";
 import { getAuthBootCache, clearAuthBootCache, type AuthBootCacheData } from "@/stores/authBootCache";
 import { isDemoMode, convex } from "@/hooks/useConvex";
@@ -13,6 +14,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { COLORS } from "@/lib/constants";
 import { markTiming, markDuration } from "@/utils/startupTiming";
+import { startDiscoverPrefetch, clearDiscoverPrefetch } from "@/lib/discoverPrefetch";
 
 // =============================================================================
 // BOOT STATE MACHINE
@@ -44,7 +46,8 @@ type BootState =
   | "VALID_ONBOARD"
   | "INVALID"
   | "DEMO_HOME"
-  | "DEMO_WELCOME";
+  | "DEMO_WELCOME"
+  | "TIMEOUT_RETRY";  // TIMEOUT-FIX: New state for validation timeout with retry
 
 const H = (p: string) => p as unknown as Href;
 
@@ -103,7 +106,8 @@ export default function Index() {
     currentDemoUserId: string | null;
     demoOnboardingComplete: Record<string, boolean>;
   } | null>(null);
-  // FIX: Store resume route for VALID_ONBOARD state
+  // P1-003 FIX: Store resume route for VALID_ONBOARD state
+  // Reset when bootState changes to non-onboarding state to prevent route leakage
   const [onboardingResumeRoute, setOnboardingResumeRoute] = useState<string | null>(null);
 
   // ==========================================================================
@@ -114,6 +118,9 @@ export default function Index() {
   const hasLoadedCache = useRef(false);
   const hasValidated = useRef(false);
   const mounted = useRef(true);
+  // TIMEOUT-FIX: Track retry attempts for validation timeout
+  const validationRetryCount = useRef(0);
+  const MAX_VALIDATION_RETRIES = 2;
 
   // Cleanup on unmount
   useEffect(() => {
@@ -150,6 +157,15 @@ export default function Index() {
 
       if (!mounted.current) return;
 
+      // P0-004 FIX: Re-check logout state AFTER async cache read
+      // Logout could have occurred during the Promise.all wait
+      const postLoadAuthState = useAuthStore.getState();
+      if (postLoadAuthState.logoutInProgress || (postLoadAuthState.authVersion > 0 && !postLoadAuthState.token)) {
+        if (__DEV__) console.log('[BOOT] Logout detected after cache load, aborting auth restoration');
+        setBootState(isDemoMode ? "DEMO_WELCOME" : "NO_AUTH");
+        return;
+      }
+
       setAuthCache(authData);
       if (demoData) setDemoCache(demoData);
 
@@ -168,6 +184,12 @@ export default function Index() {
         // Live mode decision
         const hasValidToken = authData.token && authData.token.trim().length > 0;
         if (hasValidToken && authData.userId) {
+          // PERF: Start prefetching Discover profiles in parallel with validation
+          // This eliminates the serial wait: validate → navigate → mount → query
+          // Instead: validate + prefetch (parallel) → navigate → mount → render immediately
+          const currentAuthVersion = useAuthStore.getState().authVersion;
+          startDiscoverPrefetch(authData.userId, currentAuthVersion);
+
           setBootState("VALIDATING");
         } else {
           setBootState("NO_AUTH");
@@ -179,12 +201,19 @@ export default function Index() {
   }, []);
 
   // ==========================================================================
-  // STEP 2: Validate with backend (ONCE, only if VALIDATING)
+  // STEP 2: Validate with backend (with retry support for timeouts)
+  // ==========================================================================
+  // TIMEOUT-FIX: Separate timeout from invalid session
+  // - Timeout = network/query delay, should retry
+  // - Invalid = backend explicitly confirms user doesn't exist
   // ==========================================================================
 
   useEffect(() => {
-    if (bootState !== "VALIDATING" || hasValidated.current || !authCache) return;
-    hasValidated.current = true;
+    // TIMEOUT-FIX: Handle both VALIDATING and TIMEOUT_RETRY states
+    if (bootState !== "VALIDATING" && bootState !== "TIMEOUT_RETRY") return;
+    if (bootState === "VALIDATING" && hasValidated.current) return;
+    if (bootState === "VALIDATING") hasValidated.current = true;
+    if (!authCache) return;
 
     const { token, userId } = authCache;
     if (!token || !userId) {
@@ -203,9 +232,10 @@ export default function Index() {
 
     // Capture authVersion BEFORE async operation
     const capturedAuthVersion = currentAuthState.authVersion;
+    const retryAttempt = validationRetryCount.current;
 
     if (__DEV__) {
-      console.log(`[BOOT] Validating session, userId=${userId.substring(0, 10)}..., authVersion=${capturedAuthVersion}`);
+      console.log(`[BOOT] Validating session, userId=${userId.substring(0, 10)}..., authVersion=${capturedAuthVersion}, attempt=${retryAttempt + 1}`);
     }
 
     const validate = async () => {
@@ -224,6 +254,9 @@ export default function Index() {
 
         if (!mounted.current) return;
 
+        // Reset retry count on success
+        validationRetryCount.current = 0;
+
         // Check if logout happened during validation
         const currentState = useAuthStore.getState();
         if (currentState.logoutInProgress) {
@@ -238,9 +271,11 @@ export default function Index() {
         }
 
         if (!status) {
-          // User not found in database - clear stale auth
-          if (__DEV__) console.log("[BOOT] User not found (null status), clearing auth");
+          // User not found in database - THIS IS A TRUE INVALID SESSION
+          // Clear stale auth and prefetch, route to welcome
+          if (__DEV__) console.log("[BOOT] User not found (null status), clearing auth - TRUE INVALID");
           await clearAuthBootCache();
+          clearDiscoverPrefetch();
           setBootState("INVALID");
           return;
         }
@@ -274,36 +309,154 @@ export default function Index() {
           if (__DEV__) {
             console.log(`[BOOT] VALID_ONBOARD: lastStepKey=${lastStepKey}, resumeRoute=${resumeRoute}`);
           }
+
+          // DATA-1 FIX: Hydrate onboarding store BEFORE navigation
+          // We already have the draft data from getOnboardingStatus, so hydrate now
+          // This prevents the "pop in" effect where screens render empty then fill in
+          const onbStore = useOnboardingStore.getState();
+
+          // Step 1: Hydrate from draft (resets store, applies saved progress)
+          if (status.onboardingDraft) {
+            if (__DEV__) {
+              console.log('[BOOT] Pre-hydrating onboarding store from draft');
+            }
+            onbStore.hydrateFromDraft(status.onboardingDraft);
+          } else {
+            // No draft - just mark as hydrated
+            onbStore.hydrateFromDraft(null);
+          }
+
+          // Step 2: Apply user document basicInfo (authoritative, overrides stale draft)
+          // IDENTITY SIMPLIFICATION: Single name field
+          if (status.basicInfo) {
+            const { name, nickname, dateOfBirth, gender } = status.basicInfo;
+            if (name) {
+              onbStore.setName(name);
+            }
+            if (nickname) onbStore.setNickname(nickname);
+            if (dateOfBirth) onbStore.setDateOfBirth(dateOfBirth);
+            if (gender) {
+              const validGenders = ['male', 'female', 'non_binary'];
+              if (validGenders.includes(gender)) {
+                onbStore.setGender(gender as any);
+              }
+            }
+            if (__DEV__) {
+              console.log('[BOOT] Applied basicInfo from user document');
+            }
+          }
+
           setOnboardingResumeRoute(resumeRoute);
           setBootState("VALID_ONBOARD");
         }
 
       } catch (error) {
-        console.error("[BOOT] Validation failed:", error);
         if (!mounted.current) return;
 
-        // On validation failure, trust cached onboardingCompleted if available
+        // TIMEOUT-FIX: Distinguish timeout from actual validation failure
+        const isTimeoutError = error instanceof Error && error.message === "Validation timeout";
         const cachedOnbComplete = authCache.onboardingCompleted === true;
 
-        // Check logout state again
+        // Check logout state
         const currentState = useAuthStore.getState();
         if (currentState.logoutInProgress || currentState.authVersion !== capturedAuthVersion) {
           if (__DEV__) console.log("[BOOT] Logout during validation error handling, routing to welcome");
+          setOnboardingResumeRoute(null);
           setBootState("INVALID");
           return;
         }
+
+        // TIMEOUT-FIX: Debug logging for timeout handling
+        if (__DEV__) {
+          console.log('[BOOT_TIMEOUT_DEBUG]', {
+            hasToken: !!token,
+            userId: userId?.substring(0, 10),
+            onboardingCompletedCached: cachedOnbComplete,
+            authVersion: capturedAuthVersion,
+            failureType: isTimeoutError ? 'TIMEOUT' : 'ERROR',
+            retryAttempt,
+            maxRetries: MAX_VALIDATION_RETRIES,
+            willRetry: isTimeoutError && retryAttempt < MAX_VALIDATION_RETRIES,
+          });
+        }
+
+        if (isTimeoutError) {
+          // TIMEOUT-FIX: Timeout is NOT the same as invalid session
+          // Retry if we haven't exceeded max retries
+          if (retryAttempt < MAX_VALIDATION_RETRIES) {
+            if (__DEV__) {
+              console.log(`[BOOT] Validation timeout, retrying (attempt ${retryAttempt + 2}/${MAX_VALIDATION_RETRIES + 1})`);
+            }
+            validationRetryCount.current = retryAttempt + 1;
+            // Trigger retry by setting TIMEOUT_RETRY state
+            setBootState("TIMEOUT_RETRY");
+            return;
+          }
+
+          // All retries exhausted - but token exists, so trust cache if available
+          if (__DEV__) {
+            console.log(`[BOOT] All ${MAX_VALIDATION_RETRIES + 1} validation attempts timed out`);
+          }
+
+          if (cachedOnbComplete) {
+            // TIMEOUT-FIX: Trust cache for completed users after timeout
+            // SessionValidator will catch truly invalid sessions later
+            const accepted = useAuthStore.getState().setAuthenticatedSession(userId, token, true, capturedAuthVersion);
+            if (accepted) {
+              if (__DEV__) console.log("[BOOT] Timeout exhausted, trusting cached onboardingCompleted=true, proceeding to home");
+              setBootState("VALID_HOME");
+              return;
+            }
+          }
+
+          // TIMEOUT-FIX: Even without cached completion, keep trying
+          // Show loading state, don't route to welcome
+          // The user has a valid token - this is likely just network issues
+          if (__DEV__) {
+            console.log("[BOOT] Timeout exhausted, no cached completion - staying in loading state (NOT routing to welcome)");
+            console.log("[BOOT] Token exists, user should not be logged out due to timeout");
+          }
+
+          // Keep in VALIDATING state to show loading UI
+          // The bootStore safety timer will eventually kick in
+          // but we won't incorrectly route to welcome
+          // For now, trust the token and proceed to home as a fallback
+          const accepted = useAuthStore.getState().setAuthenticatedSession(userId, token, false, capturedAuthVersion);
+          if (accepted) {
+            // Go to onboarding flow - safer than welcome
+            if (__DEV__) console.log("[BOOT] Timeout fallback: proceeding to onboarding flow (safer than welcome)");
+            setOnboardingResumeRoute("/(onboarding)/basic-info");
+            setBootState("VALID_ONBOARD");
+          } else {
+            // Auth rejected - truly invalid
+            setBootState("INVALID");
+          }
+          return;
+        }
+
+        // Non-timeout error (actual failure)
+        console.error("[BOOT] Validation failed (non-timeout):", error);
 
         if (cachedOnbComplete) {
           // Trust cache for completed users (SessionValidator will catch truly invalid sessions)
           const accepted = useAuthStore.getState().setAuthenticatedSession(userId, token, true, capturedAuthVersion);
           if (accepted) {
-            if (__DEV__) console.log("[BOOT] Validation failed, trusting cached onboardingCompleted=true");
+            if (__DEV__) console.log("[BOOT] Validation failed (non-timeout), trusting cached onboardingCompleted=true");
             setBootState("VALID_HOME");
           } else {
             setBootState("INVALID");
           }
         } else {
-          // No cached completion - route to welcome
+          // Non-timeout error with no cached completion
+          // This might be a network error, not necessarily invalid session
+          // Still retry once for non-timeout errors too
+          if (retryAttempt < 1) {
+            if (__DEV__) console.log("[BOOT] Non-timeout error, retrying once");
+            validationRetryCount.current = retryAttempt + 1;
+            setBootState("TIMEOUT_RETRY");
+            return;
+          }
+          // After retry, if still failing with no cache, route to welcome
           if (__DEV__) console.log("[BOOT] Validation failed, no cached completion, routing to welcome");
           setBootState("INVALID");
         }
@@ -362,12 +515,15 @@ export default function Index() {
   // RENDER
   // ==========================================================================
 
-  // Show loading while in LOADING or VALIDATING state
-  if (bootState === "LOADING" || bootState === "VALIDATING") {
+  // Show loading while in LOADING, VALIDATING, or TIMEOUT_RETRY state
+  // TIMEOUT-FIX: TIMEOUT_RETRY should also show loading, not navigate to welcome
+  if (bootState === "LOADING" || bootState === "VALIDATING" || bootState === "TIMEOUT_RETRY") {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Loading...</Text>
+        <Text style={styles.loadingText}>
+          {bootState === "TIMEOUT_RETRY" ? "Reconnecting..." : "Loading..."}
+        </Text>
       </View>
     );
   }

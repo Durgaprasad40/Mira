@@ -28,10 +28,10 @@ interface ProtectedMediaOptionsSheetProps {
 }
 
 const TIMER_OPTIONS = [
-  { label: 'Off', value: 0 },
-  { label: '3s', value: 3 },
-  { label: '10s', value: 10 },
+  { label: 'Normal', value: 0 },
+  { label: 'View once', value: -1 },
   { label: '30s', value: 30 },
+  { label: '60s', value: 60 },
 ];
 
 export function ProtectedMediaOptionsSheet({
@@ -43,22 +43,22 @@ export function ProtectedMediaOptionsSheet({
   const insets = useSafeAreaInsets();
   const [timer, setTimer] = useState(0);
   const [screenshotAllowed, setScreenshotAllowed] = useState(false);
-  const [viewOnce, setViewOnce] = useState(false);
   const [watermark, setWatermark] = useState(false);
 
   const handleConfirm = () => {
-    onConfirm({ timer, screenshotAllowed, viewOnce, watermark });
+    // Derive viewOnce from timer selection (-1 = View once)
+    const viewOnce = timer === -1;
+    const effectiveTimer = viewOnce ? 0 : timer;
+    onConfirm({ timer: effectiveTimer, screenshotAllowed, viewOnce, watermark });
     // Reset for next use
     setTimer(0);
     setScreenshotAllowed(false);
-    setViewOnce(false);
     setWatermark(false);
   };
 
   const handleCancel = () => {
     setTimer(0);
     setScreenshotAllowed(false);
-    setViewOnce(false);
     setWatermark(false);
     onCancel();
   };
@@ -123,20 +123,6 @@ export function ProtectedMediaOptionsSheet({
               onValueChange={setScreenshotAllowed}
               trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
               thumbColor={screenshotAllowed ? COLORS.primary : COLORS.backgroundDark}
-            />
-          </View>
-
-          {/* View Once */}
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Ionicons name="eye-off-outline" size={20} color={COLORS.text} />
-              <Text style={styles.optionLabel}>View once</Text>
-            </View>
-            <Switch
-              value={viewOnce}
-              onValueChange={setViewOnce}
-              trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
-              thumbColor={viewOnce ? COLORS.primary : COLORS.backgroundDark}
             />
           </View>
 

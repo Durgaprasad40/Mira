@@ -71,13 +71,16 @@ export default function LookingForEdit() {
         >
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Edit Looking For</Text>
+        <View style={styles.headerTitleContainer}>
+          <Text style={styles.headerTitle}>What are you looking for here?</Text>
+          <Text style={styles.headerHelper}>Be honest — this helps us match you better</Text>
+        </View>
         <TouchableOpacity
           onPress={handleSave}
           disabled={!canSave}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
-          <Text style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}>Save</Text>
+          <Text style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}>Done</Text>
         </TouchableOpacity>
       </View>
 
@@ -87,9 +90,12 @@ export default function LookingForEdit() {
       >
         {/* Instructions */}
         <View style={styles.instructionBox}>
-          <Text style={styles.instructionTitle}>What are you looking for?</Text>
+          <View style={styles.instructionHeader}>
+            <Ionicons name="heart-outline" size={18} color={C.primary} />
+            <Text style={styles.instructionTitle}>Choose your intents</Text>
+          </View>
           <Text style={styles.instructionText}>
-            Select {PHASE2_MIN_INTENTS}-{PHASE2_MAX_INTENTS} intents that describe what you're seeking.
+            Pick {PHASE2_MIN_INTENTS}-{PHASE2_MAX_INTENTS} that describe what you're seeking. You can change these anytime.
           </Text>
         </View>
 
@@ -158,13 +164,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderBottomWidth: 1,
     borderBottomColor: C.surface,
   },
-  headerTitle: { fontSize: 18, fontWeight: '700', color: C.text },
+  headerTitleContainer: { flex: 1, marginHorizontal: 12 },
+  headerTitle: { fontSize: 15, fontWeight: '700', color: C.text },
+  headerHelper: { fontSize: 11, color: C.textLight, marginTop: 2 },
   saveBtn: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '600',
     color: C.primary,
   },
@@ -180,16 +188,21 @@ const styles = StyleSheet.create({
     padding: 16,
     marginBottom: 20,
   },
+  instructionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
   instructionTitle: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: C.text,
-    marginBottom: 6,
   },
   instructionText: {
     fontSize: 13,
     color: C.textLight,
-    lineHeight: 18,
+    lineHeight: 20,
   },
 
   // Counter

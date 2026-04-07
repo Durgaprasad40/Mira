@@ -956,6 +956,118 @@ export const deleteUserCompletely = mutation({
       deletedData.filterPresets++;
     }
 
+    // P0-001: Delete Truth or Dare data
+    const userIdStr = args.userId as string;
+
+    // Delete T/D prompts owned by user
+    const todPrompts = await ctx.db
+      .query("todPrompts")
+      .withIndex("by_owner", (q) => q.eq("ownerUserId", userIdStr))
+      .collect();
+    deletedData.todPrompts = 0;
+    for (const prompt of todPrompts) {
+      await ctx.db.delete(prompt._id);
+      deletedData.todPrompts++;
+    }
+
+    // Delete T/D answers by user
+    const todAnswers = await ctx.db
+      .query("todAnswers")
+      .withIndex("by_user", (q) => q.eq("userId", userIdStr))
+      .collect();
+    deletedData.todAnswers = 0;
+    for (const answer of todAnswers) {
+      // Delete associated media if exists
+      if (answer.mediaStorageId) {
+        try {
+          await ctx.storage.delete(answer.mediaStorageId);
+        } catch (e) {}
+      }
+      await ctx.db.delete(answer._id);
+      deletedData.todAnswers++;
+    }
+
+    // Delete T/D connect requests (sent or received)
+    const todConnectsSent = await ctx.db
+      .query("todConnectRequests")
+      .withIndex("by_from_to", (q) => q.eq("fromUserId", userIdStr))
+      .collect();
+    const todConnectsReceived = await ctx.db
+      .query("todConnectRequests")
+      .withIndex("by_to_user", (q) => q.eq("toUserId", userIdStr))
+      .collect();
+    deletedData.todConnectRequests = 0;
+    for (const req of [...todConnectsSent, ...todConnectsReceived]) {
+      await ctx.db.delete(req._id);
+      deletedData.todConnectRequests++;
+    }
+
+    // Delete T/D answer reactions by user
+    const todReactions = await ctx.db
+      .query("todAnswerReactions")
+      .withIndex("by_user", (q) => q.eq("userId", userIdStr))
+      .collect();
+    deletedData.todAnswerReactions = 0;
+    for (const reaction of todReactions) {
+      await ctx.db.delete(reaction._id);
+      deletedData.todAnswerReactions++;
+    }
+
+    // Delete T/D prompt reactions by user
+    const todPromptReactions = await ctx.db
+      .query("todPromptReactions")
+      .withIndex("by_user", (q) => q.eq("userId", userIdStr))
+      .collect();
+    deletedData.todPromptReactions = 0;
+    for (const reaction of todPromptReactions) {
+      await ctx.db.delete(reaction._id);
+      deletedData.todPromptReactions++;
+    }
+
+    // Delete T/D answer likes by user
+    const todLikes = await ctx.db
+      .query("todAnswerLikes")
+      .withIndex("by_user", (q) => q.eq("likedByUserId", userIdStr))
+      .collect();
+    deletedData.todAnswerLikes = 0;
+    for (const like of todLikes) {
+      await ctx.db.delete(like._id);
+      deletedData.todAnswerLikes++;
+    }
+
+    // Delete T/D answer reports by user
+    const todAnswerReports = await ctx.db
+      .query("todAnswerReports")
+      .withIndex("by_reporter", (q) => q.eq("reporterId", userIdStr))
+      .collect();
+    deletedData.todAnswerReports = 0;
+    for (const report of todAnswerReports) {
+      await ctx.db.delete(report._id);
+      deletedData.todAnswerReports++;
+    }
+
+    // Delete T/D prompt reports by user
+    const todPromptReports = await ctx.db
+      .query("todPromptReports")
+      .withIndex("by_reporter", (q) => q.eq("reporterId", userIdStr))
+      .collect();
+    deletedData.todPromptReports = 0;
+    for (const report of todPromptReports) {
+      await ctx.db.delete(report._id);
+      deletedData.todPromptReports++;
+    }
+
+    // Delete T/D rate limits for user
+    const todRateLimits = await ctx.db
+      .query("todRateLimits")
+      .withIndex("by_user_action", (q) => q.eq("userId", userIdStr))
+      .collect();
+    deletedData.todRateLimits = 0;
+    for (const limit of todRateLimits) {
+      await ctx.db.delete(limit._id);
+      deletedData.todRateLimits++;
+    }
+
     // Finally, delete the user
     await ctx.db.delete(args.userId);
 

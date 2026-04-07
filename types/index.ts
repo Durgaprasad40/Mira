@@ -31,17 +31,17 @@ export type Gender = "male" | "female" | "non_binary";
 
 export type Orientation = "straight" | "gay" | "lesbian" | "bisexual" | "prefer_not_to_say";
 
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 export type RelationshipIntent =
-  | "long_term"
-  | "short_term"
-  | "fwb"
-  | "figuring_out"
-  | "short_to_long"
-  | "long_to_short"
-  | "new_friends"
+  | "serious_vibes"
+  | "keep_it_casual"
+  | "exploring_vibes"
+  | "see_where_it_goes"
+  | "open_to_vibes"
+  | "just_friends"
   | "open_to_anything"
   | "single_parent"
-  | "just_18";
+  | "new_to_dating";
 
 export type ActivityFilter =
   // Original 20 (backward compatible)
@@ -446,7 +446,8 @@ export type TodResponseType = "text" | "video" | "audio" | "picture";
 
 export type TodResponseStatus = "pending" | "correct" | "declined";
 
-export type ConnectionSource = "tod" | "room" | "desire" | "friend";
+// P2-006: Extended connection sources for Phase-2 matches
+export type ConnectionSource = "tod" | "room" | "desire" | "desire_match" | "desire_super_like" | "friend";
 
 export type BodyStructure = "slim" | "athletic" | "average" | "curvy" | "muscular" | "plus_size";
 
@@ -512,8 +513,8 @@ export interface TodResponse {
 
 export type TodUserState = "answered" | "skipped" | "could_not_answer";
 
-// Truth & Dare Report Reasons
-export type TodReportReason = 'harassment' | 'sexual' | 'spam' | 'hate' | 'violence' | 'other';
+// Truth & Dare Report Reasons (P0-002: Added 'privacy' and 'scam' for prompt reports)
+export type TodReportReason = 'harassment' | 'sexual' | 'spam' | 'hate' | 'violence' | 'privacy' | 'scam' | 'other';
 
 // Truth & Dare Trending System Types
 export type TodAnswerType = "text" | "photo" | "video" | "voice";
@@ -588,12 +589,20 @@ export interface IncognitoConversation {
   participantName: string;
   participantAge: number;
   participantPhotoUrl: string;
+  /** P1-004 FIX: Intent key from backend userPrivateProfiles for intent label lookup */
+  participantIntentKey?: string | null;
   lastMessage: string;
   lastMessageAt: number;
   unreadCount: number;
   connectionSource: ConnectionSource;
   /** Match origin for Desire Land matches: 'super_like' shows blue ring in New Matches row */
   matchSource?: 'super_like' | 'normal';
+  /** PHOTO-BLUR-FIX: Whether participant chose to blur their photo */
+  isPhotoBlurred?: boolean;
+  /** PHOTO-BLUR-FIX: Whether viewer has permission to see clear photo */
+  canViewClearPhoto?: boolean;
+  /** PRESENCE: Last active timestamp for online status */
+  participantLastActive?: number;
 }
 
 export interface IncognitoMessage {
@@ -603,6 +612,9 @@ export interface IncognitoMessage {
   content: string;
   createdAt: number;
   isRead: boolean;
+  // MESSAGE-TICKS-FIX: Delivery and read timestamps for visual ticks
+  deliveredAt?: number;
+  readAt?: number;
   // Protected media fields (secure photos for Phase-2)
   isProtected?: boolean;
   protectedMedia?: {
@@ -624,8 +636,10 @@ export interface IncognitoMessage {
   /** Timestamp when message should be auto-deleted */
   deleteAt?: number;
   // Voice message fields
-  type?: 'text' | 'voice';
-  audioUri?: string;
+  // T/D PERSISTENCE FIX: Added 'system' type for T/D game events from backend
+  type?: 'text' | 'voice' | 'image' | 'video' | 'system';
+  audioUri?: string; // Local URI (legacy, for local-only messages)
+  audioUrl?: string | null; // P0-003: Backend URL from Convex storage
   durationMs?: number;
 }
 
@@ -686,8 +700,6 @@ export type PrivateBoundary =
   | 'no_sharing_screenshots'
   | 'meet_when_ready';
 
-export type RevealRequestStatus = 'none' | 'pending_sent' | 'pending_received' | 'mutual_accepted' | 'declined';
-
 export interface PrivateProfileData {
   userId: string;
   isPrivateEnabled: boolean;
@@ -703,20 +715,10 @@ export interface PrivateProfileData {
   age: number;
   city?: string;
   gender: string;
-  revealPolicy: 'mutual_only' | 'request_based';
   isSetupComplete: boolean;
   // Phase-1 imported fields (read-only after import)
   hobbies?: string[];
   isVerified?: boolean;
-}
-
-export interface RevealRequest {
-  id: string;
-  fromUserId: string;
-  toUserId: string;
-  status: 'pending' | 'accepted' | 'declined';
-  respondedAt?: number;
-  createdAt: number;
 }
 
 // Confession Types
@@ -730,11 +732,18 @@ export type ConfessionReplyType = 'text' | 'voice';
 export type ConfessionRevealPolicy = 'never' | 'allow_later';
 export type TimedRevealOption = 'never' | '24h' | '48h';
 
+// Author visibility mode for confessions
+// - anonymous: fully hidden identity (no photo, no name, no age/gender)
+// - open: fully visible identity (photo, name, age, gender)
+// - blur_photo: partially hidden (blurred photo, visible name/age/gender)
+export type ConfessionAuthorVisibility = 'anonymous' | 'open' | 'blur_photo';
+
 export interface Confession {
   id: string;
   userId: string;
   text: string;
-  isAnonymous: boolean;
+  isAnonymous: boolean; // Legacy field - use authorVisibility instead
+  authorVisibility?: ConfessionAuthorVisibility; // New 3-mode visibility
   mood: ConfessionMood;
   topic?: ConfessionTopic;
   reactions?: Record<string, number>;
@@ -763,9 +772,13 @@ export interface ConfessionReply {
   userId: string;
   text: string;
   isAnonymous: boolean;
+  identityMode?: 'anonymous' | 'blur' | 'open'; // FIX 2: Identity mode for replies
   type?: ConfessionReplyType;
   voiceUrl?: string;
   voiceDurationSec?: number;
+  parentReplyId?: string; // For nested replies - if set, this is a child reply
+  editedAt?: number; // Timestamp if reply was edited
+  hasActiveConnectRequest?: boolean; // FIX 3: Whether reply has active connect request (locked)
   createdAt: number;
 }
 

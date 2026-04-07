@@ -1,9 +1,8 @@
 /*
- * LOCKED (PHASE-1 TAB)
+ * LOCKED (PROFILE TAB)
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- * Nearby tab is the only Phase-1 tab currently unlocked.
  */
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,22 +12,27 @@ import {
   Platform,
   Alert,
   Modal,
+  Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { safePush, safeReplace } from '@/lib/safeRouter';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS } from '@/lib/constants';
+import { COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
 import { Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
 import { useOnboardingStore } from '@/stores/onboardingStore';
+import { usePrivacyStore } from '@/stores/privacyStore';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useScreenTrace } from '@/lib/devTrace';
+import { ProfileCompletionCard } from '@/components/profile/ProfileCompletionCard';
+import { getProfileCompletion } from '@/lib/profileCompletion';
 
 /**
  * Calculate age from DOB string ("YYYY-MM-DD").
@@ -88,12 +92,6 @@ export default function ProfileScreen() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
-  // CRITICAL DEBUG: In demo mode, still check if Convex has photos for this userId
-  const convexPhotosDebug = useQuery(
-    api.users.getCurrentUser,
-    isDemoMode && userId ? { userId: userId as any } : 'skip'
-  );
-
   const subscriptionStatus = useQuery(
     api.subscriptions.getSubscriptionStatus,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
@@ -106,12 +104,83 @@ export default function ProfileScreen() {
   );
   const isAdmin = adminCheck?.isAdmin === true;
 
+  // Query verification status for details (date, pending session)
+  const verificationDetails = useQuery(
+    api.verification.getVerificationStatus,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
+
+  // CONSISTENCY FIX: Use same photo source as Edit Profile (api.photos.getUserPhotos)
+  // This ensures Profile Tab shows the SAME photos as Edit Profile grid
+  const backendPhotos = useQuery(
+    api.photos.getUserPhotos,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
+
+  // HYDRATION FIX: Distinguish loading vs empty to prevent flicker
+  // - backendPhotos === undefined → loading (query not yet resolved)
+  // - backendPhotos is array (even empty) → loaded
+  const isPhotosLoading = !isDemoMode && backendPhotos === undefined;
+
+  // HYDRATION FIX: Keep last valid photos to prevent flicker during re-fetch
+  // CRITICAL: This ref MUST persist across renders to provide stable fallback
+  const lastValidPhotosRef = React.useRef<typeof backendPhotos>(undefined);
+  const hydrationStartRef = React.useRef<number>(0);
+
+  // Update last valid photos BEFORE computing effectivePhotos
+  // Use layout effect to ensure ref is updated before render computations
+  if (!isDemoMode && backendPhotos !== undefined && backendPhotos !== lastValidPhotosRef.current) {
+    lastValidPhotosRef.current = backendPhotos;
+  }
+
+  // EFFECTIVE PHOTOS: THE authoritative source for all photo logic
+  // RULE: During loading, NEVER return null/empty if we have cached data
+  // This prevents UI from showing incorrect empty state during hydration
+  const effectivePhotos = React.useMemo(() => {
+    if (isDemoMode) {
+      return undefined; // Demo mode uses currentUser.photos directly
+    }
+    // CRITICAL: Use lastValidPhotos during loading to prevent flicker
+    if (isPhotosLoading) {
+      // Return cached data if available, undefined only if truly first load
+      return lastValidPhotosRef.current;
+    }
+    // Not loading - use actual backend data
+    return backendPhotos;
+  }, [isDemoMode, isPhotosLoading, backendPhotos]);
+
+  // Track if we have any cached photos (for render guards)
+  const hasCachedPhotos = lastValidPhotosRef.current !== undefined && lastValidPhotosRef.current.length > 0;
+
+  // Track hydration timing
+  React.useEffect(() => {
+    if (isPhotosLoading && hydrationStartRef.current === 0) {
+      hydrationStartRef.current = Date.now();
+      if (__DEV__) {
+        console.log('[ProfileTab] ⏳ Photo hydration started', {
+          hasCachedPhotos,
+          cachedCount: lastValidPhotosRef.current?.length ?? 0,
+        });
+      }
+    }
+    if (!isPhotosLoading && hydrationStartRef.current > 0) {
+      const hydrationTime = Date.now() - hydrationStartRef.current;
+      if (__DEV__) {
+        console.log('[ProfileTab] ✅ Photo hydration complete:', {
+          hydrationTimeMs: hydrationTime,
+          photoCount: backendPhotos?.length ?? 0,
+        });
+      }
+      hydrationStartRef.current = 0;
+    }
+  }, [isPhotosLoading, backendPhotos?.length, hasCachedPhotos]);
+
   const deactivateAccount = useMutation(api.users.deactivateAccount);
   // 3A1-2: Server-side logout mutation
   const serverLogout = useMutation(api.auth.logout);
 
-  // FIX C: Extract photos robustly from any format
-  const extractPhotos = (user: any): { url: string; isPrimary: boolean }[] => {
+  // FIX C: Extract photos robustly from any format, preserving isBlurred for backend blur
+  const extractPhotos = (user: any): { url: string; isPrimary: boolean; isBlurred?: boolean; order?: number }[] => {
     if (!user) return [];
 
     // Try user.photos first (most common)
@@ -126,18 +195,26 @@ export default function ProfileScreen() {
     if (!rawPhotos?.length || !Array.isArray(rawPhotos)) return [];
 
     return rawPhotos
-      .map((p: any, i: number) => {
+      .map((p: any, i: number): { url: string; isPrimary: boolean; isBlurred?: boolean; order?: number } | null => {
         // Handle string URLs directly
         if (typeof p === 'string') {
           return { url: p, isPrimary: i === 0 };
         }
-        // Handle { url: string } objects
+        // Handle { url: string } objects - preserve isBlurred and order from backend
+        // ORDER-BASED PRIMARY: First photo (i === 0) is always primary (order is source of truth)
         if (p?.url) {
-          return { url: p.url, isPrimary: p.isPrimary ?? i === 0 };
+          const result: { url: string; isPrimary: boolean; isBlurred?: boolean; order?: number } = {
+            url: p.url,
+            // ORDER IS SOURCE OF TRUTH: First photo in sorted array is primary
+            isPrimary: i === 0,
+          };
+          if (typeof p.isBlurred === 'boolean') result.isBlurred = p.isBlurred;
+          if (typeof p.order === 'number') result.order = p.order;
+          return result;
         }
         return null;
       })
-      .filter((p): p is { url: string; isPrimary: boolean } => p !== null && !!p.url);
+      .filter((p): p is { url: string; isPrimary: boolean; isBlurred?: boolean; order?: number } => p !== null && !!p.url);
   };
 
   // BUGFIX #26: Build currentUser reactively from subscribed demoProfiles
@@ -171,19 +248,69 @@ export default function ProfileScreen() {
         }
       : null;
 
-  // FIX C: Get main photo (index 0 after reorder)
-  // PERF: Memoize main photo URL to prevent re-creating source object
-  const mainPhotoUrl = React.useMemo(
-    () => currentUser?.photos?.[0]?.url || null,
-    [currentUser?.photos]
-  );
+  // MAIN PHOTO SOURCE OF TRUTH:
+  // - Live mode: Use effectivePhotos (api.photos.getUserPhotos with hydration guard)
+  // - Demo mode: Use first photo from demoStore
+  // HYDRATION FIX: effectivePhotos uses cached data during loading
+  const mainPhotoUrl = React.useMemo(() => {
+    if (isDemoMode) {
+      // Demo mode: use first photo from demoStore
+      return currentUser?.photos?.[0]?.url || null;
+    }
+    // Live mode: Use effectivePhotos (cached during loading, real when loaded)
+    // CRITICAL: Only return null if we truly have no photos (not during loading)
+    if (!effectivePhotos?.length) {
+      // No photos available - but check if we're loading with no cache
+      if (isPhotosLoading && !hasCachedPhotos) {
+        // First load with no cache - keep previous mainPhotoUrl (handled by memo)
+        return null;
+      }
+      return null;
+    }
+    // SINGLE SOURCE OF TRUTH: First photo (index 0) is always main
+    // Photos are ordered by `order` field, with order=0 being main
+    const mainPhoto = effectivePhotos[0];
 
-  // PERF: Prefetch top photos after hydration
+    if (__DEV__) {
+      console.log('[ProfileTab] 📸 Main photo (index 0):', {
+        selectedUrl: mainPhoto?.url?.slice(-30),
+        totalPhotos: effectivePhotos.length,
+        isPhotosLoading,
+        usingCachedData: isPhotosLoading && hasCachedPhotos,
+      });
+    }
+
+    return mainPhoto?.url || null;
+  }, [isDemoMode, currentUser?.photos, effectivePhotos, isPhotosLoading, hasCachedPhotos]);
+
+  // PER-PHOTO BLUR CHECK: Read from backend photo.isBlurred field (source of truth)
+  // Edit Profile persists blur state to Convex on Save via api.photos.setPhotosBlur
+  // HYDRATION FIX: Use effectivePhotos to prevent flicker during loading
+  const mainPhotoIsBlurred = React.useMemo(() => {
+    if (isDemoMode) {
+      // Demo mode: check first photo's isBlurred field
+      const firstPhoto = currentUser?.photos?.[0];
+      return firstPhoto?.isBlurred === true;
+    }
+    // Live mode: Use effectivePhotos (cached during loading)
+    if (!effectivePhotos?.length) {
+      return false;
+    }
+    // SINGLE SOURCE OF TRUTH: First photo (index 0) is always main
+    const mainPhoto = effectivePhotos[0];
+    return mainPhoto?.isBlurred === true;
+  }, [isDemoMode, currentUser?.photos, effectivePhotos]);
+
+  // PERF: Prefetch top photos after hydration (only when not loading)
+  // HYDRATION FIX: Use effectivePhotos for live mode, currentUser.photos for demo mode
   React.useEffect(() => {
-    const photos = currentUser?.photos;
+    // Skip prefetch during loading to avoid wasted work
+    if (isPhotosLoading) return;
+
+    const photos = isDemoMode ? currentUser?.photos : effectivePhotos;
     if (photos && photos.length > 0) {
       const topPhotos = photos.slice(0, Math.min(6, photos.length));
-      topPhotos.forEach((photo) => {
+      topPhotos.forEach((photo: any) => {
         if (photo.url) {
           Image.prefetch(photo.url).catch(() => {
             // Silently ignore prefetch errors
@@ -194,16 +321,81 @@ export default function ProfileScreen() {
         console.log('[PERF ProfileTab] Prefetching', topPhotos.length, 'photos');
       }
     }
-  }, [currentUser?.photos]);
+  }, [isDemoMode, currentUser?.photos, effectivePhotos, isPhotosLoading]);
 
-  // Blur status: detect from existing field names only (no new fields added)
-  const blurEnabled = Boolean(
-    (currentUser as any)?.blurMyPhoto ??
-    (currentUser as any)?.blurPhoto ??
-    (currentUser as any)?.blurEnabled ??
-    (currentUser as any)?.photoVisibilityBlur ??
-    false
-  );
+  // Global blur feature toggle (enables per-photo blur controls, does NOT mean "blur all")
+  const blurFeatureEnabled = Boolean((currentUser as any)?.photoBlurred ?? false);
+
+  // __DEV__ LOG: Blur state tracing
+  if (__DEV__) {
+    console.log('[ProfileTab] 🔒 Blur state:', {
+      photoBlurred: (currentUser as any)?.photoBlurred,
+      blurFeatureEnabled,
+      mainPhotoIsBlurred,
+      userId: userId?.slice(-8),
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VERIFICATION STATUS - Computed display info
+  // ═══════════════════════════════════════════════════════════════════════════
+  const verificationStatusInfo = useMemo(() => {
+    // Demo mode: use isVerified flag
+    if (isDemoMode) {
+      return {
+        status: currentUser?.isVerified ? 'verified' : 'unverified',
+        label: currentUser?.isVerified ? 'Verified' : 'Not Verified',
+        icon: currentUser?.isVerified ? 'checkmark-circle' : 'alert-circle-outline',
+        color: currentUser?.isVerified ? COLORS.success : COLORS.textMuted,
+        bgColor: currentUser?.isVerified ? COLORS.successSubtle : COLORS.backgroundDark,
+        buttonLabel: currentUser?.isVerified ? 'Re-verify' : 'Verify Now',
+        date: null,
+      } as const;
+    }
+
+    // Live mode: use verificationDetails from backend
+    const status = verificationDetails?.status || (convexUser as any)?.verificationStatus || 'unverified';
+    const completedAt = verificationDetails?.completedAt;
+
+    // Format date if available
+    let dateLabel: string | null = null;
+    if (completedAt && status === 'verified') {
+      const date = new Date(completedAt);
+      dateLabel = date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    }
+
+    if (status === 'verified') {
+      return {
+        status: 'verified',
+        label: dateLabel ? `Verified (${dateLabel})` : 'Verified',
+        icon: 'checkmark-circle',
+        color: COLORS.success,
+        bgColor: COLORS.successSubtle,
+        buttonLabel: 'Re-verify',
+        date: dateLabel,
+      } as const;
+    } else if (status === 'pending_verification' || status === 'pending') {
+      return {
+        status: 'pending',
+        label: 'Pending Review',
+        icon: 'time-outline',
+        color: COLORS.warning,
+        bgColor: COLORS.warningSubtle,
+        buttonLabel: 'Check Status',
+        date: null,
+      } as const;
+    } else {
+      return {
+        status: 'unverified',
+        label: 'Not Verified',
+        icon: 'alert-circle-outline',
+        color: COLORS.textMuted,
+        bgColor: COLORS.backgroundDark,
+        buttonLabel: 'Verify Now',
+        date: null,
+      } as const;
+    }
+  }, [isDemoMode, currentUser?.isVerified, verificationDetails, convexUser]);
 
   // Preview toggle state (UI only, doesn't change settings)
   const [previewBlur, setPreviewBlur] = useState(false);
@@ -211,49 +403,47 @@ export default function ProfileScreen() {
   // Full-screen photo preview state
   const [showPhotoPreview, setShowPhotoPreview] = useState(false);
 
+  // Verification details modal state
+  const [showVerificationModal, setShowVerificationModal] = useState(false);
+
+  // P2-033 FIX: Track main photo load error to show fallback
+  const [mainPhotoError, setMainPhotoError] = useState(false);
+
+  // P2-033 FIX: Reset error state when photo URL changes
+  React.useEffect(() => {
+    setMainPhotoError(false);
+  }, [mainPhotoUrl]);
+
   if (__DEV__) {
-    const source = isDemoMode ? 'demoStore' : 'convex';
-    const count = currentUser?.photos?.length ?? 0;
-    console.log('[ProfileTab] photoSource', {
+    // PHOTO_SOURCE_AUDIT: Unified source for all photo displays
+    // Live mode: api.photos.getUserPhotos (excludes verification_reference)
+    // Demo mode: demoStore
+    const resolvedPhotoCount = isDemoMode
+      ? (currentUser?.photos?.length ?? 0)
+      : (effectivePhotos?.length ?? 0);
+    const source = isDemoMode ? 'demoStore' : 'api.photos.getUserPhotos (pre-filtered)';
+    const photoIds = isDemoMode
+      ? currentUser?.photos?.map((p: any) => p._id?.slice?.(-6) || 'local').join(',')
+      : effectivePhotos?.map((p: any) => p._id?.slice(-6)).join(',');
+
+    console.log('[PHOTO_SOURCE_AUDIT] [PROFILE_MAIN_PHOTO] Profile Tab loaded:', {
       source,
-      count,
-      main: !!mainPhotoUrl,
-      refreshKey,
-      hydrated: demoHydrated,
-      // CRITICAL DEBUG: Show auth state
-      isDemoMode,
-      authUserId: userId,
-      demoUserId: currentDemoUserId,
+      totalRegularPhotos: resolvedPhotoCount,
+      mainPhotoUrl: mainPhotoUrl?.slice(-30) || null,
+      photoIds: photoIds || 'none',
+      isPhotosLoading,
     });
 
-    // CRITICAL: If in demo mode, warn that Convex photos are being ignored
+    // Only log loading state if we're actually loading
+    if (isPhotosLoading) {
+      console.log('[ProfileTab] ⏳ Loading photos...', {
+        usingCachedData: hasCachedPhotos,
+        cachedCount: lastValidPhotosRef.current?.length ?? 0,
+      });
+    }
+
     if (isDemoMode) {
-      console.warn('[ProfileTab] ⚠️ DEMO MODE ACTIVE - Reading photos from demoStore (local), NOT Convex backend!');
-      console.warn('[ProfileTab] ⚠️ Phase-1 photos uploaded to Convex will NOT be visible in demo mode.');
-      console.warn('[ProfileTab] ⚠️ To see Convex photos, set EXPO_PUBLIC_DEMO_MODE=false in .env.local');
-
-      // DEBUG: Check if Convex actually has photos for this user
-      if (convexPhotosDebug) {
-        const convexPhotoCount = convexPhotosDebug.photos?.length ?? 0;
-        const convexPhotoIds = convexPhotosDebug.photos?.map((p: any) => ({
-          id: p._id,
-          storageId: p.storageId,
-          order: p.order,
-        })) ?? [];
-
-        console.log('[ProfileTab] 🔍 Convex backend CHECK:', {
-          userId,
-          convexPhotoCount,
-          convexPhotoIds,
-          displayUrl: convexPhotosDebug.displayPrimaryPhotoUrl,
-          verificationPhotoId: convexPhotosDebug.verificationReferencePhotoId,
-        });
-
-        if (convexPhotoCount > 0) {
-          console.error('[ProfileTab] ❌ FOUND CONVEX PHOTOS BUT NOT DISPLAYING THEM!');
-          console.error('[ProfileTab] ❌ This is WHY Phase-1 photos are missing - demo mode ignores Convex backend.');
-        }
-      }
+      console.warn('[ProfileTab] ⚠️ DEMO MODE - Using demoStore photos');
     }
   }
 
@@ -265,21 +455,32 @@ export default function ProfileScreen() {
         text: 'Logout',
         style: 'destructive',
         onPress: async () => {
-          // Clear local state FIRST for crash safety
+          // SEC-3 FIX: Server logout FIRST (with timeout) to invalidate session
+          // This ensures the token is invalidated server-side before we clear local state
+          if (!isDemoMode && token) {
+            try {
+              // Use Promise.race with 3s timeout - don't block UX indefinitely
+              await Promise.race([
+                serverLogout({ token }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+              ]);
+              if (__DEV__) console.log('[Logout] Server session invalidated');
+            } catch (e) {
+              // Log but continue - local logout is more important for UX
+              console.warn('[Logout] Server logout failed or timed out:', e);
+            }
+          }
+
+          // Clear local state after server logout attempt
           if (isDemoMode) {
             useDemoStore.getState().demoLogout();
           }
           useOnboardingStore.getState().reset();
+          // P0-002 FIX: Reset privacy store to prevent leaking settings to next user
+          usePrivacyStore.getState().resetPrivacy();
           // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
           await logout();
           safeReplace(router, '/(auth)/welcome', 'profile->logout');
-
-          // Server logout in background (best-effort)
-          if (!isDemoMode && token) {
-            serverLogout({ token }).catch((e) => {
-              console.warn('[Logout] Server logout failed:', e);
-            });
-          }
         },
       },
     ]);
@@ -304,6 +505,8 @@ export default function ProfileScreen() {
               }
               // 3A1-2: Also clear onboarding store on deactivate
               useOnboardingStore.getState().reset();
+              // P0-002 FIX: Reset privacy store to prevent leaking settings to next user
+              usePrivacyStore.getState().resetPrivacy();
               // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
               await logout();
               safeReplace(router, '/(auth)/welcome', 'profile->deactivate');
@@ -320,7 +523,8 @@ export default function ProfileScreen() {
     return (
       <SafeAreaView edges={['top']} style={styles.container}>
         <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading profile...</Text>
+          <View style={styles.loadingAvatar} />
+          <Text style={styles.loadingText}>Loading your profile...</Text>
         </View>
       </SafeAreaView>
     );
@@ -333,91 +537,188 @@ export default function ProfileScreen() {
     <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Profile</Text>
-        <TouchableOpacity onPress={() => safePush(router, '/(main)/edit-profile', 'profile->edit')}>
+        <TouchableOpacity
+          onPress={() => safePush(router, '/(main)/edit-profile', 'profile->edit')}
+          accessibilityRole="button"
+          accessibilityLabel="Edit profile"
+        >
           <Ionicons name="create-outline" size={24} color={COLORS.primary} />
         </TouchableOpacity>
       </View>
 
+      {/* PROFILE COMPLETION CARD - Non-blocking nudge system */}
+      <ProfileCompletionCard
+        userData={{
+          name: currentUser.name,
+          dateOfBirth: currentUser.dateOfBirth,
+          gender: currentUser.gender,
+          isVerified: currentUser.isVerified,
+          photos: isDemoMode ? currentUser.photos : effectivePhotos,
+          lookingFor: (currentUser as any).lookingFor,
+          relationshipIntent: (currentUser as any).relationshipIntent,
+          bio: currentUser.bio,
+          profilePrompts: (currentUser as any).profilePrompts,
+          education: (currentUser as any).education,
+          jobTitle: (currentUser as any).jobTitle,
+          company: (currentUser as any).company,
+        }}
+      />
+
       <View style={styles.profileSection}>
-        {/* Main photo - always clear for owner, tappable for full-screen view */}
-        {mainPhotoUrl ? (
+        {/* Main photo - large with shadow, tappable for full-screen view */}
+        {/* BLUR FIX: Apply soft blur (radius 8) when photoBlurred is true */}
+        {/* P2-033 FIX: Show fallback Avatar if photo fails to load */}
+        {mainPhotoUrl && !mainPhotoError ? (
           <TouchableOpacity
             activeOpacity={0.9}
             onPress={() => setShowPhotoPreview(true)}
+            accessibilityRole="imagebutton"
+            accessibilityLabel="View profile photo full screen"
+            style={styles.avatarContainer}
           >
             <Image
               source={{ uri: mainPhotoUrl }}
               style={styles.avatar}
               contentFit="cover"
               transition={200}
+              blurRadius={0}
               onLoadEnd={() => {
                 // PERF: Log photo load time once per focus
                 if (__DEV__ && !hasLoggedPhotoLoad.current && focusTimeRef.current > 0) {
                   const loadTime = Date.now() - focusTimeRef.current;
-                  console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime });
+                  console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime, mainPhotoIsBlurred });
                   hasLoggedPhotoLoad.current = true;
                 }
+              }}
+              onError={() => {
+                // P2-033 FIX: Show fallback Avatar when image fails to load
+                setMainPhotoError(true);
               }}
             />
           </TouchableOpacity>
         ) : (
-          <Avatar size={100} />
+          <View style={styles.avatarContainer}>
+            <Avatar size={120} />
+          </View>
         )}
 
-        {/* Blur status badge */}
-        <View style={[styles.blurStatusBadge, blurEnabled ? styles.blurStatusOn : styles.blurStatusOff]}>
+        {/* Name + Age + Verified Badge (always visible, interactive) */}
+        <View style={styles.nameRow}>
+          <Text style={styles.name}>
+            {currentUser.name}{age !== null ? `, ${age}` : ''}
+          </Text>
+          <TouchableOpacity
+            onPress={() => setShowVerificationModal(true)}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={`Verification status: ${verificationStatusInfo.label}. Tap for details.`}
+          >
+            <View style={[
+              styles.verifiedInline,
+              { backgroundColor: verificationStatusInfo.bgColor }
+            ]}>
+              <Ionicons
+                name={verificationStatusInfo.icon as any}
+                size={16}
+                color={verificationStatusInfo.color}
+              />
+              <Text style={[
+                styles.verifiedInlineText,
+                { color: verificationStatusInfo.color }
+              ]}>
+                {verificationStatusInfo.status === 'verified' ? 'Verified' :
+                 verificationStatusInfo.status === 'pending' ? 'Pending' : 'Unverified'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+        </View>
+
+        {/* Bio */}
+        {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
+
+        {/* REMOVED: Interests Section - per user request, interests should NOT appear on profile homepage */}
+        {/* Interests are only shown/edited in the Edit Profile screen */}
+
+        {/* Verification Status Row - Always Visible */}
+        <View style={styles.verificationStatusRow}>
+          <View style={styles.verificationStatusLeft}>
+            <View style={[
+              styles.verificationStatusDot,
+              {
+                backgroundColor: verificationStatusInfo.status === 'verified'
+                  ? COLORS.success
+                  : verificationStatusInfo.status === 'pending'
+                    ? COLORS.warning
+                    : COLORS.textMuted
+              }
+            ]} />
+            <Text style={styles.verificationStatusLabel}>
+              {verificationStatusInfo.label}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={[
+              styles.verificationActionButton,
+              verificationStatusInfo.status === 'verified' && styles.verificationActionButtonSecondary
+            ]}
+            onPress={() => safePush(router, '/(main)/verification', 'profile->verification')}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={verificationStatusInfo.buttonLabel}
+          >
+            <Text style={[
+              styles.verificationActionButtonText,
+              verificationStatusInfo.status === 'verified' && styles.verificationActionButtonTextSecondary
+            ]}>
+              {verificationStatusInfo.buttonLabel}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Photo visibility status - based on main photo's individual blur state */}
+        <View style={styles.visibilityRow}>
           <Ionicons
-            name={blurEnabled ? 'eye-off' : 'eye'}
+            name={mainPhotoIsBlurred ? 'eye-off-outline' : 'eye-outline'}
             size={16}
-            color={blurEnabled ? COLORS.primary : COLORS.textLight}
+            color={COLORS.textMuted}
           />
-          <Text style={[styles.blurStatusText, blurEnabled && styles.blurStatusTextOn]}>
-            {blurEnabled ? 'Blur ON — others see your photos blurred' : 'Blur OFF — others see your photos clearly'}
+          <Text style={styles.visibilityText}>
+            {mainPhotoIsBlurred ? 'Photo blurred to others' : 'Photos visible to others'}
           </Text>
         </View>
 
-        {/* Preview toggle */}
-        {mainPhotoUrl && (
+        {/* Preview toggle (only if main photo is individually blurred) */}
+        {mainPhotoIsBlurred && mainPhotoUrl && (
           <TouchableOpacity
             style={styles.previewToggle}
             onPress={() => setPreviewBlur((p) => !p)}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={previewBlur ? 'Hide blur preview' : 'Preview how others see your photo'}
           >
-            <Ionicons name={previewBlur ? 'eye' : 'eye-off-outline'} size={14} color={COLORS.primary} />
             <Text style={styles.previewToggleText}>
-              {previewBlur ? 'Hide preview' : 'Preview how others see it'}
+              {previewBlur ? 'Hide preview' : 'See how others view you'}
             </Text>
           </TouchableOpacity>
         )}
 
-        {/* Blurred preview thumbnail */}
-        {previewBlur && mainPhotoUrl && (
+        {/* Blurred preview thumbnail - only shown if main photo is individually blurred */}
+        {previewBlur && mainPhotoIsBlurred && mainPhotoUrl && (
           <View style={styles.previewContainer}>
             <Image
               source={{ uri: mainPhotoUrl }}
               style={styles.previewThumbnail}
               contentFit="cover"
-              blurRadius={blurEnabled ? 20 : 0}
+              blurRadius={8}
               transition={100}
             />
-            <Text style={styles.previewLabel}>
-              {blurEnabled ? 'Others see this (blurred)' : 'Others see this (clear)'}
-            </Text>
-            <Text style={styles.previewHint}>Preview only — does not change your setting</Text>
+            <Text style={styles.previewHint}>How others see your photo</Text>
           </View>
         )}
-
-        {currentUser.isVerified && (
-          <View style={styles.verifiedBadge}>
-            <Ionicons name="checkmark-circle" size={24} color={COLORS.primary} />
-            <Text style={styles.verifiedText}>Verified</Text>
-          </View>
-        )}
-        <Text style={styles.name}>
-          {currentUser.name}{age !== null ? `, ${age}` : ''}
-        </Text>
-        {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
       </View>
+
+      {/* Section divider */}
+      <View style={styles.sectionDivider} />
 
 {/* HIDDEN: Subscription UI temporarily removed per product rules */}
 
@@ -426,6 +727,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/edit-profile', 'profile->editMenu')}
+          accessibilityRole="button"
+          accessibilityLabel="Edit Profile"
         >
           <Ionicons name="create-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Edit Profile</Text>
@@ -436,6 +739,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/privacy', 'profile->privacy')}
+          accessibilityRole="button"
+          accessibilityLabel="Privacy settings"
         >
           <Ionicons name="lock-closed-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Privacy</Text>
@@ -446,6 +751,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/notifications', 'profile->notifications')}
+          accessibilityRole="button"
+          accessibilityLabel="Notification settings"
         >
           <Ionicons name="notifications-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Notifications</Text>
@@ -456,6 +763,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/safety', 'profile->safety')}
+          accessibilityRole="button"
+          accessibilityLabel="Safety settings"
         >
           <Ionicons name="shield-checkmark-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Safety</Text>
@@ -466,19 +775,23 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/account', 'profile->account')}
+          accessibilityRole="button"
+          accessibilityLabel="Account settings"
         >
           <Ionicons name="person-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Account</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
-        {/* 6. Help & FAQ */}
+        {/* 6. Support & FAQ */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings/help', 'profile->help')}
+          onPress={() => safePush(router, '/(main)/settings/support', 'profile->support')}
+          accessibilityRole="button"
+          accessibilityLabel="Support and FAQ"
         >
           <Ionicons name="help-circle-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Help & FAQ</Text>
+          <Text style={styles.menuText}>Support & FAQ</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
@@ -486,6 +799,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={handleLogout}
+          accessibilityRole="button"
+          accessibilityLabel="Log out"
         >
           <Ionicons name="log-out-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Log Out</Text>
@@ -516,7 +831,12 @@ export default function ProfileScreen() {
 
       {/* 8. Deactivate Account - destructive action at bottom */}
       <View style={styles.footer}>
-        <TouchableOpacity onPress={handleDeactivate} style={styles.deactivateButton}>
+        <TouchableOpacity
+          onPress={handleDeactivate}
+          style={styles.deactivateButton}
+          accessibilityRole="button"
+          accessibilityLabel="Deactivate account"
+        >
           <Text style={styles.deactivateText}>Deactivate Account</Text>
         </TouchableOpacity>
       </View>
@@ -534,6 +854,8 @@ export default function ProfileScreen() {
             style={styles.photoPreviewCloseArea}
             activeOpacity={1}
             onPress={() => setShowPhotoPreview(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close photo preview"
           >
             {mainPhotoUrl && (
               <Image
@@ -551,11 +873,106 @@ export default function ProfileScreen() {
           </TouchableOpacity>
         </View>
       </Modal>
+
+      {/* Verification Details Modal */}
+      <Modal
+        visible={showVerificationModal}
+        animationType="fade"
+        transparent
+        statusBarTranslucent
+        onRequestClose={() => setShowVerificationModal(false)}
+      >
+        <Pressable
+          style={styles.verificationModalOverlay}
+          onPress={() => setShowVerificationModal(false)}
+        >
+          <Pressable style={styles.verificationModalContent} onPress={(e) => e.stopPropagation()}>
+            {/* Modal Header */}
+            <View style={styles.verificationModalHeader}>
+              <View style={[
+                styles.verificationModalIcon,
+                { backgroundColor: verificationStatusInfo.bgColor }
+              ]}>
+                <Ionicons
+                  name={verificationStatusInfo.icon as any}
+                  size={32}
+                  color={verificationStatusInfo.color}
+                />
+              </View>
+              <Text style={styles.verificationModalTitle}>
+                {verificationStatusInfo.status === 'verified' ? 'Face Verified' :
+                 verificationStatusInfo.status === 'pending' ? 'Verification Pending' :
+                 'Not Yet Verified'}
+              </Text>
+            </View>
+
+            {/* Status Details */}
+            <View style={styles.verificationModalBody}>
+              {verificationStatusInfo.status === 'verified' && (
+                <>
+                  <Text style={styles.verificationModalText}>
+                    Your face has been verified. This badge helps build trust with other users.
+                  </Text>
+                  {verificationStatusInfo.date && (
+                    <View style={styles.verificationModalRow}>
+                      <Ionicons name="calendar-outline" size={16} color={COLORS.textLight} />
+                      <Text style={styles.verificationModalRowText}>
+                        Verified: {verificationStatusInfo.date}
+                      </Text>
+                    </View>
+                  )}
+                </>
+              )}
+              {verificationStatusInfo.status === 'pending' && (
+                <Text style={styles.verificationModalText}>
+                  We're reviewing your verification. This usually takes less than 24 hours. You'll be notified once complete.
+                </Text>
+              )}
+              {verificationStatusInfo.status === 'unverified' && (
+                <Text style={styles.verificationModalText}>
+                  Verify your face to get a badge, unlock full visibility, and build trust with matches.
+                </Text>
+              )}
+            </View>
+
+            {/* Action Button */}
+            <TouchableOpacity
+              style={[
+                styles.verificationModalButton,
+                verificationStatusInfo.status === 'verified' && styles.verificationModalButtonSecondary
+              ]}
+              onPress={() => {
+                setShowVerificationModal(false);
+                safePush(router, '/(main)/verification', 'profile->verification-modal');
+              }}
+              activeOpacity={0.7}
+            >
+              <Text style={[
+                styles.verificationModalButtonText,
+                verificationStatusInfo.status === 'verified' && styles.verificationModalButtonTextSecondary
+              ]}>
+                {verificationStatusInfo.buttonLabel}
+              </Text>
+            </TouchableOpacity>
+
+            {/* Close */}
+            <TouchableOpacity
+              style={styles.verificationModalClose}
+              onPress={() => setShowVerificationModal(false)}
+            >
+              <Text style={styles.verificationModalCloseText}>Close</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONTAINER - Clean background
+  // ═══════════════════════════════════════════════════════════════════════════
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
@@ -565,70 +982,152 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.background,
+    padding: 24,
   },
   loadingText: {
     fontSize: 16,
-    color: COLORS.textLight,
+    fontWeight: '500',
+    color: COLORS.textMuted,
+    marginTop: 12,
   },
+  loadingAvatar: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: COLORS.backgroundDark,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HEADER - Clean, minimal top bar
+  // ═══════════════════════════════════════════════════════════════════════════
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
     backgroundColor: COLORS.background,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
   },
   headerTitle: {
-    fontSize: 28,
+    fontSize: 32,
     fontWeight: '700',
     color: COLORS.text,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PROFILE SECTION - Prominent photo and identity
+  // ═══════════════════════════════════════════════════════════════════════════
   profileSection: {
     alignItems: 'center',
-    padding: 24,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    paddingTop: 28,
+    paddingHorizontal: 24,
+    paddingBottom: 28,
+  },
+  avatarContainer: {
+    marginBottom: 20,
+    // Premium shadow
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 16,
+    elevation: 10,
   },
   avatar: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    marginBottom: 12,
+    width: 130,
+    height: 130,
+    borderRadius: 65,
+    borderWidth: 4,
+    borderColor: COLORS.white,
+    backgroundColor: COLORS.backgroundDark,
   },
-  verifiedBadge: {
+  nameRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.primary + '20',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    marginBottom: 12,
-  },
-  verifiedText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.primary,
-    marginLeft: 4,
-  },
-  name: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: COLORS.text,
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    gap: 10,
     marginBottom: 8,
   },
+  name: {
+    fontSize: 26,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  verifiedInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: COLORS.primarySubtle,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  verifiedInlineText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
   bio: {
-    fontSize: 16,
+    fontSize: 15,
     color: COLORS.textLight,
     textAlign: 'center',
     lineHeight: 22,
+    marginBottom: 14,
+    paddingHorizontal: 20,
+    maxWidth: 300,
   },
+  interestsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 14,
+    paddingHorizontal: 20,
+  },
+  interestChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: COLORS.primarySubtle,
+    borderWidth: 1,
+    borderColor: COLORS.primary + '40',
+  },
+  interestChipText: {
+    fontSize: 13,
+    color: COLORS.primary,
+    fontWeight: '500',
+  },
+  visibilityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 16,
+  },
+  visibilityText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SECTION DIVIDER - Subtle separation
+  // ═══════════════════════════════════════════════════════════════════════════
+  sectionDivider: {
+    height: 8,
+    backgroundColor: COLORS.backgroundDark,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATS CARD (if used)
+  // ═══════════════════════════════════════════════════════════════════════════
   statsCard: {
     backgroundColor: COLORS.backgroundDark,
     margin: 16,
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 16,
   },
   statsTitle: {
     fontSize: 18,
@@ -653,106 +1152,97 @@ const styles = StyleSheet.create({
   subscriptionButton: {
     marginTop: 12,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MENU SECTION - Clean settings list
+  // ═══════════════════════════════════════════════════════════════════════════
   menuSection: {
-    marginTop: 8,
+    paddingTop: 8,
   },
   menuItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    minHeight: 56,
+    backgroundColor: COLORS.background,
   },
   adminMenuItem: {
-    backgroundColor: COLORS.primary + '10',
-    borderBottomColor: COLORS.primary + '30',
+    backgroundColor: COLORS.primarySubtle,
   },
   menuText: {
     flex: 1,
     fontSize: 16,
+    fontWeight: '500',
     color: COLORS.text,
-    marginLeft: 16,
+    marginLeft: 14,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FOOTER - Destructive actions
+  // ═══════════════════════════════════════════════════════════════════════════
   footer: {
-    padding: 16,
-    paddingBottom: 32,
+    padding: 20,
+    paddingBottom: 40,
+    alignItems: 'center',
   },
   deactivateButton: {
-    marginTop: 16,
-    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
   },
   deactivateText: {
     fontSize: 14,
     color: COLORS.error,
     fontWeight: '500',
   },
-  // Blur status badge
-  blurStatusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    marginTop: 12,
-    marginBottom: 8,
-    gap: 6,
-  },
-  blurStatusOn: {
-    backgroundColor: COLORS.primary + '20',
-  },
-  blurStatusOff: {
-    backgroundColor: COLORS.backgroundDark,
-  },
-  blurStatusText: {
-    fontSize: 12,
-    color: COLORS.textLight,
-  },
-  blurStatusTextOn: {
-    color: COLORS.primary,
-    fontWeight: '500',
-  },
-  // Preview toggle
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PREVIEW TOGGLE - Blur preview
+  // ═══════════════════════════════════════════════════════════════════════════
   previewToggle: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingVertical: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    marginTop: 8,
   },
   previewToggleText: {
-    fontSize: 12,
+    fontSize: 13,
     color: COLORS.primary,
-    fontWeight: '500',
+    fontWeight: '600',
   },
-  // Preview container
   previewContainer: {
     alignItems: 'center',
-    marginTop: 8,
+    marginTop: 12,
     marginBottom: 8,
-    padding: 12,
+    padding: 16,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 12,
+    borderRadius: 16,
   },
   previewThumbnail: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    marginBottom: 8,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    marginBottom: 10,
   },
   previewLabel: {
-    fontSize: 11,
+    fontSize: 12,
     color: COLORS.text,
     fontWeight: '500',
     marginBottom: 2,
   },
   previewHint: {
-    fontSize: 10,
+    fontSize: 11,
     color: COLORS.textMuted,
-    fontStyle: 'italic',
   },
-  // Full-screen photo preview
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHOTO PREVIEW MODAL - Full-screen view
+  // ═══════════════════════════════════════════════════════════════════════════
   photoPreviewContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: COLORS.black,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -773,8 +1263,153 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VERIFICATION STATUS ROW - Always visible status + action button
+  // ═══════════════════════════════════════════════════════════════════════════
+  verificationStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginTop: 16,
+    marginBottom: 12,
+    width: '100%',
+    maxWidth: 340,
+  },
+  verificationStatusLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  verificationStatusDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  verificationStatusLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.text,
+    flex: 1,
+  },
+  verificationActionButton: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 16,
+  },
+  verificationActionButtonSecondary: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  verificationActionButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.white,
+  },
+  verificationActionButtonTextSecondary: {
+    color: COLORS.text,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VERIFICATION DETAILS MODAL
+  // ═══════════════════════════════════════════════════════════════════════════
+  verificationModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  verificationModalContent: {
+    backgroundColor: COLORS.background,
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    maxWidth: 340,
+    alignItems: 'center',
+  },
+  verificationModalHeader: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  verificationModalIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  verificationModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.text,
+    textAlign: 'center',
+  },
+  verificationModalBody: {
+    width: '100%',
+    marginBottom: 20,
+  },
+  verificationModalText: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  verificationModalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 8,
+  },
+  verificationModalRowText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+  },
+  verificationModalButton: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 24,
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  verificationModalButtonSecondary: {
+    backgroundColor: 'transparent',
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+  },
+  verificationModalButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.white,
+  },
+  verificationModalButtonTextSecondary: {
+    color: COLORS.text,
+  },
+  verificationModalClose: {
+    paddingVertical: 8,
+  },
+  verificationModalCloseText: {
+    fontSize: 14,
+    color: COLORS.textMuted,
+    fontWeight: '500',
   },
 });

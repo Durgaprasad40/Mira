@@ -1,27 +1,127 @@
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { useAuthStore } from '@/stores/authStore';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
+import { isDemoMode } from '@/hooks/useConvex';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
+import { useScreenTrace } from '@/lib/devTrace';
 import type { IncognitoProfile } from '@/types';
+// P2-002/P2-004: Centralized utilities
+import { getGenderIcon } from '@/lib/genderIcon';
+import { PHASE2_BLUR_CARD } from '@/lib/phase2UI';
 
 const C = INCOGNITO_COLORS;
 
 export default function PrivateProfileViewScreen() {
-  const { userId } = useLocalSearchParams<{ userId: string }>();
+  useScreenTrace('P2_PROFILE_VIEW');
+  const { userId: profileUserId } = useLocalSearchParams<{ userId: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const currentUserId = useAuthStore((s) => s.userId);
 
-  const profile: IncognitoProfile | undefined = DEMO_INCOGNITO_PROFILES.find(
-    (p) => p.id === userId
+  // P2-003: Error and retry state
+  const [retryKey, setRetryKey] = useState(0);
+  const [hasError, setHasError] = useState(false);
+
+  // Demo mode: use local demo data
+  const demoProfile: IncognitoProfile | undefined = isDemoMode
+    ? DEMO_INCOGNITO_PROFILES.find((p) => p.id === profileUserId)
+    : undefined;
+
+  // Convex mode: fetch real Phase-2 profile
+  // Note: retryKey is tracked locally but not passed to query (forces React to re-render)
+  const convexProfile = useQuery(
+    api.privateDiscover.getProfileByUserId,
+    !isDemoMode && profileUserId && currentUserId
+      ? { userId: profileUserId as any, viewerId: currentUserId as any }
+      : 'skip'
   );
+
+  // P2-003: Error detection - timeout after 15s of loading
+  const isLoading = !isDemoMode && convexProfile === undefined && !hasError;
+
+  useEffect(() => {
+    if (isDemoMode || convexProfile !== undefined) {
+      setHasError(false);
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      if (convexProfile === undefined) {
+        setHasError(true);
+        if (__DEV__) {
+          console.warn('[P2_PROFILE_VIEW] Query timeout - showing error state');
+        }
+      }
+    }, 15000);
+
+    return () => clearTimeout(timeout);
+  }, [convexProfile, retryKey]);
+
+  // P2-003: Retry handler
+  const handleRetry = useCallback(() => {
+    setHasError(false);
+    setRetryKey((k) => k + 1);
+  }, []);
+
+  // Determine which profile to use
+  const profile = isDemoMode ? demoProfile : convexProfile;
+
+  const { conversations, createConversation, unlockUser } = usePrivateChatStore();
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Profile</Text>
+          <View style={{ width: 24 }} />
+        </View>
+        <View style={styles.emptyState}>
+          <ActivityIndicator size="large" color={C.primary} />
+        </View>
+      </View>
+    );
+  }
+
+  // P2-003: Error state with retry
+  if (hasError) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Profile</Text>
+          <View style={{ width: 24 }} />
+        </View>
+        <View style={styles.errorState}>
+          <Ionicons name="cloud-offline-outline" size={64} color={C.textLight} />
+          <Text style={styles.errorTitle}>Couldn't load profile</Text>
+          <Text style={styles.errorSubtitle}>
+            Please check your connection and try again
+          </Text>
+          <TouchableOpacity style={styles.retryButton} onPress={handleRetry}>
+            <Ionicons name="refresh" size={18} color="#FFFFFF" />
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
 
   // Hard fallback: null profile
   if (profile === undefined || profile === null) {
@@ -42,46 +142,65 @@ export default function PrivateProfileViewScreen() {
     );
   }
 
-  const { conversations, createConversation, unlockUser } = usePrivateChatStore();
+  // Normalize profile data for both demo and Convex formats
+  const isConvexProfile = 'userId' in profile;
+  const profileId = isConvexProfile ? (profile as any).userId : (profile as any).id;
+  const profileName = isConvexProfile ? (profile as any).nickname || (profile as any).name : (profile as any).username;
+  const profileAge = profile.age;
+  const profileGender = profile.gender;
+  const profileCity = profile.city;
+  const profileBio = isConvexProfile ? (profile as any).bio : (profile as any).bio;
+  const profilePhotoUrl = isConvexProfile
+    ? ((profile as any).photos?.[0]?.url || (profile as any).blurredPhotoUrl)
+    : (profile as any).photoUrl;
+  const profileIntentKeys = isConvexProfile
+    ? (profile as any).intentKeys
+    : ((profile as any).privateIntentKey ? [(profile as any).privateIntentKey] : []);
+  const profileHobbies = isConvexProfile ? (profile as any).hobbies : (profile as any).hobbies;
+  const profileDesires = isConvexProfile ? (profile as any).desireTagKeys : (profile as any).desires;
+  const profileInterests = isConvexProfile ? (profile as any).interests : (profile as any).interests;
+  const profileIsOnline = !isConvexProfile && (profile as any).isOnline;
+  const profileFaceUnblurred = !isConvexProfile && (profile as any).faceUnblurred;
 
   const handleMessage = () => {
     if (!profile) return;
 
     // Check if conversation already exists with this user
-    const existing = conversations.find((c) => c.participantId === profile.id);
+    const existing = conversations.find((c) => c.participantId === profileId);
     if (existing) {
       router.push({ pathname: '/(main)/incognito-chat', params: { id: existing.id } } as any);
       return;
     }
 
     // Create new conversation
-    const convoId = `ic_profile_${profile.id}_${Date.now()}`;
+    const convoId = `ic_profile_${profileId}_${Date.now()}`;
 
     unlockUser({
-      id: profile.id,
-      username: profile.username,
-      photoUrl: profile.photoUrl,
-      age: profile.age,
-      source: 'tod',
+      id: profileId,
+      username: profileName,
+      photoUrl: profilePhotoUrl,
+      age: profileAge,
+      source: 'tod', // Using 'tod' as connection source for Phase-2 profile views
       unlockedAt: Date.now(),
     });
 
     createConversation({
       id: convoId,
-      participantId: profile.id,
-      participantName: profile.username,
-      participantAge: profile.age,
-      participantPhotoUrl: profile.photoUrl,
+      participantId: profileId,
+      participantName: profileName,
+      participantAge: profileAge,
+      participantPhotoUrl: profilePhotoUrl,
       lastMessage: 'Say hi!',
       lastMessageAt: Date.now(),
       unreadCount: 0,
-      connectionSource: 'tod',
+      connectionSource: 'tod', // Using 'tod' for Phase-2 profile connections
     });
 
     router.push({ pathname: '/(main)/incognito-chat', params: { id: convoId } } as any);
   };
 
-  const genderIcon = profile.gender === 'male' ? 'male' : profile.gender === 'female' ? 'female' : 'male-female';
+  // P2-004: Using centralized getGenderIcon
+  const genderIcon = getGenderIcon(profileGender);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -98,70 +217,67 @@ export default function PrivateProfileViewScreen() {
         {/* Photo + basic info */}
         <View style={styles.photoSection}>
           <Image
-            source={{ uri: profile.photoUrl }}
-            style={[styles.profilePhoto, !profile.faceUnblurred && styles.photoBlurred]}
+            source={{ uri: profilePhotoUrl }}
+            style={[styles.profilePhoto, !profileFaceUnblurred && styles.photoBlurred]}
             contentFit="cover"
-            blurRadius={profile.faceUnblurred ? 0 : 20}
+            blurRadius={profileFaceUnblurred ? 0 : PHASE2_BLUR_CARD}
           />
-          {profile.isOnline && <View style={styles.onlineDot} />}
+          {profileIsOnline && <View style={styles.onlineDot} />}
         </View>
 
         <View style={styles.nameRow}>
-          <Text style={styles.nameText}>{profile.username}</Text>
-          <Text style={styles.ageText}>{profile.age}</Text>
+          <Text style={styles.nameText}>{profileName}</Text>
+          <Text style={styles.ageText}>{profileAge}</Text>
           <Ionicons name={genderIcon} size={16} color={C.textLight} />
         </View>
 
-        <View style={styles.locationRow}>
-          <Ionicons name="location-outline" size={14} color={C.textLight} />
-          <Text style={styles.locationText}>{profile.city}</Text>
-          <Text style={styles.distanceText}>{profile.distance} km away</Text>
-        </View>
+        {profileCity && (
+          <View style={styles.locationRow}>
+            <Ionicons name="location-outline" size={14} color={C.textLight} />
+            <Text style={styles.locationText}>{profileCity}</Text>
+          </View>
+        )}
 
         {/* Bio */}
-        {profile.bio ? (
+        {profileBio ? (
           <View style={styles.section}>
-            <Text style={styles.bioText}>{profile.bio}</Text>
+            <Text style={styles.bioText}>{profileBio}</Text>
           </View>
         ) : null}
 
         {/* DESIRE - Phase 2 desires as text */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>DESIRE</Text>
-          {profile.desires && profile.desires.length > 0 ? (
-            <Text style={styles.desireText}>{profile.desires.join(' • ')}</Text>
-          ) : (
-            <Text style={styles.placeholderText}>No desire added yet</Text>
-          )}
-        </View>
+        {profileDesires && profileDesires.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>DESIRE</Text>
+            <Text style={styles.desireText}>{profileDesires.join(' • ')}</Text>
+          </View>
+        )}
 
         {/* LOOKING FOR - Phase 2 intent category */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>LOOKING FOR</Text>
-          {profile.privateIntentKey ? (
+        {profileIntentKeys && profileIntentKeys.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>LOOKING FOR</Text>
             <View style={styles.intentChipRow}>
-              {(() => {
-                const intent = PRIVATE_INTENT_CATEGORIES.find(c => c.key === profile.privateIntentKey);
-                if (!intent) return <Text style={styles.placeholderText}>Not set</Text>;
+              {profileIntentKeys.map((intentKey: string, i: number) => {
+                const intent = PRIVATE_INTENT_CATEGORIES.find(c => c.key === intentKey);
+                if (!intent) return null;
                 return (
-                  <View style={[styles.intentChip, { borderColor: intent.color + '50' }]}>
+                  <View key={i} style={[styles.intentChip, { borderColor: intent.color + '50' }]}>
                     <Ionicons name={intent.icon as any} size={16} color={intent.color} />
                     <Text style={[styles.intentChipText, { color: intent.color }]}>{intent.label}</Text>
                   </View>
                 );
-              })()}
+              })}
             </View>
-          ) : (
-            <Text style={styles.placeholderText}>Not set</Text>
-          )}
-        </View>
+          </View>
+        )}
 
         {/* Interests */}
-        {profile.interests && profile.interests.length > 0 && (
+        {profileInterests && profileInterests.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Interests</Text>
             <View style={styles.chipRow}>
-              {profile.interests.map((interest, i) => (
+              {profileInterests.map((interest: string, i: number) => (
                 <View key={i} style={styles.chipAlt}>
                   <Text style={styles.chipAltText}>{interest}</Text>
                 </View>
@@ -171,11 +287,11 @@ export default function PrivateProfileViewScreen() {
         )}
 
         {/* Hobbies */}
-        {profile.hobbies && profile.hobbies.length > 0 && (
+        {profileHobbies && profileHobbies.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Hobbies</Text>
             <View style={styles.chipRow}>
-              {profile.hobbies.map((hobby, i) => (
+              {profileHobbies.map((hobby: string, i: number) => (
                 <View key={i} style={styles.chipAlt}>
                   <Text style={styles.chipAltText}>{hobby}</Text>
                 </View>
@@ -184,43 +300,45 @@ export default function PrivateProfileViewScreen() {
           </View>
         )}
 
-        {/* Details */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Details</Text>
-          <View style={styles.detailsGrid}>
-            {profile.height ? (
-              <View style={styles.detailItem}>
-                <Ionicons name="resize-outline" size={16} color={C.textLight} />
-                <Text style={styles.detailText}>{profile.height} cm</Text>
-              </View>
-            ) : null}
-            {profile.bodyStructure ? (
-              <View style={styles.detailItem}>
-                <Ionicons name="body-outline" size={16} color={C.textLight} />
-                <Text style={styles.detailText}>{profile.bodyStructure}</Text>
-              </View>
-            ) : null}
-            {profile.hairColor ? (
-              <View style={styles.detailItem}>
-                <Ionicons name="color-palette-outline" size={16} color={C.textLight} />
-                <Text style={styles.detailText}>{profile.hairColor} hair</Text>
-              </View>
-            ) : null}
-            {profile.eyeColor ? (
-              <View style={styles.detailItem}>
-                <Ionicons name="eye-outline" size={16} color={C.textLight} />
-                <Text style={styles.detailText}>{profile.eyeColor} eyes</Text>
-              </View>
-            ) : null}
+        {/* Details - only for demo profiles with this data */}
+        {!isConvexProfile && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Details</Text>
+            <View style={styles.detailsGrid}>
+              {(profile as any).height ? (
+                <View style={styles.detailItem}>
+                  <Ionicons name="resize-outline" size={16} color={C.textLight} />
+                  <Text style={styles.detailText}>{(profile as any).height} cm</Text>
+                </View>
+              ) : null}
+              {(profile as any).bodyStructure ? (
+                <View style={styles.detailItem}>
+                  <Ionicons name="body-outline" size={16} color={C.textLight} />
+                  <Text style={styles.detailText}>{(profile as any).bodyStructure}</Text>
+                </View>
+              ) : null}
+              {(profile as any).hairColor ? (
+                <View style={styles.detailItem}>
+                  <Ionicons name="color-palette-outline" size={16} color={C.textLight} />
+                  <Text style={styles.detailText}>{(profile as any).hairColor} hair</Text>
+                </View>
+              ) : null}
+              {(profile as any).eyeColor ? (
+                <View style={styles.detailItem}>
+                  <Ionicons name="eye-outline" size={16} color={C.textLight} />
+                  <Text style={styles.detailText}>{(profile as any).eyeColor} eyes</Text>
+                </View>
+              ) : null}
+            </View>
           </View>
-        </View>
+        )}
 
-        {/* Desire categories */}
-        {profile.desireCategories && profile.desireCategories.length > 0 && (
+        {/* Desire categories - only for demo profiles */}
+        {!isConvexProfile && (profile as any).desireCategories && (profile as any).desireCategories.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Vibe</Text>
             <View style={styles.chipRow}>
-              {profile.desireCategories.map((cat, i) => (
+              {(profile as any).desireCategories.map((cat: string, i: number) => (
                 <View key={i} style={styles.vibeChip}>
                   <Text style={styles.vibeChipText}>{cat}</Text>
                 </View>
@@ -255,6 +373,40 @@ const styles = StyleSheet.create({
   // Empty
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   emptyText: { fontSize: 15, color: C.textLight },
+  // P2-003: Error state
+  errorState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+    gap: 12,
+  },
+  errorTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: C.text,
+    marginTop: 4,
+  },
+  errorSubtitle: {
+    fontSize: 14,
+    color: C.textLight,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: C.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 8,
+  },
+  retryButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
   // Scroll
   scrollContent: { paddingHorizontal: 16 },
   // Photo

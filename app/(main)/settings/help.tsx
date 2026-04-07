@@ -3,7 +3,11 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-nati
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import Constants from 'expo-constants';
 import { COLORS } from '@/lib/constants';
+
+// Get app version from expo config (safe fallback)
+const APP_VERSION = Constants.expoConfig?.version ?? '1.0.0';
 
 // Help topics content
 const HELP_TOPICS = {
@@ -195,7 +199,7 @@ export default function HelpSupportScreen() {
 
         {/* App Version */}
         <View style={styles.versionSection}>
-          <Text style={styles.versionText}>Mira v1.0.0</Text>
+          <Text style={styles.versionText}>Mira v{APP_VERSION}</Text>
         </View>
       </ScrollView>
     </SafeAreaView>

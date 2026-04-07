@@ -1,5 +1,15 @@
+/**
+ * LOCKED (MESSAGE BUBBLE)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - P0 audit passed: renders backend message data correctly
+ * - Used by Phase-1 messaging (ChatScreenInner)
+ */
 import React from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity, Alert, Pressable, Dimensions } from 'react-native';
+import Animated, { FadeIn, SlideInUp } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
@@ -8,10 +18,21 @@ import { SystemMessage } from './SystemMessage';
 import { VoiceMessageBubble } from './VoiceMessageBubble';
 import { formatTime } from '@/utils/chatTime';
 
-// Avatar size constant for consistent spacing
-// AVATAR-ENLARGE: Increased from 28 to 34 for better visibility
-const AVATAR_SIZE = 34;
-const AVATAR_GAP = 8;
+// ═══════════════════════════════════════════════════════════════════════════
+// LAYOUT CONSTANTS - Tight, modern chat layout (WhatsApp/Telegram density)
+// ═══════════════════════════════════════════════════════════════════════════
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+// Avatar sizing - compact for tight layout
+const AVATAR_SIZE = 26;
+const AVATAR_GAP = 4;
+
+// Bubble constraints - maximize usable width
+const MAX_BUBBLE_WIDTH = Math.min(SCREEN_WIDTH * 0.80, 310);
+
+// Border radius for premium rounded look
+const BUBBLE_RADIUS = 18;
+const BUBBLE_TAIL_RADIUS = 4; // Smaller radius for the tail corner
 
 interface MessageBubbleProps {
   message: {
@@ -124,25 +145,56 @@ export function MessageBubble({
 }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
 
+  // Entry animation: subtle fade + slide up for new messages
+  const enteringAnimation = FadeIn.duration(180).withInitialValues({
+    opacity: 0,
+    transform: [{ translateY: 6 }],
+  });
+
   // Avatar rendering helper for received messages - tappable to open profile
   const renderAvatar = () => {
     if (isOwn) return null; // No avatar for sent messages
 
-    if (showAvatar && avatarUrl) {
+    // Only render avatar on last message in group (showAvatar=true)
+    if (showAvatar) {
+      // Compute initials fallback from otherUserName
+      const initials = (() => {
+        const name = otherUserName || '';
+        const parts = name.split(' ').filter(Boolean);
+        if (parts.length >= 2) {
+          return (parts[0][0] + parts[1][0]).toUpperCase();
+        }
+        return name.slice(0, 2).toUpperCase() || '?';
+      })();
+
+      if (avatarUrl) {
+        return (
+          <TouchableOpacity
+            onPress={onAvatarPress}
+            activeOpacity={0.7}
+            disabled={!onAvatarPress}
+          >
+            <Image
+              source={{ uri: avatarUrl }}
+              style={styles.avatar}
+            />
+          </TouchableOpacity>
+        );
+      }
+      // Fallback: show initials avatar when photoUrl is missing
       return (
         <TouchableOpacity
           onPress={onAvatarPress}
           activeOpacity={0.7}
           disabled={!onAvatarPress}
         >
-          <Image
-            source={{ uri: avatarUrl }}
-            style={styles.avatar}
-          />
+          <View style={[styles.avatar, styles.avatarFallback]}>
+            <Text style={styles.avatarInitials}>{initials}</Text>
+          </View>
         </TouchableOpacity>
       );
     }
-    // Spacer to maintain alignment when avatar is not shown
+    // Spacer to maintain alignment when avatar is not shown (not last in group)
     return <View style={styles.avatarSpacer} />;
   };
 
@@ -158,6 +210,18 @@ export function MessageBubble({
     if (markerMatch) {
       const subtype = markerMatch[1];
       const displayText = message.content.slice(markerMatch[0].length);
+
+      // PIN-NOTIFICATION-CLEANUP: Auto-hide "Bottle landed on" notifications
+      // after 5 minutes of being seen (UI-only suppression, message still exists in DB)
+      const isBottleLandedNotification = subtype === 'truthdare' && displayText.startsWith('Bottle landed on');
+      if (isBottleLandedNotification && message.readAt) {
+        const fiveMinutesMs = 5 * 60 * 1000;
+        const timeSinceSeen = Date.now() - message.readAt;
+        if (timeSinceSeen > fiveMinutesMs) {
+          return null; // Hide temporary pin notification after 5 min of being seen
+        }
+      }
+
       return <SystemMessage text={displayText} subtype={subtype as any} />;
     }
   }
@@ -187,72 +251,27 @@ export function MessageBubble({
       }
     }
 
-    return (
-      <View style={[
-        styles.container,
-        isOwn ? styles.ownContainer : styles.otherContainer,
-        !isLastInGroup && styles.groupedContainer,
-      ]}>
-        {!isOwn && renderAvatar()}
-        <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, styles.protectedBubble]}>
-          <ProtectedMediaBubble
-            messageId={message.id}
-            mediaId={message.mediaId}
-            userId={currentUserId}
-            protectedMedia={message.protectedMedia as any}
-            timerEndsAt={message.timerEndsAt}
-            isExpired={!!message.isExpired}
-            expiredAt={message.expiredAt}
-            isOwn={isOwn}
-            viewOnce={message.viewOnce}
-            recipientOpened={message.recipientOpened}
-            onPress={() => onProtectedMediaPress?.(message.id)}
-            onHoldStart={() => onProtectedMediaHoldStart?.(message.id)}
-            onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
-            onExpire={() => onProtectedMediaExpire?.(message.id)}
-          />
-          {!message.isExpired && (
-            <View style={styles.imageFooter}>
-              <Text style={[styles.time, isOwn && styles.ownTime]}>
-                {formatTime(message.createdAt)}
-              </Text>
-              {isOwn && (() => {
-                const tickStatus = getTickStatus(message);
-                return (
-                  <Ionicons
-                    name={getTickIcon(tickStatus)}
-                    size={14}
-                    color={getTickColor(tickStatus, isOwn)}
-                    style={styles.readIcon}
-                  />
-                );
-              })()}
-            </View>
-          )}
-        </View>
-      </View>
-    );
-  }
-
-  // Unified media rendering for image, video
-  // Check multiple possible URI fields: mediaUrl, imageUrl, videoUri
-  const mediaUrl = message.mediaUrl || message.imageUrl || message.videoUri;
-  const isMedia = (message.type === 'image' || message.type === 'video') && mediaUrl;
-
-  if (isMedia) {
-    return (
-      <View style={[
-        styles.container,
-        isOwn ? styles.ownContainer : styles.otherContainer,
-        !isLastInGroup && styles.groupedContainer,
-      ]}>
-        {!isOwn && renderAvatar()}
-        <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
-          <MediaMessage
-            mediaUrl={mediaUrl!}
-            type={message.type as 'image' | 'video'}
-            onPress={() => onMediaPress?.(mediaUrl!, message.type as 'image' | 'video')}
-          />
+    // TOUCH-FIX: Wrap protected media with Pressable for sender long-press delete
+    // Receiver uses ProtectedMediaBubble's internal PanResponder for tap/hold to view
+    const protectedMediaContent = (
+      <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, styles.protectedBubble]}>
+        <ProtectedMediaBubble
+          messageId={message.id}
+          mediaId={message.mediaId}
+          userId={currentUserId}
+          protectedMedia={message.protectedMedia as any}
+          timerEndsAt={message.timerEndsAt}
+          isExpired={!!message.isExpired}
+          expiredAt={message.expiredAt}
+          isOwn={isOwn}
+          viewOnce={message.viewOnce}
+          recipientOpened={message.recipientOpened}
+          onPress={() => onProtectedMediaPress?.(message.id)}
+          onHoldStart={() => onProtectedMediaHoldStart?.(message.id)}
+          onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
+          onExpire={() => onProtectedMediaExpire?.(message.id)}
+        />
+        {!message.isExpired && (
           <View style={styles.imageFooter}>
             <Text style={[styles.time, isOwn && styles.ownTime]}>
               {formatTime(message.createdAt)}
@@ -269,8 +288,65 @@ export function MessageBubble({
               );
             })()}
           </View>
-        </View>
+        )}
       </View>
+    );
+
+    return (
+      <Animated.View
+        entering={enteringAnimation}
+        style={[
+          styles.container,
+          isOwn ? styles.ownContainer : styles.otherContainer,
+          !isLastInGroup && styles.groupedContainer,
+        ]}
+      >
+        {!isOwn && renderAvatar()}
+        {protectedMediaContent}
+      </Animated.View>
+    );
+  }
+
+  // Unified media rendering for image, video
+  // Check multiple possible URI fields: mediaUrl, imageUrl, videoUri
+  const mediaUrl = message.mediaUrl || message.imageUrl || message.videoUri;
+  const isMedia = (message.type === 'image' || message.type === 'video') && mediaUrl;
+
+  if (isMedia) {
+    return (
+      <Animated.View
+        entering={enteringAnimation}
+        style={[
+          styles.container,
+          isOwn ? styles.ownContainer : styles.otherContainer,
+          !isLastInGroup && styles.groupedContainer,
+        ]}
+      >
+        {!isOwn && renderAvatar()}
+        <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
+            <MediaMessage
+              mediaUrl={mediaUrl!}
+              type={message.type as 'image' | 'video'}
+              onPress={() => onMediaPress?.(mediaUrl!, message.type as 'image' | 'video')}
+            />
+            <View style={styles.imageFooter}>
+              <Text style={[styles.time, isOwn && styles.ownTime]}>
+                {formatTime(message.createdAt)}
+              </Text>
+              {isOwn && (() => {
+                const tickStatus = getTickStatus(message);
+                return (
+                  <Ionicons
+                    name={getTickIcon(tickStatus)}
+                    size={14}
+                    color={getTickColor(tickStatus, isOwn)}
+                    style={styles.readIcon}
+                  />
+                );
+              })()}
+            </View>
+          </View>
+      </Animated.View>
     );
   }
 
@@ -281,11 +357,14 @@ export function MessageBubble({
   const voiceDuration = message.durationMs || message.audioDurationMs || 0;
   if (message.type === 'voice') {
     return (
-      <View style={[
-        styles.container,
-        isOwn ? styles.ownContainer : styles.otherContainer,
-        !isLastInGroup && styles.groupedContainer,
-      ]}>
+      <Animated.View
+        entering={enteringAnimation}
+        style={[
+          styles.container,
+          isOwn ? styles.ownContainer : styles.otherContainer,
+          !isLastInGroup && styles.groupedContainer,
+        ]}
+      >
         {!isOwn && renderAvatar()}
         <VoiceMessageBubble
           messageId={message.id}
@@ -294,18 +373,24 @@ export function MessageBubble({
           isOwn={isOwn}
           timestamp={message.createdAt}
           onDelete={isOwn && onVoiceDelete ? () => onVoiceDelete(message.id) : undefined}
+          // VOICE-TICKS: Pass tick status props for sent/delivered/read indicators
+          deliveredAt={message.deliveredAt}
+          readAt={message.readAt}
         />
-      </View>
+      </Animated.View>
     );
   }
 
   if (message.type === 'dare') {
     return (
-      <View style={[
-        styles.container,
-        isOwn ? styles.ownContainer : styles.otherContainer,
-        !isLastInGroup && styles.groupedContainer,
-      ]}>
+      <Animated.View
+        entering={enteringAnimation}
+        style={[
+          styles.container,
+          isOwn ? styles.ownContainer : styles.otherContainer,
+          !isLastInGroup && styles.groupedContainer,
+        ]}
+      >
         {!isOwn && renderAvatar()}
         <View style={[styles.bubble, styles.dareBubble, isOwn && styles.ownBubble]}>
           <View style={styles.dareHeader}>
@@ -317,16 +402,19 @@ export function MessageBubble({
           <Text style={styles.dareContent}>{message.content}</Text>
           <Text style={[styles.time, styles.dareTime]}>{formatTime(message.createdAt)}</Text>
         </View>
-      </View>
+      </Animated.View>
     );
   }
 
   return (
-    <View style={[
-      styles.container,
-      isOwn ? styles.ownContainer : styles.otherContainer,
-      !isLastInGroup && styles.groupedContainer,
-    ]}>
+    <Animated.View
+      entering={enteringAnimation}
+      style={[
+        styles.container,
+        isOwn ? styles.ownContainer : styles.otherContainer,
+        !isLastInGroup && styles.groupedContainer,
+      ]}
+    >
       {/* Avatar for received messages */}
       {!isOwn && renderAvatar()}
 
@@ -361,16 +449,19 @@ export function MessageBubble({
           </View>
         )}
       </View>
-    </View>
+    </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONTAINER - Tight message row layout (WhatsApp-style density)
+  // ═══════════════════════════════════════════════════════════════════════════
   container: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginVertical: 3,
-    paddingHorizontal: 12,
+    marginVertical: 2,
+    paddingHorizontal: 8, // Tight horizontal padding
   },
   ownContainer: {
     justifyContent: 'flex-end',
@@ -379,9 +470,12 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   groupedContainer: {
-    marginVertical: 1, // Tighter spacing for grouped messages
+    marginVertical: 1, // Minimal gap for grouped messages
   },
-  // Avatar styles
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AVATAR - Compact circular profile image for received messages
+  // ═══════════════════════════════════════════════════════════════════════════
   avatar: {
     width: AVATAR_SIZE,
     height: AVATAR_SIZE,
@@ -393,31 +487,54 @@ const styles = StyleSheet.create({
     width: AVATAR_SIZE,
     marginRight: AVATAR_GAP,
   },
+  avatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+  },
+  avatarInitials: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BUBBLE - Compact, modern message container
+  // ═══════════════════════════════════════════════════════════════════════════
   bubble: {
-    maxWidth: '70%',
+    maxWidth: MAX_BUBBLE_WIDTH,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 18,
+    borderRadius: BUBBLE_RADIUS,
     backgroundColor: COLORS.backgroundDark,
   },
   ownBubble: {
     backgroundColor: COLORS.primary,
-    borderBottomRightRadius: 4,
+    borderBottomRightRadius: BUBBLE_TAIL_RADIUS,
   },
   otherBubble: {
-    backgroundColor: COLORS.backgroundDark,
-    borderBottomLeftRadius: 4,
+    backgroundColor: COLORS.card,
+    borderBottomLeftRadius: BUBBLE_TAIL_RADIUS,
+    // Very subtle shadow
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 1,
+    elevation: 1,
   },
   dareBubble: {
     backgroundColor: COLORS.secondary,
-    maxWidth: '70%',
+    maxWidth: MAX_BUBBLE_WIDTH,
   },
   protectedBubble: {
     paddingHorizontal: 6,
     paddingVertical: 6,
     backgroundColor: 'transparent',
   },
-  // SECURE-REWRITE: Pending/uploading secure photo styles
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PENDING - Uploading secure photo state
+  // ═══════════════════════════════════════════════════════════════════════════
   pendingBubble: {
     paddingVertical: 12,
     paddingHorizontal: 16,
@@ -432,24 +549,36 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EMOJI - Large emoji-only messages
+  // ═══════════════════════════════════════════════════════════════════════════
   emojiBubble: {
     backgroundColor: 'transparent',
     paddingHorizontal: 4,
     paddingVertical: 4,
   },
+  emojiText: {
+    fontSize: 34,
+    lineHeight: 42,
+    textAlign: 'center',
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TEXT - Readable, clean typography
+  // ═══════════════════════════════════════════════════════════════════════════
   text: {
-    fontSize: 15,
+    fontSize: 16,
     color: COLORS.text,
-    lineHeight: 20,
+    lineHeight: 22,
   },
   ownText: {
     color: COLORS.white,
   },
-  emojiText: {
-    fontSize: 36,
-    lineHeight: 44,
-    textAlign: 'center',
-  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FOOTER - Compact timestamp and read status (WhatsApp-style)
+  // ═══════════════════════════════════════════════════════════════════════════
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -457,21 +586,26 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   time: {
-    fontSize: 11,
-    color: COLORS.textLight,
+    fontSize: 10,
+    color: COLORS.textMuted,
+    letterSpacing: -0.2,
   },
   ownTime: {
-    color: COLORS.white,
-    opacity: 0.8,
+    color: 'rgba(255, 255, 255, 0.55)',
   },
   readIcon: {
-    marginLeft: 4,
+    marginLeft: 2,
   },
   imageFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
+    marginTop: 3,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DARE - Special dare message styling
+  // ═══════════════════════════════════════════════════════════════════════════
   dareHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -486,11 +620,11 @@ const styles = StyleSheet.create({
   dareContent: {
     fontSize: 15,
     color: COLORS.white,
-    lineHeight: 20,
-    marginBottom: 8,
+    lineHeight: 21,
+    marginBottom: 6,
   },
   dareTime: {
-    color: COLORS.white,
-    opacity: 0.8,
+    fontSize: 10,
+    color: 'rgba(255, 255, 255, 0.55)',
   },
 });

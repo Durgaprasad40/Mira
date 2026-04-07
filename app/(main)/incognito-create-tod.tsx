@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,7 @@ import {
   Alert,
   ActivityIndicator,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation } from 'convex/react';
@@ -59,10 +59,30 @@ function calculateAge(dob: string | undefined): number | undefined {
 export default function CreateTodScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const params = useLocalSearchParams<{
+    editPromptId?: string;
+    editType?: string;
+    editText?: string;
+  }>();
+
+  // Edit mode detection
+  const isEditMode = !!params.editPromptId;
+  const editPromptId = params.editPromptId;
+
   const [postType, setPostType] = useState<PostType>('truth');
   const [content, setContent] = useState('');
   const [visibility, setVisibility] = useState<VisibilityMode>('anonymous');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Initialize state from edit params
+  useEffect(() => {
+    if (isEditMode && params.editText) {
+      setContent(params.editText);
+      if (params.editType === 'truth' || params.editType === 'dare') {
+        setPostType(params.editType);
+      }
+    }
+  }, [isEditMode, params.editText, params.editType]);
 
   // Get user data from canonical sources
   const userId = useAuthStore((s) => s.userId);
@@ -133,8 +153,9 @@ export default function CreateTodScreen() {
     return { name: undefined, age: undefined, gender: undefined, photoCandidates: [] };
   }, [currentDemoUserId, demoProfiles, p2DisplayName, p2Age, p2Gender, p2PhotoUrls, p2BlurredPhotoUrls]);
 
-  // Convex mutation
+  // Convex mutations
   const createPrompt = useMutation(api.truthDare.createPrompt);
+  const editPromptMutation = useMutation(api.truthDare.editPrompt);
 
   const maxLength = 280;
   const canSubmit = content.trim().length >= 10 && !isSubmitting;
@@ -212,7 +233,19 @@ export default function CreateTodScreen() {
     setIsSubmitting(true);
 
     try {
-      // TOD-001 FIX: Use authUserId for server-side verification
+      // EDIT MODE: Update existing prompt text only
+      if (isEditMode && editPromptId) {
+        await editPromptMutation({
+          promptId: editPromptId as any,
+          text: content.trim(),
+          authUserId: effectiveUserId,
+        });
+        console.log(`[T/D REPORT] edited promptId=${editPromptId}`);
+        router.back();
+        return;
+      }
+
+      // CREATE MODE: TOD-001 FIX: Use authUserId for server-side verification
       if (visibility === 'anonymous') {
         // Anonymous: no identity, no photo
         await createPrompt({
@@ -276,23 +309,25 @@ export default function CreateTodScreen() {
         <TouchableOpacity onPress={() => router.back()}>
           <Ionicons name="close" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>New Post</Text>
+        <Text style={styles.headerTitle}>{isEditMode ? 'Edit Post' : 'New Post'}</Text>
         {/* Spacer for alignment */}
         <View style={{ width: 24 }} />
       </View>
 
-      {/* Type Selector */}
-      <View style={styles.typeSelector}>
+      {/* Type Selector - disabled in edit mode (can't change truth/dare type) */}
+      <View style={[styles.typeSelector, isEditMode && { opacity: 0.5 }]}>
         <TouchableOpacity
           style={[styles.typeOption, postType === 'truth' && styles.typeOptionActive]}
-          onPress={() => setPostType('truth')}
+          onPress={() => !isEditMode && setPostType('truth')}
+          disabled={isEditMode}
         >
           <Ionicons name="help-circle" size={20} color={postType === 'truth' ? '#FFFFFF' : C.textLight} />
           <Text style={[styles.typeLabel, postType === 'truth' && styles.typeLabelActive]}>Truth</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.typeOption, postType === 'dare' && styles.typeOptionDareActive]}
-          onPress={() => setPostType('dare')}
+          onPress={() => !isEditMode && setPostType('dare')}
+          disabled={isEditMode}
         >
           <Ionicons name="flash" size={20} color={postType === 'dare' ? '#FFFFFF' : C.textLight} />
           <Text style={[styles.typeLabel, postType === 'dare' && styles.typeLabelActive]}>Dare</Text>
@@ -320,7 +355,8 @@ export default function CreateTodScreen() {
         </Text>
       </View>
 
-      {/* 3-Option Visibility Selector */}
+      {/* 3-Option Visibility Selector - hidden in edit mode (identity already set) */}
+      {!isEditMode && (
       <View style={styles.visibilityContainer}>
         <Text style={styles.visibilityLabel}>Who can see your identity?</Text>
         <View style={styles.visibilityOptions}>
@@ -376,8 +412,11 @@ export default function CreateTodScreen() {
             ? 'Your profile photo is visible'
             : 'Your name is visible, no photo'}
         </Text>
+      </View>
+      )}
 
-        {/* POST button - directly under visibility options */}
+      {/* POST/SAVE button - always visible */}
+      <View style={styles.postButtonContainer}>
         <TouchableOpacity
           style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
           onPress={handleSubmit}
@@ -388,10 +427,30 @@ export default function CreateTodScreen() {
             <ActivityIndicator size="small" color="#FFFFFF" />
           ) : (
             <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
-              POST
+              {isEditMode ? 'SAVE' : 'POST'}
             </Text>
           )}
         </TouchableOpacity>
+      </View>
+
+      {/* Guidelines - below POST button */}
+      <View style={styles.guidelinesContainer}>
+        <Text style={styles.guidelinesTitle}>Before you post:</Text>
+
+        <Text style={styles.guidelinesPoint}>• Be respectful to others</Text>
+        <Text style={styles.guidelinesPoint}>• Keep content safe and appropriate</Text>
+        <Text style={styles.guidelinesPoint}>• No scams or misleading content</Text>
+        <Text style={styles.guidelinesPoint}>• Respect privacy and consent</Text>
+
+        <Text style={styles.guidelinesLinkText}>
+          Read full{' '}
+          <Text
+            style={styles.guidelinesLink}
+            onPress={() => router.push('/(main)/community-guidelines')}
+          >
+            community guidelines
+          </Text>
+        </Text>
       </View>
     </KeyboardAvoidingView>
   );
@@ -458,6 +517,11 @@ const styles = StyleSheet.create({
     fontSize: 12, color: C.textLight, marginTop: 8, textAlign: 'center',
   },
 
+  // Container for POST button - keeps button visible in edit mode
+  postButtonContainer: {
+    paddingHorizontal: 20,
+  },
+
   // Main POST button - placed directly under visibility options
   postButtonMain: {
     backgroundColor: C.primary,
@@ -478,5 +542,30 @@ const styles = StyleSheet.create({
   },
   postButtonMainTextDisabled: {
     color: C.textLight,
+  },
+
+  // Guidelines section - below POST button
+  guidelinesContainer: {
+    marginTop: 16,
+    paddingHorizontal: 16,
+  },
+  guidelinesTitle: {
+    fontSize: 13,
+    color: C.text,
+    marginBottom: 6,
+  },
+  guidelinesPoint: {
+    fontSize: 12,
+    color: C.textLight,
+    marginBottom: 2,
+  },
+  guidelinesLinkText: {
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 6,
+  },
+  guidelinesLink: {
+    color: C.primary,
+    textDecorationLine: 'underline',
   },
 });

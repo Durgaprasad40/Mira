@@ -30,6 +30,11 @@ interface AuthState {
   token: string | null;
   onboardingCompleted: boolean;
 
+  // AUTH_READY_FIX: Flag indicating auth state is fully validated and ready
+  // Set to true ONLY after setAuthenticatedSession is called with validated onboarding status
+  // Components should wait for this before running queries that depend on auth state
+  authReady: boolean;
+
   // Auth lifecycle flags
   authVersion: number;        // Monotonic counter, incremented on logout start
   logoutInProgress: boolean;  // True between beginLogout and finishLogout
@@ -73,7 +78,8 @@ interface AuthState {
 
   // Begin logout - sets logoutInProgress, increments authVersion
   // After this, all setAuthenticatedSession calls will be rejected
-  beginLogout: () => void;
+  // P0-003 FIX: Returns false if logout already in progress (mutex)
+  beginLogout: () => boolean;
 
   // Finish logout - clears all state, sets logoutInProgress=false
   finishLogout: () => void;
@@ -124,6 +130,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   userId: null,
   token: null,
   onboardingCompleted: false,
+  // AUTH_READY_FIX: Start as false, set true only after validation completes
+  authReady: false,
   authVersion: 0,
   logoutInProgress: false,
   faceVerificationPassed: false,
@@ -188,20 +196,36 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.log(`[AUTH] setAuthenticatedSession: userId=${userId.substring(0, 10)}..., onboardingCompleted=${onboardingCompleted}, authVersion=${expectedAuthVersion}`);
     }
 
+    // AUTH_READY_FIX: Set authReady=true now that validation is complete
+    // This signals to components that auth state is fully hydrated and reliable
     set({
       userId,
       token,
       onboardingCompleted,
+      authReady: true, // AUTH_READY_FIX: Mark auth as ready
       isAuthenticated: true,
       error: null,
       _sessionValidated: false,
       _sessionValidationError: null,
     });
 
+    if (__DEV__) {
+      console.log('[AUTH_READY] authReady=true, onboardingCompleted=', onboardingCompleted);
+    }
+
     return true;
   },
 
   beginLogout: () => {
+    // P0-003 FIX: Prevent double logout - if already in progress, return false
+    // This acts as a mutex to prevent concurrent logout execution
+    if (get().logoutInProgress) {
+      if (__DEV__) {
+        console.log('[AUTH] beginLogout: already in progress, skipping');
+      }
+      return false;
+    }
+
     const currentVersion = get().authVersion;
     const newVersion = currentVersion + 1;
 
@@ -213,6 +237,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       logoutInProgress: true,
       authVersion: newVersion,
     });
+
+    return true;
   },
 
   finishLogout: () => {
@@ -224,6 +250,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       userId: null,
       token: null,
       onboardingCompleted: false,
+      authReady: false, // AUTH_READY_FIX: Reset on logout
       faceVerificationPassed: false,
       faceVerificationPending: false,
       _sessionValidated: false,
@@ -251,7 +278,14 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     // =======================================================================
 
     // STEP 1: Begin logout - blocks all auth restoration
-    get().beginLogout();
+    // P0-003 FIX: Check if logout already in progress (mutex)
+    const didAcquireLock = get().beginLogout();
+    if (!didAcquireLock) {
+      if (__DEV__) {
+        console.log('[AUTH] logout: skipped (already in progress)');
+      }
+      return; // Another logout is already running
+    }
 
     // STEP 2: Clear SecureStore FIRST
     try {
@@ -259,7 +293,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       await clearAuthBootCache();
       if (__DEV__) console.log('[AUTH] logout: cleared SecureStore');
     } catch (error) {
-      console.error('[AUTH] logout: SecureStore cleanup failed:', error);
+      if (__DEV__) console.error('[AUTH] logout: SecureStore cleanup failed:', error);
       // CRITICAL: SecureStore failed - we must still clear in-memory to prevent
       // the user staying logged in. On next boot, they may get ghost login,
       // but that's better than being stuck logged in now.
@@ -274,7 +308,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       useOnboardingStore.getState()?.reset?.();
       if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset onboardingStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset onboardingStore', error);
     }
 
     try {
@@ -282,7 +316,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       usePrivateProfileStore.getState()?.resetPhase2?.();
       if (__DEV__) console.log('[AUTH] logout: cleared privateProfileStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset privateProfileStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset privateProfileStore', error);
     }
 
     try {
@@ -296,7 +330,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       });
       if (__DEV__) console.log('[AUTH] logout: cleared privateChatStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset privateChatStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset privateChatStore', error);
     }
 
     if (isDemoMode) {
@@ -305,7 +339,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         useDemoStore.getState()?.demoLogout?.();
         if (__DEV__) console.log('[AUTH] logout: called demoLogout()');
       } catch (error) {
-        console.warn('[AUTH] logout: failed to call demoLogout', error);
+        if (__DEV__) console.warn('[AUTH] logout: failed to call demoLogout', error);
       }
     }
 
@@ -315,7 +349,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       useDemoDmStore.getState()?.reset?.();
       if (__DEV__) console.log('[AUTH] logout: cleared demoDmStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset demoDmStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset demoDmStore', error);
     }
 
     try {
@@ -323,7 +357,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       useVerificationStore.getState()?.resetVerification?.();
       if (__DEV__) console.log('[AUTH] logout: cleared verificationStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset verificationStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset verificationStore', error);
     }
 
     // P0-PRIVACY-FIX: Reset privacy settings to prevent cross-user leakage
@@ -332,7 +366,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       usePrivacyStore.getState()?.resetPrivacy?.();
       if (__DEV__) console.log('[AUTH] logout: cleared privacyStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset privacyStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset privacyStore', error);
     }
 
     try {
@@ -360,7 +394,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       }
       if (__DEV__) console.log('[AUTH] logout: cleared confessionStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset confessionStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset confessionStore', error);
     }
 
     try {
@@ -368,7 +402,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       clearTodCache?.();
       if (__DEV__) console.log('[AUTH] logout: cleared T&D cache');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to clear T&D cache', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to clear T&D cache', error);
     }
 
     try {
@@ -376,7 +410,16 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       useChatTodStore.setState({ games: {} });
       if (__DEV__) console.log('[AUTH] logout: cleared chatTodStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to clear chatTodStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to clear chatTodStore', error);
+    }
+
+    // P0-005 FIX: Reset Phase-2 active flag to prevent notification filtering for next user
+    try {
+      const { setPhase2Active } = require('@/hooks/useNotifications');
+      setPhase2Active(false);
+      if (__DEV__) console.log('[AUTH] logout: reset Phase-2 active flag');
+    } catch (error) {
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset Phase-2 active flag', error);
     }
 
     // P1 SECURITY: Reset discoverStore to prevent cross-user state bleed
@@ -395,7 +438,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       });
       if (__DEV__) console.log('[AUTH] logout: cleared discoverStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset discoverStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset discoverStore', error);
     }
 
     // APP-P1-007 FIX: Clear blockStore to prevent cross-user blocked list bleed
@@ -404,7 +447,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       useBlockStore.getState().clearBlocks();
       if (__DEV__) console.log('[AUTH] logout: cleared blockStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset blockStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset blockStore', error);
     }
 
     // P0-002 FIX: Clear filterStore to prevent cross-user filter bleed
@@ -413,16 +456,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       useFilterStore.getState().clearFilters();
       if (__DEV__) console.log('[AUTH] logout: cleared filterStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset filterStore', error);
-    }
-
-    // P0-002 FIX: Clear photoBlurStore to prevent cross-user blur settings bleed
-    try {
-      const { usePhotoBlurStore } = require('@/stores/photoBlurStore');
-      usePhotoBlurStore.setState({ userSettings: {} });
-      if (__DEV__) console.log('[AUTH] logout: cleared photoBlurStore');
-    } catch (error) {
-      console.warn('[AUTH] logout: failed to reset photoBlurStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset filterStore', error);
     }
 
     // P0-002 FIX: Clear subscriptionStore to prevent cross-user subscription bleed
@@ -445,7 +479,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       });
       if (__DEV__) console.log('[AUTH] logout: cleared subscriptionStore');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to reset subscriptionStore', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to reset subscriptionStore', error);
     }
 
     // P0-003 FIX: Stop GPS tracking to prevent battery drain and privacy leak
@@ -454,7 +488,16 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       useLocationStore.getState().stopLocationTracking();
       if (__DEV__) console.log('[AUTH] logout: stopped location tracking');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to stop location tracking', error);
+      if (__DEV__) console.warn('[AUTH] logout: failed to stop location tracking', error);
+    }
+
+    // PHASE 2: Stop background location tracking and clear settings on logout
+    try {
+      const { cleanupBackgroundLocation } = require('@/utils/backgroundLocation');
+      await cleanupBackgroundLocation();
+      if (__DEV__) console.log('[AUTH] logout: cleaned up background location');
+    } catch (error) {
+      if (__DEV__) console.warn('[AUTH] logout: failed to cleanup background location', error);
     }
 
     // STEP 4: Finish logout - clear in-memory state
@@ -465,28 +508,60 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   // OTHER ACTIONS
   // ==========================================================================
 
-  setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
+  setOnboardingCompleted: (completed) => {
+    // LOOP FIX: Equality guard
+    if (get().onboardingCompleted === completed) return;
+    set({ onboardingCompleted: completed });
+  },
 
-  setFaceVerificationPassed: (passed) => set({ faceVerificationPassed: passed }),
+  setFaceVerificationPassed: (passed) => {
+    // LOOP FIX: Equality guard
+    if (get().faceVerificationPassed === passed) return;
+    set({ faceVerificationPassed: passed });
+  },
 
-  setFaceVerificationPending: (pending) => set({ faceVerificationPending: pending }),
+  setFaceVerificationPending: (pending) => {
+    // LOOP FIX: Equality guard
+    if (get().faceVerificationPending === pending) return;
+    set({ faceVerificationPending: pending });
+  },
 
-  setLoading: (isLoading) => set({ isLoading }),
+  setLoading: (isLoading) => {
+    // LOOP FIX: Equality guard
+    if (get().isLoading === isLoading) return;
+    set({ isLoading });
+  },
 
-  setError: (error) => set({ error, isLoading: false }),
+  setError: (error) => {
+    // LOOP FIX: Equality guard (compare error string)
+    if (get().error === error) return;
+    set({ error, isLoading: false });
+  },
 
-  setHasHydrated: () => set({ _hasHydrated: true }),
+  setHasHydrated: () => {
+    // LOOP FIX: Equality guard
+    if (get()._hasHydrated === true) return;
+    set({ _hasHydrated: true });
+  },
 
-  syncFromServerValidation: (userInfo) =>
-    set((state) => ({
-      onboardingCompleted: userInfo.onboardingCompleted || state.onboardingCompleted,
-    })),
+  syncFromServerValidation: (userInfo) => {
+    // LOOP FIX: Only update if value actually changes
+    const current = get().onboardingCompleted;
+    const newValue = userInfo.onboardingCompleted || current;
+    if (current === newValue) return;
+    set({ onboardingCompleted: newValue });
+  },
 
-  setSessionValidated: (validated, error = null) =>
+  setSessionValidated: (validated, error = null) => {
+    // LOOP FIX: Equality guard - check both fields
+    const state = get();
+    const newError = validated ? null : error;
+    if (state._sessionValidated === true && state._sessionValidationError === newError) return;
     set({
       _sessionValidated: true,
-      _sessionValidationError: validated ? null : error,
-    }),
+      _sessionValidationError: newError,
+    });
+  },
 
   // ==========================================================================
   // LEGACY COMPATIBILITY

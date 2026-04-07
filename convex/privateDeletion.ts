@@ -230,25 +230,7 @@ export const cleanupExpiredDeletions = mutation({
         await ctx.db.delete(prompt._id);
       }
 
-      // 8. Delete revealRequests from user
-      const revealsFrom = await ctx.db
-        .query("revealRequests")
-        .withIndex("by_from_user", (q) => q.eq("fromUserId", userId))
-        .collect();
-      for (const reveal of revealsFrom) {
-        await ctx.db.delete(reveal._id);
-      }
-
-      // 9. Delete revealRequests to user
-      const revealsTo = await ctx.db
-        .query("revealRequests")
-        .withIndex("by_to_user", (q) => q.eq("toUserId", userId))
-        .collect();
-      for (const reveal of revealsTo) {
-        await ctx.db.delete(reveal._id);
-      }
-
-      // 10. Delete todConnectRequests to user
+      // 8. Delete todConnectRequests to user
       const connectsTo = await ctx.db
         .query("todConnectRequests")
         .withIndex("by_to_user", (q) => q.eq("toUserId", userIdString))

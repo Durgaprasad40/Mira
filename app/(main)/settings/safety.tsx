@@ -1,6 +1,10 @@
+/*
+ * LOCKED (SAFETY SETTINGS)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ */
 import React, { useState, useRef, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, LayoutChangeEvent, Modal, ActivityIndicator } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
@@ -41,6 +45,7 @@ const SAFETY_TIPS = {
 
 export default function SafetySettingsScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   // Safe back navigation - ensures return to Profile tab
   const handleGoBack = useCallback(() => {
@@ -73,6 +78,9 @@ export default function SafetySettingsScreen() {
   // Track which safety tip section is expanded
   const [expandedTip, setExpandedTip] = useState<string | null>(null);
 
+  // P2-035 FIX: Loading states for verification buttons
+  const [isStartingFaceVerification, setIsStartingFaceVerification] = useState(false);
+
   // ScrollView ref for auto-scroll
   const scrollViewRef = useRef<ScrollView>(null);
 
@@ -88,16 +96,23 @@ export default function SafetySettingsScreen() {
   ];
 
   // Handle face verification start
+  // P2-035 FIX: Add loading state to prevent double-tap and show feedback
   const handleStartFaceVerification = async () => {
-    if (!permission?.granted) {
-      const result = await requestPermission();
-      if (!result.granted) {
-        Alert.alert('Camera Permission', 'Camera access is required for face verification.');
-        return;
+    if (isStartingFaceVerification) return;
+    setIsStartingFaceVerification(true);
+    try {
+      if (!permission?.granted) {
+        const result = await requestPermission();
+        if (!result.granted) {
+          Alert.alert('Camera Permission', 'Camera access is required for face verification.');
+          return;
+        }
       }
+      setCaptureStep(0);
+      setShowCamera(true);
+    } finally {
+      setIsStartingFaceVerification(false);
     }
-    setCaptureStep(0);
-    setShowCamera(true);
   };
 
   // Handle camera modal close — reset all capture state to prevent stale step on reopen
@@ -213,7 +228,7 @@ export default function SafetySettingsScreen() {
         <View style={{ width: 24 }} />
       </View>
 
-      <ScrollView ref={scrollViewRef} style={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollViewRef} style={styles.content} contentContainerStyle={{ paddingBottom: insets.bottom + 20 }} showsVerticalScrollIndicator={false}>
         {/* Verification Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Verification</Text>
@@ -284,10 +299,21 @@ export default function SafetySettingsScreen() {
               </Text>
 
               {/* CTA only if not started */}
+              {/* P2-035 FIX: Add loading state and disabled during loading */}
               {faceStatus === 'not_verified' && (
-                <TouchableOpacity style={styles.verificationButton} onPress={handleStartFaceVerification}>
-                  <Ionicons name="camera-outline" size={18} color={COLORS.white} />
-                  <Text style={styles.verificationButtonText}>Start Verification</Text>
+                <TouchableOpacity
+                  style={[styles.verificationButton, isStartingFaceVerification && styles.verificationButtonLoading]}
+                  onPress={handleStartFaceVerification}
+                  disabled={isStartingFaceVerification}
+                >
+                  {isStartingFaceVerification ? (
+                    <ActivityIndicator size="small" color={COLORS.white} />
+                  ) : (
+                    <Ionicons name="camera-outline" size={18} color={COLORS.white} />
+                  )}
+                  <Text style={styles.verificationButtonText}>
+                    {isStartingFaceVerification ? 'Starting...' : 'Start Verification'}
+                  </Text>
                 </TouchableOpacity>
               )}
 
@@ -732,6 +758,10 @@ const styles = StyleSheet.create({
   },
   verificationButtonDisabled: {
     backgroundColor: COLORS.border,
+  },
+  // P2-035 FIX: Loading state style for verification button
+  verificationButtonLoading: {
+    opacity: 0.8,
   },
   verificationButtonText: {
     fontSize: 15,

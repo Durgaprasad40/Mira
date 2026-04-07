@@ -46,7 +46,8 @@ export function useExploreProfiles(): any[] {
   const result = useQuery(api.discover.getExploreProfiles, queryArgs);
 
   return useMemo(() => {
-    if (isDemoMode) {
+    // P0-004 FIX: Demo mode only available in __DEV__ builds
+    if (__DEV__ && isDemoMode) {
       // Use demoStore.profiles if available (mutable), else fallback to static DEMO_PROFILES
       const sourceProfiles = demo.profiles.length > 0 ? demo.profiles : DEMO_PROFILES;
       return (sourceProfiles as any[]).filter(

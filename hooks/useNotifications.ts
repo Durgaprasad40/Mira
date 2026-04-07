@@ -1,20 +1,40 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
-import { useSegments } from 'expo-router';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import { create } from 'zustand';
 import { log } from '@/utils/logger';
+import { usePhaseMode } from '@/lib/usePhaseMode';
 
 // Phase 1-only notification types — never shown in Phase 2 (private tabs)
 const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
 
-// Module-level phase tracking for creation-side blocking in Zustand store
-let _isInPhase2 = false;
-export function setPhase2Active(active: boolean) {
-  _isInPhase2 = active;
+// Phase 2-only notification types — never shown in Phase 1 (main discover)
+// PHASE SEPARATION: These types are created by Phase 2 (Deep Connect) backend and should
+// only appear in the Phase 2 notification bell, not in the Phase 1 bell.
+// - phase2_match: Matches created in Deep Connect
+// - phase2_like: Likes received in Deep Connect
+// - comment_connect: TOD confession reactions and connects
+// - tod_connect: Truth or Dare connections
+const PHASE2_ONLY_TYPES = new Set([
+  'phase2_match',
+  'phase2_like',
+  'comment_connect',
+  'tod_connect',
+]);
+
+// Types excluded from ALL in-app bells — messages have dedicated chat UI, not bell
+// Push notifications for messages still work; this only affects the bell popover
+const BELL_EXCLUDED_TYPES = new Set(['message', 'new_message']);
+
+// REMOVED: Module-level phase tracking (_isInPhase2, setPhase2Active)
+// This was causing infinite loops when navigating to shared routes.
+// Phase is now derived directly from route in the hook below.
+// Export a no-op for backward compatibility (can be removed later)
+export function setPhase2Active(_active: boolean) {
+  // NO-OP: Phase is now derived from route, not toggled
 }
 
 /**
@@ -92,6 +112,19 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
       return `confession_reaction:${data?.confessionId ?? 'unknown'}`;
     case 'confession_reply':
       return `confession_reply:${data?.confessionId ?? 'unknown'}`;
+    // P2-007 FIX: Phase-2 notification deduplication
+    case 'phase2_match':
+      // Dedupe by conversation ID (one notification per match conversation)
+      return `phase2_match:${data?.conversationId ?? userId ?? 'unknown'}`;
+    case 'phase2_like':
+      // Per-event: each Phase-2 like is unique by liker's userId
+      return `phase2_like:${userId ?? 'unknown'}`;
+    case 'tod_connect':
+      // Dedupe by answer/prompt context to avoid duplicate connect notifications
+      return `tod_connect:${data?.answerId ?? data?.promptId ?? userId ?? 'unknown'}`;
+    case 'comment_connect':
+      // Dedupe by conversation ID for comment-based connections
+      return `comment_connect:${data?.conversationId ?? userId ?? 'unknown'}`;
     default:
       return `${type}:${Date.now()}`;
   }
@@ -276,10 +309,8 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
     }),
   addNotification: (input: AddNotificationInput) =>
     set((state) => {
-      // Creation-side guard: Block Phase 1-only notifications if currently in Phase 2
-      if (PHASE1_ONLY_TYPES.has(input.type) && _isInPhase2) {
-        return {};
-      }
+      // NOTE: Creation-side guard removed - phase filtering now happens in useNotifications hook
+      // All notifications are stored; display filtering happens at read time based on route
 
       const now = Date.now();
       const key = computeDedupeKey(input.type, input.data);
@@ -465,9 +496,17 @@ export function useNotifications() {
   const userId = useAuthStore((s) => s.userId);
   const convexUserId = asUserId(userId);
 
-  // Detect if we're in Phase 2 (private tabs) — filter out Phase 1-only notifications
-  const segments = useSegments();
-  const isInPhase2 = segments.includes('(private)' as never);
+  // ══════════════════════════════════════════════════════════════════════════════
+  // PHASE DETECTION: Derive notification phase directly from route
+  // - Phase 2 ('phase2'): Show Phase 2 notifications
+  // - Shared ('shared'): Show Phase 2 notifications (user came from Phase 2)
+  // - Phase 1 ('phase1'): Show Phase 1 notifications
+  //
+  // KEY FIX: Shared routes (incognito-chat, match-celebration) are reached FROM
+  // Phase 2, so the user expects to see Phase 2 notifications in the bell.
+  // ══════════════════════════════════════════════════════════════════════════════
+  const phaseMode = usePhaseMode();
+  const isInPhase2 = phaseMode === 'phase2' || phaseMode === 'shared';
 
   // BUGFIX #32: Track mounted state to prevent state updates after unmount
   const isMountedRef = useRef(true);
@@ -615,8 +654,21 @@ export function useNotifications() {
   const baseNotifications = isDemoMode
     ? (demoStoreReady ? filteredDemoNotifs : EMPTY_ARRAY)
     : filteredConvexNotifs;
+  // Filter notifications for bell display:
+  // 1. Always exclude BELL_EXCLUDED_TYPES (messages have dedicated chat UI)
+  // 2. Phase separation: Phase 1 excludes Phase-2 types, Phase 2 excludes Phase-1 types
   const notifications: AppNotification[] = useMemo(
-    () => isInPhase2 ? baseNotifications.filter((n) => !PHASE1_ONLY_TYPES.has(n.type)) : baseNotifications,
+    () => {
+      let filtered = baseNotifications.filter((n) => !BELL_EXCLUDED_TYPES.has(n.type));
+      if (isInPhase2) {
+        // In Phase 2: show Phase-2 notifications, hide Phase-1 only types
+        filtered = filtered.filter((n) => !PHASE1_ONLY_TYPES.has(n.type));
+      } else {
+        // In Phase 1: show Phase-1 notifications, hide Phase-2 only types
+        filtered = filtered.filter((n) => !PHASE2_ONLY_TYPES.has(n.type));
+      }
+      return filtered;
+    },
     [baseNotifications, isInPhase2],
   );
 

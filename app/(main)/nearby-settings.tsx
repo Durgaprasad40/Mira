@@ -3,6 +3,11 @@
  *
  * User-facing settings for Nearby visibility, privacy, and crossed paths.
  * Part of Phase-1 Profile settings.
+ *
+ * HARDENING (v2):
+ * - Added Location Mode selector (foreground vs background)
+ * - Added effective status display
+ * - Graceful fallback when background permission denied
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -13,9 +18,11 @@ import {
   TouchableOpacity,
   Switch,
   Alert,
+  Linking,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
@@ -24,8 +31,33 @@ import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
 import { Toast } from '@/components/ui/Toast';
 import { getDemoCurrentUser } from '@/lib/demoData';
+import {
+  startBackgroundLocation,
+  stopBackgroundLocation,
+  getLocationModeStatus,
+  setPreferredLocationMode,
+  type NearbyLocationMode,
+} from '@/utils/backgroundLocation';
 
 type VisibilityMode = 'always' | 'app_open' | 'recent';
+
+// Location mode options for user selection
+const LOCATION_MODE_OPTIONS: {
+  value: NearbyLocationMode;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: 'foreground',
+    label: 'While Using the App',
+    description: 'Location tracked only when app is open',
+  },
+  {
+    value: 'background',
+    label: 'Background Nearby',
+    description: 'Location updates even when app is closed',
+  },
+];
 
 const VISIBILITY_OPTIONS: { value: VisibilityMode; label: string; description: string }[] = [
   { value: 'always', label: 'Always visible', description: 'Show me in Nearby all the time' },
@@ -57,6 +89,12 @@ export default function NearbySettingsScreen() {
   const [visibilityMode, setVisibilityMode] = useState<VisibilityMode>('always');
   const [isPaused, setIsPaused] = useState(false);
   const [pausedUntil, setPausedUntil] = useState<number | null>(null);
+
+  // Location mode state (device-level, persisted locally)
+  const [locationMode, setLocationMode] = useState<NearbyLocationMode>('foreground');
+  const [locationStatusText, setLocationStatusText] = useState<string>('');
+  const [backgroundDenied, setBackgroundDenied] = useState(false);
+  const [isChangingMode, setIsChangingMode] = useState(false);
 
   // Loading states
   const [timedOut, setTimedOut] = useState(false);
@@ -91,6 +129,86 @@ export default function NearbySettingsScreen() {
       }
     }
   }, [currentUser]);
+
+  // Load location mode status on mount and when screen focuses
+  const loadLocationModeStatus = useCallback(async () => {
+    try {
+      const status = await getLocationModeStatus();
+      setLocationMode(status.preferredMode);
+      setLocationStatusText(status.statusText);
+      setBackgroundDenied(
+        status.preferredMode === 'background' && !status.backgroundPermissionGranted
+      );
+    } catch {
+      // Fallback to foreground mode
+      setLocationMode('foreground');
+      setLocationStatusText('Using location while app is open');
+    }
+  }, []);
+
+  // Load on mount
+  useEffect(() => {
+    loadLocationModeStatus();
+  }, [loadLocationModeStatus]);
+
+  // Reload when screen focuses (in case permissions changed in Settings)
+  useFocusEffect(
+    useCallback(() => {
+      loadLocationModeStatus();
+    }, [loadLocationModeStatus])
+  );
+
+  // Handle location mode change
+  const handleLocationModeChange = useCallback(async (newMode: NearbyLocationMode) => {
+    if (isChangingMode) return;
+    setIsChangingMode(true);
+
+    try {
+      // Save preferred mode
+      await setPreferredLocationMode(newMode);
+      setLocationMode(newMode);
+
+      // Apply the change (request permissions, start/stop background task)
+      const result = await startBackgroundLocation();
+
+      if (result.backgroundDenied) {
+        // Background was denied - show fallback message
+        setBackgroundDenied(true);
+        setLocationStatusText('Background access not enabled. Nearby works while app is open.');
+
+        // Show alert with option to open settings
+        Alert.alert(
+          'Background Location',
+          Platform.OS === 'ios'
+            ? 'To enable Background Nearby, go to Settings > Mira > Location and select "Always".'
+            : 'To enable Background Nearby, grant "Allow all the time" location permission in Settings.',
+          [
+            { text: 'Not Now', style: 'cancel' },
+            {
+              text: 'Open Settings',
+              onPress: () => Linking.openSettings(),
+            },
+          ]
+        );
+      } else if (result.effectiveMode === 'background') {
+        setBackgroundDenied(false);
+        setLocationStatusText('Background Nearby is active');
+        Toast.show('Background Nearby enabled');
+      } else {
+        setBackgroundDenied(false);
+        setLocationStatusText('Using location while app is open');
+        if (newMode === 'foreground') {
+          Toast.show('Location mode updated');
+        }
+      }
+    } catch (error) {
+      Toast.show('Failed to update location mode');
+      // Reload status to reflect actual state
+      await loadLocationModeStatus();
+    } finally {
+      setIsChangingMode(false);
+    }
+  }, [isChangingMode, loadLocationModeStatus]);
 
   // Premium check for incognito (premium-only, no gender-based access)
   const canUseIncognito = currentUser?.subscriptionTier === 'premium';
@@ -230,6 +348,61 @@ export default function NearbySettingsScreen() {
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+        {/* Location Mode Section */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Location Tracking</Text>
+
+          {/* Status Display */}
+          <View style={styles.statusRow}>
+            <Ionicons
+              name={locationMode === 'background' && !backgroundDenied ? 'location' : 'location-outline'}
+              size={20}
+              color={backgroundDenied ? COLORS.warning : COLORS.primary}
+            />
+            <Text style={[styles.statusText, backgroundDenied && styles.statusTextWarning]}>
+              {locationStatusText}
+            </Text>
+          </View>
+
+          {/* Location Mode Options */}
+          <View style={styles.locationModeOptions}>
+            {LOCATION_MODE_OPTIONS.map((option) => (
+              <TouchableOpacity
+                key={option.value}
+                style={[
+                  styles.locationModeOption,
+                  locationMode === option.value && styles.locationModeOptionActive,
+                ]}
+                onPress={() => handleLocationModeChange(option.value)}
+                disabled={isChangingMode}
+              >
+                <View style={styles.locationModeRadio}>
+                  {locationMode === option.value && (
+                    <View style={styles.locationModeRadioInner} />
+                  )}
+                </View>
+                <View style={styles.locationModeTextContainer}>
+                  <Text style={styles.locationModeLabel}>{option.label}</Text>
+                  <Text style={styles.locationModeDesc}>{option.description}</Text>
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* Background denied warning */}
+          {backgroundDenied && (
+            <TouchableOpacity
+              style={styles.permissionWarning}
+              onPress={() => Linking.openSettings()}
+            >
+              <Ionicons name="settings-outline" size={16} color={COLORS.primary} />
+              <Text style={styles.permissionWarningText}>
+                Tap to open Settings and enable background location
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
         {/* Visibility Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Visibility</Text>
@@ -562,5 +735,83 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.white,
     letterSpacing: 0.5,
+  },
+  // Location Mode styles
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  statusText: {
+    fontSize: 14,
+    color: COLORS.text,
+    flex: 1,
+  },
+  statusTextWarning: {
+    color: COLORS.warning || '#FF9800',
+  },
+  locationModeOptions: {
+    gap: 8,
+  },
+  locationModeOption: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  locationModeOptionActive: {
+    backgroundColor: COLORS.primaryLight || '#FFE4E9',
+  },
+  locationModeRadio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+    marginTop: 2,
+  },
+  locationModeRadioInner: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.primary,
+  },
+  locationModeTextContainer: {
+    flex: 1,
+  },
+  locationModeLabel: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: COLORS.text,
+    marginBottom: 2,
+  },
+  locationModeDesc: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+  },
+  permissionWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.primaryLight || '#FFE4E9',
+    borderRadius: 8,
+  },
+  permissionWarningText: {
+    fontSize: 13,
+    color: COLORS.primary,
+    flex: 1,
   },
 });

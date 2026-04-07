@@ -71,34 +71,50 @@ function parseDOBString(dobString: string): Date {
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
-/**
- * Parse backend full name into firstName/lastName for display
- */
-function parseFullName(fullName: string): { firstName: string; lastName: string } {
-  const parts = fullName.trim().split(/\s+/);
-  if (parts.length === 1) {
-    return { firstName: parts[0], lastName: '' };
-  }
-  return {
-    firstName: parts[0],
-    lastName: parts.slice(1).join(' ')
-  };
-}
+// IDENTITY SIMPLIFICATION: Single name field - no parsing needed
 
-// STABILITY FIX: Schema-safe relationship intent values (excludes UI-only values)
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
-  'long_term', 'short_term', 'fwb', 'figuring_out',
-  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+  'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes',
+  'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
 ]);
 
-// Sanitize relationshipIntent to only include schema-valid values
+// Legacy → Current mapping for relationshipIntent values
+// These old values may exist in cached drafts or older user profiles
+const LEGACY_INTENT_MAP: Record<string, string> = {
+  'long_term': 'serious_vibes',
+  'short_term': 'keep_it_casual',
+  'fwb': 'keep_it_casual',
+  'figuring_out': 'exploring_vibes',
+  'short_to_long': 'see_where_it_goes',
+  'long_to_short': 'see_where_it_goes',
+  // Additional potential legacy values
+  'casual': 'keep_it_casual',
+  'serious': 'serious_vibes',
+  'marriage': 'serious_vibes',
+  'friendship': 'just_friends',
+  'open': 'open_to_anything',
+};
+
+// Sanitize relationshipIntent: map legacy values AND filter invalid ones
 function sanitizeRelationshipIntent(arr: string[]): string[] {
-  const sanitized = arr.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
-  if (__DEV__ && sanitized.length !== arr.length) {
-    const removed = arr.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
-    console.warn('[REVIEW] Removed invalid relationshipIntent values:', removed);
+  // Step 1: Map legacy values to current valid values
+  const mapped = arr.map(v => LEGACY_INTENT_MAP[v] || v);
+
+  // Step 2: Filter to only valid values
+  const sanitized = mapped.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+
+  // Step 3: Deduplicate (multiple legacy values might map to same current value)
+  const deduped = [...new Set(sanitized)];
+
+  if (__DEV__ && (arr.length !== deduped.length || arr.some((v, i) => v !== mapped[i]))) {
+    console.log('[REVIEW] relationshipIntent normalization:', {
+      original: arr,
+      mapped,
+      final: deduped,
+    });
   }
-  return sanitized;
+  return deduped;
 }
 
 export default function ReviewScreen() {
@@ -113,8 +129,7 @@ export default function ReviewScreen() {
   );
 
   const {
-    firstName,
-    lastName,
+    name, // IDENTITY SIMPLIFICATION: Single name field
     nickname,
     dateOfBirth,
     gender,
@@ -175,27 +190,18 @@ export default function ReviewScreen() {
   // Extract photos from currentUser (includes verification_reference)
   const backendPhotos = currentUser?.photos ?? [];
 
+  // IDENTITY SIMPLIFICATION: Single name field
   // Fallback to backend data if store is empty
-  // Parse backend name into firstName/lastName for display
-  const getDisplayNames = (): { firstName: string; lastName: string } => {
-    // Priority 1: Store values
-    if (firstName || lastName) {
-      return { firstName: firstName || '', lastName: lastName || '' };
-    }
-    // Priority 2: demoProfile values (demo mode)
-    if (demoProfile?.firstName || demoProfile?.lastName) {
-      return { firstName: demoProfile.firstName || '', lastName: demoProfile.lastName || '' };
-    }
-    // Priority 3: Parse from backend or demoProfile name
-    const backendName = onboardingStatus?.basicInfo?.name || demoProfile?.name || '';
-    if (backendName) {
-      return parseFullName(backendName);
-    }
-    return { firstName: '', lastName: '' };
+  const getDisplayName = (): string => {
+    // Priority 1: Store value
+    if (name) return name;
+    // Priority 2: demoProfile value (demo mode)
+    if (demoProfile?.name) return demoProfile.name;
+    // Priority 3: Backend value
+    if (onboardingStatus?.basicInfo?.name) return onboardingStatus.basicInfo.name;
+    return '';
   };
-  const displayNames = getDisplayNames();
-  const displayFirstName = displayNames.firstName || "Not set";
-  const displayLastName = displayNames.lastName || "—";
+  const displayName = getDisplayName() || "Not set";
   const displayNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "—";
   const displayDateOfBirth = dateOfBirth || onboardingStatus?.basicInfo?.dateOfBirth || demoProfile?.dateOfBirth || "";
   const displayGender = gender || onboardingStatus?.basicInfo?.gender || demoProfile?.gender || "";
@@ -204,21 +210,19 @@ export default function ReviewScreen() {
   React.useEffect(() => {
     if (__DEV__) {
       console.log('[REVIEW] basic info values:', {
-        displayFirstName,
-        displayLastName,
+        displayName,
         displayNickname,
         displayDateOfBirth,
         displayGender,
       });
       console.log('[REVIEW] basic info sources:', {
-        firstName: firstName ? 'store' : (demoProfile?.firstName ? 'demoProfile' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none')),
-        lastName: lastName ? 'store' : (demoProfile?.lastName ? 'demoProfile' : 'none'),
+        name: name ? 'store' : (demoProfile?.name ? 'demoProfile' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none')),
         nickname: nickname ? 'store' : (onboardingStatus?.basicInfo?.nickname ? 'backend' : 'none'),
         dateOfBirth: dateOfBirth ? 'store' : (onboardingStatus?.basicInfo?.dateOfBirth ? 'backend' : 'none'),
         gender: gender ? 'store' : (onboardingStatus?.basicInfo?.gender ? 'backend' : 'none'),
       });
     }
-  }, [firstName, lastName, nickname, dateOfBirth, gender, onboardingStatus, demoProfile, displayFirstName, displayLastName, displayNickname, displayDateOfBirth, displayGender]);
+  }, [name, nickname, dateOfBirth, gender, onboardingStatus, demoProfile, displayName, displayNickname, displayDateOfBirth, displayGender]);
 
   // PERFORMANCE LOG: Track photo rendering speed
   React.useEffect(() => {
@@ -330,12 +334,8 @@ export default function ReviewScreen() {
         };
 
         // Only include basic fields if they have values (don't overwrite with empty)
-        // Store firstName/lastName separately and construct name for backend compat
-        if (firstName && firstName.trim().length > 0) profileData.firstName = firstName.trim();
-        if (lastName && lastName.trim().length > 0) profileData.lastName = lastName.trim();
-        // Construct full name from firstName/lastName for backward compat
-        const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
-        if (fullName.length > 0) profileData.name = fullName;
+        // IDENTITY SIMPLIFICATION: Single name field
+        if (name && name.trim().length > 0) profileData.name = name.trim();
         if (nickname && nickname.length > 0) profileData.handle = nickname;
         if (dateOfBirth && dateOfBirth.length > 0) profileData.dateOfBirth = dateOfBirth;
         if (gender) profileData.gender = gender;
@@ -384,11 +384,10 @@ export default function ReviewScreen() {
       }
 
       // Prepare onboarding data
-      // Construct full name from firstName/lastName for backend
-      const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
+      // IDENTITY SIMPLIFICATION: Single name field
       const onboardingData: any = {
         userId: userId as Id<"users">,
-        name: fullName,
+        name: (name || '').trim(),
         dateOfBirth,
         gender: payloadGender,
         bio,
@@ -418,6 +417,8 @@ export default function ReviewScreen() {
         // FIX: Add missing fields from demo mode payload
         profilePrompts: profilePrompts.length > 0 ? profilePrompts : undefined,
         lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined,
+        // P0 FIX: Include lgbtqPreference for LGBTQ matching
+        lgbtqPreference: lgbtqPreference.length > 0 ? lgbtqPreference : undefined,
         // photoStorageIds omitted - photos already uploaded in additional-photos screen
       };
 
@@ -458,6 +459,24 @@ export default function ReviewScreen() {
         }
       }
 
+      // FINAL DEFENSIVE NORMALIZATION: Ensure relationshipIntent NEVER contains legacy values
+      // This is the last line of defense before Convex mutation - even if store has stale data
+      if (onboardingData.relationshipIntent && Array.isArray(onboardingData.relationshipIntent)) {
+        const beforeFinal = [...onboardingData.relationshipIntent];
+        const mapped = onboardingData.relationshipIntent.map((v: string) => LEGACY_INTENT_MAP[v] || v);
+        const filtered = mapped.filter((v: string) => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+        const deduped = [...new Set(filtered)];
+        onboardingData.relationshipIntent = deduped.length > 0 ? deduped : undefined;
+
+        if (__DEV__) {
+          console.log('[REVIEW_SUBMIT] relationshipIntent FINAL normalization:', {
+            beforeFinal,
+            afterFinal: onboardingData.relationshipIntent,
+            hadLegacyValues: beforeFinal.some((v: string) => LEGACY_INTENT_MAP[v] !== undefined),
+          });
+        }
+      }
+
       // Debug log before mutation to verify all required fields
       if (__DEV__) {
         console.log('[REVIEW_SUBMIT] Final payload:', {
@@ -469,6 +488,7 @@ export default function ReviewScreen() {
           hasHeight: !!onboardingData.height,
           hasWeight: !!onboardingData.weight,
           activitiesCount: onboardingData.activities?.length || 0,
+          relationshipIntent: onboardingData.relationshipIntent, // ADDED: Show final intent values
         });
       }
 
@@ -600,15 +620,11 @@ export default function ReviewScreen() {
           </TouchableOpacity>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>First Name:</Text>
-          <Text style={styles.infoValue}>{displayFirstName}</Text>
+          <Text style={styles.infoLabel}>Name:</Text>
+          <Text style={styles.infoValue}>{displayName}</Text>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Last Name:</Text>
-          <Text style={styles.infoValue}>{displayLastName}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>User ID:</Text>
+          <Text style={styles.infoLabel}>Nickname:</Text>
           <Text style={styles.infoValue}>@{displayNickname}</Text>
         </View>
         <View style={styles.infoRow}>
@@ -979,28 +995,31 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 24,
+    paddingBottom: 40,
   },
   progressText: {
     fontSize: 14,
     color: COLORS.primary,
     textAlign: "center",
-    marginBottom: 12,
+    marginBottom: 14,
+    fontWeight: "500",
   },
   title: {
     fontSize: 28,
     fontWeight: "700",
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 10,
+    letterSpacing: -0.5,
   },
   subtitle: {
     fontSize: 16,
     color: COLORS.textLight,
     marginBottom: 32,
-    lineHeight: 22,
+    lineHeight: 24,
   },
   section: {
-    marginBottom: 24,
-    paddingBottom: 24,
+    marginBottom: 26,
+    paddingBottom: 26,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
@@ -1008,49 +1027,50 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
+    marginBottom: 14,
   },
   sectionTitle: {
     fontSize: 18,
     fontWeight: "600",
     color: COLORS.text,
+    letterSpacing: -0.3,
   },
   editLink: {
     fontSize: 14,
     color: COLORS.primary,
-    fontWeight: "500",
+    fontWeight: "600",
   },
   photosScroll: {
-    marginTop: 12,
+    marginTop: 14,
   },
   photoWrapper: {
     position: 'relative',
-    marginRight: 12,
+    marginRight: 14,
   },
   photoThumbnail: {
-    width: 80,
-    height: 120,
-    borderRadius: 12,
+    width: 85,
+    height: 125,
+    borderRadius: 14,
   },
   variantBadge: {
     position: 'absolute',
-    bottom: 4,
-    left: 4,
-    right: 4,
-    backgroundColor: COLORS.primary + 'E0',
-    borderRadius: 6,
-    paddingVertical: 2,
-    paddingHorizontal: 4,
+    bottom: 6,
+    left: 6,
+    right: 6,
+    backgroundColor: 'rgba(255, 107, 107, 0.9)',
+    borderRadius: 8,
+    paddingVertical: 3,
+    paddingHorizontal: 6,
     alignItems: 'center',
   },
   variantBadgeText: {
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '600',
     color: COLORS.white,
   },
   infoRow: {
     flexDirection: "row",
-    marginBottom: 8,
+    marginBottom: 10,
   },
   infoLabel: {
     fontSize: 15,
@@ -1066,30 +1086,31 @@ const styles = StyleSheet.create({
   bioText: {
     fontSize: 15,
     color: COLORS.text,
-    lineHeight: 22,
-    marginTop: 8,
+    lineHeight: 24,
+    marginTop: 10,
   },
   emptyText: {
     fontSize: 14,
     color: COLORS.textMuted,
     fontStyle: "italic",
-    marginTop: 8,
+    marginTop: 10,
   },
   sectionPromptsHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
-    marginTop: 8,
+    marginBottom: 14,
+    marginTop: 10,
   },
   sectionPromptsLabel: {
     fontSize: 14,
     fontWeight: "600",
     color: COLORS.text,
+    letterSpacing: -0.2,
   },
   promptSubsection: {
-    marginBottom: 16,
-    paddingBottom: 12,
+    marginBottom: 18,
+    paddingBottom: 14,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
@@ -1097,32 +1118,33 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "600",
     color: COLORS.primary,
-    marginBottom: 10,
+    marginBottom: 12,
+    letterSpacing: -0.2,
   },
   promptItem: {
-    marginBottom: 12,
+    marginBottom: 14,
   },
   promptQuestion: {
     fontSize: 13,
     fontWeight: "600",
     color: COLORS.textLight,
-    marginBottom: 4,
+    marginBottom: 6,
   },
   promptAnswer: {
     fontSize: 15,
     color: COLORS.text,
-    lineHeight: 20,
+    lineHeight: 22,
   },
   chipsContainer: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 8,
-    marginTop: 8,
+    gap: 10,
+    marginTop: 10,
   },
   chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
     backgroundColor: COLORS.backgroundDark,
   },
   chipText: {
@@ -1132,9 +1154,10 @@ const styles = StyleSheet.create({
   preferenceText: {
     fontSize: 14,
     color: COLORS.textLight,
-    marginTop: 8,
+    marginTop: 10,
+    lineHeight: 20,
   },
   footer: {
-    marginTop: 24,
+    marginTop: 28,
   },
 });

@@ -293,6 +293,28 @@ export const unmatch = mutation({
       isActive: false,
     });
 
+    // POST-UNMATCH REAPPEARANCE FIX: Delete bidirectional like records
+    // This allows unmatched users to reappear in Explore/Discover
+    const otherId = match.user1Id === userId ? match.user2Id : match.user1Id;
+
+    // Delete: userId -> otherId
+    const like1 = await ctx.db
+      .query('likes')
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', otherId))
+      .first();
+    if (like1) {
+      await ctx.db.delete(like1._id);
+    }
+
+    // Delete: otherId -> userId
+    const like2 = await ctx.db
+      .query('likes')
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', otherId).eq('toUserId', userId))
+      .first();
+    if (like2) {
+      await ctx.db.delete(like2._id);
+    }
+
     return { success: true };
   },
 });

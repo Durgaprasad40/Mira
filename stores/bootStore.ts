@@ -10,12 +10,15 @@ import { create } from 'zustand';
  * - Used only for UI gating (BootScreen hide/show)
  *
  * STABILITY FIX: Boot safety timeout
- * - Ensures boot ALWAYS resolves within 5 seconds
+ * - Ensures boot ALWAYS resolves within 30 seconds
+ * - TIMEOUT-FIX: Increased from 5s to accommodate validation retries
  * - Prevents infinite loading if hydration fails silently
  */
 
-// Module-level safety timeout (5 seconds)
-const BOOT_SAFETY_TIMEOUT_MS = 5000;
+// Module-level safety timeout
+// TIMEOUT-FIX: Increased from 5s to 30s to accommodate validation retries
+// Validation has 3 attempts × 8s each = 24s max, plus buffer
+const BOOT_SAFETY_TIMEOUT_MS = 30000;
 let _bootSafetyTimer: ReturnType<typeof setTimeout> | null = null;
 let _bootResolved = false; // Guard: boot can only resolve once
 
@@ -57,7 +60,9 @@ function startBootSafetyTimer(forceReady: () => void) {
     // Guard: don't force if already resolved
     if (_bootResolved) return;
 
-    console.warn('[BOOT_SAFETY] Timeout reached (5s) - forcing boot to resolve');
+    if (__DEV__) {
+      console.warn('[BOOT_SAFETY] Timeout reached (30s) - forcing boot to resolve');
+    }
     forceReady();
   }, BOOT_SAFETY_TIMEOUT_MS);
 }
@@ -91,6 +96,8 @@ export const useBootStore = create<BootState>((set, get) => {
     routeDecisionMade: false,
 
     setAuthHydrated: (v) => {
+      // LOOP FIX: Equality guard - don't update if value is same
+      if (get().authHydrated === v) return;
       set({ authHydrated: v });
       // Check if boot is now ready, clear timer
       const state = get();
@@ -101,6 +108,8 @@ export const useBootStore = create<BootState>((set, get) => {
     },
 
     setDemoHydrated: (v) => {
+      // LOOP FIX: Equality guard - don't update if value is same
+      if (get().demoHydrated === v) return;
       set({ demoHydrated: v });
       // Check if boot is now ready, clear timer
       const state = get();
@@ -111,6 +120,8 @@ export const useBootStore = create<BootState>((set, get) => {
     },
 
     setRouteDecisionMade: (v) => {
+      // LOOP FIX: Equality guard - don't update if value is same
+      if (get().routeDecisionMade === v) return;
       set({ routeDecisionMade: v });
       // Check if boot is now ready, clear timer
       const state = get();
