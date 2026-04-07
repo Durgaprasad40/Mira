@@ -704,62 +704,84 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
     if (totalPhotos === 1) {
       // ─────────────────────────────────────────────────────────────────────
-      // 1 PHOTO: Identity only
+      // 1 PHOTO: Identity + ONE personality hook (bio OR prompt OR fallback)
+      // UX FIX: Single photo profiles need personality context for swipe decision
+      // Priority: bio > first prompt > fallback bio
       // ─────────────────────────────────────────────────────────────────────
       const content = createEmptyContent();
-      content.slotType = 'identity';
-      content.waveDensity = 'low';
+
+      if (hasBio) {
+        // Priority 1: Use actual bio
+        content.bio = bio;
+        content.slotType = 'identity_bio';
+        content.waveDensity = 'medium';
+        usedUnitKeys.add('bio');
+      } else if (selectedPrompts.length > 0) {
+        // Priority 2: Use first prompt if no bio
+        content.prompts.push(selectedPrompts[0]);
+        content.slotType = 'wave_content';
+        content.waveDensity = 'medium';
+        usedUnitKeys.add('prompt1');
+      } else {
+        // Priority 3: Use fallback bio
+        content.bio = getDisplayBio(bio, true);
+        content.slotType = 'identity_bio';
+        content.waveDensity = 'medium';
+      }
+
       contents.push(content);
 
     } else if (totalPhotos === 2) {
       // ─────────────────────────────────────────────────────────────────────
-      // 2 PHOTOS: P1 = identity+bio, P2 = prompt1+basics
+      // 2 PHOTOS: P1 = identity only, P2 = bio + prompt/basics
+      // UX FIX: Clean first impression - no text overload on Photo 1
       // ─────────────────────────────────────────────────────────────────────
-      // Photo 1: Identity + bio (allowed because only 2 photos)
+      // Photo 1: Identity ONLY (clean visual first impression)
       const p1 = createEmptyContent();
-      p1.slotType = hasBio ? 'identity_bio' : 'identity';
-      p1.waveDensity = hasBio ? 'medium' : 'low';
+      p1.slotType = 'identity';
+      p1.waveDensity = 'low';
+      contents.push(p1);
+
+      // Photo 2: Bio + remaining units (prompt + basics)
+      const p2 = createEmptyContent();
       if (hasBio) {
         const bioUnit = units.find(u => u.key === 'bio');
         if (bioUnit) {
-          p1.bio = bioUnit.payload.text;
-          p1.waveUnits = [bioUnit];
+          p2.bio = bioUnit.payload.text;
+          p2.waveUnits = [bioUnit];
           usedUnitKeys.add('bio');
         }
       }
-      contents.push(p1);
-
-      // Photo 2: Remaining units (prompt + basics)
-      const p2 = createEmptyContent();
       const p2Units = getNextUnits(2);
       applyUnitsToContent(p2, p2Units);
-      p2.slotType = p2Units.length > 0 ? 'wave_content' : 'identity';
-      p2.waveDensity = p2Units.length >= 2 ? 'medium' : 'low';
+      p2.slotType = (hasBio || p2Units.length > 0) ? 'wave_content' : 'identity';
+      p2.waveDensity = (hasBio || p2Units.length >= 2) ? 'medium' : 'low';
       contents.push(p2);
 
     } else if (totalPhotos === 3) {
       // ─────────────────────────────────────────────────────────────────────
-      // 3 PHOTOS: P1 = identity+bio, P2 = prompt1+basics, P3 = remaining
+      // 3 PHOTOS: P1 = identity only, P2 = bio + prompt, P3 = remaining
+      // UX FIX: Clean first impression - no text overload on Photo 1
       // ─────────────────────────────────────────────────────────────────────
-      // Photo 1: Identity + bio
+      // Photo 1: Identity ONLY (clean visual first impression)
       const p1 = createEmptyContent();
-      p1.slotType = hasBio ? 'identity_bio' : 'identity';
-      p1.waveDensity = hasBio ? 'medium' : 'low';
+      p1.slotType = 'identity';
+      p1.waveDensity = 'low';
+      contents.push(p1);
+
+      // Photo 2: Bio + prompt/basics
+      const p2 = createEmptyContent();
       if (hasBio) {
         const bioUnit = units.find(u => u.key === 'bio');
         if (bioUnit) {
-          p1.bio = bioUnit.payload.text;
-          p1.waveUnits = [bioUnit];
+          p2.bio = bioUnit.payload.text;
+          p2.waveUnits = [bioUnit];
           usedUnitKeys.add('bio');
         }
       }
-      contents.push(p1);
-
-      // Photo 2: MEDIUM (prompt1 + basics)
-      const p2 = createEmptyContent();
       const p2Units = getNextUnits(2);
       applyUnitsToContent(p2, p2Units);
-      p2.slotType = p2Units.length > 0 ? 'wave_content' : 'identity';
+      p2.slotType = (hasBio || p2Units.length > 0) ? 'wave_content' : 'identity';
       p2.waveDensity = 'medium';
       contents.push(p2);
 
@@ -773,24 +795,33 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
     } else if (totalPhotos === 4) {
       // ─────────────────────────────────────────────────────────────────────
-      // 4 PHOTOS: P1 = identity+bio, P2 = MEDIUM, P3 = MEDIUM, P4 = MEDIUM
+      // 4 PHOTOS: P1 = identity only, P2 = bio, P3 = MEDIUM, P4 = MEDIUM
+      // UX FIX: Clean first impression - no text overload on Photo 1
       // ─────────────────────────────────────────────────────────────────────
-      // Photo 1: Identity + bio
+      // Photo 1: Identity ONLY (clean visual first impression)
       const p1 = createEmptyContent();
-      p1.slotType = hasBio ? 'identity_bio' : 'identity';
-      p1.waveDensity = hasBio ? 'medium' : 'low';
+      p1.slotType = 'identity';
+      p1.waveDensity = 'low';
+      contents.push(p1);
+
+      // Photo 2: Bio + some content
+      const p2 = createEmptyContent();
       if (hasBio) {
         const bioUnit = units.find(u => u.key === 'bio');
         if (bioUnit) {
-          p1.bio = bioUnit.payload.text;
-          p1.waveUnits = [bioUnit];
+          p2.bio = bioUnit.payload.text;
+          p2.waveUnits = [bioUnit];
           usedUnitKeys.add('bio');
         }
       }
-      contents.push(p1);
+      const p2Units = getNextUnits(1); // Get 1 unit to pair with bio
+      applyUnitsToContent(p2, p2Units);
+      p2.slotType = (hasBio || p2Units.length > 0) ? 'wave_content' : 'identity';
+      p2.waveDensity = 'medium';
+      contents.push(p2);
 
-      // Photos 2-4: Distribute remaining units evenly (MEDIUM density)
-      for (let i = 1; i < 4; i++) {
+      // Photos 3-4: Distribute remaining units evenly (MEDIUM density)
+      for (let i = 2; i < 4; i++) {
         const content = createEmptyContent();
         const photoUnits = getNextUnits(2);
         applyUnitsToContent(content, photoUnits);
