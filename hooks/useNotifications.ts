@@ -7,6 +7,7 @@ import { asUserId } from '@/convex/id';
 import { create } from 'zustand';
 import { log } from '@/utils/logger';
 import { usePhaseMode } from '@/lib/usePhaseMode';
+import { DEBUG_NOTIFICATIONS } from '@/lib/debugFlags';
 
 // Phase 1-only notification types — never shown in Phase 2 (private tabs)
 const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
@@ -564,11 +565,9 @@ export function useNotifications() {
       // STABILITY: Stop polling after timeout - proceed with empty notifications
       if (pollAttempts >= MAX_POLL_ATTEMPTS) {
         clearInterval(interval);
-        if (__DEV__) {
-          console.warn('[useNotifications] demoStore ready timeout - proceeding without seed');
-        }
+        if (__DEV__ && DEBUG_NOTIFICATIONS) console.warn('[useNotifications] timeout');
         if (isMountedRef.current) {
-          setDemoStoreReady(true); // Unblock UI even if seed didn't complete
+          setDemoStoreReady(true);
         }
       }
     }, POLL_INTERVAL_MS);
@@ -675,13 +674,10 @@ export function useNotifications() {
   // ── Derived count (single formula, no separate query) ──
   const unseenCount = notifications.filter((n) => !n.isRead).length;
 
-  // ── Debug logging (once globally, DEV only) ──
+  // ── Debug logging (once globally, DEV only, gated) ──
   useEffect(() => {
-    if (__DEV__ && !__notifLogged) {
-      console.log(
-        `[useNotifications] mode=${isDemoMode ? 'demo' : 'convex'} ` +
-          `total=${notifications.length} unseenCount=${unseenCount}`,
-      );
+    if (__DEV__ && DEBUG_NOTIFICATIONS && !__notifLogged) {
+      console.log(`[useNotifications] ${isDemoMode ? 'demo' : 'convex'} total=${notifications.length} unseen=${unseenCount}`);
       __notifLogged = true;
     }
   }, [notifications.length, unseenCount]);
@@ -719,8 +715,8 @@ export function useNotifications() {
             pendingReadsRef.current.delete(notificationId);
           })
           .catch((error) => {
-            // BUGFIX #33: Remove from ref on error (rollback) and force re-render to show notification again
-            console.error('[useNotifications] markRead failed, rolling back:', error);
+            // BUGFIX #33: Remove from ref on error (rollback)
+            if (__DEV__) console.error('[useNotifications] markRead failed:', error);
             pendingReadsRef.current.delete(notificationId);
             forceUpdate((n) => n + 1);
           });

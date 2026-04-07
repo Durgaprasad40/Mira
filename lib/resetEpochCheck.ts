@@ -20,6 +20,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { isDemoMode } from '@/config/demo';
+import { DEBUG_STARTUP } from '@/lib/debugFlags';
 
 const RESET_EPOCH_KEY = 'mira:resetEpoch';
 
@@ -46,7 +47,7 @@ export async function getLocalResetEpoch(): Promise<number> {
     const value = await AsyncStorage.getItem(RESET_EPOCH_KEY);
     return value ? parseInt(value, 10) : 0;
   } catch (error) {
-    console.error('[RESET_EPOCH] Failed to read local resetEpoch:', error);
+    console.error('[RESET_EPOCH] read failed:', error);
     return 0;
   }
 }
@@ -57,9 +58,9 @@ export async function getLocalResetEpoch(): Promise<number> {
 export async function setLocalResetEpoch(epoch: number): Promise<void> {
   try {
     await AsyncStorage.setItem(RESET_EPOCH_KEY, epoch.toString());
-    console.log(`[RESET_EPOCH] Local epoch updated to ${epoch}`);
+    if (__DEV__ && DEBUG_STARTUP) console.log(`[RESET_EPOCH] epoch=${epoch}`);
   } catch (error) {
-    console.error('[RESET_EPOCH] Failed to store local resetEpoch:', error);
+    console.error('[RESET_EPOCH] store failed:', error);
   }
 }
 
@@ -68,24 +69,20 @@ export async function setLocalResetEpoch(epoch: number): Promise<void> {
  * SAFE: Does not touch auth, onboarding, or real user data
  */
 export async function clearDemoStores(): Promise<void> {
-  console.log('[RESET_EPOCH] Clearing demo stores only...');
+  if (__DEV__ && DEBUG_STARTUP) console.log('[RESET_EPOCH] clearing demo stores');
 
   try {
-    // Clear only demo store keys - preserves auth and user data
     const clearPromises = DEMO_STORE_KEYS.map(async (key) => {
       try {
         await AsyncStorage.removeItem(key);
-        console.log(`[RESET_EPOCH] Cleared demo store: ${key}`);
       } catch (error) {
-        console.error(`[RESET_EPOCH] Failed to clear ${key}:`, error);
+        console.error(`[RESET_EPOCH] clear ${key} failed:`, error);
       }
     });
-
     await Promise.all(clearPromises);
-
-    console.log('[RESET_EPOCH] Demo stores cleared (auth/onboarding preserved)');
+    if (__DEV__ && DEBUG_STARTUP) console.log('[RESET_EPOCH] demo stores cleared');
   } catch (error) {
-    console.error('[RESET_EPOCH] Error during demo store clearing:', error);
+    console.error('[RESET_EPOCH] clear error:', error);
   }
 }
 
@@ -94,12 +91,9 @@ export async function clearDemoStores(): Promise<void> {
  * This prevents demo data from leaking into live mode
  */
 export async function purgeDemoStoresIfDisabled(): Promise<void> {
-  if (isDemoMode) {
-    // Demo mode is enabled, don't purge
-    return;
-  }
+  if (isDemoMode) return;
 
-  console.log('[RESET_EPOCH] Demo mode disabled - purging demo stores...');
+  if (__DEV__ && DEBUG_STARTUP) console.log('[RESET_EPOCH] purging demo stores');
 
   const demoStoreKeys = [
     'demo-storage',
@@ -110,10 +104,9 @@ export async function purgeDemoStoresIfDisabled(): Promise<void> {
   try {
     for (const key of demoStoreKeys) {
       await AsyncStorage.removeItem(key);
-      console.log(`[RESET_EPOCH] Purged demo store: ${key}`);
     }
   } catch (error) {
-    console.error('[RESET_EPOCH] Error purging demo stores:', error);
+    console.error('[RESET_EPOCH] purge error:', error);
   }
 }
 
@@ -133,21 +126,16 @@ export async function checkAndHandleResetEpoch(serverEpoch: number): Promise<boo
 
   // FAST PATH: If epochs match, skip entirely - no work needed
   if (serverEpoch === localEpoch) {
-    console.log(`[RESET_EPOCH] ✅ Epochs match (${serverEpoch}) - skipping`);
+    if (__DEV__ && DEBUG_STARTUP) console.log(`[RESET_EPOCH] match (${serverEpoch})`);
     return false;
   }
 
-  console.log(`[RESET_EPOCH] Epoch mismatch: local=${localEpoch}, server=${serverEpoch}`);
+  if (__DEV__ && DEBUG_STARTUP) console.log(`[RESET_EPOCH] mismatch: ${localEpoch}->${serverEpoch}`);
 
-  // Always purge demo stores if demo mode is disabled
   await purgeDemoStoresIfDisabled();
-
-  // Clear only demo stores - preserves auth/onboarding/user data
   await clearDemoStores();
-
-  // Update local epoch to match server
   await setLocalResetEpoch(serverEpoch);
 
-  console.log('[RESET_EPOCH] ✅ Demo stores cleared, epoch synced (no logout)');
+  if (__DEV__ && DEBUG_STARTUP) console.log('[RESET_EPOCH] synced');
   return true;
 }
