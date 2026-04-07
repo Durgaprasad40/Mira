@@ -15,4 +15,9 @@ if (!convexUrl) {
   );
 }
 
-export const convex = new ConvexReactClient(convexUrl);
+// LOG_FORMAT_FIX: Disable Convex client verbose logging
+// This removes the styled %c[CONVEX Q(...)] [LOG] wrapper around server logs
+// Server-side console.log calls will still appear, but without the styled prefix
+export const convex = new ConvexReactClient(convexUrl, {
+  verbose: false,
+});
