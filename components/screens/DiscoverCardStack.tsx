@@ -361,10 +361,10 @@ const CATEGORY_TAG_LABELS: Record<string, string> = {
   coffee_date: "Loves coffee",
   nature_lovers: "Nature lover",
   binge_watchers: "Binge watcher",
-  fitness_buffs: "Fitness enthusiast",
-  foodies: "Food lover",
-  pet_lovers: "Pet lover",
-  creative_souls: "Creative soul",
+  travel: "Loves to travel",
+  gaming: "Into gaming",
+  fitness: "Fitness enthusiast",
+  music: "Music lover",
 };
 
 export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader, exploreCategoryId, onStackEmpty }: DiscoverCardStackProps) {

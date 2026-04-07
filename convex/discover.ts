@@ -86,6 +86,15 @@ function getDiscoverFetchLimit(
   return Math.min(Math.max(requestedWindow * bufferMultiplier, 300), 1000);
 }
 
+function shouldIncludeReducedReachCandidate(viewerId: string, candidateId: string): boolean {
+  const pairId = `${viewerId}:${candidateId}`;
+  let hash = 0;
+  for (let i = 0; i < pairId.length; i++) {
+    hash = (hash + pairId.charCodeAt(i)) % 100;
+  }
+  return hash < 50;
+}
+
 // ---------------------------------------------------------------------------
 // DISCOVER-CATEGORY-FIX: Shared eligibility helper for counts + detail consistency
 // ---------------------------------------------------------------------------
@@ -279,8 +288,13 @@ function isUserEligibleForViewer(
     debug?.logs.push(`  [EXCLUDE] ${user.name}: security_only enforcement`);
     return false;
   }
-  // Note: reduced_reach random exclusion NOT applied in counts for consistency
-  // (would cause non-deterministic count/detail mismatch)
+  if (
+    user.verificationEnforcementLevel === 'reduced_reach' &&
+    !shouldIncludeReducedReachCandidate(String(viewerId), String(user._id))
+  ) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: reduced_reach enforcement`);
+    return false;
+  }
 
   debug?.logs.push(`  [ELIGIBLE] ${user.name}`);
   return true;
@@ -612,14 +626,11 @@ export const getDiscoverProfiles = query({
       if (user.verificationEnforcementLevel === 'security_only') continue;
       // P1-027 FIX: Use deterministic hash instead of Math.random() for reduced_reach
       // This ensures consistent results across page loads for the same viewer+user pair
-      if (user.verificationEnforcementLevel === 'reduced_reach') {
-        // Simple hash: sum of character codes modulo 2
-        const pairId = `${userId}:${user._id}`;
-        let hash = 0;
-        for (let i = 0; i < pairId.length; i++) {
-          hash = (hash + pairId.charCodeAt(i)) % 100;
-        }
-        if (hash >= 50) continue; // Skip 50% deterministically
+      if (
+        user.verificationEnforcementLevel === 'reduced_reach' &&
+        !shouldIncludeReducedReachCandidate(String(userId), String(user._id))
+      ) {
+        continue;
       }
 
       filteredCandidates.push({ user, distance });
@@ -990,7 +1001,7 @@ export const getDiscoverProfiles = query({
 
 export const getExploreProfiles = query({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()),
     genderFilter: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other')))),
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
@@ -1016,105 +1027,47 @@ export const getExploreProfiles = query({
   },
   handler: async (ctx, args) => {
     const {
-      userId, genderFilter, minAge, maxAge, maxDistance,
+      genderFilter, minAge, maxAge, maxDistance,
       relationshipIntent, activities, sortByInterests,
       limit = 20, offset = 0,
     } = args;
 
-    const currentUser = await ctx.db.get(userId);
+    const viewerId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!viewerId) return { profiles: [], totalCount: 0 };
+
+    const currentUser = await ctx.db.get(viewerId);
     if (!currentUser) return { profiles: [], totalCount: 0 };
     if (isUserPaused(currentUser)) return { profiles: [], totalCount: 0 };
 
-    const effectiveGender = genderFilter || currentUser.lookingFor;
+    const effectiveGender = genderFilter ?? currentUser.lookingFor ?? [];
     const effectiveMinAge = minAge ?? currentUser.minAge;
     const effectiveMaxAge = maxAge ?? currentUser.maxAge;
     const effectiveMaxDistance = maxDistance ?? currentUser.maxDistance;
 
-    // PERF FIX: Pre-fetch all swipes, matches, blocks upfront (converts O(4*N) queries to O(4))
-    // Same efficient pattern as getDiscoverProfiles
-    const now = Date.now();
-    const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
-
-    // P1/R3 FIX: Adaptive buffer sizing instead of full table scan
-    // Base multiplier with adjustment for filter strictness
     const hasStrictFilters = (relationshipIntent && relationshipIntent.length > 0) ||
-                              (activities && activities.length > 0);
-    const bufferMultiplier = hasStrictFilters ? 20 : 10; // Higher buffer for stricter filters
-    const fetchLimit = Math.max((offset + limit) * bufferMultiplier, 200); // Min 200 candidates
+      (activities && activities.length > 0);
+    const bufferMultiplier = hasStrictFilters ? 20 : 10;
+    const fetchLimit = Math.max((offset + limit) * bufferMultiplier, 200);
+    const cooldownThreshold = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-    const [
-      allUsers,
-      mySwipes,
-      matchesAsUser1,
-      matchesAsUser2,
-      blocksICreated,
-      blocksAgainstMe,
-    ] = await Promise.all([
-      // P0 FIX: Remove verification hard-filter - verification is a ranking boost, not exclusion
-      // Use take() with buffer for efficiency without filtering by verification status
-      ctx.db.query('users')
-        .take(fetchLimit),
-      // All my swipes (likes/passes)
-      ctx.db
-        .query('likes')
-        .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
-        .collect(),
-      // Matches where I'm user1
-      ctx.db
-        .query('matches')
-        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .collect(),
-      // Matches where I'm user2
-      ctx.db
-        .query('matches')
-        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .collect(),
-      // Blocks I created
-      ctx.db
-        .query('blocks')
-        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
-        .collect(),
-      // Blocks against me
-      ctx.db
-        .query('blocks')
-        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
-        .collect(),
+    const [allUsers, exclusions] = await Promise.all([
+      ctx.db.query('users').take(fetchLimit),
+      buildExclusionSets(ctx, viewerId),
     ]);
 
-    // Build Maps/Sets for O(1) lookups
-    // Swiped users: exclude likes/superlikes, and recent passes (within 7 days)
-    const swipedUserIds = new Set<string>();
-    for (const swipe of mySwipes) {
-      // Skip expired passes (can re-show after 7 days)
-      if (swipe.action === 'pass' && swipe.createdAt < passExpiry) continue;
-      swipedUserIds.add(swipe.toUserId as string);
-    }
-
-    const matchedUserIds = new Set<string>();
-    for (const m of matchesAsUser1) matchedUserIds.add(m.user2Id as string);
-    for (const m of matchesAsUser2) matchedUserIds.add(m.user1Id as string);
-
-    const blockedUserIds = new Set<string>();
-    for (const b of blocksICreated) blockedUserIds.add(b.blockedUserId as string);
-    for (const b of blocksAgainstMe) blockedUserIds.add(b.blockerId as string);
-
-    // STABILITY FIX: C-9 - Two-pass approach to eliminate N+1 photo queries
-    // First pass: filter candidates, collect user objects with computed values
-    type FilteredUser = { user: typeof allUsers[0]; userAge: number; distance: number | undefined };
+    type FilteredUser = { user: typeof allUsers[number]; userAge: number; distance: number | undefined };
     const filteredUsers: FilteredUser[] = [];
 
     for (const user of allUsers) {
-      if (user._id === userId) continue;
-      if (!user.isActive || user.isBanned) continue;
-      if (isUserPaused(user)) continue;
-      // P0 FIX: Verification is a ranking boost, not a hard filter - no verification check here
+      if (!isUserEligibleForViewer(user, currentUser, viewerId, exclusions, cooldownThreshold)) {
+        continue;
+      }
 
-      if (!effectiveGender.includes(user.gender)) continue;
+      if (effectiveGender.length > 0 && !effectiveGender.includes(user.gender)) continue;
 
       const userAge = calculateAge(user.dateOfBirth);
-      if (userAge < effectiveMinAge || userAge > effectiveMaxAge) continue;
+      if (effectiveMinAge != null && userAge < effectiveMinAge) continue;
+      if (effectiveMaxAge != null && userAge > effectiveMaxAge) continue;
 
       let distance: number | undefined;
       if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
@@ -1122,27 +1075,23 @@ export const getExploreProfiles = query({
           currentUser.latitude, currentUser.longitude,
           user.latitude, user.longitude,
         );
-        if (!isDistanceAllowed(dist, effectiveMaxDistance)) continue;
+        if (effectiveMaxDistance != null && !isDistanceAllowed(dist, effectiveMaxDistance)) continue;
         distance = dist;
       }
 
       if (relationshipIntent && relationshipIntent.length > 0) {
-        if (!relationshipIntent.some((i) => user.relationshipIntent.includes(i))) continue;
+        const userRelationshipIntent = Array.isArray(user.relationshipIntent) ? user.relationshipIntent : [];
+        if (!relationshipIntent.some((i) => userRelationshipIntent.includes(i))) continue;
       }
 
       if (activities && activities.length > 0) {
-        if (!activities.some((a) => user.activities.includes(a))) continue;
+        const userActivities = Array.isArray(user.activities) ? user.activities : [];
+        if (!activities.some((a) => userActivities.includes(a))) continue;
       }
-
-      // PERF FIX: O(1) Set lookups instead of per-user database queries
-      if (swipedUserIds.has(user._id as string)) continue;
-      if (matchedUserIds.has(user._id as string)) continue;
-      if (blockedUserIds.has(user._id as string)) continue;
 
       filteredUsers.push({ user, userAge, distance });
     }
 
-    // STABILITY FIX: C-9 - Batch fetch photos with chunked concurrency (avoids N+1)
     const CHUNK_SIZE = 20;
     const photosByUser = new Map<string, any[]>();
     for (let i = 0; i < filteredUsers.length; i += CHUNK_SIZE) {
@@ -1160,10 +1109,15 @@ export const getExploreProfiles = query({
       }
     }
 
-    // Second pass: build candidates with photos from the map
-    const candidates = filteredUsers.map(({ user, userAge, distance }) => {
-      const photos = photosByUser.get(user._id as string) ?? [];
-      return {
+    const candidates = [];
+    for (const { user, userAge, distance } of filteredUsers) {
+      const rawPhotos = photosByUser.get(user._id as string) ?? [];
+      const photos = getSafeDiscoverPhotos(
+        rawPhotos.filter((photo: any) => photo.photoType !== 'verification_reference')
+      );
+      if (photos.length === 0) continue;
+
+      candidates.push({
         id: user._id,
         name: user.name,
         age: userAge,
@@ -1177,19 +1131,19 @@ export const getExploreProfiles = query({
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos, // Already sorted by order via by_user_order index
+        photos,
         photoBlurred: user.photoBlurred === true,
-        photoCount: photos.filter((p: any) => !p.isNsfw).length,
+        photoCount: photos.length,
         isIncognito: user.incognitoMode === true,
-      };
-    });
+      });
+    }
 
-    // Sort: interests sort uses shared activities, filtered categories use relevance,
-    // default falls back to the simple 4-signal score.
-    if (sortByInterests && currentUser.activities.length > 0) {
+    const currentActivities = Array.isArray(currentUser.activities) ? currentUser.activities : [];
+
+    if (sortByInterests && currentActivities.length > 0) {
       candidates.sort((a, b) => {
-        const shA = a.activities.filter((act) => currentUser.activities.includes(act)).length;
-        const shB = b.activities.filter((act) => currentUser.activities.includes(act)).length;
+        const shA = a.activities.filter((act) => currentActivities.includes(act)).length;
+        const shB = b.activities.filter((act) => currentActivities.includes(act)).length;
         return shB - shA;
       });
     } else if ((relationshipIntent && relationshipIntent.length > 0) || (activities && activities.length > 0)) {
@@ -1206,7 +1160,6 @@ export const getExploreProfiles = query({
         return sB - sA;
       });
     } else {
-      // Default: rank by the same 4-signal formula
       candidates.sort((a, b) => {
         const scoreA = 0.45 * activityScore(a.lastActive) +
           0.35 * completenessScore(a, a.photoCount) +
@@ -1302,6 +1255,7 @@ export const getExploreCategoryProfiles = query({
     categoryId: v.string(), // Category key from exploreCategories.ts
     limit: v.optional(v.number()),
     offset: v.optional(v.number()),
+    refreshKey: v.optional(v.number()), // Client-only cache busting / refetch trigger
   },
   handler: async (ctx, args) => {
     const { categoryId, limit = 20, offset = 0 } = args;
@@ -1425,12 +1379,10 @@ export const getExploreCategoryProfiles = query({
       const { user, distance } = filteredCandidates[i];
       const rawPhotos = photoResults[i];
 
-      // Filter out verification_reference photos (private verification photos, not for display)
-      const displayPhotos = rawPhotos.filter((p) => p.photoType !== 'verification_reference');
-
-      // Filter out NSFW photos
-      const nonNsfwPhotos = displayPhotos.filter((p) => !p.isNsfw);
-      if (nonNsfwPhotos.length === 0) continue; // Require at least 1 photo
+      const safePhotos = getSafeDiscoverPhotos(
+        rawPhotos.filter((p) => p.photoType !== 'verification_reference')
+      );
+      if (safePhotos.length === 0) continue;
 
       const userAge = calculateAge(user.dateOfBirth);
       const theyLikedMe = usersWhoLikedMe.has(user._id as string);
@@ -1460,11 +1412,11 @@ export const getExploreCategoryProfiles = query({
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos: nonNsfwPhotos.sort((a, b) => a.order - b.order),
+        photos: safePhotos,
         photoBlurred: user.photoBlurred === true,
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
-        photoCount: nonNsfwPhotos.length,
+        photoCount: safePhotos.length,
         isIncognito: user.incognitoMode === true,
         // DISCOVER-CATEGORY-FIX: Include category info for debugging/UI
         assignedCategory: user.assignedDiscoverCategory,
@@ -1571,9 +1523,10 @@ export const assignUserCategory = mutation({
 
     // Calculate best category
     const bestCategory = findBestCategory({
-      relationshipIntent: user.relationshipIntent,
-      activities: user.activities,
-      lastActive: user.lastActive,
+      relationshipIntent: user.relationshipIntent ?? [],
+      activities: user.activities ?? [],
+      lastActive: user.lastActive ?? Date.now(),
+      lastShownInDiscoverAt: user.lastShownInDiscoverAt,
     });
 
     // Update user with new assignment
@@ -1594,6 +1547,7 @@ export const assignUserCategory = mutation({
 export const getExploreCategoryCounts = query({
   args: {
     viewerId: v.union(v.id('users'), v.string()),
+    refreshKey: v.optional(v.number()), // Client-only cache busting / refetch trigger
   },
   handler: async (ctx, args) => {
     // Resolve viewer ID

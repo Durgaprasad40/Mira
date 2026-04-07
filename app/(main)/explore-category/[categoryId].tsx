@@ -20,14 +20,10 @@ export default function ExploreCategoryScreen() {
   const [stackExhausted, setStackExhausted] = useState(false);
   const hadProfilesRef = useRef(false);
 
-  // DISCOVER-CATEGORY-FIX: Use new category-based query with single-category assignment
-  // trackShown=false: Do NOT mark profiles as shown on load (causes instant cooldown bug)
-  // Swipe exclusion is handled separately via likes table - that's the correct mechanism
-  const { profiles, isLoading, isUsingBackend, totalCount } = useExploreCategoryProfiles({
+  const { profiles, isLoading, isUsingBackend, totalCount, isError, error } = useExploreCategoryProfiles({
     categoryId: categoryId ?? '',
-    trackShown: false, // FIXED: Disable auto-marking to prevent instant cooldown
     limit: 50,
-    refreshKey, // Pass refresh key to trigger reload
+    refreshKey,
   });
 
   const cat = useMemo(
@@ -120,7 +116,7 @@ export default function ExploreCategoryScreen() {
       </View>
 
       {/* Engagement triggers - subtle hints */}
-      {!isLoading && items.length > 0 && (showScarcityHint || showRevisitNudge) && (
+      {!isLoading && !isError && items.length > 0 && (showScarcityHint || showRevisitNudge) && (
         <View style={styles.engagementHint}>
           <Text style={styles.engagementHintText}>
             {showScarcityHint
@@ -134,6 +130,15 @@ export default function ExploreCategoryScreen() {
         <View style={styles.loadingState}>
           <ActivityIndicator size="large" color={COLORS.primary} />
           <Text style={styles.loadingText}>Finding the best people for you...</Text>
+        </View>
+      ) : isError ? (
+        <View style={styles.emptyState}>
+          <Ionicons name="alert-circle-outline" size={64} color={COLORS.textLight} style={styles.emptyIcon} />
+          <Text style={styles.emptyTitle}>This vibe is unavailable</Text>
+          <Text style={styles.emptySubtitle}>{error ?? 'Unable to load this vibe right now.'}</Text>
+          <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+            <Text style={styles.retryButtonText}>Try again</Text>
+          </TouchableOpacity>
         </View>
       ) : items.length > 0 && !stackExhausted ? (
         <DiscoverCardStack
@@ -225,5 +230,17 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 22,
     paddingHorizontal: 16,
+  },
+  retryButton: {
+    marginTop: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: COLORS.primary,
+  },
+  retryButtonText: {
+    color: COLORS.white,
+    fontSize: 15,
+    fontWeight: '600',
   },
 });

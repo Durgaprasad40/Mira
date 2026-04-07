@@ -1,7 +1,6 @@
 import { useMemo } from 'react';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_PROFILES } from '@/lib/demoData';
@@ -21,7 +20,8 @@ const EMPTY_PROFILES: any[] = [];
  * - excluded users change (blocked, matches, swipes)
  * - Convex query returns new data
  */
-export function useExploreProfiles(): any[] {
+export function useExploreProfiles(options: { enabled?: boolean } = {}): any[] {
+  const { enabled = true } = options;
   const userId = useAuthStore((s) => s.userId);
   const demo = useDemoStore(useShallow((s) => ({
     matchCount: s.matches.length,
@@ -39,11 +39,11 @@ export function useExploreProfiles(): any[] {
   }, [blockedUserIds, demo.matchCount, demo.likesCount, demo.getExcludedUserIds]);
 
   const queryArgs = useMemo(() => {
-    if (isDemoMode || !userId) return 'skip' as const;
-    return { userId: userId as Id<'users'> };
-  }, [userId]);
+    if (!enabled || isDemoMode || !userId) return 'skip' as const;
+    return { userId };
+  }, [enabled, userId]);
 
-  const result = useQuery(api.discover.getExploreProfiles, queryArgs);
+  const result = useQuery(api.discover.getExploreProfiles as any, queryArgs);
 
   return useMemo(() => {
     // P0-004 FIX: Demo mode only available in __DEV__ builds

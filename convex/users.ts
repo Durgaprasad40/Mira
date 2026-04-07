@@ -1590,7 +1590,7 @@ export const completeOnboarding = mutation({
     if (insect !== undefined) cleanUpdates.insect = insect;
 
     // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values
-    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    // Keeps relationshipIntent aligned with the current 9 Explore-safe schema values
     if (cleanUpdates.relationshipIntent) {
       cleanUpdates.relationshipIntent = sanitizeRelationshipIntent(
         cleanUpdates.relationshipIntent as string[]
@@ -2139,7 +2139,7 @@ export const upsertOnboardingDraft = mutation({
     };
 
     // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values before saving
-    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    // Keeps draft preferences aligned with the current 9 Explore-safe schema values
     if (mergedDraft.preferences?.relationshipIntent) {
       mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
         mergedDraft.preferences.relationshipIntent

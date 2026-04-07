@@ -317,13 +317,13 @@ export default function ExploreScreen() {
   const router = useRouter();
   const [refreshKey, setRefreshKey] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
-  const [isLoading, setIsLoading] = useState(true);
+  const hasFocusedOnceRef = useRef(false);
 
   // ScrollView ref for scroll-to-top
   const scrollViewRef = useRef<ScrollView>(null);
 
   // Backend counts for tile badges
-  const backendCounts = useExploreCategoryCounts();
+  const { data: backendCounts, isLoading, isError, error } = useExploreCategoryCounts(refreshKey);
 
   // Explore preferences
   const trackCategoryClick = useExplorePrefsStore((s) => s.trackCategoryClick);
@@ -370,11 +370,17 @@ export default function ExploreScreen() {
 
   // Category counts
   const categoryCounts = useMemo(() => {
-    if (backendCounts) return backendCounts;
     const counts: Record<string, number> = {};
     for (const cat of EXPLORE_CATEGORIES) {
       counts[cat.id] = 0;
     }
+
+    if (!backendCounts) return counts;
+
+    for (const [categoryId, count] of Object.entries(backendCounts)) {
+      counts[categoryId] = count;
+    }
+
     return counts;
   }, [backendCounts]);
 
@@ -412,11 +418,11 @@ export default function ExploreScreen() {
   // Refresh on focus
   useFocusEffect(
     useCallback(() => {
-      setRefreshKey((k) => k + 1);
-      setIsLoading(true);
-
-      // Simulate loading
-      const timer = setTimeout(() => setIsLoading(false), 500);
+      if (hasFocusedOnceRef.current) {
+        setRefreshKey((k) => k + 1);
+      } else {
+        hasFocusedOnceRef.current = true;
+      }
 
       // Check for return hook
       if (shouldShowReturnHook() && returnCategory) {
@@ -425,7 +431,6 @@ export default function ExploreScreen() {
       }
 
       return () => {
-        clearTimeout(timer);
         trackExploreExit();
         setShowReturnHook(false);
       };
@@ -482,6 +487,17 @@ export default function ExploreScreen() {
     </View>
   );
 
+  const renderErrorState = () => (
+    <View style={styles.emptyContainer}>
+      <Ionicons name="alert-circle-outline" size={52} color={COLORS.textLight} />
+      <Text style={styles.emptyTitle}>Explore is unavailable</Text>
+      <Text style={styles.emptySubtitle}>{error ?? 'Unable to load Explore right now.'}</Text>
+      <TouchableOpacity style={styles.retryButton} onPress={() => setRefreshKey((k) => k + 1)}>
+        <Text style={styles.retryButtonText}>Try again</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
   return (
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       {/* Header */}
@@ -506,6 +522,8 @@ export default function ExploreScreen() {
       {/* Main Section-Based Content */}
       {isLoading ? (
         renderLoadingState()
+      ) : isError ? (
+        renderErrorState()
       ) : !hasAnyItems ? (
         renderEmptyState()
       ) : (
@@ -824,6 +842,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textMuted,
     textAlign: "center",
+  },
+  retryButton: {
+    marginTop: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: COLORS.primary,
+  },
+  retryButtonText: {
+    color: COLORS.white,
+    fontSize: 15,
+    fontWeight: "600",
   },
 
   // ══════════════════════════════════════════════════════════════════════════

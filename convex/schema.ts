@@ -129,14 +129,15 @@ export default defineSchema({
     // Preferences
     lookingFor: v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'))),
     relationshipIntent: v.array(v.union(
-      v.literal('long_term'),
-      v.literal('short_term'),
-      v.literal('fwb'),
-      v.literal('figuring_out'),
-      v.literal('short_to_long'),
-      v.literal('long_to_short'),
-      v.literal('new_friends'),
-      v.literal('open_to_anything')
+      v.literal('serious_vibes'),
+      v.literal('keep_it_casual'),
+      v.literal('exploring_vibes'),
+      v.literal('see_where_it_goes'),
+      v.literal('open_to_vibes'),
+      v.literal('just_friends'),
+      v.literal('open_to_anything'),
+      v.literal('single_parent'),
+      v.literal('new_to_dating')
     )),
     activities: v.array(v.union(
       v.literal('coffee'),
@@ -190,6 +191,11 @@ export default defineSchema({
     // Discovery Pause
     isDiscoveryPaused: v.optional(v.boolean()),
     discoveryPausedUntil: v.optional(v.number()),
+
+    // Explore category assignment (Phase-1 Explore single-category system)
+    assignedDiscoverCategory: v.optional(v.string()),
+    discoverCategoryAssignedAt: v.optional(v.number()),
+    lastShownInDiscoverAt: v.optional(v.number()),
 
     // Chat Rooms: Preferred room (auto-opens on tab entry)
     preferredChatRoomId: v.optional(v.id('chatRooms')),
@@ -359,8 +365,9 @@ export default defineSchema({
           v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'), v.literal('transgender'), v.literal('bisexual'), v.literal('prefer_not_to_say')
         ))),
         relationshipIntent: v.optional(v.array(v.union(
-          v.literal('long_term'), v.literal('short_term'), v.literal('fwb'), v.literal('figuring_out'),
-          v.literal('short_to_long'), v.literal('long_to_short'), v.literal('new_friends'), v.literal('open_to_anything')
+          v.literal('serious_vibes'), v.literal('keep_it_casual'), v.literal('exploring_vibes'),
+          v.literal('see_where_it_goes'), v.literal('open_to_vibes'), v.literal('just_friends'),
+          v.literal('open_to_anything'), v.literal('single_parent'), v.literal('new_to_dating')
         ))),
         activities: v.optional(v.array(v.union(
           // Original 20 activities
@@ -496,6 +503,7 @@ export default defineSchema({
     .index('by_handle', ['handle'])
     .index('by_external_id', ['externalId'])
     .index('by_gender', ['gender'])
+    .index('by_discover_category', ['assignedDiscoverCategory'])
     .index('by_last_active', ['lastActive'])
     .index('by_boosted', ['boostedUntil'])
     .index('by_verification_status', ['verificationStatus'])
