@@ -157,6 +157,7 @@ export default function CrossedPathsScreen() {
   // Local state
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [hiddenDemoIds, setHiddenDemoIds] = useState<Set<string>>(new Set());
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // ---------------------------------------------------------------------------
   // Animation state for section reveals
@@ -172,7 +173,7 @@ export default function CrossedPathsScreen() {
   // Query crossed paths history (live mode only)
   const crossedPathsQuery = useQuery(
     api.crossedPaths.getCrossPathHistory,
-    !isDemo && convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemo && userId ? { authUserId: userId, refreshKey } : 'skip'
   );
 
   // Mutations for hide/delete (live mode only)
@@ -181,6 +182,12 @@ export default function CrossedPathsScreen() {
 
   // Loading state
   const isLoading = !isDemo && crossedPathsQuery === undefined;
+
+  useEffect(() => {
+    if (!isDemo && isRefreshing && crossedPathsQuery !== undefined) {
+      setIsRefreshing(false);
+    }
+  }, [isDemo, isRefreshing, crossedPathsQuery]);
 
   // Mark crossed paths as seen when screen opens
   useEffect(() => {
@@ -320,11 +327,9 @@ export default function CrossedPathsScreen() {
       return;
     }
 
-    // Live mode: Convex queries auto-refresh, but we show the indicator briefly
+    // Live mode: change query identity so refresh causes a real refetch
     setIsRefreshing(true);
-    // Give time for the query to potentially re-fetch
-    await new Promise((resolve) => setTimeout(resolve, 800));
-    setIsRefreshing(false);
+    setRefreshKey((current) => current + 1);
   }, [isDemo]);
 
   // ---------------------------------------------------------------------------

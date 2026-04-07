@@ -95,7 +95,7 @@ export default function ViewProfileScreen() {
   const sharedPlaces = useQuery(
     api.crossedPaths.getSharedPlaces,
     !isDemoMode && !isPhase2 && userId && currentUserId
-      ? { viewerId: currentUserId as any, profileUserId: userId as any }
+      ? { authUserId: currentUserId, profileUserId: userId as any }
       : 'skip'
   );
 

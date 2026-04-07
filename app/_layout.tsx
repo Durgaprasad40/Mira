@@ -803,7 +803,7 @@ function CrossedPathToastManager() {
   // Query crossed-path history (live mode only)
   const crossedPathsQuery = useQuery(
     api.crossedPaths.getCrossPathHistory,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemoMode && userId ? { authUserId: userId } : 'skip'
   );
 
   // Check for new crossed paths and show toast

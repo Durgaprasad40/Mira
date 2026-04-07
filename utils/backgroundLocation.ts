@@ -7,8 +7,9 @@
  * SAFETY:
  * - Does NOT modify existing feature logic
  * - Respects battery + OS limitations
- * - Reuses existing publishLocation mutation
+ * - Reuses existing publishLocation mutation only
  * - Keeps interval >= 20 minutes
+ * - Publish-only: does NOT run crossed-path detection in background
  *
  * HARDENING (v2):
  * - User-selectable location mode: 'foreground' or 'background'
@@ -53,6 +54,7 @@ const CONVEX_URL = process.env.EXPO_PUBLIC_CONVEX_URL!;
 /**
  * Define the background task at TOP LEVEL (required by expo-task-manager)
  * This runs when the OS delivers location updates in background.
+ * It refreshes Nearby visibility only; crossed-path detection remains foreground-only.
  */
 TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
   if (error) {
@@ -145,7 +147,7 @@ export async function startBackgroundLocation(): Promise<{
         showsBackgroundLocationIndicator: false,
         foregroundService: {
           notificationTitle: 'Mira',
-          notificationBody: 'Finding nearby people',
+          notificationBody: 'Updating Nearby visibility',
           notificationColor: '#FF69B4',
         },
       });

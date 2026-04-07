@@ -207,7 +207,6 @@ function getClusterImage(pointCount: number) {
 /** Explicit location UI states for stability */
 type LocationUIState =
   | 'checking'
-  | 'permission_required'
   | 'denied_needs_settings'
   | 'restricted'           // iOS parental controls
   | 'services_disabled'    // System-wide location off
@@ -230,7 +229,7 @@ interface NearbyUser {
   hideDistance: boolean;
 }
 
-/** Processed nearby user with fuzzed coordinates */
+/** Processed nearby user with backend-fuzzed map coordinates */
 interface ProcessedNearbyUser extends NearbyUser {
   fuzzedLat: number;
   fuzzedLng: number;
@@ -483,6 +482,7 @@ export default function NearbyScreen() {
   const [queryError, setQueryError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
   const [showEmptyState, setShowEmptyState] = useState(false);
+  const [nearbyRefreshKey, setNearbyRefreshKey] = useState(0);
 
   // Mount guard for async operations
   const isMountedRef = useRef(true);
@@ -527,7 +527,9 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   const nearbyUsersQuery = useQuery(
     api.crossedPaths.getNearbyUsers,
-    !isDemo && userId ? { authUserId: userId } : 'skip' // P2 AUTH FIX: Pass auth ID for server-side resolution
+    !isDemo && userId
+      ? { authUserId: userId, refreshKey: nearbyRefreshKey }
+      : 'skip' // P2 AUTH FIX: Pass auth ID for server-side resolution
   );
 
   // ---------------------------------------------------------------------------
@@ -535,7 +537,7 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   const crossedPathsQuery = useQuery(
     api.crossedPaths.getCrossPathHistory,
-    !isDemo && convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemo && userId ? { authUserId: userId } : 'skip'
   );
 
   const [hasNewCrossedPaths, setHasNewCrossedPaths] = useState(false);
@@ -583,8 +585,11 @@ export default function NearbyScreen() {
       if (queryError) {
         setQueryError(null);
       }
+      if (isRetrying) {
+        setIsRetrying(false);
+      }
     }
-  }, [nearbyUsersQuery, queryError]);
+  }, [nearbyUsersQuery, queryError, isRetrying]);
 
   // Set timeout for query loading (30 seconds)
   useEffect(() => {
@@ -602,6 +607,7 @@ export default function NearbyScreen() {
       // Only set error if query is still pending
       if (nearbyUsersQuery === undefined && isQueryActive) {
         setQueryError('Unable to load nearby users. Please check your connection.');
+        setIsRetrying(false);
         log.warn('[NEARBY]', 'query timeout - no data after 30s');
       }
       queryTimeoutRef.current = null;
@@ -652,14 +658,8 @@ export default function NearbyScreen() {
         // Clear error and trigger retry (same as manual retry)
         setQueryError(null);
         setIsRetrying(true);
+        setNearbyRefreshKey((current) => current + 1);
         startLocationTracking();
-
-        // Clear retry feedback after delay
-        setTimeout(() => {
-          if (isMountedRef.current) {
-            setIsRetrying(false);
-          }
-        }, 2000);
       }
 
       autoRetryTimeoutRef.current = null;
@@ -758,8 +758,10 @@ export default function NearbyScreen() {
         // Guard: skip state updates if unmounted
         if (!isMountedRef.current) return;
 
-        // Update last published ref
-        lastPublishedRef.current = { lat, lng };
+        // Only treat the current coordinates as published if the backend actually refreshed them
+        if (result?.published) {
+          lastPublishedRef.current = { lat, lng };
+        }
 
         if (__DEV__) {
           console.log('[NEARBY] publishLocation success:', result);
@@ -900,14 +902,12 @@ export default function NearbyScreen() {
   }, [isDemo, bestLocation]);
 
   // ---------------------------------------------------------------------------
-  // Combine and process nearby users with fuzzing
+  // Combine and process nearby users using backend-fuzzed coordinates
   // ---------------------------------------------------------------------------
   const processedNearbyUsers = useMemo(() => {
     const rawUsers: NearbyUser[] = isDemo
       ? demoNearbyUsers
       : (nearbyUsersQuery ?? []);
-
-    const viewerId = userId || 'anonymous';
     let validCount = 0;
     let skippedCount = 0;
 
@@ -927,20 +927,10 @@ export default function NearbyScreen() {
         return true;
       })
       .map((user) => {
-        // Apply privacy fuzzing (use strongPrivacyMode for larger fuzz radius)
-        const fuzzed = applyPrivacyFuzz(
-          user.publishedLat,
-          user.publishedLng,
-          user.id,
-          viewerId,
-          MODULE_SESSION_SALT,
-          user.strongPrivacyMode,
-        );
-
         return {
           ...user,
-          fuzzedLat: fuzzed.lat,
-          fuzzedLng: fuzzed.lng,
+          fuzzedLat: user.publishedLat,
+          fuzzedLng: user.publishedLng,
         };
       });
 
@@ -1278,16 +1268,10 @@ export default function NearbyScreen() {
     // Clear error and show loading feedback
     setQueryError(null);
     setIsRetrying(true);
+    setNearbyRefreshKey((current) => current + 1);
 
-    // Re-trigger location tracking which will re-run query
+    // Re-trigger location tracking and force query identity change so retry is real
     startLocationTracking();
-
-    // Clear retry state after a delay (query will auto-resolve via Convex)
-    setTimeout(() => {
-      if (isMountedRef.current) {
-        setIsRetrying(false);
-      }
-    }, 2000);
   }, [startLocationTracking]);
 
   // ---------------------------------------------------------------------------
@@ -1319,43 +1303,6 @@ export default function NearbyScreen() {
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
           <Text style={styles.statusText}>Getting your location...</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Render: Permission required
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'permission_required') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <View style={{ width: 22 }} />
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity
-            onPress={handleOpenCrossedPaths}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Crossed paths"
-            accessibilityHint="View people you've crossed paths with"
-          >
-            <View>
-              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-              {hasNewCrossedPaths && (
-                <Badge dot animate style={styles.crossedPathsBadge} />
-              )}
-            </View>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.centered}>
-          <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Location Access Needed</Text>
-          <Text style={styles.subtitle}>
-            To see people nearby, please enable location access.
-          </Text>
-          <TouchableOpacity style={styles.primaryButton} onPress={startLocationTracking}>
-            <Text style={styles.primaryButtonText}>Enable Location</Text>
-          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );

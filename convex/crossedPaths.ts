@@ -63,6 +63,56 @@ async function prefetchPhotoCounts(
   return counts;
 }
 
+function shouldIncludeReducedReachCandidate(viewerId: string, candidateId: string): boolean {
+  const pairId = `${viewerId}:${candidateId}`;
+  let hash = 0;
+  for (let i = 0; i < pairId.length; i++) {
+    hash = (hash + pairId.charCodeAt(i)) % 100;
+  }
+  return hash < 50;
+}
+
+function getSafeNearbyDisplayPhotos<
+  T extends { url?: string | null; isNsfw?: boolean; order?: number; photoType?: string | null }
+>(photos: T[]): T[] {
+  return photos
+    .filter(
+      (photo) =>
+        photo.photoType !== 'verification_reference' &&
+        !photo.isNsfw &&
+        typeof photo.url === 'string' &&
+        photo.url.trim().length > 0
+    )
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+async function prefetchPhotoSummaries(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userIds: string[]
+): Promise<Map<string, { count: number; safeDisplayUrl: string | null }>> {
+  const summaries = new Map<string, { count: number; safeDisplayUrl: string | null }>();
+  const photoPromises = userIds.map((uid) =>
+    ctx.db
+      .query('photos')
+      .withIndex('by_user', (q: any) => q.eq('userId', uid))
+      .collect()
+  );
+
+  const photoResults = await Promise.all(photoPromises);
+
+  userIds.forEach((uid, i) => {
+    const photos = photoResults[i];
+    const safePhotos = getSafeNearbyDisplayPhotos(photos);
+    summaries.set(uid, {
+      count: photos.length,
+      safeDisplayUrl: safePhotos[0]?.url ?? null,
+    });
+  });
+
+  return summaries;
+}
+
 /**
  * Pre-fetch swipes from a user in a single query.
  * Returns a Map for O(1) lookup.
@@ -104,6 +154,7 @@ const LOCATION_UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 // Published location window (how often user can refresh their published location)
 const PUBLISH_WINDOW_MS = 45 * 60 * 1000; // 45 minutes
+const PUBLISH_MOVEMENT_OVERRIDE_METERS = 100; // allow refresh within window after meaningful movement
 
 // Marker visibility tiers (for map)
 const SOLID_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // 1–3 days → solid marker
@@ -324,24 +375,42 @@ export const publishLocation = mutation({
     if (!user) return { success: false, reason: 'user_not_found' };
 
     // Check if published location is still within the publish window
-    // DEV MODE: Uses shorter window (2 min) instead of production (6 hours)
+    // DEV MODE: Uses shorter window (2 min) instead of production (45 min)
     const effectivePublishWindow = config.PUBLISH_WINDOW_MS;
     if (user.publishedAt && now - user.publishedAt < effectivePublishWindow) {
+      const hasPublishedCoords =
+        user.publishedLat !== undefined &&
+        user.publishedLng !== undefined;
+      const distanceSincePublish = hasPublishedCoords
+        ? calculateDistanceMeters(user.publishedLat!, user.publishedLng!, latitude, longitude)
+        : Number.POSITIVE_INFINITY;
+
+      if (!hasPublishedCoords || distanceSincePublish < PUBLISH_MOVEMENT_OVERRIDE_METERS) {
       const timeRemaining = Math.round((user.publishedAt + effectivePublishWindow - now) / 1000);
-      devLog('publishLocation: within_window (throttled)', {
+        devLog('publishLocation: within_window (throttled)', {
+          userId: userId,
+          userName: user.name,
+          publishedAt: new Date(user.publishedAt).toISOString(),
+          windowMs: effectivePublishWindow,
+          timeRemainingSeconds: timeRemaining,
+          distanceSincePublishMeters: hasPublishedCoords ? Math.round(distanceSincePublish) : null,
+          isDevMode: config.IS_DEV_MODE,
+        });
+        return {
+          success: true,
+          published: false,
+          reason: 'within_window',
+          nextPublishAt: user.publishedAt + effectivePublishWindow,
+        };
+      }
+
+      devLog('publishLocation: movement override within window', {
         userId: userId,
         userName: user.name,
-        publishedAt: new Date(user.publishedAt).toISOString(),
+        distanceSincePublishMeters: Math.round(distanceSincePublish),
+        overrideThresholdMeters: PUBLISH_MOVEMENT_OVERRIDE_METERS,
         windowMs: effectivePublishWindow,
-        timeRemainingSeconds: timeRemaining,
-        isDevMode: config.IS_DEV_MODE,
       });
-      return {
-        success: true,
-        published: false,
-        reason: 'within_window',
-        nextPublishAt: user.publishedAt + effectivePublishWindow,
-      };
     }
 
     // Publish new location
@@ -648,7 +717,15 @@ export const recordLocation = mutation({
     for (const user of verifiedUsers) {
       if (user._id === userId) continue;
       if (!user.isActive) continue;
+      if (user.isBanned) continue;
       if (!user.latitude || !user.longitude) continue;
+      if (user.verificationEnforcementLevel === 'security_only') continue;
+      if (
+        user.verificationEnforcementLevel === 'reduced_reach' &&
+        !shouldIncludeReducedReachCandidate(String(userId), String(user._id))
+      ) {
+        continue;
+      }
 
       // Incognito mode: Skip users who are hidden (but they can still BE detected for crossings)
       // Note: Incognito users can still trigger crossings, they just don't appear on map
@@ -682,13 +759,15 @@ export const recordLocation = mutation({
     }
 
     // STABILITY FIX: Fetch photo counts only for candidates (not all users)
-    const photoCountsMap = await prefetchPhotoCounts(ctx, candidateUserIds);
+    const photoSummariesMap = await prefetchPhotoSummaries(ctx, candidateUserIds);
 
     // Second pass: filter by photo count
     const nearbyUsers: UserWithDistance[] = [];
     for (const user of candidateUsers) {
-      const photoCount = photoCountsMap.get(user._id as string) || 0;
+      const photoSummary = photoSummariesMap.get(user._id as string);
+      const photoCount = photoSummary?.count ?? 0;
       if (photoCount < 2) continue;
+      if (!photoSummary?.safeDisplayUrl) continue;
       nearbyUsers.push(user);
     }
 
@@ -995,8 +1074,11 @@ export const recordLocation = mutation({
 // ---------------------------------------------------------------------------
 
 export const getNearbyUsers = query({
-  args: { authUserId: v.string() }, // P2 AUTH FIX: Server-side auth instead of trusting client
-  handler: async (ctx, { authUserId }) => {
+  args: {
+    authUserId: v.string(),
+    refreshKey: v.optional(v.number()),
+  }, // P2 AUTH FIX: Server-side auth instead of trusting client
+  handler: async (ctx, { authUserId: authUserId }) => {
     const now = Date.now();
 
     // Get effective config (DEV vs production)
@@ -1091,12 +1173,13 @@ export const getNearbyUsers = query({
       passed: 0,
       filtered_self: 0,
       filtered_inactive: 0,
+      filtered_banned: 0,
       filtered_incognito: 0,
       filtered_nearbyDisabled: 0,
       filtered_paused: 0,
       filtered_visibilityMode: 0,
       filtered_incompleteProfile: 0,
-      filtered_noPrimaryPhoto: 0,
+      filtered_verificationEnforcement: 0,
       filtered_noPublishedLocation: 0,
       filtered_staleLocation: 0,
       filtered_tooClose: 0,
@@ -1105,6 +1188,7 @@ export const getNearbyUsers = query({
       filtered_genderMismatch: 0,
       filtered_blocked: 0,
       filtered_swiped: 0,
+      filtered_noSafePhoto: 0,
     };
 
     for (const user of allUsers) {
@@ -1118,6 +1202,27 @@ export const getNearbyUsers = query({
       if (!user.isActive) {
         filterStats.filtered_inactive++;
         devLog('FILTERED: inactive', { userId: user._id, name: user.name });
+        continue;
+      }
+
+      if (user.isBanned) {
+        filterStats.filtered_banned++;
+        devLog('FILTERED: banned', { userId: user._id, name: user.name });
+        continue;
+      }
+
+      if (user.verificationEnforcementLevel === 'security_only') {
+        filterStats.filtered_verificationEnforcement++;
+        devLog('FILTERED: security_only', { userId: user._id, name: user.name });
+        continue;
+      }
+
+      if (
+        user.verificationEnforcementLevel === 'reduced_reach' &&
+        !shouldIncludeReducedReachCandidate(String(userId), String(user._id))
+      ) {
+        filterStats.filtered_verificationEnforcement++;
+        devLog('FILTERED: reduced_reach', { userId: user._id, name: user.name });
         continue;
       }
 
@@ -1177,14 +1282,6 @@ export const getNearbyUsers = query({
           hasBio: !!user.bio,
           hasDateOfBirth: !!user.dateOfBirth,
         });
-        continue;
-      }
-
-      // P0 FIX: Require valid primary photo URL
-      // DEV MODE: Can skip this check
-      if (!config.SKIP_PRIMARY_PHOTO_CHECK && !user.primaryPhotoUrl) {
-        filterStats.filtered_noPrimaryPhoto++;
-        devLog('FILTERED: noPrimaryPhoto', { userId: user._id, name: user.name });
         continue;
       }
 
@@ -1340,13 +1437,14 @@ export const getNearbyUsers = query({
     devLog('getNearbyUsers: FILTER SUMMARY', filterStats);
 
     // STABILITY FIX: Fetch photo counts only for candidates (not all users)
-    const photoCountsMap = await prefetchPhotoCounts(ctx, candidateUserIds);
+    const photoSummariesMap = await prefetchPhotoSummaries(ctx, candidateUserIds);
 
     // Second pass: filter by photo count and build results
     const results = [];
     for (let i = 0; i < candidateUsers.length; i++) {
       const user = candidateUsers[i];
-      const photoCount = photoCountsMap.get(user._id as string) || 0;
+      const photoSummary = photoSummariesMap.get(user._id as string);
+      const photoCount = photoSummary?.count ?? 0;
 
       // DEV MODE: Can skip photo count check
       if (!config.SKIP_PHOTO_COUNT_CHECK && photoCount < config.MIN_PHOTO_COUNT) {
@@ -1355,6 +1453,15 @@ export const getNearbyUsers = query({
           name: user.name,
           photoCount,
           requiredMin: config.MIN_PHOTO_COUNT,
+        });
+        continue;
+      }
+
+      if (!config.SKIP_PRIMARY_PHOTO_CHECK && !photoSummary?.safeDisplayUrl) {
+        filterStats.filtered_noSafePhoto++;
+        devLog('FILTERED (2nd pass): no safe display photo', {
+          userId: user._id,
+          name: user.name,
         });
         continue;
       }
@@ -1386,9 +1493,9 @@ export const getNearbyUsers = query({
         publishedLat: fuzzed.lat,  // SEC-1 FIX: Return fuzzed coordinates
         publishedLng: fuzzed.lng,  // SEC-1 FIX: Return fuzzed coordinates
         publishedAt: user.publishedAt,
-        distance,
+        distance: user.hideDistance === true ? undefined : distance,
         freshness,
-        photoUrl: user.primaryPhotoUrl ?? null,
+        photoUrl: photoSummary?.safeDisplayUrl ?? null,
         isVerified: user.isVerified,
         strongPrivacyMode: user.strongPrivacyMode ?? false,
         hideDistance: user.hideDistance ?? false,
@@ -1401,13 +1508,17 @@ export const getNearbyUsers = query({
       if (Math.abs(recencyDiff) > 60 * 60 * 1000) {
         return recencyDiff;
       }
-      return a.distance - b.distance;
+      return (a.distance ?? NEARBY_MAX_METERS) - (b.distance ?? NEARBY_MAX_METERS);
     });
 
     devLog('getNearbyUsers: FINAL RESULTS', {
       resultCount: results.length,
       isDevMode: config.IS_DEV_MODE,
-      users: results.map((r) => ({ id: r.id, name: r.name, distance: Math.round(r.distance) })),
+      users: results.map((r) => ({
+        id: r.id,
+        name: r.name,
+        distance: r.distance === undefined ? 'hidden' : Math.round(r.distance),
+      })),
     });
 
     return results;
@@ -1421,20 +1532,33 @@ export const getNearbyUsers = query({
 // ---------------------------------------------------------------------------
 
 export const getCrossPathHistory = query({
-  args: { userId: v.id('users') },
-  handler: async (ctx, { userId }) => {
+  args: {
+    authUserId: v.string(),
+    refreshKey: v.optional(v.number()),
+  },
+  handler: async (ctx, { authUserId }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return [];
+    }
+
     const now = Date.now();
 
     // Get current user for distance calculation
     const currentUser = await ctx.db.get(userId);
+    if (!currentUser) {
+      return [];
+    }
     const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
     const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
 
-    // Pre-fetch swipes for skip filtering (matches Discover behavior per Rule 9)
-    const mySwipes = await ctx.db
-      .query('likes')
-      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
-      .collect();
+    const [mySwipes, blockedIds] = await Promise.all([
+      ctx.db
+        .query('likes')
+        .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+        .collect(),
+      prefetchBlockedUserIds(ctx, userId),
+    ]);
     const swipedUsersMap = new Map<string, { action: string; createdAt: number }>();
     for (const swipe of mySwipes) {
       swipedUsersMap.set(swipe.toUserId as string, {
@@ -1463,8 +1587,10 @@ export const getCrossPathHistory = query({
         if (isUser1 && entry.hiddenByUser1) return false;
         if (!isUser1 && entry.hiddenByUser2) return false;
 
-        // Skip filter: Same as Discover behavior (Rule 9)
         const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
+        if (blockedIds.has(otherUserId as string)) return false;
+
+        // Skip filter: Same as Discover behavior (Rule 9)
         const existingSwipe = swipedUsersMap.get(otherUserId as string);
         if (existingSwipe) {
           if (existingSwipe.action !== 'pass') return false; // Skip likes/super_likes
@@ -1505,20 +1631,10 @@ export const getCrossPathHistory = query({
       if (user) usersMap.set(id as string, user as Doc<'users'>);
     });
 
-    // Parallel fetch all primary photos
-    const photosMap = new Map<string, string | null>();
-    const photoFetches = await Promise.all(
-      otherUserIds.map((id) =>
-        ctx.db
-          .query('photos')
-          .withIndex('by_user', (q) => q.eq('userId', id))
-          .filter((q) => q.eq(q.field('isPrimary'), true))
-          .first()
-      )
+    const photoSummariesMap = await prefetchPhotoSummaries(
+      ctx,
+      otherUserIds.map((id) => String(id))
     );
-    otherUserIds.forEach((id, i) => {
-      photosMap.set(id as string, photoFetches[i]?.url ?? null);
-    });
 
     // Build results using pre-fetched data
     const results = [];
@@ -1526,13 +1642,21 @@ export const getCrossPathHistory = query({
       const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
       const otherUser = usersMap.get(otherUserId as string);
       if (!otherUser || !otherUser.isActive) continue;
+      if (otherUser.isBanned) continue;
+      if (otherUser.verificationEnforcementLevel === 'security_only') continue;
+      if (
+        otherUser.verificationEnforcementLevel === 'reduced_reach' &&
+        !shouldIncludeReducedReachCandidate(String(userId), String(otherUserId))
+      ) {
+        continue;
+      }
 
       // P0 FIX: Privacy filtering - hide users who disabled/paused Nearby
       if (otherUser.nearbyEnabled === false) continue;
       if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
 
-      // P0 FIX: Require valid primary photo URL
-      if (!otherUser.primaryPhotoUrl) continue;
+      const photoSummary = photoSummariesMap.get(otherUserId as string);
+      if (!photoSummary?.safeDisplayUrl) continue;
 
       const crossingCount = crossingCountsMap.get(otherUserId as string) || 1;
 
@@ -1594,7 +1718,7 @@ export const getCrossPathHistory = query({
         whyExplanation,
         createdAt: entry.createdAt,
         expiresAt: entry.expiresAt,
-        photoUrl: photosMap.get(otherUserId as string),
+        photoUrl: photoSummary.safeDisplayUrl,
         initial: displayName.charAt(0).toUpperCase(),
         isVerified: otherUser.isVerified,
       });
@@ -2004,14 +2128,23 @@ export const getCrossedPathsCount = query({
  */
 export const getSharedPlaces = query({
   args: {
-    viewerId: v.id('users'),    // Current user viewing the profile
+    authUserId: v.string(),
     profileUserId: v.id('users'), // User whose profile is being viewed
   },
   handler: async (ctx, args) => {
-    const { viewerId, profileUserId } = args;
+    const { authUserId, profileUserId } = args;
+    const viewerId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!viewerId) {
+      return [];
+    }
 
     // Don't show shared places for self
     if (viewerId === profileUserId) {
+      return [];
+    }
+
+    const blockedIds = await prefetchBlockedUserIds(ctx, viewerId);
+    if (blockedIds.has(profileUserId as string)) {
       return [];
     }
 
@@ -2238,25 +2371,32 @@ function offsetCoords(
 
 /** Trim cross-path history to MAX_HISTORY_ENTRIES for a given user. */
 async function trimHistoryForUser(ctx: any, userId: Id<'users'>) {
-  const asUser1 = await ctx.db
-    .query('crossPathHistory')
-    .withIndex('by_user1', (q: any) => q.eq('user1Id', userId))
-    .collect();
+  const [asUser1, asUser2] = await Promise.all([
+    ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user1', (q: any) => q.eq('user1Id', userId))
+      .collect(),
+    ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user2', (q: any) => q.eq('user2Id', userId))
+      .collect(),
+  ]);
 
-  const asUser2 = await ctx.db
-    .query('crossPathHistory')
-    .withIndex('by_user2', (q: any) => q.eq('user2Id', userId))
-    .collect();
+  const visibleEntries = [
+    ...asUser1.filter((entry: any) => !entry.hiddenByUser1),
+    ...asUser2.filter((entry: any) => !entry.hiddenByUser2),
+  ].sort((a: any, b: any) => b.createdAt - a.createdAt);
 
-  const all = [...asUser1, ...asUser2].sort(
-    (a: any, b: any) => b.createdAt - a.createdAt,
-  );
-
-  // Delete entries beyond the limit
-  if (all.length > MAX_HISTORY_ENTRIES) {
-    const toDelete = all.slice(MAX_HISTORY_ENTRIES);
-    for (const entry of toDelete) {
-      await ctx.db.delete(entry._id);
+  if (visibleEntries.length > MAX_HISTORY_ENTRIES) {
+    const toHide = visibleEntries.slice(MAX_HISTORY_ENTRIES);
+    for (const entry of toHide) {
+      if (entry.user1Id === userId) {
+        if (!entry.hiddenByUser1) {
+          await ctx.db.patch(entry._id, { hiddenByUser1: true });
+        }
+      } else if (!entry.hiddenByUser2) {
+        await ctx.db.patch(entry._id, { hiddenByUser2: true });
+      }
     }
   }
 }
