@@ -123,27 +123,46 @@ const PhotoStack = memo(function PhotoStack({
   photoBlurred,
   onError,
 }: PhotoStackProps) {
-  // Only render up to PREFETCH_COUNT photos to limit memory usage
-  const visiblePhotos = photos.slice(0, PREFETCH_COUNT);
+  // PHOTO_RENDER_FIX: Render photos around the active index for memory efficiency
+  // Instead of only first 5, render a sliding window that includes the active photo
+  // This ensures P6/P7 images are available when user swipes to them
+  const windowStart = Math.max(0, activeIndex - 2);
+  const windowEnd = Math.min(photos.length, activeIndex + PREFETCH_COUNT);
+  const visiblePhotos = photos.slice(windowStart, windowEnd);
+  const indexOffset = windowStart; // Offset to map local index to global
+
+  if (__DEV__) {
+    console.log('[PHOTO_RENDER_DEBUG]', {
+      activeIndex,
+      totalPhotos: photos.length,
+      windowStart,
+      windowEnd,
+      visibleCount: visiblePhotos.length,
+      currentPhotoUrl: photos[activeIndex]?.url ? 'exists' : 'MISSING',
+    });
+  }
 
   return (
     <>
-      {visiblePhotos.map((photo, idx) => (
-        <Image
-          key={photo.url}
-          source={{ uri: photo.url }}
-          style={[
-            styles.image,
-            // PERF: Only current photo is visible; others are pre-rendered but hidden
-            { opacity: idx === activeIndex ? 1 : 0 },
-          ]}
-          contentFit="cover"
-          cachePolicy="memory-disk"
-          blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
-          // Only attach error handler to active photo
-          onError={idx === activeIndex ? onError : undefined}
-        />
-      ))}
+      {visiblePhotos.map((photo, localIdx) => {
+        const globalIdx = localIdx + indexOffset;
+        return (
+          <Image
+            key={photo.url}
+            source={{ uri: photo.url }}
+            style={[
+              styles.image,
+              // PERF: Only current photo is visible; others are pre-rendered but hidden
+              { opacity: globalIdx === activeIndex ? 1 : 0 },
+            ]}
+            contentFit="cover"
+            cachePolicy="memory-disk"
+            blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
+            // Only attach error handler to active photo
+            onError={globalIdx === activeIndex ? onError : undefined}
+          />
+        );
+      })}
     </>
   );
 });
@@ -1378,14 +1397,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     setImageError(false);
   }, [photoIndex]);
 
-  // PERF: Prefetch first N photos on mount for instant switching
+  // PERF: Prefetch ALL photos on mount for instant switching (up to 8)
+  // PHOTO_RENDER_FIX: Increased from 5 to 8 to support profiles with 6-8 photos
   const prefetchedRef = useRef(false);
   useEffect(() => {
     if (prefetchedRef.current || !photos || photos.length === 0) return;
     prefetchedRef.current = true;
 
-    // Prefetch first PREFETCH_COUNT photos (or all if fewer)
-    const toPrefetch = photos.slice(0, PREFETCH_COUNT);
+    // Prefetch all photos up to 8 for profiles with many photos
+    const MAX_PREFETCH = 8;
+    const toPrefetch = photos.slice(0, MAX_PREFETCH);
     toPrefetch.forEach((photo, index) => {
       if (photo?.url) {
         Image.prefetch(photo.url).catch((error) => {
