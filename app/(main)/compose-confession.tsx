@@ -84,7 +84,7 @@ export default function ComposeConfessionScreen() {
       const primaryPhoto = convexCurrentUser.photos?.[0];
       const userAny = convexCurrentUser as any;
       const result = {
-        authorName: userAny.firstName || userAny.name,
+        authorName: userAny.name,
         authorPhotoUrl: primaryPhoto?.url,
         authorAge: computeAge(userAny.dateOfBirth),
         authorGender: userAny.gender,

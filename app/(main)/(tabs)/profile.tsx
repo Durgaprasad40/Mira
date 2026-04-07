@@ -31,6 +31,8 @@ import { useOnboardingStore } from '@/stores/onboardingStore';
 import { usePrivacyStore } from '@/stores/privacyStore';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useScreenTrace } from '@/lib/devTrace';
+import { ProfileCompletionCard } from '@/components/profile/ProfileCompletionCard';
+import { getProfileCompletion } from '@/lib/profileCompletion';
 
 /**
  * Calculate age from DOB string ("YYYY-MM-DD").
@@ -543,6 +545,24 @@ export default function ProfileScreen() {
           <Ionicons name="create-outline" size={24} color={COLORS.primary} />
         </TouchableOpacity>
       </View>
+
+      {/* PROFILE COMPLETION CARD - Non-blocking nudge system */}
+      <ProfileCompletionCard
+        userData={{
+          name: currentUser.name,
+          dateOfBirth: currentUser.dateOfBirth,
+          gender: currentUser.gender,
+          isVerified: currentUser.isVerified,
+          photos: isDemoMode ? currentUser.photos : effectivePhotos,
+          lookingFor: (currentUser as any).lookingFor,
+          relationshipIntent: (currentUser as any).relationshipIntent,
+          bio: currentUser.bio,
+          profilePrompts: (currentUser as any).profilePrompts,
+          education: (currentUser as any).education,
+          jobTitle: (currentUser as any).jobTitle,
+          company: (currentUser as any).company,
+        }}
+      />
 
       <View style={styles.profileSection}>
         {/* Main photo - large with shadow, tappable for full-screen view */}
