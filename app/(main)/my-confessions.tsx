@@ -17,7 +17,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
-import { ConfessionMood, ConfessionAuthorVisibility } from '@/types';
+import { ConfessionMood } from '@/types';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 
 export default function MyConfessionsScreen() {
@@ -34,7 +34,7 @@ export default function MyConfessionsScreen() {
   const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
   const convexMyConfessions = useQuery(
     api.confessions.getMyConfessions,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemoMode && convexUserId ? { userId: convexUserId, limit: 100 } : 'skip'
   );
 
   // Unified confession type for the list
@@ -42,12 +42,9 @@ export default function MyConfessionsScreen() {
     id: string;
     text: string;
     isAnonymous: boolean;
-    authorVisibility?: ConfessionAuthorVisibility;
     mood: ConfessionMood;
     authorName?: string;
     authorPhotoUrl?: string;
-    authorAge?: number;
-    authorGender?: string;
     replyCount: number;
     reactionCount: number;
     createdAt: number;
@@ -61,12 +58,9 @@ export default function MyConfessionsScreen() {
         id: c._id,
         text: c.text,
         isAnonymous: c.isAnonymous,
-        authorVisibility: c.authorVisibility,
         mood: c.mood,
         authorName: c.authorName,
         authorPhotoUrl: c.authorPhotoUrl,
-        authorAge: c.authorAge,
-        authorGender: c.authorGender,
         replyCount: c.replyCount,
         reactionCount: c.reactionCount,
         createdAt: c.createdAt,
@@ -78,25 +72,18 @@ export default function MyConfessionsScreen() {
     const EXPIRY_MS = 24 * 60 * 60 * 1000;
     return demoConfessions
       .filter((c) => c.userId === currentUserId)
-      .map((c) => {
-        // P1-004 FIX: Guard against undefined createdAt (legacy data)
-        const createdAt = c.createdAt ?? now;
-        return {
-          id: c.id,
-          text: c.text,
-          isAnonymous: c.isAnonymous,
-          authorVisibility: c.authorVisibility,
-          mood: c.mood,
-          authorName: c.authorName,
-          authorPhotoUrl: c.authorPhotoUrl,
-          authorAge: (c as any).authorAge,
-          authorGender: (c as any).authorGender,
-          replyCount: c.replyCount,
-          reactionCount: c.reactionCount,
-          createdAt,
-          isExpired: createdAt + EXPIRY_MS < now,
-        };
-      })
+      .map((c) => ({
+        id: c.id,
+        text: c.text,
+        isAnonymous: c.isAnonymous,
+        mood: c.mood,
+        authorName: c.authorName,
+        authorPhotoUrl: c.authorPhotoUrl,
+        replyCount: c.replyCount,
+        reactionCount: c.reactionCount,
+        createdAt: c.createdAt,
+        isExpired: c.createdAt + EXPIRY_MS < now,
+      }))
       .sort((a, b) => b.createdAt - a.createdAt);
   }, [isDemoMode, convexMyConfessions, demoConfessions, currentUserId]);
 
@@ -141,7 +128,6 @@ export default function MyConfessionsScreen() {
             id={item.id}
             text={item.text}
             isAnonymous={item.isAnonymous}
-            authorVisibility={item.authorVisibility}
             mood={item.mood}
             topEmojis={[]}
             userEmoji={userReactions[item.id] || null}
@@ -149,9 +135,6 @@ export default function MyConfessionsScreen() {
             replyCount={item.replyCount}
             reactionCount={item.reactionCount}
             authorName={item.authorName}
-            authorPhotoUrl={item.authorPhotoUrl}
-            authorAge={item.authorAge}
-            authorGender={item.authorGender}
             createdAt={item.createdAt}
             isExpired={item.isExpired}
             onPress={() => handleOpenThread(item.id)}

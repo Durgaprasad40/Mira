@@ -23,13 +23,6 @@ export default defineSchema({
       v.literal('transgender'),
       v.literal('prefer_not_to_say')
     ))), // LGBTQ identity (optional, max 2)
-    lgbtqPreference: v.optional(v.array(v.union(
-      v.literal('gay'),
-      v.literal('lesbian'),
-      v.literal('bisexual'),
-      v.literal('transgender'),
-      v.literal('prefer_not_to_say')
-    ))), // LGBTQ dating preference (optional, max 2)
 
     // Profile
     bio: v.string(),
@@ -135,26 +128,15 @@ export default defineSchema({
 
     // Preferences
     lookingFor: v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'))),
-    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth)
-    // LEGACY COMPAT: Also accepts old values (long_term, short_term, etc.) for existing data - run migration to remove
     relationshipIntent: v.array(v.union(
-      // NEW values (canonical)
-      v.literal('serious_vibes'),
-      v.literal('keep_it_casual'),
-      v.literal('exploring_vibes'),
-      v.literal('see_where_it_goes'),
-      v.literal('open_to_vibes'),
-      v.literal('just_friends'),
-      v.literal('open_to_anything'),
-      v.literal('single_parent'),
-      v.literal('new_to_dating'),
-      // LEGACY values (deprecated - run migration to convert)
       v.literal('long_term'),
       v.literal('short_term'),
       v.literal('fwb'),
       v.literal('figuring_out'),
       v.literal('short_to_long'),
-      v.literal('long_to_short')
+      v.literal('long_to_short'),
+      v.literal('new_friends'),
+      v.literal('open_to_anything')
     )),
     activities: v.array(v.union(
       v.literal('coffee'),
@@ -209,12 +191,6 @@ export default defineSchema({
     isDiscoveryPaused: v.optional(v.boolean()),
     discoveryPausedUntil: v.optional(v.number()),
 
-    // DISCOVER-CATEGORY-FIX: Single-category assignment to prevent duplicate visibility
-    // Each user belongs to ONE category at a time (mutual exclusivity)
-    assignedDiscoverCategory: v.optional(v.string()), // Category key from exploreCategories.ts
-    discoverCategoryAssignedAt: v.optional(v.number()), // When category was assigned (28-48h reassignment window)
-    lastShownInDiscoverAt: v.optional(v.number()), // When last shown (7-day cooldown after shown)
-
     // Chat Rooms: Preferred room (auto-opens on tab entry)
     preferredChatRoomId: v.optional(v.id('chatRooms')),
 
@@ -250,11 +226,9 @@ export default defineSchema({
     createdAt: v.number(),
 
     // Profile Prompts (icebreakers)
-    // BUGFIX: Added section field for reliable hydration when editing
     profilePrompts: v.optional(v.array(v.object({
       question: v.string(),
       answer: v.string(),
-      section: v.optional(v.string()), // builder | performer | seeker | grounded
     }))),
 
     // Onboarding
@@ -300,7 +274,6 @@ export default defineSchema({
         profilePrompts: v.optional(v.array(v.object({
           question: v.string(),
           answer: v.string(),
-          section: v.optional(v.string()), // builder | performer | seeker | grounded
         }))),
         displayPhotoVariant: v.optional(v.union(
           v.literal('original'),
@@ -385,14 +358,9 @@ export default defineSchema({
         lgbtqPreference: v.optional(v.array(v.union(
           v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'), v.literal('transgender'), v.literal('bisexual'), v.literal('prefer_not_to_say')
         ))),
-        // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth)
-        // LEGACY COMPAT: Also accepts old values for existing data - run migration to remove
         relationshipIntent: v.optional(v.array(v.union(
-          // NEW values (canonical)
-          v.literal('serious_vibes'), v.literal('keep_it_casual'), v.literal('exploring_vibes'), v.literal('see_where_it_goes'),
-          v.literal('open_to_vibes'), v.literal('just_friends'), v.literal('open_to_anything'), v.literal('single_parent'), v.literal('new_to_dating'),
-          // LEGACY values (deprecated - run migration to convert)
-          v.literal('long_term'), v.literal('short_term'), v.literal('fwb'), v.literal('figuring_out'), v.literal('short_to_long'), v.literal('long_to_short')
+          v.literal('long_term'), v.literal('short_term'), v.literal('fwb'), v.literal('figuring_out'),
+          v.literal('short_to_long'), v.literal('long_to_short'), v.literal('new_friends'), v.literal('open_to_anything')
         ))),
         activities: v.optional(v.array(v.union(
           // Original 20 activities
@@ -532,9 +500,7 @@ export default defineSchema({
     .index('by_boosted', ['boostedUntil'])
     .index('by_verification_status', ['verificationStatus'])
     .index('by_demo_user_id', ['demoUserId'])
-    .index('by_auth_user_id', ['authUserId'])
-    // DISCOVER-CATEGORY-FIX: Index for category-based profile queries
-    .index('by_discover_category', ['assignedDiscoverCategory']),
+    .index('by_auth_user_id', ['authUserId']),
 
   // Photos table
   photos: defineTable({
@@ -545,9 +511,6 @@ export default defineSchema({
     isPrimary: v.boolean(),
     hasFace: v.boolean(),
     isNsfw: v.boolean(),
-    // Per-photo blur: when true, other users see this photo blurred
-    // This is the backend source of truth for Phase-1 per-photo blur feature
-    isBlurred: v.optional(v.boolean()),
     width: v.optional(v.number()),
     height: v.optional(v.number()),
     createdAt: v.number(),
@@ -596,9 +559,7 @@ export default defineSchema({
     isActive: v.boolean(),
     // Track how this match was created for UI organization
     // 'super_like' matches appear in Super Likes section, 'like' in New Matches
-    // 'confession' for matches created via the two-step confess-connect flow
-    // 'confession_comment' for matches created via comment-based connection
-    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'), v.literal('confession'), v.literal('confession_comment'))),
+    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
@@ -626,13 +587,6 @@ export default defineSchema({
       v.literal('room'),
       v.literal('desire')
     )),
-    // Anti-spam: Thread visibility control
-    // initiatorId = who started the conversation (sent first message)
-    // hasRecipientEngaged = recipient has replied (thread now visible to both)
-    // - When false/undefined: thread only visible to initiator
-    // - When true: thread visible to both in their inbox
-    initiatorId: v.optional(v.id('users')),
-    hasRecipientEngaged: v.optional(v.boolean()),
   })
     .index('by_match', ['matchId'])
     .index('by_confession', ['confessionId'])
@@ -757,7 +711,6 @@ export default defineSchema({
   notifications: defineTable({
     userId: v.id('users'),
     type: v.union(
-      // Phase 1 notification types
       v.literal('match'),
       v.literal('message'),
       v.literal('like'),
@@ -765,12 +718,7 @@ export default defineSchema({
       v.literal('crossed_paths'),
       v.literal('subscription'),
       v.literal('weekly_refresh'),
-      v.literal('profile_nudge'),
-      // Phase 2 (Deep Connect) notification types - only shown in Phase 2 bell
-      v.literal('phase2_match'),     // Match created in Deep Connect
-      v.literal('phase2_like'),      // Like received in Deep Connect
-      v.literal('comment_connect'),
-      v.literal('tod_connect')       // T/D connect request accepted
+      v.literal('profile_nudge')
     ),
     title: v.string(),
     body: v.string(),
@@ -780,10 +728,6 @@ export default defineSchema({
       userId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
       likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
-      confessionId: v.optional(v.string()), // For comment_connect notifications
-      connectId: v.optional(v.string()), // For comment_connect notifications
-      phase: v.optional(v.string()),    // Phase identifier ('phase2' for Deep Connect)
-      roomId: v.optional(v.string()),   // For chat room @mention notifications
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
@@ -890,26 +834,19 @@ export default defineSchema({
     reporterId: v.id('users'),
     reportedUserId: v.id('users'),
     reason: v.union(
-      // Final 7 report categories (exact product spec)
-      v.literal('spam'),                    // Spam
-      v.literal('harassment_hate'),         // Harassment / Hate Speech
-      v.literal('sexual_nudity'),           // Sexual Content / Nudity
-      v.literal('threats'),                 // Threats
-      v.literal('impersonation'),           // Impersonation
-      v.literal('fake_profile'),            // Fake Profile
-      v.literal('selling_promotion'),       // Selling / Promotion
-      // Legacy values (for backward compatibility with existing reports)
-      v.literal('harassment'),
-      v.literal('hate_speech'),
-      v.literal('explicit_content'),
-      v.literal('spam_scam'),
-      v.literal('violence_threats'),
-      v.literal('other'),
+      // Original reasons
+      v.literal('fake_profile'),
       v.literal('inappropriate_photos'),
+      v.literal('harassment'),
+      v.literal('spam'),
       v.literal('underage'),
+      v.literal('other'),
+      // Chat room reasons
+      v.literal('hate_speech'),
       v.literal('sexual_content'),
       v.literal('nudity'),
       v.literal('violent_threats'),
+      v.literal('impersonation'),
       v.literal('selling')
     ),
     description: v.optional(v.string()),
@@ -923,34 +860,6 @@ export default defineSchema({
     .index('by_reporter', ['reporterId'])
     .index('by_status', ['status'])
     .index('by_room', ['roomId']),
-
-  // Chat Room User Strikes - tracks reports and enforces escalation policy
-  // Escalation: 1st=5min, 2nd=30min, 3rd=3hr, 4th=6hr, 5th+=12hr
-  // Reset: 14 days with no new reports resets escalationStage to 0
-  chatRoomUserStrikes: defineTable({
-    userId: v.id('users'),
-    roomId: v.string(),
-    // Report tracking (historical - never erased)
-    totalReportCount: v.number(), // Total unique reports received in this room (historical)
-    uniqueReporters: v.array(v.id('users')), // Track unique users who reported (no double-counting)
-    // Escalation stage (resets after 14 clean days)
-    escalationStage: v.number(), // Current escalation level (0-5), resets to 0 after 14 days clean
-    lastReportAt: v.optional(v.number()), // When last unique report was received (for 14-day reset)
-    // Suspension state
-    suspensionCount: v.number(), // Number of suspensions served (historical)
-    suspendedUntil: v.optional(v.number()), // Active suspension expiry timestamp
-    lastSuspendedAt: v.optional(v.number()), // When last suspension started
-    // Moderation escalation flag (after 3+ reports from different users)
-    moderationFlag: v.boolean(), // Marked for human review
-    moderationFlaggedAt: v.optional(v.number()),
-    // Audit
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index('by_user', ['userId'])
-    .index('by_room', ['roomId'])
-    .index('by_user_room', ['userId', 'roomId'])
-    .index('by_moderation', ['moderationFlag']),
 
   // Blocks table
   blocks: defineTable({
@@ -1065,32 +974,6 @@ export default defineSchema({
     isTyping: v.boolean(),
     updatedAt: v.number(),
   }).index('by_conversation', ['conversationId']).index('by_user_conversation', ['userId', 'conversationId']),
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // ANTI-SPAM COIN TRACKING
-  // Tracks coin earning with anti-spam protections:
-  // - Two-way interaction requirement (both users must engage)
-  // - Cooldown (max 1 coin per 12 seconds per user)
-  // - Per-conversation cap (max 20 coins per hour per user pair)
-  // - Spam filtering (repeated/short messages don't earn)
-  // ═══════════════════════════════════════════════════════════════════════════
-  coinEarningLog: defineTable({
-    userId: v.id('users'),
-    // Context: chat room ID OR conversation ID (for 1-on-1 DMs)
-    contextType: v.union(v.literal('room'), v.literal('dm')),
-    contextId: v.string(), // Room ID or Conversation ID as string
-    // For DMs: the other user ID (to track pair limits)
-    // For rooms: undefined (room-level tracking only)
-    otherUserId: v.optional(v.id('users')),
-    // When coin was earned
-    earnedAt: v.number(),
-    // Message hash for spam detection (to prevent same message farming)
-    messageHash: v.optional(v.string()),
-  })
-    .index('by_user', ['userId'])
-    .index('by_user_earned', ['userId', 'earnedAt'])
-    .index('by_user_context', ['userId', 'contextType', 'contextId'])
-    .index('by_context_pair', ['contextType', 'contextId', 'userId', 'otherUserId']),
 
   // Nudges table (smart notifications)
   nudges: defineTable({
@@ -1224,7 +1107,6 @@ export default defineSchema({
     age: v.number(),
     city: v.optional(v.string()),
     gender: v.string(),
-    // DEPRECATED: Photo reveal feature removed. Kept for backward compat with existing data.
     revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
     isSetupComplete: v.boolean(),
     // Phase-1 imported fields (read-only after import, stored in Phase-2 for isolation)
@@ -1249,32 +1131,23 @@ export default defineSchema({
       drinking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
       intent: v.union(v.literal('not_important'), v.literal('prefer_similar'), v.literal('important'), v.literal('must_match_exactly')),
     })),
-    // Per-photo blur state: array of 9 booleans (one per photo slot)
-    // true = photo is blurred to other users, false = photo is visible
-    // CRITICAL: This is the backend source of truth for Phase-2 per-photo blur
-    photoBlurSlots: v.optional(v.array(v.boolean())),
-    // P0-1 FIX: Privacy settings (Deep Connect specific)
-    hideFromDeepConnect: v.optional(v.boolean()),
-    hideAge: v.optional(v.boolean()),
-    hideDistance: v.optional(v.boolean()),
-    disableReadReceipts: v.optional(v.boolean()),
-    // P0-2 FIX: Safe Mode setting
-    safeMode: v.optional(v.boolean()),
-    // P0-1 FIX: Notification settings
-    notificationsEnabled: v.optional(v.boolean()),
-    notificationCategories: v.optional(v.object({
-      deepConnect: v.optional(v.boolean()),
-      privateMessages: v.optional(v.boolean()),
-      chatRooms: v.optional(v.boolean()),
-      truthOrDare: v.optional(v.boolean()),
-    })),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index('by_user', ['userId'])
-    .index('by_enabled', ['isPrivateEnabled'])
-    // P2-007 FIX: Add index for setup complete queries
-    .index('by_setup_complete', ['isSetupComplete']),
+    .index('by_enabled', ['isPrivateEnabled']),
+
+  // Reveal Requests table (mutual photo reveal for Private Mode)
+  revealRequests: defineTable({
+    fromUserId: v.id('users'),
+    toUserId: v.id('users'),
+    status: v.union(v.literal('pending'), v.literal('accepted'), v.literal('declined')),
+    respondedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index('by_from_user', ['fromUserId'])
+    .index('by_to_user', ['toUserId'])
+    .index('by_from_to', ['fromUserId', 'toUserId']),
 
   // Truth & Dare Prompts (trending system)
   todPrompts: defineTable({
@@ -1286,10 +1159,6 @@ export default defineSchema({
     activeCount: v.number(),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()),
-    // P0-002: Hidden flag for prompts with 5+ reports
-    isHidden: v.optional(v.boolean()),
-    // Prompt reaction count (emoji reactions)
-    totalReactionCount: v.optional(v.number()),
     // Owner profile snapshot (immutable at creation time)
     isAnonymous: v.optional(v.boolean()), // true = hide photo/name, show only age+gender
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))), // 'blur' = show blurred photo
@@ -1332,10 +1201,6 @@ export default defineSchema({
     // Reaction and report counts (denormalized for ranking)
     totalReactionCount: v.optional(v.number()), // total emoji reactions
     reportCount: v.optional(v.number()), // unique reporters
-    // P1-002: Per-user hiding - array of userIds who reported this answer
-    hiddenForUserIds: v.optional(v.array(v.string())),
-    // P1-002: Global soft-remove flag (set when reportCount >= threshold)
-    isGloballyHidden: v.optional(v.boolean()),
     // One-time view gating fields (for both owner_only and public visibility)
     viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
     viewDurationSec: v.optional(v.number()), // 1-60 seconds for one-time view
@@ -1381,32 +1246,17 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_answer_user', ['answerId', 'userId']),
 
-  // Truth & Dare Prompt Reactions (emoji reactions - one per user per prompt)
-  todPromptReactions: defineTable({
-    promptId: v.string(),
-    userId: v.string(),
-    emoji: v.string(), // any emoji: "😂", "🔥", "❤️", "😮", "👏"
-    createdAt: v.number(),
-    updatedAt: v.optional(v.number()),
-  })
-    .index('by_prompt', ['promptId'])
-    .index('by_user', ['userId'])
-    .index('by_prompt_user', ['promptId', 'userId']),
-
   // Truth & Dare Answer Reports (for hiding answers with 5+ reports)
   todAnswerReports: defineTable({
     answerId: v.string(),
     reporterId: v.string(),
     // Structured report reason (required for new reports)
-    // P0-002 FIX: Added 'privacy' and 'scam' to match reportPrompt
     reasonCode: v.optional(v.union(
       v.literal('harassment'),
       v.literal('sexual'),
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
-      v.literal('privacy'),
-      v.literal('scam'),
       v.literal('other')
     )),
     // Optional additional details (renamed from reason for clarity)
@@ -1419,37 +1269,13 @@ export default defineSchema({
     .index('by_reporter', ['reporterId'])
     .index('by_answer_reporter', ['answerId', 'reporterId']),
 
-  // P0-002: Truth & Dare Prompt Reports (for hiding prompts with 5+ reports)
-  todPromptReports: defineTable({
-    promptId: v.string(),
-    reporterId: v.string(),
-    reasonCode: v.union(
-      v.literal('harassment'),
-      v.literal('sexual'),
-      v.literal('spam'),
-      v.literal('hate'),
-      v.literal('violence'),
-      v.literal('privacy'),
-      v.literal('scam'),
-      v.literal('other')
-    ),
-    reasonText: v.optional(v.string()),
-    createdAt: v.number(),
-  })
-    .index('by_prompt', ['promptId'])
-    .index('by_reporter', ['reporterId'])
-    .index('by_prompt_reporter', ['promptId', 'reporterId']),
-
   // Truth & Dare Rate Limiting (tracks user action counts per day)
   todRateLimits: defineTable({
     userId: v.string(),
     actionType: v.union(
       v.literal('answer'),
       v.literal('reaction'),
-      v.literal('report'),
-      v.literal('prompt'), // P0-003: Rate limit prompt creation
-      v.literal('claim_media'), // Rate limit media view claims
-      v.literal('connect') // P0-004: Rate limit connect requests
+      v.literal('report')
     ),
     windowStart: v.number(), // Start of the rate limit window (day start)
     count: v.number(), // Actions in this window
@@ -1510,9 +1336,7 @@ export default defineSchema({
   confessions: defineTable({
     userId: v.id('users'),
     text: v.string(),
-    isAnonymous: v.boolean(), // Legacy field - derived from authorVisibility for backward compat
-    // Author visibility mode: anonymous (fully hidden), open (fully visible), blur_photo (blurred photo + visible name/age/gender)
-    authorVisibility: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur_photo'))),
+    isAnonymous: v.boolean(),
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
     visibility: v.literal('global'),
     imageUrl: v.optional(v.string()),
@@ -1525,39 +1349,7 @@ export default defineSchema({
     voiceReplyCount: v.optional(v.number()),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
-    // ═══════════════════════════════════════════════════════════════════════════
-    // RANKING SYSTEM FIELDS
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Computed ranking score (updated on each engagement)
-    rankingScore: v.optional(v.number()),
-    // Timestamp of last engagement (reply, reaction) - used as tie-breaker
-    lastEngagementAt: v.optional(v.number()),
-    // Count of unique users who commented/replied (excluding author)
-    uniqueCommenters: v.optional(v.number()),
-    // Report count for ranking penalty
-    reportCount: v.optional(v.number()),
-    // Recent engagement counts (within rolling 6-hour window)
-    recentReplyCount: v.optional(v.number()),
-    recentReactionCount: v.optional(v.number()),
-    recentEngagementWindowStart: v.optional(v.number()),
     taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
-    // Tagged user response (Reject/Connect flow - Step 1)
-    taggedUserResponse: v.optional(v.union(
-      v.literal('pending'),    // Default: not yet responded
-      v.literal('rejected'),   // Tagged user rejected - no chat
-      v.literal('connected')   // Tagged user connected - waiting for author
-    )),
-    taggedUserRespondedAt: v.optional(v.number()), // When tagged user responded
-    // Author response (Step 2 - only active after tagged user connects)
-    authorResponse: v.optional(v.union(
-      v.literal('pending'),    // Default: not yet responded (only after tagged user connects)
-      v.literal('rejected'),   // Author rejected - no match
-      v.literal('connected')   // Author connected - match created
-    )),
-    authorRespondedAt: v.optional(v.number()), // When author responded
-    // One-time profile preview for tagged user
-    previewConsumedAt: v.optional(v.number()),    // When preview was consumed (null = not consumed)
-    previewConsumedBy: v.optional(v.id('users')), // Who consumed the preview (should match taggedUserId)
     // Soft delete support
     isDeleted: v.optional(v.boolean()),
     deletedAt: v.optional(v.number()),
@@ -1565,23 +1357,7 @@ export default defineSchema({
     .index('by_created', ['createdAt'])
     .index('by_user', ['userId'])
     .index('by_expires', ['expiresAt'])
-    .index('by_tagged_user', ['taggedUserId'])
-    .index('by_ranking', ['rankingScore']),
-
-  // Confession Connect Signals table (discover boost for Connect action)
-  // When a tagged user taps "Connect" on a confession, this stores a signal
-  // that boosts the confessor's priority in the tagged user's discover feed
-  confessionConnectSignals: defineTable({
-    confessionId: v.id('confessions'),
-    fromUserId: v.id('users'),      // The person who confessed (gets boosted)
-    toUserId: v.id('users'),        // The tagged person who tapped Connect
-    createdAt: v.number(),
-    expiresAt: v.number(),          // Signal expires after 7 days (ranking decay)
-  })
-    .index('by_to_user', ['toUserId'])              // For discover ranking lookup
-    .index('by_from_user', ['fromUserId'])          // For checking existing signals
-    .index('by_confession', ['confessionId'])       // For cleanup on confession delete
-    .index('by_expires', ['expiresAt']),            // For cleanup cron
+    .index('by_tagged_user', ['taggedUserId']),
 
   // Confession Reports table (for moderation)
   confessionReports: defineTable({
@@ -1608,29 +1384,17 @@ export default defineSchema({
     confessionId: v.id('confessions'),
     userId: v.id('users'),
     text: v.string(),
-    isAnonymous: v.boolean(), // Legacy: true if anonymous or blur, false if open
-    // FIX 2: Identity mode for comments (replaces isAnonymous behavior)
-    // - anonymous: name hidden, photo hidden, gender hidden, age hidden
-    // - blur: partial name, blurred photo, gender visible, age visible
-    // - open: full name, full photo, gender visible, age visible
-    identityMode: v.optional(v.union(
-      v.literal('anonymous'),
-      v.literal('blur'),
-      v.literal('open')
-    )), // Default: 'blur' if not set (for backward compat, treat isAnonymous=true as 'blur')
+    isAnonymous: v.boolean(),
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
     parentReplyId: v.optional(v.id('confessionReplies')), // For reply-to-reply (OP responding to anonymous reply)
     createdAt: v.number(),
-    editedAt: v.optional(v.number()), // Timestamp of last edit
-    // FIX 5: Lock reply when OP sends connect request (cannot edit/delete)
-    hasActiveConnectRequest: v.optional(v.boolean()),
   })
     .index('by_confession', ['confessionId'])
     .index('by_user', ['userId']),
 
-  // Confession Reply Reports table (for moderation)
+  // Reply Reports table (per-reporter moderation on replies)
   replyReports: defineTable({
     replyId: v.id('confessionReplies'),
     confessionId: v.id('confessions'),
@@ -1638,9 +1402,8 @@ export default defineSchema({
     reportedUserId: v.id('users'),
     reason: v.union(
       v.literal('spam'),
+      v.literal('abuse'),
       v.literal('harassment'),
-      v.literal('hate'),
-      v.literal('sexual'),
       v.literal('other')
     ),
     description: v.optional(v.string()),
@@ -1649,7 +1412,8 @@ export default defineSchema({
   })
     .index('by_reply', ['replyId'])
     .index('by_reporter', ['reporterId'])
-    .index('by_status', ['status']),
+    .index('by_reply_reporter', ['replyId', 'reporterId'])
+    .index('by_confession', ['confessionId']),
 
   // Confession Reactions table (free emoji — one emoji per user per confession)
   confessionReactions: defineTable({
@@ -1675,39 +1439,15 @@ export default defineSchema({
     .index('by_user_created', ['userId', 'createdAt'])
     .index('by_confession', ['confessionId']),
 
-  // Comment-based Connection Requests table
-  // Allows confession authors (OP) to request a connection with anonymous commenters
-  // Flow: OP sees reply they like → requests connect → commenter accepts/rejects → match created
-  //
-  // RULES ENFORCED:
-  // - ONE active request per confession (pending or accepted blocks new requests)
-  // - 24h expiry on pending requests (allows OP to choose again after expiry)
-  // - Cannot request same user twice for same confession
-  // - Tagged confession connect flow blocks comment-based connect
-  confessionCommentConnects: defineTable({
-    confessionId: v.id('confessions'),     // The confession this connection originated from
-    replyId: v.id('confessionReplies'),    // The specific reply that triggered the connect request
-    fromUserId: v.id('users'),             // The OP (confession author) requesting connection
-    toUserId: v.id('users'),               // The anonymous commenter being requested
-    status: v.union(
-      v.literal('pending'),                // OP sent request, waiting for commenter response
-      v.literal('accepted'),               // Commenter accepted - match will be created
-      v.literal('rejected'),               // Commenter declined
-      v.literal('expired')                 // Request expired (24h timeout)
-    ),
-    createdAt: v.number(),                 // When OP sent the request
-    expiresAt: v.number(),                 // createdAt + 24h (for pending timeout)
-    respondedAt: v.optional(v.number()),   // When commenter responded
-    matchId: v.optional(v.id('matches')),  // Created match ID (if accepted)
+  // One-time Confess profile preview consumption tracker
+  confessionProfilePreviews: defineTable({
+    viewerId: v.id('users'),
+    targetUserId: v.id('users'),
+    confessionId: v.optional(v.id('confessions')),
+    createdAt: v.number(),
   })
-    .index('by_confession', ['confessionId'])           // Find all connects for a confession
-    .index('by_reply', ['replyId'])                     // Find connect for a specific reply
-    .index('by_from_user', ['fromUserId'])              // OP's sent requests
-    .index('by_to_user', ['toUserId'])                  // Commenter's received requests
-    .index('by_to_user_status', ['toUserId', 'status']) // Pending requests for commenter
-    .index('by_confession_reply', ['confessionId', 'replyId']) // Unique per confession+reply
-    .index('by_confession_status', ['confessionId', 'status']) // Find active requests per confession
-    .index('by_confession_to_user', ['confessionId', 'toUserId']), // Block duplicate requests to same user
+    .index('by_viewer', ['viewerId'])
+    .index('by_viewer_target', ['viewerId', 'targetUserId']),
 
   // Chat Rooms table (group chat rooms in Private section)
   chatRooms: defineTable({
@@ -1767,27 +1507,6 @@ export default defineSchema({
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
     deletedAt: v.optional(v.number()), // Soft delete
     expiresAt: v.optional(v.float64()), // For ephemeral/expiring messages
-    // System event metadata (for type='system' messages)
-    systemEventType: v.optional(v.union(v.literal('join'))), // Type of system event (extensible)
-    systemUserName: v.optional(v.string()), // User's display name for system events
-    // @mention tagging support
-    mentions: v.optional(v.array(v.object({
-      userId: v.id('users'),           // Tagged user's ID
-      nickname: v.string(),            // Chat room nickname at time of mention
-      startIndex: v.number(),          // Position in text where @mention starts
-      endIndex: v.number(),            // Position in text where @mention ends
-    }))),
-    // Reply-to-message support
-    replyToMessageId: v.optional(v.id('chatRoomMessages')), // ID of the message being replied to
-    replyToSenderNickname: v.optional(v.string()),           // Snapshot of sender's chat-room nickname
-    replyToSnippet: v.optional(v.string()),                  // Short snippet of original message (max 100 chars)
-    replyToType: v.optional(v.union(                         // Type of original message for media labels
-      v.literal('text'),
-      v.literal('image'),
-      v.literal('video'),
-      v.literal('doodle'),
-      v.literal('audio')
-    )),
   })
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
@@ -1827,43 +1546,6 @@ export default defineSchema({
   })
     .index('by_room_user', ['roomId', 'userId'])
     .index('by_user', ['userId']),
-
-  // Chat Room Password Attempts table (LOCKED-ROOM-FIX)
-  // Tracks password attempts per user per room to enforce 5-attempt limit
-  // Stage model:
-  //   1: initial 3 attempts available
-  //   2: waiting 3-min cooldown, then 1 attempt
-  //   3: waiting 2-min cooldown, then 1 final attempt
-  //   4: permanently blocked
-  //   0: authorized (successfully entered with password)
-  chatRoomPasswordAttempts: defineTable({
-    roomId: v.id('chatRooms'),
-    userId: v.id('users'),
-    stage: v.number(),           // 0=authorized, 1-3=attempting, 4=blocked
-    attemptsInStage: v.number(), // attempts used in current stage
-    cooldownUntil: v.optional(v.number()), // timestamp when cooldown ends
-    blocked: v.boolean(),        // true if permanently blocked (stage 4)
-    authorized: v.optional(v.boolean()), // true if user successfully entered with password
-    lastAttemptAt: v.number(),   // timestamp of last attempt
-    createdAt: v.number(),
-  })
-    .index('by_room_user', ['roomId', 'userId'])
-    .index('by_user', ['userId']),
-
-  // Chat Room Message Reactions table
-  // Tracks emoji reactions on messages (👍 ❤️ 😂 😮 🔥 👎)
-  chatRoomReactions: defineTable({
-    messageId: v.id('chatRoomMessages'),
-    roomId: v.id('chatRooms'),              // Denormalized for efficient room-level queries
-    userId: v.id('users'),                   // User who reacted
-    emoji: v.string(),                       // The emoji reaction (e.g., "👍")
-    createdAt: v.number(),
-  })
-    .index('by_message', ['messageId'])                    // Get all reactions for a message
-    .index('by_message_emoji', ['messageId', 'emoji'])     // Get users who reacted with specific emoji
-    .index('by_message_user', ['messageId', 'userId'])     // Check if user already reacted
-    .index('by_room', ['roomId'])                          // For room-level cleanup
-    .index('by_user', ['userId']),                         // For user's reaction history
 
   // Filter Presets table
   filterPresets: defineTable({
@@ -1978,34 +1660,6 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_user_room', ['userId', 'roomId']),
 
-  // Chat Room Muted Users (per-room user muting)
-  // When user A mutes user B in room X, only user A stops seeing user B's messages in room X
-  // This does NOT affect other rooms or other users
-  chatRoomMutedUsers: defineTable({
-    roomId: v.id('chatRooms'),      // The room where muting applies
-    muterId: v.id('users'),          // The user who initiated the mute
-    mutedUserId: v.id('users'),      // The user being muted
-    mutedAt: v.number(),             // Timestamp when mute was created
-  })
-    .index('by_muter_room', ['muterId', 'roomId'])           // Get all muted users for a user in a room
-    .index('by_muter_room_target', ['muterId', 'roomId', 'mutedUserId']), // Check if specific user is muted
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // CHAT ROOM PROFILES (Separate identity for Chat Rooms)
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Each user has ONE chat room identity (global across all rooms, not per room).
-  // This is COMPLETELY SEPARATE from main profile (name, photo, bio).
-  // Backend userId remains the true identity internally for moderation/bans/reports.
-  chatRoomProfiles: defineTable({
-    userId: v.id('users'),           // Link to real user (for moderation)
-    nickname: v.string(),            // REQUIRED - display name in chat rooms
-    avatarUrl: v.optional(v.string()), // OPTIONAL - avatar URL
-    bio: v.optional(v.string()),     // OPTIONAL - short bio
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index('by_userId', ['userId']), // One profile per user (unique)
-
   // User Room Reports (track which rooms user has reported)
   userRoomReports: defineTable({
     userId: v.id('users'),
@@ -2028,7 +1682,6 @@ export default defineSchema({
     .index('by_user_game_convo', ['userId', 'game', 'convoId', 'windowKey']),
 
   // Bottle Spin Game Sessions (invite + active game tracking)
-  // TD-LIFECYCLE: Enhanced session tracking with proper timeout support
   bottleSpinSessions: defineTable({
     conversationId: v.string(),
     inviterId: v.string(),           // User who sent the invite
@@ -2037,34 +1690,18 @@ export default defineSchema({
       v.literal('pending'),          // Invite sent, waiting for response
       v.literal('active'),           // Invite accepted, game in progress
       v.literal('rejected'),         // Invite rejected
-      v.literal('ended'),            // Game ended
-      v.literal('expired')           // Pending invite timed out (5 min)
+      v.literal('ended')             // Game ended
     ),
     createdAt: v.number(),
     respondedAt: v.optional(v.number()),  // When invite was accepted/rejected
     endedAt: v.optional(v.number()),      // When game was ended
     cooldownUntil: v.optional(v.number()), // Cooldown end time (10 min after rejection/end)
-    // TD-LIFECYCLE: New fields for proper session lifecycle
-    acceptedAt: v.optional(v.number()),   // When invite was accepted (separate from respondedAt for clarity)
-    gameStartedAt: v.optional(v.number()), // When inviter manually started the game
-    lastActionAt: v.optional(v.number()), // Last activity timestamp for inactivity timeout
-    endedReason: v.optional(v.union(
-      v.literal('manual'),           // User pressed End Game
-      v.literal('timeout'),          // 10 min inactivity during gameplay
-      v.literal('invite_expired'),   // Pending invite expired (2 min)
-      v.literal('not_started')       // Accepted but inviter didn't start within 2 min
-    )),
     // Turn tracking for real-time sync across devices
     // NOTE: Using role-based turn tracking to avoid ID format mismatch issues
     currentTurnUserId: v.optional(v.string()), // Legacy - kept for compatibility
     currentTurnRole: v.optional(v.union(
       v.literal('inviter'),          // Inviter's turn to choose
       v.literal('invitee')           // Invitee's turn to choose
-    )),
-    // SPIN-TURN-FIX: Track who can spin next (alternates after each round)
-    spinTurnRole: v.optional(v.union(
-      v.literal('inviter'),          // Inviter's turn to spin
-      v.literal('invitee')           // Invitee's turn to spin
     )),
     turnPhase: v.optional(v.union(
       v.literal('idle'),             // Waiting for spin
@@ -2073,13 +1710,6 @@ export default defineSchema({
       v.literal('complete')          // Choice made, can spin again
     )),
     lastSpinResult: v.optional(v.string()), // 'truth' | 'dare' | 'skip' | null
-    // RANDOM-TARGET-FIX: Track consecutive target selections for fairness cap
-    // Target selection is random, but same person cannot be selected more than 3 times in a row
-    lastSelectedRole: v.optional(v.union(
-      v.literal('inviter'),          // Last spin landed on inviter
-      v.literal('invitee')           // Last spin landed on invitee
-    )),
-    consecutiveSelectedCount: v.optional(v.number()), // How many times in a row same role was selected (max 3)
   })
     .index('by_conversation', ['conversationId'])
     .index('by_inviter', ['inviterId'])
@@ -2133,285 +1763,4 @@ export default defineSchema({
   })
     .index('by_viewer', ['viewerId'])
     .index('by_pair', ['viewerId', 'viewedUserId']),
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Support Tickets System
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Phase-2 Private Mode Backend Tables (Desire Land - STRICT ISOLATION)
-  // These tables are COMPLETELY SEPARATE from Phase-1 tables.
-  // Phase-2 swipes, matches, conversations, and messages NEVER mix with Phase-1.
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // Phase-2 Private Likes (swipe records for Desire Land)
-  privateLikes: defineTable({
-    fromUserId: v.id('users'),
-    toUserId: v.id('users'),
-    action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like')),
-    message: v.optional(v.string()), // For super_like standout messages
-    createdAt: v.number(),
-  })
-    .index('by_from_user', ['fromUserId'])
-    .index('by_to_user', ['toUserId'])
-    .index('by_from_to', ['fromUserId', 'toUserId'])
-    .index('by_to_from', ['toUserId', 'fromUserId']),
-
-  // Phase-2 Private Matches (Desire Land matches - separate from Phase-1 matches)
-  privateMatches: defineTable({
-    user1Id: v.id('users'),           // Ordered pair: user1Id < user2Id
-    user2Id: v.id('users'),
-    matchedAt: v.number(),
-    isActive: v.boolean(),
-    user1UnmatchedAt: v.optional(v.number()),
-    user2UnmatchedAt: v.optional(v.number()),
-    // Track match source for analytics
-    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'), v.literal('confession'), v.literal('confession_comment'))),
-  })
-    .index('by_user1', ['user1Id'])
-    .index('by_user2', ['user2Id'])
-    .index('by_users', ['user1Id', 'user2Id'])
-    // P2-007 FIX: Add indexes for common query patterns
-    .index('by_active', ['isActive'])
-    .index('by_matched_at', ['matchedAt']),
-
-  // Phase-2 Private Conversations (DM threads for Desire Land matches)
-  privateConversations: defineTable({
-    matchId: v.optional(v.id('privateMatches')),
-    participants: v.array(v.id('users')),
-    isPreMatch: v.boolean(),          // False for match-based conversations
-    lastMessageAt: v.optional(v.number()),
-    createdAt: v.number(),
-    // Connection source tracking
-    connectionSource: v.optional(v.union(
-      v.literal('desire_match'),      // Match from Desire Land swipes
-      v.literal('desire_super_like'), // Super like match
-      v.literal('tod'),               // Truth or Dare connection
-      v.literal('room')               // Chat room DM
-    )),
-  })
-    .index('by_match', ['matchId'])
-    .index('by_last_message', ['lastMessageAt'])
-    .index('by_connection_source', ['connectionSource']),
-
-  // Phase-2 Private Conversation Participants (for efficient user-scoped queries)
-  privateConversationParticipants: defineTable({
-    conversationId: v.id('privateConversations'),
-    userId: v.id('users'),
-    unreadCount: v.number(),
-    // Leave conversation feature: User can hide conversation from their view
-    // Does NOT delete the conversation - other user can still see it
-    isHidden: v.optional(v.boolean()),
-  })
-    .index('by_user', ['userId'])
-    .index('by_conversation', ['conversationId'])
-    .index('by_user_conversation', ['userId', 'conversationId']),
-
-  // Phase-2 Private Messages (messages in Desire Land conversations)
-  privateMessages: defineTable({
-    conversationId: v.id('privateConversations'),
-    senderId: v.id('users'),
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('voice'), v.literal('system')),
-    content: v.string(),
-    imageStorageId: v.optional(v.id('_storage')),
-    audioStorageId: v.optional(v.id('_storage')),
-    audioDurationMs: v.optional(v.number()),
-    // P1-001: Protected media metadata for secure photos/videos
-    isProtected: v.optional(v.boolean()),
-    protectedMediaTimer: v.optional(v.number()), // Timer in seconds (0 = view once)
-    protectedMediaViewingMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
-    protectedMediaIsMirrored: v.optional(v.boolean()), // Front camera flip flag
-    viewedAt: v.optional(v.number()), // When recipient first viewed
-    timerEndsAt: v.optional(v.number()), // When timer expires
-    isExpired: v.optional(v.boolean()), // Whether media has expired
-    deliveredAt: v.optional(v.number()),
-    readAt: v.optional(v.number()),
-    createdAt: v.number(),
-    // Client-provided idempotency key
-    clientMessageId: v.optional(v.string()),
-  })
-    .index('by_conversation', ['conversationId'])
-    .index('by_conversation_created', ['conversationId', 'createdAt'])
-    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId'])
-    // P2-007 FIX: Add indexes for sender and read status queries
-    .index('by_sender', ['senderId'])
-    .index('by_read_at', ['readAt']),
-
-  // Phase-2 Private Photo Access Requests
-  // One-to-one access control for viewing blurred photos in Phase-2 Messages context
-  privatePhotoAccessRequests: defineTable({
-    ownerUserId: v.id('users'),       // The user whose photo is being requested
-    viewerUserId: v.id('users'),      // The user requesting to see the photo
-    status: v.union(
-      v.literal('pending'),
-      v.literal('approved'),
-      v.literal('declined')
-    ),
-    requestSource: v.literal('phase2_messages'), // Only Phase-2 Messages for now
-    conversationId: v.optional(v.id('privateConversations')), // Context where request was made
-    createdAt: v.number(),
-    updatedAt: v.number(),
-    respondedAt: v.optional(v.number()),
-  })
-    .index('by_owner', ['ownerUserId'])
-    .index('by_viewer', ['viewerUserId'])
-    .index('by_owner_viewer', ['ownerUserId', 'viewerUserId'])
-    .index('by_owner_status', ['ownerUserId', 'status']),
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Phase-2 User Presence (ISOLATED from users table)
-  // Tracks lastActiveAt for online status display in Phase-2 Messages
-  // ═══════════════════════════════════════════════════════════════════════════
-  privateUserPresence: defineTable({
-    userId: v.id('users'),           // The user this presence record belongs to
-    lastActiveAt: v.number(),        // Timestamp of last activity
-    updatedAt: v.number(),           // When this record was last updated
-  })
-    .index('by_user', ['userId']),
-
-  // P1-004 FIX: Phase-2 Typing Status (ephemeral, isolated from Phase-1)
-  // Tracks when users are typing in Phase-2 private conversations
-  privateTypingStatus: defineTable({
-    conversationId: v.id('privateConversations'),
-    userId: v.id('users'),
-    isTyping: v.boolean(),
-    updatedAt: v.number(),
-  })
-    .index('by_conversation', ['conversationId'])
-    .index('by_user_conversation', ['userId', 'conversationId']),
-
-  // User support tickets for Help & Support inquiries
-  supportTickets: defineTable({
-    userId: v.id('users'),
-    category: v.union(
-      v.literal('payment'),
-      v.literal('subscription'),
-      v.literal('account'),
-      v.literal('bug'),
-      v.literal('safety'),
-      v.literal('verification'),
-      v.literal('other')
-    ),
-    message: v.string(),
-    status: v.union(
-      v.literal('open'),
-      v.literal('in_review'),
-      v.literal('replied'),
-      v.literal('closed')
-    ),
-    adminReply: v.optional(v.string()),
-    // Attachments: up to 5 photos OR 1 video (not both)
-    attachments: v.optional(v.array(v.object({
-      storageId: v.id('_storage'),
-      type: v.union(v.literal('photo'), v.literal('video')),
-    }))),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index('by_user', ['userId'])
-    .index('by_status', ['status'])
-    .index('by_created', ['createdAt']),
-
-  // Support ticket conversation messages (general support thread, distinct from Phase-2 Safety)
-  supportTicketMessages: defineTable({
-    ticketId: v.id('supportTickets'),
-    senderType: v.union(v.literal('user'), v.literal('admin')),
-    senderUserId: v.optional(v.id('users')), // For user messages
-    senderName: v.optional(v.string()),       // For admin display name
-    message: v.string(),
-    attachments: v.optional(v.array(v.object({
-      storageId: v.id('_storage'),
-      type: v.union(v.literal('photo'), v.literal('video')),
-    }))),
-    createdAt: v.number(),
-  })
-    .index('by_ticket', ['ticketId']),
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Chat Room Presence (Room-Specific Real-Time Presence)
-  // Tracks which users are currently active IN A SPECIFIC ROOM
-  // States: ONLINE_IN_ROOM (heartbeat within 15s), RECENTLY_LEFT (within 10min), NOT_SHOWN
-  // ═══════════════════════════════════════════════════════════════════════════
-  chatRoomPresence: defineTable({
-    roomId: v.id('chatRooms'),           // The room this presence belongs to
-    userId: v.id('users'),               // The user
-    lastHeartbeatAt: v.number(),         // Last heartbeat timestamp (updated every 10-15s)
-    joinedAt: v.number(),                // When user entered this room session
-  })
-    .index('by_room', ['roomId'])                    // List all presence in a room
-    .index('by_room_user', ['roomId', 'userId'])     // Single user lookup in room
-    .index('by_user', ['userId'])                    // All rooms user is present in
-    .index('by_heartbeat', ['lastHeartbeatAt']),     // Cleanup stale presence
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Chat Room DM Threads (Private Messages Between Users)
-  // Stores 1:1 DM conversation threads initiated from Chat Rooms
-  // Uses canonical Convex user IDs (Id<'users'>) for both participants
-  // ═══════════════════════════════════════════════════════════════════════════
-  chatRoomDmThreads: defineTable({
-    // Participants stored in normalized order (smaller ID first for consistent lookup)
-    participant1Id: v.id('users'),        // First participant (smaller ID)
-    participant2Id: v.id('users'),        // Second participant (larger ID)
-    // Optional: room where DM was initiated (for context)
-    sourceRoomId: v.optional(v.id('chatRooms')),
-    // Thread metadata
-    lastMessageAt: v.number(),            // For sorting DM inbox
-    lastMessagePreview: v.optional(v.string()), // Preview text for inbox
-    createdAt: v.number(),
-    // HIDE-VS-DELETE-FIX: Hidden flags (timestamp when hidden, null = not hidden)
-    // If lastMessageAt > hiddenByPxAt, thread reappears (new message arrived)
-    hiddenByP1At: v.optional(v.number()), // When participant1 hid this thread
-    hiddenByP2At: v.optional(v.number()), // When participant2 hid this thread
-  })
-    .index('by_participants', ['participant1Id', 'participant2Id'])  // Find thread by pair
-    .index('by_participant1', ['participant1Id'])                    // List all DMs for user
-    .index('by_participant2', ['participant2Id'])                    // List all DMs for user
-    .index('by_last_message', ['lastMessageAt']),                    // Sort by recent activity
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Chat Room DM Messages (Individual Messages in DM Threads)
-  // Messages in private 1:1 conversations from Chat Rooms
-  // ═══════════════════════════════════════════════════════════════════════════
-  chatRoomDmMessages: defineTable({
-    threadId: v.id('chatRoomDmThreads'),  // Parent thread
-    senderId: v.id('users'),              // Who sent the message
-    text: v.optional(v.string()),         // Text content (optional if media)
-    // Media support (same as group chat)
-    type: v.optional(v.union(
-      v.literal('text'),
-      v.literal('image'),
-      v.literal('video'),
-      v.literal('audio'),
-      v.literal('doodle')
-    )),
-    mediaStorageId: v.optional(v.id('_storage')),  // For media messages
-    mediaUrl: v.optional(v.string()),              // Resolved URL (cached)
-    // Message status
-    readAt: v.optional(v.number()),       // When recipient read the message
-    createdAt: v.number(),
-  })
-    .index('by_thread', ['threadId', 'createdAt'])   // Messages in thread, ordered
-    .index('by_sender', ['senderId', 'createdAt'])   // Messages by sender (for moderation)
-    // P0-004 FIX: Index for efficient unread count query (avoids O(n²) scan)
-    .index('by_thread_read_status', ['threadId', 'readAt']),
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Chat Room Mentions (Mention Inbox / Notification Records)
-  // Tracks when users are @mentioned in chat rooms for dedicated mention inbox
-  // ═══════════════════════════════════════════════════════════════════════════
-  chatRoomMentions: defineTable({
-    mentionedUserId: v.id('users'),         // User who was mentioned
-    senderUserId: v.id('users'),            // User who sent the mention
-    senderNickname: v.string(),             // Sender's chat room nickname at time of mention
-    roomId: v.id('chatRooms'),              // Room where mention occurred
-    roomName: v.string(),                   // Room name at time of mention (denormalized)
-    messageId: v.id('chatRoomMessages'),    // Exact message containing the mention
-    messagePreview: v.string(),             // Short preview of the message (max 100 chars)
-    createdAt: v.number(),                  // When the mention was created
-    readAt: v.optional(v.number()),         // When the mentioned user viewed/acknowledged it
-  })
-    .index('by_mentioned_user', ['mentionedUserId', 'createdAt'])  // User's mention inbox
-    .index('by_mentioned_unread', ['mentionedUserId', 'readAt'])   // For unread count query
-    .index('by_message', ['messageId'])                             // For cleanup when message deleted
-    .index('by_room', ['roomId']),                                  // For room-level cleanup
 });

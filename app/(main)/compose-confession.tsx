@@ -7,17 +7,17 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  Switch,
   Alert,
   ScrollView,
   Animated,
-  Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import EmojiPicker from 'rn-emoji-keyboard';
 import { COLORS } from '@/lib/constants';
-import { ConfessionRevealPolicy, TimedRevealOption, ConfessionAuthorVisibility } from '@/types';
+import { ConfessionRevealPolicy, TimedRevealOption } from '@/types';
 import { isContentClean } from '@/lib/contentFilter';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -80,11 +80,10 @@ export default function ComposeConfessionScreen() {
       return result;
     }
     if (!isDemoMode && convexCurrentUser) {
-      // SINGLE SOURCE OF TRUTH: First photo (index 0) is always main
-      const primaryPhoto = convexCurrentUser.photos?.[0];
+      const primaryPhoto = convexCurrentUser.photos?.find((p: any) => p.isPrimary) || convexCurrentUser.photos?.[0];
       const userAny = convexCurrentUser as any;
       const result = {
-        authorName: userAny.name,
+        authorName: userAny.firstName || userAny.name,
         authorPhotoUrl: primaryPhoto?.url,
         authorAge: computeAge(userAny.dateOfBirth),
         authorGender: userAny.gender,
@@ -97,7 +96,7 @@ export default function ComposeConfessionScreen() {
   };
 
   const [text, setText] = useState('');
-  const [authorVisibility, setAuthorVisibility] = useState<ConfessionAuthorVisibility>('anonymous');
+  const [isAnonymous, setIsAnonymous] = useState(true);
   const [confessToSomeone, setConfessToSomeone] = useState(false);
   const [targetUserId, setTargetUserId] = useState<string | undefined>();
   const [targetName, setTargetName] = useState<string | undefined>();
@@ -122,7 +121,7 @@ export default function ComposeConfessionScreen() {
 
   const canSubmit = text.trim().length >= 10 && !isSubmitting;
 
-  const handleSubmit = useCallback(() => {
+  const handleSubmit = useCallback(async () => {
     if (!canSubmit || isSubmitting) return;
     const trimmed = text.trim();
     const phonePattern = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
@@ -143,19 +142,15 @@ export default function ComposeConfessionScreen() {
       return;
     }
 
-    const confessionId = `conf_new_${Date.now()}`;
     const finalTarget = confessToSomeone ? targetUserId : undefined;
 
-    // Convert visibility mode to legacy isAnonymous for backward compatibility
-    const isAnonymous = authorVisibility === 'anonymous';
-    // Get author info for non-anonymous confessions (open and blur_photo modes)
-    const includeAuthorInfo = authorVisibility !== 'anonymous';
-    const authorInfo = includeAuthorInfo ? getAuthorInfo() : {};
+    // Get author info for non-anonymous confessions
+    const authorInfo = !isAnonymous ? getAuthorInfo() : {};
 
-    if (__DEV__) console.log('[COMPOSE] handleSubmit - authorVisibility:', authorVisibility, 'isAnonymous:', isAnonymous, 'authorInfo:', authorInfo);
+    if (__DEV__) console.log('[COMPOSE] handleSubmit - isAnonymous:', isAnonymous, 'authorInfo:', authorInfo);
 
     // Safety guard: prevent posting non-anonymous without profile data
-    if (includeAuthorInfo && !authorInfo.authorName) {
+    if (!isAnonymous && !authorInfo.authorName) {
       setIsSubmitting(false);
       Alert.alert(
         'Profile Not Ready',
@@ -165,77 +160,74 @@ export default function ComposeConfessionScreen() {
       return;
     }
 
-    addConfession({
-      id: confessionId,
-      userId: currentUserId,
-      text: trimmed,
-      isAnonymous,
-      authorVisibility, // New 3-mode visibility
-      mood: 'emotional' as const,
-      topEmojis: [],
-      replyPreviews: [],
-      targetUserId: finalTarget,
-      visibility: 'global' as const,
-      replyCount: 0,
-      reactionCount: 0,
-      createdAt: Date.now(),
-      revealPolicy: revealPolicy || 'never',
-      // Include author identity for non-anonymous confessions (open and blur_photo modes)
-      ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
-      ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
-      ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
-      ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
-    });
+    try {
+      if (isDemoMode) {
+        const confessionId = `conf_new_${Date.now()}`;
 
-    // Debug event logging
-    logDebugEvent('CONFESSION_CREATED', 'New confession posted');
-    if (finalTarget) {
-      logDebugEvent('CONFESSION_TAGGED', 'Confession tagged someone');
+        addConfession({
+          id: confessionId,
+          userId: currentUserId,
+          text: trimmed,
+          isAnonymous,
+          mood: 'emotional' as const,
+          topEmojis: [],
+          replyPreviews: [],
+          targetUserId: finalTarget,
+          visibility: 'global' as const,
+          replyCount: 0,
+          reactionCount: 0,
+          createdAt: Date.now(),
+          revealPolicy: revealPolicy || 'never',
+          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+        });
+
+        if (timedRevealOption && timedRevealOption !== 'never' && finalTarget) {
+          setTimedReveal(confessionId, timedRevealOption, finalTarget);
+        }
+
+        if (finalTarget) {
+          const { addSecretCrush } = useConfessionStore.getState();
+          addSecretCrush({
+            id: `sc_new_${Date.now()}`,
+            fromUserId: currentUserId,
+            toUserId: finalTarget,
+            confessionText: trimmed,
+            isRevealed: false,
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 1000 * 60 * 60 * 48,
+          });
+        }
+      } else {
+        const mutationPayload = {
+          userId: currentUserId as any,
+          text: trimmed,
+          isAnonymous,
+          mood: 'emotional' as any,
+          visibility: 'global' as any,
+          ...(finalTarget ? { taggedUserId: finalTarget as any } : {}),
+          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+        };
+        if (__DEV__) console.log('[COMPOSE] mutation payload:', mutationPayload);
+        await createConfessionMutation(mutationPayload);
+      }
+
+      logDebugEvent('CONFESSION_CREATED', 'New confession posted');
+      if (finalTarget) {
+        logDebugEvent('CONFESSION_TAGGED', 'Confession tagged someone');
+      }
+
+      router.back();
+    } catch (error: any) {
+      setIsSubmitting(false);
+      Alert.alert('Error', error?.message || 'Failed to post confession');
     }
-
-    if (timedRevealOption && timedRevealOption !== 'never' && finalTarget) {
-      setTimedReveal(confessionId, timedRevealOption, finalTarget);
-    }
-
-    if (finalTarget) {
-      const { addSecretCrush } = useConfessionStore.getState();
-      addSecretCrush({
-        id: `sc_new_${Date.now()}`,
-        fromUserId: currentUserId,
-        toUserId: finalTarget,
-        confessionText: trimmed,
-        isRevealed: false,
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 1000 * 60 * 60 * 48,
-      });
-    }
-
-    // Sync to backend (only if we have a valid userId)
-    if (!isDemoMode && currentUserId) {
-      const mutationPayload = {
-        userId: currentUserId as any,
-        text: trimmed,
-        isAnonymous,
-        authorVisibility, // New 3-mode visibility
-        mood: 'emotional' as any,
-        visibility: 'global' as any,
-        // Include tagged user if confessing to someone
-        ...(finalTarget ? { taggedUserId: finalTarget as any } : {}),
-        // Include author identity for non-anonymous confessions (open and blur_photo modes)
-        ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
-        ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
-        ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
-        ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
-      };
-      if (__DEV__) console.log('[COMPOSE] mutation payload:', mutationPayload);
-      createConfessionMutation(mutationPayload).catch((error: any) => {
-        Alert.alert('Error', error.message || 'Failed to post confession');
-      });
-    }
-
-    // Navigate back
-    router.back();
-  }, [canSubmit, isSubmitting, text, authorVisibility, confessToSomeone, targetUserId, revealPolicy, timedRevealOption, currentUserId, addConfession, setTimedReveal, createConfessionMutation, router]);
+  }, [canSubmit, isSubmitting, text, isAnonymous, confessToSomeone, targetUserId, revealPolicy, timedRevealOption, currentUserId, addConfession, setTimedReveal, createConfessionMutation, router, isDemoMode]);
 
   const handleEmojiSelected = (emoji: any) => {
     setText((prev) => prev + emoji.emoji);
@@ -302,99 +294,27 @@ export default function ComposeConfessionScreen() {
           <Text style={styles.charCount}>{text.length}/500</Text>
         </View>
 
-        {/* Visibility Mode Selection - 3 side-by-side options */}
-        <View style={styles.visibilitySection}>
-          <Text style={styles.visibilitySectionTitle}>How others will see you</Text>
-          <View style={styles.visibilityOptions}>
-            {/* Anonymous option */}
-            <TouchableOpacity
-              style={[
-                styles.visibilityOption,
-                authorVisibility === 'anonymous' && styles.visibilityOptionSelected,
-              ]}
-              onPress={() => setAuthorVisibility('anonymous')}
-              activeOpacity={0.7}
-            >
-              <View style={[
-                styles.visibilityIconWrap,
-                authorVisibility === 'anonymous' && styles.visibilityIconWrapSelected,
-              ]}>
-                <Ionicons
-                  name="eye-off"
-                  size={18}
-                  color={authorVisibility === 'anonymous' ? COLORS.white : COLORS.textMuted}
-                />
-              </View>
-              <Text style={[
-                styles.visibilityLabel,
-                authorVisibility === 'anonymous' && styles.visibilityLabelSelected,
-              ]}>Anonymous</Text>
-            </TouchableOpacity>
-
-            {/* Open to all option */}
-            <TouchableOpacity
-              style={[
-                styles.visibilityOption,
-                authorVisibility === 'open' && styles.visibilityOptionSelected,
-              ]}
-              onPress={() => setAuthorVisibility('open')}
-              activeOpacity={0.7}
-            >
-              <View style={[
-                styles.visibilityIconWrap,
-                authorVisibility === 'open' && styles.visibilityIconWrapSelected,
-              ]}>
-                <Ionicons
-                  name="person"
-                  size={18}
-                  color={authorVisibility === 'open' ? COLORS.white : COLORS.textMuted}
-                />
-              </View>
-              <Text style={[
-                styles.visibilityLabel,
-                authorVisibility === 'open' && styles.visibilityLabelSelected,
-              ]}>Open to all</Text>
-            </TouchableOpacity>
-
-            {/* Blur photo option */}
-            <TouchableOpacity
-              style={[
-                styles.visibilityOption,
-                authorVisibility === 'blur_photo' && styles.visibilityOptionSelected,
-              ]}
-              onPress={() => setAuthorVisibility('blur_photo')}
-              activeOpacity={0.7}
-            >
-              <View style={[
-                styles.visibilityIconWrap,
-                authorVisibility === 'blur_photo' && styles.visibilityIconWrapSelected,
-              ]}>
-                <Ionicons
-                  name="eye"
-                  size={18}
-                  color={authorVisibility === 'blur_photo' ? COLORS.white : COLORS.textMuted}
-                />
-              </View>
-              <Text style={[
-                styles.visibilityLabel,
-                authorVisibility === 'blur_photo' && styles.visibilityLabelSelected,
-              ]}>Blur photo</Text>
-            </TouchableOpacity>
+        {/* Anonymous / Open Toggle */}
+        <View style={styles.toggleRow}>
+          <View style={styles.toggleInfo}>
+            <Ionicons
+              name={isAnonymous ? 'eye-off' : 'person'}
+              size={20}
+              color={isAnonymous ? COLORS.textMuted : COLORS.primary}
+            />
+            <View>
+              <Text style={styles.toggleLabel}>{isAnonymous ? 'Anonymous' : 'Open'}</Text>
+              <Text style={styles.toggleDesc}>
+                {isAnonymous ? 'Your identity is hidden' : 'Your name will be shown'}
+              </Text>
+            </View>
           </View>
-        </View>
-
-        {/* Helper explanation section */}
-        <View style={styles.helperSection}>
-          <Text style={styles.helperTitle}>How your confession will appear</Text>
-          <Text style={styles.helperBulletText}>
-            • <Text style={styles.helperBulletLabel}>Anonymous:</Text> your name, photo, and profile details will be completely hidden from everyone
-          </Text>
-          <Text style={styles.helperBulletText}>
-            • <Text style={styles.helperBulletLabel}>Open:</Text> your profile will be visible with the confession, so people can see who posted it
-          </Text>
-          <Text style={styles.helperBulletText}>
-            • <Text style={styles.helperBulletLabel}>Mention username:</Text> tag someone you like so your confession directly reaches them
-          </Text>
+          <Switch
+            value={!isAnonymous}
+            onValueChange={(val) => setIsAnonymous(!val)}
+            trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+            thumbColor={!isAnonymous ? COLORS.primary : '#f4f3f4'}
+          />
         </View>
 
         {/* Confess to Someone Toggle */}
@@ -607,76 +527,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: COLORS.textMuted,
     marginTop: 2,
-  },
-  // Visibility mode selector styles (3 options)
-  visibilitySection: {
-    paddingHorizontal: 16,
-    paddingVertical: 16,
-  },
-  visibilitySectionTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginBottom: 12,
-  },
-  visibilityOptions: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  visibilityOption: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    backgroundColor: COLORS.backgroundDark,
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  visibilityOptionSelected: {
-    borderColor: COLORS.primary,
-    backgroundColor: 'rgba(255,107,107,0.08)',
-  },
-  visibilityIconWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(153,153,153,0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  visibilityIconWrapSelected: {
-    backgroundColor: COLORS.primary,
-  },
-  visibilityLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.textMuted,
-    textAlign: 'center',
-  },
-  visibilityLabelSelected: {
-    color: COLORS.primary,
-  },
-  // Helper instructions section (minimal)
-  helperSection: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    marginTop: 4,
-  },
-  helperTitle: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.textMuted,
-    marginBottom: 8,
-  },
-  helperBulletText: {
-    fontSize: 12,
-    lineHeight: 20,
-    color: COLORS.textMuted,
-  },
-  helperBulletLabel: {
-    fontWeight: '600',
   },
   pickPersonButton: {
     flexDirection: 'row',
