@@ -520,11 +520,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     return label.charAt(0).toUpperCase() + label.slice(1);
   };
 
-  // DETERMINISTIC prompt selection: Same 2 prompts for homepage AND full profile
+  // DETERMINISTIC prompt selection: Use ALL prompts for richer content distribution
   const selectedPrompts = useMemo(() => {
     if (isPhase2 || phase1AllPrompts.length === 0) return [];
-    // Always select first 2 prompts (deterministic)
-    return phase1AllPrompts.slice(0, 2).map((p, idx) => ({
+    // Use ALL available prompts (up to 5) for better content distribution on 5+ photo profiles
+    return phase1AllPrompts.slice(0, 5).map((p, idx) => ({
       ...p,
       id: idx,
       shortLabel: toShortLabel(p.question),
@@ -566,15 +566,21 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     const hasBasics = lifestyleWithKeys.length > 0;
     const hasInterests = activities && activities.length > 0;
 
-    // Convert activities to interest chips (max 5)
-    const interestChips = hasInterests
-      ? activities!.slice(0, 5).map((key, idx) => {
+    // Convert ALL activities to interest chips (up to 8) for splitting into chunks
+    const allInterestChips = hasInterests
+      ? activities!.slice(0, 8).map((key, idx) => {
           const activity = ACTIVITY_FILTERS.find(a => a.value === key);
           return activity
             ? { emoji: activity.emoji, label: activity.label, key: `int-${idx}-${key}` }
             : null;
         }).filter(Boolean) as { emoji: string; label: string; key: string }[]
       : [];
+
+    // Split interests into chunks of 3 for finer-grained distribution
+    const interestChunks: { emoji: string; label: string; key: string }[][] = [];
+    for (let i = 0; i < allInterestChips.length; i += 3) {
+      interestChunks.push(allInterestChips.slice(i, i + 3));
+    }
 
     // Unit 1: Bio (priority 1, weight based on length)
     if (hasBio) {
@@ -623,13 +629,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       });
     }
 
-    // Unit 5: Interests (priority 5)
-    if (interestChips.length > 0) {
+    // Unit 5: Interests Part 1 (first chunk of 3)
+    if (interestChunks.length > 0) {
       units.push({
-        key: 'interests',
+        key: 'interests_part1',
         type: 'interests',
         priority: priority++,
-        payload: { chips: interestChips },
+        payload: { chips: interestChunks[0] },
         weight: 1,
       });
     }
@@ -667,25 +673,80 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       }
     }
 
+    // Unit 8: Interests Part 2 (second chunk of 3, if available)
+    if (interestChunks.length > 1) {
+      units.push({
+        key: 'interests_part2',
+        type: 'interests',
+        priority: priority++,
+        payload: { chips: interestChunks[1] },
+        weight: 1,
+      });
+    }
+
+    // Unit 9: Prompt 4 (if available)
+    if (selectedPrompts.length > 3) {
+      units.push({
+        key: 'prompt4',
+        type: 'prompt',
+        priority: priority++,
+        payload: { prompt: selectedPrompts[3] },
+        weight: 1,
+      });
+    }
+
+    // Unit 10: Interests Part 3 (third chunk of 3, if available)
+    if (interestChunks.length > 2) {
+      units.push({
+        key: 'interests_part3',
+        type: 'interests',
+        priority: priority++,
+        payload: { chips: interestChunks[2] },
+        weight: 1,
+      });
+    }
+
+    // Unit 11: Prompt 5 (if available)
+    if (selectedPrompts.length > 4) {
+      units.push({
+        key: 'prompt5',
+        type: 'prompt',
+        priority: priority++,
+        payload: { prompt: selectedPrompts[4] },
+        weight: 1,
+      });
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // NO-EMPTY-SLIDES FALLBACK: Ensure we have enough content for all photos
-    // If totalPhotos > units.length + 1 (Photo 1 is identity-only for 2+ photos),
-    // reuse the best available content to prevent empty slides
+    // For 5+ photos, if units run out, cycle through best reusable content
+    // Priority: bio > prompts > relationship > interests
     // ═══════════════════════════════════════════════════════════════════════
     const contentSlidesNeeded = totalPhotos === 1 ? 1 : totalPhotos - 1; // P1 is identity for 2+ photos
-    const bestReusableUnit = units.find((u) => u.type === 'bio') || units.find((u) => u.type === 'prompt') || units[0];
 
-    if (units.length < contentSlidesNeeded && bestReusableUnit) {
+    // Build reusable content pool in priority order for cycling
+    const reusableUnits: DisplayUnit[] = [];
+    const bioUnit = units.find((u) => u.type === 'bio');
+    if (bioUnit) reusableUnits.push(bioUnit);
+    units.filter((u) => u.type === 'prompt').forEach((u) => reusableUnits.push(u));
+    const relUnit = units.find((u) => u.type === 'relationship');
+    if (relUnit) reusableUnits.push(relUnit);
+    units.filter((u) => u.type === 'interests').forEach((u) => reusableUnits.push(u));
+
+    if (units.length < contentSlidesNeeded && reusableUnits.length > 0) {
       let fallbackIndex = 0;
+      let reuseIdx = 0;
       while (units.length < contentSlidesNeeded) {
-        // Create a reusable version of the best content
+        // Cycle through reusable units instead of repeating the same one
+        const unitToReuse = reusableUnits[reuseIdx % reusableUnits.length];
         const reusedUnit: DisplayUnit = {
-          ...bestReusableUnit,
-          key: `${bestReusableUnit.key}_reuse_${fallbackIndex}`,
+          ...unitToReuse,
+          key: `${unitToReuse.key}_reuse_${fallbackIndex}`,
           priority: priority++,
         };
         units.push(reusedUnit);
         fallbackIndex++;
+        reuseIdx++;
       }
 
       if (__DEV__) {
@@ -694,7 +755,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           photoCount: totalPhotos,
           originalUnits: units.length - fallbackIndex,
           reusedUnits: fallbackIndex,
-          reusedType: bestReusableUnit.type,
+          reusablePoolSize: reusableUnits.length,
         });
       }
     }
@@ -949,7 +1010,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       p3.waveDensity = p3Units.length >= 2 ? 'high' : (p3Units.length > 0 ? 'medium' : 'low');
       contents.push(p3);
 
-      // Photo 4: prompt2 + interests
+      // Photo 4: prompt2 + interests_part1
       const p4 = createEmptyContent();
       const p4Units: DisplayUnit[] = [];
       const prompt2Unit = getUnitByKey('prompt2');
@@ -957,7 +1018,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         p4.prompts.push(prompt2Unit.payload.prompt);
         p4Units.push(prompt2Unit);
       }
-      const interestsUnit = getUnitByKey('interests');
+      const interestsUnit = getUnitByKey('interests_part1');
       if (interestsUnit) {
         p4.interests = interestsUnit.payload.chips;
         p4Units.push(interestsUnit);
@@ -980,7 +1041,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // DEBUG LOGGING: P1_WAVE_UNITS_FULL, P1_WAVE_PLAN_FULL
+    // DEBUG LOGGING: P1_WAVE_UNITS_FULL, P1_WAVE_PLAN_FULL, P1_WAVE_FINAL_CHECK
     // ═══════════════════════════════════════════════════════════════════════
     if (__DEV__) {
       // P1_WAVE_UNITS_FULL: Log available units with source data
@@ -995,7 +1056,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           hasBasics,
           hasInterests,
           lifestyleItems: lifestyleWithKeys.length,
-          interestItems: interestChips.length,
+          interestItems: allInterestChips.length,
+          interestChunks: interestChunks.length,
+          relationshipIntentCount: relationshipIntent?.length ?? 0,
         },
       });
 
@@ -1016,10 +1079,34 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         is5Plus: totalPhotos >= 5,
         plan,
       });
+
+      // P1_WAVE_FINAL_CHECK: Verify no identity-only tail slides for 5+ photos
+      const identityOnlyTailSlides = plan.filter(
+        (p, idx) => idx > 0 && p.slotType === 'identity' && p.assignedUnitKeys.length === 0
+      );
+      if (totalPhotos >= 5 && identityOnlyTailSlides.length > 0) {
+        console.warn('[P1_WAVE_FINAL_CHECK] WARNING: Identity-only tail slides detected', {
+          name,
+          photoCount: totalPhotos,
+          identityOnlySlides: identityOnlyTailSlides.map(p => p.photoIndex),
+        });
+      } else {
+        console.log('[P1_WAVE_FINAL_CHECK]', {
+          name,
+          photoCount: totalPhotos,
+          totalUnits: units.length,
+          allSlidesHaveContent: identityOnlyTailSlides.length === 0,
+          plan: plan.map(p => ({
+            photoIndex: p.photoIndex,
+            slotType: p.slotType,
+            assignedUnitKeys: p.assignedUnitKeys,
+          })),
+        });
+      }
     }
 
     return contents;
-  }, [isPhase2, photos?.length, bio, selectedPrompts, phase1Lifestyle, activities, name]);
+  }, [isPhase2, photos?.length, bio, selectedPrompts, phase1Lifestyle, activities, name, relationshipIntent]);
 
   // NOTE: currentPhotoContent is computed after photoIndex state declaration (see below)
 

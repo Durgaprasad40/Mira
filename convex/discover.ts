@@ -626,22 +626,45 @@ export const getDiscoverProfiles = query({
       const { user, distance } = filteredCandidates[i];
       const rawPhotos = photoResults[i];
 
-      // PHOTO SOURCE FIX: Filter out verification_reference photos
-      // These are private verification photos, NOT display photos
-      // This ensures Discover shows the same photos as Edit Profile and Profile Tab
-      const photos = rawPhotos.filter((p) => p.photoType !== 'verification_reference');
+      // ═══════════════════════════════════════════════════════════════════════
+      // PHOTO FILTER DEBUG: Detailed logging to identify filtering issues
+      // ═══════════════════════════════════════════════════════════════════════
+      console.log('[DISCOVER_PHOTO_FILTER_DEBUG]', {
+        userId: user._id,
+        userName: user.name,
+        rawCount: rawPhotos?.length ?? 0,
+        rawPhotoDetails: rawPhotos?.map((p) => ({
+          id: p._id,
+          order: p.order,
+          photoType: p.photoType,
+          isNsfw: p.isNsfw,
+          hasUrl: !!p.url,
+          hasStorageId: !!p.storageId,
+        })) ?? [],
+      });
+
+      // PHOTO SOURCE FIX: Filter out ONLY verification_reference photos
+      // These are private verification photos used for face verification, NOT display photos
+      // Any photo with photoType undefined, null, or 'display' should be kept
+      const displayPhotos = rawPhotos.filter((p) => p.photoType !== 'verification_reference');
 
       // Filter out NSFW photos - these should never be shown in Discover
-      const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
+      const nonNsfwPhotos = displayPhotos.filter((p) => !p.isNsfw);
 
-      console.log('[P1_CARD_PHOTOS] getDiscoverProfiles photo source', {
+      // Log filtering results
+      console.log('[DISCOVER_PHOTO_FILTER_RESULT]', {
         userId: user._id,
         userName: user.name,
         rawCount: rawPhotos.length,
-        afterVerificationFilter: photos.length,
+        afterVerificationFilter: displayPhotos.length,
         afterNsfwFilter: nonNsfwPhotos.length,
-        filteredOut: rawPhotos.length - nonNsfwPhotos.length,
-        photoIds: nonNsfwPhotos.map((p) => p._id),
+        verificationFiltered: rawPhotos
+          .filter((p) => p.photoType === 'verification_reference')
+          .map((p) => ({ id: p._id, order: p.order })),
+        nsfwFiltered: displayPhotos
+          .filter((p) => p.isNsfw)
+          .map((p) => ({ id: p._id, order: p.order })),
+        finalPhotoIds: nonNsfwPhotos.map((p) => p._id),
       });
 
       if (nonNsfwPhotos.length === 0) continue; // at least 1 photo required
@@ -1384,9 +1407,13 @@ export const getExploreCategoryProfiles = query({
     const candidates = [];
     for (let i = 0; i < filteredCandidates.length; i++) {
       const { user, distance } = filteredCandidates[i];
-      const photos = photoResults[i];
+      const rawPhotos = photoResults[i];
 
-      const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
+      // Filter out verification_reference photos (private verification photos, not for display)
+      const displayPhotos = rawPhotos.filter((p) => p.photoType !== 'verification_reference');
+
+      // Filter out NSFW photos
+      const nonNsfwPhotos = displayPhotos.filter((p) => !p.isNsfw);
       if (nonNsfwPhotos.length === 0) continue; // Require at least 1 photo
 
       const userAge = calculateAge(user.dateOfBirth);
