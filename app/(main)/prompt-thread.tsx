@@ -4,7 +4,6 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
-import * as ImagePicker from 'expo-image-picker';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -14,13 +13,11 @@ import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { UnifiedAnswerComposer, IdentityMode, Attachment } from '@/components/truthdare/UnifiedAnswerComposer';
 import { TodVoicePlayer } from '@/components/truthdare/TodVoicePlayer';
-import { CameraPhotoSheet, CameraPhotoOptions } from '@/components/chat/CameraPhotoSheet';
 import { uploadMediaToConvex } from '@/lib/uploadUtils';
 import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
-import { useDemoStore } from '@/stores/demoStore';
-import type { TodPrompt, TodProfileVisibility, TodReportReason } from '@/types';
+import type { TodReportReason } from '@/types';
 
 const C = INCOGNITO_COLORS;
 
@@ -84,24 +81,7 @@ export default function PromptThreadScreen() {
   }>();
   const { promptId, autoOpenComposer } = params;
   const userId = useAuthStore((s) => s.userId);
-  const demoUserId = useDemoStore((s) => s.currentDemoUserId);
-
-  // C-002 FIX: Stable fallback ID constant (outside useMemo to avoid re-creation)
-  // Resolve currentUserId: authStore userId → demoStore currentDemoUserId
-  const currentUserId = useMemo(() => {
-    if (userId) {
-      console.log(`[T/D] resolvedUserId source=auth valuePrefix=${userId.substring(0, 12)}...`);
-      return userId;
-    }
-    if (demoUserId) {
-      console.log(`[T/D] resolvedUserId source=demoStore valuePrefix=${demoUserId.substring(0, 12)}...`);
-      return demoUserId;
-    }
-    // P0-001 FIX: Return null instead of fake user ID to prevent cross-user data leaks
-    // Downstream code already handles null (guards + query 'skip')
-    console.warn(`[T/D] resolvedUserId source=none (no auth or demoStore userId)`);
-    return null;
-  }, [userId, demoUserId]);
+  const token = useAuthStore((s) => s.token);
 
   // Get profile data for author identity snapshot
   const p2DisplayName = usePrivateProfileStore((s) => s.displayName);
@@ -125,17 +105,16 @@ export default function PromptThreadScreen() {
 
 
   // Fetch thread data from Convex
-  // P0-001 FIX: Also check currentUserId to prevent query with null viewer
   const threadData = useQuery(
     api.truthDare.getPromptThread,
-    promptId && currentUserId ? { promptId, viewerUserId: currentUserId } : 'skip'
+    promptId && token ? { promptId, token } : 'skip'
   );
 
   // RECEIVER VISIBILITY: Fetch pending connect requests for this user
   // This allows non-prompt-owners (answer authors) to see incoming connect requests
   const pendingRequests = useQuery(
     api.truthDare.getPendingConnectRequests,
-    currentUserId ? { authUserId: currentUserId } : 'skip'
+    token ? { token } : 'skip'
   );
   const respondToConnect = useMutation(api.truthDare.respondToConnect);
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
@@ -160,14 +139,14 @@ export default function PromptThreadScreen() {
   useEffect(() => {
     if (__DEV__) {
       console.log('[T/D THREAD] Pending requests state:', {
-        currentUserId: currentUserId?.slice(-8),
+        viewerUserId: userId?.slice(-8),
         promptId: promptId?.slice(-8),
         totalPendingRequests: pendingRequests?.length ?? 0,
         pendingForThisPrompt: pendingRequestsForPrompt.length,
         pendingIds: pendingRequestsForPrompt.map((r) => r._id?.slice(-8)),
       });
     }
-  }, [currentUserId, promptId, pendingRequests, pendingRequestsForPrompt]);
+  }, [userId, promptId, pendingRequests, pendingRequestsForPrompt]);
 
   // Mutations
   const createOrEditAnswer = useMutation(api.truthDare.createOrEditAnswer);
@@ -187,6 +166,8 @@ export default function PromptThreadScreen() {
   const isLoading = threadData === undefined;
   const prompt = threadData?.prompt;
   const answers = threadData?.answers ?? [];
+  const visibleAnswerCount = prompt?.visibleAnswerCount ?? prompt?.answerCount ?? answers.length;
+  const isAnswerListTruncated = answers.length < visibleAnswerCount;
 
   // Force re-render when expiry time passes (so isExpired updates in real-time)
   const [, forceUpdate] = useState(0);
@@ -277,14 +258,6 @@ export default function PromptThreadScreen() {
     return () => clearTimeout(safetyTimeout);
   }, [pendingAnswerSubmission]);
 
-  // Gallery media state for privacy sheet (camera flow)
-  const [galleryMedia, setGalleryMedia] = useState<{
-    uri: string;
-    type: 'photo' | 'video';
-    durationMs?: number;
-  } | null>(null);
-  const [isSubmittingMedia, setIsSubmittingMedia] = useState(false);
-
   // Emoji picker state (per answer)
   const [emojiPickerAnswerId, setEmojiPickerAnswerId] = useState<string | null>(null);
   // Emoji picker state for prompt
@@ -334,7 +307,6 @@ export default function PromptThreadScreen() {
 
   // Check if current user is the prompt owner
   // CONNECT FIX: Use backend-computed flag (resolves ID format mismatch)
-  // prompt.ownerUserId is Convex ID, currentUserId is authUserId - can't compare directly
   const isPromptOwner = threadData?.isViewerPromptOwner ?? false;
 
   // CONNECT DEBUG: Log thread ownership state
@@ -342,14 +314,14 @@ export default function PromptThreadScreen() {
     if (__DEV__ && threadData) {
       console.log('[T/D Connect] Thread state:', {
         promptId: promptId?.slice(-8),
-        viewerUserId: currentUserId?.slice(-8),
+        viewerUserId: userId?.slice(-8),
         promptOwnerUserId: prompt?.ownerUserId?.slice(-8),
         isViewerPromptOwner: threadData?.isViewerPromptOwner,
         isPromptOwner,
-        answerCount: answers.length,
+        answerCount: visibleAnswerCount,
       });
     }
-  }, [promptId, currentUserId, prompt?.ownerUserId, threadData?.isViewerPromptOwner, isPromptOwner, answers.length]);
+  }, [promptId, userId, prompt?.ownerUserId, threadData?.isViewerPromptOwner, isPromptOwner, visibleAnswerCount]);
 
   const listRef = useRef<FlatList>(null);
 
@@ -433,7 +405,8 @@ export default function PromptThreadScreen() {
     });
 
     try {
-      const result = await setReaction({ answerId, userId, emoji });
+      if (!token) return;
+      const result = await setReaction({ answerId, token, emoji });
       // Handle server returning ok: false (no throw, graceful fail)
       if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
         console.warn('[T/D REACTION] failed', { reason: (result as any).reason });
@@ -449,11 +422,11 @@ export default function PromptThreadScreen() {
     } finally {
       pendingReactionsRef.current.delete(answerId);
     }
-  }, [userId, setReaction]);
+  }, [token, setReaction]);
 
   // Handle prompt emoji reaction
   const handlePromptReact = useCallback(async (emoji: string) => {
-    if (!userId || !promptId) {
+    if (!token || !promptId) {
       console.log('[T/D PROMPT REACTION] skip - no userId or promptId');
       return;
     }
@@ -467,7 +440,7 @@ export default function PromptThreadScreen() {
     });
 
     try {
-      const result = await setPromptReaction({ promptId, userId, emoji });
+      const result = await setPromptReaction({ promptId, token, emoji });
       if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
         console.warn('[T/D PROMPT REACTION] failed', { reason: (result as any).reason });
       } else {
@@ -479,7 +452,7 @@ export default function PromptThreadScreen() {
         Alert.alert('Slow down', 'Please wait a moment before reacting again.');
       }
     }
-  }, [userId, promptId, setPromptReaction]);
+  }, [token, promptId, setPromptReaction]);
 
   // Open report modal
   const handleReport = useCallback((answerId: string, authorId: string) => {
@@ -499,12 +472,11 @@ export default function PromptThreadScreen() {
 
     setIsSubmittingReport(true);
     try {
-      if (isReportingPrompt && promptId && userId) {
+      if (isReportingPrompt && promptId && token) {
         // P0-002: Report the prompt
-        // P1-002 FIX: Pass reporterId for demo mode compatibility
         const result = await reportPromptMutation({
           promptId,
-          reporterId: userId,
+          token,
           reasonCode: selectedReportReason,
           reasonText: reportReasonText.trim() || undefined,
         });
@@ -515,11 +487,11 @@ export default function PromptThreadScreen() {
         } else {
           Alert.alert('Reported', 'Thank you for your report. We will review it.');
         }
-      } else if (reportingAnswerId && userId) {
+      } else if (reportingAnswerId && token) {
         // Report the answer
         const result = await reportAnswer({
           answerId: reportingAnswerId,
-          reporterId: userId,
+          token,
           reasonCode: selectedReportReason,
           reasonText: reportReasonText.trim() || undefined,
         });
@@ -544,7 +516,7 @@ export default function PromptThreadScreen() {
     } finally {
       setIsSubmittingReport(false);
     }
-  }, [userId, promptId, reportingAnswerId, isReportingPrompt, selectedReportReason, reportReasonText, reportAnswer, reportPromptMutation, router]);
+  }, [token, promptId, reportingAnswerId, isReportingPrompt, selectedReportReason, reportReasonText, reportAnswer, reportPromptMutation, router]);
 
   // Close report modal
   const closeReportModal = useCallback(() => {
@@ -582,12 +554,12 @@ export default function PromptThreadScreen() {
   // Handle delete own prompt
   // P0-006 FIX: Use finally block to always clear loading state
   const handleDeletePrompt = useCallback(async () => {
-    if (!userId || !promptId || !isPromptOwner) return;
+    if (!token || !promptId || !isPromptOwner) return;
     if (isDeletingPrompt) return; // Prevent double-tap
 
     setIsDeletingPrompt(true);
     try {
-      await deletePrompt({ promptId, userId });
+      await deletePrompt({ promptId, token });
       setShowPromptActionPopup(false);
       router.back(); // Navigate back after successful delete
     } catch (error: any) {
@@ -595,11 +567,11 @@ export default function PromptThreadScreen() {
     } finally {
       setIsDeletingPrompt(false);
     }
-  }, [userId, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, router]);
+  }, [token, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, router]);
 
   // Handle delete own comment
   const handleDeleteAnswer = useCallback(async (answerId: string) => {
-    if (!userId) return;
+    if (!token) return;
 
     Alert.alert(
       'Delete Comment',
@@ -611,7 +583,7 @@ export default function PromptThreadScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await deleteAnswer({ answerId, userId });
+              await deleteAnswer({ answerId, token });
             } catch (error) {
               Alert.alert('Error', 'Failed to delete comment. Please try again.');
             }
@@ -619,7 +591,7 @@ export default function PromptThreadScreen() {
         },
       ]
     );
-  }, [userId, deleteAnswer]);
+  }, [token, deleteAnswer]);
 
   // Open 3-dot menu
   const handleOpenMenu = useCallback((answerId: string, authorId: string, isOwn: boolean) => {
@@ -663,13 +635,13 @@ export default function PromptThreadScreen() {
   // RECEIVER: Handle accept T&D connect request
   // FIX: Show success sheet instead of navigating directly to chat
   const handleAcceptConnect = useCallback(async (requestId: string) => {
-    if (!currentUserId) return;
+    if (!token) return;
     setRespondingTo(requestId);
     try {
       const result = await respondToConnect({
         requestId: requestId as any,
         action: 'connect',
-        authUserId: currentUserId,
+        token,
       });
       if (__DEV__) {
         console.log('[T/D ACCEPT RESULT]', {
@@ -698,17 +670,17 @@ export default function PromptThreadScreen() {
     } finally {
       setRespondingTo(null);
     }
-  }, [currentUserId, respondToConnect]);
+  }, [token, respondToConnect]);
 
   // RECEIVER: Handle reject T&D connect request
   const handleRejectConnect = useCallback(async (requestId: string) => {
-    if (!currentUserId) return;
+    if (!token) return;
     setRespondingTo(requestId);
     try {
       const result = await respondToConnect({
         requestId: requestId as any,
         action: 'remove',
-        authUserId: currentUserId,
+        token,
       });
       if (__DEV__) {
         console.log('[T/D THREAD] Reject result:', result);
@@ -721,12 +693,12 @@ export default function PromptThreadScreen() {
     } finally {
       setRespondingTo(null);
     }
-  }, [currentUserId, respondToConnect]);
+  }, [token, respondToConnect]);
 
   // Handle send T&D connect request (prompt owner → answer author)
   // P0-007 FIX: Add double-tap guard + backend is authoritative for dedup
   const handleSendConnect = useCallback(async (answerId: string) => {
-    if (!userId || !promptId) return;
+    if (!token || !promptId) return;
     if (connectSending) return; // P0-007: Prevent double-tap while request in flight
 
     setConnectSending(answerId);
@@ -734,7 +706,7 @@ export default function PromptThreadScreen() {
       const result = await sendConnectRequest({
         promptId,
         answerId,
-        authUserId: userId,
+        token,
       });
 
       if (result.success) {
@@ -750,7 +722,7 @@ export default function PromptThreadScreen() {
     } finally {
       setConnectSending(null);
     }
-  }, [userId, promptId, connectSending, sendConnectRequest]);
+  }, [token, promptId, connectSending, sendConnectRequest]);
 
   // Handle tap-to-view for media content
   // P0-001 FIX: Backend is the source of truth for view state.
@@ -784,7 +756,7 @@ export default function PromptThreadScreen() {
     // The backend will return the appropriate status.
 
     // Guard: ensure user is authenticated before claiming
-    if (!currentUserId) {
+    if (!token) {
       Alert.alert('Sign In Required', 'Please sign in to view media.');
       return;
     }
@@ -795,7 +767,7 @@ export default function PromptThreadScreen() {
       // Backend claim is atomic and records the view at this moment (P0-002 FIX)
       const result = await claimAnswerMediaView({
         answerId,
-        viewerId: currentUserId,
+        token,
       });
 
       // Handle backend responses
@@ -840,16 +812,16 @@ export default function PromptThreadScreen() {
       // P0-001 FIX: Always clear the pending flag
       pendingMediaClaimsRef.current.delete(answerId);
     }
-  }, [currentUserId, claimAnswerMediaView]);
+  }, [token, claimAnswerMediaView]);
 
   // Handle closing the media viewer
   const handleCloseMediaViewer = useCallback(async () => {
-    if (viewingMedia && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed && currentUserId) {
+    if (viewingMedia && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed && token) {
       // Finalize the view for non-owners
       try {
         await finalizeAnswerMediaView({
           answerId: viewingMedia.answerId,
-          viewerId: currentUserId,
+          token,
         });
         console.log('[T/D] Media view finalized');
       } catch (error) {
@@ -866,7 +838,7 @@ export default function PromptThreadScreen() {
     setViewingMedia(null);
     // T/D VIDEO FIX: Reset video progress state
     setVideoProgress({ position: 0, duration: 0, isPlaying: false });
-  }, [viewingMedia, currentUserId, finalizeAnswerMediaView]);
+  }, [viewingMedia, token, finalizeAnswerMediaView]);
 
   // Unified submit handler - handles text + optional media attachment
   // Uses MERGE behavior: only sends fields that changed
@@ -877,7 +849,7 @@ export default function PromptThreadScreen() {
     identityMode: IdentityMode;
     mediaVisibility?: 'private' | 'public';
   }) => {
-    if (!promptId || !currentUserId) return;
+    if (!promptId || !token) return;
 
     setIsSubmitting(true);
 
@@ -902,6 +874,7 @@ export default function PromptThreadScreen() {
       let mediaMime: string | undefined;
       let durationSec: number | undefined;
       let isFrontCamera: boolean | undefined;
+      let authorPhotoStorageId: string | undefined;
 
       if (attachment) {
         // Check if this is a remote URL (already uploaded media from existing answer)
@@ -920,7 +893,11 @@ export default function PromptThreadScreen() {
           console.log('[T/D UPLOAD] start', { type: mediaType, isFrontCamera });
 
           try {
-            mediaStorageId = await uploadMediaToConvex(attachment.uri, generateUploadUrl, mediaType);
+            mediaStorageId = await uploadMediaToConvex(
+              attachment.uri,
+              () => generateUploadUrl({ token }),
+              mediaType
+            );
             const storageIdPrefix = mediaStorageId?.substring(0, 8) ?? 'none';
             console.log('[T/D UPLOAD] success', { storageIdPrefix });
           } catch (uploadError: any) {
@@ -934,12 +911,27 @@ export default function PromptThreadScreen() {
         }
       }
 
+      const authorPhotoUrl = authorProfile.photoUrl;
+      const shouldAttachProfilePhoto =
+        !isAnon &&
+        !isNoPhoto &&
+        typeof authorPhotoUrl === 'string' &&
+        authorPhotoUrl.length > 0;
+
+      if (shouldAttachProfilePhoto && authorPhotoUrl && !(authorPhotoUrl.startsWith('http://') || authorPhotoUrl.startsWith('https://'))) {
+        authorPhotoStorageId = await uploadMediaToConvex(
+          authorPhotoUrl,
+          () => generateUploadUrl({ token }),
+          'photo'
+        );
+      }
+
       // Create or edit the answer with MERGE behavior
       // Only send fields that are explicitly provided
       console.log('[T/D BEHAVIOR] createOrEditAnswer start', { identityMode, visibility: mediaVisibility === 'private' ? 'owner_only' : 'public' });
       await createOrEditAnswer({
         promptId,
-        userId: currentUserId,
+        token,
         // Text - send if provided (even empty string is valid to clear)
         text: text.trim() || undefined,
         // Media - only send if new attachment or removeMedia
@@ -954,7 +946,13 @@ export default function PromptThreadScreen() {
         viewMode: attachment ? 'tap' : undefined, // One-time tap to view for media
         // Author identity based on choice
         authorName: isAnon ? undefined : authorProfile.name,
-        authorPhotoUrl: isAnon || isNoPhoto ? undefined : authorProfile.photoUrl,
+        authorPhotoUrl:
+          isAnon || isNoPhoto
+            ? undefined
+            : (authorPhotoUrl?.startsWith('http://') || authorPhotoUrl?.startsWith('https://'))
+              ? authorPhotoUrl
+              : undefined,
+        authorPhotoStorageId: isAnon || isNoPhoto ? undefined : (authorPhotoStorageId as any),
         authorAge: isAnon ? undefined : authorProfile.age,
         authorGender: isAnon ? undefined : authorProfile.gender,
         photoBlurMode: photoBlurMode as 'none' | 'blur',
@@ -980,92 +978,7 @@ export default function PromptThreadScreen() {
     }
     // P0-005 FIX: Don't reset isSubmitting in finally - let the useEffect handle it
     // when data arrives, providing continuous loading feedback
-  }, [promptId, currentUserId, generateUploadUrl, createOrEditAnswer, authorProfile, myAnswer]);
-
-  // These functions are kept for camera-composer route compatibility
-  const openCamera = () => {
-    if (!promptId) return;
-    router.push({
-      pathname: '/(main)/camera-composer' as any,
-      params: { promptId, promptType: prompt?.type },
-    });
-  };
-
-  // Gallery picker - pick photo/video from library, then show privacy sheet
-  const openGallery = useCallback(async () => {
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images', 'videos'],
-        allowsEditing: false,
-        quality: 0.8,
-        videoMaxDuration: 60,
-      });
-
-      if (result.canceled || !result.assets || result.assets.length === 0) {
-        return;
-      }
-
-      const asset = result.assets[0];
-      const mediaType = asset.type === 'video' ? 'video' : 'photo';
-      // asset.duration is in milliseconds - store as durationMs for consistency
-      const durationMs = asset.duration ? Math.round(asset.duration) : undefined;
-
-      // Set gallery media state to show privacy sheet
-      setGalleryMedia({
-        uri: asset.uri,
-        type: mediaType,
-        durationMs,
-      });
-    } catch (error) {
-      Alert.alert('Error', 'Failed to open gallery. Please try again.');
-    }
-  }, []);
-
-  // Handle gallery media privacy settings confirmation
-  const handleGalleryMediaConfirm = useCallback(async (
-    imageUri: string,
-    options: CameraPhotoOptions
-  ) => {
-    if (!promptId || !currentUserId || !galleryMedia) return;
-
-    setIsSubmittingMedia(true);
-
-    try {
-      // Upload media to Convex storage
-      const storageId = await uploadMediaToConvex(imageUri, generateUploadUrl, galleryMedia.type);
-
-      // Default to anonymous for this legacy flow
-      const identityMode: IdentityMode = 'anonymous';
-      const isAnon = true;
-
-      await createOrEditAnswer({
-        promptId,
-        userId: currentUserId,
-        mediaStorageId: storageId,
-        mediaMime: galleryMedia.type === 'video' ? 'video/mp4' : 'image/jpeg',
-        // Convert durationMs to durationSec for API (backend expects seconds)
-        durationSec: galleryMedia.durationMs ? Math.ceil(galleryMedia.durationMs / 1000) : undefined,
-        identityMode,
-        isAnonymous: isAnon,
-        visibility: 'public',
-        viewMode: options.viewingMode,
-        viewDurationSec: options.timer > 0 ? options.timer : undefined,
-      });
-
-      // Clear gallery media state and close sheet
-      setGalleryMedia(null);
-      scrollToEnd();
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to post media comment. Please try again.');
-    } finally {
-      setIsSubmittingMedia(false);
-    }
-  }, [promptId, currentUserId, galleryMedia, generateUploadUrl, createOrEditAnswer]);
-
-  // Handle gallery media cancel
-  const handleGalleryMediaCancel = useCallback(() => {
-    setGalleryMedia(null);
-  }, []);
+  }, [promptId, token, generateUploadUrl, createOrEditAnswer, authorProfile, myAnswer]);
 
   // Helper for gender icon
   const getCommentGenderIcon = (gender: string | undefined): string => {
@@ -1567,10 +1480,10 @@ export default function PromptThreadScreen() {
           </View>
 
           {/* Answer count badge */}
-          {prompt.answerCount > 0 && (
+          {visibleAnswerCount > 0 && (
             <View style={styles.answerCountBadge}>
               <Ionicons name="chatbubbles" size={12} color={PREMIUM.coral} />
-              <Text style={styles.answerCountText}>{prompt.answerCount}</Text>
+              <Text style={styles.answerCountText}>{visibleAnswerCount}</Text>
             </View>
           )}
         </View>
@@ -1686,7 +1599,11 @@ export default function PromptThreadScreen() {
             )}
             <View style={styles.commentsHeader}>
               <Text style={styles.commentsHeaderText}>
-                {answers.length === 0 ? 'Be the first to respond' : `${answers.length} ${answers.length === 1 ? 'Response' : 'Responses'}`}
+                {visibleAnswerCount === 0
+                  ? 'Be the first to respond'
+                  : isAnswerListTruncated
+                    ? `Showing ${answers.length} of ${visibleAnswerCount} responses`
+                    : `${visibleAnswerCount} ${visibleAnswerCount === 1 ? 'Response' : 'Responses'}`}
               </Text>
             </View>
           </View>
@@ -1862,7 +1779,7 @@ export default function PromptThreadScreen() {
           text: prompt.text,
           isTrending: prompt.isTrending,
           ownerUserId: prompt.ownerUserId,
-          answerCount: prompt.answerCount,
+          answerCount: visibleAnswerCount,
           activeCount: 0,
           createdAt: prompt.createdAt,
           expiresAt: prompt.expiresAt,
@@ -1881,23 +1798,6 @@ export default function PromptThreadScreen() {
         onSubmit={handleUnifiedSubmit}
         isSubmitting={isSubmitting}
       />
-
-      {/* Gallery Media Privacy Sheet - same as camera flow */}
-      <CameraPhotoSheet
-        visible={!!galleryMedia}
-        imageUri={galleryMedia?.uri ?? null}
-        mediaType={galleryMedia?.type}
-        onConfirm={handleGalleryMediaConfirm}
-        onCancel={handleGalleryMediaCancel}
-      />
-
-      {/* Loading overlay for media upload */}
-      {isSubmittingMedia && (
-        <View style={styles.uploadingOverlay}>
-          <ActivityIndicator size="large" color={PREMIUM.coral} />
-          <Text style={styles.uploadingText}>Posting media...</Text>
-        </View>
-      )}
 
       {/* Media Viewer Modal - Tap to view */}
       <Modal
@@ -2794,21 +2694,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: PREMIUM.textSecondary,
-  },
-
-  // Uploading overlay
-  uploadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.8)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 100,
-  },
-  uploadingText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: '#FFF',
-    fontWeight: '600',
   },
 
   // Media viewer modal

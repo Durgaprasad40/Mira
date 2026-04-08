@@ -212,7 +212,7 @@ export default function PrivateTabsLayout() {
   // P0-FIX: Query pending T/D connect requests for badge
   const pendingConnectRequests = useQuery(
     api.truthDare.getPendingConnectRequests,
-    currentUserId ? { authUserId: currentUserId } : 'skip'
+    token ? { token } : 'skip'
   );
   const todPendingCount = pendingConnectRequests?.length ?? 0;
 

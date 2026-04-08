@@ -724,6 +724,7 @@ export default defineSchema({
       v.literal('like'),
       v.literal('super_like'),
       v.literal('crossed_paths'),
+      v.literal('tod_connect'),
       v.literal('subscription'),
       v.literal('weekly_refresh'),
       v.literal('profile_nudge')
@@ -751,6 +752,61 @@ export default defineSchema({
     .index('by_user_dedupe', ['userId', 'dedupeKey'])
     // 4-2: Cleanup index for expired notifications
     .index('by_expires', ['expiresAt']),
+
+  // Phase-2 private conversations
+  privateConversations: defineTable({
+    participants: v.array(v.id('users')),
+    connectionSource: v.optional(v.union(
+      v.literal('tod'),
+      v.literal('room'),
+      v.literal('desire'),
+      v.literal('desire_match'),
+      v.literal('desire_super_like'),
+      v.literal('friend')
+    )),
+    matchId: v.optional(v.id('matches')),
+    lastMessageAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index('by_connection_source', ['connectionSource'])
+    .index('by_last_message', ['lastMessageAt']),
+
+  privateConversationParticipants: defineTable({
+    conversationId: v.id('privateConversations'),
+    userId: v.id('users'),
+    unreadCount: v.number(),
+    isHidden: v.optional(v.boolean()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
+
+  privateMessages: defineTable({
+    conversationId: v.id('privateConversations'),
+    senderId: v.id('users'),
+    type: v.union(
+      v.literal('text'),
+      v.literal('image'),
+      v.literal('video'),
+      v.literal('voice'),
+      v.literal('system')
+    ),
+    content: v.string(),
+    imageStorageId: v.optional(v.id('_storage')),
+    audioStorageId: v.optional(v.id('_storage')),
+    audioDurationMs: v.optional(v.number()),
+    isProtected: v.optional(v.boolean()),
+    protectedMediaTimer: v.optional(v.number()),
+    protectedMediaViewingMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
+    protectedMediaIsMirrored: v.optional(v.boolean()),
+    deliveredAt: v.optional(v.number()),
+    readAt: v.optional(v.number()),
+    clientMessageId: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_conversation_created', ['conversationId', 'createdAt'])
+    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
 
   // Crossed Paths table
   crossedPaths: defineTable({
@@ -1167,6 +1223,8 @@ export default defineSchema({
     activeCount: v.number(),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()),
+    isHidden: v.optional(v.boolean()),
+    totalReactionCount: v.optional(v.number()),
     // Owner profile snapshot (immutable at creation time)
     isAnonymous: v.optional(v.boolean()), // true = hide photo/name, show only age+gender
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))), // 'blur' = show blurred photo
@@ -1209,6 +1267,8 @@ export default defineSchema({
     // Reaction and report counts (denormalized for ranking)
     totalReactionCount: v.optional(v.number()), // total emoji reactions
     reportCount: v.optional(v.number()), // unique reporters
+    hiddenForUserIds: v.optional(v.array(v.string())),
+    isGloballyHidden: v.optional(v.boolean()),
     // One-time view gating fields (for both owner_only and public visibility)
     viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
     viewDurationSec: v.optional(v.number()), // 1-60 seconds for one-time view
@@ -1254,6 +1314,18 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_answer_user', ['answerId', 'userId']),
 
+  // Truth & Dare Prompt Reactions (emoji reactions - one per user per prompt)
+  todPromptReactions: defineTable({
+    promptId: v.string(),
+    userId: v.string(),
+    emoji: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.optional(v.number()),
+  })
+    .index('by_prompt', ['promptId'])
+    .index('by_user', ['userId'])
+    .index('by_prompt_user', ['promptId', 'userId']),
+
   // Truth & Dare Answer Reports (for hiding answers with 5+ reports)
   todAnswerReports: defineTable({
     answerId: v.string(),
@@ -1265,6 +1337,8 @@ export default defineSchema({
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
       v.literal('other')
     )),
     // Optional additional details (renamed from reason for clarity)
@@ -1277,13 +1351,37 @@ export default defineSchema({
     .index('by_reporter', ['reporterId'])
     .index('by_answer_reporter', ['answerId', 'reporterId']),
 
+  // Truth & Dare Prompt Reports
+  todPromptReports: defineTable({
+    promptId: v.string(),
+    reporterId: v.string(),
+    reasonCode: v.union(
+      v.literal('harassment'),
+      v.literal('sexual'),
+      v.literal('spam'),
+      v.literal('hate'),
+      v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
+      v.literal('other')
+    ),
+    reasonText: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_prompt', ['promptId'])
+    .index('by_reporter', ['reporterId'])
+    .index('by_prompt_reporter', ['promptId', 'reporterId']),
+
   // Truth & Dare Rate Limiting (tracks user action counts per day)
   todRateLimits: defineTable({
     userId: v.string(),
     actionType: v.union(
       v.literal('answer'),
       v.literal('reaction'),
-      v.literal('report')
+      v.literal('report'),
+      v.literal('claim_media'),
+      v.literal('prompt'),
+      v.literal('connect')
     ),
     windowStart: v.number(), // Start of the rate limit window (day start)
     count: v.number(), // Actions in this window

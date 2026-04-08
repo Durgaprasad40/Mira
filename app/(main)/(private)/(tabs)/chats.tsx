@@ -279,7 +279,7 @@ export default function ChatsScreen() {
   // P0-AUTH-CRASH-FIX: Gate on canRunQueries to prevent early query errors
   const pendingRequests = useQuery(
     api.truthDare.getPendingConnectRequests,
-    canRunQueries ? { authUserId: currentUserId } : 'skip'
+    canRunQueries && token ? { token } : 'skip'
   );
   const respondToConnect = useMutation(api.truthDare.respondToConnect);
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
@@ -441,14 +441,14 @@ export default function ChatsScreen() {
 
   // Handle accept T&D connect request
   const handleAcceptConnect = useCallback(async (requestId: string) => {
-    if (!currentUserId) return;
+    if (!currentUserId || !token) return;
 
     setRespondingTo(requestId);
     try {
       const result = await respondToConnect({
         requestId: requestId as any,
         action: 'connect',
-        authUserId: currentUserId,
+        token: token as string,
       });
 
       if (result?.success && result.action === 'connected') {
@@ -500,25 +500,25 @@ export default function ChatsScreen() {
     } finally {
       setRespondingTo(null);
     }
-  }, [currentUserId, respondToConnect, conversations, unlockUser, createConversation, router]);
+  }, [currentUserId, token, respondToConnect, conversations, unlockUser, createConversation, router]);
 
   // Handle reject T&D connect request
   const handleRejectConnect = useCallback(async (requestId: string) => {
-    if (!currentUserId) return;
+    if (!currentUserId || !token) return;
 
     setRespondingTo(requestId);
     try {
       await respondToConnect({
         requestId: requestId as any,
         action: 'remove',
-        authUserId: currentUserId,
+        token: token as string,
       });
     } catch (error) {
       Alert.alert('Error', 'Failed to decline connection. Please try again.');
     } finally {
       setRespondingTo(null);
     }
-  }, [currentUserId, respondToConnect]);
+  }, [currentUserId, token, respondToConnect]);
 
   // Separate conversations into "new matches" (no real messages) and "message threads" (has real messages)
   // FIX: Use backend lastMessage field instead of local messages store for consistent cross-device state

@@ -280,6 +280,7 @@ type TrendingPromptData = {
   isTrending: boolean;
   expiresAt: number;
   answerCount: number;
+  totalAnswers?: number;
   isAnonymous?: boolean;
   photoBlurMode?: 'none' | 'blur';
   ownerName?: string;
@@ -360,7 +361,7 @@ const TrendingCard = React.memo(function TrendingCard({
   const handleLongPress = useCallback(() => onLongPress?.(promptId), [onLongPress, promptId]);
   const isTruth = prompt.type === 'truth';
   const isAnon = prompt.isAnonymous ?? true;
-  const answerCount = prompt.answerCount ?? 0;
+  const answerCount = prompt.totalAnswers ?? prompt.answerCount ?? 0;
   const showPhoto = shouldShowPhoto(prompt);
   const genderColor = getGenderColor(prompt.ownerGender);
 
@@ -661,23 +662,23 @@ export default function TruthOrDareScreen() {
   }, []);
 
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // Delete popup state
   const [deletePopupPromptId, setDeletePopupPromptId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const deletePromptMutation = useMutation(api.truthDare.deleteMyPrompt);
 
-  // Get trending prompts (1 Dare + 1 Truth)
-  // P1-006 FIX: Pass authUserId for block filtering in trending
+  // Get trending prompts (1 Dare + 1 Truth) using the token-authenticated viewer
   const trendingDataQuery = useQuery(
     api.truthDare.getTrendingTruthAndDare,
-    { authUserId: userId ?? undefined }
+    token ? { token, refreshKey } : 'skip'
   );
 
   // Get all prompts (sorted by engagement)
   const promptsDataQuery = useQuery(
     api.truthDare.listActivePromptsWithTop2Answers,
-    { viewerUserId: userId ?? undefined }
+    token ? { token, refreshKey } : 'skip'
   );
 
   // Update cache when data arrives + log diagnostics
@@ -772,11 +773,11 @@ export default function TruthOrDareScreen() {
 
   // Handle delete confirmation
   const handleDeletePrompt = useCallback(async () => {
-    if (!deletePopupPromptId || !userId) return;
+    if (!deletePopupPromptId || !token) return;
 
     setIsDeleting(true);
     try {
-      await deletePromptMutation({ promptId: deletePopupPromptId, userId });
+      await deletePromptMutation({ promptId: deletePopupPromptId, token });
       setDeletePopupPromptId(null);
       Alert.alert('Deleted', 'Your post has been deleted.');
     } catch (error: any) {
@@ -784,7 +785,7 @@ export default function TruthOrDareScreen() {
     } finally {
       setIsDeleting(false);
     }
-  }, [deletePopupPromptId, userId, deletePromptMutation]);
+  }, [deletePopupPromptId, token, deletePromptMutation]);
 
   // Close delete popup
   const handleCloseDeletePopup = useCallback(() => {

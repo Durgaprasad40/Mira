@@ -374,12 +374,12 @@ export default function PrivateLayout() {
   // PREWARM: Start T/D queries early so data is cached when user opens T/D tab
   const prewarmPromptsData = useQuery(
     api.truthDare.listActivePromptsWithTop2Answers,
-    { viewerUserId: userId ?? undefined }
+    !isDemoMode && token ? { token } : 'skip'
   );
-  // P1-006 FIX: Pass authUserId for block filtering in trending
+  // P0 FIX: Prewarm token-authenticated trending data so blocked users stay filtered
   const prewarmTrendingData = useQuery(
     api.truthDare.getTrendingTruthAndDare,
-    { authUserId: userId ?? undefined }
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Push data into module-level cache as soon as it arrives

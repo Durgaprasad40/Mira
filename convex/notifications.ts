@@ -152,6 +152,7 @@ export const createNotification = mutation({
       v.literal('message'),
       v.literal('super_like'),
       v.literal('crossed_paths'),
+      v.literal('tod_connect'),
       v.literal('subscription'),
       v.literal('weekly_refresh'),
       v.literal('profile_nudge')
