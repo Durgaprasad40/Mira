@@ -38,7 +38,7 @@ const SHARED_ROUTES = new Set([
  * Check if a segment array represents a Phase 2 (private) route
  */
 export function isPhase2Segment(segments: string[]): boolean {
-  return segments.includes('(private)') || segments.includes('(private-setup)');
+  return segments.includes('(private)');
 }
 
 /**

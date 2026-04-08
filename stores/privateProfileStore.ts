@@ -1,9 +1,7 @@
 /**
- * STORAGE POLICY: Convex is ONLY source of truth for profile data.
- * Store is in-memory only EXCEPT for onboarding wizard progress (P0-002 fix).
- *
- * P0-002 FIX: Onboarding wizard state is persisted to AsyncStorage to prevent
- * data loss when app closes during onboarding. This is cleared once setup completes.
+ * STORAGE POLICY: Convex is the only source of truth for active Phase-2
+ * profile and onboarding state. AsyncStorage is retained only to clear
+ * legacy saved onboarding progress from older builds.
  */
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -624,122 +622,19 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     notificationCategories: { ...state.notificationCategories, [key]: value },
   })),
 
-  // P0-002 FIX: Save onboarding wizard progress to AsyncStorage
-  // Called after each step to prevent data loss on app close
+  // Legacy no-op: active Phase-2 onboarding no longer trusts AsyncStorage progress.
   saveOnboardingProgress: async () => {
-    const state = usePrivateProfileStore.getState();
-
-    // Only save if onboarding is not yet complete
-    if (state.phase2OnboardingCompleted || state.isSetupComplete) {
-      return;
-    }
-
-    const progressData = {
-      currentStep: state.currentStep,
-      acceptedTermsAt: state.acceptedTermsAt,
-      phase1PhotoSlots: state.phase1PhotoSlots,
-      selectedPhotoIds: state.selectedPhotoIds,
-      selectedPhotoUrls: state.selectedPhotoUrls,
-      blurredPhotoLocalUris: state.blurredPhotoLocalUris,
-      blurredStorageIds: state.blurredStorageIds,
-      blurredPhotoUrls: state.blurredPhotoUrls,
-      photoBlurSlots: state.photoBlurSlots,
-      intentKeys: state.intentKeys,
-      desireTags: state.desireTags,
-      boundaries: state.boundaries,
-      privateBio: state.privateBio,
-      promptAnswers: state.promptAnswers,
-      displayName: state.displayName,
-      age: state.age,
-      city: state.city,
-      gender: state.gender,
-      hobbies: state.hobbies,
-      height: state.height,
-      weight: state.weight,
-      smoking: state.smoking,
-      drinking: state.drinking,
-      education: state.education,
-      religion: state.religion,
-      phase2PhotosConfirmed: state.phase2PhotosConfirmed,
-      savedAt: Date.now(),
-    };
-
-    try {
-      await AsyncStorage.setItem(ONBOARDING_PROGRESS_KEY, JSON.stringify(progressData));
-      if (__DEV__) {
-        console.log('[P2 ONBOARDING] Progress saved at step', state.currentStep);
-      }
-    } catch (error) {
-      if (__DEV__) {
-        console.error('[P2 ONBOARDING] Failed to save progress:', error);
-      }
-    }
+    return;
   },
 
-  // P0-002 FIX: Restore onboarding wizard progress from AsyncStorage
-  // Called on app load before onboarding screen mounts
+  // Legacy cleanup: clear stale saved progress and never restore it into live onboarding.
   restoreOnboardingProgress: async () => {
     try {
-      const stored = await AsyncStorage.getItem(ONBOARDING_PROGRESS_KEY);
-      if (!stored) return false;
-
-      const progressData = JSON.parse(stored);
-
-      // Validate saved data is not too old (24 hours max)
-      const savedAt = progressData.savedAt || 0;
-      const maxAge = 24 * 60 * 60 * 1000; // 24 hours
-      if (Date.now() - savedAt > maxAge) {
-        await AsyncStorage.removeItem(ONBOARDING_PROGRESS_KEY);
-        if (__DEV__) {
-          console.log('[P2 ONBOARDING] Expired progress cleared');
-        }
-        return false;
-      }
-
-      // Restore only if not already completed
-      const currentState = usePrivateProfileStore.getState();
-      if (currentState.phase2OnboardingCompleted || currentState.isSetupComplete) {
-        await AsyncStorage.removeItem(ONBOARDING_PROGRESS_KEY);
-        return false;
-      }
-
-      // Restore the saved state
-      usePrivateProfileStore.setState({
-        currentStep: progressData.currentStep ?? 1,
-        acceptedTermsAt: progressData.acceptedTermsAt ?? null,
-        phase1PhotoSlots: progressData.phase1PhotoSlots ?? createEmptyPhotoSlots(),
-        selectedPhotoIds: progressData.selectedPhotoIds ?? [],
-        selectedPhotoUrls: progressData.selectedPhotoUrls ?? [],
-        blurredPhotoLocalUris: progressData.blurredPhotoLocalUris ?? [],
-        blurredStorageIds: progressData.blurredStorageIds ?? [],
-        blurredPhotoUrls: progressData.blurredPhotoUrls ?? [],
-        photoBlurSlots: progressData.photoBlurSlots ?? [true, true, true, true, true, true, true, true, true],
-        intentKeys: progressData.intentKeys ?? [],
-        desireTags: progressData.desireTags ?? [],
-        boundaries: progressData.boundaries ?? [],
-        privateBio: progressData.privateBio ?? '',
-        promptAnswers: progressData.promptAnswers ?? [],
-        displayName: progressData.displayName ?? '',
-        age: progressData.age ?? 0,
-        city: progressData.city ?? '',
-        gender: progressData.gender ?? '',
-        hobbies: progressData.hobbies ?? [],
-        height: progressData.height ?? null,
-        weight: progressData.weight ?? null,
-        smoking: progressData.smoking ?? null,
-        drinking: progressData.drinking ?? null,
-        education: progressData.education ?? null,
-        religion: progressData.religion ?? null,
-        phase2PhotosConfirmed: progressData.phase2PhotosConfirmed ?? false,
-      });
-
-      if (__DEV__) {
-        console.log('[P2 ONBOARDING] Progress restored at step', progressData.currentStep);
-      }
-      return true;
+      await AsyncStorage.removeItem(ONBOARDING_PROGRESS_KEY);
+      return false;
     } catch (error) {
       if (__DEV__) {
-        console.error('[P2 ONBOARDING] Failed to restore progress:', error);
+        console.error('[P2 ONBOARDING] Failed to clear legacy progress:', error);
       }
       return false;
     }
@@ -778,9 +673,16 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       });
     }
 
+    const notificationCategories: Record<string, boolean> = {
+      deepConnect: convexProfile.notificationCategories?.deepConnect ?? true,
+      privateMessages: convexProfile.notificationCategories?.privateMessages ?? true,
+      chatRooms: convexProfile.notificationCategories?.chatRooms ?? true,
+      truthOrDare: convexProfile.notificationCategories?.truthOrDare ?? true,
+    };
+
     // Hydrate store with Convex profile data
     // ALWAYS hydrate from Convex - this is the source of truth after restart
-    set({
+    set((state) => ({
       // Profile info
       displayName: convexProfile.displayName || '',
       age: convexProfile.age || 0,
@@ -811,7 +713,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
 
       // Completion flags
       isSetupComplete: convexProfile.isSetupComplete,
-      phase2OnboardingCompleted: convexProfile.isSetupComplete, // If profile exists & setup complete, onboarding is done
+      phase2OnboardingCompleted: state.phase2OnboardingCompleted,
       convexProfileId: convexProfile._id,
 
       // Profile visibility (Pause Profile)
@@ -838,18 +740,11 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
 
       // P0-1 FIX: Notification settings (hydrate from backend)
       notificationsEnabled: convexProfile.notificationsEnabled ?? true,
-      notificationCategories: convexProfile.notificationCategories
-        ? {
-            deepConnect: convexProfile.notificationCategories.deepConnect ?? true,
-            privateMessages: convexProfile.notificationCategories.privateMessages ?? true,
-            chatRooms: convexProfile.notificationCategories.chatRooms ?? true,
-            truthOrDare: convexProfile.notificationCategories.truthOrDare ?? true,
-          }
-        : {},
+      notificationCategories,
 
       // Mark as hydrated
       _hasHydrated: true,
-    });
+    }));
 
     if (__DEV__) {
       console.log('[privateProfileStore] hydrateFromConvex complete:', {
@@ -876,6 +771,16 @@ function isValidPhotoUrl(url: unknown): url is string {
   );
 }
 
+function isPersistedPhotoUrl(url: unknown): url is string {
+  return (
+    typeof url === 'string' &&
+    url.length > 0 &&
+    url !== 'undefined' &&
+    url !== 'null' &&
+    (url.startsWith('http://') || url.startsWith('https://'))
+  );
+}
+
 // Phase-2 onboarding validation constants
 export const PHASE2_MIN_PHOTOS = 2;
 export const PHASE2_MIN_INTENTS = 1;
@@ -898,7 +803,7 @@ export const selectIsSetupValid = (state: PrivateProfileState): boolean => {
   if (state.acceptedTermsAt === null) return false;
 
   // Must have at least 2 valid photos
-  const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
+  const validPhotos = state.selectedPhotoUrls.filter(isPersistedPhotoUrl);
   if (validPhotos.length < PHASE2_MIN_PHOTOS) return false;
 
   // Must have 1-3 intent categories
@@ -912,7 +817,7 @@ export const selectIsSetupValid = (state: PrivateProfileState): boolean => {
 
 // Selector: Check if photos step is valid (min 2 selected)
 export const selectCanContinuePhotos = (state: PrivateProfileState): boolean => {
-  const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
+  const validPhotos = state.selectedPhotoUrls.filter(isPersistedPhotoUrl);
   return validPhotos.length >= PHASE2_MIN_PHOTOS;
 };
 
@@ -965,13 +870,12 @@ export const selectMissingProfileFields = (state: PrivateProfileState): string[]
 
 // Selector: Check if entire Phase-2 profile is complete (photos + intents + desire + profile details)
 export const selectIsPhase2ProfileComplete = (state: PrivateProfileState): boolean => {
-  const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
+  const validPhotos = state.selectedPhotoUrls.filter(isPersistedPhotoUrl);
   const hasEnoughPhotos = validPhotos.length >= PHASE2_MIN_PHOTOS;
   const hasValidIntents = state.intentKeys.length >= PHASE2_MIN_INTENTS && state.intentKeys.length <= PHASE2_MAX_INTENTS;
   const hasValidDesire = state.privateBio.trim().length >= PHASE2_DESIRE_MIN_LENGTH && state.privateBio.trim().length <= PHASE2_DESIRE_MAX_LENGTH;
-  const hasProfileDetails = selectIsProfileDetailsComplete(state);
 
-  return hasEnoughPhotos && hasValidIntents && hasValidDesire && hasProfileDetails;
+  return hasEnoughPhotos && hasValidIntents && hasValidDesire;
 };
 
 // Selector: Get all missing items for Phase-2 completion
@@ -979,7 +883,7 @@ export const selectAllMissingItems = (state: PrivateProfileState): string[] => {
   const missing: string[] = [];
 
   // Photos
-  const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
+  const validPhotos = state.selectedPhotoUrls.filter(isPersistedPhotoUrl);
   if (validPhotos.length < PHASE2_MIN_PHOTOS) {
     missing.push(`${PHASE2_MIN_PHOTOS - validPhotos.length} more photo${PHASE2_MIN_PHOTOS - validPhotos.length > 1 ? 's' : ''}`);
   }
@@ -993,10 +897,6 @@ export const selectAllMissingItems = (state: PrivateProfileState): string[] => {
   if (state.privateBio.trim().length < PHASE2_DESIRE_MIN_LENGTH) {
     missing.push('Desire text');
   }
-
-  // Profile details
-  const missingFields = selectMissingProfileFields(state);
-  missing.push(...missingFields);
 
   return missing;
 };

@@ -121,7 +121,7 @@ export default function AdditionalPhotosScreen() {
   // Query onboarding status for reference photo existence check (source of truth)
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Backend mutations

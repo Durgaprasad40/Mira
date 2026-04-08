@@ -559,6 +559,7 @@ function PhotoSyncManager() {
  */
 function OnboardingDraftHydrator() {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authHydrated = useAuthStore((s) => s._hasHydrated);
   const onboardingHydrated = useOnboardingStore((s) => s._hasHydrated);
   const hydrateFromDraft = useOnboardingStore((s) => s.hydrateFromDraft);
@@ -576,8 +577,8 @@ function OnboardingDraftHydrator() {
   // BUG FIX: Use getOnboardingStatus to get comprehensive data including basicInfo from user document
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId && authHydrated && onboardingHydrated
-      ? { userId }
+    !isDemoMode && token && authHydrated && onboardingHydrated
+      ? { token }
       : 'skip'
   );
 

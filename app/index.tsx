@@ -248,7 +248,7 @@ export default function Index() {
         );
 
         const statusPromise = convex.query(api.users.getOnboardingStatus, {
-          userId: userId as Id<"users">,
+          token,
         });
 
         const status = (await Promise.race([statusPromise, timeoutPromise])) as any;

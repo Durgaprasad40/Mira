@@ -2359,15 +2359,11 @@ export const upsertCurrentUserOnboardingDraft = mutation({
  */
 export const getOnboardingStatus = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-
-    if (!userId) {
-      console.log('[ONB_STATUS] User not found');
-      return null;
-    }
+    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
+    const userId = currentUser._id;
 
     const user = await ctx.db.get(userId);
     if (!user) {
@@ -2440,16 +2436,54 @@ export const getOnboardingStatus = query({
 });
 
 /**
+ * Canonical Phase-2 onboarding consent write.
+ * This is the only active onboarding step that should set both consentAcceptedAt
+ * and privateWelcomeConfirmed on the users table.
+ */
+export const acceptPrivateOnboardingConsent = mutation({
+  args: {
+    token: v.string(),
+    confirmAdult: v.boolean(),
+    confirmNoSharing: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    if (!args.confirmAdult || !args.confirmNoSharing) {
+      throw new Error('Both onboarding consent confirmations are required');
+    }
+
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+    const now = Date.now();
+
+    const consentAcceptedAt = user.consentAcceptedAt ?? now;
+    const privateWelcomeConfirmedAt = user.privateWelcomeConfirmedAt ?? now;
+
+    await ctx.db.patch(user._id, {
+      consentAcceptedAt,
+      privateWelcomeConfirmed: true,
+      privateWelcomeConfirmedAt,
+    });
+
+    return {
+      success: true,
+      consentAcceptedAt,
+      privateWelcomeConfirmed: true,
+    };
+  },
+});
+
+/**
  * Set Phase-2 onboarding as completed for a user.
  * This is a one-time operation - once set, onboarding never shows again.
  * Called from profile-setup.tsx when user completes Phase-2 onboarding.
  */
 export const setPhase2OnboardingCompleted = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
+    const resolvedUserId = currentUser._id;
+
     if (!resolvedUserId) {
       console.warn('[P2_ONBOARD] setPhase2OnboardingCompleted: user not found');
       return { success: false, error: 'user_not_found' };
@@ -2484,16 +2518,17 @@ export const setPhase2OnboardingCompleted = mutation({
 });
 
 /**
- * Set Private welcome/guidelines as confirmed for a user (18+ consent gate).
- * This is a one-time operation - once set, consent screen never shows again.
- * Called from PrivateConsentGate when user confirms.
+ * Legacy helper retained for compatibility.
+ * Active Phase-2 onboarding uses acceptPrivateOnboardingConsent instead.
  */
 export const setPrivateWelcomeConfirmed = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
+    const resolvedUserId = currentUser._id;
+
     if (!resolvedUserId) {
       console.warn('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: user not found');
       return { success: false, error: 'user_not_found' };

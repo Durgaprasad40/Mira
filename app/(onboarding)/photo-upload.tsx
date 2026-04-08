@@ -101,7 +101,7 @@ async function persistPhoto(cacheUri: string): Promise<string | null> {
 export default function PhotoUploadScreen() {
   useScreenTrace("ONB_PHOTO_UPLOAD");
   const { photos, setPhotoAtIndex, setStep, setVerificationPhoto, clearAllPhotos } = useOnboardingStore();
-  const { userId, faceVerificationPassed } = useAuthStore();
+  const { userId, token, faceVerificationPassed } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
   const [isUploading, setIsUploading] = useState(false);
@@ -124,7 +124,7 @@ export default function PhotoUploadScreen() {
   // C4 FIX: Include queryEnabled in skip condition to allow forced re-subscription
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId && queryEnabled ? { userId } : 'skip'
+    !isDemoMode && token && queryEnabled ? { token } : 'skip'
   );
 
   // Local state for immediate preview update

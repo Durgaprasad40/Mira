@@ -66,7 +66,7 @@ type VerificationState =
 export default function FaceVerificationScreen() {
   useScreenTrace("ONB_FACE_VERIFICATION");
   const { photos, setStep } = useOnboardingStore();
-  const { userId, faceVerificationPassed, faceVerificationPending, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
+  const { userId, token, faceVerificationPassed, faceVerificationPending, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
 
@@ -77,7 +77,7 @@ export default function FaceVerificationScreen() {
   // M6 FIX: Include queryEnabled in skip condition to allow forced re-subscription
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId && queryEnabled ? { userId: userId as Id<'users'> } : 'skip'
+    !isDemoMode && token && queryEnabled ? { token } : 'skip'
   );
 
   // M6 FIX: Track loading timeout to prevent infinite loading state

@@ -1,7 +1,147 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, requireAuthenticatedSessionUser } from './helpers';
+
+const PHASE2_MIN_PHOTOS = 2;
+const PHASE2_MAX_PHOTOS = 9;
+const PHASE2_MIN_INTENTS = 1;
+const PHASE2_MAX_INTENTS = 3;
+const PHASE2_BIO_MIN_LENGTH = 30;
+const PHASE2_BIO_MAX_LENGTH = 300;
+
+function calculateAge(dateOfBirth?: string | null): number {
+  if (!dateOfBirth || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) {
+    return 0;
+  }
+
+  const [year, month, day] = dateOfBirth.split('-').map(Number);
+  const birthDate = new Date(year, month - 1, day, 12, 0, 0);
+  const now = new Date();
+  let age = now.getFullYear() - birthDate.getFullYear();
+  const monthDiff = now.getMonth() - birthDate.getMonth();
+
+  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < birthDate.getDate())) {
+    age--;
+  }
+
+  return age;
+}
+
+function isPersistedPhotoUrl(url: string): boolean {
+  return url.startsWith('http://') || url.startsWith('https://');
+}
+
+function normalizePersistedPhotoUrls(photoUrls: string[]): string[] {
+  const normalized: string[] = [];
+
+  for (const rawUrl of photoUrls) {
+    const url = rawUrl.trim();
+    if (!url) continue;
+    if (!isPersistedPhotoUrl(url)) {
+      throw new Error('Only uploaded or existing backend photos can be used in Private Mode');
+    }
+    if (!normalized.includes(url)) {
+      normalized.push(url);
+    }
+  }
+
+  return normalized.slice(0, PHASE2_MAX_PHOTOS);
+}
+
+function validateIntentKeys(intentKeys: string[]) {
+  if (intentKeys.length < PHASE2_MIN_INTENTS || intentKeys.length > PHASE2_MAX_INTENTS) {
+    throw new Error(`Select ${PHASE2_MIN_INTENTS}-${PHASE2_MAX_INTENTS} intents`);
+  }
+}
+
+function validatePrivateBio(privateBio: string) {
+  const length = privateBio.trim().length;
+  if (length < PHASE2_BIO_MIN_LENGTH || length > PHASE2_BIO_MAX_LENGTH) {
+    throw new Error(`Private bio must be ${PHASE2_BIO_MIN_LENGTH}-${PHASE2_BIO_MAX_LENGTH} characters`);
+  }
+}
+
+async function getCurrentPrivateProfileRecord(
+  ctx: any,
+  userId: Id<'users'>
+) {
+  return await ctx.db
+    .query('userPrivateProfiles')
+    .withIndex('by_user', (q: any) => q.eq('userId', userId))
+    .first();
+}
+
+function buildCurrentUserProfileBase(user: any, existing: any, now: number) {
+  return {
+    userId: user._id,
+    isPrivateEnabled: existing?.isPrivateEnabled ?? true,
+    ageConfirmed18Plus: true,
+    ageConfirmedAt: existing?.ageConfirmedAt ?? user.consentAcceptedAt ?? now,
+    privatePhotosBlurred: existing?.privatePhotosBlurred ?? [],
+    privatePhotoUrls: existing?.privatePhotoUrls ?? [],
+    privatePhotoBlurLevel: existing?.privatePhotoBlurLevel ?? 0,
+    privateIntentKeys: existing?.privateIntentKeys ?? [],
+    privateDesireTagKeys: existing?.privateDesireTagKeys ?? [],
+    privateBoundaries: existing?.privateBoundaries ?? [],
+    privateBio: existing?.privateBio ?? '',
+    displayName: user.handle || existing?.displayName || 'Anonymous',
+    age: calculateAge(user.dateOfBirth) || existing?.age || 0,
+    city: user.city ?? existing?.city ?? '',
+    gender: user.gender ?? existing?.gender ?? '',
+    revealPolicy: existing?.revealPolicy ?? 'mutual_only',
+    isSetupComplete: existing?.isSetupComplete ?? false,
+    hobbies: user.activities ?? existing?.hobbies ?? [],
+    isVerified: user.isVerified ?? existing?.isVerified ?? false,
+    promptAnswers: existing?.promptAnswers ?? [],
+    preferenceStrength: existing?.preferenceStrength,
+    height: existing?.height,
+    weight: existing?.weight,
+    smoking: existing?.smoking,
+    drinking: existing?.drinking,
+    education: existing?.education,
+    religion: existing?.religion,
+  };
+}
+
+async function upsertCurrentUserProfileDraft(
+  ctx: any,
+  user: any,
+  updates: Record<string, unknown>
+) {
+  const existing = await getCurrentPrivateProfileRecord(ctx, user._id);
+  const now = Date.now();
+  const baseProfile = buildCurrentUserProfileBase(user, existing, now);
+  const nextProfile = {
+    ...baseProfile,
+    ...updates,
+    updatedAt: now,
+  };
+
+  const cleanProfile = Object.fromEntries(
+    Object.entries(nextProfile).filter(([, value]) => value !== undefined)
+  );
+
+  if (existing) {
+    await ctx.db.patch(existing._id, cleanProfile);
+    return { success: true, profileId: existing._id, profile: cleanProfile };
+  }
+
+  const profileId = await ctx.db.insert('userPrivateProfiles', {
+    ...cleanProfile,
+    createdAt: now,
+  });
+  return { success: true, profileId, profile: cleanProfile };
+}
+
+function withSafeDisplayName(profile: any, user: any) {
+  if (!profile) return null;
+  return {
+    ...profile,
+    displayName: user?.handle || profile.displayName || 'Anonymous',
+  };
+}
 
 // Get private profile by user ID
 export const getByUserId = query({
@@ -363,6 +503,7 @@ export const updatePhotoBlurSlots = mutation({
     );
 
     await ctx.db.patch(existing._id, {
+      // @ts-ignore Legacy field exists in runtime data but is absent from generated schema typings.
       photoBlurSlots: normalizedSlots,
       updatedAt: Date.now(),
     });
@@ -421,6 +562,121 @@ export const getByAuthUserId = query({
       ...profile,
       displayName: safeDisplayName,
     };
+  },
+});
+
+export const getCurrentOnboardingProfile = query({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+
+    const isDeleted = await isPrivateDataDeleted(ctx, user._id);
+    if (isDeleted) {
+      return null;
+    }
+
+    const profile = await getCurrentPrivateProfileRecord(ctx, user._id);
+    return withSafeDisplayName(profile, user);
+  },
+});
+
+export const saveOnboardingPhotos = mutation({
+  args: {
+    token: v.string(),
+    privatePhotoUrls: v.array(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+
+    if (!user.consentAcceptedAt || !user.privateWelcomeConfirmed) {
+      throw new Error('Complete Private Mode consent before saving photos');
+    }
+
+    const isDeleted = await isPrivateDataDeleted(ctx, user._id);
+    if (isDeleted) {
+      throw new Error('Cannot update profile while deletion is pending');
+    }
+
+    const privatePhotoUrls = normalizePersistedPhotoUrls(args.privatePhotoUrls);
+    if (privatePhotoUrls.length < PHASE2_MIN_PHOTOS) {
+      throw new Error(`Select at least ${PHASE2_MIN_PHOTOS} photos`);
+    }
+
+    return await upsertCurrentUserProfileDraft(ctx, user, {
+      privatePhotoUrls,
+      isSetupComplete: false,
+    });
+  },
+});
+
+export const saveOnboardingLookingFor = mutation({
+  args: {
+    token: v.string(),
+    privateIntentKeys: v.array(v.string()),
+    privateBio: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+
+    if (!user.consentAcceptedAt || !user.privateWelcomeConfirmed) {
+      throw new Error('Complete Private Mode consent before saving your profile');
+    }
+
+    const isDeleted = await isPrivateDataDeleted(ctx, user._id);
+    if (isDeleted) {
+      throw new Error('Cannot update profile while deletion is pending');
+    }
+
+    validateIntentKeys(args.privateIntentKeys);
+    validatePrivateBio(args.privateBio);
+
+    return await upsertCurrentUserProfileDraft(ctx, user, {
+      privateIntentKeys: args.privateIntentKeys,
+      privateBio: args.privateBio.trim(),
+      isSetupComplete: false,
+    });
+  },
+});
+
+export const finalizeOnboardingProfile = mutation({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+
+    if (!user.consentAcceptedAt || !user.privateWelcomeConfirmed) {
+      throw new Error('Complete Private Mode consent before finishing onboarding');
+    }
+
+    const isDeleted = await isPrivateDataDeleted(ctx, user._id);
+    if (isDeleted) {
+      throw new Error('Cannot update profile while deletion is pending');
+    }
+
+    const existing = await getCurrentPrivateProfileRecord(ctx, user._id);
+    if (!existing) {
+      throw new Error('Complete the photo and profile steps before finishing onboarding');
+    }
+
+    const privatePhotoUrls = normalizePersistedPhotoUrls(existing.privatePhotoUrls ?? []);
+    if (privatePhotoUrls.length < PHASE2_MIN_PHOTOS) {
+      throw new Error(`Select at least ${PHASE2_MIN_PHOTOS} photos`);
+    }
+
+    validateIntentKeys(existing.privateIntentKeys ?? []);
+    validatePrivateBio(existing.privateBio ?? '');
+
+    if (!user.gender && !existing.gender) {
+      throw new Error('Finish your main profile before entering Private Mode');
+    }
+
+    return await upsertCurrentUserProfileDraft(ctx, user, {
+      privatePhotoUrls,
+      privateIntentKeys: existing.privateIntentKeys,
+      privateBio: existing.privateBio?.trim(),
+      isSetupComplete: true,
+      ageConfirmed18Plus: true,
+      ageConfirmedAt: user.consentAcceptedAt ?? existing.ageConfirmedAt ?? Date.now(),
+    });
   },
 });
 

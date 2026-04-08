@@ -18,9 +18,7 @@ import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { useIncognitoStore } from '@/stores/incognitoStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
-import { PrivateConsentGate } from '@/components/private/PrivateConsentGate';
 // REMOVED: setPhase2Active import - no longer toggling phase via module variable
 // Notification phase is now derived directly from route in useNotifications
 import { prewarmTodCache } from './(tabs)/truth-or-dare';
@@ -57,11 +55,8 @@ export default function PrivateLayout() {
   const pathname = usePathname();
   const segments = useSegments();
   const insets = useSafeAreaInsets();
-  const ageConfirmed18Plus = useIncognitoStore((s) => s.ageConfirmed18Plus);
-  const acceptPrivateTerms = useIncognitoStore((s) => s.acceptPrivateTerms);
-  // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
-  const incognitoHydrated = useIncognitoStore((s) => s._hasHydrated);
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   // B1 FIX: Need hasHydrated early for phantom "/" normalization effect
   const hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
 
@@ -366,14 +361,14 @@ export default function PrivateLayout() {
   // No automatic segment-based or focus-based reset here to prevent double-entry bugs
 
   const convexPrivateProfile = useQuery(
-    api.privateProfiles.getByUserId,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    api.privateProfiles.getCurrentOnboardingProfile,
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // PHASE-1 GUARD: Query Phase-1 onboarding status to block Phase-2 access if incomplete
   const phase1OnboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // PREWARM: Start T/D queries early so data is cached when user opens T/D tab
@@ -414,13 +409,12 @@ export default function PrivateLayout() {
   // P2-002 FIX: Use OR logic so local completion is respected even if Convex hasn't synced yet
   // This prevents re-triggering onboarding when server returns false due to sync lag
   // STABILITY FIX: Now also checks users.phase2OnboardingCompleted from getOnboardingStatus
-  // Priority: local store (instant) || users table (durable) || privateProfile (legacy fallback)
+  // Priority: local store (instant) || users table (durable)
   const onboardingComplete = isDemoMode
     ? phase2OnboardingCompleted
     : (
         phase2OnboardingCompleted ||
-        phase1OnboardingStatus?.phase2OnboardingCompleted === true ||
-        convexPrivateProfile?.isSetupComplete === true
+        phase1OnboardingStatus?.phase2OnboardingCompleted === true
       );
 
   // ══════════════════════════════════════════════════════════════════════════════
@@ -504,10 +498,7 @@ export default function PrivateLayout() {
     }
   }, [onboardingComplete, hasHydrated, router, phase1OnboardingStatus, isInPhase2]);
 
-  // B1.1 FIX: Conditional rendering moved to END after ALL hooks
-  // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
-  // Prevents showing consent gate to already-consented users on cold start
-  if (!incognitoHydrated || !hasHydrated) {
+  if (!hasHydrated) {
     return (
       <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
         <ActivityIndicator size="large" color={C.primary} />
@@ -519,17 +510,6 @@ export default function PrivateLayout() {
   // This reduces the visible loading flash during Phase-2 entry
   if (isNormalizingRoot) {
     return null;
-  }
-
-  // B1.1 FIX: Consent gate (checked after spinner check above)
-  // STABILITY FIX: Also check backend flag to skip after first confirm (survives force-quit)
-  // Priority: local store (instant) || backend flag (durable)
-  const welcomeConfirmed = isDemoMode
-    ? ageConfirmed18Plus
-    : (ageConfirmed18Plus || phase1OnboardingStatus?.privateWelcomeConfirmed === true);
-
-  if (!welcomeConfirmed) {
-    return <PrivateConsentGate onAccept={acceptPrivateTerms} />;
   }
 
   // B1.1 FIX: FLASH FIX - Render null while redirecting to avoid visual flash

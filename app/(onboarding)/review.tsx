@@ -164,7 +164,7 @@ export default function ReviewScreen() {
     setStep,
   } = useOnboardingStore();
   const router = useRouter();
-  const { userId, setOnboardingCompleted, faceVerificationPassed, faceVerificationPending } = useAuthStore();
+  const { userId, token, setOnboardingCompleted, faceVerificationPassed, faceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
 
   // H8 FIX: Track mounted state to prevent setAuth after unmount
@@ -177,7 +177,7 @@ export default function ReviewScreen() {
   // BUG FIX: Always query backend status as authoritative source + fallback
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // BUG FIX (2026-03-06): Use getCurrentUser which includes ALL photos

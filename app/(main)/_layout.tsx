@@ -252,10 +252,6 @@ export default function MainLayout() {
       <Stack.Screen name="incognito-room/[id]" />
       <Stack.Screen name="(private)" options={{ headerShown: false }} />
       <Stack.Screen
-        name="(private-setup)"
-        options={{ presentation: "fullScreenModal" }}
-      />
-      <Stack.Screen
         name="verification"
         options={{ presentation: "fullScreenModal" }}
       />
