@@ -1087,15 +1087,15 @@ export const markVerified = mutation({
 // Block user
 export const blockUser = mutation({
   args: {
-    // C2 SECURITY: Use authUserId for server-side validation
-    authUserId: v.string(),
+    token: v.optional(v.string()),
+    authUserId: v.optional(v.string()),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { authUserId, blockedUserId } = args;
-
-    // C2 SECURITY: Resolve auth ID to Convex user ID
-    const blockerId = await resolveUserIdByAuthId(ctx, authUserId);
+    const { token, authUserId, blockedUserId } = args;
+    const blockerId = token
+      ? await validateSessionToken(ctx, token)
+      : (authUserId ? await resolveUserIdByAuthId(ctx, authUserId) : null);
     if (!blockerId) {
       return { success: false, error: 'unauthorized' };
     }
@@ -1159,8 +1159,8 @@ export const unblockUser = mutation({
 // Report user
 export const reportUser = mutation({
   args: {
-    // C2 SECURITY: Use authUserId for server-side validation
-    authUserId: v.string(),
+    token: v.optional(v.string()),
+    authUserId: v.optional(v.string()),
     reportedUserId: v.id("users"),
     reason: v.union(
       v.literal("fake_profile"),
@@ -1173,11 +1173,11 @@ export const reportUser = mutation({
     description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, reportedUserId, reason, description } = args;
+    const { token, authUserId, reportedUserId, reason, description } = args;
     const now = Date.now();
-
-    // C2 SECURITY: Resolve auth ID to Convex user ID
-    const reporterId = await resolveUserIdByAuthId(ctx, authUserId);
+    const reporterId = token
+      ? await validateSessionToken(ctx, token)
+      : (authUserId ? await resolveUserIdByAuthId(ctx, authUserId) : null);
     if (!reporterId) {
       return { success: false, error: 'unauthorized' };
     }

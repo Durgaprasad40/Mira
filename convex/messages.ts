@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { softMaskText } from './softMask';
-import { resolveUserIdByAuthId } from './helpers';
+import { requireLiveMessageSessionUser, resolveUserIdByAuthId } from './helpers';
 import { tryEarnCoinInDm } from './coinEarning';
 
 // Phase-2: Helper to check if user has any active chatRoom readOnly penalty
@@ -101,12 +101,146 @@ async function upsertParticipantUnreadCount(
   }
 }
 
+async function findCanonicalPreMatchConversation(
+  ctx: QueryCtx | MutationCtx,
+  userA: Id<'users'>,
+  userB: Id<'users'>
+) {
+  const matches = await ctx.db
+    .query('conversations')
+    .filter((q) =>
+      q.and(
+        q.eq(q.field('isPreMatch'), true),
+        q.or(
+          q.eq(q.field('participants'), [userA, userB]),
+          q.eq(q.field('participants'), [userB, userA])
+        )
+      )
+    )
+    .collect();
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  return matches.sort((a, b) => {
+    const createdDiff = (a.createdAt ?? 0) - (b.createdAt ?? 0);
+    if (createdDiff !== 0) return createdDiff;
+    return String(a._id).localeCompare(String(b._id));
+  })[0];
+}
+
+async function getFormattedConversationMessagesPage(
+  ctx: QueryCtx,
+  conversationId: Id<'conversations'>,
+  userId: Id<'users'>,
+  limit = 50,
+  before?: number
+): Promise<{
+  messages: any[];
+  hasOlder: boolean;
+  oldestMessageCreatedAt: number | null;
+}> {
+  const pageSize = Math.max(1, Math.min(limit, 100));
+  const query = ctx.db
+    .query('messages')
+    .withIndex('by_conversation_created', (q) =>
+      before
+        ? q.eq('conversationId', conversationId).lt('createdAt', before)
+        : q.eq('conversationId', conversationId)
+    );
+
+  const rawMessages = await query.order('desc').take(pageSize + 1);
+  const hasOlder = rawMessages.length > pageSize;
+  const pageMessages = hasOlder ? rawMessages.slice(0, pageSize) : rawMessages;
+  const messages = pageMessages.reverse();
+
+  const mediaIds = messages.filter((m) => m.mediaId).map((m) => m.mediaId!);
+  const mediaRecords = await Promise.all(mediaIds.map((id) => ctx.db.get(id)));
+  const mediaMap = new Map(mediaRecords.filter(Boolean).map((m) => [m!._id, m!]));
+
+  const permissionsForUser = await Promise.all(
+    mediaIds.map(async (mediaId) => {
+      const media = mediaMap.get(mediaId);
+      const isOwner = media?.ownerId === userId;
+
+      if (isOwner) {
+        return ctx.db
+          .query('mediaPermissions')
+          .withIndex('by_media_recipient', (q) => q.eq('mediaId', mediaId))
+          .first();
+      }
+
+      return ctx.db
+        .query('mediaPermissions')
+        .withIndex('by_media_recipient', (q) =>
+          q.eq('mediaId', mediaId).eq('recipientId', userId)
+        )
+        .first();
+    })
+  );
+  const permissionMap = new Map(
+    mediaIds.map((id, i) => [id as string, permissionsForUser[i]])
+  );
+
+  const audioStorageIds = messages.filter((m) => m.audioStorageId).map((m) => m.audioStorageId!);
+  const audioUrls = await Promise.all(
+    audioStorageIds.map((id) => ctx.storage.getUrl(id))
+  );
+  const audioUrlMap = new Map(audioStorageIds.map((id, i) => [id as string, audioUrls[i]]));
+
+  const formattedMessages = messages.map((msg) => {
+    if (msg.type === 'voice' && msg.audioStorageId) {
+      const { audioStorageId, ...rest } = msg;
+      return {
+        ...rest,
+        isProtected: false,
+        audioUrl: audioUrlMap.get(audioStorageId as string) ?? null,
+      };
+    }
+
+    if (msg.mediaId) {
+      const { imageStorageId, ...rest } = msg;
+      const media = mediaMap.get(msg.mediaId);
+      const permission = permissionMap.get(msg.mediaId as string);
+      const isOwner = media?.ownerId === userId;
+      const globallyExpired = !!media?.expiredAt;
+      const recipientExpired = !isOwner && (
+        permission?.revoked ||
+        (permission?.expiresAt != null && Date.now() >= permission.expiresAt)
+      );
+      const isExpired = globallyExpired || !!recipientExpired;
+
+      return {
+        ...rest,
+        isProtected: true,
+        viewMode: media?.viewMode ?? 'tap',
+        mediaType: media?.mediaType ?? 'image',
+        isMirrored: media?.isMirrored ?? false,
+        timerEndsAt: permission?.expiresAt ?? null,
+        isExpired,
+        expiredAt: media?.expiredAt ?? null,
+        viewOnce: media?.viewOnce ?? false,
+        recipientOpened: !!permission?.openedAt,
+      };
+    }
+
+    return { ...msg, isProtected: false };
+  });
+
+  return {
+    messages: formattedMessages,
+    hasOlder,
+    oldestMessageCreatedAt: formattedMessages[0]?.createdAt ?? null,
+  };
+}
+
 // Send a message
-// MSG-001 FIX: Auth hardening - verify caller identity server-side
+// Live Phase-1 messages are authorized strictly via validated session token.
 export const sendMessage = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(), // MSG-001: Auth verification required
+    token: v.string(),
     type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare'), v.literal('voice')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
@@ -118,17 +252,10 @@ export const sendMessage = mutation({
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId, type, content, imageStorageId, templateId, audioStorageId, audioDurationMs, clientMessageId } = args;
+    const { conversationId, token, type, content, imageStorageId, templateId, audioStorageId, audioDurationMs, clientMessageId } = args;
     const now = Date.now();
 
-    // MSG-001 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!senderId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const senderId = await requireLiveMessageSessionUser(ctx, token);
 
     // Phase-2: Block DMs if user has active chatRoom readOnly penalty
     if (await hasActiveChatRoomPenalty(ctx, senderId)) {
@@ -253,15 +380,16 @@ export const sendMessage = mutation({
     } = {
       lastMessageAt: now,
     };
+    const roomScopedConversation = conversation as any;
 
     // If this is a room-scoped conversation (sourceRoomId set)
-    if (conversation.sourceRoomId) {
+    if (roomScopedConversation.sourceRoomId) {
       // Set initiatorId on first message (if not already set)
-      if (!conversation.initiatorId) {
+      if (!roomScopedConversation.initiatorId) {
         conversationUpdate.initiatorId = senderId;
       }
       // If sender is NOT the initiator, mark recipient as engaged
-      else if (conversation.initiatorId !== senderId && !conversation.hasRecipientEngaged) {
+      else if (roomScopedConversation.initiatorId !== senderId && !roomScopedConversation.hasRecipientEngaged) {
         conversationUpdate.hasRecipientEngaged = true;
       }
 
@@ -337,10 +465,10 @@ export const sendMessage = mutation({
 });
 
 // Send pre-match message (uses template or limited text)
-// MSG-002 FIX: Auth hardening - verify caller identity server-side
+// Live Phase-1 messages are authorized strictly via validated session token.
 export const sendPreMatchMessage = mutation({
   args: {
-    authUserId: v.string(), // MSG-002: Auth verification required
+    token: v.string(),
     toUserId: v.id('users'),
     content: v.string(),
     templateId: v.optional(v.string()),
@@ -348,17 +476,10 @@ export const sendPreMatchMessage = mutation({
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, toUserId, content, templateId, clientMessageId } = args;
+    const { token, toUserId, content, templateId, clientMessageId } = args;
     const now = Date.now();
 
-    // MSG-002 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!fromUserId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const fromUserId = await requireLiveMessageSessionUser(ctx, token);
 
     // Phase-2: Block DMs if user has active chatRoom readOnly penalty
     if (await hasActiveChatRoomPenalty(ctx, fromUserId)) {
@@ -384,32 +505,25 @@ export const sendPreMatchMessage = mutation({
       throw new Error('Cannot send message');
     }
 
-    // Check if already have a conversation
-    let conversation = await ctx.db
-      .query('conversations')
-      .filter((q) =>
-        q.and(
-          q.eq(q.field('isPreMatch'), true),
-          q.or(
-            q.and(
-              q.eq(q.field('participants'), [fromUserId, toUserId])
-            ),
-            q.and(
-              q.eq(q.field('participants'), [toUserId, fromUserId])
-            )
-          )
-        )
-      )
-      .first();
+    // Check if already have a canonical pre-match conversation.
+    let conversation = await findCanonicalPreMatchConversation(ctx, fromUserId, toUserId);
 
-    // Create conversation if doesn't exist
+    // Create conversation if doesn't exist, then re-check immediately to reduce
+    // duplicate-thread races under concurrent creation attempts.
     if (!conversation) {
       const conversationId = await ctx.db.insert('conversations', {
         participants: [fromUserId, toUserId],
         isPreMatch: true,
         createdAt: now,
       });
-      conversation = await ctx.db.get(conversationId);
+
+      const canonicalConversation = await findCanonicalPreMatchConversation(ctx, fromUserId, toUserId);
+      if (canonicalConversation && canonicalConversation._id !== conversationId) {
+        await ctx.db.delete(conversationId);
+        conversation = canonicalConversation;
+      } else {
+        conversation = await ctx.db.get(conversationId);
+      }
     }
 
     if (!conversation) throw new Error('Failed to create conversation');
@@ -515,25 +629,18 @@ export const sendPreMatchMessage = mutation({
   },
 });
 
-// Get messages in a conversation
-// P0-AUTH-FIX: Require authUserId and resolve server-side only (matches sendMessage pattern)
+// Get messages in a conversation.
+// Live Phase-1 access is authorized strictly via validated session token.
 export const getMessages = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.optional(v.id('users')), // IGNORED: Legacy compat only, never used
-    authUserId: v.string(), // P0-AUTH-FIX: Required, resolved server-side
+    token: v.string(),
     limit: v.optional(v.number()),
     before: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId, limit = 50, before } = args;
-
-    // P0-AUTH-FIX: Always resolve identity server-side from authUserId
-    // Never trust client-provided userId - it is ignored even if passed
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return [];
-    }
+    const { conversationId, token, limit = 50, before } = args;
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {
@@ -545,132 +652,67 @@ export const getMessages = query({
       return [];
     }
 
-    // SYNC-FIX: Deterministic query - same for all devices
-    let query = ctx.db
-      .query('messages')
-      .withIndex('by_conversation_created', (q) =>
-        q.eq('conversationId', conversationId)
-      );
-
-    if (before) {
-      query = query.filter((q) => q.lt(q.field('createdAt'), before));
-    }
-
-    // Fetch latest messages (desc order), then reverse for chronological display
-    const messages = await query.order('desc').take(limit);
-
-    // SECURE-MEDIA-FIX: Batch-fetch media info for protected messages
-    // This ensures both sender and receiver have consistent metadata (viewMode, expiresAt, expiredAt)
-    const mediaIds = messages.filter((m) => m.mediaId).map((m) => m.mediaId!);
-    const mediaRecords = await Promise.all(mediaIds.map((id) => ctx.db.get(id)));
-    const mediaMap = new Map(mediaRecords.filter(Boolean).map((m) => [m!._id, m!]));
-
-    // SENDER-TIMER-FIX: Fetch permissions correctly for both sender and receiver
-    // For receiver: get their own permission (recipientId = userId)
-    // For sender: get the recipient's permission (to see their timer)
-    const permissionsForUser = await Promise.all(
-      mediaIds.map(async (mediaId) => {
-        const media = mediaMap.get(mediaId);
-        const isOwner = media?.ownerId === userId;
-
-        if (isOwner) {
-          // SENDER-TIMER-FIX: Sender needs recipient's permission to show their timer
-          // Find any recipient permission for this media
-          return ctx.db
-            .query('mediaPermissions')
-            .withIndex('by_media_recipient', (q) => q.eq('mediaId', mediaId))
-            .first();
-        } else {
-          // Receiver gets their own permission
-          return ctx.db
-            .query('mediaPermissions')
-            .withIndex('by_media_recipient', (q) =>
-              q.eq('mediaId', mediaId).eq('recipientId', userId)
-            )
-            .first();
-        }
-      })
-    );
-    const permissionMap = new Map(
-      mediaIds.map((id, i) => [id as string, permissionsForUser[i]])
+    const page = await getFormattedConversationMessagesPage(
+      ctx,
+      conversationId,
+      userId,
+      limit,
+      before
     );
 
-    // Batch-fetch audio URLs for voice messages
-    const audioStorageIds = messages.filter((m) => m.audioStorageId).map((m) => m.audioStorageId!);
-    const audioUrls = await Promise.all(
-      audioStorageIds.map((id) => ctx.storage.getUrl(id))
-    );
-    const audioUrlMap = new Map(audioStorageIds.map((id, i) => [id as string, audioUrls[i]]));
-
-    // Strip imageStorageId from protected messages and add isProtected flag + media metadata
-    return messages.reverse().map((msg) => {
-      // Voice messages: include audio URL
-      if (msg.type === 'voice' && msg.audioStorageId) {
-        const { audioStorageId, ...rest } = msg;
-        return {
-          ...rest,
-          isProtected: false,
-          audioUrl: audioUrlMap.get(audioStorageId as string) ?? null,
-        };
-      }
-
-      if (msg.mediaId) {
-        // Protected media — strip storage keys, flag as protected
-        const { imageStorageId, ...rest } = msg;
-        const media = mediaMap.get(msg.mediaId);
-        const permission = permissionMap.get(msg.mediaId as string);
-        const isOwner = media?.ownerId === userId;
-
-        // SECURE-MEDIA-FIX: Compute expiry state consistently for both sides
-        const globallyExpired = !!media?.expiredAt;
-        // VIEW-ONCE-FIX: Don't use viewCount for expiry - it causes race conditions
-        // View-once expiry is determined ONLY by media.expiredAt (set when viewer closes)
-        // The viewCount >= 1 check was causing premature expiry during active viewing
-        const recipientExpired = !isOwner && (
-          permission?.revoked ||
-          (permission?.expiresAt != null && Date.now() >= permission.expiresAt)
-        );
-        // SENDER-TIMER-FIX: Both sender and receiver use globallyExpired as single source of truth
-        const isExpired = globallyExpired || !!recipientExpired;
-
-        return {
-          ...rest,
-          isProtected: true,
-          // SECURE-MEDIA-FIX: Include media metadata for both sender and receiver
-          viewMode: media?.viewMode ?? 'tap',
-          timerEndsAt: permission?.expiresAt ?? null, // Absolute deadline (wall-clock)
-          isExpired,
-          expiredAt: media?.expiredAt ?? null, // For auto-hide timer
-          // VIEW-ONCE-FIX: Include viewOnce flag for UI to handle properly
-          viewOnce: media?.viewOnce ?? false,
-          // SENDER-TIMER-FIX: Include opened state so sender knows recipient is viewing
-          recipientOpened: !!(permission?.openedAt),
-        };
-      }
-      return { ...msg, isProtected: false };
-    });
+    return page.messages;
   },
 });
 
-// Mark messages as read
-// MSG-004 FIX: Auth hardening - verify caller identity server-side
+// Get a bounded page of messages with pagination metadata for Phase-1 live chat.
+export const getMessagesPage = query({
+  args: {
+    conversationId: v.id('conversations'),
+    token: v.string(),
+    limit: v.optional(v.number()),
+    before: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const { conversationId, token, limit = 50, before } = args;
+    const userId = await requireLiveMessageSessionUser(ctx, token);
+
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation) {
+      return {
+        messages: [],
+        hasOlder: false,
+        oldestMessageCreatedAt: null,
+      };
+    }
+
+    if (!conversation.participants.includes(userId)) {
+      return {
+        messages: [],
+        hasOlder: false,
+        oldestMessageCreatedAt: null,
+      };
+    }
+
+    return getFormattedConversationMessagesPage(
+      ctx,
+      conversationId,
+      userId,
+      limit,
+      before
+    );
+  },
+});
+
+// Mark messages as read using the validated live session as the source of truth.
 export const markAsRead = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(), // MSG-004: Auth verification required
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId } = args;
+    const { conversationId, token } = args;
     const now = Date.now();
-
-    // MSG-004 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return; // Silent return for mark-as-read (non-critical)
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return; // Silent return for mark-as-read (non-critical)
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) return;
@@ -708,20 +750,12 @@ export const markAsRead = mutation({
 export const markAsDelivered = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId } = args;
+    const { conversationId, token } = args;
     const now = Date.now();
-
-    // Verify caller identity
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { success: false, count: 0 };
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: false, count: 0 };
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation || !conversation.participants.includes(userId)) {
@@ -753,19 +787,12 @@ export const markAsDelivered = mutation({
 // This ensures "delivered" state is set when message reaches device, not when conversation is opened
 export const markAllAsDelivered = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
+    const { token } = args;
     const now = Date.now();
-
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { success: false, count: 0 };
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: false, count: 0 };
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     // Find all messages sent TO this user that are not yet delivered
     // Query all conversations this user is part of
@@ -808,16 +835,11 @@ export const markAllAsDelivered = mutation({
 export const deleteMessage = mutation({
   args: {
     messageId: v.id('messages'),
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { messageId, authUserId } = args;
-
-    // Resolve auth ID to user ID
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const { messageId, token } = args;
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     // Get the message
     const message = await ctx.db.get(messageId);
@@ -861,47 +883,31 @@ export const deleteMessage = mutation({
   },
 });
 
-// ONLINE-STATUS-FIX: Update user's lastActive timestamp
-// Called periodically while user is in a conversation to show "Online" status
+// Update presence using the validated live session as the source of truth.
 export const updatePresence = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
+    const { token } = args;
     const now = Date.now();
-
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { success: false };
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: false };
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     await ctx.db.patch(userId, { lastActive: now });
     return { success: true, lastActive: now };
   },
 });
 
-// Get conversation by ID
-// P0-AUTH-FIX: Require authUserId and resolve server-side only (matches sendMessage pattern)
+// Get conversation by ID using the validated live session as the source of truth.
 export const getConversation = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.optional(v.id('users')), // IGNORED: Legacy compat only, never used
-    authUserId: v.string(), // P0-AUTH-FIX: Required, resolved server-side
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId } = args;
+    const { conversationId, token } = args;
     const now = Date.now();
-
-    // P0-AUTH-FIX: Always resolve identity server-side from authUserId
-    // Never trust client-provided userId - it is ignored even if passed
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return null;
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) return null;
@@ -915,7 +921,28 @@ export const getConversation = query({
     if (!otherUserId) return null;
 
     const otherUser = await ctx.db.get(otherUserId);
-    if (!otherUser) return null;
+
+    let terminalState: 'blocked_by_you' | 'blocked_by_other' | 'unmatched' | 'user_removed' | null = null;
+    const [blockByMe, blockByThem] = await Promise.all([
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', userId).eq('blockedUserId', otherUserId)
+        )
+        .first(),
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', otherUserId).eq('blockedUserId', userId)
+        )
+        .first(),
+    ]);
+
+    if (blockByMe) {
+      terminalState = 'blocked_by_you';
+    } else if (blockByThem) {
+      terminalState = 'blocked_by_other';
+    }
 
     // PRIVACY FIX: Check if the other user should be shown anonymously
     // This happens when they're the confession author on an anonymous confession
@@ -923,7 +950,7 @@ export const getConversation = query({
 
     // Get primary photo (only if not anonymous)
     let photo = null;
-    if (!isOtherUserAnonymous) {
+    if (!isOtherUserAnonymous && otherUser?.isActive !== false && otherUser) {
       photo = await ctx.db
         .query('photos')
         .withIndex('by_user', (q) => q.eq('userId', otherUserId))
@@ -958,6 +985,13 @@ export const getConversation = query({
     if (conversation.matchId) {
       const match = await ctx.db.get(conversation.matchId);
       matchSource = (match as any)?.matchSource;
+      if (!match || match.isActive === false) {
+        terminalState = terminalState ?? 'unmatched';
+      }
+    }
+
+    if (!otherUser || otherUser.isActive === false) {
+      terminalState = 'user_removed';
     }
 
     return {
@@ -969,64 +1003,94 @@ export const getConversation = query({
       isConfessionChat,
       expiresAt: conversation.expiresAt,
       isExpired,
+      terminalState,
       otherUser: {
         id: otherUserId,
         // PRIVACY FIX: Return anonymous display info if user should be anonymous
-        name: isOtherUserAnonymous ? 'Anonymous' : otherUser.name,
+        name: terminalState === 'user_removed'
+          ? 'User unavailable'
+          : (isOtherUserAnonymous ? 'Anonymous' : (otherUser?.name || 'User unavailable')),
         photoUrl: isOtherUserAnonymous ? undefined : resolvedPhotoUrl,
-        lastActive: isOtherUserAnonymous ? undefined : otherUser.lastActive,
-        isVerified: isOtherUserAnonymous ? false : otherUser.isVerified,
+        lastActive: terminalState === 'user_removed'
+          ? undefined
+          : (isOtherUserAnonymous ? undefined : otherUser?.lastActive),
+        isVerified: terminalState === 'user_removed'
+          ? false
+          : (isOtherUserAnonymous ? false : !!otherUser?.isVerified),
         isAnonymous: isOtherUserAnonymous, // Flag for UI to show anonymous avatar
       },
     };
   },
 });
 
-// Get all conversations for a user
-// APP-P0-004 FIX: Server-side auth - resolve userId from authUserId to prevent cross-user access
+// Get all conversations for the validated live session user.
 export const getConversations = query({
   args: {
-    authUserId: v.string(), // APP-P0-004: Changed from userId: v.id('users')
+    token: v.string(),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, limit = 50 } = args;
+    const { token, limit = 50 } = args;
     const now = Date.now();
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
-    // APP-P0-004 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return []; // Unauthorized - return empty array
+    const isVisibleConversationForInbox = (conversation: any) => {
+      if (!conversation.participants.includes(userId)) return false;
+      if (conversation.expiresAt && conversation.expiresAt <= now) return false;
+
+      if (conversation.sourceRoomId && conversation.initiatorId) {
+        const amInitiator = conversation.initiatorId === userId;
+        if (!amInitiator && !conversation.hasRecipientEngaged) {
+          return false;
+        }
+      }
+
+      return true;
+    };
+
+    const participantRows = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    const participantRowMap = new Map(
+      participantRows.map((row) => [String(row.conversationId), row])
+    );
+
+    const participantConversations = await Promise.all(
+      participantRows.map((row) => ctx.db.get(row.conversationId))
+    );
+
+    const uniqueConversationMap = new Map<string, any>();
+    for (const conversation of participantConversations) {
+      if (!conversation) continue;
+      if (!isVisibleConversationForInbox(conversation)) continue;
+      uniqueConversationMap.set(String(conversation._id), conversation);
     }
 
-    // Get all conversations where user is a participant
-    const allConversations = await ctx.db
+    // Lightweight migration fallback:
+    // if participant rows are missing for some recent live threads, check only a
+    // bounded recent window rather than scanning the whole conversations table.
+    const FALLBACK_SCAN_LIMIT = Math.max(limit * 4, 120);
+    const recentConversations = await ctx.db
       .query('conversations')
       .withIndex('by_last_message')
       .order('desc')
-      .collect();
+      .take(FALLBACK_SCAN_LIMIT);
 
-    const userConversations = allConversations
-      .filter((c) => {
-        // Must be a participant
-        if (!c.participants.includes(userId)) return false;
+    for (const conversation of recentConversations) {
+      const conversationId = String(conversation._id);
+      if (uniqueConversationMap.has(conversationId)) continue;
+      if (!isVisibleConversationForInbox(conversation)) continue;
+      uniqueConversationMap.set(conversationId, conversation);
+    }
 
-        // Filter out expired conversations (confession-based OR room-scoped threads)
-        // Room-scoped threads expire 1 hour after last message
-        if (c.expiresAt && c.expiresAt <= now) return false;
-
-        // Anti-spam: For room-scoped threads, hide from recipient until they engage
-        // - If I'm NOT the initiator AND recipient hasn't engaged yet, hide from my inbox
-        // - This prevents spam: one-sided outgoing messages don't clutter recipient's inbox
-        if (c.sourceRoomId && c.initiatorId) {
-          const amInitiator = c.initiatorId === userId;
-          // If I'm not the initiator and haven't engaged yet, hide this thread from my inbox
-          if (!amInitiator && !c.hasRecipientEngaged) {
-            return false;
-          }
-        }
-
-        return true;
+    const userConversations = Array.from(uniqueConversationMap.values())
+      .sort((a, b) => {
+        const aSort = a.lastMessageAt ?? a.createdAt ?? 0;
+        const bSort = b.lastMessageAt ?? b.createdAt ?? 0;
+        if (bSort !== aSort) return bSort - aSort;
+        return String(b._id).localeCompare(String(a._id));
       })
       .slice(0, limit);
 
@@ -1034,7 +1098,7 @@ export const getConversations = query({
 
     // PERF #7: Batch-fetch all related data in parallel instead of N+1 queries
     const otherUserIds = userConversations
-      .map((c) => c.participants.find((id) => id !== userId))
+      .map((c) => c.participants.find((id: Id<'users'>) => id !== userId))
       .filter((id): id is Id<'users'> => id !== undefined);
 
     // M2 FIX: Batch-fetch ALL blocks for current user in just 2 queries (not 2*N)
@@ -1075,30 +1139,21 @@ export const getConversations = query({
       // Batch fetch last message for each conversation
       Promise.all(
         userConversations.map((c) =>
-          ctx.db
-            .query('messages')
-            .withIndex('by_conversation_created', (q) =>
-              q.eq('conversationId', c._id)
-            )
-            .order('desc')
-            .first()
+          c.lastMessageAt
+            ? ctx.db
+                .query('messages')
+                .withIndex('by_conversation_created', (q) =>
+                  q.eq('conversationId', c._id)
+                )
+                .order('desc')
+                .first()
+            : Promise.resolve(null)
         )
       ),
-      // Batch fetch unread messages for each conversation
+      // Prefer already-fetched participant rows; recent fallback conversations may not have one yet.
       Promise.all(
         userConversations.map((c) =>
-          ctx.db
-            .query('messages')
-            .withIndex('by_conversation', (q) =>
-              q.eq('conversationId', c._id)
-            )
-            .filter((q) =>
-              q.and(
-                q.neq(q.field('senderId'), userId),
-                q.eq(q.field('readAt'), undefined)
-              )
-            )
-            .collect()
+          Promise.resolve(participantRowMap.get(String(c._id)) ?? null)
         )
       ),
     ]);
@@ -1144,7 +1199,7 @@ export const getConversations = query({
     const result = [];
     for (let i = 0; i < userConversations.length; i++) {
       const conversation = userConversations[i];
-      const otherUserId = conversation.participants.find((id) => id !== userId);
+      const otherUserId = conversation.participants.find((id: Id<'users'>) => id !== userId);
       if (!otherUserId) continue;
 
       // SAFETY FIX: Skip conversations with blocked users (either direction)
@@ -1155,9 +1210,10 @@ export const getConversations = query({
 
       const resolvedPhotoUrl = photoUrlMap.get(otherUserId as string) ?? null;
       const lastMessage = lastMessages[i];
-      // P0-008 FIX: Filter unread messages by COUNTABLE_MESSAGE_TYPES (same as computeUnreadCountFromMessages)
-      // System messages should not count toward the unread badge
-      const unreadCount = (unreadCounts[i] || []).filter((m) => COUNTABLE_MESSAGE_TYPES.includes(m.type)).length;
+      const participantRow = unreadCounts[i] ?? participantRowMap.get(String(conversation._id));
+      const unreadCount = typeof participantRow?.unreadCount === 'number'
+        ? participantRow.unreadCount
+        : await computeUnreadCountFromMessages(ctx, conversation._id, userId);
 
       // PRIVACY FIX: Check if the other user should be shown anonymously
       // This happens when they're the confession author on an anonymous confession
@@ -1180,7 +1236,9 @@ export const getConversations = query({
         },
         lastMessage: lastMessage
           ? {
-              content: lastMessage.mediaId ? 'Protected Photo' : lastMessage.content,
+              content: lastMessage.mediaId
+                ? (lastMessage.type === 'video' ? 'Protected Video' : 'Protected Photo')
+                : lastMessage.content,
               type: lastMessage.type,
               senderId: lastMessage.senderId,
               createdAt: lastMessage.createdAt,
@@ -1236,15 +1294,10 @@ export const canSendMessage = query({
 
 export const getUnreadCount = query({
   args: {
-    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!userId) {
-      console.log('[getUnreadCount] User not found for authUserId:', args.userId);
-      return 0;
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, args.token);
 
     // C1/C2-REPAIR: Hybrid approach - use denormalized counts where available,
     // fall back to source-of-truth computation for conversations without participant rows.
@@ -1387,19 +1440,11 @@ export const getUnreadDmCountsByRoom = query({
 export const markDmConversationRead = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(), // MSG-004: Auth verification required
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, authUserId }) => {
+  handler: async (ctx, { conversationId, token }) => {
     const now = Date.now();
-
-    // MSG-004 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { success: false, count: 0 };
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: false, count: 0 };
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) return { success: false, count: 0 };
@@ -1531,16 +1576,13 @@ export const backfillConversationParticipants = internalMutation({
 export const setTypingStatus = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(),
+    token: v.string(),
     isTyping: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId, isTyping } = args;
+    const { conversationId, token, isTyping } = args;
     const now = Date.now();
-
-    // Resolve auth ID to user ID
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) return;
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     // Verify user is part of conversation
     const conversation = await ctx.db.get(conversationId);
@@ -1576,12 +1618,13 @@ export const setTypingStatus = mutation({
 export const getTypingStatus = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, userId } = args;
+    const { conversationId, token } = args;
     const now = Date.now();
     const TYPING_TIMEOUT = 5000; // 5 seconds
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     // Get conversation to find the other participant
     const conversation = await ctx.db.get(conversationId);

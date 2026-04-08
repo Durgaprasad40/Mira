@@ -96,11 +96,15 @@ export const setScreenshotPermission = mutation({
 export const requestScreenshotAccess = mutation({
   args: {
     mediaId: v.id('media'),
-    requesterId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { mediaId, requesterId } = args;
+    const { mediaId, token } = args;
     const now = Date.now();
+    const requesterId = await validateSessionToken(ctx, token);
+    if (!requesterId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');

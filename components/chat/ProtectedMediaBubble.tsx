@@ -1,7 +1,6 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { View, Text, StyleSheet, PanResponder, GestureResponderEvent } from 'react-native';
 import { Image } from 'expo-image';
-import { Video, AVPlaybackStatus } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -20,7 +19,7 @@ const isContentUri = (uri: string) => uri?.startsWith('content://');
 interface ProtectedMediaBubbleProps {
   messageId: string;
   mediaId?: string;
-  userId?: string;
+  authToken?: string;
   // Phase-1 demo mode props
   protectedMedia?: {
     localUri?: string;
@@ -49,7 +48,7 @@ interface ProtectedMediaBubbleProps {
 export function ProtectedMediaBubble({
   messageId,
   mediaId,
-  userId,
+  authToken,
   protectedMedia,
   timerEndsAt,
   isExpired: isExpiredProp,
@@ -67,25 +66,12 @@ export function ProtectedMediaBubble({
   // This ensures hooks are called in the same order on every render
   // ============================================================================
 
-  // Fetch media info from Convex if mediaId is provided
+  // Fetch media info from Convex if mediaId is provided.
+  // Live Phase-1 secure media is token-authenticated and tap-to-view only.
   const mediaInfo = useQuery(
     api.media.getMediaInfo,
-    mediaId && userId ? { mediaId: mediaId as any, userId: userId as any } : 'skip'
+    mediaId && authToken ? { mediaId: mediaId as any, token: authToken } : 'skip'
   );
-
-  // PREFETCH-FIX: Fetch media URL for prefetching (only if not expired and mediaId exists)
-  // Note: We use isExpiredProp here since isExpired derived value isn't available yet
-  const mediaUrlData = useQuery(
-    api.protectedMedia.getMediaUrl,
-    mediaId && userId && !isExpiredProp
-      ? { messageId: messageId as any, userId: userId as any }
-      : 'skip'
-  );
-
-  // PREFETCH-FIX-V2: Refs for prefetching
-  const hasPrefetchedRef = useRef(false);
-  const videoPrefetchRef = useRef<Video | null>(null);
-  const prefetchStartTimeRef = useRef<number>(0);
 
   // P1-FIX: Lock the first valid timer value to prevent jump when query hydrates
   const lockedTimerSecondsRef = useRef<number | null>(null);
@@ -114,8 +100,6 @@ export function ProtectedMediaBubble({
   const viewingMode = protectedMedia?.viewingMode ?? mediaInfo?.viewMode ?? 'tap';
   const isHoldMode = viewingMode === 'hold';
   const viewOnce = mediaInfo?.viewOnce ?? protectedMedia?.viewOnce ?? false;
-  const canScreenshot = mediaInfo?.canScreenshot ?? protectedMedia?.screenshotAllowed ?? false;
-  const watermark = mediaInfo?.watermarkEnabled ?? protectedMedia?.watermark ?? false;
   const isExpired = mediaInfo?.isExpired ?? isExpiredProp ?? false;
 
   // PanResponder for hold mode - must be declared before any early returns
@@ -185,55 +169,6 @@ export function ProtectedMediaBubble({
       }
     },
   }), [isHoldMode, onHoldStart, onHoldEnd, onPress, messageId, isOwn]);
-
-  // VIDEO-PREFETCH: Callback when video is preloaded
-  const handleVideoPrefetchLoad = useCallback((status: AVPlaybackStatus) => {
-    if (status.isLoaded) {
-      const prefetchTime = Date.now() - prefetchStartTimeRef.current;
-      log.info('[SECURE_BUBBLE]', 'video prefetch complete', { messageId, prefetchTime });
-    }
-  }, [messageId]);
-
-  // PREFETCH-FIX-V3: Prefetch from BOTH Convex URL and local URI
-  // This ensures instant open in both demo mode (local URI) and Convex mode (remote URL)
-  useEffect(() => {
-    if (hasPrefetchedRef.current || isExpired) return;
-
-    // Determine the URI to prefetch - prioritize Convex URL, fall back to local URI
-    const urlToFetch = mediaUrlData?.url || protectedMedia?.localUri;
-    const isVideoMedia = mediaUrlData?.mediaType === 'video' || protectedMedia?.mediaType === 'video';
-
-    if (!urlToFetch) {
-      log.info('[SECURE_PREFETCH]', 'no URL available yet', { messageId, hasMediaUrlData: !!mediaUrlData, hasLocalUri: !!protectedMedia?.localUri });
-      return;
-    }
-
-    hasPrefetchedRef.current = true;
-    prefetchStartTimeRef.current = Date.now();
-
-    if (isVideoMedia) {
-      // For videos, we log but actual prefetch happens via hidden Video component
-      log.info('[SECURE_PREFETCH]', 'video prefetch queued', {
-        messageId,
-        source: mediaUrlData?.url ? 'convex' : 'local',
-        url: urlToFetch.substring(0, 50),
-      });
-    } else {
-      // For photos, use Image.prefetch for instant load
-      Image.prefetch(urlToFetch)
-        .then(() => {
-          const prefetchTime = Date.now() - prefetchStartTimeRef.current;
-          log.info('[SECURE_PREFETCH]', 'image prefetch complete', { messageId, prefetchTime });
-        })
-        .catch((err) => {
-          log.info('[SECURE_PREFETCH]', 'image prefetch failed', { messageId, error: err?.message });
-        });
-      log.info('[SECURE_PREFETCH]', 'image prefetch started', {
-        messageId,
-        source: mediaUrlData?.url ? 'convex' : 'local',
-      });
-    }
-  }, [mediaUrlData?.url, mediaUrlData?.mediaType, protectedMedia?.localUri, protectedMedia?.mediaType, isExpired, messageId]);
 
   // Calculate remaining time from wall-clock using shared countdown helper
   useEffect(() => {
@@ -318,12 +253,6 @@ export function ProtectedMediaBubble({
   // ============================================================================
   // END OF HOOKS - Early returns are safe below this point
   // ============================================================================
-
-  // Determine if we should show hidden video prefetcher
-  const shouldPrefetchVideo = mediaUrlData?.url &&
-    mediaUrlData?.mediaType === 'video' &&
-    hasPrefetchedRef.current &&
-    !isExpired;
 
   // Determine timer display using shared countdown formatting
   const hasActiveTimer = remainingSec !== null && remainingSec > 0;
@@ -447,7 +376,7 @@ export function ProtectedMediaBubble({
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // RECEIVER PATH: Blurred thumbnail with "Tap/Hold to view" hint
+  // RECEIVER PATH: Blurred thumbnail with "Tap to view" hint
   // TOUCH-FIX: All overlay Views must have pointerEvents="none" to allow
   // touch events to pass through to the parent container with PanResponder
   // ═══════════════════════════════════════════════════════════════════════════
@@ -497,24 +426,12 @@ export function ProtectedMediaBubble({
         </View>
       )}
 
-      {/* Tap/Hold to view hint */}
+      {/* Tap to view hint */}
       <View style={styles.hintOverlay} pointerEvents="none">
         <Text style={styles.hintText}>
-          {isHoldMode ? 'Hold to view' : 'Tap to view'}
+          {isHoldMode ? 'Hold to view securely' : 'Tap to view securely'}
         </Text>
       </View>
-
-      {/* VIDEO-PREFETCH: Hidden video for preloading */}
-      {shouldPrefetchVideo && (
-        <Video
-          ref={videoPrefetchRef}
-          source={{ uri: mediaUrlData!.url }}
-          style={styles.hiddenPrefetch}
-          shouldPlay={false}
-          isMuted={true}
-          onLoad={handleVideoPrefetchLoad}
-        />
-      )}
     </View>
   );
 
@@ -653,13 +570,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: COLORS.textMuted,
     fontWeight: '500',
-  },
-  // VIDEO-PREFETCH: Hidden element for preloading video
-  hiddenPrefetch: {
-    width: 1,
-    height: 1,
-    position: 'absolute',
-    opacity: 0,
   },
   // SENDER-TIMER: Wrapper for bubble + external timer
   senderWrapper: {

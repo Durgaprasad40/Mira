@@ -79,6 +79,7 @@ interface MessageBubbleProps {
   isOwn: boolean;
   otherUserName?: string;
   currentUserId?: string;
+  currentUserToken?: string;
   onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
   onProtectedMediaPress?: (messageId: string) => void;
   onProtectedMediaHoldStart?: (messageId: string) => void;
@@ -126,11 +127,12 @@ function getTickColor(status: TickStatus, isOwn: boolean): string {
   return isOwn ? 'rgba(255,255,255,0.8)' : COLORS.textLight;
 }
 
-export function MessageBubble({
+function MessageBubbleComponent({
   message,
   isOwn,
   otherUserName,
   currentUserId,
+  currentUserToken,
   onMediaPress,
   onProtectedMediaPress,
   onProtectedMediaHoldStart,
@@ -229,12 +231,13 @@ export function MessageBubble({
   // SECURE-REWRITE: Pending/optimistic message (uploading secure photo)
   // Always own message, no avatar needed
   if (message.isPending) {
+    const pendingLabel = message.type === 'video' ? 'Sending secure video...' : 'Sending secure photo...';
     return (
       <View style={[styles.container, styles.ownContainer]}>
         <View style={[styles.bubble, styles.ownBubble, styles.pendingBubble]}>
           <View style={styles.pendingContent}>
             <ActivityIndicator size="small" color={COLORS.white} />
-            <Text style={styles.pendingText}>Sending secure photo...</Text>
+            <Text style={styles.pendingText}>{pendingLabel}</Text>
           </View>
         </View>
       </View>
@@ -258,7 +261,7 @@ export function MessageBubble({
         <ProtectedMediaBubble
           messageId={message.id}
           mediaId={message.mediaId}
-          userId={currentUserId}
+          authToken={currentUserToken}
           protectedMedia={message.protectedMedia as any}
           timerEndsAt={message.timerEndsAt}
           isExpired={!!message.isExpired}
@@ -271,11 +274,13 @@ export function MessageBubble({
           onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
           onExpire={() => onProtectedMediaExpire?.(message.id)}
         />
-        {!message.isExpired && (
-          <View style={styles.imageFooter}>
-            <Text style={[styles.time, isOwn && styles.ownTime]}>
-              {formatTime(message.createdAt)}
-            </Text>
+        {!message.isExpired && (showTimestamp || isOwn) && (
+          <View style={[styles.imageFooter, !showTimestamp && styles.statusOnlyFooter]}>
+            {showTimestamp && (
+              <Text style={[styles.time, isOwn && styles.ownTime]}>
+                {formatTime(message.createdAt)}
+              </Text>
+            )}
             {isOwn && (() => {
               const tickStatus = getTickStatus(message);
               return (
@@ -329,22 +334,26 @@ export function MessageBubble({
               type={message.type as 'image' | 'video'}
               onPress={() => onMediaPress?.(mediaUrl!, message.type as 'image' | 'video')}
             />
-            <View style={styles.imageFooter}>
-              <Text style={[styles.time, isOwn && styles.ownTime]}>
-                {formatTime(message.createdAt)}
-              </Text>
-              {isOwn && (() => {
-                const tickStatus = getTickStatus(message);
-                return (
-                  <Ionicons
-                    name={getTickIcon(tickStatus)}
-                    size={14}
-                    color={getTickColor(tickStatus, isOwn)}
-                    style={styles.readIcon}
-                  />
-                );
-              })()}
-            </View>
+            {(showTimestamp || isOwn) && (
+              <View style={[styles.imageFooter, !showTimestamp && styles.statusOnlyFooter]}>
+                {showTimestamp && (
+                  <Text style={[styles.time, isOwn && styles.ownTime]}>
+                    {formatTime(message.createdAt)}
+                  </Text>
+                )}
+                {isOwn && (() => {
+                  const tickStatus = getTickStatus(message);
+                  return (
+                    <Ionicons
+                      name={getTickIcon(tickStatus)}
+                      size={14}
+                      color={getTickColor(tickStatus, isOwn)}
+                      style={styles.readIcon}
+                    />
+                  );
+                })()}
+              </View>
+            )}
           </View>
       </Animated.View>
     );
@@ -430,11 +439,13 @@ export function MessageBubble({
         ]}>
           {message.content}
         </Text>
-        {showTimestamp && (
+        {(showTimestamp || isOwn) && (
           <View style={styles.footer}>
-            <Text style={[styles.time, isOwn && styles.ownTime]}>
-              {formatTime(message.createdAt)}
-            </Text>
+            {showTimestamp && (
+              <Text style={[styles.time, isOwn && styles.ownTime]}>
+                {formatTime(message.createdAt)}
+              </Text>
+            )}
             {isOwn && (() => {
               const tickStatus = getTickStatus(message);
               return (
@@ -452,6 +463,59 @@ export function MessageBubble({
     </Animated.View>
   );
 }
+
+function areMessageBubblePropsEqual(
+  prev: Readonly<MessageBubbleProps>,
+  next: Readonly<MessageBubbleProps>
+) {
+  const prevMedia = prev.message.protectedMedia;
+  const nextMedia = next.message.protectedMedia;
+
+  return (
+    prev.isOwn === next.isOwn &&
+    prev.otherUserName === next.otherUserName &&
+    prev.currentUserId === next.currentUserId &&
+    prev.currentUserToken === next.currentUserToken &&
+    prev.showTimestamp === next.showTimestamp &&
+    prev.showAvatar === next.showAvatar &&
+    prev.avatarUrl === next.avatarUrl &&
+    prev.isLastInGroup === next.isLastInGroup &&
+    prev.message.id === next.message.id &&
+    prev.message.content === next.message.content &&
+    prev.message.type === next.message.type &&
+    prev.message.senderId === next.message.senderId &&
+    prev.message.createdAt === next.message.createdAt &&
+    prev.message.readAt === next.message.readAt &&
+    prev.message.deliveredAt === next.message.deliveredAt &&
+    prev.message.imageUrl === next.message.imageUrl &&
+    prev.message.mediaUrl === next.message.mediaUrl &&
+    prev.message.videoUri === next.message.videoUri &&
+    prev.message.isProtected === next.message.isProtected &&
+    prev.message.isExpired === next.message.isExpired &&
+    prev.message.timerEndsAt === next.message.timerEndsAt &&
+    prev.message.expiredAt === next.message.expiredAt &&
+    prev.message.viewedAt === next.message.viewedAt &&
+    prev.message.systemSubtype === next.message.systemSubtype &&
+    prev.message.mediaId === next.message.mediaId &&
+    prev.message.viewOnce === next.message.viewOnce &&
+    prev.message.recipientOpened === next.message.recipientOpened &&
+    prev.message.audioUri === next.message.audioUri &&
+    prev.message.audioUrl === next.message.audioUrl &&
+    prev.message.durationMs === next.message.durationMs &&
+    prev.message.audioDurationMs === next.message.audioDurationMs &&
+    prev.message.isPending === next.message.isPending &&
+    prevMedia?.localUri === nextMedia?.localUri &&
+    prevMedia?.mediaType === nextMedia?.mediaType &&
+    prevMedia?.timer === nextMedia?.timer &&
+    prevMedia?.viewingMode === nextMedia?.viewingMode &&
+    prevMedia?.screenshotAllowed === nextMedia?.screenshotAllowed &&
+    prevMedia?.viewOnce === nextMedia?.viewOnce &&
+    prevMedia?.watermark === nextMedia?.watermark
+  );
+}
+
+export const MessageBubble = React.memo(MessageBubbleComponent, areMessageBubblePropsEqual);
+MessageBubble.displayName = 'MessageBubble';
 
 const styles = StyleSheet.create({
   // ═══════════════════════════════════════════════════════════════════════════
@@ -601,6 +665,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'flex-end',
     marginTop: 3,
+  },
+  statusOnlyFooter: {
+    marginTop: 4,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════

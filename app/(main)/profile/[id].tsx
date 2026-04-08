@@ -725,6 +725,7 @@ export default function ViewProfileScreen() {
         reportedUserId={userId || ''}
         reportedUserName={profile?.name || 'this user'}
         currentUserId={currentUserId || ''}
+        authToken={token || undefined}
         onBlockSuccess={() => router.back()}
       />
     </ScrollView>

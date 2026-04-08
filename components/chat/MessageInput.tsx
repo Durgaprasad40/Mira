@@ -32,6 +32,8 @@ interface MessageInputProps {
   onTextChange?: (text: string) => void;
   /** Called when user starts/stops typing (for production typing indicators). */
   onTypingChange?: (isTyping: boolean) => void;
+  /** Optional placeholder when composer is disabled for a known reason. */
+  disabledPlaceholder?: string;
 }
 
 export function MessageInput({
@@ -49,6 +51,7 @@ export function MessageInput({
   initialText = '',
   onTextChange,
   onTypingChange,
+  disabledPlaceholder,
 }: MessageInputProps) {
   const [text, setText] = useState(initialText);
   const [showTemplates, setShowTemplates] = useState(false);
@@ -70,13 +73,49 @@ export function MessageInput({
 
   const handleFocus = useCallback(() => {
     setIsFocused(true);
+    if (showAttachMenu) {
+      setShowAttachMenu(false);
+    }
+    if (showTemplates) {
+      setShowTemplates(false);
+    }
     inputBorderColor.value = withTiming(1, { duration: 150 });
-  }, [inputBorderColor]);
+  }, [inputBorderColor, showAttachMenu, showTemplates]);
+
+  const [isSending, setIsSending] = useState(false);
+
+  // P1-A FIX: Ref-based guard to prevent duplicate sends on rapid double-tap
+  // State updates are async; ref is synchronous and prevents race
+  const isSendingRef = useRef(false);
+  const isTypingRef = useRef(false);
+
+  // Typing notification timer ref (for debouncing typing status)
+  const hideTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // P1-B FIX: Ref to hold latest onTypingChange callback
+  // Prevents stale closure in setTimeout
+  const onTypingChangeRef = useRef(onTypingChange);
+
+  // P1-B FIX: Sync ref when onTypingChange prop changes
+  useEffect(() => {
+    onTypingChangeRef.current = onTypingChange;
+  }, [onTypingChange]);
+
+  const emitTypingState = useCallback((nextIsTyping: boolean) => {
+    if (isTypingRef.current === nextIsTyping) return;
+    isTypingRef.current = nextIsTyping;
+    onTypingChangeRef.current?.(nextIsTyping);
+  }, []);
 
   const handleBlur = useCallback(() => {
     setIsFocused(false);
     inputBorderColor.value = withTiming(0, { duration: 150 });
-  }, [inputBorderColor]);
+    if (hideTypingTimerRef.current) {
+      clearTimeout(hideTypingTimerRef.current);
+      hideTypingTimerRef.current = null;
+    }
+    emitTypingState(false);
+  }, [emitTypingState, inputBorderColor]);
 
   const handleSendPressIn = useCallback(() => {
     sendButtonScale.value = withSpring(0.92, { damping: 15, stiffness: 400 });
@@ -132,44 +171,26 @@ export function MessageInput({
     if (!isDemoMode && onTypingChangeRef.current) {
       if (hasText) {
         // User is typing - notify immediately
-        onTypingChangeRef.current(true);
+        emitTypingState(true);
         // Stop typing after 2s of inactivity
         hideTypingTimerRef.current = setTimeout(() => {
-          // P1-B FIX: Use ref here - closure would capture stale onTypingChange
-          onTypingChangeRef.current?.(false);
+          emitTypingState(false);
         }, 2000);
       } else {
         // User cleared input - stop typing
-        onTypingChangeRef.current(false);
+        emitTypingState(false);
       }
     }
 
   };
 
-  const [isSending, setIsSending] = useState(false);
-
-  // P1-A FIX: Ref-based guard to prevent duplicate sends on rapid double-tap
-  // State updates are async; ref is synchronous and prevents race
-  const isSendingRef = useRef(false);
-
-  // Typing notification timer ref (for debouncing typing status)
-  const hideTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // P1-B FIX: Ref to hold latest onTypingChange callback
-  // Prevents stale closure in setTimeout
-  const onTypingChangeRef = useRef(onTypingChange);
-
-  // P1-B FIX: Sync ref when onTypingChange prop changes
-  useEffect(() => {
-    onTypingChangeRef.current = onTypingChange;
-  }, [onTypingChange]);
-
   // Cleanup timer on unmount
   useEffect(() => {
     return () => {
       if (hideTypingTimerRef.current) clearTimeout(hideTypingTimerRef.current);
+      emitTypingState(false);
     };
-  }, []);
+  }, [emitTypingState]);
 
   const handleSend = async () => {
     // P1-A FIX: Ref guard at START - prevents double-tap race condition
@@ -303,13 +324,16 @@ export function MessageInput({
             >
               <Pressable style={styles.menuOverlay} onPress={() => setShowAttachMenu(false)}>
                 <View style={styles.menuContainer}>
+                  <Text style={styles.menuCaption}>
+                    Secure media opens on tap. Choose view once or a timer before sending.
+                  </Text>
                   {/* Camera option */}
                   {onSendCamera && (
                     <TouchableOpacity style={styles.menuItem} onPress={handleCameraPress}>
                       <View style={[styles.menuIcon, { backgroundColor: COLORS.primary }]}>
                         <Ionicons name="camera" size={20} color={COLORS.white} />
                       </View>
-                      <Text style={styles.menuText}>Camera</Text>
+                      <Text style={styles.menuText}>Secure Camera</Text>
                     </TouchableOpacity>
                   )}
 
@@ -319,7 +343,7 @@ export function MessageInput({
                       <View style={[styles.menuIcon, { backgroundColor: COLORS.secondary }]}>
                         <Ionicons name="images" size={20} color={COLORS.white} />
                       </View>
-                      <Text style={styles.menuText}>Gallery</Text>
+                      <Text style={styles.menuText}>Secure Gallery</Text>
                     </TouchableOpacity>
                   )}
 
@@ -360,7 +384,13 @@ export function MessageInput({
               !isDemoMode && !canSendCustom && isPreMatch && styles.inputDisabled,
               isRecording && styles.inputRecording,
             ]}
-            placeholder={isRecording ? 'Recording voice message...' : (!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...')}
+            placeholder={
+              isRecording
+                ? 'Recording voice message...'
+                : disabled && disabledPlaceholder
+                  ? disabledPlaceholder
+                  : (!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...')
+            }
             placeholderTextColor={isRecording ? COLORS.error : COLORS.textLight}
             value={text}
             onChangeText={handleTextChange}
@@ -513,6 +543,14 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 8,
     elevation: 8,
+  },
+  menuCaption: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: COLORS.textMuted,
+    marginBottom: 6,
+    paddingHorizontal: 16,
+    paddingTop: 4,
   },
   menuItem: {
     flexDirection: 'row',

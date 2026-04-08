@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -23,7 +23,7 @@ export default function PreMatchMessageScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId: targetUserId } = useLocalSearchParams<{ userId: string }>();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const { tier } = useSubscriptionStore();
   const isPremium = isDemoMode || tier === 'premium';
 
@@ -31,6 +31,7 @@ export default function PreMatchMessageScreen() {
   const [customMessage, setCustomMessage] = useState('');
   const [sending, setSending] = useState(false);
   const [timedOut, setTimedOut] = useState(false);
+  const sendingRef = useRef(false);
 
   useEffect(() => {
     const t = setTimeout(() => setTimedOut(true), 8000);
@@ -57,7 +58,8 @@ export default function PreMatchMessageScreen() {
   const sendPreMatchMessage = useMutation(api.messages.sendPreMatchMessage);
 
   const handleSend = async () => {
-    if (!userId || !targetUserId) return;
+    if (sendingRef.current) return;
+    if (!userId || !targetUserId || !token) return;
 
     const message = selectedTemplate
       ? templates?.find((t) => t.id === selectedTemplate)?.text || customMessage
@@ -84,13 +86,15 @@ export default function PreMatchMessageScreen() {
     }
 
     setSending(true);
+    sendingRef.current = true;
     try {
-      // MSG-002 FIX: Use authUserId for server-side verification
+      // Live pre-match sends use the validated session token as the source of truth.
       await sendPreMatchMessage({
-        authUserId: userId!,
+        token,
         toUserId: targetUserId as any,
         content: message,
         templateId: selectedTemplate || undefined,
+        clientMessageId: `pre_match_${targetUserId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       });
       Alert.alert('Success', 'Message sent! They\'ll see it at the top of their screen.', [
         { text: 'OK', onPress: () => router.back() },
@@ -99,6 +103,7 @@ export default function PreMatchMessageScreen() {
       Alert.alert('Error', error.message || 'Failed to send message');
     } finally {
       setSending(false);
+      sendingRef.current = false;
     }
   };
 

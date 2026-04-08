@@ -27,15 +27,19 @@ interface ConversationItemProps {
   onPress: () => void;
   /** DM-FIX: Tap avatar to view profile (optional, falls back to onPress if not provided) */
   onAvatarPress?: () => void;
+  currentUserId?: string;
 }
 
-export function ConversationItem({
+const PRESENCE_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
+
+function ConversationItemComponent({
   otherUser,
   lastMessage,
   unreadCount,
   isPreMatch,
   onPress,
   onAvatarPress,
+  currentUserId,
 }: ConversationItemProps) {
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const highlightAnim = useRef(new Animated.Value(0)).current;
@@ -118,16 +122,23 @@ export function ConversationItem({
 
   // System message marker regex (matches [SYSTEM:subtype] prefix)
   const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
+  const isActiveNow = useMemo(() => {
+    if (!otherUser.lastActive) return false;
+    return Date.now() - otherUser.lastActive < PRESENCE_ACTIVE_WINDOW_MS;
+  }, [otherUser.lastActive]);
 
   // 5-7: Safe fallback for corrupted/missing preview content
   // TASK-2: Strip system message markers from preview
-  const getMessagePreview = () => {
+  const messagePreview = useMemo(() => {
     if (!lastMessage) return 'Say hi 👋';
-    if (lastMessage.isProtected) return '🔒 Protected Photo';
-    if (lastMessage.type === 'image') return '📷 Photo';
-    if (lastMessage.type === 'video') return '🎬 Video';
-    if (lastMessage.type === 'voice') return '🎤 Voice message';
-    if (lastMessage.type === 'dare') return '🎲 Dare sent';
+    const previewPrefix = currentUserId && lastMessage.senderId === currentUserId ? 'You: ' : '';
+    if (lastMessage.isProtected) {
+      return `${previewPrefix}${lastMessage.type === 'video' ? '🔒 Secure video' : '🔒 Secure photo'}`;
+    }
+    if (lastMessage.type === 'image') return `${previewPrefix}📷 Photo`;
+    if (lastMessage.type === 'video') return `${previewPrefix}🎬 Video`;
+    if (lastMessage.type === 'voice') return `${previewPrefix}🎤 Voice message`;
+    if (lastMessage.type === 'dare') return `${previewPrefix}🎲 Dare sent`;
     // 5-7: Check for valid content before returning
     const content = lastMessage.content;
     if (typeof content === 'string' && content.trim()) {
@@ -137,11 +148,11 @@ export function ConversationItem({
         const cleanContent = content.slice(markerMatch[0].length).trim();
         return cleanContent || 'New message';
       }
-      return content;
+      return `${previewPrefix}${content}`;
     }
     // Fallback for corrupted/missing content
     return 'New message';
-  };
+  }, [currentUserId, lastMessage]);
 
   // Interpolate highlight animation for subtle background pulse
   const highlightBgColor = highlightAnim.interpolate({
@@ -188,7 +199,7 @@ export function ConversationItem({
               <Text style={styles.avatarInitials}>{avatarInitials}</Text>
             </View>
           )}
-          {/* Online indicator could go here */}
+          {isActiveNow && <View style={styles.activeNowDot} />}
           {isPreMatch && (
             <View style={styles.preMatchBadge}>
               <Text style={styles.preMatchText}>Pre-Match</Text>
@@ -197,15 +208,22 @@ export function ConversationItem({
         </TouchableOpacity>
 
         {/* Content Section */}
-        <View style={styles.content}>
+          <View style={styles.content}>
           {/* Top row: Name + Time */}
           <View style={styles.header}>
-            <Text
-              style={[styles.name, hasUnread && styles.nameUnread]}
-              numberOfLines={1}
-            >
-              {otherUser.name}
-            </Text>
+            <View style={styles.nameRow}>
+              <Text
+                style={[styles.name, hasUnread && styles.nameUnread]}
+                numberOfLines={1}
+              >
+                {otherUser.name}
+              </Text>
+              {otherUser.isVerified && (
+                <View style={styles.verifiedBadge}>
+                  <Text style={styles.verifiedBadgeText}>✓</Text>
+                </View>
+              )}
+            </View>
             {lastMessage && (
               <Text style={styles.time}>
                 {formatTime(lastMessage.createdAt)}
@@ -219,7 +237,7 @@ export function ConversationItem({
               style={[styles.message, hasUnread && styles.unreadMessage]}
               numberOfLines={1}
             >
-              {getMessagePreview()}
+              {messagePreview}
             </Text>
             {hasUnread && (
               <View style={styles.unreadDot}>
@@ -237,6 +255,32 @@ export function ConversationItem({
     </Reanimated.View>
   );
 }
+
+function areConversationItemPropsEqual(
+  prev: Readonly<ConversationItemProps>,
+  next: Readonly<ConversationItemProps>
+) {
+  return (
+    prev.id === next.id &&
+    prev.unreadCount === next.unreadCount &&
+    prev.isPreMatch === next.isPreMatch &&
+    prev.currentUserId === next.currentUserId &&
+    prev.otherUser.id === next.otherUser.id &&
+    prev.otherUser.name === next.otherUser.name &&
+    prev.otherUser.photoUrl === next.otherUser.photoUrl &&
+    prev.otherUser.lastActive === next.otherUser.lastActive &&
+    prev.otherUser.isVerified === next.otherUser.isVerified &&
+    prev.otherUser.photoBlurred === next.otherUser.photoBlurred &&
+    prev.lastMessage?.content === next.lastMessage?.content &&
+    prev.lastMessage?.type === next.lastMessage?.type &&
+    prev.lastMessage?.senderId === next.lastMessage?.senderId &&
+    prev.lastMessage?.createdAt === next.lastMessage?.createdAt &&
+    prev.lastMessage?.isProtected === next.lastMessage?.isProtected
+  );
+}
+
+export const ConversationItem = React.memo(ConversationItemComponent, areConversationItemPropsEqual);
+ConversationItem.displayName = 'ConversationItem';
 
 // Responsive avatar size (48-52px range for comfortable touch)
 const AVATAR_SIZE = moderateScale(52, 0.3);
@@ -302,6 +346,17 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     letterSpacing: 0.3,
   },
+  activeNowDot: {
+    position: 'absolute',
+    bottom: 1,
+    right: 1,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#22C55E',
+    borderWidth: 2,
+    borderColor: COLORS.background,
+  },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // CONTENT - Text hierarchy: Name (bold) > Message (light) > Time (subtle)
@@ -317,11 +372,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 4,
   },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flex: 1,
+    minWidth: 0,
+  },
   name: {
     fontSize: 16,
     fontWeight: '600',
     color: COLORS.text,
-    flex: 1,
     flexShrink: 1,
     letterSpacing: -0.2,
   },
@@ -350,6 +411,21 @@ const styles = StyleSheet.create({
   unreadMessage: {
     fontWeight: '600',
     color: COLORS.text,
+  },
+  verifiedBadge: {
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  verifiedBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.white,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════

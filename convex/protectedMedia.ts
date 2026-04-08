@@ -1,6 +1,8 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { resolveUserIdByAuthId } from './helpers';
+import { requireLiveMessageSessionUser } from './helpers';
+import type { MutationCtx, QueryCtx } from './_generated/server';
+import type { Id } from './_generated/dataModel';
 
 /**
  * Legacy compatibility layer.
@@ -8,52 +10,112 @@ import { resolveUserIdByAuthId } from './helpers';
  * These wrappers keep existing frontend call-sites working during migration.
  */
 
-// Legacy: sendProtectedImage → delegates to media.createMediaMessage pattern
-// MSG-003 FIX: Auth hardening - verify caller identity server-side
+const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice', 'template', 'dare'];
+
+async function computeUnreadCountFromMessages(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: Id<'conversations'>,
+  userId: Id<'users'>
+): Promise<number> {
+  const unreadMessages = await ctx.db
+    .query('messages')
+    .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+    .filter((q) =>
+      q.and(
+        q.neq(q.field('senderId'), userId),
+        q.eq(q.field('readAt'), undefined)
+      )
+    )
+    .collect();
+
+  return unreadMessages.filter((m) => COUNTABLE_MESSAGE_TYPES.includes(m.type)).length;
+}
+
+async function upsertParticipantUnreadCount(
+  ctx: MutationCtx,
+  conversationId: Id<'conversations'>,
+  userId: Id<'users'>
+): Promise<void> {
+  const unreadCount = await computeUnreadCountFromMessages(ctx, conversationId, userId);
+  const existing = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user_conversation', (q) =>
+      q.eq('userId', userId).eq('conversationId', conversationId)
+    )
+    .first();
+
+  if (existing) {
+    if (existing.unreadCount !== unreadCount) {
+      await ctx.db.patch(existing._id, { unreadCount });
+    }
+    return;
+  }
+
+  await ctx.db.insert('conversationParticipants', {
+    conversationId,
+    userId,
+    unreadCount,
+  });
+}
+
+// Legacy: sendProtectedImage → delegates to media.createMediaMessage pattern.
+// Phase-1 Messages uses a canonical tap-to-view secure-media contract.
 export const sendProtectedImage = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(), // MSG-003: Auth verification required
+    token: v.string(),
     imageStorageId: v.id('_storage'),
     timer: v.number(),
     screenshotAllowed: v.boolean(),
     viewOnce: v.boolean(),
     watermark: v.boolean(),
-    // HOLD-TAP-FIX: Accept viewMode from frontend
+    // Accepted for backward compatibility, but Phase-1 live messages always normalize to tap.
     viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
     // VIDEO-FIX: Accept mediaType to distinguish photo vs video
     mediaType: v.optional(v.union(v.literal('image'), v.literal('video'))),
     // VIDEO-MIRROR-FIX: Accept isMirrored flag for front-camera videos
     isMirrored: v.optional(v.boolean()),
+    // P1: Client-provided idempotency key to reduce duplicate secure-media sends.
+    clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const {
       conversationId,
-      authUserId,
+      token,
       imageStorageId,
       timer,
       screenshotAllowed,
       viewOnce,
       watermark,
-      viewMode,
       mediaType = 'image', // Default to image for backwards compatibility
       isMirrored = false, // VIDEO-MIRROR-FIX: Default to false
+      clientMessageId,
     } = args;
     const now = Date.now();
-
-    // MSG-003 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!senderId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const senderId = await requireLiveMessageSessionUser(ctx, token);
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) throw new Error('Conversation not found');
     if (!conversation.participants.includes(senderId)) {
       throw new Error('Not authorized');
+    }
+
+    if (clientMessageId) {
+      const existing = await ctx.db
+        .query('messages')
+        .withIndex('by_conversation_clientMessageId', (q) =>
+          q.eq('conversationId', conversationId).eq('clientMessageId', clientMessageId)
+        )
+        .first();
+
+      if (existing) {
+        return {
+          success: true,
+          messageId: existing._id,
+          mediaId: existing.mediaId,
+          duplicate: true,
+        };
+      }
     }
 
     const sender = await ctx.db.get(senderId);
@@ -67,9 +129,10 @@ export const sendProtectedImage = mutation({
     }
 
     // Insert media row
-    // HOLD-TAP-FIX: Store viewMode for consistent rendering on both sides
-    // VIDEO-FIX: Use passed mediaType instead of hardcoded 'image'
-    // VIDEO-MIRROR-FIX: Store isMirrored for front-camera video correction
+    // Phase-1 canonical contract:
+    // - secure photo/video only
+    // - tap to view only
+    // - timer options: Normal, View once, 30s, 60s
     const mediaId = await ctx.db.insert('media', {
       chatId: conversationId,
       ownerId: senderId,
@@ -79,7 +142,7 @@ export const sendProtectedImage = mutation({
       timerSeconds: timer > 0 ? timer : undefined,
       viewOnce,
       watermarkEnabled: watermark,
-      viewMode: viewMode ?? 'tap', // Default to tap if not specified
+      viewMode: 'tap',
       isMirrored: mediaType === 'video' ? isMirrored : undefined, // Only store for videos
     });
 
@@ -92,6 +155,7 @@ export const sendProtectedImage = mutation({
       type: isVideo ? 'video' : 'image',
       content: isVideo ? 'Protected Video' : 'Protected Photo',
       mediaId,
+      clientMessageId,
       createdAt: now,
     });
 
@@ -112,8 +176,13 @@ export const sendProtectedImage = mutation({
     // Update conversation
     await ctx.db.patch(conversationId, { lastMessageAt: now });
 
-    // Notify recipient
     const recipientId = conversation.participants.find((id) => id !== senderId);
+    if (recipientId) {
+      await upsertParticipantUnreadCount(ctx, conversationId, recipientId);
+      await upsertParticipantUnreadCount(ctx, conversationId, senderId);
+    }
+
+    // Notify recipient
     if (recipientId) {
       await ctx.db.insert('notifications', {
         userId: recipientId,
@@ -134,22 +203,12 @@ export const sendProtectedImage = mutation({
 export const getMediaUrl = query({
   args: {
     messageId: v.id('messages'),
-    userId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { messageId, userId } = args;
+    const { messageId, token } = args;
     const now = Date.now();
-
-    // MSG-P1-001 FIX: Server-side auth verification
-    // Verify caller identity matches the requested userId
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      const callerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
-      if (callerUserId !== userId) {
-        // Caller is not authorized to view media as this user
-        return null;
-      }
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     const message = await ctx.db.get(messageId);
     if (!message) return null;
@@ -177,7 +236,7 @@ export const getMediaUrl = query({
         timerSeconds: null,
         expiresAt: null, // TIMER-FIX: Include deadline for consistency
         viewOnce: media.viewOnce,
-        viewMode: media.viewMode ?? 'tap', // HOLD-TAP-FIX: Include viewMode
+        viewMode: 'tap',
         mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
         isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
       };
@@ -206,7 +265,7 @@ export const getMediaUrl = query({
           timerSeconds: null,
           expiresAt: null,
           viewOnce: false,
-          viewMode: media.viewMode ?? 'tap',
+          viewMode: 'tap',
           mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
           isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
           error: 'storage_unavailable', // Indicates media could not be loaded
@@ -228,19 +287,19 @@ export const getMediaUrl = query({
         timerSeconds: media.timerSeconds ?? null,
         expiresAt: recipientPermission?.expiresAt ?? null, // TIMER-FIX: Owner sees recipient's deadline
         viewOnce: media.viewOnce,
-        viewMode: media.viewMode ?? 'tap', // HOLD-TAP-FIX: Include viewMode
+        viewMode: 'tap',
         mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
         isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
       };
     }
 
     if (!permission || permission.revoked || !permission.canView) {
-      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, expiresAt: null, viewOnce: false, viewMode: media.viewMode ?? 'tap', mediaType: media.mediaType ?? 'image', isMirrored: media.isMirrored ?? false };
+      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, expiresAt: null, viewOnce: false, viewMode: 'tap', mediaType: media.mediaType ?? 'image', isMirrored: media.isMirrored ?? false };
     }
 
     // Timer expired
     if (permission.expiresAt && now >= permission.expiresAt) {
-      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, expiresAt: permission.expiresAt, viewOnce: false, viewMode: media.viewMode ?? 'tap', mediaType: media.mediaType ?? 'image', isMirrored: media.isMirrored ?? false };
+      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, expiresAt: permission.expiresAt, viewOnce: false, viewMode: 'tap', mediaType: media.mediaType ?? 'image', isMirrored: media.isMirrored ?? false };
     }
 
     // VIEW-ONCE-FIX: Don't check viewCount >= 1 here!
@@ -268,7 +327,7 @@ export const getMediaUrl = query({
         timerSeconds: null,
         expiresAt: null,
         viewOnce: false,
-        viewMode: media.viewMode ?? 'tap',
+        viewMode: 'tap',
         mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
         isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
         error: 'storage_unavailable', // Indicates media could not be loaded
@@ -291,7 +350,7 @@ export const getMediaUrl = query({
       timerSeconds: media.timerSeconds ?? null,
       expiresAt: permission.expiresAt ?? null, // TIMER-FIX: Include absolute deadline
       viewOnce: media.viewOnce,
-      viewMode: media.viewMode ?? 'tap', // HOLD-TAP-FIX: Include viewMode
+      viewMode: 'tap',
       mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
       isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
     };
@@ -303,20 +362,12 @@ export const getMediaUrl = query({
 export const markViewed = mutation({
   args: {
     messageId: v.id('messages'),
-    authUserId: v.string(), // MSG-006: Auth verification required
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { messageId, authUserId } = args;
+    const { messageId, token } = args;
     const now = Date.now();
-
-    // MSG-006 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { success: true }; // Silent return for view tracking
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: true }; // Silent return for view tracking
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     const message = await ctx.db.get(messageId);
     if (!message || !message.mediaId) return { success: true };
@@ -369,20 +420,12 @@ export const markViewed = mutation({
 export const markExpired = mutation({
   args: {
     messageId: v.id('messages'),
-    authUserId: v.string(), // MSG-006: Auth verification required
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { messageId, authUserId } = args;
+    const { messageId, token } = args;
     const now = Date.now();
-
-    // MSG-006 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { success: true }; // Silent return for expiry tracking
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: true }; // Silent return for expiry tracking
-    }
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     const message = await ctx.db.get(messageId);
     if (!message || !message.mediaId) return { success: true };
@@ -428,21 +471,12 @@ export const markExpired = mutation({
 export const logScreenshotEvent = mutation({
   args: {
     messageId: v.id('messages'),
-    // MEDIA-P1-003 FIX: Removed userId - now derived from server auth
+    token: v.string(),
     wasTaken: v.boolean(),
   },
   handler: async (ctx, args) => {
-    // MEDIA-P1-003 FIX: Derive caller identity from server auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return { success: true }; // Silent return for unauthenticated
-    }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!userId) {
-      return { success: true }; // Silent return if user not found
-    }
-
-    const { messageId, wasTaken } = args;
+    const { messageId, token, wasTaken } = args;
+    const userId = await requireLiveMessageSessionUser(ctx, token);
     const now = Date.now();
 
     const message = await ctx.db.get(messageId);

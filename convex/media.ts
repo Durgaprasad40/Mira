@@ -1,12 +1,13 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { resolveUserIdByAuthId } from './helpers';
+import { requireLiveMessageSessionUser, resolveUserIdByAuthId } from './helpers';
 
 // Create a protected media message with per-recipient permissions
 export const createMediaMessage = mutation({
   args: {
     chatId: v.id('conversations'),
-    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
+    token: v.optional(v.string()),
+    authUserId: v.optional(v.string()),
     objectKey: v.id('_storage'),
     mediaType: v.union(v.literal('image'), v.literal('video')),
     timerSeconds: v.optional(v.number()),
@@ -16,6 +17,7 @@ export const createMediaMessage = mutation({
   handler: async (ctx, args) => {
     const {
       chatId,
+      token,
       authUserId,
       objectKey,
       mediaType,
@@ -25,11 +27,9 @@ export const createMediaMessage = mutation({
     } = args;
     const now = Date.now();
 
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
+    const senderId = token
+      ? await requireLiveMessageSessionUser(ctx, token)
+      : (authUserId ? await resolveUserIdByAuthId(ctx, authUserId) : null);
     if (!senderId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -66,7 +66,7 @@ export const createMediaMessage = mutation({
       conversationId: chatId,
       senderId,
       type: mediaType,
-      content: 'Protected Photo',
+      content: mediaType === 'video' ? 'Protected Video' : 'Protected Photo',
       mediaId,
       createdAt: now,
     });
@@ -95,7 +95,7 @@ export const createMediaMessage = mutation({
         userId: recipientId,
         type: 'message',
         title: 'New Message',
-        body: `${sender.name} sent you a protected photo`,
+        body: `${sender.name} sent you a protected ${mediaType === 'video' ? 'video' : 'photo'}`,
         data: { conversationId: chatId },
         createdAt: now,
       });
@@ -308,10 +308,11 @@ export const expireMedia = mutation({
 export const getMediaInfo = query({
   args: {
     mediaId: v.id('media'),
-    userId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { mediaId, userId } = args;
+    const { mediaId, token } = args;
+    const userId = await requireLiveMessageSessionUser(ctx, token);
 
     const media = await ctx.db.get(mediaId);
     if (!media) return null;
@@ -332,8 +333,7 @@ export const getMediaInfo = query({
     // Recipient-specific expiry checks (only apply if not owner)
     const recipientExpired = !isOwner && (
       permission?.revoked ||
-      (permission?.expiresAt != null && Date.now() >= permission.expiresAt) ||
-      (media.viewOnce && (permission?.viewCount ?? 0) >= 1)
+      (permission?.expiresAt != null && Date.now() >= permission.expiresAt)
     );
 
     // Final expiry: either globally expired OR recipient-specifically expired
@@ -348,8 +348,7 @@ export const getMediaInfo = query({
       canScreenshot: isOwner ? true : (permission?.canScreenshot ?? false),
       isExpired, // EXPIRY-SYNC-FIX: Now includes owner expiry
       isOwner,
-      // HOLD-TAP-FIX: Return viewMode so bubble renders correct interaction label
-      viewMode: media.viewMode ?? 'tap',
+      viewMode: 'tap',
     };
   },
 });

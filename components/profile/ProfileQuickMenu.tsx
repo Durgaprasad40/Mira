@@ -29,7 +29,7 @@ interface ProfileQuickMenuProps {
 export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId, logout } = useAuthStore();
+  const { userId, token, logout } = useAuthStore();
   const { tier } = useSubscriptionStore();
   const isPremium = tier === 'premium';
 
@@ -65,7 +65,7 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
 
   const messageQuota = useQuery(
     api.messages.getUnreadCount,
-    userId ? { userId: userId as any } : 'skip'
+    token ? { token } : 'skip'
   );
 
   const menuItems = [

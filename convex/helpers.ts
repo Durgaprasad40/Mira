@@ -294,7 +294,7 @@ export async function ensureUserByAuthId(
  * @returns userId if valid, null if invalid/expired/revoked
  */
 export async function validateSessionToken(
-  ctx: MutationCtx,
+  ctx: QueryCtx | MutationCtx,
   token: string
 ): Promise<Id<"users"> | null> {
   const now = Date.now();
@@ -321,6 +321,30 @@ export async function validateSessionToken(
   }
 
   return session.userId;
+}
+
+/**
+ * Strict session-based user resolution for live Phase-1 Messages paths.
+ *
+ * IMPORTANT:
+ * - Uses ONLY the validated session token as the source of truth
+ * - Does NOT accept Convex user IDs, authUserIds, demoUserIds, or prefix matches
+ * - Intended for security-sensitive message and protected-media access
+ */
+export async function requireLiveMessageSessionUser(
+  ctx: QueryCtx | MutationCtx,
+  token: string
+): Promise<Id<"users">> {
+  if (!token || token.trim().length === 0) {
+    throw new Error("Unauthorized: authentication required");
+  }
+
+  const userId = await validateSessionToken(ctx, token);
+  if (!userId) {
+    throw new Error("Unauthorized: invalid or expired session");
+  }
+
+  return userId;
 }
 
 // =============================================================================
@@ -398,6 +422,7 @@ async function isPairEligibleForPhase1(
   userA: Id<"users">,
   userB: Id<"users">
 ): Promise<boolean> {
+  const db = ctx.db as any;
   // Check Phase-1 blocks (bidirectional)
   const blockCheck1 = await ctx.db
     .query('blocks')
@@ -428,17 +453,17 @@ async function isPairEligibleForPhase1(
   // A single-sided like should not prevent future connection attempts
 
   // Check confession comment connects (either direction)
-  const confessionConnect1 = await ctx.db
+  const confessionConnect1 = await db
     .query('confessionCommentConnects')
-    .withIndex('by_from_user', (q) => q.eq('fromUserId', userA))
-    .filter((q) => q.eq(q.field('toUserId'), userB))
+    .withIndex('by_from_user', (q: any) => q.eq('fromUserId', userA))
+    .filter((q: any) => q.eq(q.field('toUserId'), userB))
     .first();
   if (confessionConnect1) return false;
 
-  const confessionConnect2 = await ctx.db
+  const confessionConnect2 = await db
     .query('confessionCommentConnects')
-    .withIndex('by_from_user', (q) => q.eq('fromUserId', userB))
-    .filter((q) => q.eq(q.field('toUserId'), userA))
+    .withIndex('by_from_user', (q: any) => q.eq('fromUserId', userB))
+    .filter((q: any) => q.eq(q.field('toUserId'), userA))
     .first();
   if (confessionConnect2) return false;
 
@@ -472,18 +497,19 @@ async function isPairEligibleForPhase2(
   userA: Id<"users">,
   userB: Id<"users">
 ): Promise<boolean> {
+  const db = ctx.db as any;
   // NOTE: No blocks check for Phase-2 - blocks table is Phase-1 only
 
   // Check private matches (either direction, any status)
-  const privateMatch1 = await ctx.db
+  const privateMatch1 = await db
     .query('privateMatches')
-    .withIndex('by_users', (q) => q.eq('user1Id', userA).eq('user2Id', userB))
+    .withIndex('by_users', (q: any) => q.eq('user1Id', userA).eq('user2Id', userB))
     .first();
   if (privateMatch1) return false;
 
-  const privateMatch2 = await ctx.db
+  const privateMatch2 = await db
     .query('privateMatches')
-    .withIndex('by_users', (q) => q.eq('user1Id', userB).eq('user2Id', userA))
+    .withIndex('by_users', (q: any) => q.eq('user1Id', userB).eq('user2Id', userA))
     .first();
   if (privateMatch2) return false;
 
@@ -491,16 +517,16 @@ async function isPairEligibleForPhase2(
   // A single-sided like should not prevent future connection attempts
 
   // Check private conversations (through participants)
-  const privateConvsWithUserA = await ctx.db
+  const privateConvsWithUserA = await db
     .query('privateConversationParticipants')
-    .withIndex('by_user', (q) => q.eq('userId', userA))
+    .withIndex('by_user', (q: any) => q.eq('userId', userA))
     .take(100);
 
   for (const cp of privateConvsWithUserA) {
-    const otherParticipant = await ctx.db
+    const otherParticipant = await db
       .query('privateConversationParticipants')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', cp.conversationId))
-      .filter((q) => q.eq(q.field('userId'), userB))
+      .withIndex('by_conversation', (q: any) => q.eq('conversationId', cp.conversationId))
+      .filter((q: any) => q.eq(q.field('userId'), userB))
       .first();
     if (otherParticipant) return false;
   }

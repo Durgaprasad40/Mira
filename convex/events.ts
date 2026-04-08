@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { validateSessionToken } from './helpers';
 
 // Report that a screenshot was taken — deduplicates system messages
 export const reportScreenshotTaken = mutation({
@@ -117,7 +118,7 @@ export const getSecurityEvents = query({
 // Submit a media report
 export const reportMedia = mutation({
   args: {
-    reporterId: v.id('users'),
+    token: v.string(),
     reportedUserId: v.id('users'),
     chatId: v.id('conversations'),
     mediaId: v.optional(v.id('media')),
@@ -132,9 +133,13 @@ export const reportMedia = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const reporterId = await validateSessionToken(ctx, args.token);
+    if (!reporterId) {
+      throw new Error('Unauthorized');
+    }
 
     await ctx.db.insert('mediaReports', {
-      reporterId: args.reporterId,
+      reporterId,
       reportedUserId: args.reportedUserId,
       mediaId: args.mediaId,
       chatId: args.chatId,

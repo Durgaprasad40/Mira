@@ -368,7 +368,7 @@ export default function MatchCelebrationScreen() {
     }
 
     // Phase-1 flow continues below
-    if (!matchIdValue || !viewerId) {
+    if (!matchIdValue || !viewerId || !token) {
       Toast.show("Something went wrong. Please go back and try again.");
       sendingRef.current = false;
       return;
@@ -379,22 +379,21 @@ export default function MatchCelebrationScreen() {
       // STEP A: Ensure a conversation row exists for this match.
       // Idempotent — safe to retry if the previous attempt crashed mid-flow.
       // Returns the conversationId needed for Step B.
-      // MSG-005 FIX: Use authUserId for server-side verification
       const { conversationId: conversationIdFinal } = await ensureConversation({
         matchId: matchIdValue,
-        authUserId: viewerId,
+        token: token!,
       });
       if (__DEV__) console.log("[SayHi] conversationId(after)", conversationIdFinal);
 
       // STEP B: Send the mandatory first message ("Hi 👋").
       // Must happen BEFORE navigation — otherwise the chat screen opens empty
       // and the message appears with a visible delay.
-      // MSG-001 FIX: Use authUserId for server-side verification
       await sendMessageMut({
         conversationId: conversationIdFinal,
-        authUserId: viewerId,
+        token: token!,
         type: "text",
         content: "Hi 👋",
+        clientMessageId: `first_hi_${matchIdValue}_${Date.now()}`,
       });
       trackEvent({ name: 'first_message_sent', conversationId: conversationIdFinal as string });
       if (__DEV__) console.log("[SayHi] messageSent ok");

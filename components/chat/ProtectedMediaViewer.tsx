@@ -18,7 +18,6 @@ import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
-import { getVideoUri } from '@/lib/videoCache';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -28,7 +27,7 @@ type ViewerState = 'loading' | 'ready' | 'error' | 'expired';
 interface ProtectedMediaViewerProps {
   visible: boolean;
   messageId: string;
-  userId: string;
+  authToken: string;
   viewerName: string;
   onClose: () => void;
   onReport?: () => void;
@@ -41,7 +40,7 @@ interface ProtectedMediaViewerProps {
 export function ProtectedMediaViewer({
   visible,
   messageId,
-  userId,
+  authToken,
   viewerName,
   onClose,
   onReport,
@@ -58,9 +57,6 @@ export function ProtectedMediaViewer({
   // 5-1: Track mounted state to prevent setState after unmount
   const mountedRef = useRef(true);
   const [requestedAccess, setRequestedAccess] = useState(false);
-
-  // CACHE-FIX: Cache URL per messageId to avoid reload on re-open
-  const urlCacheRef = useRef<Map<string, string>>(new Map());
   // PERF-FIX: Track open time for performance logging
   const openTimeRef = useRef<number>(0);
 
@@ -86,24 +82,19 @@ export function ProtectedMediaViewer({
 
   const mediaData = useQuery(
     api.protectedMedia.getMediaUrl,
-    visible && messageId ? { messageId: messageId as any, userId: userId as any } : 'skip'
+    visible && messageId && authToken ? { messageId: messageId as any, token: authToken } : 'skip'
   );
 
   // SECURE-REWRITE: Reset viewer state when opening
   React.useEffect(() => {
     if (visible) {
       openTimeRef.current = Date.now();
-      // CACHE-FIX: Check if we have a cached URL for this message
-      const cachedUrl = urlCacheRef.current.get(messageId);
-      if (cachedUrl) {
-        console.log('[SECURE-VIEWER] cache-hit: Using cached URL for', messageId);
-        setMediaUrl(cachedUrl);
-        // Still need to go through loading to trigger onLoad callbacks
-        setViewerState('loading');
-      } else {
-        console.log('[SECURE-VIEWER] cache-miss: Fetching URL for', messageId);
-        setViewerState('loading');
-      }
+      setMediaUrl(null);
+      setTimeLeft(null);
+      setRequestedAccess(false);
+      setViewerState('loading');
+      hasMarkedViewed.current = false;
+      hasExpired.current = false;
     }
   }, [visible, messageId]);
 
@@ -149,13 +140,14 @@ export function ProtectedMediaViewer({
 
   // Screenshot detection — fires on both platforms
   const handleScreenshot = useCallback(() => {
-    if (messageId && userId) {
+    if (messageId && authToken) {
       logScreenshot({
         messageId: messageId as any,
+        token: authToken,
         wasTaken: true,
       });
     }
-  }, [messageId, userId, logScreenshot]);
+  }, [messageId, authToken, logScreenshot]);
 
   useScreenshotDetection({
     enabled: visible,
@@ -171,12 +163,11 @@ export function ProtectedMediaViewer({
     }
 
     // 5-2: If view-once, expire on close (only once)
-    // MSG-006 FIX: Use authUserId for server-side verification
-    if (mediaData?.viewOnce && !hasExpired.current) {
+    if (mediaData?.viewOnce && hasMarkedViewed.current && !hasExpired.current) {
       hasExpired.current = true;
       markExpired({
         messageId: messageId as any,
-        authUserId: userId,
+        token: authToken,
       });
     }
 
@@ -190,10 +181,10 @@ export function ProtectedMediaViewer({
     hasMarkedViewed.current = false;
     hasExpired.current = false; // Reset for next open
     onClose();
-  }, [mediaData, messageId, userId, markExpired, onClose]);
+  }, [mediaData, messageId, authToken, markExpired, onClose]);
 
   // SECURE-REWRITE: Process mediaData and set viewerState
-  // Only transition state when data arrives; image load callback handles 'ready'
+  // Protected media is only consumed after the asset actually loads and becomes visible.
   useEffect(() => {
     if (!visible) return;
 
@@ -209,75 +200,76 @@ export function ProtectedMediaViewer({
       return;
     }
 
-    // Handle URL received - stay in loading until image actually loads
-    if (mediaData?.url && !hasMarkedViewed.current) {
-      hasMarkedViewed.current = true;
-      // viewerState stays 'loading' until image onLoad fires
+    if (mediaData?.url) {
+      setMediaUrl(mediaData.url);
+    }
+  }, [visible, mediaData]);
 
-      // VIDEO-CACHE-FIX: Cache video to local file system for instant playback
-      const processUrl = async () => {
-        let finalUrl = mediaData.url;
+  const applyCountdownFromResult = useCallback((expiresAt?: number | null) => {
+    if (expiresAt) {
+      const remainingMs = expiresAt - Date.now();
+      const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
+      setTimeLeft(remainingSec > 0 ? remainingSec : 0);
+      return;
+    }
 
-        // For videos, use file-based caching
-        if (mediaData.mediaType === 'video') {
-          try {
-            finalUrl = await getVideoUri(mediaData.url);
-            console.log('[SECURE-VIEWER] video-cached:', finalUrl.includes('video-cache') ? 'local' : 'remote');
-          } catch {
-            // Fallback to original URL
-          }
-        }
+    if (mediaData?.timerSeconds && mediaData.timerSeconds > 0) {
+      setTimeLeft(mediaData.timerSeconds);
+      return;
+    }
 
-        // CACHE-FIX: Store URL in cache for faster re-opens
-        urlCacheRef.current.set(messageId, finalUrl);
-        if (mountedRef.current) {
-          setMediaUrl(finalUrl);
-        }
-      };
+    setTimeLeft(null);
+  }, [mediaData?.timerSeconds]);
 
-      processUrl();
+  const handleProtectedMediaReady = useCallback(async () => {
+    const loadTime = Date.now() - openTimeRef.current;
+    if (!mountedRef.current) return;
 
-      // MSG-006 FIX: Use authUserId for server-side verification
-      markViewed({
+    console.log('[SECURE-VIEWER] media-ready:', {
+      messageId,
+      loadTime,
+      mediaType: mediaData?.mediaType ?? 'unknown',
+    });
+
+    if (hasMarkedViewed.current) {
+      setViewerState('ready');
+      return;
+    }
+
+    hasMarkedViewed.current = true;
+
+    try {
+      const result = await markViewed({
         messageId: messageId as any,
-        authUserId: userId,
+        token: authToken,
       });
 
-      // ONCE-VIEW-FIX: Skip timer for view-once media
-      // View-once media has NO timer - user can view as long as they want
-      // Expiration happens ONLY when user closes the viewer
-      if (mediaData.viewOnce) {
-        console.log('[SECURE-VIEWER] view-once mode: no timer');
-        // No timer for view-once - leave timeLeft as null
-      } else if (mediaData.expiresAt) {
-        // TIMER-FIX: Use absolute deadline (expiresAt) instead of resetting to timerSeconds
-        // This ensures timer continues even if viewer is closed and reopened
-        const remainingMs = mediaData.expiresAt - Date.now();
-        const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
-        if (remainingSec > 0) {
-          setTimeLeft(remainingSec);
-        } else {
-          // Already expired by deadline
-          setTimeLeft(0);
-        }
-      } else if (mediaData.timerSeconds && mediaData.timerSeconds > 0) {
-        // First open - use timerSeconds (markViewed will set expiresAt on backend)
-        setTimeLeft(mediaData.timerSeconds);
+      if (!mountedRef.current) return;
+
+      setViewerState('ready');
+      if (mediaData?.viewOnce) {
+        setTimeLeft(null);
+      } else {
+        applyCountdownFromResult(result?.expiresAt ?? mediaData?.expiresAt ?? null);
+      }
+    } catch (error) {
+      console.log('[SECURE-VIEWER] markViewed failed:', error);
+      if (mountedRef.current) {
+        setViewerState('error');
       }
     }
-  }, [visible, mediaData, markViewed, messageId, userId]);
+  }, [messageId, authToken, mediaData?.mediaType, mediaData?.viewOnce, mediaData?.expiresAt, markViewed, applyCountdownFromResult]);
 
   // 6-2: handleExpire now includes handleClose in deps (no stale closure)
-  // MSG-006 FIX: Use authUserId for server-side verification
   const handleExpire = useCallback(() => {
     if (hasExpired.current) return; // Already expired
     hasExpired.current = true;
     markExpired({
       messageId: messageId as any,
-      authUserId: userId,
+      token: authToken,
     });
     handleClose();
-  }, [messageId, userId, markExpired, handleClose]);
+  }, [messageId, authToken, markExpired, handleClose]);
 
   // STABILITY FIX: C-5 - Fix timer infinite loop by using proper dependency pattern
   // Compute stable boolean outside effect to avoid expression in dependency array
@@ -334,23 +326,19 @@ export function ProtectedMediaViewer({
   }, [timeLeft, handleExpire, isViewOnce]);
 
   const handleRequestAccess = useCallback(() => {
-    if (mediaId) {
+    if (mediaId && authToken) {
       requestAccess({
         mediaId: mediaId as any,
-        requesterId: userId as any,
+        token: authToken,
       });
       setRequestedAccess(true);
     }
-  }, [mediaId, userId, requestAccess]);
+  }, [mediaId, authToken, requestAccess]);
 
   // SECURE-REWRITE: Image load handlers (ONLY for images, not videos)
   const handleImageLoad = useCallback(() => {
-    const loadTime = Date.now() - openTimeRef.current;
-    console.log('[SECURE-VIEWER] image-ready: Image loaded successfully, time:', loadTime, 'ms');
-    if (mountedRef.current) {
-      setViewerState('ready');
-    }
-  }, []);
+    handleProtectedMediaReady();
+  }, [handleProtectedMediaReady]);
 
   const handleImageError = useCallback((e: any) => {
     console.log('[SECURE-VIEWER] image-error: Image load failed', e);
@@ -362,13 +350,9 @@ export function ProtectedMediaViewer({
   // VIDEO-FIX: Separate video load handler using expo-av
   const handleVideoLoad = useCallback((status: AVPlaybackStatus) => {
     if (status.isLoaded) {
-      const loadTime = Date.now() - openTimeRef.current;
-      console.log('[SECURE-VIEWER] video-ready: Video loaded successfully, time:', loadTime, 'ms');
-      if (mountedRef.current) {
-        setViewerState('ready');
-      }
+      handleProtectedMediaReady();
     }
-  }, []);
+  }, [handleProtectedMediaReady]);
 
   const handleVideoError = useCallback((error: string) => {
     console.log('[SECURE-VIEWER] video-error: Video load failed', error);
@@ -425,12 +409,12 @@ export function ProtectedMediaViewer({
             {allowScreenshot ? (
               <View style={styles.trustRow}>
                 <Ionicons name="shield-checkmark-outline" size={14} color="#4CAF50" />
-                <Text style={[styles.trustText, { color: '#4CAF50' }]}>Screenshot allowed</Text>
+                <Text style={[styles.trustText, { color: '#4CAF50' }]}>Capture allowed by sender</Text>
               </View>
             ) : (
               <View style={styles.trustRow}>
                 <Ionicons name="shield" size={14} color={COLORS.primary} />
-                <Text style={[styles.trustText, { color: COLORS.primary }]}>Screenshot blocked</Text>
+                <Text style={[styles.trustText, { color: COLORS.primary }]}>Capture restricted</Text>
               </View>
             )}
           </View>
@@ -441,7 +425,7 @@ export function ProtectedMediaViewer({
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color={COLORS.primary} />
             <Text style={styles.loadingText}>
-              Loading protected {isVideo ? 'video' : 'photo'}...
+              Opening protected {isVideo ? 'video' : 'photo'}...
             </Text>
             {/* VIDEO-FIX: ONLY use hidden Image preload for IMAGES, never for videos */}
             {mediaUrl && !isVideo && (
@@ -478,10 +462,10 @@ export function ProtectedMediaViewer({
           <View style={styles.expiredContainer}>
             <Ionicons name="cloud-offline" size={48} color={COLORS.textMuted} />
             <Text style={styles.expiredText}>
-              Unable to load this {isVideo ? 'video' : 'photo'}
+              This protected {isVideo ? 'video' : 'photo'} couldn't be opened
             </Text>
             <Text style={[styles.loadingText, { marginTop: 8 }]}>
-              The {isVideo ? 'video' : 'photo'} may no longer be available
+              It may no longer be available, or your connection may have dropped.
             </Text>
             <TouchableOpacity onPress={handleClose} style={styles.expiredButton}>
               <Text style={styles.expiredButtonText}>Go Back</Text>
@@ -593,13 +577,19 @@ export function ProtectedMediaViewer({
           {!allowScreenshot && (
             <View style={styles.infoRow}>
               <Ionicons name="eye-off-outline" size={14} color={COLORS.textMuted} />
-              <Text style={styles.infoSubtext}>Screenshots are monitored</Text>
+              <Text style={styles.infoSubtext}>Capture attempts may be logged</Text>
             </View>
           )}
           {mediaData?.viewOnce && (
             <View style={styles.infoRow}>
               <Ionicons name="eye-outline" size={14} color={COLORS.textMuted} />
-              <Text style={styles.infoSubtext}>View once — closes after viewing</Text>
+              <Text style={styles.infoSubtext}>View once — closes after a successful view</Text>
+            </View>
+          )}
+          {!mediaData?.viewOnce && !!mediaData?.timerSeconds && mediaData.timerSeconds > 0 && (
+            <View style={styles.infoRow}>
+              <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
+              <Text style={styles.infoSubtext}>Timer starts after it opens</Text>
             </View>
           )}
         </View>

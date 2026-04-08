@@ -19,7 +19,6 @@ import { api } from "@/convex/_generated/api";
 import { COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
-import { useAuthStore } from "@/stores/authStore";
 import { Toast } from "@/components/ui/Toast";
 import { trackEvent } from "@/lib/analytics";
 import { useEffect } from "react";
@@ -30,6 +29,7 @@ interface Props {
   reportedUserId: string;
   reportedUserName: string;
   currentUserId: string;
+  authToken?: string;
   conversationId?: string;
   matchId?: string;
   onBlockSuccess?: () => void;
@@ -41,8 +41,8 @@ type ViewState = 'main' | 'report' | 'other';
 
 // Report reason options (simplified for messages context)
 const REPORT_REASONS = [
-  { key: 'inappropriate', label: 'Inappropriate Content', icon: 'warning-outline' as const },
-  { key: 'other', label: 'Other', icon: 'ellipsis-horizontal' as const },
+  { key: 'inappropriate', label: 'Inappropriate behavior', icon: 'warning-outline' as const },
+  { key: 'other', label: 'Something else', icon: 'ellipsis-horizontal' as const },
 ];
 
 export function ReportBlockModal({
@@ -51,6 +51,7 @@ export function ReportBlockModal({
   reportedUserId,
   reportedUserName,
   currentUserId,
+  authToken,
   conversationId,
   matchId,
   onBlockSuccess,
@@ -63,6 +64,17 @@ export function ReportBlockModal({
   const reportMutation = useMutation(api.users.reportUser);
   const unmatchMutation = useMutation(api.matches.unmatch);
   const uncrushMutation = useMutation(api.likes.uncrush);
+  const isLiveChatContext = !!conversationId;
+  const canUnmatch = isLiveChatContext && !!matchId;
+  const canUncrush = !isLiveChatContext;
+
+  const requireLiveToken = () => {
+    if (!authToken) {
+      Alert.alert("Error", "Session expired. Please log in again.");
+      return null;
+    }
+    return authToken;
+  };
 
   // Handle Android back button - navigate within views before closing
   useEffect(() => {
@@ -159,9 +171,11 @@ export function ReportBlockModal({
             }
 
             try {
+              const token = requireLiveToken();
+              if (!token) return;
               await unmatchMutation({
                 matchId: matchId as any,
-                authUserId: currentUserId,
+                token,
               });
               Toast.show(`Unmatched with ${reportedUserName}`);
               resetAndClose();
@@ -193,9 +207,8 @@ export function ReportBlockModal({
               return;
             }
 
-            const token = useAuthStore.getState().token;
+            const token = requireLiveToken();
             if (!token) {
-              Alert.alert("Error", "Session expired. Please log in again.");
               return;
             }
 
@@ -227,8 +240,10 @@ export function ReportBlockModal({
     }
 
     try {
+      const token = requireLiveToken();
+      if (!token) return;
       await blockMutation({
-        authUserId: currentUserId,
+        token,
         blockedUserId: reportedUserId as any,
       });
       const { useBlockStore } = await import('@/stores/blockStore');
@@ -269,8 +284,10 @@ export function ReportBlockModal({
     }
 
     try {
+      const token = requireLiveToken();
+      if (!token) return;
       await reportMutation({
-        authUserId: currentUserId,
+        token,
         reportedUserId: reportedUserId as any,
         reason: reportData.reason as any,
         ...(reportData.description ? { description: reportData.description } : {}),
@@ -298,8 +315,10 @@ export function ReportBlockModal({
     }
 
     try {
+      const token = requireLiveToken();
+      if (!token) return;
       await reportMutation({
-        authUserId: currentUserId,
+        token,
         reportedUserId: reportedUserId as any,
         reason: 'other',
         description: trimmed,
@@ -324,23 +343,44 @@ export function ReportBlockModal({
   // Main action sheet - minimal top-level options
   const renderMain = () => (
     <View style={styles.content}>
-      <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>
-        <Ionicons name="heart-dislike-outline" size={20} color={COLORS.textLight} />
-        <Text style={styles.actionText}>Uncrush</Text>
-      </TouchableOpacity>
+      <View style={styles.mainHeader}>
+        <Text style={styles.mainTitle}>Safety options</Text>
+        <Text style={styles.mainSubtitle}>
+          Manage this conversation or let us know if something feels wrong.
+        </Text>
+      </View>
+      {canUnmatch && (
+        <>
+          <TouchableOpacity style={styles.actionRow} onPress={handleUnmatch}>
+            <Ionicons name="heart-dislike-outline" size={20} color={COLORS.textLight} />
+            <Text style={styles.actionText}>Unmatch</Text>
+          </TouchableOpacity>
 
-      <View style={styles.divider} />
+          <View style={styles.divider} />
+        </>
+      )}
+
+      {canUncrush && (
+        <>
+          <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>
+            <Ionicons name="heart-dislike-outline" size={20} color={COLORS.textLight} />
+            <Text style={styles.actionText}>Uncrush</Text>
+          </TouchableOpacity>
+
+          <View style={styles.divider} />
+        </>
+      )}
 
       <TouchableOpacity style={styles.actionRow} onPress={handleBlock}>
         <Ionicons name="ban" size={20} color={COLORS.error} />
-        <Text style={[styles.actionText, { color: COLORS.error }]}>Block</Text>
+        <Text style={[styles.actionText, { color: COLORS.error }]}>Block user</Text>
       </TouchableOpacity>
 
       <View style={styles.divider} />
 
       <TouchableOpacity style={styles.actionRow} onPress={handleReportPress}>
         <Ionicons name="flag-outline" size={20} color={COLORS.warning} />
-        <Text style={[styles.actionText, { color: COLORS.warning }]}>Report</Text>
+        <Text style={[styles.actionText, { color: COLORS.warning }]}>Report user</Text>
         <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} style={styles.chevron} />
       </TouchableOpacity>
 
@@ -361,7 +401,7 @@ export function ReportBlockModal({
         <View style={styles.backButton} />
       </View>
 
-      <Text style={styles.reportSubtitle}>Why are you reporting this user?</Text>
+      <Text style={styles.reportSubtitle}>Choose the reason that fits best.</Text>
 
       {REPORT_REASONS.map((reason, index) => (
         <React.Fragment key={reason.key}>
@@ -397,12 +437,12 @@ export function ReportBlockModal({
         <View style={styles.backButton} />
       </View>
 
-      <Text style={styles.otherSubtitle}>Please describe the issue</Text>
+      <Text style={styles.otherSubtitle}>Share a few details so our team can review it.</Text>
 
       {/* Input area */}
       <TextInput
         style={styles.otherInput}
-        placeholder="Enter your reason..."
+        placeholder="Tell us what happened..."
         placeholderTextColor={COLORS.textMuted}
         value={otherReason}
         onChangeText={setOtherReason}
@@ -425,7 +465,7 @@ export function ReportBlockModal({
           onPress={handleOtherSubmit}
           disabled={!otherReason.trim()}
         >
-          <Text style={styles.otherSubmitText}>Submit Report</Text>
+          <Text style={styles.otherSubmitText}>Send report</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -508,6 +548,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 8,
     paddingBottom: 8,
+  },
+  mainHeader: {
+    paddingTop: 4,
+    paddingBottom: 10,
+    alignItems: 'center',
+  },
+  mainTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.text,
+    textAlign: 'center',
+  },
+  mainSubtitle: {
+    marginTop: 6,
+    fontSize: 13,
+    lineHeight: 18,
+    color: COLORS.textLight,
+    textAlign: 'center',
   },
   actionRow: {
     flexDirection: "row",

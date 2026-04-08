@@ -54,6 +54,7 @@ export default function MainTabsLayout() {
     });
   }, [router]);
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   // BUGFIX: In live mode, never use demo_user_1 fallback for Convex queries
   // Demo mode: use demo_user_1 fallback for UI consistency
   // Live mode: use actual userId or undefined (queries will skip if falsy)
@@ -82,7 +83,7 @@ export default function MainTabsLayout() {
   // Convex mode: query unread count from server
   const convexUnreadCount = useQuery(
     api.messages.getUnreadCount,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   const unreadChats = isDemoMode ? demoUnreadCount : (convexUnreadCount ?? 0);

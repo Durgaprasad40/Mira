@@ -36,7 +36,7 @@ const REPORT_REASONS: { key: ReportReason; label: string; icon: string }[] = [
 
 interface ReportModalProps {
   visible: boolean;
-  reporterId: string;
+  authToken?: string;
   reportedUserId: string;
   chatId: string;
   mediaId?: string;
@@ -45,7 +45,7 @@ interface ReportModalProps {
 
 export function ReportModal({
   visible,
-  reporterId,
+  authToken,
   reportedUserId,
   chatId,
   mediaId,
@@ -75,8 +75,11 @@ export function ReportModal({
 
     setSubmitting(true);
     try {
+      if (!authToken) {
+        throw new Error('Session expired. Please log in again.');
+      }
       await reportMedia({
-        reporterId: reporterId as any,
+        token: authToken,
         reportedUserId: reportedUserId as any,
         chatId: chatId as any,
         mediaId: mediaId ? (mediaId as any) : undefined,
@@ -108,8 +111,8 @@ export function ReportModal({
           onPress={(e) => e.stopPropagation()}
         >
           <View style={styles.handle} />
-          <Text style={styles.title}>Report</Text>
-          <Text style={styles.subtitle}>Why are you reporting this?</Text>
+          <Text style={styles.title}>Report protected media</Text>
+          <Text style={styles.subtitle}>Tell us what felt unsafe or inappropriate.</Text>
 
           {REPORT_REASONS.map((reason) => (
             <TouchableOpacity
@@ -160,7 +163,7 @@ export function ReportModal({
             disabled={!selectedReason || submitting}
           >
             <Text style={styles.submitButtonText}>
-              {submitting ? 'Submitting...' : 'Submit Report'}
+              {submitting ? 'Sending...' : 'Send report'}
             </Text>
           </TouchableOpacity>
 
