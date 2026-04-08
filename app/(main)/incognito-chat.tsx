@@ -2149,7 +2149,7 @@ export default function PrivateChatScreen() {
         visible={reportVisible}
         targetName={conversation.participantName}
         targetUserId={conversation.participantId}
-        currentUserId={currentUserId || ''}
+        authToken={token || undefined}
         conversationId={id}
         onClose={() => setReportVisible(false)}
         onBlockSuccess={() => router.back()}

@@ -94,8 +94,8 @@ export default function ViewProfileScreen() {
   // Shared Places query (Phase-1 only, not for demo mode)
   const sharedPlaces = useQuery(
     api.crossedPaths.getSharedPlaces,
-    !isDemoMode && !isPhase2 && userId && currentUserId
-      ? { authUserId: currentUserId, profileUserId: userId as any }
+    !isDemoMode && !isPhase2 && userId && token
+      ? { token, profileUserId: userId as any }
       : 'skip'
   );
 
@@ -724,7 +724,6 @@ export default function ViewProfileScreen() {
         onClose={() => setShowReportBlock(false)}
         reportedUserId={userId || ''}
         reportedUserName={profile?.name || 'this user'}
-        currentUserId={currentUserId || ''}
         authToken={token || undefined}
         onBlockSuccess={() => router.back()}
       />

@@ -17,29 +17,22 @@ import { Toast } from '@/components/ui/Toast';
 
 export default function PrivacySettingsScreen() {
   const router = useRouter();
-  const { userId, token } = useAuthStore();
+  const { token } = useAuthStore();
 
   // Query current user privacy settings (live mode only)
   const currentUser = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Mutations for backend sync
   const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
-  const updateNearbySettings = useMutation(api.users.updateNearbySettings);
-  const updatePrivacySettings = useMutation(api.users.updatePrivacySettings);
 
   // Privacy toggles from persisted store
   const hideFromDiscover = usePrivacyStore((s) => s.hideFromDiscover);
-  const hideAge = usePrivacyStore((s) => s.hideAge);
-  const hideDistance = usePrivacyStore((s) => s.hideDistance);
-  const disableReadReceipts = usePrivacyStore((s) => s.disableReadReceipts);
 
   const setHideFromDiscover = usePrivacyStore((s) => s.setHideFromDiscover);
-  const setHideAge = usePrivacyStore((s) => s.setHideAge);
-  const setHideDistance = usePrivacyStore((s) => s.setHideDistance);
-  const setDisableReadReceipts = usePrivacyStore((s) => s.setDisableReadReceipts);
+  const [discoveryPauseEndsAt, setDiscoveryPauseEndsAt] = useState<number | null>(null);
 
   // P1-042 FIX: Track if initial sync has been done to prevent overwriting pending changes
   const initialSyncDoneRef = React.useRef(false);
@@ -49,24 +42,33 @@ export default function PrivacySettingsScreen() {
   useEffect(() => {
     if (currentUser && !initialSyncDoneRef.current) {
       initialSyncDoneRef.current = true;
-      // Sync hideFromDiscover from isDiscoveryPaused
-      if (currentUser.isDiscoveryPaused !== undefined) {
-        setHideFromDiscover(currentUser.isDiscoveryPaused);
-      }
-      // Sync hideDistance
-      if (currentUser.hideDistance !== undefined) {
-        setHideDistance(currentUser.hideDistance);
-      }
-      // Sync hideAge
-      if (currentUser.hideAge !== undefined) {
-        setHideAge(currentUser.hideAge);
-      }
-      // Sync disableReadReceipts
-      if (currentUser.disableReadReceipts !== undefined) {
-        setDisableReadReceipts(currentUser.disableReadReceipts);
-      }
+      const pauseUntil =
+        typeof currentUser.discoveryPausedUntil === 'number' &&
+        currentUser.discoveryPausedUntil > Date.now()
+          ? currentUser.discoveryPausedUntil
+          : null;
+      setDiscoveryPauseEndsAt(pauseUntil);
+      setHideFromDiscover(!!pauseUntil);
     }
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!discoveryPauseEndsAt) return;
+
+    const remainingMs = discoveryPauseEndsAt - Date.now();
+    if (remainingMs <= 0) {
+      setDiscoveryPauseEndsAt(null);
+      setHideFromDiscover(false);
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setDiscoveryPauseEndsAt(null);
+      setHideFromDiscover(false);
+    }, remainingMs + 250);
+
+    return () => clearTimeout(timeout);
+  }, [discoveryPauseEndsAt, setHideFromDiscover]);
 
   // Track if warning has been shown this session (session-only, no persistence needed)
   const [warningShownThisSession, setWarningShownThisSession] = useState(false);
@@ -76,12 +78,14 @@ export default function PrivacySettingsScreen() {
     const applyChange = async () => {
       setHideFromDiscover(newValue);
       // Sync to backend in live mode
-      if (!isDemoMode && userId && currentUser?._id) {
+      if (!isDemoMode && token) {
         try {
-          await toggleDiscoveryPause({ authUserId: userId, paused: newValue });
+          await toggleDiscoveryPause({ token, paused: newValue });
+          setDiscoveryPauseEndsAt(newValue ? Date.now() + 24 * 60 * 60 * 1000 : null);
         } catch {
           Toast.show("Couldn't update setting. Please try again.");
           setHideFromDiscover(!newValue); // Revert on error
+          setDiscoveryPauseEndsAt(newValue ? null : discoveryPauseEndsAt);
         }
       }
     };
@@ -89,8 +93,8 @@ export default function PrivacySettingsScreen() {
     if (newValue && !warningShownThisSession) {
       // Show one-time warning (session-scoped, no AsyncStorage needed)
       Alert.alert(
-        'Hide from Discover',
-        'While hidden from Discover, you won\'t get new matches. Existing matches can still chat with you.',
+        'Pause Discovery for 24 hours',
+        'While paused, your profile won\'t appear in Discover for 24 hours. Existing matches can still chat with you.',
         [
           {
             text: 'Cancel',
@@ -109,49 +113,7 @@ export default function PrivacySettingsScreen() {
       return; // Don't toggle yet, wait for user confirmation
     }
     applyChange();
-  }, [warningShownThisSession, setHideFromDiscover, userId, currentUser, toggleDiscoveryPause, token]);
-
-  // Handle "Hide Distance" toggle with backend sync
-  const handleHideDistanceChange = useCallback(async (newValue: boolean) => {
-    setHideDistance(newValue);
-    // Sync to backend in live mode
-    if (!isDemoMode && userId && currentUser?._id) {
-      try {
-        await updateNearbySettings({ authUserId: userId, hideDistance: newValue });
-      } catch {
-        Toast.show("Couldn't update setting. Please try again.");
-        setHideDistance(!newValue); // Revert on error
-      }
-    }
-  }, [setHideDistance, userId, currentUser, updateNearbySettings, token]);
-
-  // Handle "Hide Age" toggle with backend sync
-  const handleHideAgeChange = useCallback(async (newValue: boolean) => {
-    setHideAge(newValue);
-    // Sync to backend in live mode
-    if (!isDemoMode && userId && currentUser?._id) {
-      try {
-        await updatePrivacySettings({ authUserId: userId, hideAge: newValue });
-      } catch {
-        Toast.show("Couldn't update setting. Please try again.");
-        setHideAge(!newValue); // Revert on error
-      }
-    }
-  }, [setHideAge, userId, currentUser, updatePrivacySettings, token]);
-
-  // Handle "Disable Read Receipts" toggle with backend sync
-  const handleDisableReadReceiptsChange = useCallback(async (newValue: boolean) => {
-    setDisableReadReceipts(newValue);
-    // Sync to backend in live mode
-    if (!isDemoMode && userId && currentUser?._id) {
-      try {
-        await updatePrivacySettings({ authUserId: userId, disableReadReceipts: newValue });
-      } catch {
-        Toast.show("Couldn't update setting. Please try again.");
-        setDisableReadReceipts(!newValue); // Revert on error
-      }
-    }
-  }, [setDisableReadReceipts, userId, currentUser, updatePrivacySettings, token]);
+  }, [warningShownThisSession, setHideFromDiscover, toggleDiscoveryPause, token, discoveryPauseEndsAt]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -171,9 +133,9 @@ export default function PrivacySettingsScreen() {
           {/* Hide from Discover */}
           <View style={styles.toggleRow}>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Hide me from Discover</Text>
+              <Text style={styles.toggleTitle}>Pause Discovery for 24 hours</Text>
               <Text style={styles.toggleDescription}>
-                Your profile won't appear in Discover while this is on.
+                Your profile stays out of Discover for 24 hours, then turns back on automatically.
               </Text>
             </View>
             <Switch
@@ -184,58 +146,6 @@ export default function PrivacySettingsScreen() {
             />
           </View>
 
-          {/* Hide Age */}
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Hide my age</Text>
-              <Text style={styles.toggleDescription}>
-                Your age will not be shown on your profile.
-              </Text>
-            </View>
-            <Switch
-              value={hideAge}
-              onValueChange={handleHideAgeChange}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-            />
-          </View>
-
-          {/* Hide Distance */}
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Hide my distance</Text>
-              <Text style={styles.toggleDescription}>
-                Other users won't see how far away you are.
-              </Text>
-            </View>
-            <Switch
-              value={hideDistance}
-              onValueChange={handleHideDistanceChange}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-            />
-          </View>
-        </View>
-
-        {/* Messaging */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Messaging</Text>
-
-          {/* Disable Read Receipts (asymmetric) */}
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Disable read receipts</Text>
-              <Text style={styles.toggleDescription}>
-                Others won't see when you read their messages. You can still see theirs.
-              </Text>
-            </View>
-            <Switch
-              value={disableReadReceipts}
-              onValueChange={handleDisableReadReceiptsChange}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-            />
-          </View>
         </View>
 
         {/* Location & Nearby */}

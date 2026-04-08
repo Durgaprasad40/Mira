@@ -31,7 +31,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { asUserId } from '@/convex/id';
 import { safePush } from '@/lib/safeRouter';
 import { COLORS } from '@/lib/constants';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -151,8 +150,7 @@ export default function CrossedPathsScreen() {
   const isDemo = isDemoMode;
 
   // Auth store
-  const userId = useAuthStore((s) => s.userId);
-  const convexUserId = userId ? asUserId(userId) : undefined;
+  const token = useAuthStore((s) => s.token);
 
   // Local state
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -173,7 +171,7 @@ export default function CrossedPathsScreen() {
   // Query crossed paths history (live mode only)
   const crossedPathsQuery = useQuery(
     api.crossedPaths.getCrossPathHistory,
-    !isDemo && userId ? { authUserId: userId, refreshKey } : 'skip'
+    !isDemo && token ? { token, refreshKey } : 'skip'
   );
 
   // Mutations for hide/delete (live mode only)
@@ -369,10 +367,10 @@ export default function CrossedPathsScreen() {
             }
 
             // Live mode: call mutation
-            if (!userId) return;
+            if (!token) return;
             try {
               await hideCrossedPathMutation({
-                authUserId: userId,
+                token,
                 historyId: item.id as Id<'crossPathHistory'>,
               });
             } catch (error) {
@@ -383,7 +381,7 @@ export default function CrossedPathsScreen() {
         },
       ]
     );
-  }, [isDemo, userId, hideCrossedPathMutation]);
+  }, [isDemo, token, hideCrossedPathMutation]);
 
   const handleDeletePress = useCallback((item: CrossedPathItem) => {
     Alert.alert(
@@ -402,10 +400,10 @@ export default function CrossedPathsScreen() {
             }
 
             // Live mode: call mutation
-            if (!userId) return;
+            if (!token) return;
             try {
               await deleteCrossedPathMutation({
-                authUserId: userId,
+                token,
                 historyId: item.id as Id<'crossPathHistory'>,
               });
             } catch (error) {
@@ -416,7 +414,7 @@ export default function CrossedPathsScreen() {
         },
       ]
     );
-  }, [isDemo, userId, deleteCrossedPathMutation]);
+  }, [isDemo, token, deleteCrossedPathMutation]);
 
   const handleOptionsPress = useCallback((item: CrossedPathItem) => {
     Alert.alert(

@@ -3,14 +3,16 @@
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
  */
 import React, { useState, useRef, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, LayoutChangeEvent, Modal, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, LayoutChangeEvent, ActivityIndicator } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useQuery } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
-import { useVerificationStore } from '@/stores/verificationStore';
-import { useSubscriptionStore } from '@/stores/subscriptionStore';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { api } from '@/convex/_generated/api';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import { getDemoCurrentUser } from '@/lib/demoData';
 
 // Safety tips content
 const SAFETY_TIPS = {
@@ -46,6 +48,7 @@ const SAFETY_TIPS = {
 export default function SafetySettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const token = useAuthStore((s) => s.token);
 
   // Safe back navigation - ensures return to Profile tab
   const handleGoBack = useCallback(() => {
@@ -56,30 +59,18 @@ export default function SafetySettingsScreen() {
     }
   }, [router]);
 
-  // Verification store
-  const faceStatus = useVerificationStore((s) => s.faceStatus);
-  const kycStatus = useVerificationStore((s) => s.kycStatus);
-  const startFaceVerification = useVerificationStore((s) => s.startFaceVerification);
-  const completeFaceVerification = useVerificationStore((s) => s.completeFaceVerification);
-  const startKycVerification = useVerificationStore((s) => s.startKycVerification);
-  const completeKycVerification = useVerificationStore((s) => s.completeKycVerification);
-
-  // Subscription store - KYC enabled for paid subscribers (basic or premium)
-  const subscriptionTier = useSubscriptionStore((s) => s.tier);
-  const hasPaidPlan = subscriptionTier !== 'free';
-
-  // Camera state for face verification
-  const [showCamera, setShowCamera] = useState(false);
-  const [captureStep, setCaptureStep] = useState(0); // 0: neutral, 1: left, 2: right
-  const [isCapturing, setIsCapturing] = useState(false);
-  const [permission, requestPermission] = useCameraPermissions();
-  const cameraRef = useRef<CameraView>(null);
+  const currentUserQuery = useQuery(
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : 'skip'
+  );
+  const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
+  const verificationDetails = useQuery(
+    api.verification.getVerificationStatus,
+    !isDemoMode && token ? { token } : 'skip'
+  );
 
   // Track which safety tip section is expanded
   const [expandedTip, setExpandedTip] = useState<string | null>(null);
-
-  // P2-035 FIX: Loading states for verification buttons
-  const [isStartingFaceVerification, setIsStartingFaceVerification] = useState(false);
 
   // ScrollView ref for auto-scroll
   const scrollViewRef = useRef<ScrollView>(null);
@@ -88,100 +79,20 @@ export default function SafetySettingsScreen() {
   const tipPositions = useRef<Record<string, number>>({});
   const safetyCenterOffset = useRef<number>(0);
 
-  // Capture instructions for each step
-  const captureInstructions = [
-    'Look straight at the camera',
-    'Turn your head slightly left',
-    'Turn your head slightly right',
-  ];
-
-  // Handle face verification start
-  // P2-035 FIX: Add loading state to prevent double-tap and show feedback
-  const handleStartFaceVerification = async () => {
-    if (isStartingFaceVerification) return;
-    setIsStartingFaceVerification(true);
-    try {
-      if (!permission?.granted) {
-        const result = await requestPermission();
-        if (!result.granted) {
-          Alert.alert('Camera Permission', 'Camera access is required for face verification.');
-          return;
-        }
-      }
-      setCaptureStep(0);
-      setShowCamera(true);
-    } finally {
-      setIsStartingFaceVerification(false);
-    }
-  };
-
-  // Handle camera modal close — reset all capture state to prevent stale step on reopen
-  const handleCloseCamera = () => {
-    setShowCamera(false);
-    setCaptureStep(0);
-    setIsCapturing(false);
-  };
-
-  // Capture a frame
-  const handleCaptureFrame = async () => {
-    if (!cameraRef.current || isCapturing) return;
-
-    setIsCapturing(true);
-
-    try {
-      // Simulate capture (in real app, would use takePictureAsync)
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      if (captureStep < 2) {
-        // Move to next capture step
-        setCaptureStep((prev) => prev + 1);
-      } else {
-        // All frames captured, close camera and set to pending
-        setShowCamera(false);
-        setCaptureStep(0);
-        startFaceVerification();
-
-        // Simulate backend processing (mock: auto-verify after 2s for demo)
-        setTimeout(() => {
-          completeFaceVerification();
-        }, 2000);
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to capture. Please try again.');
-    } finally {
-      setIsCapturing(false);
-    }
-  };
-
-  // Handle KYC verification start
-  const handleStartKycVerification = () => {
-    if (!hasPaidPlan) {
-      Alert.alert(
-        'Subscription Required',
-        'KYC verification is available for paid subscribers only.',
-        [{ text: 'OK' }]
-      );
-      return;
+  const faceStatus = React.useMemo(() => {
+    if (isDemoMode) {
+      return currentUser?.isVerified ? 'verified' : 'not_verified';
     }
 
-    Alert.alert(
-      'Start KYC Verification',
-      'This will begin the identity verification process. You\'ll need to provide a government-issued ID.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Continue',
-          onPress: () => {
-            startKycVerification();
-            // Mock: auto-complete after 3s for demo
-            setTimeout(() => {
-              completeKycVerification();
-            }, 3000);
-          },
-        },
-      ]
-    );
-  };
+    const backendStatus = verificationDetails?.status || currentUser?.verificationStatus || 'unverified';
+    if (backendStatus === 'verified') return 'verified';
+    if (backendStatus === 'pending_verification' || backendStatus === 'pending') return 'pending';
+    return 'not_verified';
+  }, [currentUser?.isVerified, currentUser?.verificationStatus, verificationDetails, currentUser]);
+
+  const handleOpenVerification = useCallback(() => {
+    router.push('/(main)/verification' as any);
+  }, [router]);
 
   const handleReportUser = () => {
     router.push('/(main)/settings/report-user' as any);
@@ -232,174 +143,91 @@ export default function SafetySettingsScreen() {
         {/* Verification Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Verification</Text>
-
-          {/* ───────────────────────────────────────────────────────────────
-              BADGES (Always at top when earned)
-             ─────────────────────────────────────────────────────────────── */}
-          {(faceStatus === 'pending' || faceStatus === 'verified' || kycStatus === 'verified') && (
-            <View style={styles.badgesContainer}>
-              {/* Face Verification Badge */}
-              {faceStatus === 'pending' && (
-                <View style={[styles.badge, styles.badgePending]}>
-                  <Ionicons name="time-outline" size={14} color="#F59E0B" />
-                  <Text style={[styles.badgeText, styles.badgeTextPending]}>Face verification pending</Text>
-                </View>
-              )}
-              {faceStatus === 'verified' && (
-                <View style={[styles.badge, styles.badgeVerified]}>
-                  <Ionicons name="checkmark-circle" size={14} color={COLORS.success} />
-                  <Text style={[styles.badgeText, styles.badgeTextVerified]}>Face verified</Text>
-                </View>
-              )}
-
-              {/* KYC Verification Badge - only shown when verified */}
-              {kycStatus === 'verified' && (
-                <View style={[styles.badge, styles.badgeVerified]}>
-                  <Ionicons name="shield-checkmark" size={14} color={COLORS.success} />
-                  <Text style={[styles.badgeText, styles.badgeTextVerified]}>Identity verified</Text>
-                </View>
-              )}
-            </View>
-          )}
-
-          {/* ───────────────────────────────────────────────────────────────
-              FACE VERIFICATION SECTION (only if not verified)
-             ─────────────────────────────────────────────────────────────── */}
-          {faceStatus !== 'verified' && (
-            <View style={styles.verificationCard}>
-              <View style={styles.verificationHeader}>
-                <View style={[
-                  styles.verificationIconContainer,
-                  faceStatus === 'pending' && styles.verificationIconPending,
-                ]}>
-                  <Ionicons
-                    name="person-circle-outline"
-                    size={24}
-                    color={faceStatus === 'pending' ? '#F59E0B' : COLORS.textMuted}
-                  />
-                </View>
-                <View style={styles.verificationInfo}>
-                  <Text style={styles.verificationTitle}>Face Verification</Text>
-                  <View style={[
+          <View style={styles.verificationCard}>
+            <View style={styles.verificationHeader}>
+              <View style={[
+                styles.verificationIconContainer,
+                faceStatus === 'pending' && styles.verificationIconPending,
+                faceStatus === 'verified' && styles.badgeVerified,
+              ]}>
+                <Ionicons
+                  name={
+                    faceStatus === 'verified'
+                      ? 'checkmark-circle'
+                      : faceStatus === 'pending'
+                        ? 'time-outline'
+                        : 'person-circle-outline'
+                  }
+                  size={24}
+                  color={
+                    faceStatus === 'verified'
+                      ? COLORS.success
+                      : faceStatus === 'pending'
+                        ? '#F59E0B'
+                        : COLORS.textMuted
+                  }
+                />
+              </View>
+              <View style={styles.verificationInfo}>
+                <Text style={styles.verificationTitle}>Face Verification</Text>
+                <View
+                  style={[
                     styles.statusPill,
                     faceStatus === 'pending' && styles.statusPillPending,
-                  ]}>
-                    <Text style={[
+                    faceStatus === 'verified' && styles.badgeVerified,
+                  ]}
+                >
+                  <Text
+                    style={[
                       styles.statusPillText,
                       faceStatus === 'pending' && styles.statusPillTextPending,
-                    ]}>
-                      {faceStatus === 'pending' ? 'Verification pending' : 'Not verified'}
-                    </Text>
-                  </View>
+                      faceStatus === 'verified' && styles.badgeTextVerified,
+                    ]}
+                  >
+                    {faceStatus === 'verified'
+                      ? 'Face verified'
+                      : faceStatus === 'pending'
+                        ? 'Verification pending'
+                        : 'Not verified'}
+                  </Text>
                 </View>
               </View>
-
-              <Text style={styles.verificationDescription}>
-                Verify your face to build trust and improve match quality.
-              </Text>
-
-              {/* CTA only if not started */}
-              {/* P2-035 FIX: Add loading state and disabled during loading */}
-              {faceStatus === 'not_verified' && (
-                <TouchableOpacity
-                  style={[styles.verificationButton, isStartingFaceVerification && styles.verificationButtonLoading]}
-                  onPress={handleStartFaceVerification}
-                  disabled={isStartingFaceVerification}
-                >
-                  {isStartingFaceVerification ? (
-                    <ActivityIndicator size="small" color={COLORS.white} />
-                  ) : (
-                    <Ionicons name="camera-outline" size={18} color={COLORS.white} />
-                  )}
-                  <Text style={styles.verificationButtonText}>
-                    {isStartingFaceVerification ? 'Starting...' : 'Start Verification'}
-                  </Text>
-                </TouchableOpacity>
-              )}
-
-              {/* Pending state - no CTA, just info */}
-              {faceStatus === 'pending' && (
-                <View style={styles.pendingInfo}>
-                  <ActivityIndicator size="small" color="#F59E0B" />
-                  <Text style={styles.pendingInfoText}>Processing your verification...</Text>
-                </View>
-              )}
             </View>
-          )}
 
-          {/* ───────────────────────────────────────────────────────────────
-              KYC VERIFICATION SECTION
-             ─────────────────────────────────────────────────────────────── */}
-          {kycStatus !== 'verified' && (
-            <View style={[styles.verificationCard, styles.kycCard]}>
-              <View style={styles.verificationHeader}>
-                <View style={[
-                  styles.verificationIconContainer,
-                  kycStatus === 'pending' && styles.verificationIconPending,
-                ]}>
-                  <Ionicons
-                    name="id-card-outline"
-                    size={24}
-                    color={kycStatus === 'pending' ? '#F59E0B' : COLORS.textMuted}
-                  />
-                </View>
-                <View style={styles.verificationInfo}>
-                  <Text style={styles.verificationTitle}>KYC Verification</Text>
-                  <View style={[
-                    styles.statusPill,
-                    kycStatus === 'pending' && styles.statusPillPending,
-                  ]}>
-                    <Text style={[
-                      styles.statusPillText,
-                      kycStatus === 'pending' && styles.statusPillTextPending,
-                    ]}>
-                      {kycStatus === 'pending' ? 'Verification pending' : 'Not started'}
-                    </Text>
-                  </View>
-                </View>
+            <Text style={styles.verificationDescription}>
+              {faceStatus === 'verified'
+                ? 'Your profile is verified.'
+                : faceStatus === 'pending'
+                  ? 'Your selfie is under review.'
+                  : 'Verify your face to build trust on your profile.'}
+            </Text>
+
+            {faceStatus === 'pending' && (
+              <View style={styles.pendingInfo}>
+                <ActivityIndicator size="small" color="#F59E0B" />
+                <Text style={styles.pendingInfoText}>Processing your verification...</Text>
               </View>
+            )}
 
-              <Text style={styles.verificationDescription}>
-                Required only for certain features or payments.
+            <TouchableOpacity
+              style={styles.verificationButton}
+              onPress={handleOpenVerification}
+              activeOpacity={0.8}
+            >
+              <Ionicons
+                name={faceStatus === 'verified' ? 'shield-checkmark-outline' : 'camera-outline'}
+                size={18}
+                color={COLORS.white}
+              />
+              <Text style={styles.verificationButtonText}>
+                {faceStatus === 'verified'
+                  ? 'View Verification'
+                  : faceStatus === 'pending'
+                    ? 'Check Verification'
+                    : 'Start Verification'}
               </Text>
-
-              {/* CTA only if not started and has paid plan */}
-              {kycStatus === 'not_started' && (
-                <TouchableOpacity
-                  style={[
-                    styles.verificationButton,
-                    !hasPaidPlan && styles.verificationButtonDisabled,
-                  ]}
-                  onPress={handleStartKycVerification}
-                  activeOpacity={hasPaidPlan ? 0.8 : 1}
-                >
-                  <Ionicons name="shield-outline" size={18} color={hasPaidPlan ? COLORS.white : COLORS.textMuted} />
-                  <Text style={[
-                    styles.verificationButtonText,
-                    !hasPaidPlan && styles.verificationButtonTextDisabled,
-                  ]}>
-                    Start KYC Verification
-                  </Text>
-                </TouchableOpacity>
-              )}
-
-              {/* Show gating message if no paid plan */}
-              {kycStatus === 'not_started' && !hasPaidPlan && (
-                <Text style={styles.kycGatingText}>
-                  Available for paid subscribers
-                </Text>
-              )}
-
-              {/* Pending state */}
-              {kycStatus === 'pending' && (
-                <View style={styles.pendingInfo}>
-                  <ActivityIndicator size="small" color="#F59E0B" />
-                  <Text style={styles.pendingInfoText}>Processing your verification...</Text>
-                </View>
-              )}
-            </View>
-          )}
-
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Blocking & Reporting Section */}
@@ -527,87 +355,6 @@ export default function SafetySettingsScreen() {
         </View>
       </ScrollView>
 
-      {/* ───────────────────────────────────────────────────────────────
-          FACE VERIFICATION CAMERA MODAL
-         ─────────────────────────────────────────────────────────────── */}
-      <Modal
-        visible={showCamera}
-        animationType="slide"
-        onRequestClose={handleCloseCamera}
-      >
-        <SafeAreaView style={styles.cameraContainer}>
-          <View style={styles.cameraHeader}>
-            <TouchableOpacity
-              onPress={handleCloseCamera}
-              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-            >
-              <Ionicons name="close" size={28} color={COLORS.white} />
-            </TouchableOpacity>
-            <Text style={styles.cameraTitle}>Face Verification</Text>
-            <View style={{ width: 28 }} />
-          </View>
-
-          {/* Camera view */}
-          <View style={styles.cameraWrapper}>
-            {permission?.granted ? (
-              <CameraView
-                ref={cameraRef}
-                style={styles.camera}
-                facing="front"
-              />
-            ) : (
-              <View style={styles.cameraPlaceholder}>
-                <Ionicons name="camera-outline" size={64} color={COLORS.textMuted} />
-                <Text style={styles.cameraPlaceholderText}>Camera access required</Text>
-              </View>
-            )}
-
-            {/* Oval face guide overlay */}
-            <View style={styles.faceGuideOverlay}>
-              <View style={styles.faceGuideOval} />
-            </View>
-          </View>
-
-          {/* Instructions */}
-          <View style={styles.cameraInstructions}>
-            <Text style={styles.cameraInstructionStep}>
-              Step {captureStep + 1} of 3
-            </Text>
-            <Text style={styles.cameraInstructionText}>
-              {captureInstructions[captureStep]}
-            </Text>
-          </View>
-
-          {/* Capture button */}
-          <View style={styles.cameraActions}>
-            <TouchableOpacity
-              style={[styles.captureButton, isCapturing && styles.captureButtonDisabled]}
-              onPress={handleCaptureFrame}
-              disabled={isCapturing}
-            >
-              {isCapturing ? (
-                <ActivityIndicator size="small" color={COLORS.white} />
-              ) : (
-                <View style={styles.captureButtonInner} />
-              )}
-            </TouchableOpacity>
-          </View>
-
-          {/* Progress dots */}
-          <View style={styles.progressDots}>
-            {[0, 1, 2].map((step) => (
-              <View
-                key={step}
-                style={[
-                  styles.progressDot,
-                  step <= captureStep && styles.progressDotActive,
-                  step < captureStep && styles.progressDotCompleted,
-                ]}
-              />
-            ))}
-          </View>
-        </SafeAreaView>
-      </Modal>
     </SafeAreaView>
   );
 }

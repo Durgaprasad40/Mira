@@ -7,7 +7,9 @@
  */
 
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
+import { Id } from './_generated/dataModel';
+import { requireAdminSessionUser, requireAuthenticatedSessionUser } from './helpers';
 
 // Category type for validation
 const categoryValidator = v.union(
@@ -30,12 +32,32 @@ const attachmentValidator = v.object({
 const MAX_PHOTOS = 5;
 const MAX_VIDEOS = 1;
 
+async function getAuthorizedTicket(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+  ticketId: Id<'supportTickets'>
+) {
+  const user = await requireAuthenticatedSessionUser(ctx, token);
+  const ticket = await ctx.db.get(ticketId);
+  if (!ticket) {
+    throw new Error('Ticket not found');
+  }
+  const isAdmin = user.isAdmin === true;
+  if (!isAdmin && ticket.userId !== user._id) {
+    throw new Error('Not authorized to access this ticket');
+  }
+  return { ticket, user, isAdmin };
+}
+
 /**
  * Generate upload URL for support ticket attachments.
  */
 export const generateUploadUrl = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await requireAuthenticatedSessionUser(ctx, args.token);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -48,13 +70,14 @@ export const generateUploadUrl = mutation({
  */
 export const submitSupportTicket = mutation({
   args: {
-    userId: v.id('users'),
+    token: v.string(),
     category: categoryValidator,
     message: v.string(),
     attachments: v.optional(v.array(attachmentValidator)),
   },
   handler: async (ctx, args) => {
-    const { userId, category, message, attachments } = args;
+    const { category, message, attachments } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
 
     // Validate message is not empty
     if (!message.trim()) {
@@ -90,7 +113,7 @@ export const submitSupportTicket = mutation({
     const now = Date.now();
 
     const ticketId = await ctx.db.insert('supportTickets', {
-      userId,
+      userId: user._id,
       category,
       message: message.trim(),
       status: 'open',
@@ -100,7 +123,7 @@ export const submitSupportTicket = mutation({
     });
 
     console.log(
-      `[SUPPORT] Ticket created: ${ticketId} by user ${userId} with ${attachments?.length ?? 0} attachments`
+      `[SUPPORT] Ticket created: ${ticketId} by user ${user._id} with ${attachments?.length ?? 0} attachments`
     );
 
     return { ticketId, success: true };
@@ -114,12 +137,13 @@ export const submitSupportTicket = mutation({
  */
 export const getUserTickets = query({
   args: {
-    userId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
     const tickets = await ctx.db
       .query('supportTickets')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .withIndex('by_user', (q) => q.eq('userId', user._id))
       .order('desc')
       .collect();
 
@@ -135,6 +159,7 @@ export const getUserTickets = query({
  */
 export const getAllTickets = query({
   args: {
+    token: v.string(),
     status: v.optional(
       v.union(
         v.literal('open'),
@@ -145,6 +170,7 @@ export const getAllTickets = query({
     ),
   },
   handler: async (ctx, args) => {
+    await requireAdminSessionUser(ctx, args.token);
     // Branch query logic to avoid type reassignment issues
     if (args.status) {
       return await ctx.db
@@ -169,6 +195,7 @@ export const getAllTickets = query({
  */
 export const updateTicketStatus = mutation({
   args: {
+    token: v.string(),
     ticketId: v.id('supportTickets'),
     status: v.union(
       v.literal('open'),
@@ -179,6 +206,7 @@ export const updateTicketStatus = mutation({
     adminReply: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    await requireAdminSessionUser(ctx, args.token);
     const { ticketId, status, adminReply } = args;
 
     const ticket = await ctx.db.get(ticketId);
@@ -214,10 +242,12 @@ export const updateTicketStatus = mutation({
  */
 export const getTicketById = query({
   args: {
+    token: v.string(),
     ticketId: v.id('supportTickets'),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.ticketId);
+    const { ticket } = await getAuthorizedTicket(ctx, args.token, args.ticketId);
+    return ticket;
   },
 });
 
@@ -227,9 +257,11 @@ export const getTicketById = query({
  */
 export const getTicketMessages = query({
   args: {
+    token: v.string(),
     ticketId: v.id('supportTickets'),
   },
   handler: async (ctx, args) => {
+    await getAuthorizedTicket(ctx, args.token, args.ticketId);
     const messages = await ctx.db
       .query('supportTicketMessages')
       .withIndex('by_ticket', (q) => q.eq('ticketId', args.ticketId))
@@ -245,9 +277,11 @@ export const getTicketMessages = query({
  */
 export const getTicketWithThread = query({
   args: {
+    token: v.string(),
     ticketId: v.id('supportTickets'),
   },
   handler: async (ctx, args) => {
+    await requireAdminSessionUser(ctx, args.token);
     const ticket = await ctx.db.get(args.ticketId);
     if (!ticket) return null;
 
@@ -269,12 +303,13 @@ export const getTicketWithThread = query({
  */
 export const getUserTicketsWithPreview = query({
   args: {
-    userId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
     const tickets = await ctx.db
       .query('supportTickets')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .withIndex('by_user', (q) => q.eq('userId', user._id))
       .order('desc')
       .collect();
 
@@ -314,24 +349,14 @@ export const getUserTicketsWithPreview = query({
  */
 export const addUserMessage = mutation({
   args: {
+    token: v.string(),
     ticketId: v.id('supportTickets'),
-    userId: v.id('users'),
     message: v.string(),
     attachments: v.optional(v.array(attachmentValidator)),
   },
   handler: async (ctx, args) => {
-    const { ticketId, userId, message, attachments } = args;
-
-    // Get ticket
-    const ticket = await ctx.db.get(ticketId);
-    if (!ticket) {
-      throw new Error('Ticket not found');
-    }
-
-    // Check ticket belongs to user
-    if (ticket.userId !== userId) {
-      throw new Error('Not authorized to reply to this ticket');
-    }
+    const { ticketId, message, attachments } = args;
+    const { ticket, user } = await getAuthorizedTicket(ctx, args.token, ticketId);
 
     // Check ticket is not closed
     if (ticket.status === 'closed') {
@@ -369,7 +394,7 @@ export const addUserMessage = mutation({
     const messageId = await ctx.db.insert('supportTicketMessages', {
       ticketId,
       senderType: 'user',
-      senderUserId: userId,
+      senderUserId: user._id,
       message: message.trim(),
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
       createdAt: now,
@@ -395,12 +420,14 @@ export const addUserMessage = mutation({
  */
 export const addAdminMessage = mutation({
   args: {
+    token: v.string(),
     ticketId: v.id('supportTickets'),
     message: v.string(),
     adminName: v.optional(v.string()),
     attachments: v.optional(v.array(attachmentValidator)),
   },
   handler: async (ctx, args) => {
+    await requireAdminSessionUser(ctx, args.token);
     const { ticketId, message, adminName, attachments } = args;
 
     // Get ticket
@@ -463,19 +490,14 @@ export const addAdminMessage = mutation({
  */
 export const closeTicket = mutation({
   args: {
+    token: v.string(),
     ticketId: v.id('supportTickets'),
-    userId: v.optional(v.id('users')), // If provided, verify ownership
   },
   handler: async (ctx, args) => {
-    const { ticketId, userId } = args;
+    const { ticketId } = args;
+    const { ticket, isAdmin, user } = await getAuthorizedTicket(ctx, args.token, ticketId);
 
-    const ticket = await ctx.db.get(ticketId);
-    if (!ticket) {
-      throw new Error('Ticket not found');
-    }
-
-    // If userId provided, verify ownership (user closing their own ticket)
-    if (userId && ticket.userId !== userId) {
+    if (!isAdmin && ticket.userId !== user._id) {
       throw new Error('Not authorized to close this ticket');
     }
 

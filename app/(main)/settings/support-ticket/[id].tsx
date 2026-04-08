@@ -76,7 +76,7 @@ export default function SupportTicketScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { id: ticketId } = useLocalSearchParams<{ id: string }>();
-  const { userId } = useAuthStore();
+  const { token } = useAuthStore();
   const flatListRef = useRef<FlatList>(null);
 
   // Form state
@@ -88,12 +88,12 @@ export default function SupportTicketScreen() {
   // Queries
   const ticket = useQuery(
     api.supportTickets.getTicketById,
-    ticketId ? { ticketId: ticketId as Id<'supportTickets'> } : 'skip'
+    ticketId && token ? { token, ticketId: ticketId as Id<'supportTickets'> } : 'skip'
   );
 
   const threadMessages = useQuery(
     api.supportTickets.getTicketMessages,
-    ticketId ? { ticketId: ticketId as Id<'supportTickets'> } : 'skip'
+    ticketId && token ? { token, ticketId: ticketId as Id<'supportTickets'> } : 'skip'
   );
 
   // Mutations
@@ -245,7 +245,7 @@ export default function SupportTicketScreen() {
       return;
     }
 
-    if (!userId || !ticketId) {
+    if (!token || !ticketId) {
       Toast.show('Unable to send message');
       return;
     }
@@ -265,7 +265,7 @@ export default function SupportTicketScreen() {
 
           const storageId = await uploadMediaToConvex(
             attachment.uri,
-            generateUploadUrl,
+            () => generateUploadUrl({ token }),
             attachment.type
           );
 
@@ -280,8 +280,8 @@ export default function SupportTicketScreen() {
 
       // Send message
       await addUserMessage({
+        token,
         ticketId: ticketId as Id<'supportTickets'>,
-        userId: userId as Id<'users'>,
         message: message.trim() || '(attachment)',
         attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
       });

@@ -88,8 +88,8 @@ export default function ProfileScreen() {
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
 
   const convexUser = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   const subscriptionStatus = useQuery(
@@ -99,22 +99,22 @@ export default function ProfileScreen() {
 
   // Admin check for showing admin menu
   const adminCheck = useQuery(
-    api.users.checkIsAdmin,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    api.users.checkCurrentUserIsAdmin,
+    !isDemoMode && token ? { token } : 'skip'
   );
   const isAdmin = adminCheck?.isAdmin === true;
 
   // Query verification status for details (date, pending session)
   const verificationDetails = useQuery(
     api.verification.getVerificationStatus,
-    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // CONSISTENCY FIX: Use same photo source as Edit Profile (api.photos.getUserPhotos)
   // This ensures Profile Tab shows the SAME photos as Edit Profile grid
   const backendPhotos = useQuery(
-    api.photos.getUserPhotos,
-    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+    api.photos.getCurrentUserPhotos,
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // HYDRATION FIX: Distinguish loading vs empty to prevent flicker
@@ -175,7 +175,7 @@ export default function ProfileScreen() {
     }
   }, [isPhotosLoading, backendPhotos?.length, hasCachedPhotos]);
 
-  const deactivateAccount = useMutation(api.users.deactivateAccount);
+  const deactivateAccount = useMutation(api.auth.softDeleteAccount);
   // 3A1-2: Server-side logout mutation
   const serverLogout = useMutation(api.auth.logout);
 
@@ -348,7 +348,7 @@ export default function ProfileScreen() {
         icon: currentUser?.isVerified ? 'checkmark-circle' : 'alert-circle-outline',
         color: currentUser?.isVerified ? COLORS.success : COLORS.textMuted,
         bgColor: currentUser?.isVerified ? COLORS.successSubtle : COLORS.backgroundDark,
-        buttonLabel: currentUser?.isVerified ? 'Re-verify' : 'Verify Now',
+        buttonLabel: currentUser?.isVerified ? 'View Status' : 'Verify Now',
         date: null,
       } as const;
     }
@@ -371,7 +371,7 @@ export default function ProfileScreen() {
         icon: 'checkmark-circle',
         color: COLORS.success,
         bgColor: COLORS.successSubtle,
-        buttonLabel: 'Re-verify',
+        buttonLabel: 'View Status',
         date: dateLabel,
       } as const;
     } else if (status === 'pending_verification' || status === 'pending') {
@@ -487,10 +487,10 @@ export default function ProfileScreen() {
   };
 
   const handleDeactivate = () => {
-    if (!userId) return;
+    if (!token) return;
     Alert.alert(
       'Deactivate Account',
-      'Are you sure you want to deactivate your account? You can reactivate it later.',
+      'Are you sure you want to deactivate your account? Signing in again will reactivate it.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -499,7 +499,10 @@ export default function ProfileScreen() {
           onPress: async () => {
             try {
               if (!isDemoMode) {
-                await deactivateAccount({ authUserId: userId });
+                await deactivateAccount({
+                  token,
+                  reason: 'User requested account deactivation',
+                });
               } else {
                 useDemoStore.getState().demoLogout();
               }

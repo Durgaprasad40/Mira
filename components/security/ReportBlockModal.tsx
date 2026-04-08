@@ -28,7 +28,6 @@ interface Props {
   onClose: () => void;
   reportedUserId: string;
   reportedUserName: string;
-  currentUserId: string;
   authToken?: string;
   conversationId?: string;
   matchId?: string;
@@ -50,7 +49,6 @@ export function ReportBlockModal({
   onClose,
   reportedUserId,
   reportedUserName,
-  currentUserId,
   authToken,
   conversationId,
   matchId,

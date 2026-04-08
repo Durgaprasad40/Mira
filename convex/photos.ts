@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, action, internalMutation, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+import { resolveUserIdByAuthId, ensureUserByAuthId, requireAuthenticatedSessionUser } from './helpers';
 
 // ---------------------------------------------------------------------------
 // Session-based Auth Helper (matches app's custom auth system)
@@ -712,6 +712,23 @@ export const getUserPhotos = query({
     // BUG FIX: Filter out verification_reference photos (those are private, not for profile display)
     const normalPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
 
+    return normalPhotos.sort((a, b) => a.order - b.order);
+  },
+});
+
+export const getCurrentUserPhotos = query({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+
+    const photos = await ctx.db
+      .query('photos')
+      .withIndex('by_user_order', (q) => q.eq('userId', user._id))
+      .collect();
+
+    const normalPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
     return normalPhotos.sort((a, b) => a.order - b.order);
   },
 });

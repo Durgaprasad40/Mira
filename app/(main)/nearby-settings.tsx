@@ -67,12 +67,12 @@ const VISIBILITY_OPTIONS: { value: VisibilityMode; label: string; description: s
 
 export default function NearbySettingsScreen() {
   const router = useRouter();
-  const { userId } = useAuthStore();
+  const { token } = useAuthStore();
 
   // Fetch current user
   const currentUserQuery = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
@@ -221,12 +221,12 @@ export default function NearbySettingsScreen() {
         return;
       }
 
-      if (!userId) return;
+      if (!token) return;
       setIsSaving(true);
 
       try {
         await updateNearbySettingsMut({
-          authUserId: userId,
+          token,
           [field]: value,
         });
       } catch (error: any) {
@@ -244,7 +244,7 @@ export default function NearbySettingsScreen() {
         setIsSaving(false);
       }
     },
-    [userId, currentUser, updateNearbySettingsMut]
+    [token, currentUser, updateNearbySettingsMut]
   );
 
   // Toggle handlers
@@ -299,11 +299,11 @@ export default function NearbySettingsScreen() {
       return;
     }
 
-    if (!userId) return;
+    if (!token) return;
 
     try {
       await pauseNearbyMut({
-        authUserId: userId,
+        token,
         paused: !isPaused,
       });
       if (isPaused) {

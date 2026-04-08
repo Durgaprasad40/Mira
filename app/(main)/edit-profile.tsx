@@ -99,7 +99,7 @@ function isValidPhotoUrl(url: unknown): url is string {
 export default function EditProfileScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const params = useLocalSearchParams<{ scrollTo?: string }>();
 
   // PROFILE COMPLETION: Scroll to section support
@@ -126,15 +126,15 @@ export default function EditProfileScreen() {
   const hasLoggedGridLoad = useRef(false);
 
   const currentUserQuery = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
   // Query backend photos to get photo IDs for replacement logic (live mode only)
   const backendPhotos = useQuery(
-    api.photos.getUserPhotos,
-    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+    api.photos.getCurrentUserPhotos,
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   const [timedOut, setTimedOut] = useState(false);
@@ -163,7 +163,7 @@ export default function EditProfileScreen() {
 
   const updateProfile = useMutation(api.users.updateProfile);
   const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
-  const upsertOnboardingDraft = useMutation(api.users.upsertOnboardingDraft);
+  const upsertOnboardingDraft = useMutation(api.users.upsertCurrentUserOnboardingDraft);
   const reorderPhotos = useMutation(api.photos.reorderPhotosWithToken);
   const deletePhotoMutation = useMutation(api.photos.deletePhoto);
   // Per-photo blur mutation - backend is source of truth
@@ -1223,7 +1223,7 @@ export default function EditProfileScreen() {
       }
 
       await updateProfile({
-        authUserId: userId as string,
+        token: sessionToken,
         name: fullName || undefined,
         bio: bio || undefined,
         height: height ? parseInt(height) : undefined,
@@ -1282,7 +1282,7 @@ export default function EditProfileScreen() {
 
       if (Object.keys(lifeRhythmPatch).length > 0) {
         await upsertOnboardingDraft({
-          userId: userId as string,
+          token: sessionToken,
           patch: { lifeRhythm: lifeRhythmPatch },
         });
       }

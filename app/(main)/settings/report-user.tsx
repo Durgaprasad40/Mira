@@ -12,12 +12,13 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { useBlockStore } from '@/stores/blockStore';
 import { useAuthStore } from '@/stores/authStore';
 import { Id } from '@/convex/_generated/dataModel';
+import { isDemoMode } from '@/hooks/useConvex';
 
 // Report reasons
 const REPORT_REASONS = [
@@ -37,15 +38,48 @@ const REASON_MAP: Record<string, 'harassment' | 'spam' | 'inappropriate_photos' 
   'other': 'other',
 };
 
+type ReportCandidate = {
+  userId: string;
+  displayName: string;
+  blockedAt: number | null;
+  lastInteractionAt: number | null;
+  contexts: string[];
+  isVerified: boolean;
+  unavailable: boolean;
+};
+
 export default function ReportUserScreen() {
   const router = useRouter();
-  const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
+  const isDemo = isDemoMode;
 
-  // Get blocked users from store
   const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
+  const reportCandidatesQuery = useQuery(
+    api.users.getCurrentUserReportCandidates,
+    !isDemo && token ? { token } : 'skip'
+  );
 
-  // P0-001 FIX: Add mutation for reporting users
   const reportUserMutation = useMutation(api.users.reportUser);
+  const reportCandidates: ReportCandidate[] = isDemo
+    ? blockedUsersInfo.map((user) => ({
+        userId: user.id,
+        displayName: 'Blocked user',
+        blockedAt: user.blockedAt,
+        lastInteractionAt: user.blockedAt,
+        contexts: ['blocked'],
+        isVerified: false,
+        unavailable: false,
+      }))
+    : (reportCandidatesQuery ?? []).map((candidate: any) => ({
+        userId: String(candidate.userId),
+        displayName: candidate.displayName,
+        blockedAt: candidate.blockedAt ?? null,
+        lastInteractionAt: candidate.lastInteractionAt ?? null,
+        contexts: Array.isArray(candidate.contexts) ? candidate.contexts : [],
+        isVerified: !!candidate.isVerified,
+        unavailable: !!candidate.unavailable,
+      }));
+  const isLoading = !isDemo && token ? reportCandidatesQuery === undefined : false;
 
   // Modal state for reason selection
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
@@ -53,7 +87,7 @@ export default function ReportUserScreen() {
   // P0-001 FIX: Add loading state to prevent double submission
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const formatBlockedDate = (timestamp: number): string => {
+  const formatRelativeDate = (timestamp: number): string => {
     const now = Date.now();
     const diffTime = Math.abs(now - timestamp);
     const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
@@ -65,6 +99,28 @@ export default function ReportUserScreen() {
     return `${Math.floor(diffDays / 30)} months ago`;
   };
 
+  const getCandidateSubtitle = (candidate: ReportCandidate): string => {
+    if (candidate.unavailable) {
+      return 'Account unavailable';
+    }
+    if (candidate.blockedAt) {
+      return `Blocked ${formatRelativeDate(candidate.blockedAt)}`;
+    }
+    if (candidate.contexts.includes('messaged') && candidate.lastInteractionAt) {
+      return `Messaged ${formatRelativeDate(candidate.lastInteractionAt)}`;
+    }
+    if (candidate.contexts.includes('matched') && candidate.lastInteractionAt) {
+      return `Matched ${formatRelativeDate(candidate.lastInteractionAt)}`;
+    }
+    if (candidate.contexts.includes('liked_you') && candidate.lastInteractionAt) {
+      return `Liked you ${formatRelativeDate(candidate.lastInteractionAt)}`;
+    }
+    if (candidate.contexts.includes('liked') && candidate.lastInteractionAt) {
+      return `You liked them ${formatRelativeDate(candidate.lastInteractionAt)}`;
+    }
+    return 'Recent interaction';
+  };
+
   const handleSelectUser = (userId: string) => {
     setSelectedUserId(userId);
     setShowReasonModal(true);
@@ -72,7 +128,7 @@ export default function ReportUserScreen() {
 
   // P0-001 FIX: Actually call backend mutation when submitting report
   const handleSelectReason = async (reasonId: string) => {
-    if (!userId || !selectedUserId || isSubmitting) return;
+    if (!selectedUserId || isSubmitting) return;
 
     const backendReason = REASON_MAP[reasonId];
     if (!backendReason) {
@@ -83,11 +139,18 @@ export default function ReportUserScreen() {
     setIsSubmitting(true);
 
     try {
-      const result = await reportUserMutation({
-        authUserId: userId,
-        reportedUserId: selectedUserId as Id<'users'>,
-        reason: backendReason,
-      });
+      let result: { success?: boolean; error?: string } = { success: true };
+      if (!isDemo) {
+        if (!token) {
+          Alert.alert('Error', 'Please log in to report users.');
+          return;
+        }
+        result = await reportUserMutation({
+          token,
+          reportedUserId: selectedUserId as Id<'users'>,
+          reason: backendReason,
+        });
+      }
 
       setShowReasonModal(false);
       setSelectedUserId(null);
@@ -140,16 +203,24 @@ export default function ReportUserScreen() {
         <View style={styles.helperSection}>
           <Ionicons name="information-circle-outline" size={20} color={COLORS.textMuted} />
           <Text style={styles.helperText}>
-            You can report users you've blocked.
+            Report people you recently interacted with in Phase-1, including anyone you currently have blocked.
           </Text>
         </View>
 
-        {blockedUsersInfo.length === 0 ? (
+        {isLoading ? (
+          <View style={styles.emptyState}>
+            <ActivityIndicator size="small" color={COLORS.primary} />
+            <Text style={styles.emptyStateTitle}>Loading recent users</Text>
+            <Text style={styles.emptyStateDescription}>
+              Fetching recent Phase-1 people you can report.
+            </Text>
+          </View>
+        ) : reportCandidates.length === 0 ? (
           <View style={styles.emptyState}>
             <Ionicons name="flag-outline" size={48} color={COLORS.textMuted} />
             <Text style={styles.emptyStateTitle}>No users to report</Text>
             <Text style={styles.emptyStateDescription}>
-              You haven't blocked any users. You can only report users you've blocked.
+              No recent Phase-1 interactions are available to report right now.
             </Text>
           </View>
         ) : (
@@ -158,21 +229,23 @@ export default function ReportUserScreen() {
               Select a user to report
             </Text>
 
-            {blockedUsersInfo.map((user, index) => (
+            {reportCandidates.map((user, index) => (
               <TouchableOpacity
-                key={user.id}
-                style={[styles.userEntry, index === blockedUsersInfo.length - 1 && styles.userEntryLast]}
-                onPress={() => handleSelectUser(user.id)}
+                key={user.userId}
+                style={[styles.userEntry, index === reportCandidates.length - 1 && styles.userEntryLast]}
+                onPress={() => handleSelectUser(user.userId)}
                 activeOpacity={0.7}
               >
-                {/* Generic avatar placeholder - no photo */}
                 <View style={styles.avatarPlaceholder}>
                   <Ionicons name="person" size={24} color={COLORS.textMuted} />
                 </View>
 
                 <View style={styles.entryInfo}>
-                  <Text style={styles.entryLabel}>Blocked User</Text>
-                  <Text style={styles.entryDate}>Blocked {formatBlockedDate(user.blockedAt)}</Text>
+                  <Text style={styles.entryLabel}>
+                    {user.displayName}
+                    {user.isVerified ? ' • Verified' : ''}
+                  </Text>
+                  <Text style={styles.entryDate}>{getCandidateSubtitle(user)}</Text>
                 </View>
 
                 <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />

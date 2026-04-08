@@ -6,44 +6,80 @@ import {
   ScrollView,
   TouchableOpacity,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { COLORS } from '@/lib/constants';
 import { useBlockStore } from '@/stores/blockStore';
 import { useAuthStore } from '@/stores/authStore';
 import { Toast } from '@/components/ui/Toast';
+import { isDemoMode } from '@/hooks/useConvex';
 
 // Report reason type matching backend
 type ReportReason = 'harassment' | 'spam' | 'inappropriate_photos';
 
+type BlockedUserListItem = {
+  blockedUserId: string;
+  blockedAt: number;
+  displayName: string;
+  isVerified: boolean;
+  unavailable: boolean;
+};
+
 export default function BlockedUsersScreen() {
   const router = useRouter();
-  const { userId } = useAuthStore();
+  const token = useAuthStore((s) => s.token);
+  const isDemo = isDemoMode;
 
-  // Get blocked users from store
   const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
+  const blockedUsersQuery = useQuery(
+    api.users.getCurrentUserBlockedUsers,
+    !isDemo && token ? { token } : 'skip'
+  );
 
-  // Backend mutation
+  const unblockUserMutation = useMutation(api.users.unblockUser);
   const reportUserMutation = useMutation(api.users.reportUser);
 
-  // Prevent spam clicks
-  const [isReporting, setIsReporting] = useState(false);
+  const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);
+
+  const blockedUsers: BlockedUserListItem[] = isDemo
+    ? blockedUsersInfo.map((user) => ({
+        blockedUserId: user.id,
+        blockedAt: user.blockedAt,
+        displayName: 'Blocked user',
+        isVerified: false,
+        unavailable: false,
+      }))
+    : (blockedUsersQuery ?? []).map((user: any) => ({
+        blockedUserId: String(user.blockedUserId),
+        blockedAt: user.blockedAt,
+        displayName: user.displayName,
+        isVerified: !!user.isVerified,
+        unavailable: !!user.unavailable,
+      }));
+
+  const isLoading = !isDemo && token ? blockedUsersQuery === undefined : false;
 
   const submitReport = async (reportedUserId: string, reason: ReportReason) => {
-    if (!userId) {
+    if (isDemo) {
+      Toast.show('Report submitted. Our team will review it.');
+      return;
+    }
+
+    if (!token) {
       Toast.show('Please log in to report users');
       return;
     }
 
-    setIsReporting(true);
+    setPendingActionKey(`report:${reportedUserId}`);
     try {
       const result = await reportUserMutation({
-        authUserId: userId,
+        token,
         reportedUserId: reportedUserId as Id<'users'>,
         reason,
       });
@@ -62,12 +98,12 @@ export default function BlockedUsersScreen() {
       console.error('[BlockedUsers] Report failed:', error);
       Toast.show('Failed to submit report. Please try again.');
     } finally {
-      setIsReporting(false);
+      setPendingActionKey((current) => current === `report:${reportedUserId}` ? null : current);
     }
   };
 
   const handleReport = (reportedUserId: string) => {
-    if (isReporting) return; // Prevent spam clicks
+    if (pendingActionKey) return;
 
     Alert.alert(
       'Report User',
@@ -85,6 +121,56 @@ export default function BlockedUsersScreen() {
         {
           text: 'Inappropriate Content',
           onPress: () => submitReport(reportedUserId, 'inappropriate_photos'),
+        },
+      ]
+    );
+  };
+
+  const handleUnblock = (blockedUserId: string, displayName: string) => {
+    if (pendingActionKey) return;
+
+    Alert.alert(
+      'Unblock user?',
+      `${displayName} will be able to see your profile and interact with you again if you cross paths in the app.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unblock',
+          onPress: async () => {
+            setPendingActionKey(`unblock:${blockedUserId}`);
+            try {
+              if (isDemo) {
+                useBlockStore.getState().unblockUser(blockedUserId);
+                useBlockStore.getState().setJustUnblockedUserId(blockedUserId);
+                Toast.show('User unblocked');
+                return;
+              }
+
+              if (!token) {
+                Toast.show('Please log in to manage blocked users');
+                return;
+              }
+
+              const result = await unblockUserMutation({
+                token,
+                blockedUserId: blockedUserId as Id<'users'>,
+              });
+
+              if (!result.success) {
+                Toast.show('Failed to unblock user. Please try again.');
+                return;
+              }
+
+              useBlockStore.getState().unblockUser(blockedUserId);
+              useBlockStore.getState().setJustUnblockedUserId(blockedUserId);
+              Toast.show(`${displayName} unblocked`);
+            } catch (error) {
+              console.error('[BlockedUsers] Unblock failed:', error);
+              Toast.show('Failed to unblock user. Please try again.');
+            } finally {
+              setPendingActionKey((current) => current === `unblock:${blockedUserId}` ? null : current);
+            }
+          },
         },
       ]
     );
@@ -113,7 +199,15 @@ export default function BlockedUsersScreen() {
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {blockedUsersInfo.length === 0 ? (
+        {isLoading ? (
+          <View style={styles.emptyState}>
+            <ActivityIndicator size="small" color={COLORS.primary} />
+            <Text style={styles.emptyStateTitle}>Loading blocked users</Text>
+            <Text style={styles.emptyStateDescription}>
+              Fetching your account-level blocked users list.
+            </Text>
+          </View>
+        ) : blockedUsers.length === 0 ? (
           <View style={styles.emptyState}>
             <Ionicons name="ban-outline" size={48} color={COLORS.textMuted} />
             <Text style={styles.emptyStateTitle}>No blocked users</Text>
@@ -124,29 +218,43 @@ export default function BlockedUsersScreen() {
         ) : (
           <View style={styles.list}>
             <Text style={styles.listHeader}>
-              {blockedUsersInfo.length} {blockedUsersInfo.length === 1 ? 'user' : 'users'} blocked
+              {blockedUsers.length} {blockedUsers.length === 1 ? 'user' : 'users'} blocked
             </Text>
 
-            {blockedUsersInfo.map((user, index) => (
-              <View key={user.id} style={[styles.blockedEntry, index === blockedUsersInfo.length - 1 && styles.blockedEntryLast]}>
-                {/* Generic avatar placeholder - no photo */}
+            {blockedUsers.map((user, index) => (
+              <View key={user.blockedUserId} style={[styles.blockedEntry, index === blockedUsers.length - 1 && styles.blockedEntryLast]}>
                 <View style={styles.avatarPlaceholder}>
                   <Ionicons name="person" size={24} color={COLORS.textMuted} />
                 </View>
 
                 <View style={styles.entryInfo}>
-                  <Text style={styles.entryLabel}>Blocked User</Text>
-                  <Text style={styles.entryDate}>Blocked {formatBlockedDate(user.blockedAt)}</Text>
+                  <Text style={styles.entryLabel}>
+                    {user.displayName}
+                    {user.isVerified ? ' • Verified' : ''}
+                  </Text>
+                  <Text style={styles.entryDate}>
+                    {user.unavailable
+                      ? `Blocked ${formatBlockedDate(user.blockedAt)} • Account unavailable`
+                      : `Blocked ${formatBlockedDate(user.blockedAt)}`}
+                  </Text>
                 </View>
 
                 <View style={styles.entryActions}>
                   <TouchableOpacity
-                    style={[styles.actionButton, isReporting && styles.actionButtonDisabled]}
-                    onPress={() => handleReport(user.id)}
+                    style={[styles.actionButton, pendingActionKey !== null && styles.actionButtonDisabled]}
+                    onPress={() => handleReport(user.blockedUserId)}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    disabled={isReporting}
+                    disabled={pendingActionKey !== null}
                   >
-                    <Ionicons name="flag-outline" size={20} color={COLORS.textMuted} />
+                    <Text style={styles.actionText}>Report</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.actionButton, pendingActionKey !== null && styles.actionButtonDisabled]}
+                    onPress={() => handleUnblock(user.blockedUserId, user.displayName)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    disabled={pendingActionKey !== null}
+                  >
+                    <Text style={styles.actionText}>Unblock</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -158,7 +266,7 @@ export default function BlockedUsersScreen() {
         <View style={styles.infoFooter}>
           <Ionicons name="information-circle-outline" size={18} color={COLORS.textMuted} />
           <Text style={styles.infoFooterText}>
-            Blocked users cannot see your profile or send you messages. Blocks are permanent and private.
+            Blocked users cannot message you or appear in your Phase-1 surfaces while blocked. Blocks stay private, and you can unblock at any time.
           </Text>
         </View>
       </ScrollView>
@@ -261,10 +369,16 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   actionButton: {
-    padding: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
   },
   actionButtonDisabled: {
     opacity: 0.4,
+  },
+  actionText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textMuted,
   },
   // Info footer
   infoFooter: {

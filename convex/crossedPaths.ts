@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { requireAuthenticatedSessionUser } from './helpers';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
@@ -348,31 +348,24 @@ function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>, now: 
 // ---------------------------------------------------------------------------
 // publishLocation — updates published location (max once per 6 hours)
 // Called when Nearby screen is opened. Others see publishedLat/Lng, not live GPS.
-// P1 AUTH FIX: Uses authUserId + server-side resolution to prevent spoofing
+// P1 AUTH HARDENING: Uses validated session token for current-user resolution
 // ---------------------------------------------------------------------------
 
 export const publishLocation = mutation({
   args: {
-    authUserId: v.string(), // P1 AUTH FIX: Server-side auth instead of trusting client
+    token: v.string(),
     latitude: v.number(),
     longitude: v.number(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, latitude, longitude } = args;
+    const { token, latitude, longitude } = args;
     const now = Date.now();
 
     // Get effective config (DEV vs production)
     const config = getEffectiveNearbyConfig();
 
-    // P1 AUTH FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      devLog('publishLocation: user_not_found', { authUserId });
-      return { success: false, reason: 'user_not_found' };
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) return { success: false, reason: 'user_not_found' };
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     // Check if published location is still within the publish window
     // DEV MODE: Uses shorter window (2 min) instead of production (45 min)
@@ -444,30 +437,21 @@ export const publishLocation = mutation({
 // Returns { triggered: true } if alert should be shown, never reveals identity.
 // STABILITY FIX S2: Uses indexed query instead of full table scan
 // STABILITY FIX S6: Pre-fetches blocks before loop
-// P1 AUTH FIX: Uses authUserId + server-side resolution to prevent spoofing
+// P1 AUTH HARDENING: Uses validated session token for current-user resolution
 // ---------------------------------------------------------------------------
 
 export const detectCrossedUsers = mutation({
   args: {
-    authUserId: v.string(), // P1 AUTH FIX: Server-side auth instead of trusting client
+    token: v.string(),
     myLat: v.number(),
     myLng: v.number(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, myLat, myLng } = args;
+    const { token, myLat, myLng } = args;
     const now = Date.now();
 
-    // P1 AUTH FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { triggered: false, reason: 'user_not_found' };
-    }
-
-    // 1) Validate user exists
-    const currentUser = await ctx.db.get(userId);
-    if (!currentUser) {
-      return { triggered: false, reason: 'user_not_found' };
-    }
+    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = currentUser._id;
 
     // 2) Enforce cooldown — check most recent crossedEvent for this user
     const lastEvent = await ctx.db
@@ -588,28 +572,22 @@ export const cleanupExpiredCrossedEvents = internalMutation({
 // recordLocation — called when user opens app / becomes active
 // STABILITY FIX S3: Uses indexed query instead of full table scan
 // STABILITY FIX S6/C2: Pre-fetches blocks before loop (eliminates N+1)
-// P1 AUTH FIX: Uses authUserId + server-side resolution to prevent spoofing
+// P1 AUTH HARDENING: Uses validated session token for current-user resolution
 // ---------------------------------------------------------------------------
 
 export const recordLocation = mutation({
   args: {
-    authUserId: v.string(), // P1 AUTH FIX: Server-side auth instead of trusting client
+    token: v.string(),
     latitude: v.number(),
     longitude: v.number(),
     accuracy: v.optional(v.number()), // GPS accuracy in meters (for jitter protection)
   },
   handler: async (ctx, args) => {
-    const { authUserId, latitude, longitude, accuracy } = args;
+    const { token, latitude, longitude, accuracy } = args;
     const now = Date.now();
 
-    // P1 AUTH FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: false, reason: 'user_not_found' };
-    }
-
-    const currentUser = await ctx.db.get(userId);
-    if (!currentUser) return { success: false };
+    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = currentUser._id;
 
     // ---------------------------------------------------------------------------
     // GPS JITTER PROTECTION (server-side)
@@ -1069,16 +1047,16 @@ export const recordLocation = mutation({
 // getNearbyUsers — map markers with jittered coords & freshness
 // STABILITY FIX S1: Uses indexed query instead of full table scan
 // STABILITY FIX S6: Pre-fetches blocks before loop (eliminates N+1)
-// P2 AUTH FIX: Uses authUserId + server-side resolution for consistency
+// P1 AUTH HARDENING: Uses validated session token for current-user resolution
 // DEV TEST MODE: When enabled, relaxes filters for real-device testing
 // ---------------------------------------------------------------------------
 
 export const getNearbyUsers = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     refreshKey: v.optional(v.number()),
-  }, // P2 AUTH FIX: Server-side auth instead of trusting client
-  handler: async (ctx, { authUserId: authUserId }) => {
+  },
+  handler: async (ctx, { token }) => {
     const now = Date.now();
 
     // Get effective config (DEV vs production)
@@ -1093,18 +1071,8 @@ export const getNearbyUsers = query({
       skipPhotoCountCheck: config.SKIP_PHOTO_COUNT_CHECK,
     });
 
-    // P2 AUTH FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      devLog('getNearbyUsers: BLOCKED - user not found', { authUserId });
-      return [];
-    }
-
-    const currentUser = await ctx.db.get(userId);
-    if (!currentUser) {
-      devLog('getNearbyUsers: BLOCKED - currentUser not found', { userId });
-      return [];
-    }
+    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = currentUser._id;
 
     devLog('getNearbyUsers: currentUser', {
       userId,
@@ -1533,22 +1501,14 @@ export const getNearbyUsers = query({
 
 export const getCrossPathHistory = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     refreshKey: v.optional(v.number()),
   },
-  handler: async (ctx, { authUserId }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return [];
-    }
-
+  handler: async (ctx, { token }) => {
+    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = currentUser._id;
     const now = Date.now();
 
-    // Get current user for distance calculation
-    const currentUser = await ctx.db.get(userId);
-    if (!currentUser) {
-      return [];
-    }
     const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
     const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
 
@@ -1738,20 +1698,16 @@ export const getCrossPathHistory = query({
 // hideCrossedPath — mark a crossed path as hidden for the current user
 // ---------------------------------------------------------------------------
 
-// P2 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
+// P1 AUTH HARDENING: Uses validated session token for current-user resolution.
 export const hideCrossedPath = mutation({
   args: {
-    authUserId: v.string(), // P2 SECURITY: Server-side auth instead of trusting client
+    token: v.string(),
     historyId: v.id('crossPathHistory'),
   },
   handler: async (ctx, args) => {
-    const { authUserId, historyId } = args;
-
-    // P2 SECURITY: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const { token, historyId } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     const entry = await ctx.db.get(historyId);
     if (!entry) {
@@ -1781,20 +1737,16 @@ export const hideCrossedPath = mutation({
 // deleteCrossedPath — permanently delete a crossed path entry
 // ---------------------------------------------------------------------------
 
-// P2 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
+// P1 AUTH HARDENING: Uses validated session token for current-user resolution.
 export const deleteCrossedPath = mutation({
   args: {
-    authUserId: v.string(), // P2 SECURITY: Server-side auth instead of trusting client
+    token: v.string(),
     historyId: v.id('crossPathHistory'),
   },
   handler: async (ctx, args) => {
-    const { authUserId, historyId } = args;
-
-    // P2 SECURITY: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const { token, historyId } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     const entry = await ctx.db.get(historyId);
     if (!entry) {
@@ -2128,15 +2080,13 @@ export const getCrossedPathsCount = query({
  */
 export const getSharedPlaces = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     profileUserId: v.id('users'), // User whose profile is being viewed
   },
   handler: async (ctx, args) => {
-    const { authUserId, profileUserId } = args;
-    const viewerId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!viewerId) {
-      return [];
-    }
+    const { token, profileUserId } = args;
+    const viewer = await requireAuthenticatedSessionUser(ctx, token);
+    const viewerId = viewer._id;
 
     // Don't show shared places for self
     if (viewerId === profileUserId) {

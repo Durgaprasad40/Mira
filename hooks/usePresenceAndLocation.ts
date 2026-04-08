@@ -48,7 +48,7 @@ const LOCATION_SYNC_THROTTLE_MS = 5 * 60 * 1000;
 const MOVEMENT_THRESHOLD_METERS = 300;
 
 export function usePresenceAndLocation() {
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const heartbeatMutation = useMutation(api.users.heartbeat);
   const updateLocationMutation = useMutation(api.users.updateLocation);
 
@@ -63,7 +63,7 @@ export function usePresenceAndLocation() {
 
   // Send heartbeat to backend (presence only - no location)
   const sendHeartbeat = useCallback(async () => {
-    if (isDemoMode || !userId) return;
+    if (isDemoMode || !userId || !token) return;
 
     const now = Date.now();
     // Throttle heartbeats to max 1 per 30 seconds (tight for real-time feel)
@@ -73,7 +73,7 @@ export function usePresenceAndLocation() {
 
     try {
       lastHeartbeatRef.current = now;
-      await heartbeatMutation({ authUserId: userId });
+      await heartbeatMutation({ token });
 
       // LOG_NOISE_FIX: Heartbeat logging gated behind DEBUG_PRESENCE (fires every 60s)
       if (__DEV__ && DEBUG_PRESENCE) {
@@ -82,12 +82,12 @@ export function usePresenceAndLocation() {
     } catch (err) {
       // Silent failure - don't break app
     }
-  }, [userId, heartbeatMutation]);
+  }, [userId, token, heartbeatMutation]);
 
   // Sync location to backend (movement-based + time-based)
   // This updates latitude/longitude for server-side distance calculation
   const syncLocationToBackendIfNeeded = useCallback(async (force = false) => {
-    if (isDemoMode || !userId) return;
+    if (isDemoMode || !userId || !token) return;
     if (permissionStatus !== 'granted') {
       // LOG_NOISE_FIX: Gated behind DEBUG_LOCATION
       if (__DEV__ && DEBUG_LOCATION) {
@@ -148,7 +148,7 @@ export function usePresenceAndLocation() {
 
     try {
       await updateLocationMutation({
-        authUserId: userId,
+        token,
         latitude: coords.latitude,
         longitude: coords.longitude,
       });
@@ -167,7 +167,7 @@ export function usePresenceAndLocation() {
         console.warn('[LOCATION] sync failed:', String(err).slice(0, 50));
       }
     }
-  }, [userId, permissionStatus, getBestLocation, updateLocationMutation]);
+  }, [userId, token, permissionStatus, getBestLocation, updateLocationMutation]);
 
   // Handle app state changes
   useEffect(() => {

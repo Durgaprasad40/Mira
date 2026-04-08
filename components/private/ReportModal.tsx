@@ -39,12 +39,12 @@ interface ReportModalProps {
   targetName: string;
   // Required for backend integration; optional for demo/public rooms
   targetUserId?: string;
-  currentUserId?: string;
+  authToken?: string;
   conversationId?: string;
   onClose: () => void;
   onBlockSuccess?: () => void;
   onLeaveSuccess?: () => void;
-  // Legacy callbacks for backward compatibility (used when targetUserId/currentUserId not provided)
+  // Legacy callbacks for backward compatibility (used when targetUserId/authToken not provided)
   onReport?: (reason: string) => void;
   onBlock?: () => void;
 }
@@ -53,7 +53,7 @@ export function ReportModal({
   visible,
   targetName,
   targetUserId,
-  currentUserId,
+  authToken,
   conversationId,
   onClose,
   onBlockSuccess,
@@ -63,7 +63,7 @@ export function ReportModal({
   onBlock,
 }: ReportModalProps) {
   // Determine if we have full backend integration or using legacy mode
-  const hasBackendIntegration = !!(targetUserId && currentUserId);
+  const hasBackendIntegration = !!(targetUserId && authToken);
   const [viewState, setViewState] = useState<ViewState>('main');
   const [otherReason, setOtherReason] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -130,7 +130,7 @@ export function ReportModal({
 
             try {
               await blockMutation({
-                authUserId: currentUserId!,
+                token: authToken!,
                 blockedUserId: targetUserId as any,
               });
 
@@ -225,7 +225,7 @@ export function ReportModal({
 
     try {
       await reportMutation({
-        authUserId: currentUserId!,
+        token: authToken!,
         reportedUserId: targetUserId as any,
         reason: reasonId,
       });
@@ -259,7 +259,7 @@ export function ReportModal({
 
     try {
       await reportMutation({
-        authUserId: currentUserId!,
+        token: authToken!,
         reportedUserId: targetUserId as any,
         reason: 'other',
         description: trimmed,

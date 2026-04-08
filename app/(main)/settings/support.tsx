@@ -116,7 +116,7 @@ type Attachment = PhotoAttachment | VideoAttachment;
 export default function SupportScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { token } = useAuthStore();
 
   // FAQ expansion state
   const [expandedTopic, setExpandedTopic] = useState<string | null>(null);
@@ -237,7 +237,7 @@ export default function SupportScreen() {
       return;
     }
 
-    if (!userId) {
+    if (!token) {
       Toast.show('Please log in to submit a request');
       return;
     }
@@ -257,7 +257,7 @@ export default function SupportScreen() {
 
           const storageId = await uploadMediaToConvex(
             attachment.uri,
-            generateUploadUrl,
+            () => generateUploadUrl({ token }),
             attachment.type
           );
 
@@ -272,7 +272,7 @@ export default function SupportScreen() {
 
       // Submit ticket with attachments
       await submitTicket({
-        userId: userId as Id<'users'>,
+        token,
         category: selectedCategory,
         message: message.trim(),
         attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,

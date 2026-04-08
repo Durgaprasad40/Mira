@@ -69,7 +69,6 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useLocationStore, useBestLocation } from '@/stores/locationStore';
 import { useAuthStore } from '@/stores/authStore';
-import { asUserId } from '@/convex/id';
 import { safePush } from '@/lib/safeRouter';
 import { COLORS } from '@/lib/constants';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -468,7 +467,7 @@ export default function NearbyScreen() {
 
   // Auth store
   const userId = useAuthStore((s) => s.userId);
-  const convexUserId = userId ? asUserId(userId) : undefined;
+  const token = useAuthStore((s) => s.token);
 
   // Location store
   const permissionStatus = useLocationStore((s) => s.permissionStatus);
@@ -527,9 +526,9 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   const nearbyUsersQuery = useQuery(
     api.crossedPaths.getNearbyUsers,
-    !isDemo && userId
-      ? { authUserId: userId, refreshKey: nearbyRefreshKey }
-      : 'skip' // P2 AUTH FIX: Pass auth ID for server-side resolution
+    !isDemo && token
+      ? { token, refreshKey: nearbyRefreshKey }
+      : 'skip'
   );
 
   // ---------------------------------------------------------------------------
@@ -537,7 +536,7 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   const crossedPathsQuery = useQuery(
     api.crossedPaths.getCrossPathHistory,
-    !isDemo && userId ? { authUserId: userId } : 'skip'
+    !isDemo && token ? { token } : 'skip'
   );
 
   const [hasNewCrossedPaths, setHasNewCrossedPaths] = useState(false);
@@ -563,7 +562,7 @@ export default function NearbyScreen() {
   }, [crossedPathsQuery]);
 
   // Track query loading state for error detection
-  const isQueryActive = !isDemo && convexUserId !== undefined;
+  const isQueryActive = !isDemo && typeof token === 'string' && token.trim().length > 0;
   const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
 
   // Clear timeout when query succeeds or on unmount
@@ -705,9 +704,9 @@ export default function NearbyScreen() {
       return;
     }
 
-    // Skip if no user ID (P1 AUTH FIX: now using userId for server-side resolution)
-    if (!userId) {
-      if (__DEV__) console.log('[NEARBY] publishLocation skipped: no userId');
+    // Skip if no token
+    if (!token) {
+      if (__DEV__) console.log('[NEARBY] publishLocation skipped: no token');
       return;
     }
 
@@ -750,7 +749,7 @@ export default function NearbyScreen() {
     (async () => {
       try {
         const result = await publishLocationMutation({
-          authUserId: userId!, // P1 AUTH FIX: Pass auth ID for server-side resolution
+          token,
           latitude: lat,
           longitude: lng,
         });
@@ -808,7 +807,7 @@ export default function NearbyScreen() {
         if (!isMountedRef.current) return;
         try {
           const result = await recordLocationMutation({
-            authUserId: userId!, // P1 AUTH FIX: Pass auth ID for server-side resolution
+            token,
             latitude: lat,
             longitude: lng,
             accuracy: bestLocation.accuracy,
@@ -860,7 +859,7 @@ export default function NearbyScreen() {
         isPublishingRef.current = false;
       }
     })();
-  }, [isDemo, userId, locationUIState, bestLocation, publishLocationMutation, recordLocationMutation, router]);
+  }, [isDemo, token, locationUIState, bestLocation, publishLocationMutation, recordLocationMutation, router]);
 
   // ---------------------------------------------------------------------------
   // Demo mode nearby users - placed around current location

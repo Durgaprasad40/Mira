@@ -3,7 +3,7 @@ import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { api } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
-import { resolveUserIdByAuthId } from "./helpers";
+import { requireAuthenticatedSessionUser, resolveUserIdByAuthId } from "./helpers";
 
 // ============================================================================
 // Crypto helpers (Convex-compatible, no Node.js dependencies)
@@ -51,6 +51,26 @@ function generateToken(): string {
     token += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return token;
+}
+
+async function restoreRecoverableAccount<
+  T extends { _id: Id<"users">; deletedAt?: number | undefined; isActive?: boolean; lastActive?: number | undefined }
+>(ctx: any, user: T, now: number): Promise<T> {
+  if (user.deletedAt || user.isActive === false) {
+    await ctx.db.patch(user._id, {
+      deletedAt: undefined,
+      isActive: true,
+      lastActive: now,
+    });
+    return {
+      ...user,
+      deletedAt: undefined,
+      isActive: true,
+      lastActive: now,
+    };
+  }
+
+  return user;
 }
 
 // 8B: Generate email verification token (32-char hex)
@@ -619,7 +639,7 @@ export const loginWithEmail = mutation({
     // P2-3 FIX: Normalize email to match registration (which uses toLowerCase().trim())
     const normalizedEmail = email.toLowerCase().trim();
 
-    const user = await ctx.db
+    let user = await ctx.db
       .query("users")
       .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
       .first();
@@ -668,6 +688,8 @@ export const loginWithEmail = mutation({
     if (user.isBanned) {
       throw new Error("Account has been suspended");
     }
+
+    user = await restoreRecoverableAccount(ctx, user, now);
 
     // Success — reset attempts, update last active, and migrate hash if needed
     const updateData: Record<string, any> = {
@@ -725,6 +747,12 @@ export const socialAuth = mutation({
       .first();
 
     if (user) {
+      if (user.isBanned) {
+        throw new Error("Account has been suspended");
+      }
+
+      user = await restoreRecoverableAccount(ctx, user, now);
+
       // Existing user - update last active and create session
       // Backfill: ensure social auth users have emailVerified set
       await ctx.db.patch(user._id, {
@@ -759,6 +787,12 @@ export const socialAuth = mutation({
         .first();
 
       if (user) {
+        if (user.isBanned) {
+          throw new Error("Account has been suspended");
+        }
+
+        user = await restoreRecoverableAccount(ctx, user, now);
+
         // Link account + set email verified (social auth verifies on provider side)
         await ctx.db.patch(user._id, {
           externalId,
@@ -1128,47 +1162,8 @@ export const deactivateAccount = mutation({
     userId: v.id("users"),
     reason: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
-    const { userId, reason } = args;
-    const now = Date.now();
-
-    const user = await ctx.db.get(userId);
-    if (!user) {
-      throw new Error("User not found");
-    }
-
-    const previousIsActive = user.isActive;
-
-    // Deactivate and revoke all sessions
-    await ctx.db.patch(userId, {
-      isActive: false,
-      sessionsRevokedAt: now,
-    });
-
-    // Delete all sessions for this user
-    const sessions = await ctx.db
-      .query("sessions")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .collect();
-
-    for (const session of sessions) {
-      await ctx.db.delete(session._id);
-    }
-
-    // Audit log: record account deactivation
-    await logAdminAction(ctx, {
-      adminUserId: userId, // User acting on themselves
-      action: "deactivate",
-      targetUserId: userId,
-      reason,
-      metadata: {
-        previousIsActive,
-        newIsActive: false,
-        sessionsRevoked: sessions.length,
-      },
-    });
-
-    return { success: true, sessionsRevoked: sessions.length };
+  handler: async () => {
+    throw new Error("Deprecated: use softDeleteAccount");
   },
 });
 
@@ -1177,34 +1172,8 @@ export const reactivateAccount = mutation({
   args: {
     userId: v.id("users"),
   },
-  handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
-    if (!user) {
-      throw new Error("User not found");
-    }
-
-    if (user.isBanned) {
-      throw new Error("Account is banned and cannot be reactivated");
-    }
-
-    const previousIsActive = user.isActive;
-
-    await ctx.db.patch(args.userId, {
-      isActive: true,
-    });
-
-    // Audit log: record account reactivation
-    await logAdminAction(ctx, {
-      adminUserId: args.userId, // User acting on themselves
-      action: "reactivate",
-      targetUserId: args.userId,
-      metadata: {
-        previousIsActive,
-        newIsActive: true,
-      },
-    });
-
-    return { success: true };
+  handler: async () => {
+    throw new Error("Deprecated: sign in again to reactivate");
   },
 });
 
@@ -1389,7 +1358,7 @@ export const getOrCreateUserByIdentity = mutation({
       // CASE A: User is soft-deleted → RESTORE them
       // SAFETY: We restore ALL their data (messages, matches, profile)
       // This ensures same identity = same userId = same account ALWAYS
-      if (existingUser.deletedAt) {
+      if (existingUser.deletedAt || existingUser.isActive === false) {
         await ctx.db.patch(existingUser._id, {
           deletedAt: undefined,
           isActive: true,
@@ -1873,23 +1842,14 @@ export const checkIdentityExists = query({
  */
 export const softDeleteAccount = mutation({
   args: {
-    authUserId: v.string(), // Auth ID from client, resolved server-side
+    token: v.string(),
     reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, reason } = args;
+    const { token, reason } = args;
     const now = Date.now();
-
-    // Resolve auth ID to actual user ID server-side (prevents spoofing)
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error("User not found");
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) {
-      throw new Error("User not found");
-    }
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     // Soft delete: set flags, revoke sessions
     await ctx.db.patch(userId, {
@@ -1912,7 +1872,7 @@ export const softDeleteAccount = mutation({
 
     return {
       success: true,
-      message: "Account has been deleted. You can recover by logging in again.",
+      message: "Account has been deactivated. Sign in again to reactivate it.",
     };
   },
 });
@@ -2168,10 +2128,7 @@ export const verifyPhoneOtp = mutation({
       if (user.isBanned) {
         return { success: false, code: "ACCOUNT_BANNED" as const, message: "Account has been suspended." };
       }
-      if (user.isActive === false) {
-        return { success: false, code: "ACCOUNT_INACTIVE" as const, message: "Account is inactive." };
-      }
-      // Update lastActive
+      user = await restoreRecoverableAccount(ctx, user, now);
       await ctx.db.patch(user._id, { lastActive: now });
     }
 

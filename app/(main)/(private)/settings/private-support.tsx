@@ -110,7 +110,7 @@ interface PhotoAttachment {
 export default function PrivateSupportScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { token } = useAuthStore();
 
   // FAQ expansion state
   const [expandedTopic, setExpandedTopic] = useState<string | null>(null);
@@ -180,7 +180,7 @@ export default function PrivateSupportScreen() {
       return;
     }
 
-    if (!userId) {
+    if (!token) {
       Toast.show('Please log in to submit a request');
       return;
     }
@@ -199,7 +199,7 @@ export default function PrivateSupportScreen() {
 
           const storageId = await uploadMediaToConvex(
             attachment.uri,
-            generateUploadUrl,
+            () => generateUploadUrl({ token }),
             'photo'
           );
 
@@ -213,7 +213,7 @@ export default function PrivateSupportScreen() {
       }
 
       await submitTicket({
-        userId: userId as Id<'users'>,
+        token,
         category: selectedCategory,
         message: `[Deep Connect] ${message.trim()}`,
         attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,

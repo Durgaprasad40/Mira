@@ -841,7 +841,7 @@ export default function ChatsScreen() {
           visible
           targetName={reportTarget.name}
           targetUserId={reportTarget.id}
-          currentUserId={currentUserId || ''}
+          authToken={token || undefined}
           conversationId={reportTarget.conversationId}
           onClose={() => setReportTarget(null)}
           onBlockSuccess={() => setReportTarget(null)}

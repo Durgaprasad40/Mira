@@ -73,7 +73,7 @@ type Attachment = PhotoAttachment | VideoAttachment;
 export default function ReportPersonScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId: currentUserId } = useAuthStore();
+  const { token } = useAuthStore();
 
   // Get route params (passed from select-person or direct context reporting)
   const params = useLocalSearchParams<{ userId?: string; userName?: string; userPhoto?: string }>();
@@ -212,7 +212,7 @@ export default function ReportPersonScreen() {
       return;
     }
 
-    if (!currentUserId) {
+    if (!token) {
       Toast.show('Please log in to submit a report');
       return;
     }
@@ -232,7 +232,7 @@ export default function ReportPersonScreen() {
 
           const storageId = await uploadMediaToConvex(
             attachment.uri,
-            generateUploadUrl,
+            () => generateUploadUrl({ token }),
             attachment.type
           );
 
@@ -259,7 +259,7 @@ export default function ReportPersonScreen() {
       ].join('\n');
 
       await submitTicket({
-        userId: currentUserId as Id<'users'>,
+        token,
         category: 'safety',
         message: reportMessage,
         attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,

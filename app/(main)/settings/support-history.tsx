@@ -54,11 +54,11 @@ type TicketWithPreview = {
 
 export default function SupportHistoryScreen() {
   const router = useRouter();
-  const { userId } = useAuthStore();
+  const { token } = useAuthStore();
 
   const tickets = useQuery(
     api.supportTickets.getUserTicketsWithPreview,
-    userId ? { userId: userId as Id<'users'> } : 'skip'
+    token ? { token } : 'skip'
   );
 
   const formatDate = (timestamp: number): string => {

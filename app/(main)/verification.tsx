@@ -23,7 +23,7 @@ type VerificationState = "unverified" | "camera" | "pending" | "verified";
 export default function VerificationScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { token } = useAuthStore();
   const [state, setState] = useState<VerificationState>("unverified");
   const [capturedUri, setCapturedUri] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -32,7 +32,7 @@ export default function VerificationScreen() {
 
   const verificationStatus = useQuery(
     api.verification.getVerificationStatus,
-    !isDemoMode && userId ? { userId: userId as any } : "skip"
+    !isDemoMode && token ? { token } : "skip"
   );
 
   const createSession = useMutation(api.verification.createVerificationSession);
@@ -40,8 +40,8 @@ export default function VerificationScreen() {
 
   // Determine if the user is locked (security_only) — hide dismiss/close in that case
   const currentUser = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : "skip"
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : "skip"
   );
   const isLocked = !isDemoMode && currentUser
     ? (currentUser.verificationEnforcementLevel === "security_only" ||
@@ -101,7 +101,7 @@ export default function VerificationScreen() {
       return;
     }
 
-    if (!userId) return;
+    if (!token) return;
 
     setIsUploading(true);
     try {
@@ -120,7 +120,7 @@ export default function VerificationScreen() {
 
       // Create verification session
       await createSession({
-        userId: userId as any,
+        token,
         selfieStorageId: storageId,
       });
 

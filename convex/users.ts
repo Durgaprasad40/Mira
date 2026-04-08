@@ -3,7 +3,12 @@ import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
-import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
+import {
+  resolveUserIdByAuthId,
+  ensureUserByAuthId,
+  validateSessionToken,
+  requireAuthenticatedSessionUser,
+} from "./helpers";
 
 // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
@@ -28,6 +33,72 @@ function getSafeProfilePhotos<T extends { url?: string; isNsfw?: boolean; order:
     .sort((a, b) => a.order - b.order);
 }
 
+async function buildCurrentUserResponse(
+  ctx: any,
+  userId: Id<"users">
+) {
+  const user = await ctx.db.get(userId);
+  if (!user) return null;
+
+  const allPhotos = await ctx.db
+    .query("photos")
+    .withIndex("by_user_order", (q: any) => q.eq("userId", userId))
+    .collect();
+
+  const photos = allPhotos.filter((p: any) => p.photoType !== "verification_reference");
+  const safePhotos = getSafeProfilePhotos(photos);
+
+  return {
+    ...user,
+    photos: safePhotos,
+  };
+}
+
+function getPhase1SafetyDisplayName(user: any): string {
+  const firstName = user?.name?.trim()?.split(/\s+/)[0];
+  return firstName && firstName.length > 0 ? firstName : 'Unavailable user';
+}
+
+async function getPhase1SafetyPhotoUrl(
+  ctx: any,
+  userId: Id<'users'>
+): Promise<string | null> {
+  const photos = await ctx.db
+    .query('photos')
+    .withIndex('by_user_order', (q: any) => q.eq('userId', userId))
+    .collect();
+
+  const safePhotos = getSafeProfilePhotos(
+    photos.filter((photo: any) => photo.photoType !== 'verification_reference')
+  );
+
+  return safePhotos[0]?.url ?? null;
+}
+
+async function buildPhase1SafetyUserSummary(
+  ctx: any,
+  userId: Id<'users'>
+) {
+  const user = await ctx.db.get(userId);
+  const unavailable = !user || !user.isActive || !!user.deletedAt || !!user.isBanned;
+
+  if (unavailable) {
+    return {
+      displayName: 'Unavailable user',
+      photoUrl: null,
+      isVerified: false,
+      unavailable: true,
+    };
+  }
+
+  return {
+    displayName: getPhase1SafetyDisplayName(user),
+    photoUrl: await getPhase1SafetyPhotoUrl(ctx, userId),
+    isVerified: !!user.isVerified,
+    unavailable: false,
+  };
+}
+
 // Get current user profile
 export const getCurrentUser = query({
   args: {
@@ -41,26 +112,17 @@ export const getCurrentUser = query({
       return null;
     }
 
-    const user = await ctx.db.get(convexUserId);
-    if (!user) return null;
+    return await buildCurrentUserResponse(ctx, convexUserId);
+  },
+});
 
-    // Get user's photos
-    const allPhotos = await ctx.db
-      .query("photos")
-      .withIndex("by_user_order", (q) => q.eq("userId", convexUserId))
-      .collect();
-
-    // PHOTO SOURCE FIX: Filter out verification_reference photos
-    // These are private verification photos, NOT display photos
-    // This ensures getCurrentUser returns the same photos as getUserPhotos
-    // for consistent photo counts across Edit Profile, Profile Tab, and Discover
-    const photos = allPhotos.filter((p) => p.photoType !== 'verification_reference');
-    const safePhotos = getSafeProfilePhotos(photos);
-
-    return {
-      ...user,
-      photos: safePhotos,
-    };
+export const getCurrentUserFromToken = query({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+    return await buildCurrentUserResponse(ctx, user._id);
   },
 });
 
@@ -340,7 +402,7 @@ export const updateProfilePrompts = mutation({
 // Update user profile
 export const updateProfile = mutation({
   args: {
-    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
+    token: v.string(),
     name: v.optional(v.string()),
     bio: v.optional(v.string()),
     height: v.optional(v.number()),
@@ -486,16 +548,9 @@ export const updateProfile = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { authUserId, bio, pets, insect, ...otherUpdates } = args;
-
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const { token, bio, pets, insect, ...otherUpdates } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     // P2 VALIDATION: Bio length validation (max 500 chars - matches frontend)
     if (bio !== undefined && bio.length > 500) {
@@ -670,19 +725,15 @@ export const updatePreferences = mutation({
 // APP-P0-001 FIX: Server-side auth - user can only update their own location
 export const updateLocation = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     latitude: v.number(),
     longitude: v.number(),
     city: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, latitude, longitude, city } = args;
-
-    // APP-P0-001 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const { token, latitude, longitude, city } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     await ctx.db.patch(userId, {
       latitude,
@@ -700,16 +751,11 @@ export const updateLocation = mutation({
 // PRESENCE FIX: This mutation enables accurate "Online now" display on Discover cards
 export const heartbeat = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
-
-    // Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: false, reason: 'user_not_found' };
-    }
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+    const userId = user._id;
 
     const now = Date.now();
     await ctx.db.patch(userId, {
@@ -724,20 +770,13 @@ export const heartbeat = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own incognito
 export const toggleIncognito = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, enabled } = args;
-
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    const { token, enabled } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     // Check if user has incognito access
     const hasFullAccess =
@@ -766,7 +805,7 @@ export const toggleIncognito = mutation({
  */
 export const updateNearbySettings = mutation({
   args: {
-    authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
+    token: v.string(),
     nearbyEnabled: v.optional(v.boolean()),
     crossedPathsEnabled: v.optional(v.boolean()),
     hideDistance: v.optional(v.boolean()),
@@ -781,16 +820,9 @@ export const updateNearbySettings = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { authUserId, incognitoMode, ...updates } = args;
-
-    // P1 SECURITY: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error("Unauthorized: user not found");
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    const { token, incognitoMode, ...updates } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     // Check premium access for incognito mode (premium-only, no gender-based access)
     if (incognitoMode !== undefined) {
@@ -823,20 +855,13 @@ export const updateNearbySettings = mutation({
  */
 export const pauseNearby = mutation({
   args: {
-    authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
+    token: v.string(),
     paused: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, paused } = args;
-
-    // P1 SECURITY: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error("Unauthorized: user not found");
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    const { token, paused } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     if (paused) {
       // Pause for 24 hours
@@ -858,20 +883,13 @@ export const pauseNearby = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own discovery pause
 export const toggleDiscoveryPause = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     paused: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, paused } = args;
-
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    const { token, paused } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     if (paused) {
       await ctx.db.patch(userId, {
@@ -893,20 +911,13 @@ export const toggleDiscoveryPause = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own setting
 export const toggleShowLastSeen = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, enabled } = args;
-
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    const { token, enabled } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     await ctx.db.patch(userId, { showLastSeen: enabled });
     return { success: true };
@@ -917,21 +928,14 @@ export const toggleShowLastSeen = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only update their own privacy settings
 export const updatePrivacySettings = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     hideAge: v.optional(v.boolean()),
     disableReadReceipts: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, hideAge, disableReadReceipts } = args;
-
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    const { token, hideAge, disableReadReceipts } = args;
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     // Build update object with only provided fields
     const updates: Record<string, boolean> = {};
@@ -950,7 +954,7 @@ export const updatePrivacySettings = mutation({
 // APP-P0-002 FIX: Server-side auth - user can only update their own settings
 export const updateNotificationSettings = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     notificationsEnabled: v.optional(v.boolean()),
     emailNotificationsEnabled: v.optional(v.boolean()),
     // Notification type preferences
@@ -961,7 +965,7 @@ export const updateNotificationSettings = mutation({
   },
   handler: async (ctx, args) => {
     const {
-      authUserId,
+      token,
       notificationsEnabled,
       emailNotificationsEnabled,
       notifyNewMatches,
@@ -970,14 +974,8 @@ export const updateNotificationSettings = mutation({
       notifyProfileViews,
     } = args;
 
-    // APP-P0-002 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    const user = await requireAuthenticatedSessionUser(ctx, token);
+    const userId = user._id;
 
     const updates: Record<string, boolean> = {};
     if (notificationsEnabled !== undefined) {
@@ -1087,15 +1085,12 @@ export const markVerified = mutation({
 // Block user
 export const blockUser = mutation({
   args: {
-    token: v.optional(v.string()),
-    authUserId: v.optional(v.string()),
+    token: v.string(),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { token, authUserId, blockedUserId } = args;
-    const blockerId = token
-      ? await validateSessionToken(ctx, token)
-      : (authUserId ? await resolveUserIdByAuthId(ctx, authUserId) : null);
+    const { token, blockedUserId } = args;
+    const blockerId = await validateSessionToken(ctx, token);
     if (!blockerId) {
       return { success: false, error: 'unauthorized' };
     }
@@ -1128,15 +1123,12 @@ export const blockUser = mutation({
 // Unblock user
 export const unblockUser = mutation({
   args: {
-    // C2 SECURITY: Use authUserId for server-side validation
-    authUserId: v.string(),
+    token: v.string(),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { authUserId, blockedUserId } = args;
-
-    // C2 SECURITY: Resolve auth ID to Convex user ID
-    const blockerId = await resolveUserIdByAuthId(ctx, authUserId);
+    const { token, blockedUserId } = args;
+    const blockerId = await validateSessionToken(ctx, token);
     if (!blockerId) {
       return { success: false, error: 'unauthorized' };
     }
@@ -1156,11 +1148,176 @@ export const unblockUser = mutation({
   },
 });
 
+export const getCurrentUserBlockedUsers = query({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
+
+    const blocks = await ctx.db
+      .query('blocks')
+      .withIndex('by_blocker', (q) => q.eq('blockerId', currentUser._id))
+      .collect();
+
+    const sortedBlocks = [...blocks].sort((a, b) => b.createdAt - a.createdAt);
+
+    return await Promise.all(
+      sortedBlocks.map(async (block) => {
+        const summary = await buildPhase1SafetyUserSummary(ctx, block.blockedUserId);
+        return {
+          blockedUserId: block.blockedUserId,
+          blockedAt: block.createdAt,
+          ...summary,
+        };
+      })
+    );
+  },
+});
+
+export const getCurrentUserReportCandidates = query({
+  args: {
+    token: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
+    const currentUserId = currentUser._id;
+    const limit = Math.max(1, Math.min(args.limit ?? 30, 50));
+    const recentWindowStart = Date.now() - 30 * 24 * 60 * 60 * 1000;
+
+    const candidateMap = new Map<string, {
+      userId: Id<'users'>;
+      lastInteractionAt: number;
+      blockedAt: number | null;
+      contexts: Set<'blocked' | 'matched' | 'messaged' | 'liked' | 'liked_you'>;
+    }>();
+
+    const addCandidate = (
+      otherUserId: Id<'users'>,
+      timestamp: number,
+      context: 'blocked' | 'matched' | 'messaged' | 'liked' | 'liked_you',
+      blockedAt?: number
+    ) => {
+      if (otherUserId === currentUserId) return;
+
+      const key = String(otherUserId);
+      const existing = candidateMap.get(key);
+      if (existing) {
+        existing.lastInteractionAt = Math.max(existing.lastInteractionAt, timestamp);
+        if (blockedAt) {
+          existing.blockedAt = Math.max(existing.blockedAt ?? 0, blockedAt);
+        }
+        existing.contexts.add(context);
+        return;
+      }
+
+      candidateMap.set(key, {
+        userId: otherUserId,
+        lastInteractionAt: timestamp,
+        blockedAt: blockedAt ?? null,
+        contexts: new Set([context]),
+      });
+    };
+
+    const [
+      blocks,
+      matchesAsUser1,
+      matchesAsUser2,
+      participantRows,
+      outgoingLikes,
+      incomingLikes,
+    ] = await Promise.all([
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', currentUserId))
+        .collect(),
+      ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', currentUserId))
+        .collect(),
+      ctx.db
+        .query('matches')
+        .withIndex('by_user2', (q) => q.eq('user2Id', currentUserId))
+        .collect(),
+      ctx.db
+        .query('conversationParticipants')
+        .withIndex('by_user', (q) => q.eq('userId', currentUserId))
+        .collect(),
+      ctx.db
+        .query('likes')
+        .withIndex('by_from_user', (q) => q.eq('fromUserId', currentUserId))
+        .collect(),
+      ctx.db
+        .query('likes')
+        .withIndex('by_to_user', (q) => q.eq('toUserId', currentUserId))
+        .collect(),
+    ]);
+
+    for (const block of blocks) {
+      addCandidate(block.blockedUserId, block.createdAt, 'blocked', block.createdAt);
+    }
+
+    for (const match of [...matchesAsUser1, ...matchesAsUser2]) {
+      if (!match.isActive && match.matchedAt < recentWindowStart) {
+        continue;
+      }
+      const otherUserId = match.user1Id === currentUserId ? match.user2Id : match.user1Id;
+      addCandidate(otherUserId, match.matchedAt, 'matched');
+    }
+
+    const conversations = await Promise.all(
+      participantRows.map((row) => ctx.db.get(row.conversationId))
+    );
+    for (const conversation of conversations) {
+      if (!conversation) continue;
+      if (conversation.sourceRoomId || conversation.connectionSource) continue;
+
+      const interactionAt = conversation.lastMessageAt ?? conversation.createdAt ?? 0;
+      if (interactionAt < recentWindowStart) continue;
+
+      const otherUserId = conversation.participants.find((participantId) => participantId !== currentUserId);
+      if (!otherUserId) continue;
+      addCandidate(otherUserId, interactionAt, 'messaged');
+    }
+
+    for (const like of outgoingLikes) {
+      if (like.action === 'pass' || like.createdAt < recentWindowStart) continue;
+      addCandidate(like.toUserId, like.createdAt, 'liked');
+    }
+
+    for (const like of incomingLikes) {
+      if (like.action === 'pass' || like.createdAt < recentWindowStart) continue;
+      addCandidate(like.fromUserId, like.createdAt, 'liked_you');
+    }
+
+    const candidates = [...candidateMap.values()]
+      .sort((a, b) => {
+        const aSortAt = Math.max(a.lastInteractionAt, a.blockedAt ?? 0);
+        const bSortAt = Math.max(b.lastInteractionAt, b.blockedAt ?? 0);
+        return bSortAt - aSortAt;
+      })
+      .slice(0, limit);
+
+    return await Promise.all(
+      candidates.map(async (candidate) => {
+        const summary = await buildPhase1SafetyUserSummary(ctx, candidate.userId);
+        return {
+          userId: candidate.userId,
+          lastInteractionAt: candidate.lastInteractionAt,
+          blockedAt: candidate.blockedAt,
+          contexts: Array.from(candidate.contexts),
+          ...summary,
+        };
+      })
+    );
+  },
+});
+
 // Report user
 export const reportUser = mutation({
   args: {
-    token: v.optional(v.string()),
-    authUserId: v.optional(v.string()),
+    token: v.string(),
     reportedUserId: v.id("users"),
     reason: v.union(
       v.literal("fake_profile"),
@@ -1173,11 +1330,9 @@ export const reportUser = mutation({
     description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { token, authUserId, reportedUserId, reason, description } = args;
+    const { token, reportedUserId, reason, description } = args;
     const now = Date.now();
-    const reporterId = token
-      ? await validateSessionToken(ctx, token)
-      : (authUserId ? await resolveUserIdByAuthId(ctx, authUserId) : null);
+    const reporterId = await validateSessionToken(ctx, token);
     if (!reporterId) {
       return { success: false, error: 'unauthorized' };
     }
@@ -1241,17 +1396,10 @@ export const reportUser = mutation({
 // APP-P0-003 FIX: Server-side auth - user can only deactivate their own account
 export const deactivateAccount = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, args) => {
-    // APP-P0-003 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-
-    await ctx.db.patch(userId, { isActive: false });
-    return { success: true };
+  handler: async () => {
+    throw new Error('Deprecated: use auth.softDeleteAccount');
   },
 });
 
@@ -1259,17 +1407,10 @@ export const deactivateAccount = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only reactivate their own account
 export const reactivateAccount = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, args) => {
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-
-    await ctx.db.patch(userId, { isActive: true, lastActive: Date.now() });
-    return { success: true };
+  handler: async () => {
+    throw new Error('Deprecated: sign in again to reactivate');
   },
 });
 
@@ -1652,18 +1793,12 @@ export const completeOnboarding = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own photo blur
 export const togglePhotoBlur = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     blurred: v.boolean(),
   },
   handler: async (ctx, args) => {
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+    const userId = user._id;
     await ctx.db.patch(userId, { photoBlurred: args.blurred });
     return { success: true, blurred: args.blurred };
   },
@@ -1969,6 +2104,16 @@ export const checkIsAdmin = query({
   },
 });
 
+export const checkCurrentUserIsAdmin = query({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+    return { isAdmin: user.isAdmin === true };
+  },
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // PREFERRED CHAT ROOM
 // Auto-opens the user's preferred room when entering the Chat Rooms tab.
@@ -2140,6 +2285,60 @@ export const upsertOnboardingDraft = mutation({
 
     // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values before saving
     // Keeps draft preferences aligned with the current 9 Explore-safe schema values
+    if (mergedDraft.preferences?.relationshipIntent) {
+      mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
+        mergedDraft.preferences.relationshipIntent
+      );
+    }
+
+    await ctx.db.patch(userId, {
+      onboardingDraft: mergedDraft,
+    });
+
+    return { success: true };
+  },
+});
+
+export const upsertCurrentUserOnboardingDraft = mutation({
+  args: {
+    token: v.string(),
+    patch: v.any(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+    const userId = user._id;
+    const existingDraft = user.onboardingDraft || {};
+
+    const lastUpdatedAt = existingDraft.progress?.lastUpdatedAt;
+    const now = Date.now();
+    if (lastUpdatedAt && (now - lastUpdatedAt) < 500) {
+      console.warn(`[DRAFT_RACE] Rapid draft update detected for user ${userId}: ${now - lastUpdatedAt}ms since last update`);
+    }
+
+    const safeMerge = (existing: any, patch: any) => {
+      if (!patch) return existing;
+      const merged = { ...existing };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value !== undefined) {
+          merged[key] = value;
+        }
+      }
+      return merged;
+    };
+
+    const mergedDraft = {
+      ...existingDraft,
+      basicInfo: safeMerge(existingDraft.basicInfo, args.patch.basicInfo),
+      profileDetails: safeMerge(existingDraft.profileDetails, args.patch.profileDetails),
+      lifestyle: safeMerge(existingDraft.lifestyle, args.patch.lifestyle),
+      lifeRhythm: safeMerge(existingDraft.lifeRhythm, args.patch.lifeRhythm),
+      preferences: safeMerge(existingDraft.preferences, args.patch.preferences),
+      progress: {
+        lastStepKey: args.patch.progress?.lastStepKey ?? existingDraft.progress?.lastStepKey,
+        lastUpdatedAt: now,
+      },
+    };
+
     if (mergedDraft.preferences?.relationshipIntent) {
       mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
         mergedDraft.preferences.relationshipIntent

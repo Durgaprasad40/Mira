@@ -324,6 +324,49 @@ export async function validateSessionToken(
 }
 
 /**
+ * Strict current-user resolution from a validated session token.
+ *
+ * IMPORTANT:
+ * - Uses ONLY the session token as the source of truth
+ * - Intended for security-sensitive self-service flows (Profile, Support, Verification)
+ * - Does NOT accept raw user IDs, auth IDs, demo IDs, or prefix matches
+ */
+export async function requireAuthenticatedSessionUser(
+  ctx: QueryCtx | MutationCtx,
+  token: string
+): Promise<Doc<"users">> {
+  if (!token || token.trim().length === 0) {
+    throw new Error("Unauthorized: authentication required");
+  }
+
+  const userId = await validateSessionToken(ctx, token);
+  if (!userId) {
+    throw new Error("Unauthorized: invalid or expired session");
+  }
+
+  const user = await ctx.db.get(userId);
+  if (!user || !user.isActive || user.deletedAt || user.isBanned) {
+    throw new Error("Unauthorized: invalid user");
+  }
+
+  return user;
+}
+
+/**
+ * Strict admin resolution from a validated session token.
+ */
+export async function requireAdminSessionUser(
+  ctx: QueryCtx | MutationCtx,
+  token: string
+): Promise<Doc<"users">> {
+  const user = await requireAuthenticatedSessionUser(ctx, token);
+  if (!user.isAdmin) {
+    throw new Error("Unauthorized: admin access required");
+  }
+  return user;
+}
+
+/**
  * Strict session-based user resolution for live Phase-1 Messages paths.
  *
  * IMPORTANT:
@@ -335,16 +378,8 @@ export async function requireLiveMessageSessionUser(
   ctx: QueryCtx | MutationCtx,
   token: string
 ): Promise<Id<"users">> {
-  if (!token || token.trim().length === 0) {
-    throw new Error("Unauthorized: authentication required");
-  }
-
-  const userId = await validateSessionToken(ctx, token);
-  if (!userId) {
-    throw new Error("Unauthorized: invalid or expired session");
-  }
-
-  return userId;
+  const user = await requireAuthenticatedSessionUser(ctx, token);
+  return user._id;
 }
 
 // =============================================================================

@@ -118,7 +118,6 @@ import { startBackgroundLocation } from "@/utils/backgroundLocation";
 import { usePresenceAndLocation } from "@/hooks/usePresenceAndLocation";
 import { Toast } from "@/components/ui/Toast";
 import { safePush } from "@/lib/safeRouter";
-import { asUserId } from "@/convex/id";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { log } from "@/utils/logger";
 
@@ -786,9 +785,8 @@ const TOAST_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
 function CrossedPathToastManager() {
   const router = useRouter();
   const segments = useSegments();
-  const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authHydrated = useAuthStore((s) => s._hasHydrated);
-  const convexUserId = userId ? asUserId(userId) : undefined;
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const lastToastTimeRef = useRef<number>(0);
   const mountedRef = useRef(true);
@@ -803,7 +801,7 @@ function CrossedPathToastManager() {
   // Query crossed-path history (live mode only)
   const crossedPathsQuery = useQuery(
     api.crossedPaths.getCrossPathHistory,
-    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Check for new crossed paths and show toast
@@ -859,18 +857,18 @@ function CrossedPathToastManager() {
 
   // Check on initial data load (after mount)
   useEffect(() => {
-    if (!authHydrated || !convexUserId) return;
+    if (!authHydrated || !token) return;
     if (hasCheckedOnMountRef.current) return;
     if (!crossedPathsQuery || crossedPathsQuery.length === 0) return;
 
     hasCheckedOnMountRef.current = true;
     checkAndShowToast();
-  }, [authHydrated, convexUserId, crossedPathsQuery, checkAndShowToast]);
+  }, [authHydrated, token, crossedPathsQuery, checkAndShowToast]);
 
   // Check on app resume (foreground)
   useEffect(() => {
     if (isDemoMode) return;
-    if (!authHydrated || !convexUserId) return;
+    if (!authHydrated || !token) return;
 
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       // If app was in background and is now active
@@ -890,7 +888,7 @@ function CrossedPathToastManager() {
 
     const subscription = AppState.addEventListener('change', handleAppStateChange);
     return () => subscription.remove();
-  }, [authHydrated, convexUserId, checkAndShowToast]);
+  }, [authHydrated, token, checkAndShowToast]);
 
   return null;
 }
