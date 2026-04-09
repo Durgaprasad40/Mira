@@ -267,6 +267,7 @@ export default function CreateTodScreen() {
   };
 
   const C = INCOGNITO_COLORS;
+  const bottomScrollPadding = Math.max(insets.bottom, 16) + 20;
 
   return (
     <KeyboardAvoidingView
@@ -287,12 +288,13 @@ export default function CreateTodScreen() {
           style={styles.scroll}
           contentContainerStyle={[
             styles.scrollContent,
-            { paddingBottom: Math.max(insets.bottom, 16) + 120 },
+            { paddingBottom: bottomScrollPadding },
           ]}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
           showsVerticalScrollIndicator={false}
-          scrollIndicatorInsets={{ bottom: Math.max(insets.bottom, 16) + 96 }}
+          contentInsetAdjustmentBehavior="always"
+          scrollIndicatorInsets={{ bottom: bottomScrollPadding }}
         >
           <View style={[styles.typeSelector, isEditMode && { opacity: 0.5 }]}>
             <TouchableOpacity
@@ -334,63 +336,108 @@ export default function CreateTodScreen() {
           </View>
 
           {!isEditMode && (
-            <View style={styles.visibilityContainer}>
-              <Text style={styles.visibilityLabel}>How should your identity appear?</Text>
-              <View style={styles.visibilityOptions}>
-                <TouchableOpacity
-                  style={[styles.visibilityOption, visibility === 'anonymous' && styles.visibilityOptionActive]}
-                  onPress={() => setVisibility('anonymous')}
-                >
-                  <Ionicons
-                    name="eye-off"
-                    size={18}
-                    color={visibility === 'anonymous' ? '#FFFFFF' : C.textLight}
-                  />
-                  <Text style={[styles.visibilityText, visibility === 'anonymous' && styles.visibilityTextActive]}>
-                    Anonymous
-                  </Text>
-                </TouchableOpacity>
+            <>
+              <View style={styles.visibilityContainer}>
+                <Text style={styles.visibilityLabel}>How should your identity appear?</Text>
+                <View style={styles.visibilityOptions}>
+                  <TouchableOpacity
+                    style={[styles.visibilityOption, visibility === 'anonymous' && styles.visibilityOptionActive]}
+                    onPress={() => setVisibility('anonymous')}
+                  >
+                    <Ionicons
+                      name="eye-off"
+                      size={18}
+                      color={visibility === 'anonymous' ? '#FFFFFF' : C.textLight}
+                    />
+                    <Text style={[styles.visibilityText, visibility === 'anonymous' && styles.visibilityTextActive]}>
+                      Anonymous
+                    </Text>
+                  </TouchableOpacity>
 
-                <TouchableOpacity
-                  style={[styles.visibilityOption, visibility === 'public' && styles.visibilityOptionActive]}
-                  onPress={() => setVisibility('public')}
-                >
-                  <Ionicons
-                    name="person"
-                    size={18}
-                    color={visibility === 'public' ? '#FFFFFF' : C.textLight}
-                  />
-                  <Text style={[styles.visibilityText, visibility === 'public' && styles.visibilityTextActive]}>
-                    Name + photo
-                  </Text>
-                </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.visibilityOption, visibility === 'public' && styles.visibilityOptionActive]}
+                    onPress={() => setVisibility('public')}
+                  >
+                    <Ionicons
+                      name="person"
+                      size={18}
+                      color={visibility === 'public' ? '#FFFFFF' : C.textLight}
+                    />
+                    <Text style={[styles.visibilityText, visibility === 'public' && styles.visibilityTextActive]}>
+                      Name + photo
+                    </Text>
+                  </TouchableOpacity>
 
+                  <TouchableOpacity
+                    style={[styles.visibilityOption, visibility === 'no_photo' && styles.visibilityOptionActive]}
+                    onPress={() => setVisibility('no_photo')}
+                  >
+                    <Ionicons
+                      name="person-outline"
+                      size={18}
+                      color={visibility === 'no_photo' ? '#FFFFFF' : C.textLight}
+                    />
+                    <Text style={[styles.visibilityText, visibility === 'no_photo' && styles.visibilityTextActive]}>
+                      Name only
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.visibilityHint}>
+                  {visibility === 'anonymous'
+                    ? 'Your identity is completely hidden'
+                    : visibility === 'public'
+                    ? 'Your name and profile photo appear on the post'
+                    : 'Your name appears on the post without a photo'}
+                </Text>
+              </View>
+
+              <View style={styles.postButtonInlineContainer}>
                 <TouchableOpacity
-                  style={[styles.visibilityOption, visibility === 'no_photo' && styles.visibilityOptionActive]}
-                  onPress={() => setVisibility('no_photo')}
+                  style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
+                  onPress={handleSubmit}
+                  disabled={!canSubmit}
+                  activeOpacity={0.8}
                 >
-                  <Ionicons
-                    name="person-outline"
-                    size={18}
-                    color={visibility === 'no_photo' ? '#FFFFFF' : C.textLight}
-                  />
-                  <Text style={[styles.visibilityText, visibility === 'no_photo' && styles.visibilityTextActive]}>
-                    Name only
-                  </Text>
+                  {isSubmitting ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
+                      {isEditMode ? 'SAVE' : 'POST'}
+                    </Text>
+                  )}
                 </TouchableOpacity>
               </View>
-              <Text style={styles.visibilityHint}>
-                {visibility === 'anonymous'
-                  ? 'Your identity is completely hidden'
-                  : visibility === 'public'
-                  ? 'Your name and profile photo appear on the post'
-                  : 'Your name appears on the post without a photo'}
-              </Text>
+
+              <View style={styles.howItWorksCard}>
+                <Text style={styles.howItWorksTitle}>How it works</Text>
+                <Text style={styles.howItWorksText}>
+                  Post, get replies, and connect with someone you like.
+                </Text>
+              </View>
+            </>
+          )}
+
+          {isEditMode && (
+            <View style={styles.postButtonInlineContainer}>
+              <TouchableOpacity
+                style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
+                onPress={handleSubmit}
+                disabled={!canSubmit}
+                activeOpacity={0.8}
+              >
+                {isSubmitting ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
+                    {isEditMode ? 'SAVE' : 'POST'}
+                  </Text>
+                )}
+              </TouchableOpacity>
             </View>
           )}
 
           <View style={styles.guidelinesContainer}>
-            <Text style={styles.guidelinesTitle}>Before you post:</Text>
+            <Text style={styles.guidelinesTitle}>Before you post</Text>
             <Text style={styles.guidelinesPoint}>• Be respectful to others</Text>
             <Text style={styles.guidelinesPoint}>• Keep content safe and appropriate</Text>
             <Text style={styles.guidelinesPoint}>• No scams or misleading content</Text>
@@ -406,23 +453,6 @@ export default function CreateTodScreen() {
             </Text>
           </View>
         </ScrollView>
-
-        <View style={[styles.postButtonContainer, { paddingBottom: Math.max(insets.bottom, 16) }]}>
-          <TouchableOpacity
-            style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
-            onPress={handleSubmit}
-            disabled={!canSubmit}
-            activeOpacity={0.8}
-          >
-            {isSubmitting ? (
-              <ActivityIndicator size="small" color="#FFFFFF" />
-            ) : (
-              <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
-                {isEditMode ? 'SAVE' : 'POST'}
-              </Text>
-            )}
-          </TouchableOpacity>
-        </View>
       </View>
     </KeyboardAvoidingView>
   );
@@ -489,23 +519,45 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   visibilityHint: {
-    fontSize: 12, color: C.textLight, marginTop: 8, textAlign: 'center',
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 10,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  howItWorksCard: {
+    marginTop: 0,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: 'rgba(108, 92, 231, 0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(108, 92, 231, 0.18)',
+  },
+  howItWorksTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 4,
+  },
+  howItWorksText: {
+    fontSize: 13,
+    color: C.textLight,
+    lineHeight: 18,
+  },
+  postButtonInlineContainer: {
+    marginHorizontal: 16,
+    marginTop: 10,
+    marginBottom: 14,
   },
 
-  // Container for POST button - keeps button visible in edit mode
-  postButtonContainer: {
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: C.surface,
-    backgroundColor: C.background,
-  },
-
-  // Main POST button - fixed footer CTA
+  // Main POST button - inline primary CTA
   postButtonMain: {
     backgroundColor: C.primary,
     borderRadius: 12,
-    paddingVertical: 16,
+    paddingVertical: 15,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -524,23 +576,32 @@ const styles = StyleSheet.create({
 
   // Guidelines section - below POST button
   guidelinesContainer: {
-    marginTop: 16,
-    paddingHorizontal: 16,
+    marginTop: 8,
+    marginHorizontal: 16,
+    marginBottom: 0,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.04)',
   },
   guidelinesTitle: {
     fontSize: 13,
+    fontWeight: '700',
     color: C.text,
-    marginBottom: 6,
+    marginBottom: 8,
   },
   guidelinesPoint: {
     fontSize: 12,
     color: C.textLight,
-    marginBottom: 2,
+    marginBottom: 4,
+    lineHeight: 18,
   },
   guidelinesLinkText: {
     fontSize: 12,
     color: C.textLight,
-    marginTop: 6,
+    marginTop: 8,
+    lineHeight: 18,
   },
   guidelinesLink: {
     color: C.primary,

@@ -1106,6 +1106,42 @@ export default function MessagesScreen() {
   // Loading state - P2-PARITY: Use isQueryLoading (excludes error state)
   const isLoading = isQueryLoading;
 
+  // ── Main render state derived before any early return ──
+  const demoCurrentUser = isDemoMode ? (getDemoCurrentUser() as any) : null;
+  const currentConversationUserId = isDemoMode
+    ? String(demoCurrentUser?._id || demoCurrentUser?.id || userId || 'demo_user_1')
+    : (userId || undefined);
+  const hasConversationRows = (conversations?.length ?? 0) > 0;
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const isSearching = normalizedSearchQuery.length > 0;
+  const filteredConversations = useMemo(() => {
+    if (!normalizedSearchQuery) return conversations;
+
+    return (conversations || []).filter((conversation: any) => {
+      const haystack = [
+        conversation.otherUser?.name || '',
+        getConversationSearchPreview(conversation.lastMessage, currentConversationUserId),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(normalizedSearchQuery);
+    });
+  }, [conversations, currentConversationUserId, normalizedSearchQuery]);
+  const showsSecondaryModules = !isSearching && (showMessagesNudge || superLikeMatches.length > 0 || newMatches.length > 0);
+  const renderConversationRow = useCallback(({ item }: { item: any }) => (
+    <ConversationItem
+      id={item.id}
+      otherUser={item.otherUser}
+      lastMessage={item.lastMessage}
+      unreadCount={item.unreadCount}
+      isPreMatch={item.isPreMatch}
+      currentUserId={currentConversationUserId}
+      onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
+      onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
+    />
+  ), [currentConversationUserId, router]);
+  const conversationKeyExtractor = useCallback((item: any) => item.id, []);
+
   // Render skeleton loading rows
   const renderSkeletonLoading = () => (
     <View style={styles.skeletonContainer}>
@@ -1147,42 +1183,6 @@ export default function MessagesScreen() {
       </LoadingGuard>
     );
   }
-
-  // ── Main render ──
-  const demoCurrentUser = isDemoMode ? (getDemoCurrentUser() as any) : null;
-  const currentConversationUserId = isDemoMode
-    ? String(demoCurrentUser?._id || demoCurrentUser?.id || userId || 'demo_user_1')
-    : (userId || undefined);
-  const hasConversationRows = (conversations?.length ?? 0) > 0;
-  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
-  const isSearching = normalizedSearchQuery.length > 0;
-  const filteredConversations = useMemo(() => {
-    if (!normalizedSearchQuery) return conversations;
-
-    return (conversations || []).filter((conversation: any) => {
-      const haystack = [
-        conversation.otherUser?.name || '',
-        getConversationSearchPreview(conversation.lastMessage, currentConversationUserId),
-      ]
-        .join(' ')
-        .toLowerCase();
-      return haystack.includes(normalizedSearchQuery);
-    });
-  }, [conversations, currentConversationUserId, normalizedSearchQuery]);
-  const showsSecondaryModules = !isSearching && (showMessagesNudge || superLikeMatches.length > 0 || newMatches.length > 0);
-  const renderConversationRow = useCallback(({ item }: { item: any }) => (
-    <ConversationItem
-      id={item.id}
-      otherUser={item.otherUser}
-      lastMessage={item.lastMessage}
-      unreadCount={item.unreadCount}
-      isPreMatch={item.isPreMatch}
-      currentUserId={currentConversationUserId}
-      onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
-      onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
-    />
-  ), [currentConversationUserId, router]);
-  const conversationKeyExtractor = useCallback((item: any) => item.id, []);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
