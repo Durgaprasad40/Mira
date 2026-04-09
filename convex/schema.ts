@@ -23,6 +23,13 @@ export default defineSchema({
       v.literal('transgender'),
       v.literal('prefer_not_to_say')
     ))), // LGBTQ identity (optional, max 2)
+    lgbtqPreference: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))), // LGBTQ dating preference (optional, max 2)
 
     // Profile
     bio: v.string(),
@@ -235,6 +242,12 @@ export default defineSchema({
     profilePrompts: v.optional(v.array(v.object({
       question: v.string(),
       answer: v.string(),
+      section: v.optional(v.union(
+        v.literal('builder'),
+        v.literal('performer'),
+        v.literal('seeker'),
+        v.literal('grounded')
+      )),
     }))),
 
     // Onboarding
@@ -517,6 +530,7 @@ export default defineSchema({
     url: v.string(),
     order: v.number(),
     isPrimary: v.boolean(),
+    isBlurred: v.optional(v.boolean()),
     hasFace: v.boolean(),
     isNsfw: v.boolean(),
     width: v.optional(v.number()),
@@ -723,6 +737,8 @@ export default defineSchema({
       v.literal('message'),
       v.literal('like'),
       v.literal('super_like'),
+      v.literal('phase2_match'),
+      v.literal('phase2_like'),
       v.literal('crossed_paths'),
       v.literal('tod_connect'),
       v.literal('subscription'),
@@ -735,8 +751,10 @@ export default defineSchema({
       matchId: v.optional(v.string()),
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
+      roomId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
       likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
+      phase: v.optional(v.union(v.literal('phase1'), v.literal('phase2'))),
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
@@ -753,6 +771,29 @@ export default defineSchema({
     // 4-2: Cleanup index for expired notifications
     .index('by_expires', ['expiresAt']),
 
+  // Phase-2 private swipes/matches
+  privateLikes: defineTable({
+    fromUserId: v.id('users'),
+    toUserId: v.id('users'),
+    action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like')),
+    message: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_from_user', ['fromUserId'])
+    .index('by_to_user', ['toUserId'])
+    .index('by_from_to', ['fromUserId', 'toUserId']),
+
+  privateMatches: defineTable({
+    user1Id: v.id('users'),
+    user2Id: v.id('users'),
+    matchedAt: v.number(),
+    isActive: v.boolean(),
+    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
+  })
+    .index('by_user1', ['user1Id'])
+    .index('by_user2', ['user2Id'])
+    .index('by_users', ['user1Id', 'user2Id']),
+
   // Phase-2 private conversations
   privateConversations: defineTable({
     participants: v.array(v.id('users')),
@@ -764,7 +805,8 @@ export default defineSchema({
       v.literal('desire_super_like'),
       v.literal('friend')
     )),
-    matchId: v.optional(v.id('matches')),
+    matchId: v.optional(v.string()),
+    isPreMatch: v.optional(v.boolean()),
     lastMessageAt: v.optional(v.number()),
     createdAt: v.number(),
   })
@@ -799,6 +841,9 @@ export default defineSchema({
     protectedMediaTimer: v.optional(v.number()),
     protectedMediaViewingMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
     protectedMediaIsMirrored: v.optional(v.boolean()),
+    viewedAt: v.optional(v.number()),
+    timerEndsAt: v.optional(v.number()),
+    isExpired: v.optional(v.boolean()),
     deliveredAt: v.optional(v.number()),
     readAt: v.optional(v.number()),
     clientMessageId: v.optional(v.string()),
@@ -807,6 +852,35 @@ export default defineSchema({
     .index('by_conversation', ['conversationId'])
     .index('by_conversation_created', ['conversationId', 'createdAt'])
     .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
+
+  privateUserPresence: defineTable({
+    userId: v.id('users'),
+    lastActiveAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId']),
+
+  privatePhotoAccessRequests: defineTable({
+    ownerUserId: v.id('users'),
+    viewerUserId: v.id('users'),
+    status: v.union(v.literal('pending'), v.literal('approved'), v.literal('declined')),
+    requestSource: v.literal('phase2_messages'),
+    conversationId: v.optional(v.id('privateConversations')),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    respondedAt: v.optional(v.number()),
+  })
+    .index('by_owner_viewer', ['ownerUserId', 'viewerUserId'])
+    .index('by_owner_status', ['ownerUserId', 'status']),
+
+  privateTypingStatus: defineTable({
+    conversationId: v.id('privateConversations'),
+    userId: v.id('users'),
+    isTyping: v.boolean(),
+    updatedAt: v.number(),
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
 
   // Crossed Paths table
   crossedPaths: defineTable({
@@ -906,6 +980,10 @@ export default defineSchema({
       v.literal('underage'),
       v.literal('other'),
       // Chat room reasons
+      v.literal('harassment_hate'),
+      v.literal('sexual_nudity'),
+      v.literal('threats'),
+      v.literal('selling_promotion'),
       v.literal('hate_speech'),
       v.literal('sexual_content'),
       v.literal('nudity'),
@@ -988,6 +1066,50 @@ export default defineSchema({
     attachmentType: v.optional(v.string()),
     createdAt: v.number(),
   }).index('by_support_request', ['supportRequestId']),
+
+  supportTickets: defineTable({
+    userId: v.id('users'),
+    category: v.union(
+      v.literal('payment'),
+      v.literal('subscription'),
+      v.literal('account'),
+      v.literal('bug'),
+      v.literal('safety'),
+      v.literal('verification'),
+      v.literal('other')
+    ),
+    message: v.string(),
+    status: v.union(
+      v.literal('open'),
+      v.literal('in_review'),
+      v.literal('replied'),
+      v.literal('closed')
+    ),
+    attachments: v.optional(v.array(v.object({
+      storageId: v.id('_storage'),
+      type: v.union(v.literal('photo'), v.literal('video')),
+    }))),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    adminReply: v.optional(v.string()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_status', ['status'])
+    .index('by_created', ['createdAt']),
+
+  supportTicketMessages: defineTable({
+    ticketId: v.id('supportTickets'),
+    senderType: v.union(v.literal('user'), v.literal('admin')),
+    senderUserId: v.optional(v.id('users')),
+    senderName: v.optional(v.string()),
+    message: v.string(),
+    attachments: v.optional(v.array(v.object({
+      storageId: v.id('_storage'),
+      type: v.union(v.literal('photo'), v.literal('video')),
+    }))),
+    createdAt: v.number(),
+  })
+    .index('by_ticket', ['ticketId']),
 
   // OTP table for verification
   otpCodes: defineTable({
@@ -1163,6 +1285,7 @@ export default defineSchema({
     privatePhotosBlurred: v.array(v.id('_storage')),
     privatePhotoUrls: v.array(v.string()),
     privatePhotoBlurLevel: v.optional(v.number()),
+    photoBlurSlots: v.optional(v.array(v.boolean())),
     privateIntentKeys: v.array(v.string()),
     privateDesireTagKeys: v.array(v.string()),
     privateBoundaries: v.array(v.string()),
@@ -1443,6 +1566,11 @@ export default defineSchema({
     userId: v.id('users'),
     text: v.string(),
     isAnonymous: v.boolean(),
+    authorVisibility: v.optional(v.union(
+      v.literal('anonymous'),
+      v.literal('open'),
+      v.literal('blur_photo')
+    )),
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
     visibility: v.literal('global'),
     imageUrl: v.optional(v.string()),
@@ -1453,6 +1581,13 @@ export default defineSchema({
     replyCount: v.number(),
     reactionCount: v.number(),
     voiceReplyCount: v.optional(v.number()),
+    lastEngagementAt: v.optional(v.number()),
+    rankingScore: v.optional(v.number()),
+    recentEngagementWindowStart: v.optional(v.number()),
+    recentReactionCount: v.optional(v.number()),
+    recentReplyCount: v.optional(v.number()),
+    reportCount: v.optional(v.number()),
+    uniqueCommenters: v.optional(v.number()),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
     taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
@@ -1485,16 +1620,39 @@ export default defineSchema({
     .index('by_reporter', ['reporterId'])
     .index('by_status', ['status']),
 
+  confessionCommentConnects: defineTable({
+    fromUserId: v.id('users'),
+    toUserId: v.id('users'),
+    createdAt: v.number(),
+    confessionId: v.optional(v.id('confessions')),
+    replyId: v.optional(v.id('confessionReplies')),
+    matchId: v.optional(v.id('matches')),
+    status: v.optional(v.union(
+      v.literal('pending'),
+      v.literal('accepted'),
+      v.literal('rejected')
+    )),
+    respondedAt: v.optional(v.number()),
+    expiresAt: v.optional(v.number()),
+  })
+    .index('by_from_user', ['fromUserId']),
+
   // Confession Replies table
   confessionReplies: defineTable({
     confessionId: v.id('confessions'),
     userId: v.id('users'),
     text: v.string(),
     isAnonymous: v.boolean(),
+    identityMode: v.optional(v.union(
+      v.literal('anonymous'),
+      v.literal('blur'),
+      v.literal('open')
+    )),
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
     parentReplyId: v.optional(v.id('confessionReplies')), // For reply-to-reply (OP responding to anonymous reply)
+    hasActiveConnectRequest: v.optional(v.boolean()),
     createdAt: v.number(),
   })
     .index('by_confession', ['confessionId'])
@@ -1613,10 +1771,135 @@ export default defineSchema({
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
     deletedAt: v.optional(v.number()), // Soft delete
     expiresAt: v.optional(v.float64()), // For ephemeral/expiring messages
+    mentions: v.optional(v.array(v.object({
+      userId: v.id('users'),
+      nickname: v.string(),
+      startIndex: v.number(),
+      endIndex: v.number(),
+    }))),
+    replyToMessageId: v.optional(v.id('chatRoomMessages')),
+    replyToSenderNickname: v.optional(v.string()),
+    replyToSnippet: v.optional(v.string()),
+    replyToType: v.optional(v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('doodle'), v.literal('audio'))),
+    systemEventType: v.optional(v.string()),
+    systemUserName: v.optional(v.string()),
   })
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
     .index('by_room_clientId', ['roomId', 'clientId']), // For idempotency check
+
+  chatRoomProfiles: defineTable({
+    userId: v.id('users'),
+    nickname: v.string(),
+    avatarUrl: v.optional(v.string()),
+    bio: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_userId', ['userId']),
+
+  chatRoomPresence: defineTable({
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    lastHeartbeatAt: v.number(),
+    joinedAt: v.number(),
+  })
+    .index('by_room', ['roomId'])
+    .index('by_user', ['userId'])
+    .index('by_room_user', ['roomId', 'userId'])
+    .index('by_heartbeat', ['lastHeartbeatAt']),
+
+  chatRoomUserStrikes: defineTable({
+    userId: v.id('users'),
+    roomId: v.string(),
+    totalReportCount: v.number(),
+    uniqueReporters: v.array(v.id('users')),
+    escalationStage: v.optional(v.number()),
+    lastReportAt: v.optional(v.number()),
+    suspensionCount: v.number(),
+    suspendedUntil: v.optional(v.number()),
+    lastSuspendedAt: v.optional(v.number()),
+    moderationFlag: v.boolean(),
+    moderationFlaggedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user_room', ['userId', 'roomId']),
+
+  chatRoomPasswordAttempts: defineTable({
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    stage: v.number(),
+    attemptsInStage: v.number(),
+    blocked: v.boolean(),
+    lastAttemptAt: v.number(),
+    createdAt: v.number(),
+    cooldownUntil: v.optional(v.number()),
+    authorized: v.optional(v.boolean()),
+  })
+    .index('by_room_user', ['roomId', 'userId'])
+    .index('by_user', ['userId']),
+
+  chatRoomReactions: defineTable({
+    messageId: v.id('chatRoomMessages'),
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    emoji: v.string(),
+    createdAt: v.number(),
+  })
+    .index('by_message', ['messageId'])
+    .index('by_message_user', ['messageId', 'userId']),
+
+  chatRoomMutedUsers: defineTable({
+    roomId: v.id('chatRooms'),
+    muterId: v.id('users'),
+    mutedUserId: v.id('users'),
+    mutedAt: v.number(),
+  })
+    .index('by_muter_room', ['muterId', 'roomId'])
+    .index('by_muter_room_target', ['muterId', 'roomId', 'mutedUserId']),
+
+  chatRoomDmThreads: defineTable({
+    participant1Id: v.id('users'),
+    participant2Id: v.id('users'),
+    sourceRoomId: v.optional(v.id('chatRooms')),
+    lastMessageAt: v.number(),
+    lastMessagePreview: v.optional(v.string()),
+    createdAt: v.number(),
+    hiddenByP1At: v.optional(v.number()),
+    hiddenByP2At: v.optional(v.number()),
+  })
+    .index('by_participants', ['participant1Id', 'participant2Id'])
+    .index('by_participant1', ['participant1Id'])
+    .index('by_participant2', ['participant2Id'])
+    .index('by_last_message', ['lastMessageAt']),
+
+  chatRoomDmMessages: defineTable({
+    threadId: v.id('chatRoomDmThreads'),
+    senderId: v.id('users'),
+    text: v.optional(v.string()),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('audio'), v.literal('doodle')),
+    mediaStorageId: v.optional(v.id('_storage')),
+    mediaUrl: v.optional(v.string()),
+    createdAt: v.number(),
+    readAt: v.optional(v.number()),
+  })
+    .index('by_thread', ['threadId'])
+    .index('by_thread_read_status', ['threadId', 'readAt']),
+
+  chatRoomMentions: defineTable({
+    mentionedUserId: v.id('users'),
+    senderUserId: v.id('users'),
+    senderNickname: v.string(),
+    roomId: v.id('chatRooms'),
+    roomName: v.string(),
+    messageId: v.id('chatRoomMessages'),
+    messagePreview: v.string(),
+    createdAt: v.number(),
+    readAt: v.optional(v.number()),
+  })
+    .index('by_mentioned_user', ['mentionedUserId'])
+    .index('by_mentioned_unread', ['mentionedUserId', 'readAt']),
 
   // Chat Room Penalties table (Phase-2: kicked users read-only for 24h)
   chatRoomPenalties: defineTable({
@@ -1796,12 +2079,22 @@ export default defineSchema({
       v.literal('pending'),          // Invite sent, waiting for response
       v.literal('active'),           // Invite accepted, game in progress
       v.literal('rejected'),         // Invite rejected
-      v.literal('ended')             // Game ended
+      v.literal('ended'),            // Game ended
+      v.literal('expired')           // Invite/game expired
     ),
     createdAt: v.number(),
     respondedAt: v.optional(v.number()),  // When invite was accepted/rejected
+    acceptedAt: v.optional(v.number()),
     endedAt: v.optional(v.number()),      // When game was ended
+    gameStartedAt: v.optional(v.number()),
+    lastActionAt: v.optional(v.number()),
     cooldownUntil: v.optional(v.number()), // Cooldown end time (10 min after rejection/end)
+    endedReason: v.optional(v.union(
+      v.literal('manual'),
+      v.literal('invite_expired'),
+      v.literal('not_started'),
+      v.literal('timeout')
+    )),
     // Turn tracking for real-time sync across devices
     // NOTE: Using role-based turn tracking to avoid ID format mismatch issues
     currentTurnUserId: v.optional(v.string()), // Legacy - kept for compatibility
@@ -1809,17 +2102,37 @@ export default defineSchema({
       v.literal('inviter'),          // Inviter's turn to choose
       v.literal('invitee')           // Invitee's turn to choose
     )),
+    spinTurnRole: v.optional(v.union(
+      v.literal('inviter'),
+      v.literal('invitee')
+    )),
     turnPhase: v.optional(v.union(
       v.literal('idle'),             // Waiting for spin
       v.literal('spinning'),         // Spin animation in progress
       v.literal('choosing'),         // Current turn user choosing Truth/Dare/Skip
       v.literal('complete')          // Choice made, can spin again
     )),
+    lastSelectedRole: v.optional(v.union(
+      v.literal('inviter'),
+      v.literal('invitee')
+    )),
+    consecutiveSelectedCount: v.optional(v.number()),
     lastSpinResult: v.optional(v.string()), // 'truth' | 'dare' | 'skip' | null
   })
     .index('by_conversation', ['conversationId'])
     .index('by_inviter', ['inviterId'])
     .index('by_invitee', ['inviteeId']),
+
+  coinEarningLog: defineTable({
+    userId: v.id('users'),
+    contextType: v.union(v.literal('room'), v.literal('dm')),
+    contextId: v.string(),
+    otherUserId: v.optional(v.id('users')),
+    earnedAt: v.number(),
+    messageHash: v.optional(v.string()),
+  })
+    .index('by_user_earned', ['userId', 'earnedAt'])
+    .index('by_user_context', ['userId', 'contextType', 'contextId']),
 
   // H-1: Track pending uploads to prevent orphaned storage blobs
   // Records created after upload, deleted when addPhoto succeeds or cleanup runs

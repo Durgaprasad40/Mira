@@ -16,6 +16,13 @@ const ALLOWED_RELATIONSHIP_INTENTS = new Set([
   'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
 ]);
 
+const PROFILE_PROMPT_SECTIONS = ['builder', 'performer', 'seeker', 'grounded'] as const;
+type ProfilePromptSection = (typeof PROFILE_PROMPT_SECTIONS)[number];
+
+function isProfilePromptSection(value: string): value is ProfilePromptSection {
+  return (PROFILE_PROMPT_SECTIONS as readonly string[]).includes(value);
+}
+
 // Sanitize relationshipIntent to only include schema-valid values
 function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | undefined {
   if (!intent || !Array.isArray(intent)) return intent;
@@ -386,11 +393,17 @@ export const updateProfilePrompts = mutation({
 
     // Exactly 4 prompts (one per section), answer max 200 chars
     // BUGFIX: Include section field for reliable hydration
-    const cleaned = args.prompts.slice(0, 4).map((p) => ({
-      question: p.question.trim().slice(0, 100),
-      answer: p.answer.trim().slice(0, 200),
-      ...(p.section && { section: p.section }), // Preserve section if provided
-    }));
+    const cleaned: { question: string; answer: string; section?: ProfilePromptSection }[] =
+      args.prompts.slice(0, 4).map((p) => {
+        const question = p.question.trim().slice(0, 100);
+        const answer = p.answer.trim().slice(0, 200);
+        const section =
+          typeof p.section === 'string' && isProfilePromptSection(p.section)
+            ? p.section
+            : undefined;
+
+        return section ? { question, answer, section } : { question, answer };
+      });
 
     console.log('[PROMPTS_BACKEND] Saving', cleaned.length, 'cleaned prompts to profilePrompts field');
     await ctx.db.patch(userId, { profilePrompts: cleaned });
