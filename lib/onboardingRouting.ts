@@ -27,6 +27,15 @@ export interface OnboardingStatus {
  * Decides the next onboarding route based on current status.
  * This is the single source of truth for routing decisions.
  *
+ * PHASE-1 RESTRUCTURE: New simplified 7-step flow:
+ * 1. Basic Info (name, nickname, DOB, gender, LGBTQ self optional)
+ * 2. Preferences (lookingFor, relationshipIntent, LGBTQ preference optional)
+ * 3. Reference Photo Upload
+ * 4. Face Verification (NON-BLOCKING - can continue unverified)
+ * 5. Additional Photos + Bio (bio MANDATORY)
+ * 6. Review (simplified)
+ * 7. Tutorial → Phase-1/Discover
+ *
  * @param status - Current onboarding status from backend
  * @returns The route path to navigate to
  */
@@ -54,27 +63,29 @@ export function decideNextOnboardingRoute(status: OnboardingStatus): string {
     return '/(onboarding)/photo-upload';
   }
 
-  // Step 3: Face Verification (if not verified or pending)
+  // Step 3: Face Verification (if not verified AND not pending)
+  // PHASE-1 RESTRUCTURE: Allow continuation when pending (non-blocking)
   if (status.faceVerificationStatus === 'unverified' || status.faceVerificationStatus === 'failed') {
     console.log('[ONB_ROUTE] status=face_verification_needed -> route=/(onboarding)/face-verification');
     return '/(onboarding)/face-verification';
   }
 
-  // Step 4: Additional Photos (if face verification passed or pending)
+  // Step 4: Additional Photos + Bio (if face verification passed OR pending)
   if (!status.hasMinPhotos) {
     console.log('[ONB_ROUTE] status=need_more_photos -> route=/(onboarding)/additional-photos');
     return '/(onboarding)/additional-photos';
   }
 
-  // Step 5: Permissions (next logical step)
+  // Step 5: Review (if all above complete but onboarding not finalized)
+  // PHASE-1 RESTRUCTURE: Removed permissions step - go directly to review
   if (!status.onboardingCompleted) {
-    console.log('[ONB_ROUTE] status=need_permissions -> route=/(onboarding)/permissions');
-    return '/(onboarding)/permissions';
+    console.log('[ONB_ROUTE] status=ready_for_review -> route=/(onboarding)/review');
+    return '/(onboarding)/review';
   }
 
-  // Onboarding completed - go to review or main app
-  console.log('[ONB_ROUTE] status=completed -> route=/(onboarding)/review');
-  return '/(onboarding)/review';
+  // Onboarding completed - go to main app
+  console.log('[ONB_ROUTE] status=completed -> route=/(main)/(tabs)/home');
+  return '/(main)/(tabs)/home';
 }
 
 /**

@@ -243,23 +243,14 @@ export default function ReviewScreen() {
   }, [currentUser, backendPhotos]);
 
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
-  // Backend requires faceVerificationStatus === 'verified' - pending is NOT sufficient
+  // PHASE-1 RESTRUCTURE: Verification is now non-blocking - users can be unverified, pending, or verified
   const isVerified = isDemoMode
     ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
     : !!faceVerificationPassed;
+  const isPending = !!faceVerificationPending;
 
-  // CHECKPOINT GATE: Block access if face verification not completed
-  React.useEffect(() => {
-    if (isVerified) {
-      if (__DEV__) {
-        console.log("[REVIEW_GATE] verified=true (faceVerificationPassed) -> allow");
-        console.log("[REVIEW_GATE] faceVerificationPassed:", faceVerificationPassed);
-      }
-      return;
-    }
-    if (__DEV__) console.log("[REVIEW_GATE] verified=false -> redirect to face-verification");
-    router.replace("/(onboarding)/face-verification" as any);
-  }, [isVerified, router, faceVerificationPassed, faceVerificationPending]);
+  // PHASE-1 RESTRUCTURE: Checkpoint gate REMOVED - allow unverified users to review/complete onboarding
+  // The verification status will be shown on the review screen for transparency
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState("");
 
@@ -611,6 +602,33 @@ export default function ReviewScreen() {
         )}
       </View>
 
+      {/* PHASE-1 RESTRUCTURE: Verification Status Section (new) */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Verification Status</Text>
+        </View>
+        <View style={styles.verificationStatusRow}>
+          <Ionicons
+            name={isVerified ? "checkmark-circle" : isPending ? "time" : "close-circle"}
+            size={20}
+            color={isVerified ? COLORS.success : isPending ? "#F5A623" : COLORS.error}
+          />
+          <Text style={[
+            styles.verificationStatusText,
+            isVerified && styles.verificationStatusVerified,
+            isPending && styles.verificationStatusPending,
+            !isVerified && !isPending && styles.verificationStatusUnverified,
+          ]}>
+            {isVerified ? "Verified" : isPending ? "Pending Review" : "Not Verified"}
+          </Text>
+        </View>
+        {!isVerified && !isPending && (
+          <Text style={styles.verificationHint}>
+            You can verify your profile later in Settings
+          </Text>
+        )}
+      </View>
+
       {/* Basic Info Section - Name, Handle, Age, Gender, LGBTQ Identity */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
@@ -651,10 +669,10 @@ export default function ReviewScreen() {
         </View>
       </View>
 
-      {/* Photos & Bio Section */}
+      {/* Bio Section (PHASE-1 RESTRUCTURE: simplified from Photos & Bio) */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Photos & Bio</Text>
+          <Text style={styles.sectionTitle}>Bio</Text>
           <TouchableOpacity onPress={() => handleEdit("additional-photos")}>
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
@@ -662,216 +680,9 @@ export default function ReviewScreen() {
         <Text style={styles.bioText}>{bio || demoProfile?.bio || "No bio added"}</Text>
       </View>
 
-      {/* Prompts Section (New 2-Page System) */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>About You</Text>
-          <TouchableOpacity onPress={() => handleEdit("prompts")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
+      {/* PHASE-1 RESTRUCTURE: Prompts, Profile Details, Lifestyle, Life Rhythm sections REMOVED */}
 
-        {/* Seed Questions */}
-        {(seedQuestions.identityAnchor || seedQuestions.socialBattery || seedQuestions.valueTrigger) ? (
-          <View style={styles.promptSubsection}>
-            {seedQuestions.identityAnchor && (
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Describes you:</Text>
-                <Text style={styles.infoValue}>
-                  {IDENTITY_ANCHOR_OPTIONS.find(o => o.value === seedQuestions.identityAnchor)?.label || seedQuestions.identityAnchor}
-                </Text>
-              </View>
-            )}
-            {seedQuestions.socialBattery && (
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Social energy:</Text>
-                <Text style={styles.infoValue}>
-                  {seedQuestions.socialBattery <= 2 ? SOCIAL_BATTERY_LEFT_LABEL :
-                   seedQuestions.socialBattery >= 4 ? SOCIAL_BATTERY_RIGHT_LABEL :
-                   'Balanced'} ({seedQuestions.socialBattery}/5)
-                </Text>
-              </View>
-            )}
-            {seedQuestions.valueTrigger && (
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Good person sign:</Text>
-                <Text style={styles.infoValue}>
-                  {VALUE_TRIGGER_OPTIONS.find(o => o.value === seedQuestions.valueTrigger)?.label || seedQuestions.valueTrigger}
-                </Text>
-              </View>
-            )}
-          </View>
-        ) : null}
-
-        {/* Profile Prompts (Unified System) */}
-        {(() => {
-          const hasPrompts = profilePrompts && profilePrompts.length > 0;
-          return (
-            <>
-              <View style={styles.sectionPromptsHeader}>
-                <Text style={styles.sectionPromptsLabel}>Your Prompts</Text>
-                <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
-                  <Text style={styles.editLink}>Edit</Text>
-                </TouchableOpacity>
-              </View>
-              {hasPrompts ? (
-                profilePrompts.map((prompt, index) => (
-                  <View key={index} style={styles.promptItem}>
-                    <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                    <Text style={styles.promptAnswer}>{prompt.answer}</Text>
-                  </View>
-                ))
-              ) : (
-                <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
-                  <Text style={styles.emptyText}>No prompts added — Tap to add</Text>
-                </TouchableOpacity>
-              )}
-            </>
-          );
-        })()}
-      </View>
-
-      {/* Profile Details Section - Height, Weight, Job, Company, School, Education, Religion */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Profile Details</Text>
-          <TouchableOpacity onPress={() => handleEdit("profile-details")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Height:</Text>
-          <Text style={styles.infoValue}>{(height || demoProfile?.height) ? `${height || demoProfile?.height} cm` : "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Weight:</Text>
-          <Text style={styles.infoValue}>{(weight || demoProfile?.weight) ? `${weight || demoProfile?.weight} kg` : "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Job Title:</Text>
-          <Text style={styles.infoValue}>{jobTitle || demoProfile?.jobTitle || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Company:</Text>
-          <Text style={styles.infoValue}>{company || demoProfile?.company || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>School:</Text>
-          <Text style={styles.infoValue}>{school || demoProfile?.school || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Education:</Text>
-          <Text style={styles.infoValue}>
-            {(() => {
-              const eduValue = education || demoProfile?.education || null;
-              if (!eduValue) return "–";
-              if (eduValue === 'other') {
-                const otherText = educationOther || demoProfile?.educationOther || '';
-                return otherText ? `Other: ${otherText}` : 'Other';
-              }
-              return getLabel(EDUCATION_OPTIONS, eduValue) || "–";
-            })()}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Religion:</Text>
-          <Text style={styles.infoValue}>{getLabel(RELIGION_OPTIONS, religion || demoProfile?.religion || null) || "–"}</Text>
-        </View>
-      </View>
-
-      {/* Lifestyle Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Lifestyle</Text>
-          <TouchableOpacity onPress={() => handleEdit("profile-details/lifestyle")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Smoking:</Text>
-          <Text style={styles.infoValue}>{getLabel(SMOKING_OPTIONS, smoking || demoProfile?.smoking || null) || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Drinking:</Text>
-          <Text style={styles.infoValue}>{getLabel(DRINKING_OPTIONS, drinking || demoProfile?.drinking || null) || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Kids:</Text>
-          <Text style={styles.infoValue}>{getLabel(KIDS_OPTIONS, kids || demoProfile?.kids || null) || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Exercise:</Text>
-          <Text style={styles.infoValue}>{getLabel(EXERCISE_OPTIONS, exercise || demoProfile?.exercise || null) || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Pets:</Text>
-          <Text style={styles.infoValue}>
-            {(() => {
-              const petsData = pets.length > 0 ? pets : (demoProfile?.pets || []);
-              if (petsData.length === 0) return "–";
-              return petsData.map((p) => PETS_OPTIONS.find((o) => o.value === p)?.label ?? p).join(", ");
-            })()}
-          </Text>
-        </View>
-      </View>
-
-      {/* Life Rhythm Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Life Rhythm</Text>
-          <TouchableOpacity onPress={() => handleEdit("profile-details/life-rhythm")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>City:</Text>
-          <Text style={styles.infoValue}>{lifeRhythm.city || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Social Energy:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.socialRhythm
-              ? SOCIAL_RHYTHM_OPTIONS.find((o) => o.value === lifeRhythm.socialRhythm)?.label || "–"
-              : "–"}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Sleep Schedule:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.sleepSchedule
-              ? SLEEP_SCHEDULE_OPTIONS.find((o) => o.value === lifeRhythm.sleepSchedule)?.label || "–"
-              : "–"}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Travel Style:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.travelStyle
-              ? TRAVEL_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.travelStyle)?.label || "–"
-              : "–"}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Work Style:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.workStyle
-              ? WORK_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.workStyle)?.label || "–"
-              : "–"}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Core Values:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.coreValues && lifeRhythm.coreValues.length > 0
-              ? lifeRhythm.coreValues
-                  .map((v) => CORE_VALUES_OPTIONS.find((o) => o.value === v)?.label || v)
-                  .join(", ")
-              : "–"}
-          </Text>
-        </View>
-      </View>
-
-      {/* Looking For Section - Gender Preference, LGBTQ Preference, Age, Distance */}
+      {/* Looking For Section - PHASE-1 RESTRUCTURE: Simplified to just Gender and LGBTQ Preference */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Looking For</Text>
@@ -898,14 +709,6 @@ export default function ReviewScreen() {
               return values.map((v: string) => LGBTQ_OPTIONS.find((o) => o.value === v)?.label || v).join(", ");
             })()}
           </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Age Range:</Text>
-          <Text style={styles.infoValue}>{minAge || demoProfile?.minAge || 18} - {maxAge || demoProfile?.maxAge || 70} years</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Distance:</Text>
-          <Text style={styles.infoValue}>Up to {maxDistance || demoProfile?.maxDistance || 50} miles</Text>
         </View>
       </View>
 
@@ -937,33 +740,7 @@ export default function ReviewScreen() {
         })()}
       </View>
 
-      {/* Interests Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Interests</Text>
-          <TouchableOpacity onPress={() => handleEdit("preferences")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
-        {(() => {
-          const activitiesData = activities.length > 0 ? activities : (demoProfile?.activities || []);
-          if (activitiesData.length === 0) return <Text style={styles.emptyText}>No interests selected</Text>;
-          return (
-            <View style={styles.chipsContainer}>
-              {activitiesData.map((activity) => {
-                const activityObj = ACTIVITY_FILTERS.find((a) => a.value === activity);
-                return (
-                  <View key={activity} style={styles.chip}>
-                    <Text style={styles.chipText}>
-                      {activityObj?.emoji} {activityObj?.label}
-                    </Text>
-                  </View>
-                );
-              })}
-            </View>
-          );
-        })()}
-      </View>
+      {/* PHASE-1 RESTRUCTURE: Interests Section REMOVED from onboarding review */}
 
       {/* Footer */}
       <View style={styles.footer}>
@@ -1156,6 +933,31 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     marginTop: 10,
     lineHeight: 20,
+  },
+  // PHASE-1 RESTRUCTURE: Verification status styles
+  verificationStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+  verificationStatusText: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  verificationStatusVerified: {
+    color: COLORS.success,
+  },
+  verificationStatusPending: {
+    color: '#F5A623',
+  },
+  verificationStatusUnverified: {
+    color: COLORS.error,
+  },
+  verificationHint: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 4,
   },
   footer: {
     marginTop: 28,

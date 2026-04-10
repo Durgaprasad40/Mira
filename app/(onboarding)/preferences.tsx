@@ -229,7 +229,7 @@ export default function PreferencesScreen() {
     // PHASE-1 RESTRUCTURE: Auto-set maxDistance = 50
     setMaxDistance(DISTANCE_DEFAULT);
 
-    // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
+    // SAVE-AS-YOU-GO: Persist to demoProfiles immediately in demo mode
     // PHASE-1 RESTRUCTURE: Simplified - only lookingFor, relationshipIntent, lgbtqPreference
     if (isDemoMode && userId) {
       const demoStore = useDemoStore.getState();
@@ -280,19 +280,19 @@ export default function PreferencesScreen() {
       return;
     }
 
-    // PHASE-1 RESTRUCTURE: Go directly to permissions (step 6)
-    if (__DEV__) console.log('[ONB] preferences → permissions (continue)');
-    setStep('permissions');
-    router.push('/(onboarding)/permissions' as any);
+    // PHASE-1 RESTRUCTURE: Go to photo-upload (step 3)
+    if (__DEV__) console.log('[ONB] preferences → photo-upload (continue)');
+    setStep('photo_upload');
+    router.push('/(onboarding)/photo-upload' as any);
     // P1 STABILITY: Reset after navigation completes
     setIsSubmitting(false);
   };
 
-  // PHASE-1 RESTRUCTURE: Previous goes back to additional-photos
+  // PHASE-1 RESTRUCTURE: Previous goes back to basic-info (step 1)
   const handlePrevious = () => {
-    if (__DEV__) console.log('[ONB] preferences → additional-photos (previous)');
-    setStep('additional_photos');
-    router.push('/(onboarding)/additional-photos' as any);
+    if (__DEV__) console.log('[ONB] preferences → basic-info (previous)');
+    setStep('basic_info');
+    router.push('/(onboarding)/basic-info' as any);
   };
 
   // P1 STABILITY: Include isSubmitting in disabled check

@@ -89,9 +89,6 @@ export async function syncPhotosFromBackend(
 ): Promise<{ success: boolean; photosCount: number; message?: string }> {
   // Skip sync in demo mode - demo users don't have backend photos
   if (isDemoMode) {
-    console.warn('[PHOTO_SYNC] ⚠️ DEMO MODE - SKIPPING CONVEX SYNC!');
-    console.warn('[PHOTO_SYNC] ⚠️ Photos will be loaded from local demoStore only (not from Convex backend).');
-    console.warn('[PHOTO_SYNC] ⚠️ Set EXPO_PUBLIC_DEMO_MODE=false in .env.local to sync from Convex.');
     return { success: true, photosCount: 0, message: 'Demo mode - no backend sync' };
   }
 
@@ -205,9 +202,6 @@ export async function uploadPhotoToBackend(
 ): Promise<{ success: boolean; storageId?: string; photoId?: string; message?: string }> {
   // Skip upload in demo mode
   if (isDemoMode) {
-    console.warn('[PHOTO_SYNC] ⚠️ DEMO MODE - SKIPPING CONVEX UPLOAD!');
-    console.warn('[PHOTO_SYNC] ⚠️ Photo will be stored ONLY in local demoStore (will be lost on restart).');
-    console.warn('[PHOTO_SYNC] ⚠️ Set EXPO_PUBLIC_DEMO_MODE=false in .env.local to upload to Convex.');
     return { success: true, message: 'Demo mode - no backend upload' };
   }
 

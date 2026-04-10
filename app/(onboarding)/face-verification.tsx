@@ -32,12 +32,11 @@ import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { Ionicons } from '@expo/vector-icons';
-import { verifyFace, type CapturedFrame, type FaceMatchStatus, type FaceMatchReasonCode } from '@/services/faceVerification';
+import { verifyFace, type CapturedFrame, type FaceMatchReasonCode } from '@/services/faceVerification';
 import { isDemoMode } from '@/hooks/useConvex';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import type { Id } from '@/convex/_generated/dataModel';
 import { useScreenTrace } from '@/lib/devTrace';
 
 // =============================================================================
@@ -180,6 +179,10 @@ export default function FaceVerificationScreen() {
   const [isPermissionBlocked, setIsPermissionBlocked] = useState(false);
   const [failReasonCode, setFailReasonCode] = useState<FaceMatchReasonCode | null>(null);
 
+  // PHASE-1 RESTRUCTURE: Track verification attempts (max 3, then allow skip)
+  const MAX_VERIFICATION_ATTEMPTS = 3;
+  const [verificationAttempts, setVerificationAttempts] = useState(0);
+
   // Manual capture mode - user taps button to start
   const isCapturing = useSharedValue(false);
 
@@ -249,7 +252,7 @@ export default function FaceVerificationScreen() {
     return () => {
       isMounted = false; // Cleanup: prevent state updates if unmounted
     };
-  }, [onboardingStatus, userId, setStep, router]);
+  }, [onboardingStatus, setStep, router]);
 
   // Log mount/unmount separately (no deps needed)
   useEffect(() => {
@@ -356,6 +359,10 @@ export default function FaceVerificationScreen() {
 
   const startCapture = useCallback(async () => {
     if (!cameraRef.current || verificationState !== 'waiting') return;
+
+    // PHASE-1 RESTRUCTURE: Increment attempt counter
+    const currentAttempt = verificationAttempts + 1;
+    setVerificationAttempts(currentAttempt);
 
     console.log('[FaceMatch] Starting 3-frame capture for face verification...');
     isCapturing.value = true;
@@ -500,7 +507,18 @@ export default function FaceVerificationScreen() {
       setErrorMessage('Failed to capture selfie. Please try again.');
       setFailReasonCode('SELFIE_NO_FACE');
     }
-  }, [verificationState, userId, photos, isCapturing]);
+  }, [
+    verificationState,
+    verificationAttempts,
+    userId,
+    photos,
+    onboardingStatus,
+    isCapturing,
+    router,
+    setStep,
+    setFaceVerificationPassed,
+    setFaceVerificationPending,
+  ]);
 
   // =============================================================================
   // Success Handler - ONLY called when server returns PASS
@@ -543,6 +561,21 @@ export default function FaceVerificationScreen() {
     setStep('additional_photos');
     router.push('/(onboarding)/additional-photos' as any);
   }, [setFaceVerificationPending, setStep, router]);
+
+  // =============================================================================
+  // PHASE-1 RESTRUCTURE: Skip Handler - Allow users to skip after max attempts
+  // =============================================================================
+
+  const handleSkipVerification = useCallback(() => {
+    // Navigate to next step without verification
+    // User's profile will show "unverified" status
+    console.log('[FaceMatch] User skipping verification after max attempts');
+
+    // Don't set any verification flags - user proceeds as unverified
+    // Continue to next step
+    setStep('additional_photos');
+    router.push('/(onboarding)/additional-photos' as any);
+  }, [setStep, router]);
 
   // =============================================================================
   // Render: M6 FIX - Backend loading with timeout fallback
@@ -780,6 +813,10 @@ export default function FaceVerificationScreen() {
                 <Text style={styles.failedHintText}>
                   Make sure your selfie matches your profile photo. Try better lighting or a different angle.
                 </Text>
+                {/* PHASE-1 RESTRUCTURE: Show attempt count */}
+                <Text style={styles.attemptCountText}>
+                  Attempt {verificationAttempts} of {MAX_VERIFICATION_ATTEMPTS}
+                </Text>
               </View>
               <Button
                 title="Try Again"
@@ -787,24 +824,45 @@ export default function FaceVerificationScreen() {
                 onPress={handleRetry}
                 fullWidth
               />
+              {/* PHASE-1 RESTRUCTURE: Allow skip after max attempts */}
+              {verificationAttempts >= MAX_VERIFICATION_ATTEMPTS && (
+                <View style={styles.secondaryButtonContainer}>
+                  <Button
+                    title="Skip for Now"
+                    variant="outline"
+                    onPress={handleSkipVerification}
+                    fullWidth
+                  />
+                  <Text style={styles.skipHintText}>
+                    You can verify later in your profile settings
+                  </Text>
+                </View>
+              )}
             </>
           )}
 
           {verificationState === 'pending' && (
             <>
-              {/* ONB-P0-001 FIX: Block onboarding progression for PENDING status */}
-              {/* Users must wait for manual review approval or retry verification */}
+              {/* PHASE-1 RESTRUCTURE: Allow users to continue with pending verification */}
               <View style={styles.pendingInfo}>
                 <Text style={styles.pendingInfoText}>
-                  Your verification is under manual review. Please wait for approval or retake your selfie for faster processing.
+                  Your verification is under manual review. You can continue setting up your profile while we process your request.
                 </Text>
               </View>
               <Button
-                title="Retake Selfie"
+                title="Continue"
                 variant="primary"
-                onPress={handleRetry}
+                onPress={handlePendingContinue}
                 fullWidth
               />
+              <View style={styles.secondaryButtonContainer}>
+                <Button
+                  title="Retake Selfie"
+                  variant="outline"
+                  onPress={handleRetry}
+                  fullWidth
+                />
+              </View>
             </>
           )}
 
@@ -1013,6 +1071,22 @@ const styles = StyleSheet.create({
     color: '#B8860B',
     textAlign: 'center',
     lineHeight: 19,
+  },
+  // PHASE-1 RESTRUCTURE: New styles for non-blocking verification
+  secondaryButtonContainer: {
+    marginTop: 12,
+  },
+  attemptCountText: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  skipHintText: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginTop: 8,
   },
   permissionButton: {
     marginTop: 28,

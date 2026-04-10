@@ -470,9 +470,9 @@ export default function BasicInfoScreen() {
       console.log(`[BASIC] saved lgbtqSelf: ${JSON.stringify(lgbtqSelf)}`);
     }
 
-    if (__DEV__) console.log("[ONB] basic_info_confirm readOnly=true → continue_to_consent");
-    setStep("consent");
-    router.replace("/(onboarding)/consent" as any);
+    if (__DEV__) console.log("[ONB] basic_info_confirm readOnly=true → continue_to_preferences");
+    setStep("preferences");
+    router.replace("/(onboarding)/preferences" as any);
   };
 
   // Handle Continue in RECOVERY mode (existing user with missing fields)
@@ -525,10 +525,10 @@ export default function BasicInfoScreen() {
       demoStore.saveDemoProfile(userId, dataToSave);
     }
 
-    // Proceed to consent
-    console.log("[ONB] basic_info recovery → consent");
-    setStep("consent");
-    router.replace("/(onboarding)/consent" as any);
+    // Proceed to preferences
+    console.log("[ONB] basic_info recovery → preferences");
+    setStep("preferences");
+    router.replace("/(onboarding)/preferences" as any);
   };
 
   // Handle Continue in EDIT mode (new signup) - first validates, then shows modal
@@ -603,8 +603,8 @@ export default function BasicInfoScreen() {
                 return;
               }
               setIsSubmitting(false);
-              setStep("consent");
-              router.push("/(onboarding)/consent" as any);
+              setStep("preferences");
+              router.push("/(onboarding)/preferences" as any);
               return;
             } catch (loginError: any) {
               setIsSubmitting(false);
@@ -639,8 +639,8 @@ export default function BasicInfoScreen() {
 
         demoStore.saveDemoProfile(newUserId, dataToSave);
         setAuth(newUserId, "demo_token", false, capturedAuthVersion);
-        setStep("consent");
-        router.push("/(onboarding)/consent" as any);
+        setStep("preferences");
+        router.push("/(onboarding)/preferences" as any);
         return;
       }
 
@@ -712,8 +712,8 @@ export default function BasicInfoScreen() {
           },
         }).catch(console.error);
 
-        setStep("consent");
-        router.push("/(onboarding)/consent" as any);
+        setStep("preferences");
+        router.push("/(onboarding)/preferences" as any);
       }
     } catch (error: any) {
       // Handle unexpected errors (USER_EXISTS is already handled by the hook)

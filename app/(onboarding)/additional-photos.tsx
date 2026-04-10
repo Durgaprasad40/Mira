@@ -17,7 +17,7 @@ import {
   Modal,
   Dimensions,
   ScrollView,
-  // PHASE-1 RESTRUCTURE: TextInput removed - bio no longer collected during onboarding
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
@@ -25,8 +25,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system/legacy';
-import { COLORS } from '@/lib/constants';
-// PHASE-1 RESTRUCTURE: VALIDATION removed - bio no longer collected during onboarding
+import { COLORS, VALIDATION } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore, DisplayPhotoVariant } from '@/stores/onboardingStore';
 import { useDemoStore } from '@/stores/demoStore';
@@ -102,8 +101,8 @@ async function persistPhoto(cacheUri: string): Promise<string> {
 
 export default function AdditionalPhotosScreen() {
   useScreenTrace("ONB_ADDITIONAL_PHOTOS");
-  // PHASE-1 RESTRUCTURE: Bio removed from onboarding flow
-  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, clearAllPhotos, verificationReferencePrimary } = useOnboardingStore();
+  // PHASE-1 RESTRUCTURE: Bio added back - now MANDATORY
+  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, clearAllPhotos, verificationReferencePrimary, bio, setBio } = useOnboardingStore();
   const { userId, token } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -312,7 +311,8 @@ export default function AdditionalPhotosScreen() {
   // Warning state for minimum photos
   const [showPhotoWarning, setShowPhotoWarning] = useState(false);
 
-  // PHASE-1 RESTRUCTURE: Bio removed from onboarding - no bio error state needed
+  // PHASE-1 RESTRUCTURE: Bio added back - error state for validation
+  const [showBioError, setShowBioError] = useState(false);
 
   // Track if initial prefill has already happened
   const didPrefillPhotos = React.useRef(false);
@@ -344,7 +344,17 @@ export default function AdditionalPhotosScreen() {
     }
   }, [demoHydrated, demoProfile, photos, setPhotoAtIndex]);
 
-  // PHASE-1 RESTRUCTURE: Bio prefill removed - bio no longer collected during onboarding
+  // PHASE-1 RESTRUCTURE: Bio prefill from demoProfile
+  const didPrefillBio = React.useRef(false);
+  useEffect(() => {
+    if (didPrefillBio.current || !isDemoMode || !demoHydrated) return;
+    if (!demoProfile?.bio) return;
+    if (bio && bio.length > 0) return; // Already has a bio
+
+    didPrefillBio.current = true;
+    setBio(demoProfile.bio);
+    console.log('[PHOTOS] prefilled bio from demoProfile');
+  }, [demoHydrated, demoProfile, bio, setBio]);
 
   // FIX 2: Removed redundant syncPhotosFromBackend on mount
   // The useQuery(api.photos.getUserPhotos) subscription at line 151-154 already provides
@@ -982,20 +992,32 @@ export default function AdditionalPhotosScreen() {
       });
     }
 
-    // PHASE-1 RESTRUCTURE: Bio validation removed - bio no longer collected during onboarding
+    // PHASE-1 RESTRUCTURE: Bio validation - MANDATORY
+    const trimmedBio = (bio || '').trim();
+    if (trimmedBio.length < VALIDATION.BIO_MIN_LENGTH) {
+      console.warn(`[BIO_GATE] Blocked: bio length=${trimmedBio.length} < BIO_MIN_LENGTH=${VALIDATION.BIO_MIN_LENGTH}`);
+      setShowBioError(true);
+      Alert.alert(
+        'Bio Required',
+        `Please write a short bio (at least ${VALIDATION.BIO_MIN_LENGTH} characters) to help others know you better.`,
+        [{ text: 'OK' }]
+      );
+      return;
+    }
 
     // Clear warnings if we passed all checks
     setShowPhotoWarning(false);
+    setShowBioError(false);
 
-    // SAVE-AS-YOU-GO: Persist photos to demoProfiles immediately
-    // PHASE-1 RESTRUCTURE: Bio removed from save - no longer collected during onboarding
+    // SAVE-AS-YOU-GO: Persist photos and bio to demoProfiles immediately
     if (isDemoMode && userId) {
       const validPhotos = photos.filter((p): p is string => typeof p === 'string' && p.length > 0);
       const demoStore = useDemoStore.getState();
       demoStore.saveDemoProfile(userId, {
         photos: validPhotos.map((uri) => ({ url: uri })),
+        bio: trimmedBio,
       });
-      console.log(`[PHOTOS] saved ${validPhotos.length} photos to demoProfile`);
+      console.log(`[PHOTOS] saved ${validPhotos.length} photos and bio to demoProfile`);
     }
 
     // CENTRAL EDIT HUB: Return to Review if editing from there
@@ -1005,14 +1027,14 @@ export default function AdditionalPhotosScreen() {
       return;
     }
 
-    // PHASE-1 RESTRUCTURE: Go to preferences after additional-photos
+    // PHASE-1 RESTRUCTURE: Go to review after additional-photos (step 5 → step 6)
     // CRITICAL: Navigation MUST happen unconditionally after validation passes
     if (__DEV__) {
-      console.log('[PHOTO_GATE] All validations passed. Navigating to preferences...');
-      console.log('[ONB] additional-photos → preferences (continue)');
+      console.log('[PHOTO_GATE] All validations passed. Navigating to review...');
+      console.log('[ONB] additional-photos → review (continue)');
     }
-    setStep('preferences');
-    router.push('/(onboarding)/preferences');
+    setStep('review');
+    router.push('/(onboarding)/review');
   };
 
   // Render unified photo grid (ALL slots 0-8, primary included)
@@ -1286,7 +1308,42 @@ export default function AdditionalPhotosScreen() {
           </TouchableOpacity>
         )}
 
-        {/* PHASE-1 RESTRUCTURE: Bio section removed - bio no longer collected during onboarding */}
+        {/* PHASE-1 RESTRUCTURE: Bio section added back - MANDATORY */}
+        <View style={styles.bioSection}>
+          <Text style={styles.sectionTitle}>About You</Text>
+          <Text style={styles.bioSubtitle}>
+            Write a short bio to help others get to know you
+          </Text>
+          <TextInput
+            style={[
+              styles.bioInput,
+              showBioError && styles.bioInputError,
+            ]}
+            value={bio}
+            onChangeText={(text) => {
+              setBio(text);
+              if (showBioError && text.trim().length >= VALIDATION.BIO_MIN_LENGTH) {
+                setShowBioError(false);
+              }
+            }}
+            placeholder="Tell others about yourself..."
+            placeholderTextColor={COLORS.textMuted}
+            multiline
+            maxLength={VALIDATION.BIO_MAX_LENGTH}
+            textAlignVertical="top"
+          />
+          <View style={styles.bioFooter}>
+            <Text style={[
+              styles.bioHint,
+              showBioError && styles.bioHintError,
+            ]}>
+              {showBioError ? `Minimum ${VALIDATION.BIO_MIN_LENGTH} characters required` : 'Required'}
+            </Text>
+            <Text style={styles.bioCharCount}>
+              {(bio || '').length}/{VALIDATION.BIO_MAX_LENGTH}
+            </Text>
+          </View>
+        </View>
 
         {/* Privacy Options */}
         <View style={styles.privacySection}>
@@ -1526,39 +1583,50 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontWeight: '600',
   },
-  // Bio section
+  // PHASE-1 RESTRUCTURE: Bio section - MANDATORY during onboarding
   bioSection: {
-    marginBottom: 16,
+    marginHorizontal: 16,
+    marginBottom: 24,
+  },
+  bioSubtitle: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    marginBottom: 12,
+    lineHeight: 18,
   },
   bioInput: {
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 10,
-    padding: 12,
-    fontSize: 14,
+    borderRadius: 14,
+    padding: 16,
+    fontSize: 15,
     color: COLORS.text,
-    minHeight: 80,
+    minHeight: 120,
     textAlignVertical: 'top',
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    lineHeight: 22,
   },
   bioInputError: {
     borderColor: COLORS.error,
-    borderWidth: 2,
+    borderWidth: 1.5,
   },
   bioFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 4,
+    marginTop: 8,
   },
-  bioErrorText: {
+  bioHint: {
     fontSize: 12,
+    color: COLORS.textMuted,
+  },
+  bioHintError: {
     color: COLORS.error,
     fontWeight: '500',
   },
   bioCharCount: {
-    fontSize: 11,
-    color: COLORS.textLight,
+    fontSize: 12,
+    color: COLORS.textMuted,
   },
   // Privacy options section
   privacySection: {
