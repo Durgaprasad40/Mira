@@ -9,6 +9,7 @@ import { computeEnforcementLevel } from "@/lib/securityEnforcement";
 import { ToastHost } from "@/components/ui/Toast";
 import { useRouteTrace, trace } from "@/lib/devTrace";
 import { usePhaseMode, type PhaseMode } from "@/lib/usePhaseMode";
+import { trackRouteChange } from "@/lib/sentry";
 
 // Navigation state tracking (minimal, for effect dependency)
 let _lastPathname = '';
@@ -113,9 +114,12 @@ export default function MainLayout() {
   const pathname = usePathname();
 
   // Navigation state tracking (debug logging removed to reduce Metro noise)
+  // SENTRY: Track route changes for performance tracing and breadcrumbs
   useEffect(() => {
     if (!rootNavState?.key) return;
     _lastPathname = pathname;
+    // Track route change in Sentry for performance tracing
+    trackRouteChange(pathname);
   }, [pathname, rootNavState]);
 
   // ══════════════════════════════════════════════════════════════════════════════

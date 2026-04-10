@@ -25,6 +25,8 @@ import { prewarmTodCache } from './(tabs)/truth-or-dare';
 import { decideNextOnboardingRoute } from '@/lib/onboardingRouting';
 import { useRouteTrace } from '@/lib/devTrace';
 import { usePhaseMode, isSharedRoute } from '@/lib/usePhaseMode';
+import { AppErrorBoundary } from '@/components/safety';
+import { setFeatureAndScreen, SENTRY_FEATURES, clearFeatureContext } from '@/lib/sentry';
 
 const C = INCOGNITO_COLORS;
 
@@ -123,6 +125,18 @@ export default function PrivateLayout() {
       }
     };
   }, []);
+
+  // SENTRY: Track Phase 2 screens for error attribution
+  useEffect(() => {
+    if (isInPhase2) {
+      setFeatureAndScreen(SENTRY_FEATURES.DEEP_CONNECT, pathname || 'phase2');
+    }
+    return () => {
+      if (isInPhase2) {
+        clearFeatureContext();
+      }
+    };
+  }, [pathname, isInPhase2]);
 
   // APP-P1-003 FIX: Auth guard - redirect unauthenticated users
   // PHASE GUARD: Only run when in Phase 2 (prevents navigation when on shared routes)
@@ -521,11 +535,13 @@ export default function PrivateLayout() {
   }
 
   return (
-    <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="(tabs)" />
-      <Stack.Screen name="p2-profile/[userId]" />
-      <Stack.Screen name="phase2-likes" />
-    </Stack>
+    <AppErrorBoundary name="Phase2Private">
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="p2-profile/[userId]" />
+        <Stack.Screen name="phase2-likes" />
+      </Stack>
+    </AppErrorBoundary>
   );
 }
 

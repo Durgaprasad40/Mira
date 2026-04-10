@@ -566,6 +566,206 @@ export async function withTiming<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Navigation Tracing (expo-router compatible)
+// ---------------------------------------------------------------------------
+
+let _currentRouteName: string | null = null;
+let _currentTransaction: ReturnType<typeof Sentry.startInactiveSpan> | null = null;
+
+/**
+ * Track a screen/route change for Sentry performance tracing.
+ * Call this from a useEffect in your root layout when pathname changes.
+ *
+ * @param routeName - The current route name (e.g., from usePathname())
+ * @param params - Optional route params (will be scrubbed)
+ */
+export function trackRouteChange(
+  routeName: string,
+  params?: Record<string, unknown>
+): void {
+  if (!isInitialized && !SENTRY_DSN) return;
+  if (!routeName || routeName === _currentRouteName) return;
+
+  // End previous transaction if exists
+  if (_currentTransaction) {
+    _currentTransaction.end();
+    _currentTransaction = null;
+  }
+
+  _currentRouteName = routeName;
+
+  // Update screen context
+  setCurrentScreen(routeName);
+
+  // Add navigation breadcrumb
+  Sentry.addBreadcrumb({
+    category: 'navigation',
+    message: `Screen: ${routeName}`,
+    level: 'info',
+    data: params ? scrubSensitiveData(params) as Record<string, unknown> : undefined,
+  });
+
+  // Start new screen transaction for performance tracing
+  _currentTransaction = Sentry.startInactiveSpan({
+    name: routeName,
+    op: 'navigation',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Convex Error Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Capture a Convex query/mutation error with context.
+ * Use this for critical Convex operations that should be tracked.
+ *
+ * @param error - The error from Convex
+ * @param operation - Query/mutation name (e.g., 'users.getCurrentUser')
+ * @param context - Additional context
+ */
+export function captureConvexError(
+  error: Error | unknown,
+  operation: string,
+  context?: {
+    args?: Record<string, unknown>;
+    isMutation?: boolean;
+    isCritical?: boolean;
+  }
+): void {
+  if (!isInitialized && !SENTRY_DSN) {
+    if (IS_DEV) {
+      originalConsoleError('[Sentry] captureConvexError (not initialized):', operation, error);
+    }
+    return;
+  }
+
+  // Filter out non-critical known errors
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const isAuthError = errorMessage.toLowerCase().includes('authentication required');
+  const isNotFound = errorMessage.toLowerCase().includes('not found');
+
+  // Skip non-critical auth/not-found errors unless marked critical
+  if (!context?.isCritical && (isAuthError || isNotFound)) {
+    // Just add breadcrumb for context, don't capture as error
+    addBreadcrumb(`Convex ${context?.isMutation ? 'mutation' : 'query'} failed: ${operation}`, 'convex', {
+      error: errorMessage,
+      expected: true,
+    });
+    return;
+  }
+
+  Sentry.withScope((scope) => {
+    scope.setTag('convex_operation', operation);
+    scope.setTag('convex_type', context?.isMutation ? 'mutation' : 'query');
+    scope.setTag('feature', getCurrentFeature() || 'unknown');
+
+    if (context?.args) {
+      const safeArgs = scrubSensitiveData(context.args) as Record<string, unknown>;
+      scope.setExtra('convex_args', safeArgs);
+    }
+
+    scope.setLevel(context?.isCritical ? 'error' : 'warning');
+
+    Sentry.captureException(error);
+  });
+}
+
+/**
+ * Wrap a Convex mutation with error capture.
+ * Use for critical mutations that must succeed.
+ *
+ * @param mutationFn - The mutation function
+ * @param operationName - Name for logging/tracking
+ * @param args - Arguments to the mutation
+ */
+export async function withConvexCapture<T>(
+  mutationFn: () => Promise<T>,
+  operationName: string,
+  options?: { isCritical?: boolean }
+): Promise<T> {
+  const startTime = Date.now();
+
+  try {
+    addBreadcrumb(`Convex: ${operationName} started`, 'convex');
+    const result = await mutationFn();
+    addBreadcrumb(`Convex: ${operationName} success`, 'convex', {
+      durationMs: Date.now() - startTime,
+    });
+    return result;
+  } catch (error) {
+    captureConvexError(error, operationName, {
+      isMutation: true,
+      isCritical: options?.isCritical,
+    });
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verification / Testing Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * DEV-ONLY: Trigger a test event to verify Sentry is working.
+ * Call this from a dev menu or settings screen.
+ *
+ * Returns true if Sentry is initialized and event was sent.
+ */
+export function sentryTestCapture(): boolean {
+  if (!isInitialized) {
+    if (IS_DEV) {
+      originalConsoleLog('[Sentry] Test capture failed - not initialized (no DSN?)');
+    }
+    return false;
+  }
+
+  // Send test message
+  Sentry.captureMessage('Sentry Test Event - Mira App', 'info');
+
+  if (IS_DEV) {
+    originalConsoleLog('[Sentry] Test event sent - check Sentry dashboard');
+  }
+
+  return true;
+}
+
+/**
+ * DEV-ONLY: Trigger a test exception to verify error capture.
+ * This will show up in Sentry as an error.
+ */
+export function sentryTestException(): boolean {
+  if (!isInitialized) {
+    if (IS_DEV) {
+      originalConsoleLog('[Sentry] Test exception failed - not initialized');
+    }
+    return false;
+  }
+
+  try {
+    throw new Error('Sentry Test Exception - Mira App Verification');
+  } catch (error) {
+    captureException(error, {
+      tags: { test: 'true', verification: 'manual' },
+      level: 'warning',
+    });
+  }
+
+  if (IS_DEV) {
+    originalConsoleLog('[Sentry] Test exception sent - check Sentry dashboard');
+  }
+
+  return true;
+}
+
+/**
+ * Check if Sentry is properly initialized and has a DSN.
+ */
+export function isSentryEnabled(): boolean {
+  return isInitialized && !!SENTRY_DSN;
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
