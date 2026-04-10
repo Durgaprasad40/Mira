@@ -72,7 +72,7 @@ export default function MatchCelebrationScreen() {
   const otherUserQuery = useQuery(
     api.users.getUserById,
     !isDemo && !isPhase2 && otherUserIdValue && viewerId
-      ? { userId: otherUserIdValue, viewerId }
+      ? { userId: otherUserIdValue }
       : "skip",
   );
 

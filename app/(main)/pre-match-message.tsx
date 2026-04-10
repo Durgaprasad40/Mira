@@ -40,7 +40,7 @@ export default function PreMatchMessageScreen() {
 
   const targetUser = useQuery(
     api.users.getUserById,
-    !isDemoMode && targetUserId && userId ? { userId: targetUserId as any, viewerId: userId as any } : 'skip'
+    !isDemoMode && targetUserId && userId ? { userId: targetUserId as any } : 'skip'
   );
 
   const templates = useQuery(
