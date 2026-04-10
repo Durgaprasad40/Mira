@@ -35,6 +35,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { Badge } from '@/components/ui';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
+import type { Id } from '@/convex/_generated/dataModel';
+import { useBatchPresence } from '@/hooks/usePresence';
 import { getDemoCurrentUser, DEMO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
@@ -1127,19 +1129,45 @@ export default function MessagesScreen() {
       return haystack.includes(normalizedSearchQuery);
     });
   }, [conversations, currentConversationUserId, normalizedSearchQuery]);
+
+  // P0 UNIFIED PRESENCE: Extract user IDs for batch presence query
+  const conversationUserIds = useMemo(() => {
+    if (isDemoMode) return null; // Demo mode doesn't use presence API
+    const ids: Id<'users'>[] = [];
+    for (const convo of (filteredConversations || []) as any[]) {
+      const otherId = convo.otherUser?.id;
+      if (otherId) {
+        ids.push(otherId as Id<'users'>);
+      }
+    }
+    return ids.length > 0 ? ids : null;
+  }, [filteredConversations]);
+
+  // P0 UNIFIED PRESENCE: Batch presence query for all conversation users
+  const batchPresence = useBatchPresence(conversationUserIds);
+
   const showsSecondaryModules = !isSearching && (showMessagesNudge || superLikeMatches.length > 0 || newMatches.length > 0);
-  const renderConversationRow = useCallback(({ item }: { item: any }) => (
-    <ConversationItem
-      id={item.id}
-      otherUser={item.otherUser}
-      lastMessage={item.lastMessage}
-      unreadCount={item.unreadCount}
-      isPreMatch={item.isPreMatch}
-      currentUserId={currentConversationUserId}
-      onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
-      onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
-    />
-  ), [currentConversationUserId, router]);
+  const renderConversationRow = useCallback(({ item }: { item: any }) => {
+    // P0 UNIFIED PRESENCE: Look up presence status from batch query
+    const otherId = item.otherUser?.id;
+    const presenceStatus = otherId && batchPresence ? batchPresence[otherId]?.status : undefined;
+
+    return (
+      <ConversationItem
+        id={item.id}
+        otherUser={{
+          ...item.otherUser,
+          presenceStatus, // P0 UNIFIED PRESENCE: Add presence status to otherUser
+        }}
+        lastMessage={item.lastMessage}
+        unreadCount={item.unreadCount}
+        isPreMatch={item.isPreMatch}
+        currentUserId={currentConversationUserId}
+        onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
+        onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
+      />
+    );
+  }, [currentConversationUserId, router, batchPresence]);
   const conversationKeyExtractor = useCallback((item: any) => item.id, []);
 
   // Render skeleton loading rows

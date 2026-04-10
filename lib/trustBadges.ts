@@ -6,6 +6,7 @@
  */
 
 import { COLORS } from './constants';
+import type { PresenceStatus } from '@/hooks/usePresence';
 
 export interface TrustBadge {
   key: string;
@@ -16,7 +17,9 @@ export interface TrustBadge {
 
 interface TrustBadgeInput {
   isVerified?: boolean;
-  /** Unix-ms timestamp of last activity */
+  /** P0 UNIFIED PRESENCE: Presence status from unified system */
+  presenceStatus?: PresenceStatus;
+  /** @deprecated Use presenceStatus instead. Unix-ms timestamp of last activity */
   lastActive?: number;
   /** Number of photos the user has uploaded */
   photoCount?: number;
@@ -24,18 +27,16 @@ interface TrustBadgeInput {
   bio?: string;
 }
 
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
 /**
  * Returns an array of 0-4 trust badges based on the available profile data.
  * Safe to call with partial data — missing fields simply skip that badge.
  */
 export function getTrustBadges(input: TrustBadgeInput): TrustBadge[] {
   const badges: TrustBadge[] = [];
-  const now = Date.now();
 
-  // 1. Active Today — active within the last 24 hours
-  if (input.lastActive && now - input.lastActive < ONE_DAY_MS) {
+  // 1. Active Today — from P0 unified presence status
+  // Shows for both 'online' and 'active_today' status
+  if (input.presenceStatus === 'online' || input.presenceStatus === 'active_today') {
     badges.push({
       key: 'active',
       label: 'Active Today',

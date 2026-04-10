@@ -68,6 +68,8 @@ import {
   getOtherUserIdFromMeta,
 } from '@/lib/threadsIntegrity';
 import { preloadVideos } from '@/lib/videoCache';
+import { useUserPresence } from '@/hooks/usePresence';
+import type { Id } from '@/convex/_generated/dataModel';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SKELETON LOADING - Chat loading placeholder
@@ -110,7 +112,9 @@ const ChatLoadingSkeleton = () => (
 );
 
 const MESSAGE_PAGE_SIZE = 40;
-const PRESENCE_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
+
+// P0 UNIFIED PRESENCE: Old constant removed - now using unified presence hook
+// @deprecated const PRESENCE_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 
 function mergeMessagesById(messages: any[]): any[] {
   const seen = new Set<string>();
@@ -128,7 +132,11 @@ function mergeMessagesById(messages: any[]): any[] {
     });
 }
 
-function getPresenceStatus(lastActive?: number) {
+/**
+ * @deprecated P0 UNIFIED PRESENCE: Use useUserPresence hook instead.
+ * This function is kept only for backwards compatibility with demo mode.
+ */
+function getPresenceStatusLegacy(lastActive?: number) {
   if (!lastActive || lastActive <= 0) {
     return {
       label: 'Recently active',
@@ -137,7 +145,9 @@ function getPresenceStatus(lastActive?: number) {
   }
 
   const diff = Date.now() - lastActive;
-  if (diff < PRESENCE_ACTIVE_WINDOW_MS) {
+  // Legacy 5-minute threshold (kept for demo mode fallback)
+  const LEGACY_PRESENCE_MS = 5 * 60 * 1000;
+  if (diff < LEGACY_PRESENCE_MS) {
     return {
       label: 'Active now',
       isActiveNow: true,
@@ -432,6 +442,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     : null;
 
   const activeConversation = isDemo ? demoConversation : conversation;
+
+  // P0 UNIFIED PRESENCE: Query presence for the other user (skip in demo mode)
+  const otherUserIdForPresence = !isDemo && activeConversation?.otherUser?.id
+    ? (activeConversation.otherUser.id as Id<'users'>)
+    : null;
+  const otherUserPresence = useUserPresence(otherUserIdForPresence);
 
   useEffect(() => {
     setOlderMessages([]);
@@ -1825,7 +1841,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       : false;
 
   const messagesRemaining = isDemo ? 999999 : (currentUser?.messagesRemaining || 0);
-  const presenceStatus = getPresenceStatus(activeConversation.otherUser.lastActive);
+
+  // P0 UNIFIED PRESENCE: Use unified presence for live mode, legacy for demo
+  const presenceStatus = isDemo
+    ? getPresenceStatusLegacy(activeConversation.otherUser.lastActive)
+    : {
+        label: otherUserPresence?.label || 'Recently active',
+        isActiveNow: otherUserPresence?.status === 'online',
+      };
   const showTypingIndicator = !isDemo
     && !isExpiredChat
     && !isTerminalConversation

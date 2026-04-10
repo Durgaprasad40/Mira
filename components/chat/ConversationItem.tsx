@@ -4,6 +4,7 @@ import Reanimated, { FadeIn } from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, moderateScale } from '@/lib/constants';
 import { DEMO_PROFILES } from '@/lib/demoData';
+import type { PresenceStatus } from '@/hooks/usePresence';
 
 interface ConversationItemProps {
   id: string;
@@ -11,7 +12,10 @@ interface ConversationItemProps {
     id: string;
     name: string;
     photoUrl?: string;
-    lastActive: number;
+    /** P0 UNIFIED PRESENCE: Presence status from unified system */
+    presenceStatus?: PresenceStatus;
+    /** @deprecated Use presenceStatus instead */
+    lastActive?: number;
     isVerified: boolean;
     photoBlurred?: boolean;
   };
@@ -30,7 +34,7 @@ interface ConversationItemProps {
   currentUserId?: string;
 }
 
-const PRESENCE_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
+// P0 UNIFIED PRESENCE: Old threshold removed - now using presenceStatus prop directly
 
 function ConversationItemComponent({
   otherUser,
@@ -122,10 +126,9 @@ function ConversationItemComponent({
 
   // System message marker regex (matches [SYSTEM:subtype] prefix)
   const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
-  const isActiveNow = useMemo(() => {
-    if (!otherUser.lastActive) return false;
-    return Date.now() - otherUser.lastActive < PRESENCE_ACTIVE_WINDOW_MS;
-  }, [otherUser.lastActive]);
+
+  // P0 UNIFIED PRESENCE: Use presenceStatus directly from unified system
+  const isActiveNow = otherUser.presenceStatus === 'online';
 
   // 5-7: Safe fallback for corrupted/missing preview content
   // TASK-2: Strip system message markers from preview
@@ -268,7 +271,7 @@ function areConversationItemPropsEqual(
     prev.otherUser.id === next.otherUser.id &&
     prev.otherUser.name === next.otherUser.name &&
     prev.otherUser.photoUrl === next.otherUser.photoUrl &&
-    prev.otherUser.lastActive === next.otherUser.lastActive &&
+    prev.otherUser.presenceStatus === next.otherUser.presenceStatus &&
     prev.otherUser.isVerified === next.otherUser.isVerified &&
     prev.otherUser.photoBlurred === next.otherUser.photoBlurred &&
     prev.lastMessage?.content === next.lastMessage?.content &&

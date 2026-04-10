@@ -2198,4 +2198,34 @@ export default defineSchema({
   })
     .index('by_viewer', ['viewerId'])
     .index('by_pair', ['viewerId', 'viewedUserId']),
+
+  // ==========================================================================
+  // UNIFIED PRESENCE SYSTEM (P0)
+  // ==========================================================================
+  // Single source of truth for user online/active status.
+  // Replaces fragmented presence logic across users.lastActive,
+  // privateUserPresence, and chatRoomPresence.
+  //
+  // THRESHOLDS (standardized):
+  // - Online Now: lastSeenAt within 10 minutes AND appState = 'foreground'
+  // - Active Today: lastSeenAt within 24 hours
+  // - Offline: lastSeenAt > 24 hours ago OR appState = 'inactive'
+  // ==========================================================================
+  presence: defineTable({
+    userId: v.id('users'),
+    deviceId: v.optional(v.string()),      // For multi-device support
+    sessionId: v.optional(v.id('sessions')), // Links to sessions table
+    lastSeenAt: v.number(),                // Timestamp of last activity
+    appState: v.union(
+      v.literal('foreground'),             // App is active and visible
+      v.literal('background'),             // App is running but not visible
+      v.literal('inactive')                // App is closed or disconnected
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_lastSeenAt', ['lastSeenAt'])
+    .index('by_user_device', ['userId', 'deviceId'])
+    .index('by_appState', ['appState']),
 });

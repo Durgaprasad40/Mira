@@ -12,10 +12,13 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { safePush } from '@/lib/safeRouter';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS, PROFILE_PROMPT_QUESTIONS } from '@/lib/constants';
 import { computeIntentCompat, getIntentCompatColor, getIntentMismatchWarning } from '@/lib/intentCompat';
 import { getTrustBadges } from '@/lib/trustBadges';
+// P0 UNIFIED PRESENCE: Reactive presence query for profile page
+import { useUserPresence } from '@/hooks/usePresence';
 import { Button, Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -207,6 +210,13 @@ export default function ViewProfileScreen() {
   // Use type assertion since Phase-1 and Phase-2 profiles have different shapes
   // The UI handles conditional display of fields appropriately
   const profile = (isDemoMode ? demoProfile : convexProfile) as any;
+
+  // P0 UNIFIED PRESENCE: Get presence status for this profile user
+  // Use profile.userId if available (Phase-2), otherwise use userId from params
+  const profileUserId = profile?.userId || userId;
+  const presence = useUserPresence(profileUserId ? profileUserId as Id<'users'> : null);
+  const presenceStatus = presence?.status;
+
   const displayPhotos = useMemo(() => getRenderableProfilePhotos(profile?.photos), [profile?.photos]);
   const visiblePhotos = useMemo(
     () => (isConfessPreview ? displayPhotos.slice(0, 2) : displayPhotos),
@@ -424,9 +434,10 @@ export default function ViewProfileScreen() {
 
         {/* Trust Badges - includes verification status */}
         {!isConfessPreview && (() => {
+          // P0 UNIFIED PRESENCE: Use presenceStatus from reactive query
           const badges = getTrustBadges({
             isVerified: profile.isVerified,
-            lastActive: (profile as any).lastActive,
+            presenceStatus,
             photoCount: profile.photos?.length,
             bio: profile.bio,
           });

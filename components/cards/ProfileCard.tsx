@@ -30,6 +30,7 @@ import {
   DEBUG_CONTENT_RENDER,
   DEBUG_P2_UI,
 } from '@/lib/debugFlags';
+import type { PresenceStatus } from '@/hooks/usePresence';
 
 // PERF: Max photos to prefetch when card becomes visible
 const PREFETCH_COUNT = 5;
@@ -100,7 +101,9 @@ export interface ProfileCardProps {
   isIncognito?: boolean;
   /** Explore category tag - shows "Why this profile" label above name */
   exploreTag?: string;
-  /** Last active timestamp for "Active Now" badge */
+  /** P0 UNIFIED PRESENCE: Presence status from unified presence system */
+  presenceStatus?: PresenceStatus;
+  /** @deprecated Use presenceStatus instead. Legacy lastActive timestamp. */
   lastActive?: number;
   /** Phase-2 only: Lifestyle data */
   height?: number | null;
@@ -193,7 +196,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   viewerProfile,
   isIncognito,
   exploreTag,
-  lastActive,
+  presenceStatus,
+  lastActive, // @deprecated - use presenceStatus
   height: profileHeight,
   smoking,
   drinking,
@@ -218,28 +222,17 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // On ~850px device, 140px ≈ 16.5% from bottom — scale proportionally
   const arrowButtonBottom = Math.round(windowHeight * 0.165);
 
-  // PRESENCE: Check if user is active now (within 10 minutes of last activity)
-  // After 10 minutes of inactivity, badge is removed
-  const isActiveNow = useMemo(() => {
-    if (!lastActive) return false;
-    const tenMinutesMs = 10 * 60 * 1000; // 10 minutes threshold
-    return (Date.now() - lastActive) < tenMinutesMs;
-  }, [lastActive]);
-
-  // PRESENCE: Check if user was active today (within 24 hours but NOT currently online)
-  const isActiveToday = useMemo(() => {
-    if (!lastActive || isActiveNow) return false;
-    const twentyFourHoursMs = 24 * 60 * 60 * 1000;
-    return (Date.now() - lastActive) < twentyFourHoursMs;
-  }, [lastActive, isActiveNow]);
+  // P0 UNIFIED PRESENCE: Derive presence from presenceStatus prop (single source of truth)
+  // Standardized thresholds: Online Now = 10 min, Active Today = 24h
+  const isActiveNow = presenceStatus === 'online';
+  const isActiveToday = presenceStatus === 'active_today';
 
   // LOG_NOISE_FIX: Presence logging gated behind DEBUG_CARD_PRESENCE (default: false)
   useEffect(() => {
     if (__DEV__ && DEBUG_CARD_PRESENCE && showCarousel && !isPhase2) {
-      const badge = isActiveNow ? 'online' : (isActiveToday ? 'today' : 'none');
-      console.log(`[PRESENCE] ${name}: ${badge}`);
+      console.log(`[PRESENCE] ${name}: ${presenceStatus ?? 'none'}`);
     }
-  }, [name, lastActive, isActiveNow, isActiveToday, showCarousel, isPhase2]);
+  }, [name, presenceStatus, showCarousel, isPhase2]);
 
   // Phase-1 only: Compute "Looking for" text
   const lookingForText = useMemo(() => {

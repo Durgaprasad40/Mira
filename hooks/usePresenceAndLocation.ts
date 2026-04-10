@@ -3,11 +3,11 @@
  *
  * ARCHITECTURE (Clean 3-Layer Design):
  *
- * 1. PRESENCE (Heartbeat) — sendHeartbeat()
- *    - Updates lastActive for "Online Now" display
- *    - Interval: 60 seconds (tight for real-time feel)
- *    - Throttle: Max 1 per 30 seconds
- *    - Threshold: < 5 min = Online Now
+ * 1. PRESENCE (P0 Unified System) — usePresenceHeartbeat()
+ *    - Uses new unified presence table (convex/presence.ts)
+ *    - Updates presence.lastSeenAt AND presence.appState
+ *    - Interval: 30 seconds (as specified in P0 requirements)
+ *    - Thresholds: < 10 min foreground = Online Now, < 24h = Active Today
  *
  * 2. BACKEND LOCATION SYNC — syncLocationToBackendIfNeeded()
  *    - Updates latitude/longitude for server-side distance calculation
@@ -24,7 +24,7 @@
  *    - NOT handled here - Nearby has its own controlled refresh
  *
  * DEBUG TAGS:
- * - [PRESENCE] — heartbeat events
+ * - [PRESENCE] — heartbeat events (now uses P0 unified system)
  * - [LOCATION_SYNC] — backend sync events
  *
  * Must be called from root _layout.tsx to work globally.
@@ -38,8 +38,8 @@ import { useLocationStore, calculateDistanceKm } from '@/stores/locationStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEBUG_PRESENCE, DEBUG_LOCATION } from '@/lib/debugFlags';
 
-// Heartbeat interval: 60 seconds (tight for real-time "Online Now" feel)
-const HEARTBEAT_INTERVAL_MS = 60 * 1000;
+// P0: Heartbeat interval: 30 seconds (unified presence system)
+const HEARTBEAT_INTERVAL_MS = 30 * 1000;
 
 // Location sync throttle: 5 minutes time-based
 const LOCATION_SYNC_THROTTLE_MS = 5 * 60 * 1000;
@@ -49,7 +49,9 @@ const MOVEMENT_THRESHOLD_METERS = 300;
 
 export function usePresenceAndLocation() {
   const { userId, token } = useAuthStore();
-  const heartbeatMutation = useMutation(api.users.heartbeat);
+  // P0: Use new unified presence mutations
+  const markActiveMutation = useMutation(api.presence.markActive);
+  const markBackgroundMutation = useMutation(api.presence.markBackground);
   const updateLocationMutation = useMutation(api.users.updateLocation);
 
   const getBestLocation = useLocationStore((s) => s.getBestLocation);
@@ -60,29 +62,51 @@ export function usePresenceAndLocation() {
   const lastSyncTimeRef = useRef<number>(0);
   const lastSyncedCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastHeartbeatRef = useRef<number>(0);
+  const currentAppStateRef = useRef<AppStateStatus>(AppState.currentState);
 
-  // Send heartbeat to backend (presence only - no location)
+  // P0: Send presence heartbeat (markActive) to unified presence table
   const sendHeartbeat = useCallback(async () => {
     if (isDemoMode || !userId || !token) return;
 
     const now = Date.now();
-    // Throttle heartbeats to max 1 per 30 seconds (tight for real-time feel)
-    if (now - lastHeartbeatRef.current < 30_000) {
+    // Throttle heartbeats to max 1 per 20 seconds
+    if (now - lastHeartbeatRef.current < 20_000) {
       return; // Silent throttle - don't log every time
     }
 
     try {
       lastHeartbeatRef.current = now;
-      await heartbeatMutation({ token });
+      await markActiveMutation({ token });
 
-      // LOG_NOISE_FIX: Heartbeat logging gated behind DEBUG_PRESENCE (fires every 60s)
+      // LOG_NOISE_FIX: Heartbeat logging gated behind DEBUG_PRESENCE
       if (__DEV__ && DEBUG_PRESENCE) {
-        console.log(`[PRESENCE] heartbeat: ${userId.slice(-6)}`);
+        console.log(`[PRESENCE] markActive: ${userId.slice(-6)}`);
       }
     } catch (err) {
       // Silent failure - don't break app
+      if (__DEV__ && DEBUG_PRESENCE) {
+        console.warn('[PRESENCE] markActive failed:', String(err).slice(0, 50));
+      }
     }
-  }, [userId, token, heartbeatMutation]);
+  }, [userId, token, markActiveMutation]);
+
+  // P0: Mark user as in background state
+  const markBackground = useCallback(async () => {
+    if (isDemoMode || !userId || !token) return;
+
+    try {
+      await markBackgroundMutation({ token });
+
+      if (__DEV__ && DEBUG_PRESENCE) {
+        console.log(`[PRESENCE] markBackground: ${userId.slice(-6)}`);
+      }
+    } catch (err) {
+      // Silent failure
+      if (__DEV__ && DEBUG_PRESENCE) {
+        console.warn('[PRESENCE] markBackground failed:', String(err).slice(0, 50));
+      }
+    }
+  }, [userId, token, markBackgroundMutation]);
 
   // Sync location to backend (movement-based + time-based)
   // This updates latitude/longitude for server-side distance calculation
@@ -174,14 +198,23 @@ export function usePresenceAndLocation() {
     if (isDemoMode || !userId) return;
 
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      const prevAppState = currentAppStateRef.current;
+      currentAppStateRef.current = nextAppState;
+
       if (nextAppState === 'active') {
         // LOG_NOISE_FIX: App foreground is very frequent - gated
         if (__DEV__ && DEBUG_PRESENCE) {
-          console.log('[PRESENCE] app active');
+          console.log('[PRESENCE] app → foreground');
         }
         // App came to foreground - send heartbeat and sync location to backend
         sendHeartbeat();
         syncLocationToBackendIfNeeded(true); // Force sync on foreground
+      } else if (nextAppState === 'background' && prevAppState === 'active') {
+        // P0: App went to background - mark as background state
+        if (__DEV__ && DEBUG_PRESENCE) {
+          console.log('[PRESENCE] app → background');
+        }
+        markBackground();
       }
     };
 
@@ -210,7 +243,7 @@ export function usePresenceAndLocation() {
         heartbeatIntervalRef.current = null;
       }
     };
-  }, [userId, sendHeartbeat, syncLocationToBackendIfNeeded]);
+  }, [userId, sendHeartbeat, markBackground, syncLocationToBackendIfNeeded]);
 
   // No return value - this hook just runs side effects
 }

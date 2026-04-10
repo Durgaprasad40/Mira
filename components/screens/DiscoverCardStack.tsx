@@ -65,6 +65,8 @@ import { NotificationPopover } from "@/components/discover/NotificationPopover";
 import { useLocationStore } from "@/stores/locationStore";
 // REMOVED: IncognitoConversation, ConnectionSource types - no longer needed after disabling local conversation creation
 import type { Id } from "@/convex/_generated/dataModel";
+// P0 UNIFIED PRESENCE: Batch presence query for discover cards
+import { useBatchPresence } from "@/hooks/usePresence";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
 import * as Haptics from 'expo-haptics';
@@ -1463,6 +1465,34 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const current = queueCurrent; // From stable queue
   const next = queueNext; // From stable queue
 
+  // P0 UNIFIED PRESENCE: Batch query for current and next profile presence
+  // Use userId or id (both should map to Convex user ID)
+  const presenceUserIds = useMemo(() => {
+    const ids: Id<'users'>[] = [];
+    if (current?.userId || current?.id) {
+      ids.push((current.userId || current.id) as Id<'users'>);
+    }
+    if (next?.userId || next?.id) {
+      ids.push((next.userId || next.id) as Id<'users'>);
+    }
+    return ids;
+  }, [current?.userId, current?.id, next?.userId, next?.id]);
+
+  const batchPresence = useBatchPresence(presenceUserIds.length > 0 ? presenceUserIds : null);
+
+  // Get presence status for current and next profiles
+  const currentPresenceStatus = useMemo(() => {
+    if (!batchPresence || !current) return undefined;
+    const id = current.userId || current.id;
+    return batchPresence[id]?.status;
+  }, [batchPresence, current?.userId, current?.id]);
+
+  const nextPresenceStatus = useMemo(() => {
+    if (!batchPresence || !next) return undefined;
+    const id = next.userId || next.id;
+    return batchPresence[id]?.status;
+  }, [batchPresence, next?.userId, next?.id]);
+
   // Track when stack becomes empty (for onStackEmpty callback)
   const hadProfilesRef = useRef(false);
   const stackEmptyCalledRef = useRef(false);
@@ -1477,15 +1507,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [current, onStackEmpty]);
 
   // Trust badges — memoized per profile to avoid allocation each render
+  // P0 UNIFIED PRESENCE: Now uses presenceStatus instead of lastActive
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const currentBadges = useMemo(
-    () => current ? getTrustBadges({ isVerified: current.isVerified, lastActive: current.lastActive, photoCount: current.photos?.length, bio: current.bio }) : [],
-    [current?.id],
+    () => current ? getTrustBadges({ isVerified: current.isVerified, presenceStatus: currentPresenceStatus, photoCount: current.photos?.length, bio: current.bio }) : [],
+    [current?.id, currentPresenceStatus],
   );
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const nextBadges = useMemo(
-    () => next ? getTrustBadges({ isVerified: next.isVerified, lastActive: next.lastActive, photoCount: next.photos?.length, bio: next.bio }) : [],
-    [next?.id],
+    () => next ? getTrustBadges({ isVerified: next.isVerified, presenceStatus: nextPresenceStatus, photoCount: next.photos?.length, bio: next.bio }) : [],
+    [next?.id, nextPresenceStatus],
   );
 
   // Phase-2 only: Track profile views when card is shown
@@ -2423,6 +2454,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               theme={isPhase2 ? "dark" : "light"}
               privateIntentKeys={next.privateIntentKeys ?? (next as any).intentKeys ?? (next.privateIntentKey ? [next.privateIntentKey] : [])}
               isIncognito={next.isIncognito}
+              presenceStatus={nextPresenceStatus}
               activities={next.activities}
               gender={next.gender}
               lookingFor={next.lookingFor}
@@ -2463,7 +2495,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 privateIntentKeys={current.privateIntentKeys ?? (current as any).intentKeys ?? (current.privateIntentKey ? [current.privateIntentKey] : [])}
                 isIncognito={current.isIncognito}
                 exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
-                lastActive={current.lastActive ?? (current as any).lastActiveAt}
+                presenceStatus={currentPresenceStatus}
                 activities={current.activities}
                 gender={current.gender}
                 lookingFor={current.lookingFor}

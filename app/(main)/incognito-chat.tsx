@@ -59,6 +59,7 @@ import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import type { IncognitoMessage } from '@/types';
 // P2-INSTRUMENTATION: Sentry breadcrumbs for Phase-2 debugging
 import { P2 } from '@/lib/p2Instrumentation';
+import { useUserPresence } from '@/hooks/usePresence';
 
 // SELECTOR FIX: Stable empty array reference to avoid infinite loop in useSyncExternalStore
 const EMPTY_ARRAY: IncognitoMessage[] = [];
@@ -202,6 +203,12 @@ export default function PrivateChatScreen() {
     if (localConversation) return localConversation;
     return null;
   }, [localConversation, backendConversation]);
+
+  // P0 UNIFIED PRESENCE: Query presence for the other participant
+  const participantIdForPresence = conversation?.participantId
+    ? (conversation.participantId as Id<'users'>)
+    : null;
+  const participantPresence = useUserPresence(participantIdForPresence);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P2-INSTRUMENTATION: Set Sentry context when conversation/user data is available
@@ -1821,17 +1828,13 @@ export default function PrivateChatScreen() {
                 <Ionicons name="person" size={20} color={C.textLight} />
               </View>
             )}
-            {/* PHASE 1 PARITY: Presence dot - green if online, gray if offline */}
-            {(() => {
-              const lastActive = (conversation as any).participantLastActive ?? 0;
-              const isOnline = Date.now() - lastActive < 60_000;
-              return (
-                <View style={[
-                  styles.presenceDot,
-                  isOnline ? styles.presenceDotOnline : styles.presenceDotOffline,
-                ]} />
-              );
-            })()}
+            {/* P0 UNIFIED PRESENCE: Presence dot - green if online, gray if offline */}
+            <View style={[
+              styles.presenceDot,
+              participantPresence?.status === 'online'
+                ? styles.presenceDotOnline
+                : styles.presenceDotOffline,
+            ]} />
             {/* PHOTO ACCESS: Lock icon when photo is blurred and not approved */}
             {(conversation as any).isPhotoBlurred && !(conversation as any).canViewClearPhoto && (
               <View style={styles.photoLockedBadge}>
@@ -1849,23 +1852,12 @@ export default function PrivateChatScreen() {
           <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
             {conversation.participantName}
           </Text>
-          {/* PHASE 1 PARITY: Online status text exactly like Phase 1 */}
+          {/* P0 UNIFIED PRESENCE: Show status from unified presence system */}
           {/* P1-004 FIX: Show "typing..." when other user is typing */}
           <Text style={[styles.headerStatus, isOtherUserTyping && styles.headerStatusTyping]}>
-            {(() => {
-              // P1-004 FIX: Typing indicator takes priority
-              if (isOtherUserTyping) return 'typing...';
-              const lastActive = (conversation as any).participantLastActive ?? 0;
-              const now = Date.now();
-              const diff = now - lastActive;
-              // Online: within 1 minute (likely still in app)
-              if (diff < 60_000) return 'Online';
-              // Active now: within 5 minutes
-              if (diff < 5 * 60_000) return 'Active now';
-              // Recently active: anything else with valid timestamp
-              if (lastActive > 0) return 'Recently active';
-              return 'Offline';
-            })()}
+            {isOtherUserTyping
+              ? 'typing...'
+              : (participantPresence?.label || 'Recently active')}
           </Text>
         </TouchableOpacity>
         {/* PHOTO ACCESS: Request access button when photo is blurred */}

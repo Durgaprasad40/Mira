@@ -97,4 +97,12 @@ crons.daily(
   internal.phase2Ranking.cleanupOldImpressions
 );
 
+// P0 Presence: Expire stale presence records every 2 minutes
+// Marks users as inactive if no heartbeat received within threshold
+crons.interval(
+  'expire-stale-presence',
+  { minutes: 2 },
+  internal.presence.expireIfStale
+);
+
 export default crons;
