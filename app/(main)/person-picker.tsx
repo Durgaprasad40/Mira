@@ -19,7 +19,6 @@ import { useDemoStore } from '@/stores/demoStore';
 import { useInteractionStore } from '@/stores/interactionStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { asUserId } from '@/convex/id';
 import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 
 interface PersonItem {
@@ -37,10 +36,9 @@ export default function PersonPickerScreen() {
   const storeMatches = useDemoStore((s) => s.matches);
 
   // Convex query for eligible tag targets (only in live mode)
-  const convexUserId = !isDemoMode && userId ? asUserId(userId) : undefined;
   const convexTargets = useQuery(
     api.confessions.getEligibleTagTargets,
-    convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   // Determine loading state

@@ -17,16 +17,7 @@ import { COLORS, SPACING, SIZES, FONT_SIZE, FONT_WEIGHT, HAIRLINE, moderateScale
 import { Toast } from '@/components/ui/Toast';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { asUserId, asCommentConnectId } from '@/convex/id';
-
-// Helper for converting connect ID
-const asCommentConnectIdSafe = (id: string) => {
-  try {
-    return id as any;
-  } catch {
-    return null;
-  }
-};
+import { asCommentConnectId } from '@/convex/id';
 
 // Helper for time ago
 function getTimeAgo(timestamp: number): string {
@@ -79,16 +70,19 @@ export default function CommentConnectRequestsScreen() {
   const handleRespond = useCallback(async (connectId: string, action: 'accept' | 'reject') => {
     if (!currentUserId || respondingId) return;
 
-    const convexUserId = asUserId(currentUserId);
-    if (!convexUserId) return;
+    const connectRowId = asCommentConnectId(connectId);
+    if (!connectRowId) {
+      Toast.show('Invalid request. Please try again.');
+      return;
+    }
 
     try {
       setRespondingId(connectId);
       setRespondingAction(action);
 
       const result = await respondMutation({
-        connectId: connectId as any,
-        userId: convexUserId,
+        connectId: connectRowId,
+        userId: currentUserId,
         action,
       });
 
@@ -96,10 +90,6 @@ export default function CommentConnectRequestsScreen() {
         Toast.show("It's a match! You can now chat.");
         // FIX 1: Navigate to match celebration with matchId, userId, and source
         // source=confessions tells match-celebration to navigate to Confessions tab on "Keep Discovering"
-        if (__DEV__) {
-          console.log('[ConnectRequests] Accept success, matchId=', result.matchId, 'otherUserId=', result.otherUserId);
-          console.log('[ConnectRequests] Navigating to match-celebration with source=confessions');
-        }
         if (result.matchId && result.otherUserId) {
           router.replace(`/(main)/match-celebration?matchId=${result.matchId}&userId=${result.otherUserId}&source=confessions` as any);
         } else if (result.matchId) {
@@ -108,8 +98,9 @@ export default function CommentConnectRequestsScreen() {
       } else if (action === 'reject') {
         Toast.show('Request declined');
       }
-    } catch (e: any) {
-      Toast.show(e?.message || 'Failed to respond. Please try again.');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to respond. Please try again.';
+      Toast.show(message);
     } finally {
       setRespondingId(null);
       setRespondingAction(null);

@@ -162,6 +162,7 @@ export default function ConfessionThreadScreen() {
   // DERIVED STATE: Replies
   // ──────────────────────────────────────────────────────────────────────────
   const demoReplies = confessionId ? (storeReplies[confessionId] || []) : [];
+  const [hiddenReplyIds, setHiddenReplyIds] = useState<string[]>([]);
 
   const replies: ConfessionReply[] = useMemo(() => {
     let items: ConfessionReply[];
@@ -227,7 +228,6 @@ export default function ConfessionThreadScreen() {
   const [replyingToReplyId, setReplyingToReplyId] = useState<string | null>(null);
   const [replyToReplyText, setReplyToReplyText] = useState('');
   const [guardTriggered, setGuardTriggered] = useState(false);
-  const [hiddenReplyIds, setHiddenReplyIds] = useState<string[]>([]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // NAVIGATION GUARD: Block expired/reported confessions

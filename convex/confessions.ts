@@ -835,6 +835,190 @@ export const markTaggedConfessionsSeen = mutation({
   },
 });
 
+export const getEligibleTagTargets = query({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      return [];
+    }
+
+    const likes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+      .collect();
+
+    const eligibleTargetIds = new Set<Id<'users'>>();
+    for (const like of likes) {
+      if (like.action === 'like' || like.action === 'super_like' || like.action === 'text') {
+        eligibleTargetIds.add(like.toUserId);
+      }
+    }
+
+    const targets: Array<{ id: string; name: string; photoUrl: string | null }> = [];
+    for (const targetId of eligibleTargetIds) {
+      const targetUser = await ctx.db.get(targetId);
+      if (!targetUser || !targetUser.isActive || !!targetUser.deletedAt || !!targetUser.isBanned) {
+        continue;
+      }
+
+      targets.push({
+        id: targetUser._id,
+        name: targetUser.name,
+        photoUrl: targetUser.primaryPhotoUrl ?? targetUser.displayPrimaryPhotoUrl ?? null,
+      });
+    }
+
+    targets.sort((a, b) => a.name.localeCompare(b.name));
+    return targets;
+  },
+});
+
+export const getPendingCommentConnects = query({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      return [];
+    }
+
+    const now = Date.now();
+    const connects = await ctx.db
+      .query('confessionCommentConnects')
+      .collect();
+
+    const pendingConnects = connects
+      .filter(
+        (connect) =>
+          connect.toUserId === userId &&
+          connect.status !== 'accepted' &&
+          connect.status !== 'rejected' &&
+          (connect.expiresAt === undefined || connect.expiresAt > now) &&
+          !!connect.confessionId &&
+          !!connect.replyId
+      )
+      .sort((a, b) => b.createdAt - a.createdAt);
+
+    const results: Array<{
+      connectId: string;
+      confessionId: string;
+      replyId: string;
+      confessionText: string;
+      confessionMood: string;
+      replyText: string;
+      requestedAt: number;
+    }> = [];
+
+    for (const connect of pendingConnects) {
+      const confession = await ctx.db.get(connect.confessionId!);
+      const reply = await ctx.db.get(connect.replyId!);
+
+      if (!confession || confession.isDeleted || !reply) {
+        continue;
+      }
+
+      results.push({
+        connectId: connect._id,
+        confessionId: confession._id,
+        replyId: reply._id,
+        confessionText: confession.text,
+        confessionMood: confession.mood,
+        replyText: reply.text,
+        requestedAt: connect.createdAt,
+      });
+    }
+
+    return results;
+  },
+});
+
+export const respondToCommentConnect = mutation({
+  args: {
+    connectId: v.id('confessionCommentConnects'),
+    userId: v.union(v.id('users'), v.string()),
+    action: v.union(v.literal('accept'), v.literal('reject')),
+  },
+  handler: async (ctx, args) => {
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const connect = await ctx.db.get(args.connectId);
+
+    if (!connect) {
+      throw new Error('Connect request not found.');
+    }
+
+    if (connect.toUserId !== userId) {
+      throw new Error('Only the request recipient can respond.');
+    }
+
+    if (connect.status === 'accepted' || connect.status === 'rejected') {
+      throw new Error('Connect request already processed.');
+    }
+
+    const now = Date.now();
+    if (connect.expiresAt !== undefined && connect.expiresAt <= now) {
+      await ctx.db.patch(args.connectId, {
+        status: 'rejected',
+        respondedAt: now,
+      });
+
+      if (connect.replyId) {
+        await ctx.db.patch(connect.replyId, { hasActiveConnectRequest: false });
+      }
+
+      throw new Error('Connect request expired.');
+    }
+
+    await ctx.db.patch(args.connectId, {
+      status: args.action === 'accept' ? 'accepted' : 'rejected',
+      respondedAt: now,
+    });
+
+    if (connect.replyId) {
+      await ctx.db.patch(connect.replyId, { hasActiveConnectRequest: false });
+    }
+
+    if (args.action === 'reject') {
+      return {
+        success: true,
+        matchCreated: false,
+      };
+    }
+
+    const user1Id = connect.fromUserId < connect.toUserId ? connect.fromUserId : connect.toUserId;
+    const user2Id = connect.fromUserId < connect.toUserId ? connect.toUserId : connect.fromUserId;
+
+    let matchId: Id<'matches'>;
+    const existingMatch = await ctx.db
+      .query('matches')
+      .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+      .first();
+
+    if (existingMatch) {
+      matchId = existingMatch._id;
+    } else {
+      matchId = await ctx.db.insert('matches', {
+        user1Id,
+        user2Id,
+        matchedAt: now,
+        isActive: true,
+      });
+    }
+
+    await ctx.db.patch(args.connectId, { matchId });
+
+    return {
+      success: true,
+      matchCreated: true,
+      matchId,
+      otherUserId: connect.fromUserId as string,
+    };
+  },
+});
+
 // Report a reply for moderation
 export const reportReply = mutation({
   args: {

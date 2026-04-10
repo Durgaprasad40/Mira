@@ -78,6 +78,7 @@ export default function ConfessionsScreen() {
   const router = useRouter();
   const { openTagged } = useLocalSearchParams<{ openTagged?: string }>();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   // BUGFIX: In live mode, never use demo_user_1 fallback for Convex queries
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
@@ -295,21 +296,21 @@ export default function ConfessionsScreen() {
 
   // Convex queries (only when not in demo mode)
   const convexConfessions = useQuery(
-    (api as any).confessions.listConfessions,
+    api.confessions.listConfessions,
     !isDemoMode ? { sortBy: 'latest' as const, viewerId: currentUserId, refreshKey: retryKey, limit: 50 } : 'skip'
   );
   const convexTrending = useQuery(
-    (api as any).confessions.getTrendingConfessions,
+    api.confessions.getTrendingConfessions,
     !isDemoMode ? { viewerId: currentUserId, refreshKey: retryKey, limit: 5 } : 'skip'
   );
 
   // Tagged confessions (confessions where I'm tagged)
   const convexTaggedConfessions = useQuery(
-    (api as any).confessions.listTaggedConfessionsForUser,
+    api.confessions.listTaggedConfessionsForUser,
     !isDemoMode && convexUserId ? { userId: convexUserId, refreshKey: retryKey } : 'skip'
   );
   const convexTaggedBadgeCount = useQuery(
-    (api as any).confessions.getTaggedConfessionBadgeCount,
+    api.confessions.getTaggedConfessionBadgeCount,
     !isDemoMode && convexUserId ? { userId: convexUserId, refreshKey: retryKey } : 'skip'
   );
 
@@ -319,8 +320,8 @@ export default function ConfessionsScreen() {
   const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
   const markTaggedSeenMutation = useMutation(api.confessions.markTaggedConfessionsSeen);
   const getOrCreateForConfessionMutation = useMutation(api.confessions.getOrCreateForConfession);
-  const consumePreviewMutation = useMutation((api as any).confessions.consumePreview);
-  const blockUserMutation = useMutation((api as any).users.blockUser);
+  const consumePreviewMutation = useMutation(api.confessions.consumePreview);
+  const blockUserMutation = useMutation(api.users.blockUser);
 
   // ══════════════════════════════════════════════════════════════════════════
   // INTEGRITY MODULE — Single source of truth for confession state
@@ -775,9 +776,15 @@ export default function ConfessionsScreen() {
       pendingBlockAuthorsRef.current.add(authorId);
 
       try {
+        const blockedUserId = asUserId(authorId);
+        if (!token || !blockedUserId) {
+          Alert.alert('Unable to block user right now');
+          return;
+        }
+
         const result = await blockUserMutation({
-          authUserId: currentUserId,
-          blockedUserId: authorId as any,
+          token,
+          blockedUserId,
         });
 
         if (!result?.success) {
@@ -794,7 +801,7 @@ export default function ConfessionsScreen() {
         pendingBlockAuthorsRef.current.delete(authorId);
       }
     },
-    [blockUserLocal, blockUserMutation, currentUserId, isDemoMode, showToastMessage]
+    [blockUserLocal, blockUserMutation, isDemoMode, showToastMessage, token]
   );
 
   const handleSubmitReport = useCallback(
@@ -1367,7 +1374,6 @@ export default function ConfessionsScreen() {
               onPress={() => handleOpenThread(item.id)}
               onReact={() => handleOpenEmojiPicker(item.id)}
               onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}
-              onReplyAnonymously={() => handleReplyAnonymously(item.id, item.userId)}
               onReport={() => handleReportBlock(item.id, item.userId)}
               onViewProfile={isTaggedForMe ? () => handleViewProfileRequest(item.id, item.userId) : undefined}
               onLongPress={() => handleLongPressConfession(item.id, item.userId)}
