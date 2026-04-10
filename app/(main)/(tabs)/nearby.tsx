@@ -59,6 +59,7 @@ import {
   ActivityIndicator,
   Linking,
   Platform,
+  Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -77,6 +78,7 @@ import { log } from '@/utils/logger';
 import { Toast } from '@/components/ui/Toast';
 import { Badge } from '@/components/ui/Badge';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Haptics from 'expo-haptics';
 import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 
 // Key for storing when user last viewed crossed paths
@@ -443,15 +445,8 @@ function getBoundingBox(region: Region): [number, number, number, number] {
 // ---------------------------------------------------------------------------
 
 export default function NearbyScreen() {
-  // ══════════════════════════════════════════════════════════════════════════
-  // NEARBY STARTUP LOG - trace rendering/crash point
-  // ══════════════════════════════════════════════════════════════════════════
-  log.info('[NEARBY]', '═══════════════════════════════════════════════');
-  log.info('[NEARBY]', 'NearbyScreen rendering');
-
   const router = useRouter();
   const isDemo = isDemoMode;
-  log.info('[NEARBY]', 'Initial state', { isDemo });
 
   // Map ref for programmatic control
   const mapRef = useRef<MapView>(null);
@@ -489,6 +484,10 @@ export default function NearbyScreen() {
   // Ref to track query timeout (prevents race condition)
   const queryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // P1-003 FIX: Ref to track query completion for timeout callback
+  // This provides fresh state check inside setTimeout, avoiding stale closure values
+  const queryCompletedRef = useRef(false);
+
   // Auto-retry refs (conservative: max 2 attempts, 5s delay)
   const autoRetryCountRef = useRef(0);
   const autoRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -497,7 +496,20 @@ export default function NearbyScreen() {
 
   // Empty state auto-dismiss timer ref
   const emptyStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const EMPTY_STATE_DISMISS_MS = 3000;
+  const EMPTY_STATE_DISMISS_MS = 5000;
+
+  // P2-005: Maximum markers to render on map (performance limit)
+  const MAX_VISIBLE_MARKERS = 30;
+
+  // ---------------------------------------------------------------------------
+  // P3 POLISH: Animation refs for premium feel
+  // ---------------------------------------------------------------------------
+  // P3-001: Empty state fade animation
+  const emptyStateOpacity = useRef(new Animated.Value(0)).current;
+  // P3-002: Recenter button press scale animation
+  const recenterScale = useRef(new Animated.Value(1)).current;
+  // P3-003: Loading overlay fade animation
+  const loadingOpacity = useRef(new Animated.Value(0)).current;
 
   // P2-NEARBY-002: Centralized unmount cleanup for all timer refs
   // This ensures all timers are cleared on unmount, regardless of effect state
@@ -519,6 +531,13 @@ export default function NearbyScreen() {
         emptyStateTimerRef.current = null;
       }
     };
+  }, []);
+
+  // DEV-only startup log (runs once on mount, not on every render)
+  useEffect(() => {
+    if (__DEV__) {
+      log.info('[NEARBY]', 'NearbyScreen mounted', { isDemo });
+    }
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -552,10 +571,13 @@ export default function NearbyScreen() {
     const latestTimestamp = Math.max(...crossedPathsQuery.map((cp: any) => cp.createdAt || 0));
 
     // Get last seen timestamp from storage
+    // P1-005 FIX: Add mount guard to prevent state update after unmount
     AsyncStorage.getItem(CROSSED_PATHS_LAST_SEEN_KEY).then((lastSeenStr) => {
+      if (!isMountedRef.current) return;
       const lastSeen = lastSeenStr ? parseInt(lastSeenStr, 10) : 0;
       setHasNewCrossedPaths(latestTimestamp > lastSeen);
     }).catch(() => {
+      if (!isMountedRef.current) return;
       // On error, assume there are new paths if we have any
       setHasNewCrossedPaths(crossedPathsQuery.length > 0);
     });
@@ -568,6 +590,8 @@ export default function NearbyScreen() {
   // Clear timeout when query succeeds or on unmount
   useEffect(() => {
     if (nearbyUsersQuery !== undefined) {
+      // P1-003 FIX: Mark query as completed (checked by timeout callback)
+      queryCompletedRef.current = true;
       // Query succeeded - clear any pending timeout
       if (queryTimeoutRef.current) {
         clearTimeout(queryTimeoutRef.current);
@@ -601,10 +625,19 @@ export default function NearbyScreen() {
       clearTimeout(queryTimeoutRef.current);
     }
 
+    // P1-003 FIX: Reset completion flag when starting new query timeout
+    queryCompletedRef.current = false;
+
     queryTimeoutRef.current = setTimeout(() => {
       if (!isMountedRef.current) return;
+      // P1-003 FIX: Check ref for fresh state instead of stale closure value
+      // If query completed between timeout set and callback execution, skip error
+      if (queryCompletedRef.current) {
+        queryTimeoutRef.current = null;
+        return;
+      }
       // Only set error if query is still pending
-      if (nearbyUsersQuery === undefined && isQueryActive) {
+      if (isQueryActive) {
         setQueryError('Unable to load nearby users. Please check your connection.');
         setIsRetrying(false);
         log.warn('[NEARBY]', 'query timeout - no data after 30s');
@@ -618,7 +651,24 @@ export default function NearbyScreen() {
         queryTimeoutRef.current = null;
       }
     };
-  }, [isQueryLoading, isQueryActive, nearbyUsersQuery]);
+  }, [isQueryLoading, isQueryActive]);
+
+  // P3-003: Animate loading overlay opacity on show
+  useEffect(() => {
+    const isShowingLoading = (isQueryLoading || isRetrying) && !isDemo;
+    if (isShowingLoading) {
+      // Fade in
+      loadingOpacity.setValue(0);
+      Animated.timing(loadingOpacity, {
+        toValue: 1,
+        duration: 150,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      // Reset for next show
+      loadingOpacity.setValue(0);
+    }
+  }, [isQueryLoading, isRetrying, isDemo, loadingOpacity]);
 
   // ---------------------------------------------------------------------------
   // Auto-retry on query error (conservative: max 2 attempts, 5s delay)
@@ -962,7 +1012,7 @@ export default function NearbyScreen() {
       return (a.distance ?? 1000) - (b.distance ?? 1000);
     });
 
-    return sorted.slice(0, 30);
+    return sorted.slice(0, MAX_VISIBLE_MARKERS);
   }, [processedNearbyUsers]);
 
   // Alias for rendering (visibleUsers are the processed, sorted, limited markers)
@@ -1053,7 +1103,7 @@ export default function NearbyScreen() {
   }, []);
 
   // ---------------------------------------------------------------------------
-  // Empty state: show once per app session, auto-dismiss after 3 seconds
+  // Empty state: show once per app session, auto-dismiss after 5 seconds
   // ---------------------------------------------------------------------------
   const isEmptyStateCondition = locationUIState === 'ready' && mapUsers.length === 0 && !isDemo && !isQueryLoading && !isRetrying;
 
@@ -1077,7 +1127,7 @@ export default function NearbyScreen() {
     hasShownEmptyStateThisSession = true;
     setShowEmptyState(true);
 
-    // Auto-dismiss after 3 seconds
+    // P2-006 FIX: Auto-dismiss after 5 seconds (matches EMPTY_STATE_DISMISS_MS)
     emptyStateTimerRef.current = setTimeout(() => {
       if (isMountedRef.current) {
         setShowEmptyState(false);
@@ -1093,6 +1143,22 @@ export default function NearbyScreen() {
       }
     };
   }, [isEmptyStateCondition]);
+
+  // P3-001: Animate empty state opacity on show/hide
+  useEffect(() => {
+    if (showEmptyState) {
+      // Fade in
+      emptyStateOpacity.setValue(0);
+      Animated.timing(emptyStateOpacity, {
+        toValue: 1,
+        duration: 200,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      // Fade out (instant since component will unmount)
+      emptyStateOpacity.setValue(0);
+    }
+  }, [showEmptyState, emptyStateOpacity]);
 
   // ---------------------------------------------------------------------------
   // Navigation handlers for header buttons
@@ -1117,6 +1183,13 @@ export default function NearbyScreen() {
       return;
     }
 
+    // P2-002: Add haptic feedback on marker tap for premium feel
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {
+      // Haptics not available on device
+    }
+
     log.info('[NEARBY]', 'marker tapped, opening profile', { id: user.id, name: user.name });
     safePush(router, `/(main)/profile/${user.id}` as any, 'nearby->profile');
   }, [router]);
@@ -1134,6 +1207,13 @@ export default function NearbyScreen() {
   const handleRecenterToMyLocation = useCallback(() => {
     if (!mapRef.current) return;
 
+    // P2-003: Add haptic feedback on recenter for premium feel
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {
+      // Haptics not available on device
+    }
+
     // Use real location if available
     if (bestLocation && isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)) {
       mapRef.current.animateToRegion({
@@ -1147,6 +1227,23 @@ export default function NearbyScreen() {
       console.warn('[NEARBY] No valid location for recenter');
     }
   }, [bestLocation]);
+
+  // P3-002: Recenter button press animation handlers
+  const handleRecenterPressIn = useCallback(() => {
+    Animated.spring(recenterScale, {
+      toValue: 0.95,
+      useNativeDriver: true,
+    }).start();
+  }, [recenterScale]);
+
+  const handleRecenterPressOut = useCallback(() => {
+    Animated.spring(recenterScale, {
+      toValue: 1,
+      friction: 3,
+      tension: 40,
+      useNativeDriver: true,
+    }).start();
+  }, [recenterScale]);
 
   // ---------------------------------------------------------------------------
   // Permission flow on focus - start/stop GPS tracking
@@ -1274,62 +1371,28 @@ export default function NearbyScreen() {
   }, [startLocationTracking]);
 
   // ---------------------------------------------------------------------------
-  // Render: Checking state
+  // SHELL UI PATTERN: Header renders immediately, content area handles states
+  // This provides instant visual feedback when switching to Nearby tab
   // ---------------------------------------------------------------------------
-  log.info('[NEARBY]', 'Render check', { locationUIState, permissionStatus, hasError: !!error });
+  // P1-001 FIX: Removed render-path DEV log that executed on every render
+  // State changes are logged via useEffect hooks, not in render path
 
-  if (locationUIState === 'checking') {
-    log.info('[NEARBY]', 'Showing checking state');
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <View style={{ width: 22 }} />
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity
-            onPress={handleOpenCrossedPaths}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Crossed paths"
-            accessibilityHint="View people you've crossed paths with"
-          >
-            <View>
-              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-              {hasNewCrossedPaths && (
-                <Badge dot animate style={styles.crossedPathsBadge} />
-              )}
-            </View>
-          </TouchableOpacity>
-        </View>
+  // Helper: Render the appropriate content based on current state
+  // Header is rendered separately (shell pattern), only content varies
+  const renderContent = () => {
+    // Checking state - location being acquired
+    if (locationUIState === 'checking') {
+      return (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
           <Text style={styles.statusText}>Getting your location...</Text>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Denied - needs settings
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'denied_needs_settings') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <View style={{ width: 22 }} />
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity
-            onPress={handleOpenCrossedPaths}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Crossed paths"
-            accessibilityHint="View people you've crossed paths with"
-          >
-            <View>
-              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-              {hasNewCrossedPaths && (
-                <Badge dot animate style={styles.crossedPathsBadge} />
-              )}
-            </View>
-          </TouchableOpacity>
-        </View>
+    // Denied - needs settings
+    if (locationUIState === 'denied_needs_settings') {
+      return (
         <View style={styles.centered}>
           <Ionicons name="navigate-circle-outline" size={64} color={COLORS.textLight} />
           <Text style={styles.title}>Location Access Denied</Text>
@@ -1340,33 +1403,12 @@ export default function NearbyScreen() {
             <Text style={styles.primaryButtonText}>Open Settings</Text>
           </TouchableOpacity>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Restricted (iOS parental controls)
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'restricted') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <View style={{ width: 22 }} />
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity
-            onPress={handleOpenCrossedPaths}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Crossed paths"
-            accessibilityHint="View people you've crossed paths with"
-          >
-            <View>
-              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-              {hasNewCrossedPaths && (
-                <Badge dot animate style={styles.crossedPathsBadge} />
-              )}
-            </View>
-          </TouchableOpacity>
-        </View>
+    // Restricted (iOS parental controls)
+    if (locationUIState === 'restricted') {
+      return (
         <View style={styles.centered}>
           <Ionicons name="lock-closed-outline" size={64} color={COLORS.textLight} />
           <Text style={styles.title}>Location Restricted</Text>
@@ -1374,33 +1416,12 @@ export default function NearbyScreen() {
             Location access is restricted on this device, possibly due to parental controls or device management. Contact your device administrator for help.
           </Text>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Location Services Disabled (system-wide)
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'services_disabled') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <View style={{ width: 22 }} />
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity
-            onPress={handleOpenCrossedPaths}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Crossed paths"
-            accessibilityHint="View people you've crossed paths with"
-          >
-            <View>
-              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-              {hasNewCrossedPaths && (
-                <Badge dot animate style={styles.crossedPathsBadge} />
-              )}
-            </View>
-          </TouchableOpacity>
-        </View>
+    // Location Services Disabled (system-wide)
+    if (locationUIState === 'services_disabled') {
+      return (
         <View style={styles.centered}>
           <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
           <Text style={styles.title}>Location Services Off</Text>
@@ -1411,33 +1432,12 @@ export default function NearbyScreen() {
             <Text style={styles.primaryButtonText}>Open Settings</Text>
           </TouchableOpacity>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Error state
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'error') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <View style={{ width: 22 }} />
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity
-            onPress={handleOpenCrossedPaths}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Crossed paths"
-            accessibilityHint="View people you've crossed paths with"
-          >
-            <View>
-              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-              {hasNewCrossedPaths && (
-                <Badge dot animate style={styles.crossedPathsBadge} />
-              )}
-            </View>
-          </TouchableOpacity>
-        </View>
+    // Error state
+    if (locationUIState === 'error') {
+      return (
         <View style={styles.centered}>
           <Ionicons name="warning-outline" size={64} color={COLORS.warning} />
           <Text style={styles.title}>Location Error</Text>
@@ -1448,33 +1448,12 @@ export default function NearbyScreen() {
             <Text style={styles.primaryButtonText}>Retry</Text>
           </TouchableOpacity>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Query error state
-  // ---------------------------------------------------------------------------
-  if (queryError) {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <View style={{ width: 22 }} />
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity
-            onPress={handleOpenCrossedPaths}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Crossed paths"
-            accessibilityHint="View people you've crossed paths with"
-          >
-            <View>
-              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-              {hasNewCrossedPaths && (
-                <Badge dot animate style={styles.crossedPathsBadge} />
-              )}
-            </View>
-          </TouchableOpacity>
-        </View>
+    // Query error state
+    if (queryError) {
+      return (
         <View style={styles.centered}>
           <Ionicons name="cloud-offline-outline" size={64} color={COLORS.warning} />
           <Text style={styles.title}>Connection Issue</Text>
@@ -1485,78 +1464,26 @@ export default function NearbyScreen() {
             <Text style={styles.primaryButtonText}>Try Again</Text>
           </TouchableOpacity>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Ready - show map
-  // ---------------------------------------------------------------------------
-  log.info('[NEARBY]', 'Attempting to render map', {
-    hasMapRegion: !!mapRegion,
-    locationUIState,
-    userCount: mapUsers?.length ?? 0,
-  });
-
-  // Final safety check: ensure we have valid region
-  if (!mapRegion) {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <View style={{ width: 22 }} />
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity
-            onPress={handleOpenCrossedPaths}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Crossed paths"
-            accessibilityHint="View people you've crossed paths with"
-          >
-            <View>
-              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-              {hasNewCrossedPaths && (
-                <Badge dot animate style={styles.crossedPathsBadge} />
-              )}
-            </View>
-          </TouchableOpacity>
-        </View>
+    // Safety check: no map region yet
+    if (!mapRegion) {
+      if (__DEV__) {
+        log.info('[NEARBY]', 'Waiting for map region');
+      }
+      return (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
           <Text style={styles.statusText}>Preparing map...</Text>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  return (
-    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-      <View style={styles.header}>
-        <View style={{ width: 22 }} />
+    // Ready state - render map with error boundary
+    // P1-001 FIX: Removed DEV log from render path (was logging on every render)
 
-        <Text style={styles.headerTitle}>Nearby</Text>
-
-        <TouchableOpacity
-          onPress={handleOpenCrossedPaths}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          accessibilityLabel="Crossed paths"
-          accessibilityHint="View people you've crossed paths with"
-        >
-          <View>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-            {hasNewCrossedPaths && (
-              <Badge dot animate style={styles.crossedPathsBadge} />
-            )}
-          </View>
-        </TouchableOpacity>
-
-        {isDemo && (
-          <View style={styles.demoBadge}>
-            <Text style={styles.demoBadgeText}>DEMO</Text>
-          </View>
-        )}
-
-              </View>
-
-      {/* STABILITY FIX S4: Error boundary around map for crash containment */}
+    return (
       <MapErrorBoundary>
       <View style={styles.mapContainer}>
         <MapView
@@ -1636,20 +1563,22 @@ export default function NearbyScreen() {
         </MapView>
 
         {/* Query loading indicator - shown while fetching nearby users */}
+        {/* P3-003: Animated fade-in for premium feel */}
         {(isQueryLoading || isRetrying) && !isDemo && (
-          <View style={styles.loadingOverlay}>
+          <Animated.View style={[styles.loadingOverlay, { opacity: loadingOpacity }]}>
             <View style={styles.loadingCard}>
               <ActivityIndicator size="small" color={COLORS.primary} />
               <Text style={styles.loadingText}>
                 {isRetrying ? 'Retrying...' : 'Finding people nearby...'}
               </Text>
             </View>
-          </View>
+          </Animated.View>
         )}
 
-        {/* Empty state overlay - shown once per app session, auto-dismisses after 3s */}
+        {/* Empty state overlay - shown once per app session, auto-dismisses after 5s */}
+        {/* P3-001: Animated fade in/out for premium feel */}
         {showEmptyState && (
-          <View style={styles.emptyOverlay}>
+          <Animated.View style={[styles.emptyOverlay, { opacity: emptyStateOpacity }]}>
             <View style={styles.emptyCard}>
               <Ionicons name="people-outline" size={32} color={COLORS.textLight} />
               <Text style={styles.emptyTitle}>No one nearby right now</Text>
@@ -1661,21 +1590,70 @@ export default function NearbyScreen() {
                 <Text style={styles.emptyActionText}>Crossed Paths</Text>
               </TouchableOpacity>
             </View>
-          </View>
+          </Animated.View>
         )}
 
         {/* My location button (static, tap-once recenter) */}
+        {/* P3-002: Animated scale on press for premium feel */}
         {permissionStatus === 'granted' && bestLocation && (
-          <TouchableOpacity
-            style={styles.myLocationButton}
-            onPress={handleRecenterToMyLocation}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="locate" size={22} color={COLORS.primary} />
-          </TouchableOpacity>
+          <Animated.View style={{ transform: [{ scale: recenterScale }] }}>
+            <TouchableOpacity
+              style={styles.myLocationButton}
+              onPress={handleRecenterToMyLocation}
+              onPressIn={handleRecenterPressIn}
+              onPressOut={handleRecenterPressOut}
+              activeOpacity={1}
+            >
+              <Ionicons name="locate" size={22} color={COLORS.primary} />
+            </TouchableOpacity>
+          </Animated.View>
         )}
       </View>
       </MapErrorBoundary>
+    );
+  };
+
+  // ---------------------------------------------------------------------------
+  // SHELL UI: Single return with instant header + dynamic content
+  // ---------------------------------------------------------------------------
+  return (
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      {/* Header renders immediately (shell pattern) */}
+      <View style={styles.header}>
+        <View style={{ width: 44 }} />
+        <Text style={styles.headerTitle}>Nearby</Text>
+        <View style={styles.headerIcons}>
+          <TouchableOpacity
+            onPress={handleOpenNearbySettings}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Nearby settings"
+            accessibilityHint="Open Nearby settings"
+          >
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot animate style={styles.crossedPathsBadge} />
+              )}
+            </View>
+          </TouchableOpacity>
+        </View>
+        {isDemo && (
+          <View style={styles.demoBadge}>
+            <Text style={styles.demoBadgeText}>DEMO</Text>
+          </View>
+        )}
+      </View>
+
+      {/* Content area - state-specific UI rendered below header */}
+      {renderContent()}
     </SafeAreaView>
   );
 }
@@ -1698,11 +1676,15 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
-  // CLEANUP: headerSpacer removed - unused
   headerTitle: {
     fontSize: 20,
     fontWeight: '600',
     color: COLORS.text,
+  },
+  headerIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
   },
   crossedPathsBadge: {
     position: 'absolute',

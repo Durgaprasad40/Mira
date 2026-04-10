@@ -36,6 +36,7 @@ export default function MainTabsLayout() {
   const segments = useSegments();
   const locationPrewarmed = useRef(false);
   const fetchLastKnownOnly = useLocationStore((s) => s.fetchLastKnownOnly);
+  const permissionStatus = useLocationStore((s) => s.permissionStatus);
 
   // Prewarm with lastKnown only (fast) — full tracking starts when Nearby tab opens
   // This avoids blocking startup with slow GPS acquisition
@@ -98,6 +99,17 @@ export default function MainTabsLayout() {
   useQuery(
     api.confessions.listConfessions,
     !isDemoMode ? { sortBy: 'trending' as const } : 'skip'
+  );
+
+  // PRELOAD: Prefetch Nearby users so Nearby tab opens faster
+  // Safe conditions: authenticated + location permission already granted
+  // Does NOT request permission - only preloads if user already allowed location
+  // Uses refreshKey: 0 to share cache with Nearby screen's initial state
+  useQuery(
+    api.crossedPaths.getNearbyUsers,
+    !isDemoMode && token && permissionStatus === 'granted'
+      ? { token, refreshKey: 0 }
+      : 'skip'
   );
 
   // Demo mode: use store for tagged count (count confessions targeting current user)
