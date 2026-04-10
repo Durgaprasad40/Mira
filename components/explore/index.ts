@@ -7,5 +7,4 @@ export {
 } from './exploreCategories';
 export type { ExploreCategory } from './exploreCategories';
 export { HorizontalCarousel } from './HorizontalCarousel';
-export { default as ExploreTileGrid } from './ExploreTileGrid';
 export { ProfileCard } from './ProfileCard';
