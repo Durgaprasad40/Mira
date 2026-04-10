@@ -198,6 +198,8 @@ export default function PasswordEntryModal({
         setError('This room has expired.');
       } else if (message.includes('banned')) {
         setError('You are not allowed to join this room.');
+      } else if (message.includes('invite code')) {
+        setError('Use the room invite code first, then enter the password.');
       } else {
         setError(message);
       }

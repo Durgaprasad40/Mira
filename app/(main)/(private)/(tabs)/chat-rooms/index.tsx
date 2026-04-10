@@ -1,12 +1,3 @@
-/*
- * UNLOCKED FOR AUDIT (PRIVATE CHAT ROOMS)
- * Temporarily unlocked for deep audit and bug-fixing work.
- *
- * STATUS:
- * - Under active audit
- * - Fixes allowed during audit period
- * - Will be re-locked after audit completion
- */
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
@@ -218,17 +209,14 @@ export default function ChatRoomsScreen() {
   const [checkingPreferred, setCheckingPreferred] = useState(true);
   const [isRedirecting, setIsRedirecting] = useState(false);
   const clearPreferredRoom = usePreferredChatRoomStore((s) => s.clearPreferredRoom);
+  const clearPreferredRoomMut = useMutation(api.users.clearPreferredChatRoom);
   // NAV-TRAP FIX: Use session-level flag instead of ref (persists across remounts)
   const hasRedirectedInSession = usePreferredChatRoomStore((s) => s.hasRedirectedInSession);
-  const setHasRedirectedInSession = usePreferredChatRoomStore((s) => s.setHasRedirectedInSession);
-  // MEMBERSHIP LIFECYCLE: Track current room for leave-on-homepage logic
-  const currentRoomId = usePreferredChatRoomStore((s) => s.currentRoomId);
-  const setCurrentRoom = usePreferredChatRoomStore((s) => s.setCurrentRoom);
 
   // Convex query for preferred room
   const convexPreferredRoom = useQuery(
     api.users.getPreferredChatRoom,
-    userId ? { userId: userId as Id<'users'> } : 'skip'
+    userId ? { authUserId: userId } : 'skip'
   );
 
   // Determine if we're still loading preferred room data (always use Convex)
@@ -315,12 +303,15 @@ export default function ChatRoomsScreen() {
 
       // Room does NOT exist (stale ID) → clear and skip redirect
       if (!isPreferredRoomValid) {
-        if (__DEV__) console.log('[ChatRooms] Focus: stale roomId cleared', effectivePreferredRoomId);
         clearPreferredRoom();
+        if (userId) {
+          clearPreferredRoomMut({ authUserId: userId }).catch(() => {
+            // Ignore errors - cleanup is best-effort
+          });
+        }
         return;
       }
 
-      if (__DEV__) console.log('[ChatRooms] Focus redirect to', effectivePreferredRoomId);
       // NAV-TRAP FIX: Set session-level flag (persists across remounts, resets on app restart)
       usePreferredChatRoomStore.getState().setHasRedirectedInSession(true);
       setIsRedirecting(true);
@@ -330,7 +321,7 @@ export default function ChatRoomsScreen() {
       return () => {
         setIsRedirecting(false);
       };
-    }, [isNavigationReady, isPreferredLoading, effectivePreferredRoomId, isValidationLoading, isPreferredRoomValid, clearPreferredRoom, router])
+    }, [isNavigationReady, isPreferredLoading, effectivePreferredRoomId, isValidationLoading, isPreferredRoomValid, clearPreferredRoom, clearPreferredRoomMut, router, userId])
   );
 
   // Convex query for public rooms
@@ -347,53 +338,6 @@ export default function ChatRoomsScreen() {
   const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
   const resetMyPrivateRoomsMut = useMutation(api.chatRooms.resetMyPrivateRooms);
-  // MEMBERSHIP LIFECYCLE: Leave room mutation for when user returns to homepage
-  const leaveRoomMut = useMutation(api.chatRooms.leaveRoom);
-  // RESTORE TARGET POLICY: Clear preferred room when user intentionally leaves
-  const clearPreferredRoomMut = useMutation(api.users.clearPreferredChatRoom);
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // MEMBERSHIP LIFECYCLE: Leave room when returning to homepage
-  // When user navigates back to this homepage from a room, remove them from that room.
-  // This does NOT trigger when switching to other tabs (homepage doesn't focus).
-  //
-  // RESTORE TARGET POLICY:
-  // - Intentionally leaving a room clears the restore target (preferred room)
-  // - If user later enters a new room, that becomes the new restore target
-  // - If user doesn't enter a new room, homepage shows on next visit
-  // ─────────────────────────────────────────────────────────────────────────────
-  useFocusEffect(
-    useCallback(() => {
-      // Read currentRoomId directly from Zustand store at focus time to ensure
-      // we get the CURRENT value even if the homepage didn't re-render yet
-      const storeState = usePreferredChatRoomStore.getState();
-      const currentRoomIdFromStore = storeState.currentRoomId;
-
-      if (!currentRoomIdFromStore || !userId) return;
-
-      // Set hasRedirectedInSession to prevent redirect effect from reopening same room
-      storeState.setHasRedirectedInSession(true);
-
-      // RESTORE TARGET POLICY: Clear preferred room (restore target) when intentionally leaving
-      // This ensures homepage shows on next visit instead of auto-redirecting
-      // If user enters a new room, setPreferredRoomMutation will set the new target
-      clearPreferredRoomMut({ authUserId: userId }).catch(() => {
-        // Ignore errors - best-effort
-      });
-
-      // Call leaveRoom mutation to remove user from the room
-      // CR-011: Pass authUserId for server-side verification
-      leaveRoomMut({
-        roomId: currentRoomIdFromStore as Id<'chatRooms'>,
-        authUserId: userId!,
-      }).catch(() => {
-        // Ignore errors - leave is best-effort
-      });
-
-      // Clear the tracking immediately
-      storeState.setCurrentRoom(null);
-    }, [currentRoomId, userId, leaveRoomMut, clearPreferredRoomMut])
-  );
 
   // BUG FIX: Mutation to seed default public rooms
   const ensureDefaultRoomsMut = useMutation(api.chatRooms.ensureDefaultRooms);
@@ -408,18 +352,11 @@ export default function ChatRoomsScreen() {
 
     // If backend returns empty array, seed default rooms
     if (Array.isArray(convexRooms) && convexRooms.length === 0) {
-      if (__DEV__) {
-        console.log('[CHAT_ROOMS] Auto-seed started: backend empty, seeding default rooms');
-      }
-
       seedingAttemptedRef.current = true;
       setIsSeedingRooms(true);
 
       ensureDefaultRoomsMut({})
         .then(() => {
-          if (__DEV__) {
-            console.log('[CHAT_ROOMS] Auto-seed completed successfully');
-          }
           // Convex will auto-refresh the query, no manual refetch needed
           if (mountedRef.current) {
             setIsSeedingRooms(false);
@@ -450,9 +387,8 @@ export default function ChatRoomsScreen() {
       isPrivate: true, // Flag for compact rendering
       hasPassword: r.hasPassword ?? false, // LOCKED-ROOM-FIX
       isMember: r.isMember ?? false, // LOCKED-ROOM-FIX
-      wasAuthorized: r.wasAuthorized ?? false, // RE-ENTRY-FIX
     }));
-  }, [myPrivateRooms, userId]);
+  }, [myPrivateRooms]);
 
   // Track loading state for Convex queries
   const isConvexLoading = convexRooms === undefined;
@@ -488,15 +424,9 @@ export default function ChatRoomsScreen() {
     // If backend returns empty, use fallback to ensure UI never shows empty
     // Fallback rooms displayed but tapping is disabled (see handleOpenRoom)
     if (backendRooms.length === 0) {
-      if (__DEV__) {
-        console.log('[CHAT_ROOMS] source=fallback count=' + FALLBACK_PUBLIC_ROOMS.length + ' (backend empty, seeding=' + isSeedingRooms + ')');
-      }
       return FALLBACK_PUBLIC_ROOMS;
     }
 
-    if (__DEV__) {
-      console.log('[CHAT_ROOMS] source=backend count=' + backendRooms.length);
-    }
     return backendRooms;
   }, [convexRooms, isSeedingRooms]);
 
@@ -514,20 +444,14 @@ export default function ChatRoomsScreen() {
 
   const handleOpenRoom = useCallback(
     (roomId: string) => {
-      if (__DEV__) console.log('[TAP] room pressed', { roomId, t: Date.now() });
-
       // NAV-RACE FIX: Prevent double-tap duplicate navigation (synchronous guard)
       if (isNavigatingToRoomRef.current) {
-        if (__DEV__) console.log('[TAP] blocked - navigation in progress');
         return;
       }
 
       // BUG FIX: Prevent navigation with fallback IDs (not real Convex IDs)
       // Fallback IDs crash when passed to Convex mutations/queries
       if (roomId.startsWith('fallback_')) {
-        if (__DEV__) {
-          console.log('[CHAT_ROOMS] Blocked navigation: fallback ID detected', { roomId, isSeedingRooms });
-        }
         Alert.alert(
           'Syncing Rooms',
           isSeedingRooms
@@ -543,15 +467,13 @@ export default function ChatRoomsScreen() {
       const foundRoom = rooms.find((r) => r.id === roomId);
       const foundPrivateRoom = privateRooms.find((r) => r.id === roomId);
       const roomName = foundRoom?.name ?? foundPrivateRoom?.name ?? '';
-      // Private rooms are in privateRooms array (or from myPrivateRooms query which has joinCode)
       const isPrivate = !!foundPrivateRoom ? '1' : '0';
 
-      // LOCKED-ROOM-FIX: Check if room requires password and user is not already a member
-      // RE-ENTRY-FIX: Also skip password if user was previously authorized
-      // If password required and not a member AND not previously authorized, show password modal
-      if (foundPrivateRoom?.hasPassword && !foundPrivateRoom?.isMember && !foundPrivateRoom?.wasAuthorized) {
-        if (__DEV__) console.log('[TAP] locked room - showing password modal', { roomId, roomName });
-        setPasswordModalRoom({ id: roomId, name: roomName });
+      if (foundPrivateRoom && !foundPrivateRoom.isMember) {
+        Alert.alert(
+          'Invite Required',
+          'Use the room invite code first. Password-protected private rooms also require the room password after the code is verified.'
+        );
         return; // Don't navigate yet - wait for password validation
       }
 
@@ -566,7 +488,6 @@ export default function ChatRoomsScreen() {
         pathname: `/(main)/(private)/(tabs)/chat-rooms/${roomId}`,
         params: { roomName, isPrivate },
       } as any);
-      if (__DEV__) console.log('[NAV] room push scheduled', { roomName, isPrivate, t: Date.now() });
       // Mark room as visited to clear unread badge
       markRoomVisited(roomId);
 
@@ -585,13 +506,29 @@ export default function ChatRoomsScreen() {
   // Phase-2: Handle join by code
   const handleJoinByCode = useCallback(async () => {
     if (!joinCode.trim() || isJoining) return;
+    if (!userId) {
+      Alert.alert('Sign in required', 'Please sign in to join a private room.');
+      return;
+    }
     // P2-015: Light haptic feedback on join attempt
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setIsJoining(true);
     try {
-      const result = await joinRoomByCodeMut({ joinCode: joinCode.trim(), authUserId: userId! });
+      const normalizedCode = joinCode.trim().toUpperCase();
+      const result = await joinRoomByCodeMut({ joinCode: normalizedCode, authUserId: userId });
       // UNMOUNT-GUARD: Check mounted before setState after async
       if (!mountedRef.current) return;
+
+      if (result.requiresPassword) {
+        setJoinCode('');
+        setPasswordModalRoom({
+          id: result.roomId,
+          name: result.roomName ?? 'Private Room',
+        });
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        return;
+      }
+
       setJoinCode('');
       // P2-015: Success haptic feedback
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -601,8 +538,9 @@ export default function ChatRoomsScreen() {
       // ISSUE B: Navigate with route params for instant render (private room)
       router.push({
         pathname: `/(main)/(private)/(tabs)/chat-rooms/${result.roomId}`,
-        params: { roomName: '', isPrivate: '1' },
+        params: { roomName: result.roomName ?? '', isPrivate: '1' },
       } as any);
+      markRoomVisited(result.roomId);
     } catch (error: any) {
       // P2-015: Error haptic feedback for invalid/failed join
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -613,7 +551,7 @@ export default function ChatRoomsScreen() {
         setIsJoining(false);
       }
     }
-  }, [joinCode, isJoining, joinRoomByCodeMut, router]);
+  }, [joinCode, isJoining, joinRoomByCodeMut, router, userId, markRoomVisited]);
 
   // Phase-2: Handle create private room
   const handleCreatePrivateRoom = useCallback(async () => {
@@ -697,8 +635,6 @@ export default function ChatRoomsScreen() {
       pathname: `/(main)/(private)/(tabs)/chat-rooms/${roomId}`,
       params: { roomName, isPrivate: '1' },
     } as any);
-
-    if (__DEV__) console.log('[NAV] password success - navigating to room', { roomId, roomName });
 
     // Mark room as visited
     markRoomVisited(roomId);
@@ -1024,6 +960,38 @@ export default function ChatRoomsScreen() {
                   <View style={styles.ctaArrow}>
                     <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.45)" />
                   </View>
+                </Pressable>
+              </View>
+            )}
+
+            {!isSearchActive && (
+              <View style={styles.joinCodeRow}>
+                <TextInput
+                  style={styles.joinCodeInput}
+                  placeholder="Enter invite code"
+                  placeholderTextColor="rgba(255,255,255,0.35)"
+                  value={joinCode}
+                  onChangeText={(text) => setJoinCode(text.toUpperCase())}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  maxLength={6}
+                  returnKeyType="done"
+                  onSubmitEditing={handleJoinByCode}
+                />
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.joinCodeButton,
+                    (!joinCode.trim() || isJoining || !userId) && styles.joinCodeButtonDisabled,
+                    pressed && joinCode.trim() && !isJoining && userId && { opacity: 0.88 },
+                  ]}
+                  onPress={handleJoinByCode}
+                  disabled={!joinCode.trim() || isJoining || !userId}
+                >
+                  {isJoining ? (
+                    <ActivityIndicator size="small" color="#0F0F14" />
+                  ) : (
+                    <Text style={styles.joinCodeButtonText}>Join</Text>
+                  )}
                 </Pressable>
               </View>
             )}

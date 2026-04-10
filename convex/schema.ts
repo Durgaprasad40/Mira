@@ -1766,6 +1766,7 @@ export default defineSchema({
     text: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
     audioUrl: v.optional(v.string()), // For audio/voice messages
+    mediaStorageId: v.optional(v.id('_storage')), // For deleting uploaded media during retention cleanup
     createdAt: v.number(),
     clientId: v.optional(v.string()), // For deduplication
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
@@ -1786,6 +1787,7 @@ export default defineSchema({
   })
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
+    .index('by_created', ['createdAt'])
     .index('by_room_clientId', ['roomId', 'clientId']), // For idempotency check
 
   chatRoomProfiles: defineTable({
@@ -1824,7 +1826,8 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   })
-    .index('by_user_room', ['userId', 'roomId']),
+    .index('by_user_room', ['userId', 'roomId'])
+    .index('by_room', ['roomId']),
 
   chatRoomPasswordAttempts: defineTable({
     roomId: v.id('chatRooms'),
@@ -1837,6 +1840,7 @@ export default defineSchema({
     cooldownUntil: v.optional(v.number()),
     authorized: v.optional(v.boolean()),
   })
+    .index('by_room', ['roomId'])
     .index('by_room_user', ['roomId', 'userId'])
     .index('by_user', ['userId']),
 
@@ -1847,6 +1851,7 @@ export default defineSchema({
     emoji: v.string(),
     createdAt: v.number(),
   })
+    .index('by_room', ['roomId'])
     .index('by_message', ['messageId'])
     .index('by_message_user', ['messageId', 'userId']),
 
@@ -1856,6 +1861,7 @@ export default defineSchema({
     mutedUserId: v.id('users'),
     mutedAt: v.number(),
   })
+    .index('by_room', ['roomId'])
     .index('by_muter_room', ['muterId', 'roomId'])
     .index('by_muter_room_target', ['muterId', 'roomId', 'mutedUserId']),
 
@@ -1872,6 +1878,9 @@ export default defineSchema({
     .index('by_participants', ['participant1Id', 'participant2Id'])
     .index('by_participant1', ['participant1Id'])
     .index('by_participant2', ['participant2Id'])
+    .index('by_participant1_last_message', ['participant1Id', 'lastMessageAt'])
+    .index('by_participant2_last_message', ['participant2Id', 'lastMessageAt'])
+    .index('by_source_room', ['sourceRoomId'])
     .index('by_last_message', ['lastMessageAt']),
 
   chatRoomDmMessages: defineTable({
@@ -1884,7 +1893,9 @@ export default defineSchema({
     createdAt: v.number(),
     readAt: v.optional(v.number()),
   })
+    .index('by_created', ['createdAt'])
     .index('by_thread', ['threadId'])
+    .index('by_thread_created', ['threadId', 'createdAt'])
     .index('by_thread_read_status', ['threadId', 'readAt']),
 
   chatRoomMentions: defineTable({
@@ -1899,6 +1910,7 @@ export default defineSchema({
     readAt: v.optional(v.number()),
   })
     .index('by_mentioned_user', ['mentionedUserId'])
+    .index('by_message', ['messageId'])
     .index('by_mentioned_unread', ['mentionedUserId', 'readAt']),
 
   // Chat Room Penalties table (Phase-2: kicked users read-only for 24h)
@@ -1922,6 +1934,7 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.optional(v.number()),
   })
+    .index('by_room', ['roomId'])
     .index('by_room_status', ['roomId', 'status'])
     .index('by_room_user', ['roomId', 'userId'])
     .index('by_user_status', ['userId', 'status']),
@@ -1933,6 +1946,7 @@ export default defineSchema({
     bannedAt: v.number(),
     bannedBy: v.id('users'), // owner who banned
   })
+    .index('by_room', ['roomId'])
     .index('by_room_user', ['roomId', 'userId'])
     .index('by_user', ['userId']),
 
@@ -2047,6 +2061,7 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_user', ['userId'])
+    .index('by_room', ['roomId'])
     .index('by_user_room', ['userId', 'roomId']),
 
   // User Room Reports (track which rooms user has reported)
@@ -2056,6 +2071,7 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index('by_user', ['userId'])
+    .index('by_room', ['roomId'])
     .index('by_user_room', ['userId', 'roomId']),
 
   // User Game Limits (track game-specific limits like bottle spin skips)

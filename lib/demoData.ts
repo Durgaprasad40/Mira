@@ -2975,39 +2975,6 @@ export const DEMO_FRIEND_REQUESTS: DemoFriendRequest[] = [
   },
 ];
 
-// ──── Chat Room: Announcements / Notifications ────
-export interface DemoAnnouncement {
-  id: string;
-  title: string;
-  text: string;
-  createdAt: number;
-  seen: boolean;
-}
-
-export const DEMO_ANNOUNCEMENTS: DemoAnnouncement[] = [
-  {
-    id: 'ann_1',
-    title: 'Welcome to Chat Rooms!',
-    text: 'You can now join public rooms and chat with people. Enjoy!',
-    createdAt: Date.now() - 1000 * 60 * 5,
-    seen: false,
-  },
-  {
-    id: 'ann_2',
-    title: 'New Language Rooms Added',
-    text: 'We have added Telugu, Tamil, Malayalam, and more regional rooms.',
-    createdAt: Date.now() - 1000 * 60 * 60,
-    seen: false,
-  },
-  {
-    id: 'ann_3',
-    title: 'Community Guidelines',
-    text: 'Please be respectful. Any violations will result in a warning.',
-    createdAt: Date.now() - 1000 * 60 * 60 * 24,
-    seen: true,
-  },
-];
-
 // ──── Chat Room: Demo User Profile & Wallet ────
 export interface DemoUserProfile {
   id: string;

@@ -24,7 +24,7 @@ import type { Id } from '@/convex/_generated/dataModel';
 import ChatThemeSelector from './ChatThemeSelector';
 
 const C = INCOGNITO_COLORS;
-const BIO_MAX_LENGTH = 250;
+const BIO_MAX_LENGTH = 150;
 
 interface ProfilePopoverProps {
   visible: boolean;
@@ -88,6 +88,7 @@ export default function ProfilePopover({
   const [themeModalVisible, setThemeModalVisible] = useState(false);
   const [editName, setEditName] = useState(username);
   const [editAvatar, setEditAvatar] = useState(avatar);
+  const canLeaveRoom = !(isPrivateRoom && isRoomOwner);
   // AVATAR-UPLOAD-FIX: Track if avatar was changed (to trigger upload on save)
   const [pendingAvatarLocalUri, setPendingAvatarLocalUri] = useState<string | null>(null);
   // PROFILE-EDIT-FIX: Use bio prop from Convex as source of truth, not local store
@@ -199,7 +200,6 @@ export default function ProfilePopover({
     }
 
     const trimmedBio = editBio.trim();
-    if (__DEV__) console.log('[PROFILE] bio_saved', { length: trimmedBio.length });
 
     if (!authUserId) {
       Alert.alert('Error', 'Not authenticated. Please try again.');
@@ -380,17 +380,19 @@ export default function ProfilePopover({
             </TouchableOpacity>
 
             {/* Leave Room button */}
-            <TouchableOpacity
-              style={[styles.menuItem, styles.leaveRoomItem]}
-              activeOpacity={0.7}
-              onPress={() => {
-                onClose();
-                onLeaveRoom?.();
-              }}
-            >
-              <Ionicons name="log-out-outline" size={18} color="#FF4757" />
-              <Text style={[styles.menuLabel, styles.leaveRoomText]}>Leave Room</Text>
-            </TouchableOpacity>
+            {canLeaveRoom && (
+              <TouchableOpacity
+                style={[styles.menuItem, styles.leaveRoomItem]}
+                activeOpacity={0.7}
+                onPress={() => {
+                  onClose();
+                  onLeaveRoom?.();
+                }}
+              >
+                <Ionicons name="log-out-outline" size={18} color="#FF4757" />
+                <Text style={[styles.menuLabel, styles.leaveRoomText]}>Leave Room</Text>
+              </TouchableOpacity>
+            )}
 
             {/* End Room (private rooms, owner only) */}
             {isPrivateRoom && isRoomOwner && (

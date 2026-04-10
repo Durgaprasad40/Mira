@@ -24,7 +24,7 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useQuery, useMutation } from 'convex/react';
+import { useConvex, useQuery, useMutation } from 'convex/react';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { GENDER_COLORS } from '@/lib/responsive';
 import { api } from '@/convex/_generated/api';
@@ -93,6 +93,22 @@ interface DmMessage {
   isMe: boolean;
 }
 
+const DM_PAGE_SIZE = 50;
+
+function mergeDmMessagesById(messages: DmMessage[]): DmMessage[] {
+  const byId = new Map<string, DmMessage>();
+  for (const message of messages) {
+    byId.set(message.id, message);
+  }
+
+  return Array.from(byId.values()).sort((a, b) => {
+    if (a.createdAt !== b.createdAt) {
+      return a.createdAt - b.createdAt;
+    }
+    return a.id.localeCompare(b.id);
+  });
+}
+
 export default function PrivateChatView({
   dm,
   threadId,
@@ -115,9 +131,15 @@ export default function PrivateChatView({
   const [doodleVisible, setDoodleVisible] = useState(false);
   const [videoPlayerUri, setVideoPlayerUri] = useState('');
   const [imagePreviewUri, setImagePreviewUri] = useState('');
+  const [olderMessages, setOlderMessages] = useState<DmMessage[]>([]);
+  const [olderMessagesCursor, setOlderMessagesCursor] = useState<string | null>(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
+  const [loadOlderError, setLoadOlderError] = useState<string | null>(null);
 
   // Auth
   const authUserId = useAuthStore((s) => s.userId);
+  const convex = useConvex();
 
   // THEME: Get current chat theme colors
   const themeColors = useChatThemeColors();
@@ -168,10 +190,14 @@ export default function PrivateChatView({
   const messagesResult = useQuery(
     api.chatRooms.getDmMessages,
     threadId && authUserId
-      ? { authUserId, threadId }
+      ? { authUserId, threadId, paginationOpts: { numItems: DM_PAGE_SIZE, cursor: null } }
       : 'skip'
   );
-  const messages = messagesResult?.messages ?? [];
+  const liveMessages = messagesResult?.page ?? [];
+  const messages = useMemo(
+    () => mergeDmMessagesById([...olderMessages, ...liveMessages]),
+    [liveMessages, olderMessages]
+  );
 
   // DM-ID-FIX: Mutations for sending and marking read
   const sendDmMessage = useMutation(api.chatRooms.sendDmMessage);
@@ -179,14 +205,40 @@ export default function PrivateChatView({
   // DM-MEDIA-FIX: Mutation for generating upload URL for media messages
   const generateUploadUrl = useMutation(api.chatRooms.generateUploadUrl);
 
-  // Mark messages as read when opening DM
+  const unreadIncomingMessageIds = useMemo(
+    () =>
+      messages
+        .filter((message) => !message.isMe && message.readAt === undefined)
+        .map((message) => message.id)
+        .join('|'),
+    [messages]
+  );
+
+  // Mark messages as read when opening DM and when new incoming messages arrive
   useEffect(() => {
-    if (threadId && authUserId) {
+    if (threadId && authUserId && unreadIncomingMessageIds.length > 0) {
       markDmMessagesRead({ authUserId, threadId }).catch((err) => {
         if (__DEV__) console.warn('[DM] Failed to mark messages read:', err);
       });
     }
-  }, [threadId, authUserId, markDmMessagesRead]);
+  }, [threadId, authUserId, unreadIncomingMessageIds, markDmMessagesRead]);
+
+  useEffect(() => {
+    setOlderMessages([]);
+    setOlderMessagesCursor(null);
+    setHasOlderMessages(false);
+    setIsLoadingOlderMessages(false);
+    setLoadOlderError(null);
+  }, [threadId, authUserId]);
+
+  useEffect(() => {
+    if (!messagesResult || olderMessages.length > 0) {
+      return;
+    }
+
+    setHasOlderMessages(!messagesResult.isDone);
+    setOlderMessagesCursor(messagesResult.isDone ? null : messagesResult.continueCursor);
+  }, [messagesResult, olderMessages.length]);
 
   // CHAT_SHEET: Clear draft when switching to a different user
   // This ensures text isn't carried across different chat partners
@@ -200,6 +252,37 @@ export default function PrivateChatView({
     userScrolledAwayRef.current = false; // Fresh start = anchored to bottom
     scrollOffsetRef.current = 0;
   }, [dm.peerId]);
+
+  const handleLoadOlderMessages = useCallback(async () => {
+    if (!threadId || !authUserId || !hasOlderMessages || !olderMessagesCursor || isLoadingOlderMessages) {
+      return;
+    }
+
+    userScrolledAwayRef.current = true;
+    setIsLoadingOlderMessages(true);
+    setLoadOlderError(null);
+
+    try {
+      const nextPage = await convex.query(api.chatRooms.getDmMessages, {
+        authUserId,
+        threadId,
+        paginationOpts: {
+          numItems: DM_PAGE_SIZE,
+          cursor: olderMessagesCursor,
+        },
+      });
+
+      setOlderMessages((prev) => mergeDmMessagesById([...prev, ...nextPage.page]));
+      setHasOlderMessages(!nextPage.isDone);
+      setOlderMessagesCursor(nextPage.isDone ? null : nextPage.continueCursor);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to load earlier messages right now.';
+      setLoadOlderError(message);
+    } finally {
+      setIsLoadingOlderMessages(false);
+    }
+  }, [authUserId, convex, hasOlderMessages, isLoadingOlderMessages, olderMessagesCursor, threadId]);
 
   // ==========================================================================
   // HELPER: Check if currently near bottom
@@ -227,9 +310,6 @@ export default function PrivateChatView({
   const scrollToLatest = useCallback((animated: boolean = false, force: boolean = false): boolean => {
     // Check if we should scroll
     if (!force && userScrolledAwayRef.current) {
-      if (__DEV__) {
-        console.log('[SCROLL_SKIP] User scrolled away, not auto-scrolling');
-      }
       return true; // Return true to indicate "handled" (just skipped)
     }
 
@@ -242,25 +322,12 @@ export default function PrivateChatView({
         const offset = contentHeight - layoutHeight;
         flatListRef.current?.scrollToOffset({ offset, animated });
         scrollOffsetRef.current = offset; // Update tracked position
-
-        if (__DEV__) {
-          console.log('[SCROLL_TO_LATEST]', {
-            contentHeight: Math.round(contentHeight),
-            layoutHeight: Math.round(layoutHeight),
-            offset: Math.round(offset),
-            animated,
-            forced: force,
-          });
-        }
       }
       // Content fits in view - no scroll needed, but dimensions are valid
       return true;
     }
 
     // Dimensions not ready
-    if (__DEV__) {
-      console.log('[SCROLL_WAITING]', { contentHeight, layoutHeight });
-    }
     return false;
   }, []);
 
@@ -282,7 +349,6 @@ export default function PrivateChatView({
         scrollTimeoutRef.current = setTimeout(() => {
           scrollToLatest(animated, force);
           hasInitialScrolledRef.current = true;
-          if (__DEV__) console.log('[SCROLL_COMPLETE] Initial scroll done');
         }, 100);
       }
     };
@@ -397,11 +463,9 @@ export default function PrivateChatView({
       const nearBottom = isNearBottom();
       if (!nearBottom) {
         userScrolledAwayRef.current = true;
-        if (__DEV__) console.log('[SCROLL_AWAY] User scrolled away from bottom');
       } else if (userScrolledAwayRef.current && nearBottom) {
         // User scrolled back to bottom - reset the flag
         userScrolledAwayRef.current = false;
-        if (__DEV__) console.log('[SCROLL_RETURN] User scrolled back to bottom');
       }
     }
   }, [isNearBottom]);
@@ -565,19 +629,54 @@ export default function PrivateChatView({
     // Preload videos to file system cache
     if (videoUrls.length > 0) {
       const uniqueUrls = [...new Set(videoUrls)];
-      if (__DEV__) console.log('[DM] Preloading', uniqueUrls.length, 'videos');
       preloadVideos(uniqueUrls, 2);
     }
 
     // Prefetch images/doodles to expo-image cache
     if (imageUrls.length > 0) {
       const uniqueUrls = [...new Set(imageUrls)];
-      if (__DEV__) console.log('[DM] Prefetching', uniqueUrls.length, 'images');
       ExpoImage.prefetch(uniqueUrls);
     }
   }, [messages]);
 
   const keyExtractor = useCallback((item: EnrichedMessage) => item.id, []);
+  const isLoading = messagesResult === undefined && !!threadId;
+
+  const historyHeader = useMemo(() => {
+    if (isLoading) {
+      return null;
+    }
+    if (isLoadingOlderMessages) {
+      return (
+        <View style={styles.historyStatus}>
+          <ActivityIndicator size="small" color={C.accent} />
+          <Text style={styles.historyStatusText}>Loading earlier messages…</Text>
+        </View>
+      );
+    }
+    if (loadOlderError) {
+      return (
+        <TouchableOpacity style={styles.historyButton} onPress={handleLoadOlderMessages}>
+          <Text style={styles.historyButtonText}>Retry loading earlier messages</Text>
+        </TouchableOpacity>
+      );
+    }
+    if (hasOlderMessages) {
+      return (
+        <TouchableOpacity style={styles.historyButton} onPress={handleLoadOlderMessages}>
+          <Text style={styles.historyButtonText}>Load earlier messages</Text>
+        </TouchableOpacity>
+      );
+    }
+    if (messages.length > 0) {
+      return (
+        <View style={styles.historyStatus}>
+          <Text style={styles.historyStatusText}>Beginning of conversation</Text>
+        </View>
+      );
+    }
+    return null;
+  }, [handleLoadOlderMessages, hasOlderMessages, isLoading, isLoadingOlderMessages, loadOlderError, messages.length]);
 
   // DM-UX-FIX: Handle tap-to-view for media (not hold-to-view)
   const handleMediaTap = useCallback((mediaUrl: string, mediaType: 'image' | 'video' | 'doodle') => {
@@ -678,9 +777,6 @@ export default function PrivateChatView({
     [dm.peerAvatar, handleMediaTap, themeColors]
   );
 
-  // Show loading state while messages are loading
-  const isLoading = messagesResult === undefined && threadId;
-
   return (
     <View style={[styles.container, { backgroundColor: themeColors.dmBackground }]}>
       {/* [CHAT_SHEET_HEADER] Header row with avatar, name, and X button */}
@@ -776,6 +872,7 @@ export default function PrivateChatView({
                 maxToRenderPerBatch={10}
                 windowSize={10}
                 initialNumToRender={15}
+                ListHeaderComponent={historyHeader}
                 ListEmptyComponent={
                   <View style={styles.emptyContainer}>
                     <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
@@ -835,6 +932,7 @@ export default function PrivateChatView({
               maxToRenderPerBatch={10}
               windowSize={10}
               initialNumToRender={15}
+              ListHeaderComponent={historyHeader}
               ListEmptyComponent={
                 <View style={styles.emptyContainer}>
                   <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
@@ -1038,6 +1136,31 @@ const styles = StyleSheet.create({
     color: C.text,
   },
   // DM-UX-FIX: timeMe removed - no timestamps in 1-on-1 DM
+  historyStatus: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    gap: 6,
+  },
+  historyStatusText: {
+    fontSize: 12,
+    color: C.textLight,
+  },
+  historyButton: {
+    alignSelf: 'center',
+    marginVertical: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.accent,
+    backgroundColor: C.surface,
+  },
+  historyButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: C.text,
+  },
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',

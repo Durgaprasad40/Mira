@@ -45,13 +45,13 @@ interface OnlineUserWithPenalty extends DemoOnlineUser {
   penalty?: { type: 'readOnly'; expiresAt: number } | null;
 }
 
-// Room-specific presence user (from getRoomPresenceWithProfiles)
+// Room-specific presence user (presence truth enriched locally in the room screen)
 interface PresenceUser {
   id: string;
   displayName: string;
   avatar?: string;
-  age: number;
-  gender: 'male' | 'female' | 'other' | '';
+  age?: number;
+  gender?: 'male' | 'female' | 'other' | '';
   bio?: string;
   role: 'owner' | 'admin' | 'member';
   lastHeartbeatAt: number;
@@ -257,7 +257,6 @@ export default function OnlineUsersPanel({
         style={({ pressed }) => [styles.userRow, pressed && { opacity: 0.7 }]}
         onPress={(e) => {
           e.stopPropagation?.();
-          if (__DEV__) console.log('[TAP] active_member press fired', { id: item.id, t: Date.now() });
           // Convert UnifiedUser back to a compatible format for onUserPress
           onUserPress?.({
             id: item.id,

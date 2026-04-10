@@ -2137,11 +2137,51 @@ export const checkCurrentUserIsAdmin = query({
  */
 export const getPreferredChatRoom = query({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(),
   },
-  handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
-    return { preferredChatRoomId: user?.preferredChatRoomId ?? null };
+  handler: async (ctx, { authUserId }) => {
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { preferredChatRoomId: null };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { preferredChatRoomId: null };
+    }
+
+    const user = await ctx.db.get(userId);
+    const preferredChatRoomId = user?.preferredChatRoomId ?? null;
+    if (!preferredChatRoomId) {
+      return { preferredChatRoomId: null };
+    }
+
+    const room = await ctx.db.get(preferredChatRoomId);
+    if (!room) {
+      return { preferredChatRoomId: null };
+    }
+
+    const now = Date.now();
+    if (room.expiresAt && room.expiresAt <= now) {
+      return { preferredChatRoomId: null };
+    }
+
+    const ban = await ctx.db
+      .query("chatRoomBans")
+      .withIndex("by_room_user", (q) => q.eq("roomId", preferredChatRoomId).eq("userId", userId))
+      .first();
+    if (ban) {
+      return { preferredChatRoomId: null };
+    }
+
+    const membership = await ctx.db
+      .query("chatRoomMembers")
+      .withIndex("by_room_user", (q) => q.eq("roomId", preferredChatRoomId).eq("userId", userId))
+      .first();
+    if (!membership) {
+      return { preferredChatRoomId: null };
+    }
+
+    return { preferredChatRoomId };
   },
 });
 
@@ -2170,6 +2210,28 @@ export const setPreferredChatRoom = mutation({
     if (!room) {
       throw new Error("Room not found");
     }
+
+    const now = Date.now();
+    if (room.expiresAt && room.expiresAt <= now) {
+      throw new Error("Room has expired");
+    }
+
+    const ban = await ctx.db
+      .query("chatRoomBans")
+      .withIndex("by_room_user", (q) => q.eq("roomId", roomId).eq("userId", userId))
+      .first();
+    if (ban) {
+      throw new Error("Access denied: you are banned from this room");
+    }
+
+    const membership = await ctx.db
+      .query("chatRoomMembers")
+      .withIndex("by_room_user", (q) => q.eq("roomId", roomId).eq("userId", userId))
+      .first();
+    if (!membership) {
+      throw new Error("Cannot save a room you have not joined");
+    }
+
     await ctx.db.patch(userId, { preferredChatRoomId: roomId });
     return { success: true };
   },

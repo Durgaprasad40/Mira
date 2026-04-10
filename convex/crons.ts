@@ -41,6 +41,30 @@ crons.hourly(
   internal.chatRooms.cleanupExpiredPenalties
 );
 
+// Phase-2 Chat Rooms: Cleanup stale presence every 10 minutes
+// Removes presence rows older than the recently-left window to prevent stale online data
+crons.interval(
+  'cleanup-stale-chat-room-presence',
+  { minutes: 10 },
+  internal.chatRooms.cleanupStalePresence
+);
+
+// Phase-2 Chat Rooms: Cleanup room/DM messages older than 24 hours every 10 minutes
+// Removes expired text, voice, photo, video, doodle, and attachment records plus media blobs
+crons.interval(
+  'cleanup-expired-chat-content',
+  { minutes: 10 },
+  internal.chatRooms.cleanupExpiredChatContent
+);
+
+// Phase-2 Chat Rooms: Delete inactive private DM threads every 10 minutes
+// Removes DM threads and all backend data once no messages were exchanged for 1 hour
+crons.interval(
+  'cleanup-inactive-chat-room-dms',
+  { minutes: 10 },
+  internal.chatRooms.cleanupInactiveDmThreads
+);
+
 // B2-FIX: Retry failed storage deletions every 30 minutes
 // Cleans up orphaned storage blobs from failed photo deletions
 crons.interval(

@@ -1,23 +1,16 @@
-/*
- * UNLOCKED FOR AUDIT (PRIVATE ROOM CHAT)
- * Temporarily unlocked for deep audit and bug-fixing work.
- *
- * STATUS:
- * - Under active audit
- * - Fixes allowed during audit period
- * - Will be re-locked after audit completion
- */
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   StyleSheet,
   View,
   Text,
   Alert,
+  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
   BackHandler,
   FlatList,
   TouchableOpacity,
+  Pressable,
   AppState,
   AppStateStatus,
   Keyboard,
@@ -26,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery, useMutation } from 'convex/react';
+import { useConvex, useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -43,7 +36,6 @@ import {
   DEMO_ONLINE_USERS,
   DemoChatMessage,
   DemoDM,
-  DemoAnnouncement,
   DemoOnlineUser,
 } from '@/lib/demoData';
 
@@ -53,7 +45,6 @@ import SystemMessageItem from '@/components/chatroom/SystemMessageItem';
 import ChatComposer, { type ComposerPanel, type MentionMember, type MentionData } from '@/components/chatroom/ChatComposer';
 import MessagesPopover from '@/components/chatroom/MessagesPopover';
 import MentionsPopover, { MentionItem } from '@/components/chatroom/MentionsPopover';
-import NotificationsPopover from '@/components/chatroom/NotificationsPopover';
 import ProfilePopover from '@/components/chatroom/ProfilePopover';
 import OnlineUsersPanel from '@/components/chatroom/OnlineUsersPanel';
 import MessageActionsSheet from '@/components/chatroom/MessageActionsSheet';
@@ -154,6 +145,69 @@ type ListItem =
   | { type: 'date'; id: string; label: string }
   | { type: 'message'; id: string; message: DemoChatMessage; showAvatar: boolean; showTimestamp: boolean };
 
+interface ConvexRoomListMessage {
+  _id: string;
+  roomId: string;
+  senderId: string;
+  senderNickname?: string | null;
+  senderAvatarUrl?: string | null;
+  senderAvatarVersion?: number;
+  senderGender?: 'male' | 'female' | 'other' | null;
+  type: DemoChatMessage['type'];
+  text?: string;
+  imageUrl?: string;
+  audioUrl?: string;
+  createdAt: number;
+  clientId?: string;
+  replyToMessageId?: string;
+  replyToSenderNickname?: string;
+  replyToSnippet?: string;
+  replyToType?: DemoChatMessage['replyToType'];
+  mentions?: Array<{
+    userId: string;
+    nickname: string;
+    startIndex: number;
+    endIndex: number;
+  }>;
+}
+
+function toUiChatMessage(message: ConvexRoomListMessage): DemoChatMessage {
+  return {
+    id: message._id,
+    roomId: message.roomId,
+    senderId: message.senderId,
+    senderName: message.senderNickname ?? 'User',
+    senderAvatar: buildCacheBustedAvatarUrl(
+      message.senderAvatarUrl,
+      message.senderAvatarVersion
+    ) ?? undefined,
+    type: message.type,
+    text: message.text,
+    mediaUrl: message.imageUrl,
+    audioUrl: message.audioUrl,
+    createdAt: message.createdAt,
+    replyToMessageId: message.replyToMessageId,
+    replyToSenderNickname: message.replyToSenderNickname,
+    replyToSnippet: message.replyToSnippet,
+    replyToType: message.replyToType,
+    mentions: message.mentions?.map((mention) => ({
+      userId: mention.userId,
+      nickname: mention.nickname,
+      startIndex: mention.startIndex,
+      endIndex: mention.endIndex,
+    })),
+    senderGender: message.senderGender ?? undefined,
+  };
+}
+
+function mergeMessagesById(messages: DemoChatMessage[]): DemoChatMessage[] {
+  const byId = new Map<string, DemoChatMessage>();
+  for (const message of messages) {
+    byId.set(message.id, message);
+  }
+  return Array.from(byId.values()).sort((a, b) => a.createdAt - b.createdAt);
+}
+
 // Build list items with date separators (normal order, NOT reversed)
 // P1 CR-006: Use index in date separator ID to avoid key collisions
 // AVATAR-STABILITY: Pre-compute showAvatar for each message based on grouping rule:
@@ -197,7 +251,6 @@ function buildListItems(messages: DemoChatMessage[]): ListItem[] {
 type Overlay =
   | 'none'
   | 'profile'
-  | 'notifications'
   | 'messages'
   | 'mentions'
   | 'onlineUsers'
@@ -235,6 +288,7 @@ export default function ChatRoomScreen() {
     targetMessageId?: string;
   }>();
   const router = useRouter();
+  const convex = useConvex();
   const insets = useSafeAreaInsets();
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -340,6 +394,7 @@ export default function ChatRoomScreen() {
   const sendMessageMutation = useMutation(api.chatRooms.sendMessage);
   const generateUploadUrlMutation = useMutation(api.chatRooms.generateUploadUrl); // CR-009: For media upload
   const joinRoomMutation = useMutation(api.chatRooms.joinRoom);
+  const leaveRoomMutation = useMutation(api.chatRooms.leaveRoom);
   const closeRoomMutation = useMutation(api.chatRooms.closeRoom);
   const deleteMessageMutation = useMutation(api.chatRooms.deleteMessage);
   const addReactionMutation = useMutation(api.chatRooms.addReaction);
@@ -358,37 +413,27 @@ export default function ChatRoomScreen() {
   // HIDE-VS-DELETE-FIX: Mutation to hide DM thread from list (not delete)
   const hideDmThreadMutation = useMutation(api.chatRooms.hideDmThread);
 
-  // Query real-time online count (only users with recent heartbeat)
-  const roomOnlineCountQuery = useQuery(
-    api.chatRooms.getRoomOnlineCount,
-    hasValidRoomId && !isDemoMode ? { roomId: roomIdStr as Id<'chatRooms'> } : 'skip'
-  );
-  const roomOnlineCount = roomOnlineCountQuery?.onlineCount ?? 0;
-
-  // Query room presence with profiles (for member list Online/Recently Left sections)
+  // Query room presence state (for member list Online/Recently Left sections)
   const roomPresenceQuery = useQuery(
-    api.chatRooms.getRoomPresenceWithProfiles,
+    api.chatRooms.getRoomPresence,
     shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
+  const roomOnlineCount = roomPresenceQuery?.onlineCount ?? roomPresenceQuery?.online.length ?? 0;
 
   // Skip queries that require userId in demo mode (no real user identity)
   const shouldSkipUserIdQueries = isDemoMode || !authUserId;
 
   // Query room mute preference (Convex-backed)
-  // LOGOUT-RACE FIX: Skip when auth is missing to prevent errors during logout
-  // NOTE: This query uses optional auth so it's OK to run before membership confirmed
   const roomPrefQuery = useQuery(
     api.chatRooms.getUserRoomPref,
-    shouldSkipConvex ? 'skip' : { roomId: roomIdStr!, authUserId: authUserId ?? undefined }
+    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
   const isRoomMutedFromConvex = roomPrefQuery?.muted ?? false;
 
   // Query if room has been reported (Convex-backed)
-  // LOGOUT-RACE FIX: Skip when auth is missing to prevent errors during logout
-  // NOTE: This query uses optional auth so it's OK to run before membership confirmed
   const reportedQuery = useQuery(
     api.chatRooms.hasReportedRoom,
-    shouldSkipConvex ? 'skip' : { roomId: roomIdStr!, authUserId: authUserId ?? undefined }
+    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
   const hasReportedRoom = reportedQuery?.reported ?? false;
 
@@ -406,36 +451,6 @@ export default function ChatRoomScreen() {
     shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
 
-  // P0-FIX: Query reactions for visible messages (batched for efficiency)
-  // Extract message IDs from convex messages for the query
-  const messageIdsForReactions = useMemo(() => {
-    if (isDemoMode || !convexMessagesResult?.messages) return [];
-    return convexMessagesResult.messages.map(m => m._id);
-  }, [isDemoMode, convexMessagesResult?.messages]);
-
-  const reactionsQuery = useQuery(
-    api.chatRooms.getReactionsForMessages,
-    !isDemoMode && messageIdsForReactions.length > 0 && authUserId && hasValidRoomId
-      ? { roomId: roomIdStr as Id<'chatRooms'>, messageIds: messageIdsForReactions as Id<'chatRoomMessages'>[], authUserId }
-      : 'skip'
-  );
-
-  // P0-FIX: Create a map of reactions by message ID for efficient lookup
-  // P3-FIX: Include isUserReaction for proper typing
-  const reactionsMap = useMemo(() => {
-    if (!reactionsQuery) return new Map<string, { emoji: string; count: number; userIds: string[]; isUserReaction: boolean }[]>();
-    const map = new Map<string, { emoji: string; count: number; userIds: string[]; isUserReaction: boolean }[]>();
-    for (const [messageId, reactions] of Object.entries(reactionsQuery)) {
-      // Map reactions with isUserReaction computed from userIds
-      const mappedReactions = reactions.map((r) => ({
-        ...r,
-        isUserReaction: authUserId ? r.userIds.includes(authUserId) : false,
-      }));
-      map.set(messageId, mappedReactions);
-    }
-    return map;
-  }, [reactionsQuery, authUserId]);
-
   // ─────────────────────────────────────────────────────────────────────────
   // PER-USER MUTING: Query muted users from Convex (persistent, per-room)
   // ─────────────────────────────────────────────────────────────────────────
@@ -449,18 +464,19 @@ export default function ChatRoomScreen() {
   const room = demoRoom ?? convexRoom;
 
   // Phase-2: Determine if this is a private room (for hiding inbox/notifications)
-  // Private rooms have a joinCode field
   // ISSUE B: Use route param as fallback for instant render
-  const isPrivateRoom = convexRoom?.joinCode
-    ? true
+  const isPrivateRoom = convexRoom
+    ? convexRoom.isPublic === false
     : routeIsPrivate === '1';
 
   // Phase-2: Get effective userId (for demo mode owner detection)
   const effectiveUserIdQuery = useQuery(
     api.chatRooms.getEffectiveUserId,
-    isDemoMode && authUserId
-      ? { isDemo: true, demoUserId: authUserId }
-      : {}
+    authUserId
+      ? (isDemoMode
+        ? { isDemo: true, demoUserId: authUserId }
+        : { authUserId })
+      : 'skip'
   );
   const effectiveUserId = effectiveUserIdQuery?.userId ?? null;
 
@@ -482,8 +498,6 @@ export default function ChatRoomScreen() {
   // Default to true for room creator (for UI responsiveness before query loads)
   const canModerate: boolean = memberRoleQuery?.canModerate ?? isRoomCreator;
 
-  // Phase-2: Check if room can be closed (has expiresAt, meaning not permanent)
-  const canCloseRoom = isRoomCreator && convexRoom?.expiresAt;
   // Phase-2: Check if user has an active send-blocking penalty (muted, readOnly, send_blocked)
   // L-002 FIX: Renamed from isReadOnly to hasSendPenalty for clarity
   const hasSendPenalty = userPenalty !== null && userPenalty !== undefined;
@@ -607,7 +621,8 @@ export default function ChatRoomScreen() {
   // ENTER ROOM SESSION + SAVE AS PREFERRED
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (roomIdStr) {
+    const canEnterRoom = isDemoMode || hasMemberAccess;
+    if (roomIdStr && canEnterRoom) {
       // CHAT ROOM IDENTITY: Use myNickname/myAvatarUrl from Convex chatRoomProfiles
       // NOT main profile data (realDisplayName, realPhotoUrls, etc.)
       const identity = isDemoMode
@@ -621,16 +636,17 @@ export default function ChatRoomScreen() {
         : {
             userId: authUserId ?? 'unknown',
             name: myNickname,
-            age: realAge ?? 0,
-            gender: realGender ?? '',
+            age: 0,
+            gender: '',
             profilePicture: myAvatarUrl ?? '',
           };
       enterRoom(roomIdStr, identity);
+      setCurrentRoom(roomIdStr);
 
       // Save as preferred room (for auto-redirect on next visit)
       if (isDemoMode) {
         setPreferredRoom(roomIdStr);
-      } else if (authUserId && hasValidRoomId) {
+      } else if (authUserId && hasValidRoomId && hasMemberAccess) {
         // Convex mode: save to server (fire-and-forget)
         // CR-017 FIX: Use authUserId for server-side verification
         setPreferredRoomMutation({
@@ -641,7 +657,7 @@ export default function ChatRoomScreen() {
         });
       }
     }
-  }, [roomIdStr, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation, myNickname, myAvatarUrl, realAge, realGender]);
+  }, [roomIdStr, isDemoMode, hasMemberAccess, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation, myNickname, myAvatarUrl, setCurrentRoom]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // PHASE-2 BACK NAVIGATION: Go to Desire Land (not chat-rooms list)
@@ -748,17 +764,62 @@ export default function ChatRoomScreen() {
   const storeHasHydrated = useDemoChatRoomStore((s) => s._hasHydrated);
 
   const [pendingMessages, setPendingMessages] = useState<DemoChatMessage[]>([]);
+  const [olderMessages, setOlderMessages] = useState<DemoChatMessage[]>([]);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
+  const [loadOlderError, setLoadOlderError] = useState<string | null>(null);
+  const olderMessagesRef = useRef<DemoChatMessage[]>([]);
+  const hasOlderMessagesRef = useRef(false);
+  const isLoadingOlderMessagesRef = useRef(false);
+  const liveMessagesRef = useRef<DemoChatMessage[]>([]);
 
   // SEND-FLICKER-FIX: Track pending clientIds that have been "sent" (mutation succeeded)
   // but we're waiting for server message to arrive before removing from UI
   const pendingSentClientIdsRef = useRef<Set<string>>(new Set());
 
+  useEffect(() => {
+    olderMessagesRef.current = olderMessages;
+  }, [olderMessages]);
+
+  useEffect(() => {
+    hasOlderMessagesRef.current = hasOlderMessages;
+  }, [hasOlderMessages]);
+
+  useEffect(() => {
+    isLoadingOlderMessagesRef.current = isLoadingOlderMessages;
+  }, [isLoadingOlderMessages]);
+
+  useEffect(() => {
+    if (isDemoMode) {
+      olderMessagesRef.current = [];
+      hasOlderMessagesRef.current = false;
+      isLoadingOlderMessagesRef.current = false;
+      setOlderMessages([]);
+      setHasOlderMessages(false);
+      setLoadOlderError(null);
+      return;
+    }
+
+    olderMessagesRef.current = [];
+    hasOlderMessagesRef.current = false;
+    isLoadingOlderMessagesRef.current = false;
+    setOlderMessages([]);
+    setHasOlderMessages(false);
+    setLoadOlderError(null);
+  }, [roomIdStr, isDemoMode]);
+
+  useEffect(() => {
+    if (isDemoMode || olderMessagesRef.current.length > 0) {
+      return;
+    }
+    setHasOlderMessages(convexMessagesResult?.hasMore ?? false);
+  }, [isDemoMode, convexMessagesResult?.hasMore]);
+
   // ─────────────────────────────────────────────────────────────────────────
   // MESSAGES: Transform Convex messages to UI format
-  // Uses senderAvatarUrl directly from message (includes primary photo fallback)
   // SEND-FLICKER-FIX: Improved dedup to prevent ghost/duplicate frames during send
   // ─────────────────────────────────────────────────────────────────────────
-  const messages: DemoChatMessage[] = useMemo(() => {
+  const liveMessages: DemoChatMessage[] = useMemo(() => {
     if (isDemoMode) return demoMessages;
     const convexMsgs = convexMessagesResult?.messages ?? [];
 
@@ -791,42 +852,60 @@ export default function ChatRoomScreen() {
       return !isPending || hasArrived;
     });
 
-    const converted: DemoChatMessage[] = deduped.map((m) => ({
-      id: m._id,
-      roomId: m.roomId,
-      senderId: m.senderId,
-      senderName: m.senderNickname ?? 'User',
-      // CACHE-BUST-FIX: Use cache-busted avatar URL to ensure updated avatars display immediately
-      senderAvatar: buildCacheBustedAvatarUrl(m.senderAvatarUrl, (m as any).senderAvatarVersion) ?? undefined,
-      type: m.type as DemoChatMessage['type'],
-      text: m.text,
-      mediaUrl: m.imageUrl,
-      audioUrl: m.audioUrl,
-      createdAt: m.createdAt,
-      // P0-FIX: Include reply data
-      replyToMessageId: m.replyToMessageId,
-      replyToSenderNickname: m.replyToSenderNickname,
-      replyToSnippet: m.replyToSnippet,
-      replyToType: m.replyToType,
-      // P0-FIX: Include mentions for highlighting
-      mentions: m.mentions?.map(mention => ({
-        userId: mention.userId,
-        nickname: mention.nickname,
-        startIndex: mention.startIndex,
-        endIndex: mention.endIndex,
-      })),
-      // AVATAR-BORDER-FIX: Include gender for consistent avatar border color
-      senderGender: m.senderGender as 'male' | 'female' | 'other' | undefined,
-    }));
+    return deduped.map((message) => toUiChatMessage(message));
+  }, [isDemoMode, demoMessages, convexMessagesResult, pendingMessages]);
 
-    // SEND-FLICKER-FIX: Filter out pending messages whose server equivalent has arrived
-    const filteredPending = pendingMessages.filter(m => {
-      const clientId = m.id.replace('pending_', '');
-      return !arrivedClientIds.includes(clientId);
+  useEffect(() => {
+    liveMessagesRef.current = liveMessages;
+  }, [liveMessages]);
+
+  const messages: DemoChatMessage[] = useMemo(() => {
+    if (isDemoMode) {
+      return demoMessages;
+    }
+
+    const filteredPending = pendingMessages.filter((message) => {
+      const clientId = message.id.replace('pending_', '');
+      return !pendingSentClientIdsRef.current.has(clientId);
     });
 
-    return [...converted, ...filteredPending];
-  }, [isDemoMode, demoMessages, convexMessagesResult, pendingMessages]);
+    return mergeMessagesById([
+      ...olderMessages,
+      ...liveMessages,
+      ...filteredPending,
+    ]);
+  }, [isDemoMode, demoMessages, olderMessages, liveMessages, pendingMessages]);
+
+  const messageIdsForReactions = useMemo(() => {
+    if (isDemoMode) return [];
+    return messages
+      .map((message) => message.id)
+      .filter((messageId): messageId is Id<'chatRoomMessages'> =>
+        !messageId.startsWith('pending_') && isValidConvexId(messageId)
+      );
+  }, [isDemoMode, messages]);
+
+  const reactionsQuery = useQuery(
+    api.chatRooms.getReactionsForMessages,
+    !isDemoMode && messageIdsForReactions.length > 0 && !shouldSkipProtectedQueries
+      ? { roomId: roomIdStr as Id<'chatRooms'>, messageIds: messageIdsForReactions, authUserId: authUserId! }
+      : 'skip'
+  );
+
+  // P0-FIX: Create a map of reactions by message ID for efficient lookup
+  // P3-FIX: Include isUserReaction for proper typing
+  const reactionsMap = useMemo(() => {
+    if (!reactionsQuery) return new Map<string, { emoji: string; count: number; userIds: string[]; isUserReaction: boolean }[]>();
+    const map = new Map<string, { emoji: string; count: number; userIds: string[]; isUserReaction: boolean }[]>();
+    for (const [messageId, reactions] of Object.entries(reactionsQuery)) {
+      const mappedReactions = reactions.map((r) => ({
+        ...r,
+        isUserReaction: effectiveUserId ? r.userIds.includes(effectiveUserId) : false,
+      }));
+      map.set(messageId, mappedReactions);
+    }
+    return map;
+  }, [effectiveUserId, reactionsQuery]);
 
   // SEND-FLICKER-FIX: Effect to clean up pending messages after server messages arrive
   // This runs after render to avoid setState during render
@@ -849,6 +928,83 @@ export default function ChatRoomScreen() {
     });
   }, [convexMessagesResult]);
 
+  const fetchOlderMessagesPage = useCallback(
+    async (before: number) => {
+      if (
+        isDemoMode ||
+        !authUserId ||
+        !hasValidRoomId ||
+        !hasMemberAccess
+      ) {
+        return null;
+      }
+
+      const page = await convex.query(api.chatRooms.listMessages, {
+        roomId: roomIdStr as Id<'chatRooms'>,
+        authUserId,
+        limit: 50,
+        before,
+      });
+
+      const converted = page.messages.map((message) =>
+        toUiChatMessage(message)
+      );
+
+      const nextOlderMessages = mergeMessagesById([
+        ...converted,
+        ...olderMessagesRef.current,
+      ]);
+      olderMessagesRef.current = nextOlderMessages;
+      hasOlderMessagesRef.current = page.hasMore;
+
+      setOlderMessages(nextOlderMessages);
+      setHasOlderMessages(page.hasMore);
+      setLoadOlderError(null);
+
+      return {
+        messages: converted,
+        hasMore: page.hasMore,
+      };
+    },
+    [authUserId, convex, hasMemberAccess, hasValidRoomId, isDemoMode, roomIdStr]
+  );
+
+  const handleLoadOlderMessages = useCallback(async () => {
+    if (isLoadingOlderMessagesRef.current || !hasOlderMessagesRef.current) {
+      return;
+    }
+
+    const before =
+      olderMessagesRef.current[0]?.createdAt !== undefined
+        ? olderMessagesRef.current[0].createdAt + 1
+        : liveMessagesRef.current[0]?.createdAt !== undefined
+          ? liveMessagesRef.current[0].createdAt + 1
+          : undefined;
+    if (!before) {
+      return;
+    }
+
+    setIsLoadingOlderMessages(true);
+    isLoadingOlderMessagesRef.current = true;
+    setLoadOlderError(null);
+
+    try {
+      await fetchOlderMessagesPage(before);
+    } catch (error) {
+      if (__DEV__) {
+        console.warn('[CHAT_ROOM] Failed to load older messages:', error);
+      }
+      if (mountedRef.current) {
+        setLoadOlderError("Couldn't load older messages.");
+      }
+    } finally {
+      if (mountedRef.current) {
+        setIsLoadingOlderMessages(false);
+      }
+      isLoadingOlderMessagesRef.current = false;
+    }
+  }, [fetchOlderMessagesPage]);
+
   // ─────────────────────────────────────────────────────────────────────────
   // MEDIA PRELOADING: Cache all media from visible messages for instant open
   // Handles videos, images, doodles, and audio for premium feel
@@ -859,7 +1015,6 @@ export default function ChatRoomScreen() {
     // Extract media URLs from recent messages (last 15 for good coverage)
     const videoUrls: string[] = [];
     const imageUrls: string[] = [];
-    const audioUrls: string[] = [];
     const recentMessages = messages.slice(-15);
 
     for (const msg of recentMessages) {
@@ -876,30 +1031,19 @@ export default function ChatRoomScreen() {
         case 'doodle':
           imageUrls.push(url);
           break;
-        case 'audio':
-          audioUrls.push(url);
-          break;
       }
     }
 
     // Preload videos (non-blocking, max 2 concurrent)
     if (videoUrls.length > 0) {
       const uniqueUrls = [...new Set(videoUrls)];
-      if (__DEV__) console.log('[ChatRoom] Preloading', uniqueUrls.length, 'videos');
       preloadVideos(uniqueUrls, 2);
     }
 
     // Prefetch images/doodles to expo-image cache
     if (imageUrls.length > 0) {
       const uniqueUrls = [...new Set(imageUrls)];
-      if (__DEV__) console.log('[ChatRoom] Prefetching', uniqueUrls.length, 'images');
       ExpoImage.prefetch(uniqueUrls);
-    }
-
-    // Note: Audio URLs are already preloaded by the audioPlayerStore when first played
-    // We just ensure URLs are resolved - no additional preloading needed for audio
-    if (__DEV__ && audioUrls.length > 0) {
-      console.log('[ChatRoom] Found', audioUrls.length, 'audio messages (ready for playback)');
     }
   }, [messages]);
 
@@ -912,6 +1056,21 @@ export default function ChatRoomScreen() {
     const items = buildListItems(messages);
     return items.slice().reverse();
   }, [messages]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PERF-FIX: Use refs for frequently changing data to avoid renderItem re-creation
+  // ─────────────────────────────────────────────────────────────────────────
+  const invertedListItemsRef = useRef(invertedListItems);
+  const reactionsMapRef = useRef(reactionsMap);
+  const highlightedMessageIdRef = useRef<string | null>(null);
+
+  // Keep refs in sync
+  useEffect(() => {
+    invertedListItemsRef.current = invertedListItems;
+  }, [invertedListItems]);
+  useEffect(() => {
+    reactionsMapRef.current = reactionsMap;
+  }, [reactionsMap]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // AUTO-SCROLL: Scroll to latest message when:
@@ -1002,9 +1161,6 @@ export default function ChatRoomScreen() {
     hydrationFallbackTimerRef.current = setTimeout(() => {
       if (!mountedRef.current) return;
       if (seedAttemptedRef.current) return; // Already seeded via hydration path
-      if (__DEV__) {
-        console.warn('[ChatRoom] Store hydration timeout - proceeding with demo seeding');
-      }
       seedAttemptedRef.current = true;
       const base = getDemoMessagesForRoom(roomIdStr);
       const joinMsg: DemoChatMessage = {
@@ -1034,12 +1190,9 @@ export default function ChatRoomScreen() {
   const [joinFailed, setJoinFailed] = useState(false);
 
   // Auto-join Convex room (skip if invalid ID)
-  // MEMBERSHIP LIFECYCLE: Also track currentRoomId for leave-on-homepage logic
   useEffect(() => {
     if (isDemoMode || !hasValidRoomId || !authUserId) return;
-
-    // Track that user is currently viewing this room
-    setCurrentRoom(roomIdStr);
+    if (accessStatusQuery?.status !== 'public_joinable') return;
 
     joinRoomMutation({
       roomId: roomIdStr as Id<'chatRooms'>,
@@ -1059,7 +1212,7 @@ export default function ChatRoomScreen() {
           setJoinFailed(true);
         }
       });
-  }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation, setCurrentRoom]);
+  }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation, accessStatusQuery?.status]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // ACTIVITY-BASED PRESENCE: Heartbeat ONLY on real user activity
@@ -1144,11 +1297,42 @@ export default function ChatRoomScreen() {
   } | null>(null);
   // Highlight state: track message to highlight after scroll-to-message
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  useEffect(() => {
+    highlightedMessageIdRef.current = highlightedMessageId;
+  }, [highlightedMessageId]);
   // WALLET-FIX: In real mode, use Convex walletCoins (source of truth, auto-updates reactively)
   // In demo mode, use session store coins (no backend persistence)
   const userCoins = isDemoMode
     ? (userCoinsFromStore > 0 ? userCoinsFromStore : DEMO_CURRENT_USER.coins)
     : convexWalletCoins;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PRESENCE TRUTH: Membership and presence are separate sources.
+  // roomPresenceQuery drives online/recently-left state; member query drives who
+  // is actually in the room and available for mentions/profile actions.
+  // ─────────────────────────────────────────────────────────────────────────
+  const presenceStateByUserId = useMemo(() => {
+    const byUserId = new Map<string, { isOnline: boolean; lastSeen?: number }>();
+    if (isDemoMode) {
+      return byUserId;
+    }
+
+    roomPresenceQuery?.recentlyLeft?.forEach((member) => {
+      byUserId.set(String(member.id), {
+        isOnline: false,
+        lastSeen: member.lastHeartbeatAt,
+      });
+    });
+
+    roomPresenceQuery?.online?.forEach((member) => {
+      byUserId.set(String(member.id), {
+        isOnline: true,
+        lastSeen: member.lastHeartbeatAt,
+      });
+    });
+
+    return byUserId;
+  }, [isDemoMode, roomPresenceQuery?.online, roomPresenceQuery?.recentlyLeft]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // MEMBER-DATA FIX: Transform Convex member data for UI components
@@ -1167,15 +1351,54 @@ export default function ChatRoomScreen() {
       id: m.id,
       username: m.displayName,
       // CACHE-BUST-FIX: Use cache-busted avatar URL
-      avatar: buildCacheBustedAvatarUrl(m.avatar, (m as any).avatarVersion),
-      isOnline: m.isOnline,
+      avatar: buildCacheBustedAvatarUrl(m.avatar, m.avatarVersion),
+      isOnline: presenceStateByUserId.get(String(m.id))?.isOnline ?? false,
       gender: m.gender as 'male' | 'female' | undefined,
       age: m.age,
       chatBio: m.bio,
-      // MEMBER-STRIP FIX: Provide lastSeen for OnlineUsersPanel categorization
-      lastSeen: m.lastActive,
+      lastSeen: presenceStateByUserId.get(String(m.id))?.lastSeen,
     }));
-  }, [convexMembersWithProfiles]);
+  }, [convexMembersWithProfiles, isDemoMode, presenceStateByUserId]);
+
+  const presenceUsers = useMemo(() => {
+    if (isDemoMode || !convexMembersWithProfiles) {
+      return { online: [], recentlyLeft: [] };
+    }
+
+    const memberByUserId = new Map(
+      convexMembersWithProfiles.map((member) => [String(member.id), member])
+    );
+
+    const enrichPresence = (
+      entries:
+        | NonNullable<typeof roomPresenceQuery>['online']
+        | NonNullable<typeof roomPresenceQuery>['recentlyLeft']
+        | undefined
+    ) =>
+      (entries ?? []).flatMap((entry) => {
+        const member = memberByUserId.get(String(entry.id));
+        if (!member) {
+          return [];
+        }
+
+        return [{
+          id: member.id,
+          displayName: member.displayName,
+          avatar: buildCacheBustedAvatarUrl(member.avatar, member.avatarVersion) ?? undefined,
+          age: member.age,
+          gender: member.gender as 'male' | 'female' | 'other' | undefined,
+          bio: member.bio,
+          role: member.role,
+          lastHeartbeatAt: entry.lastHeartbeatAt,
+          joinedAt: entry.joinedAt,
+        }];
+      });
+
+    return {
+      online: enrichPresence(roomPresenceQuery?.online),
+      recentlyLeft: enrichPresence(roomPresenceQuery?.recentlyLeft),
+    };
+  }, [convexMembersWithProfiles, isDemoMode, roomPresenceQuery?.online, roomPresenceQuery?.recentlyLeft]);
 
   // @Mention members for ChatComposer suggestions
   // Transform room members to MentionMember shape
@@ -1183,7 +1406,7 @@ export default function ChatRoomScreen() {
   // MENTION-FIX: Exclude current user from suggestions (can't mention yourself)
   const mentionMembers: MentionMember[] = useMemo(() => {
     return (roomMembers ?? [])
-      .filter((m) => m.id !== authUserId) // Exclude current user
+      .filter((m) => m.id !== effectiveUserId) // Exclude current user
       .map((m) => ({
         id: m.id,
         nickname: m.username,
@@ -1191,7 +1414,7 @@ export default function ChatRoomScreen() {
         age: m.age,
         gender: m.gender,
       }));
-  }, [roomMembers, authUserId]);
+  }, [effectiveUserId, roomMembers]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // DM / NOTIFICATIONS STATE
@@ -1230,22 +1453,12 @@ export default function ChatRoomScreen() {
   );
   const mentions = (mentionsQuery ?? []) as MentionItem[];
 
-  const unreadMentionCountQuery = useQuery(
-    api.chatRooms.getUnreadMentionCount,
-    authUserId ? { authUserId } : 'skip'
-  );
-  const unreadMentionCount = unreadMentionCountQuery ?? 0;
-
   // Mutations for marking mentions as read
   const markMentionReadMutation = useMutation(api.chatRooms.markMentionRead);
   const markAllMentionsReadMutation = useMutation(api.chatRooms.markAllMentionsRead);
 
   // State for navigating to a specific message (from mention tap)
   const [targetMessageId, setTargetMessageId] = useState<Id<'chatRoomMessages'> | null>(null);
-
-  // NO DEMO DATA: Announcements start empty - no fake notifications
-  const [announcements, setAnnouncements] = useState<DemoAnnouncement[]>([]);
-  const unseenNotifications = announcements.filter((a) => !a.seen).length;
 
   // ─────────────────────────────────────────────────────────────────────────
   // OVERLAY STATE
@@ -1338,33 +1551,47 @@ export default function ChatRoomScreen() {
   // NAVIGATION HANDLERS
   // ─────────────────────────────────────────────────────────────────────────
 
-  // Standard leave (public rooms): clears session and preferred room
-  const handleLeaveRoom = useCallback(() => {
+  const performLeaveRoom = useCallback(async () => {
     closeOverlay();
+
+    if (!isDemoMode) {
+      if (!authUserId || !roomIdStr || !hasValidRoomId) {
+        Alert.alert('Error', 'Unable to leave this room right now.');
+        return;
+      }
+
+      try {
+        await leaveRoomMutation({
+          roomId: roomIdStr as Id<'chatRooms'>,
+          authUserId,
+        });
+      } catch (err: any) {
+        Alert.alert('Error', err?.message || 'Failed to leave room');
+        return;
+      }
+    }
+
     exitRoom();
-
-    // Set hasRedirectedInSession before navigation to prevent redirect race
+    setCurrentRoom(null);
     setHasRedirectedInSession(true);
+    clearPreferredRoom();
 
-    // Clear preferred room so user sees homepage next time
-    if (isDemoMode) {
-      clearPreferredRoom();
-    } else if (authUserId) {
-      // CR-017 FIX: Use authUserId for server-side verification
+    if (!isDemoMode && authUserId) {
       clearPreferredRoomMutation({ authUserId }).catch(() => {
         // Ignore errors - clearing preference is best-effort
       });
     }
 
     router.replace('/(main)/(private)/(tabs)/chat-rooms');
-  }, [closeOverlay, exitRoom, router, authUserId, clearPreferredRoom, clearPreferredRoomMutation, setHasRedirectedInSession]);
+  }, [closeOverlay, isDemoMode, authUserId, roomIdStr, hasValidRoomId, leaveRoomMutation, exitRoom, setCurrentRoom, setHasRedirectedInSession, clearPreferredRoom, clearPreferredRoomMutation, router]);
 
-  // Phase-2: Private room leave - just navigate back, don't clear membership or preferred
+  const handleLeaveRoom = useCallback(() => {
+    void performLeaveRoom();
+  }, [performLeaveRoom]);
+
   const handleLeavePrivateRoom = useCallback(() => {
-    closeOverlay();
-    setHasRedirectedInSession(true);
-    router.replace('/(main)/(private)/(tabs)/chat-rooms');
-  }, [closeOverlay, router, setHasRedirectedInSession]);
+    void performLeaveRoom();
+  }, [performLeaveRoom]);
 
   // Phase-2: End room handler (private room owner only) - deletes room permanently
   const handleEndRoom = useCallback(() => {
@@ -1386,10 +1613,14 @@ export default function ChatRoomScreen() {
                 authUserId: authUserId!,
               });
               // Clear preferred room to avoid stale redirect
+              setCurrentRoom(null);
+              exitRoom();
               clearPreferredRoom();
               if (!isDemoMode && authUserId) {
                 // CR-017 FIX: Use authUserId for server-side verification
-                clearPreferredRoomMutation({ authUserId }).catch((e) => console.warn('[ClearRoom] Silent fail:', e));
+                clearPreferredRoomMutation({ authUserId }).catch(() => {
+                  // Ignore errors - clearing preference is best-effort
+                });
               }
               setHasRedirectedInSession(true);
               router.replace('/(main)/(private)/(tabs)/chat-rooms');
@@ -1400,37 +1631,7 @@ export default function ChatRoomScreen() {
         },
       ]
     );
-  }, [isRoomCreator, authUserId, roomIdStr, closeRoomMutation, router, clearPreferredRoom, clearPreferredRoomMutation, setHasRedirectedInSession]);
-
-  // Phase-2: Close room handler (creator only)
-  const handleCloseRoom = useCallback(() => {
-    if (!canCloseRoom || !authUserId || !roomIdStr) return;
-
-    Alert.alert(
-      'Close Room',
-      'Close room? This deletes the room and all messages permanently.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Close Room',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              // CR-016 FIX: Pass authUserId for server-side verification
-              await closeRoomMutation({
-                roomId: roomIdStr as Id<'chatRooms'>,
-                authUserId: authUserId!,
-              });
-              setHasRedirectedInSession(true);
-              router.replace('/(main)/(private)/(tabs)/chat-rooms');
-            } catch (err: any) {
-              Alert.alert('Error', err.message || 'Failed to close room');
-            }
-          },
-        },
-      ]
-    );
-  }, [canCloseRoom, authUserId, roomIdStr, closeRoomMutation, router, setHasRedirectedInSession]);
+  }, [isRoomCreator, authUserId, roomIdStr, closeRoomMutation, router, clearPreferredRoom, clearPreferredRoomMutation, setHasRedirectedInSession, setCurrentRoom, exitRoom]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // RELOAD HANDLER (resets local state)
@@ -1612,12 +1813,10 @@ export default function ChatRoomScreen() {
 
       // MEDIA-RELIABILITY: Prevent duplicate sends from rapid taps
       if (isSendingMediaRef.current) {
-        if (__DEV__) console.log('[ChatRoom] Media send blocked - already sending');
         return;
       }
       // MEDIA-RELIABILITY: Prevent re-upload of same media file
       if (uploadingMediaUriRef.current === uri) {
-        if (__DEV__) console.log('[ChatRoom] Media send blocked - same file already uploading');
         return;
       }
 
@@ -1725,7 +1924,6 @@ export default function ChatRoomScreen() {
 
       // MEDIA-RELIABILITY: Synchronous guard against double-tap voice send
       if (isSendingVoiceRef.current) {
-        if (__DEV__) console.log('[ChatRoom] Voice send blocked - already sending');
         return;
       }
 
@@ -1823,15 +2021,7 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // DM HANDLERS
   // DM-ID-FIX: Marking read now happens in PrivateChatView via markDmMessagesRead mutation
-  // Hide DM functionality TODO: Add to Convex backend if needed
   // ─────────────────────────────────────────────────────────────────────────
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // NOTIFICATION HANDLERS
-  // ─────────────────────────────────────────────────────────────────────────
-  const handleMarkAllNotificationsSeen = useCallback(() => {
-    setAnnouncements((prev) => prev.map((a) => ({ ...a, seen: true })));
-  }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
   // @MENTION HANDLERS
@@ -1850,7 +2040,7 @@ export default function ChatRoomScreen() {
     } else {
       // Different room - navigate to that room with the message target
       router.push({
-        pathname: '/chat-rooms/[roomId]',
+        pathname: '/(main)/(private)/(tabs)/chat-rooms/[roomId]',
         params: {
           roomId: mention.roomId as string,
           targetMessageId: mention.messageId as string,
@@ -1924,8 +2114,6 @@ export default function ChatRoomScreen() {
   // MEMBER-DATA FIX: Use roomMembers (unified source for both demo and real mode)
   // SELF-PROFILE FIX: If tapping own avatar, open photo viewer directly (no action popup)
   const handleAvatarPress = useCallback((senderId: string) => {
-    if (__DEV__) console.log('[TAP] avatar pressed', { senderId, t: Date.now() });
-
     // SELF-PROFILE FIX: Check if this is the current user's own avatar
     const currentUserId = isDemoMode ? DEMO_CURRENT_USER.id : authUserId;
     const isSelf = senderId === currentUserId;
@@ -1944,12 +2132,10 @@ export default function ChatRoomScreen() {
       // SELF-PROFILE FIX: Open photo viewer directly, skip action popup
       setViewProfileUser(userToShow);
       setOverlay('viewProfile');
-      if (__DEV__) console.log('[TAP] self-avatar → viewProfile (no actions)', { t: Date.now() });
     } else {
       // Other user: show action popup (View Profile, Private Message, Mute, Report)
       setSelectedUser(userToShow);
       setOverlay('userProfile');
-      if (__DEV__) console.log('[TAP] other-avatar → userProfile popup', { t: Date.now() });
     }
   }, [messages, roomMembers, authUserId]);
 
@@ -1960,8 +2146,6 @@ export default function ChatRoomScreen() {
   type PanelUser = { id: string; username?: string; avatar?: string; isOnline?: boolean; age?: number; gender?: string; lastSeen?: number };
   // SELF-PROFILE FIX: If tapping own user in online panel, open photo viewer directly
   const handleOnlineUserPress = useCallback((user: PanelUser) => {
-    if (__DEV__) console.log('[TAP] online user pressed', { id: user.id, t: Date.now() });
-
     // Convert PanelUser to DemoOnlineUser format for state
     const userAsDemoUser: DemoOnlineUser = {
       id: user.id,
@@ -1981,7 +2165,6 @@ export default function ChatRoomScreen() {
       // SELF-PROFILE FIX: Open photo viewer directly, skip action popup
       setViewProfileUser(userAsDemoUser);
       setOverlay('viewProfile');
-      if (__DEV__) console.log('[TAP] self-online → viewProfile (no actions)', { t: Date.now() });
     } else {
       // Other user: show action popup
       setSelectedUser(userAsDemoUser);
@@ -2015,14 +2198,6 @@ export default function ChatRoomScreen() {
       ? (roomIdStr as Id<'chatRooms'>)
       : undefined;
 
-    if (__DEV__) {
-      console.log('[CHAT_ROOM_ID_RESOLVE] DM initiation', {
-        roomIdStr: roomIdStr?.slice(-8),
-        resolvedRoomId: resolvedRoomId ? String(resolvedRoomId).slice(-8) : 'undefined',
-        hasValidRoomId: !!resolvedRoomId,
-      });
-    }
-
     try {
       // DM-ID-FIX: Create or get thread from Convex backend
       // userId from presence is already the canonical Convex ID
@@ -2031,15 +2206,6 @@ export default function ChatRoomScreen() {
         peerUserId: userId,
         sourceRoomId: resolvedRoomId,
       });
-
-      if (__DEV__) {
-        console.log('[CHAT_DM_THREAD_OPENED]', {
-          threadId,
-          peerId: userId.slice(-8),
-          authUserId: authUserId.slice(-8),
-          sourceRoomId: resolvedRoomId ? String(resolvedRoomId).slice(-8) : 'none',
-        });
-      }
 
       // Create DM info for display
       const dmInfo = {
@@ -2054,9 +2220,9 @@ export default function ChatRoomScreen() {
       setActiveDm(dmInfo, threadId, roomIdStr!);
       setSelectedUser(null);
       setOverlay('none');
-    } catch (error) {
+    } catch (error: any) {
       if (__DEV__) console.error('[CHAT_DM_ERROR]', error);
-      Alert.alert('Error', 'Failed to open private chat. Please try again.');
+      Alert.alert('Error', error?.message || 'Failed to open private chat. Please try again.');
     }
   }, [authUserId, selectedUser, roomIdStr, getOrCreateDmThread, setActiveDm]);
 
@@ -2286,29 +2452,99 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // SCROLL TO MESSAGE (for tap-to-jump on reply quote)
   // ─────────────────────────────────────────────────────────────────────────
-  const handleScrollToMessage = useCallback((messageId: string) => {
-    // Find the index of the message in the inverted list
-    const index = invertedListItems.findIndex(
+  const highlightMessage = useCallback((messageId: string) => {
+    setHighlightedMessageId(messageId);
+    setTimeout(() => {
+      if (mountedRef.current) {
+        setHighlightedMessageId(null);
+      }
+    }, 1300);
+  }, []);
+
+  const scrollToLoadedMessage = useCallback((messageId: string) => {
+    const index = invertedListItemsRef.current.findIndex(
       (item) => item.type === 'message' && item.id === messageId
     );
-    if (index !== -1 && listRef.current) {
-      // Scroll to the message
-      listRef.current.scrollToIndex({
-        index,
-        animated: true,
-        viewPosition: 0.5, // Center the message in view
-      });
 
-      // Highlight the message briefly
-      setHighlightedMessageId(messageId);
-      // Clear highlight after animation completes (1.2s = 200ms fade in + 600ms hold + 400ms fade out)
-      setTimeout(() => {
-        if (mountedRef.current) {
-          setHighlightedMessageId(null);
-        }
-      }, 1300);
+    if (index === -1 || !listRef.current) {
+      return false;
     }
-  }, [invertedListItems]);
+
+    listRef.current.scrollToIndex({
+      index,
+      animated: true,
+      viewPosition: 0.5,
+    });
+    highlightMessage(messageId);
+    return true;
+  }, [highlightMessage]);
+
+  const handleScrollToMessage = useCallback(async (messageId: string) => {
+    if (!messageId) {
+      return;
+    }
+
+    if (scrollToLoadedMessage(messageId)) {
+      return;
+    }
+
+    let hasMore = hasOlderMessagesRef.current;
+    let before =
+      olderMessagesRef.current[0]?.createdAt !== undefined
+        ? olderMessagesRef.current[0].createdAt + 1
+        : liveMessagesRef.current[0]?.createdAt !== undefined
+          ? liveMessagesRef.current[0].createdAt + 1
+          : undefined;
+
+    while (hasMore && before) {
+      if (isLoadingOlderMessagesRef.current) {
+        break;
+      }
+
+      setIsLoadingOlderMessages(true);
+      isLoadingOlderMessagesRef.current = true;
+      setLoadOlderError(null);
+
+      try {
+        const page = await fetchOlderMessagesPage(before);
+        if (!page || page.messages.length === 0) {
+          hasMore = false;
+          break;
+        }
+
+        hasMore = page.hasMore;
+        before =
+          page.messages[0]?.createdAt !== undefined
+            ? page.messages[0].createdAt + 1
+            : undefined;
+
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => resolve());
+          });
+        });
+
+        if (scrollToLoadedMessage(messageId)) {
+          return;
+        }
+      } catch (error) {
+        if (__DEV__) {
+          console.warn('[CHAT_ROOM] Failed to load target message:', error);
+        }
+        if (mountedRef.current) {
+          setLoadOlderError("Couldn't load older messages.");
+        }
+        break;
+      } finally {
+        if (mountedRef.current) {
+          setIsLoadingOlderMessages(false);
+        }
+        isLoadingOlderMessagesRef.current = false;
+      }
+    }
+
+    Alert.alert('Message unavailable', 'That message is no longer available.');
+  }, [fetchOlderMessagesPage, scrollToLoadedMessage]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // MENTION-NAV: Handle navigation to specific message (from mention tap or route param)
@@ -2320,7 +2556,11 @@ export default function ChatRoomScreen() {
     if (messageIdToScrollTo && invertedListItems.length > 0) {
       // Small delay to ensure FlatList is ready
       const timer = setTimeout(() => {
-        handleScrollToMessage(messageIdToScrollTo);
+        void handleScrollToMessage(messageIdToScrollTo);
+
+        if (routeTargetMessageId) {
+          router.setParams({ targetMessageId: undefined });
+        }
 
         // Clear the target after scrolling
         if (targetMessageId) {
@@ -2330,25 +2570,7 @@ export default function ChatRoomScreen() {
 
       return () => clearTimeout(timer);
     }
-  }, [routeTargetMessageId, targetMessageId, invertedListItems.length, handleScrollToMessage]);
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // PERF-FIX: Use refs for frequently changing data to avoid renderItem re-creation
-  // ─────────────────────────────────────────────────────────────────────────
-  const invertedListItemsRef = useRef(invertedListItems);
-  const reactionsMapRef = useRef(reactionsMap);
-  const highlightedMessageIdRef = useRef(highlightedMessageId);
-
-  // Keep refs in sync
-  useEffect(() => {
-    invertedListItemsRef.current = invertedListItems;
-  }, [invertedListItems]);
-  useEffect(() => {
-    reactionsMapRef.current = reactionsMap;
-  }, [reactionsMap]);
-  useEffect(() => {
-    highlightedMessageIdRef.current = highlightedMessageId;
-  }, [highlightedMessageId]);
+  }, [routeTargetMessageId, targetMessageId, invertedListItems.length, handleScrollToMessage, router]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER MESSAGE ITEM (reuses existing components)
@@ -2510,9 +2732,6 @@ export default function ChatRoomScreen() {
 
   // BUG FIX: Safety guard - block invalid roomIds (e.g. fallback_* from UI fallback)
   if (!isDemoMode && !isValidConvexId(roomIdStr)) {
-    if (__DEV__) {
-      console.log('[CHAT_ROOM] Blocked invalid roomId:', { roomIdStr });
-    }
     return (
       // P1-004 FIX: Remove inline paddingTop - header handles topInset internally
       <View style={styles.container}>
@@ -2531,13 +2750,27 @@ export default function ChatRoomScreen() {
   // - joinAttempted && joinFailed → user banned or cannot access
   // SECURITY: Show error screen and navigate back safely
   // ─────────────────────────────────────────────────────────────────────────
-  const isRoomNotFound = !isDemoMode && convexRoom === null;
+  const accessStatus = accessStatusQuery?.status;
+  const isRoomNotFound =
+    !isDemoMode &&
+    (convexRoom === null || accessStatus === 'not_found' || accessStatus === 'expired');
   // SECURITY: Access denied if join was attempted but failed
-  const isAccessDenied = !isDemoMode && joinAttempted && joinFailed;
+  const isAccessDenied =
+    !isDemoMode &&
+    (
+      (joinAttempted && joinFailed) ||
+      accessStatus === 'banned' ||
+      accessStatus === 'suspended' ||
+      accessStatus === 'private_room' ||
+      accessStatus === 'password_required' ||
+      accessStatus === 'unauthenticated'
+    );
 
   if (isRoomNotFound || isAccessDenied) {
     const handleBackToRooms = () => {
       // Clear stale preferred room so user doesn't get stuck in a loop
+      setCurrentRoom(null);
+      exitRoom();
       if (isDemoMode) {
         clearPreferredRoom();
       } else if (authUserId) {
@@ -2552,7 +2785,15 @@ export default function ChatRoomScreen() {
     // Determine error title and message
     const errorTitle = isAccessDenied ? 'Access Denied' : 'Room Not Found';
     const errorMessage = isAccessDenied
-      ? 'You do not have access to this room'
+      ? accessStatus === 'password_required'
+        ? 'Use the room invite code first, then enter the room password.'
+        : accessStatus === 'private_room'
+          ? 'You do not have access to this private room.'
+          : accessStatus === 'suspended'
+            ? 'You are suspended from this room right now.'
+            : accessStatus === 'banned'
+              ? 'You are banned from this room.'
+              : 'You do not have access to this room'
       : 'Room not found';
 
     return (
@@ -2591,15 +2832,9 @@ export default function ChatRoomScreen() {
         topInset={insets.top}
         onRefreshPress={handleReload}
         onInboxPress={() => setOverlay('messages')}
-        onMentionsPress={() => setOverlay('mentions')}
-        onNotificationsPress={() => setOverlay('notifications')}
         onProfilePress={() => setOverlay('profile')}
         profileAvatar={isDemoMode ? (myAvatarUrl ?? '') : (myAvatarUrl ?? '')}
         unreadInbox={unreadDMs}
-        unreadMentions={unreadMentionCount}
-        unseenNotifications={unseenNotifications}
-        showCloseButton={!!canCloseRoom}
-        onClosePress={handleCloseRoom}
         hideInboxAndNotifications={isPrivateRoom}
         showRetentionIndicator
       />
@@ -2618,14 +2853,12 @@ export default function ChatRoomScreen() {
                 // AVATAR-BORDER-FIX: Include gender for consistent border color
                 gender: (u as any).gender as 'male' | 'female' | 'other' | undefined,
               }))
-            : (roomPresenceQuery?.online ?? []).map((u) => ({
+            : presenceUsers.online.map((u) => ({
                 id: u.id,
-                // CACHE-BUST-FIX: Use cache-busted avatar URL
-                avatar: buildCacheBustedAvatarUrl(u.avatar, (u as any).avatarVersion),
+                avatar: u.avatar,
                 isOnline: true,
-                joinedAt: u.joinedAt, // Convex provides this
-                // AVATAR-BORDER-FIX: Include gender for consistent border color
-                gender: (u.gender || undefined) as 'male' | 'female' | 'other' | undefined,
+                joinedAt: u.joinedAt,
+                gender: u.gender,
               }))
         }
         theme="dark"
@@ -2674,6 +2907,19 @@ export default function ChatRoomScreen() {
               onScroll={handleScroll}
               scrollEventThrottle={16}
               maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+              onScrollToIndexFailed={({ index }) => {
+                setTimeout(() => {
+                  try {
+                    listRef.current?.scrollToIndex({
+                      index,
+                      animated: true,
+                      viewPosition: 0.5,
+                    });
+                  } catch {
+                    // Let the user retry by tapping again if the target is still not measurable.
+                  }
+                }, 120);
+              }}
               // P0-004 FIX: Optimized FlatList tuning for variable-height content
               initialNumToRender={15}
               maxToRenderPerBatch={10}
@@ -2684,6 +2930,31 @@ export default function ChatRoomScreen() {
               // P0-004 FIX: Use highlightedMessageId ref only (reactions use ref, not extraData)
               // This prevents full list re-render when reactions change
               extraData={highlightedMessageId}
+              onEndReached={() => {
+                if (!isDemoMode && hasOlderMessages && !isLoadingOlderMessages) {
+                  void handleLoadOlderMessages();
+                }
+              }}
+              onEndReachedThreshold={0.2}
+              ListFooterComponent={
+                !isDemoMode && (hasOlderMessages || isLoadingOlderMessages || loadOlderError) ? (
+                  <View style={styles.olderMessagesStatus}>
+                    {isLoadingOlderMessages ? (
+                      <ActivityIndicator size="small" color={C.textLight} />
+                    ) : loadOlderError ? (
+                      <TouchableOpacity
+                        style={styles.retryOlderButton}
+                        onPress={() => void handleLoadOlderMessages()}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.retryOlderText}>Retry older messages</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <Text style={styles.olderMessagesHint}>Older messages available</Text>
+                    )}
+                  </View>
+                ) : null
+              }
             />
           )}
 
@@ -2779,13 +3050,6 @@ export default function ChatRoomScreen() {
         onMarkAllRead={handleMarkAllMentionsRead}
       />
 
-      <NotificationsPopover
-        visible={overlay === 'notifications'}
-        onClose={closeOverlay}
-        announcements={announcements}
-        onMarkAllSeen={handleMarkAllNotificationsSeen}
-      />
-
       {/* DATA-SOURCE FIX: Use real profile data in non-demo mode */}
       <ProfilePopover
         visible={overlay === 'profile'}
@@ -2798,8 +3062,8 @@ export default function ChatRoomScreen() {
           : (myAvatarUrl ?? '')}
         isActive={true}
         coins={userCoins}
-        age={isDemoMode ? (DEMO_CURRENT_USER.age ?? 25) : (realAge ?? 0)}
-        gender={isDemoMode ? (DEMO_CURRENT_USER.gender ?? 'Unknown') : (realGender ?? '')}
+        age={isDemoMode ? (DEMO_CURRENT_USER.age ?? 25) : undefined}
+        gender={isDemoMode ? (DEMO_CURRENT_USER.gender ?? 'Unknown') : undefined}
         bio={isDemoMode ? undefined : (myBio || undefined)}
         onLeaveRoom={isPrivateRoom ? handleLeavePrivateRoom : handleLeaveRoom}
         isPrivateRoom={isPrivateRoom}
@@ -2815,14 +3079,8 @@ export default function ChatRoomScreen() {
         visible={overlay === 'onlineUsers'}
         onClose={closeOverlay}
         users={isDemoMode ? (roomMembers ?? []) : undefined}
-        presenceOnline={isDemoMode ? undefined : roomPresenceQuery?.online?.map((u) => ({
-          ...u,
-          avatar: buildCacheBustedAvatarUrl(u.avatar, (u as any).avatarVersion),
-        }))}
-        presenceRecentlyLeft={isDemoMode ? undefined : roomPresenceQuery?.recentlyLeft?.map((u) => ({
-          ...u,
-          avatar: buildCacheBustedAvatarUrl(u.avatar, (u as any).avatarVersion),
-        }))}
+        presenceOnline={isDemoMode ? undefined : presenceUsers.online}
+        presenceRecentlyLeft={isDemoMode ? undefined : presenceUsers.recentlyLeft}
         onUserPress={handleOnlineUserPress}
       />
 
@@ -3021,6 +3279,28 @@ const styles = StyleSheet.create({
     color: C.textLight,
     textAlign: 'center',
     lineHeight: Math.round(CHAT_FONTS.emptySubtitle * 1.5),
+  },
+  olderMessagesStatus: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: SPACING.md,
+  },
+  olderMessagesHint: {
+    fontSize: CHAT_FONTS.secondary,
+    color: C.textLight,
+  },
+  retryOlderButton: {
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    borderRadius: 8,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.accent,
+  },
+  retryOlderText: {
+    fontSize: CHAT_FONTS.secondary,
+    color: C.text,
+    fontWeight: '600',
   },
   // P2-012: Improved read-only notice styling
   readOnlyNotice: {

@@ -65,30 +65,18 @@ interface ChatRoomsHeaderProps {
   onRefreshPress?: () => void;
   /** Called when inbox/mail icon pressed */
   onInboxPress?: () => void;
-  /** Called when @mentions icon pressed */
-  onMentionsPress?: () => void;
-  /** Called when bell/notifications pressed */
-  onNotificationsPress?: () => void;
   /** Called when profile avatar pressed */
   onProfilePress?: () => void;
   /** Profile avatar URL */
   profileAvatar?: string;
   /** Unread inbox count */
   unreadInbox?: number;
-  /** Unread @mentions count */
-  unreadMentions?: number;
-  /** Unseen notifications count */
-  unseenNotifications?: number;
   /** Safe-area top inset */
   topInset?: number;
   /** Show create room button (+ icon) */
   showCreateButton?: boolean;
   /** Called when create button pressed */
   onCreatePress?: () => void;
-  /** Phase-2: Show close room button (only for room creator) */
-  showCloseButton?: boolean;
-  /** Phase-2: Called when close room button pressed */
-  onClosePress?: () => void;
   /** Phase-2: Hide inbox and notifications icons (for private rooms) */
   hideInboxAndNotifications?: boolean;
   /** Show 24-hour message retention indicator below title */
@@ -104,18 +92,12 @@ export default function ChatRoomsHeader({
   onMenuPress,
   onRefreshPress,
   onInboxPress,
-  onMentionsPress,
-  onNotificationsPress,
   onProfilePress,
   profileAvatar,
   unreadInbox = 0,
-  unreadMentions = 0,
-  unseenNotifications = 0,
   topInset = 0,
   showCreateButton = false,
   onCreatePress,
-  showCloseButton = false,
-  onClosePress,
   hideInboxAndNotifications = false,
   showRetentionIndicator = false,
 }: ChatRoomsHeaderProps) {
@@ -230,15 +212,6 @@ export default function ChatRoomsHeader({
         )}
 
         {/* @Mentions moved to composer area - no longer in header */}
-
-        {/* Notifications bell (hidden for private rooms) */}
-        {!hideInboxAndNotifications && (
-          <BadgeIcon
-            name="notifications-outline"
-            count={unseenNotifications}
-            onPress={onNotificationsPress}
-          />
-        )}
 
         {/* Profile avatar */}
         <TouchableOpacity onPress={onProfilePress}>

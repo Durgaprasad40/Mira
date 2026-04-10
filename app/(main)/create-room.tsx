@@ -87,8 +87,18 @@ export default function CreateRoomScreen() {
         authUserId: userId!,
       });
 
-      // Navigate to the new room
-      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any);
+      Alert.alert(
+        'Room Created',
+        `Invite code: ${result.joinCode}\nPassword: ${trimmedPassword}\n\nShare both to let someone in.`,
+        [
+          {
+            text: 'Go to Room',
+            onPress: () => {
+              router.replace(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any);
+            },
+          },
+        ]
+      );
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to create room');
     } finally {
