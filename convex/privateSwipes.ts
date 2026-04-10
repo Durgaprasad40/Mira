@@ -9,7 +9,7 @@
 import { v } from 'convex/values';
 import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { validateSessionToken, resolveUserIdByAuthId } from './helpers';
+import { getPhase2DisplayName, validateSessionToken, resolveUserIdByAuthId } from './helpers';
 
 // Helper: Check if either user has blocked the other
 async function isBlockedBidirectional(
@@ -345,19 +345,10 @@ export const swipe = mutation({
           source: isSuperLikeMatch ? 'super_like' : 'like'
         });
 
-        // Create match notifications for both users
-        // Get display names for notifications
-        const fromProfile = await ctx.db
-          .query('userPrivateProfiles')
-          .withIndex('by_user', (q) => q.eq('userId', fromUserId))
-          .first();
-        const toProfile = await ctx.db
-          .query('userPrivateProfiles')
-          .withIndex('by_user', (q) => q.eq('userId', toUserId))
-          .first();
-
-        const fromDisplayName = fromProfile?.displayName || 'Someone';
-        const toDisplayName = toProfile?.displayName || 'Someone';
+        const [fromDisplayName, toDisplayName] = await Promise.all([
+          getPhase2DisplayName(ctx, fromUserId),
+          getPhase2DisplayName(ctx, toUserId),
+        ]);
 
         // Notify the other user (toUser) about the match
         // PHASE SEPARATION: Use 'phase2_match' type so it only shows in Phase 2 bell
@@ -403,7 +394,11 @@ export const swipe = mutation({
           type: 'phase2_like',
           title: action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜',
           body: 'Check your likes in Deep Connect to see who!',
-          data: { likeType: action, phase: 'phase2' },
+          data: {
+            likeType: action,
+            otherUserId: fromUserId as string,
+            phase: 'phase2',
+          },
           dedupeKey: `p2_like:${fromUserId}:${toUserId}`,
           createdAt: now,
           expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
@@ -512,9 +507,11 @@ export const getIncomingLikes = query({
   args: {
     userId: v.id('users'),
     limit: v.optional(v.number()),
+    refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId: requestedUserId, limit = 50 } = args;
+    const { userId: requestedUserId, limit = 50, refreshKey } = args;
+    void refreshKey;
 
     // P0-SECURITY FIX: MANDATORY auth validation - return empty during hydration
     // Changed from throw to graceful return to prevent app crashes during auth sync
@@ -545,16 +542,20 @@ export const getIncomingLikes = query({
     const userId = authenticatedUserId;
 
     // Get all likes TO the current user
+    const fetchWindow = Math.min(Math.max(limit * 3, limit + 20), 150);
     const incomingLikes = await ctx.db
       .query('privateLikes')
       .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
       .order('desc')
-      .take(limit);
+      .take(fetchWindow);
 
-    // Filter to only likes/super_likes (not passes), and exclude already matched
-    const pendingLikes = [];
-    for (const like of incomingLikes) {
-      if (like.action !== 'like' && like.action !== 'super_like') continue;
+    // Filter to only likes/super_likes (not passes), and exclude already matched.
+    // Overfetching keeps the visible pending set more complete when recent rows
+    // include passes or reciprocal likes that should be filtered out.
+    const pendingLikes = await Promise.all(incomingLikes.map(async (like) => {
+      if (like.action !== 'like' && like.action !== 'super_like') {
+        return null;
+      }
 
       // Check if current user has already liked them back (would be matched)
       const reciprocalLike = await ctx.db
@@ -565,35 +566,45 @@ export const getIncomingLikes = query({
         .first();
 
       // If user hasn't swiped on them yet, it's a pending like
-      if (!reciprocalLike) {
-        // Get liker's profile info
-        const likerProfile = await ctx.db
-          .query('userPrivateProfiles')
-          .withIndex('by_user', (q) => q.eq('userId', like.fromUserId))
-          .first();
-
-        if (likerProfile) {
-          pendingLikes.push({
-            likeId: like._id,
-            fromUserId: like.fromUserId,
-            action: like.action,
-            createdAt: like.createdAt,
-            message: like.message,
-            // Profile preview (blurred until they swipe back)
-            // displayName is the Phase-2 nickname (user-chosen display identity)
-            profile: {
-              displayName: likerProfile.displayName,
-              age: likerProfile.age,
-              gender: likerProfile.gender,
-              city: likerProfile.city,
-              blurredPhotoUrl: likerProfile.privatePhotoUrls?.[0],
-            },
-          });
-        }
+      if (reciprocalLike) {
+        return null;
       }
-    }
 
-    return pendingLikes;
+      // Get liker's profile info
+      const likerProfile = await ctx.db
+        .query('userPrivateProfiles')
+        .withIndex('by_user', (q) => q.eq('userId', like.fromUserId))
+        .first();
+
+      if (!likerProfile) {
+        return null;
+      }
+
+      const displayName = await getPhase2DisplayName(ctx, like.fromUserId);
+      const hasPrivatePhotos = (
+        likerProfile.privatePhotoStorageIds?.length ??
+        likerProfile.privatePhotoUrls?.length ??
+        0
+      ) > 0;
+
+      return {
+        likeId: like._id,
+        fromUserId: like.fromUserId,
+        action: like.action,
+        createdAt: like.createdAt,
+        message: like.message,
+        profile: {
+          displayName,
+          age: likerProfile.age,
+          gender: likerProfile.gender,
+          city: likerProfile.city,
+          blurredPhotoUrl: null,
+          hasPrivatePhotos,
+        },
+      };
+    }));
+
+    return pendingLikes.filter((like): like is NonNullable<typeof like> => like !== null).slice(0, limit);
   },
 });
 

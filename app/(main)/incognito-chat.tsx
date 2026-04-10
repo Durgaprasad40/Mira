@@ -243,7 +243,6 @@ export default function PrivateChatScreen() {
     setPhotoAccessRequesting(true);
     try {
       const result = await requestPhotoAccessMutation({
-        authUserId: currentUserId,
         ownerUserId: conversation.participantId as Id<'users'>,
         conversationId: id as Id<'privateConversations'>,
       });
@@ -264,7 +263,7 @@ export default function PrivateChatScreen() {
   // This shows a banner when the other participant wants to see MY blurred photo
   const pendingPhotoRequests = useQuery(
     api.privatePhotoAccess.getPendingPhotoAccessRequests,
-    currentUserId ? { authUserId: currentUserId } : 'skip'
+    currentUserId ? {} : 'skip'
   );
 
   // Find if the OTHER participant in this conversation has a pending request for MY photo
@@ -285,7 +284,6 @@ export default function PrivateChatScreen() {
     setRespondingToRequest(true);
     try {
       await respondPhotoAccessMutation({
-        authUserId: currentUserId,
         requestId: pendingRequestFromOther.requestId as Id<'privatePhotoAccessRequests'>,
         approve,
       });

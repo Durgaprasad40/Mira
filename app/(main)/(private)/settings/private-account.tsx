@@ -13,7 +13,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { stringToUserId } from '@/convex/helpers';
 import { INCOGNITO_COLORS, COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -68,7 +67,7 @@ export default function AccountScreen() {
               // M-004 FIX: Server mutation with rollback on failure
               if (!isDemoMode && userId) {
                 try {
-                  await initiateDeletionMutation({ userId: stringToUserId(userId) });
+                  await initiateDeletionMutation({});
                 } catch (serverError) {
                   // M-004 FIX: Rollback optimistic update to keep local+server consistent
                   recoverPrivateData();

@@ -3,7 +3,7 @@ import { query, mutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
-import { resolveUserIdByAuthId } from './helpers';
+import { getPhase2DisplayName, requireAuthenticatedUserId } from './helpers';
 
 // Phase 3: Shadow mode imports
 import { shouldRunShadowComparison } from './ranking/rankingConfig';
@@ -12,14 +12,48 @@ import { computeRankScore, logBatchRankingComparison, DEFAULT_RANKING_CONFIG } f
 // Suppression window: 4 hours in milliseconds
 const SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
 
-// SOFT_MATCH_FIX: Penalty scores for incomplete profiles (90/10 rule)
-// Incomplete profiles are NOT filtered out, just pushed to the end
+// SOFT_MATCH_FIX: Penalty scores for profiles without photos
 const SOFT_PENALTY = {
-  NO_SETUP_COMPLETE: -1000,  // Not onboarded yet
   NO_PHOTOS: -500,           // No photos uploaded
 };
 
-// Get private discovery profiles (blurred photos only) with Phase-2 ranking
+function getStoredPrivatePhotoCount(profile: {
+  privatePhotoStorageIds?: Id<'_storage'>[];
+  privatePhotoUrls?: string[];
+}): number {
+  if (Array.isArray(profile.privatePhotoStorageIds) && profile.privatePhotoStorageIds.length > 0) {
+    return profile.privatePhotoStorageIds.length;
+  }
+  return Array.isArray(profile.privatePhotoUrls) ? profile.privatePhotoUrls.length : 0;
+}
+
+async function buildPrivatePhotoUrlsFromStorageIds(ctx: any, photoStorageIds: Id<'_storage'>[]) {
+  const urls: string[] = [];
+  for (const storageId of photoStorageIds) {
+    if (!storageId || urls.length >= photoStorageIds.length) continue;
+    const url = await ctx.storage.getUrl(storageId);
+    if (typeof url === 'string' && !urls.includes(url)) {
+      urls.push(url);
+    }
+  }
+  return urls;
+}
+
+async function hasActivePhase2Match(
+  ctx: any,
+  userA: Id<'users'>,
+  userB: Id<'users'>
+) {
+  const [user1Id, user2Id] = userA < userB ? [userA, userB] : [userB, userA];
+  const match = await ctx.db
+    .query('privateMatches')
+    .withIndex('by_users', (q: any) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+    .first();
+  return match?.isActive === true;
+}
+
+// Get private discovery profiles with Phase-2 ranking.
+// Discover payloads do not expose clear private photo URLs.
 // HARD FILTERS (completely excluded):
 // - The requesting user (self)
 // - Blocked users (in BOTH directions - shared across phases)
@@ -27,7 +61,6 @@ const SOFT_PENALTY = {
 // - Users already swiped on
 // - Users with existing chat threads
 // SOFT FILTERS (pushed to end, not excluded):
-// - Incomplete profiles (isSetupComplete=false) -> penalty score
 // - Profiles without photos -> penalty score
 // Ranking behavior:
 // - Users seen within 4-hour suppression window are pushed to back
@@ -35,43 +68,13 @@ const SOFT_PENALTY = {
 // Returns profiles sorted by ranking score (descending)
 export const getProfiles = query({
   args: {
-    // P1-002 FIX: Removed userId arg - server auth only (fail closed)
-    // AUTH_FIX: authUserId string for dev/testing fallback resolution
-    authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
     const suppressionCutoff = now - SUPPRESSION_WINDOW_MS;
 
-    // AUTH_FIX: Robust identity resolution with fallback and debug logging
-    let viewerUserId: Id<'users'> | null = null;
-    let authSource = 'none';
-
-    // Step 1: Try server-side auth (preferred)
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      viewerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
-      if (viewerUserId) {
-        authSource = 'server_auth';
-      }
-    }
-
-    // Step 2: Fallback to authUserId string arg (for dev/testing)
-    if (!viewerUserId && args.authUserId) {
-      viewerUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
-      if (viewerUserId) {
-        authSource = 'authUserId_fallback';
-      }
-    }
-
-    // P1-002 FIX: REMOVED userId arg fallback - fail closed for security
-    // Client-supplied userId could allow impersonation
-
-    // P1-002 FIX: Fail closed if auth fails - do not return empty silently
-    if (!viewerUserId) {
-      throw new Error('Authentication required for Phase-2 discover');
-    }
+    const viewerUserId = await requireAuthenticatedUserId(ctx);
 
     // Phase 3: Shadow mode decision (once per request)
     const runShadow = shouldRunShadowComparison();
@@ -165,20 +168,20 @@ export const getProfiles = query({
         .map((imp) => imp.viewedUserId as string)
     );
 
-    // SOFT_MATCH_FIX: Relaxed filtering - only hard-block truly ineligible users
+    // Return only profiles that are genuinely eligible for live Phase-2 discover.
     // HARD FILTERS (completely excluded):
     // - Self
     // - Blocked users
     // - Deleted users
     // - Already swiped users
     // - Existing chat partners
+    // - Incomplete profiles
     // SOFT FILTERS (included but penalized):
-    // - isSetupComplete=false -> penalty score
     // - No photos -> penalty score
     const eligible = profiles.filter(
       (p) =>
         p.userId !== viewerUserId &&
-        // REMOVED: p.isSetupComplete - now a soft filter, not hard
+        p.isSetupComplete === true &&
         !blockedUserIds.has(p.userId as string) &&
         !deletedUserIds.has(p.userId as string) &&
         // P0-001 FIX: Already-swiped users must NEVER reappear
@@ -203,9 +206,7 @@ export const getProfiles = query({
       excludedDeleted: profiles.filter((p) => deletedUserIds.has(p.userId as string)).length,
       excludedSwiped: profiles.filter((p) => alreadySwipedUserIds.has(p.userId as string)).length,
       excludedChatPartners: profiles.filter((p) => conversationPartnerIds.has(p.userId as string)).length,
-      // Soft filter stats
-      incompleteProfiles: eligible.filter((p) => !p.isSetupComplete).length,
-      noPhotoProfiles: eligible.filter((p) => !p.privatePhotoUrls?.length).length,
+      noPhotoProfiles: eligible.filter((p) => getStoredPrivatePhotoCount(p) === 0).length,
     });
 
     // =========================================================================
@@ -229,6 +230,7 @@ export const getProfiles = query({
       finalEligible = profiles.filter(
         (p) =>
           p.userId !== viewerUserId &&
+          p.isSetupComplete === true &&
           !blockedUserIds.has(p.userId as string) &&
           !deletedUserIds.has(p.userId as string) &&
           !alreadySwipedUserIds.has(p.userId as string) // P0-004: NEVER removed
@@ -263,12 +265,8 @@ export const getProfiles = query({
       };
       let score = computeFinalScore(p, metrics, viewerId);
 
-      // SOFT_MATCH_FIX: Apply soft penalties (push incomplete profiles to end)
-      // These profiles are still shown, just ranked lower
-      if (!p.isSetupComplete) {
-        score += SOFT_PENALTY.NO_SETUP_COMPLETE;
-      }
-      if (!p.privatePhotoUrls?.length) {
+      // SOFT_MATCH_FIX: Apply soft penalties (profiles without photos rank lower)
+      if (getStoredPrivatePhotoCount(p) === 0) {
         score += SOFT_PENALTY.NO_PHOTOS;
       }
 
@@ -325,7 +323,7 @@ export const getProfiles = query({
             lifestyle: {},
             bioLength: p.privateBio?.trim().length ?? 0,
             promptsAnswered,
-            photoCount: p.privatePhotoUrls?.length ?? 0,
+            photoCount: getStoredPrivatePhotoCount(p),
             isVerified: profile.isVerified ?? false,
             hasOptionalFields: { height: !!profile.height, jobTitle: false, education: !!profile.education },
             lastActiveAt: metrics?.lastPhase2ActiveAt ?? p.updatedAt ?? now,
@@ -365,20 +363,6 @@ export const getProfiles = query({
       }
     }
 
-    // HANDLE_FIX: Fetch user handles (nicknames) from users table
-    // Phase-2 MUST use ONLY user.handle (user-controlled nickname), NEVER user.name
-    // Handle is the @username chosen by user during onboarding
-    const userIds = limited.map(({ profile: p }) => p.userId);
-    const users = await Promise.all(userIds.map((id) => ctx.db.get(id)));
-    const nicknameMap = new Map<string, string>();
-    for (let i = 0; i < userIds.length; i++) {
-      const user = users[i];
-      // STRICT: Use ONLY user.handle, never user.name or firstName
-      if (user?.handle) {
-        nicknameMap.set(userIds[i] as string, user.handle);
-      }
-    }
-
     // PRIVATE_DISCOVER_COUNTS: Comprehensive pipeline summary for debugging
     console.log('[PRIVATE_DISCOVER_COUNTS]', {
       total: profiles.length,
@@ -407,9 +391,9 @@ export const getProfiles = query({
         deleted: profiles.filter((p) => deletedUserIds.has(p.userId as string)).length,
         alreadySwiped: profiles.filter((p) => alreadySwipedUserIds.has(p.userId as string)).length,
         chatPartner: profiles.filter((p) => conversationPartnerIds.has(p.userId as string)).length,
-        // Note: These are soft filters (penalized but not excluded)
+        // Debug counts include profiles we now exclude earlier for setup completeness.
         incompleteSetup: profiles.filter((p) => !p.isSetupComplete).length,
-        noPhotos: profiles.filter((p) => !p.privatePhotoUrls?.length).length,
+        noPhotos: profiles.filter((p) => getStoredPrivatePhotoCount(p) === 0).length,
       };
 
       // Determine primary reason for empty result
@@ -448,49 +432,40 @@ export const getProfiles = query({
       });
     }
 
-    // Return only blurred data — never expose original photos
-    // Cast to access optional schema fields that may not be in generated types yet
-    // SOFT_MATCH_FIX: Include flags for incomplete profiles so frontend can show appropriate UI
-    return limited.map(({ profile: p }) => {
+    // Return profile summaries without exposing raw private photo URLs.
+    return await Promise.all(limited.map(async ({ profile: p }) => {
       const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
-      // Backward compat: older records may only have privateIntentKey (single)
       const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
-      // P0-002 FIX: Standardize on single field 'displayName' for all Phase-2 profiles
-      // This is the user's handle (anonymous identifier), never their real name
-      const displayName = nicknameMap.get(p.userId as string) ?? 'Anonymous';
+      const displayName = await getPhase2DisplayName(ctx, p.userId);
       return {
         _id: p._id,
         userId: p.userId,
-        // P0-002: Single canonical field for user's anonymous display name
         displayName,
         age: p.age,
         city: p.city,
         gender: p.gender,
-        blurredPhotoUrl: p.privatePhotoUrls?.[0] ?? null,
-        blurredPhotoUrls: p.privatePhotoUrls ?? [],
+        blurredPhotoUrl: null,
+        blurredPhotoUrls: [],
         intentKeys,
         desireTagKeys: p.privateDesireTagKeys,
         privateBio: p.privateBio,
-        // Include hobbies and verification status if available
         hobbies: profile.hobbies ?? [],
         isVerified: profile.isVerified ?? false,
-        // SOFT_MATCH_FIX: Flags for frontend to show appropriate UI
-        isSetupComplete: p.isSetupComplete ?? false,
-        hasPhotos: (p.privatePhotoUrls?.length ?? 0) > 0,
+        isSetupComplete: true,
+        hasPhotos: getStoredPrivatePhotoCount(p) > 0,
       };
-    });
+    }));
   },
 });
 
 // Get a single private profile for viewing (blurred only)
 // Also checks blocks before returning
-// viewerId is REQUIRED to enforce block checking
 export const getProfileCard = query({
   args: {
     profileId: v.id('userPrivateProfiles'),
-    viewerId: v.id('users'),
   },
   handler: async (ctx, args) => {
+    const viewerUserId = await requireAuthenticatedUserId(ctx);
     const p = await ctx.db.get(args.profileId);
     if (!p || !p.isPrivateEnabled || !p.isSetupComplete) return null;
 
@@ -498,7 +473,7 @@ export const getProfileCard = query({
     const blockedByViewer = await ctx.db
       .query('blocks')
       .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', args.viewerId).eq('blockedUserId', p.userId)
+        q.eq('blockerId', viewerUserId).eq('blockedUserId', p.userId)
       )
       .first();
     if (blockedByViewer) return null;
@@ -507,7 +482,7 @@ export const getProfileCard = query({
     const blockedByOwner = await ctx.db
       .query('blocks')
       .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', p.userId).eq('blockedUserId', args.viewerId)
+        q.eq('blockerId', p.userId).eq('blockedUserId', viewerUserId)
       )
       .first();
     if (blockedByOwner) return null;
@@ -517,39 +492,35 @@ export const getProfileCard = query({
     // Backward compat: older records may only have privateIntentKey (single)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
-    // P0-002 FIX: Standardize on single field 'displayName' for all Phase-2 profiles
-    const user = await ctx.db.get(p.userId);
-    const displayName = user?.handle ?? 'Anonymous';
+    const displayName = await getPhase2DisplayName(ctx, p.userId);
 
     return {
       _id: p._id,
       userId: p.userId,
-      // P0-002: Single canonical field for user's anonymous display name
       displayName,
       age: p.age,
       city: p.city,
       gender: p.gender,
-      blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
-      blurredPhotoUrls: p.privatePhotoUrls,
+      blurredPhotoUrl: null,
+      blurredPhotoUrls: [],
       intentKeys,
       desireTagKeys: p.privateDesireTagKeys,
       privateBio: p.privateBio,
-      // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
     };
   },
 });
 
-// Get a Phase-2 profile by userId (for full profile view)
-// Returns full profile data including intentKeys for display
-// viewerId is REQUIRED to enforce block checking
+// Get a Phase-2 profile by userId (for full profile view).
+// Uses auth-bound viewer resolution and only returns clear photos to the owner
+// or to viewers with approved private-photo access.
 export const getProfileByUserId = query({
   args: {
     userId: v.id('users'),
-    viewerId: v.id('users'),
   },
   handler: async (ctx, args) => {
+    const viewerUserId = await requireAuthenticatedUserId(ctx);
     // Find the private profile for this user
     const p = await ctx.db
       .query('userPrivateProfiles')
@@ -562,7 +533,7 @@ export const getProfileByUserId = query({
     const blockedByViewer = await ctx.db
       .query('blocks')
       .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', args.viewerId).eq('blockedUserId', args.userId)
+        q.eq('blockerId', viewerUserId).eq('blockedUserId', args.userId)
       )
       .first();
     if (blockedByViewer) return null;
@@ -571,7 +542,7 @@ export const getProfileByUserId = query({
     const blockedByOwner = await ctx.db
       .query('blocks')
       .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', args.userId).eq('blockedUserId', args.viewerId)
+        q.eq('blockerId', args.userId).eq('blockedUserId', viewerUserId)
       )
       .first();
     if (blockedByOwner) return null;
@@ -588,8 +559,8 @@ export const getProfileByUserId = query({
         q.and(
           q.eq(q.field('anonymousParticipantId'), args.userId),
           q.or(
-            q.eq(q.field('participants'), [args.userId, args.viewerId]),
-            q.eq(q.field('participants'), [args.viewerId, args.userId])
+            q.eq(q.field('participants'), [args.userId, viewerUserId]),
+            q.eq(q.field('participants'), [viewerUserId, args.userId])
           )
         )
       )
@@ -609,9 +580,8 @@ export const getProfileByUserId = query({
     // Backward compat: older records may only have privateIntentKey (single), not privateIntentKeys (array)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
-    // P0-002 FIX: Standardize on single field 'displayName' for all Phase-2 profiles
     const user = await ctx.db.get(args.userId);
-    const displayName = user?.handle ?? 'Anonymous';
+    const displayName = await getPhase2DisplayName(ctx, args.userId);
 
     // Cast to access optional promptAnswers field
     const profileWithPrompts = p as typeof p & { promptAnswers?: { promptId: string; question: string; answer: string }[] };
@@ -634,18 +604,42 @@ export const getProfileByUserId = query({
       usingSource: (profile.hobbies?.length ?? 0) > 0 ? 'phase2_hobbies' : 'phase1_activities_fallback',
     });
 
+    const approvedPhotoAccess =
+      viewerUserId === args.userId
+        ? { status: 'self' as const }
+        : await ctx.db
+            .query('privatePhotoAccessRequests')
+            .withIndex('by_owner_viewer', (q) =>
+              q.eq('ownerUserId', args.userId).eq('viewerUserId', viewerUserId)
+            )
+            .first();
+    const hasMatch =
+      viewerUserId === args.userId
+        ? true
+        : await hasActivePhase2Match(ctx, viewerUserId, args.userId);
+    const canViewClearPhoto =
+      viewerUserId === args.userId ||
+      (approvedPhotoAccess?.status === 'approved' && hasMatch);
+    const clearPhotoUrls =
+      canViewClearPhoto && Array.isArray((p as any).privatePhotoStorageIds) && (p as any).privatePhotoStorageIds.length > 0
+        ? await buildPrivatePhotoUrlsFromStorageIds(ctx, (p as any).privatePhotoStorageIds)
+        : viewerUserId === args.userId
+          ? (Array.isArray((p as any).privatePhotoUrls) ? (p as any).privatePhotoUrls : [])
+          : [];
+
     return {
       _id: p._id,
       userId: p.userId,
-      // P0-002: Single canonical field for user's anonymous display name
       displayName,
       age: p.age,
       city: p.city,
       gender: p.gender,
       bio: p.privateBio,
-      photos: p.privatePhotoUrls.map((url, i) => ({ _id: `photo_${i}`, url })),
-      blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
-      blurredPhotoUrls: p.privatePhotoUrls,
+      photos: canViewClearPhoto
+        ? clearPhotoUrls.map((url: string, i: number) => ({ _id: `photo_${i}`, url }))
+        : [],
+      blurredPhotoUrl: null,
+      blurredPhotoUrls: [],
       // Phase-2 intents (array)
       intentKeys,
       // Legacy single key for backward compat
@@ -688,12 +682,12 @@ export const recordDesireLandImpressions = mutation({
     viewedUserIds: v.array(v.id('users')),
   },
   handler: async (ctx, args) => {
-    // Resolve viewer from server-side auth (secure - not client-supplied)
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) return;
-
-    const viewerId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!viewerId) return;
+    let viewerId: Id<'users'>;
+    try {
+      viewerId = await requireAuthenticatedUserId(ctx);
+    } catch {
+      return;
+    }
 
     const now = Date.now();
 

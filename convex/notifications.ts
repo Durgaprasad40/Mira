@@ -1,27 +1,33 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { requireAuthenticatedUserId, resolveUserIdByAuthId } from './helpers';
 
 // 4-2: Notification TTL (24 hours in milliseconds)
 const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Get notifications for a user
 // 4-3: Filters out expired notifications server-side to prevent render race
+// SAFE DEGRADATION: Returns empty array if auth session not yet established
+// This prevents Discover crash when client fires query before Convex auth is ready
 export const getNotifications = query({
   args: {
-    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
     limit: v.optional(v.number()),
     unreadOnly: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const { limit = 50, unreadOnly = false } = args;
 
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    // SAFE AUTH CHECK: Return empty array if not authenticated (prevents crash)
+    // Client may fire query before Convex auth session is fully established
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      return []; // Safe degradation - no notifications for unauthenticated users
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
     if (!userId) {
-      console.log('[getNotifications] User not found for authUserId:', args.userId);
-      return [];
+      return []; // User record not found - return empty instead of throwing
     }
 
     const now = Date.now();
@@ -49,16 +55,9 @@ export const getNotifications = query({
 // Get unread notification count
 // 4-3: Filters out expired notifications server-side
 export const getUnreadCount = query({
-  args: {
-    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
-  },
-  handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!userId) {
-      console.log('[getUnreadCount] User not found for authUserId:', args.userId);
-      return 0;
-    }
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireAuthenticatedUserId(ctx);
 
     const now = Date.now();
     const notifications = await ctx.db
@@ -85,16 +84,10 @@ export const getUnreadCount = query({
 export const markAsRead = mutation({
   args: {
     notificationId: v.id('notifications'),
-    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { notificationId, authUserId } = args;
-
-    // P1 SECURITY: Resolve auth ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const { notificationId } = args;
+    const userId = await requireAuthenticatedUserId(ctx);
 
     const notification = await ctx.db.get(notificationId);
     if (!notification || notification.userId !== userId) {
@@ -111,21 +104,10 @@ export const markAsRead = mutation({
 
 // Mark all notifications as read
 export const markAllAsRead = mutation({
-  args: {
-    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
-  },
-  handler: async (ctx, args) => {
-    const { authUserId } = args;
+  args: {},
+  handler: async (ctx) => {
     const now = Date.now();
-
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await requireAuthenticatedUserId(ctx);
 
     const unreadNotifications = await ctx.db
       .query('notifications')
@@ -236,18 +218,12 @@ function computeDedupeKey(type: string, data?: { matchId?: string; conversationI
 // P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markReadByDedupeKey = mutation({
   args: {
-    authUserId: v.string(),
     dedupeKey: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, dedupeKey } = args;
+    const { dedupeKey } = args;
     const now = Date.now();
-
-    // P1 SECURITY: Resolve auth ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await requireAuthenticatedUserId(ctx);
 
     // Find unread notifications matching the dedupeKey
     const notifications = await ctx.db
@@ -275,18 +251,12 @@ export const markReadByDedupeKey = mutation({
 // P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markReadForConversation = mutation({
   args: {
-    authUserId: v.string(),
     conversationId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, conversationId } = args;
+    const { conversationId } = args;
     const now = Date.now();
-
-    // P1 SECURITY: Resolve auth ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await requireAuthenticatedUserId(ctx);
 
     // D2/D4: Use dedupeKey format matching messages.ts: `message:${conversationId}:unread`
     const dedupeKey = `message:${conversationId}:unread`;
@@ -313,16 +283,10 @@ export const markReadForConversation = mutation({
 export const deleteNotification = mutation({
   args: {
     notificationId: v.id('notifications'),
-    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { notificationId, authUserId } = args;
-
-    // P1 SECURITY: Resolve auth ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const { notificationId } = args;
+    const userId = await requireAuthenticatedUserId(ctx);
 
     const notification = await ctx.db.get(notificationId);
     if (!notification || notification.userId !== userId) {
@@ -337,17 +301,9 @@ export const deleteNotification = mutation({
 // Delete all notifications
 // P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const deleteAllNotifications = mutation({
-  args: {
-    authUserId: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const { authUserId } = args;
-
-    // P1 SECURITY: Resolve auth ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireAuthenticatedUserId(ctx);
 
     const notifications = await ctx.db
       .query('notifications')

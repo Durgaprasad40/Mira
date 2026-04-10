@@ -59,7 +59,8 @@ export const generateUploadUrl = mutation({
 
 /**
  * Get the URL for a storage ID.
- * Used by Phase-2 private profile to get permanent URLs after upload.
+ * Used only for immediate owner-side preview after upload.
+ * Callers must not persist the returned clear URL.
  */
 export const getStorageUrl = mutation({
   args: { storageId: v.id('_storage') },
@@ -1341,7 +1342,13 @@ export const cleanupPendingUpload = mutation({
       .filter((q) => q.eq(q.field('storageId'), args.storageId))
       .first();
 
-    if (photoUsingStorage) {
+    const privateProfiles = await ctx.db.query('userPrivateProfiles').collect();
+    const privateProfileUsingStorage = privateProfiles.find((profile) =>
+      Array.isArray((profile as any).privatePhotoStorageIds) &&
+      (profile as any).privatePhotoStorageIds.includes(args.storageId)
+    );
+
+    if (photoUsingStorage || privateProfileUsingStorage) {
       // Photo exists - do NOT delete storage, just clean up pending record
       await ctx.db.delete(pending._id);
       return { success: true, deleted: false, reason: 'in_use' };
@@ -1404,7 +1411,13 @@ export const cleanupStalePendingUploads = mutation({
         .filter((q) => q.eq(q.field('storageId'), pending.storageId))
         .first();
 
-      if (photoUsingStorage) {
+      const privateProfiles = await ctx.db.query('userPrivateProfiles').collect();
+      const privateProfileUsingStorage = privateProfiles.find((profile) =>
+        Array.isArray((profile as any).privatePhotoStorageIds) &&
+        (profile as any).privatePhotoStorageIds.includes(pending.storageId)
+      );
+
+      if (photoUsingStorage || privateProfileUsingStorage) {
         // Photo exists - only delete pending record, NOT storage
         await ctx.db.delete(pending._id);
         skippedCount++;

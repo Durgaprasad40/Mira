@@ -336,7 +336,7 @@ export default function Phase2FullProfileScreen() {
   const profile = useQuery(
     api.privateDiscover.getProfileByUserId,
     !isDemoMode && profileUserId && currentUserId
-      ? { userId: profileUserId as any, viewerId: currentUserId as any }
+      ? { userId: profileUserId as any }
       : 'skip'
   );
 
@@ -347,7 +347,7 @@ export default function Phase2FullProfileScreen() {
   const photoAccessStatus = useQuery(
     api.privatePhotoAccess.getPrivatePhotoAccessStatus,
     profileUserId && currentUserId
-      ? { authUserId: currentUserId, ownerUserId: profileUserId as Id<'users'> }
+      ? { ownerUserId: profileUserId as Id<'users'> }
       : 'skip'
   );
 
@@ -368,7 +368,6 @@ export default function Phase2FullProfileScreen() {
     setPhotoAccessRequesting(true);
     try {
       const result = await requestPhotoAccessMutation({
-        authUserId: currentUserId,
         ownerUserId: profileUserId as Id<'users'>,
       });
 
@@ -397,7 +396,12 @@ export default function Phase2FullProfileScreen() {
   const isPhotoBlurred = photoBlurStatus?.isBlurred ?? false;
   const canViewClearPhoto = photoAccessStatus?.canViewClear ?? !isPhotoBlurred;
   const photoAccessRequestStatus = photoAccessStatus?.status ?? 'none';
-  const showPhotoAccessButton = isPhotoBlurred && !canViewClearPhoto && photoAccessRequestStatus !== 'approved';
+  const canRequestPhotoAccess = photoAccessStatus?.canRequest === true;
+  const showPhotoAccessButton =
+    isPhotoBlurred &&
+    !canViewClearPhoto &&
+    canRequestPhotoAccess &&
+    photoAccessRequestStatus !== 'approved';
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P0 HOOK ORDER FIX: ALL HOOKS MUST BE DECLARED BEFORE EARLY RETURNS
@@ -686,7 +690,7 @@ export default function Phase2FullProfileScreen() {
               {/* Photo indicators */}
               {hasMultiplePhotos && (
                 <View style={styles.photoIndicators}>
-                  {photos.map((_, i) => (
+                  {photos.map((_: { _id: string; url: string }, i: number) => (
                     <View
                       key={i}
                       style={[
@@ -835,23 +839,15 @@ export default function Phase2FullProfileScreen() {
         )}
 
         {/* ═══════════════════════════════════════════════════════════════════
-            PROMPTS SECTION (exactly 2 prompts: first + random from rest)
+            PROMPTS SECTION (exactly 2 prompts: first two valid answers)
         ═══════════════════════════════════════════════════════════════════ */}
         {profile.promptAnswers && profile.promptAnswers.length > 0 && (() => {
-          // Deep Connect UI: Show exactly 2 prompts
-          // Prompt 1 = first non-empty, Prompt 2 = random from remaining
           const validPrompts = profile.promptAnswers.filter(
             (p: { answer: string }) => p.answer && p.answer.trim().length > 0
           );
           if (validPrompts.length === 0) return null;
 
-          const displayPrompts: typeof validPrompts = [validPrompts[0]];
-          if (validPrompts.length > 1) {
-            // Pick random from remaining prompts
-            const remaining = validPrompts.slice(1);
-            const randomIdx = Math.floor(Math.random() * remaining.length);
-            displayPrompts.push(remaining[randomIdx]);
-          }
+          const displayPrompts = validPrompts.slice(0, 2);
 
           return (
             <View style={styles.section}>

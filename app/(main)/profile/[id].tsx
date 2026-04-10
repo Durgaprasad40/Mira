@@ -106,7 +106,7 @@ export default function ViewProfileScreen() {
   const convexPhase2Profile = useQuery(
     api.privateDiscover.getProfileByUserId,
     !isDemoMode && isPhase2 && userId && currentUserId
-      ? { userId: userId as any, viewerId: currentUserId as any }
+      ? { userId: userId as any }
       : 'skip'
   );
 

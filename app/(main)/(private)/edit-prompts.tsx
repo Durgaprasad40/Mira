@@ -9,7 +9,7 @@
  * - No step navigation
  * - Just edit and save
  */
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -25,6 +25,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useNavigation, usePreventRemove } from '@react-navigation/native';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -46,6 +47,7 @@ type SectionKey = 'section1' | 'section2' | 'section3';
 
 export default function EditPromptsScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
   const scrollViewRef = useRef<ScrollView>(null);
 
   // Auth
@@ -54,21 +56,50 @@ export default function EditPromptsScreen() {
 
   // Store
   const promptAnswers = usePrivateProfileStore((s) => s.promptAnswers);
-  const setPromptAnswer = usePrivateProfileStore((s) => s.setPromptAnswer);
-  const removePromptAnswer = usePrivateProfileStore((s) => s.removePromptAnswer);
+  const setPromptAnswers = usePrivateProfileStore((s) => s.setPromptAnswers);
 
   // Local state
   const [expandedSection, setExpandedSection] = useState<SectionKey | null>('section1');
   const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
   const [draftAnswer, setDraftAnswer] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [draftPromptAnswers, setDraftPromptAnswers] = useState<Phase2PromptAnswer[]>(
+    () => promptAnswers.map((answer) => ({ ...answer }))
+  );
+
+  const updateDraftPromptAnswer = useCallback((promptId: string, question: string, answer: string) => {
+    const trimmedAnswer = answer.trim();
+    setDraftPromptAnswers((current) => {
+      const existingIndex = current.findIndex((item) => item.promptId === promptId);
+
+      if (trimmedAnswer.length === 0) {
+        if (existingIndex === -1) {
+          return current;
+        }
+        return current.filter((item) => item.promptId !== promptId);
+      }
+
+      const nextAnswer: Phase2PromptAnswer = { promptId, question, answer: trimmedAnswer };
+      if (existingIndex === -1) {
+        return [...current, nextAnswer];
+      }
+
+      const next = [...current];
+      next[existingIndex] = nextAnswer;
+      return next;
+    });
+  }, []);
+
+  const removeDraftPromptAnswer = useCallback((promptId: string) => {
+    setDraftPromptAnswers((current) => current.filter((item) => item.promptId !== promptId));
+  }, []);
 
   // Get current answer for a prompt
   const getAnswer = useCallback(
     (promptId: string) => {
-      return promptAnswers.find((a) => a.promptId === promptId)?.answer || '';
+      return draftPromptAnswers.find((a) => a.promptId === promptId)?.answer || '';
     },
-    [promptAnswers]
+    [draftPromptAnswers]
   );
 
   // Check if prompt is answered
@@ -101,9 +132,9 @@ export default function EditPromptsScreen() {
   // Save answer for a prompt
   const saveAnswer = (promptId: string, question: string) => {
     if (draftAnswer.trim().length >= PHASE2_PROMPT_MIN_TEXT_LENGTH) {
-      setPromptAnswer(promptId, question, draftAnswer.trim());
+      updateDraftPromptAnswer(promptId, question, draftAnswer);
     } else if (draftAnswer.trim().length === 0) {
-      removePromptAnswer(promptId);
+      removeDraftPromptAnswer(promptId);
     }
     setEditingPrompt(null);
     setDraftAnswer('');
@@ -114,15 +145,66 @@ export default function EditPromptsScreen() {
   const selectMultipleChoiceAnswer = (promptId: string, question: string, option: string) => {
     const current = getAnswer(promptId);
     if (current === option) {
-      removePromptAnswer(promptId);
+      removeDraftPromptAnswer(promptId);
     } else {
-      setPromptAnswer(promptId, question, option);
+      updateDraftPromptAnswer(promptId, question, option);
     }
   };
 
+  const normalizedSavedAnswers = useMemo(
+    () =>
+      JSON.stringify(
+        [...promptAnswers]
+          .map((answer) => ({ ...answer }))
+          .sort((a, b) => a.promptId.localeCompare(b.promptId))
+      ),
+    [promptAnswers]
+  );
+
+  const normalizedDraftAnswers = useMemo(
+    () =>
+      JSON.stringify(
+        [...draftPromptAnswers]
+          .map((answer) => ({ ...answer }))
+          .sort((a, b) => a.promptId.localeCompare(b.promptId))
+      ),
+    [draftPromptAnswers]
+  );
+
+  const hasPendingInlineEdit = useMemo(() => {
+    if (!editingPrompt) {
+      return false;
+    }
+
+    return draftAnswer.trim() !== getAnswer(editingPrompt).trim();
+  }, [draftAnswer, editingPrompt, getAnswer]);
+
+  const hasUnsavedChanges = normalizedDraftAnswers !== normalizedSavedAnswers || hasPendingInlineEdit;
+
+  usePreventRemove(hasUnsavedChanges && !isSaving, ({ data }) => {
+    Alert.alert(
+      'Discard changes?',
+      'You have unsaved prompt edits. Leave without saving?',
+      [
+        { text: 'Keep Editing', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          onPress: () => navigation.dispatch(data.action),
+        },
+      ]
+    );
+  });
+
   // Save all changes to backend
   const handleSave = async () => {
+    if (editingPrompt) {
+      Alert.alert('Finish editing', 'Save or cancel the answer you are editing before leaving this screen.');
+      return;
+    }
+
     if (isDemoMode) {
+      setPromptAnswers(draftPromptAnswers);
       router.back();
       return;
     }
@@ -136,8 +218,9 @@ export default function EditPromptsScreen() {
     try {
       await updatePrivateProfile({
         authUserId: userId,
-        promptAnswers: promptAnswers,
+        promptAnswers: draftPromptAnswers,
       });
+      setPromptAnswers(draftPromptAnswers);
       router.back();
     } catch (error) {
       if (__DEV__) {

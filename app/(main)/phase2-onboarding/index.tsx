@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -14,10 +14,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { usePrivateProfileStore, type Phase1ProfileData } from '@/stores/privateProfileStore';
+import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useIncognitoStore } from '@/stores/incognitoStore';
 import { useScreenTrace } from '@/lib/devTrace';
+import { PHASE2_ONBOARDING_ROUTE_MAP } from '@/lib/phase2Onboarding';
 
 const C = INCOGNITO_COLORS;
 const PHASE1_DISCOVER_ROUTE = '/(main)/(tabs)/home';
@@ -40,25 +41,6 @@ function calculateAge(dateOfBirth?: string | null): number {
   return age;
 }
 
-function buildPhase1ImportData(currentUser: any): Phase1ProfileData {
-  const sortedPhotos = Array.isArray(currentUser?.photos)
-    ? [...currentUser.photos]
-        .filter((photo: any) => typeof photo?.url === 'string' && photo.url.length > 0)
-        .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
-    : [];
-
-  return {
-    name: currentUser?.name || '',
-    handle: currentUser?.handle || '',
-    photos: sortedPhotos.map((photo: any) => ({ url: photo.url })),
-    dateOfBirth: currentUser?.dateOfBirth || '',
-    gender: currentUser?.gender || '',
-    city: currentUser?.city || '',
-    activities: currentUser?.activities || [],
-    isVerified: currentUser?.isVerified || false,
-  };
-}
-
 export default function Phase2OnboardingConsentScreen() {
   useScreenTrace('P2_ONB_CONSENT');
 
@@ -70,41 +52,19 @@ export default function Phase2OnboardingConsentScreen() {
     api.users.getCurrentUserFromToken,
     token ? { token } : 'skip'
   );
-  const currentPrivateProfile = useQuery(
-    api.privateProfiles.getCurrentOnboardingProfile,
-    token ? { token } : 'skip'
-  );
 
   const acceptConsent = useMutation(api.users.acceptPrivateOnboardingConsent);
 
-  const resetWizard = usePrivateProfileStore((s) => s.resetWizard);
-  const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
-  const hydrateFromConvex = usePrivateProfileStore((s) => s.hydrateFromConvex);
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
-  const clearOnboardingProgress = usePrivateProfileStore((s) => s.clearOnboardingProgress);
   const acceptPrivateTerms = useIncognitoStore((s) => s.acceptPrivateTerms);
 
   const [rulesChecked, setRulesChecked] = useState(false);
   const [noSharingChecked, setNoSharingChecked] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const initializedRef = useRef(false);
 
   useEffect(() => {
-    clearOnboardingProgress().catch(() => {
-      // Legacy AsyncStorage progress is no longer authoritative for Phase-2 onboarding.
-    });
-  }, [clearOnboardingProgress]);
-
-  useEffect(() => {
-    if (!currentUser || currentPrivateProfile === undefined || initializedRef.current) {
+    if (!currentUser) {
       return;
-    }
-
-    resetWizard();
-    importPhase1Data(buildPhase1ImportData(currentUser));
-
-    if (currentPrivateProfile) {
-      hydrateFromConvex(currentPrivateProfile as any);
     }
 
     if (currentUser.consentAcceptedAt) {
@@ -113,15 +73,9 @@ export default function Phase2OnboardingConsentScreen() {
       setRulesChecked(true);
       setNoSharingChecked(true);
     }
-
-    initializedRef.current = true;
   }, [
     acceptPrivateTerms,
-    currentPrivateProfile,
     currentUser,
-    hydrateFromConvex,
-    importPhase1Data,
-    resetWizard,
     setAcceptedTermsAt,
   ]);
 
@@ -137,7 +91,7 @@ export default function Phase2OnboardingConsentScreen() {
     };
   }, [currentUser]);
 
-  const isLoading = currentUser === undefined || currentPrivateProfile === undefined;
+  const isLoading = currentUser === undefined;
   const canContinue = !!token && !!currentUser && rulesChecked && noSharingChecked && !isSubmitting;
 
   const handleExit = () => {
@@ -161,7 +115,7 @@ export default function Phase2OnboardingConsentScreen() {
 
       setAcceptedTermsAt(result.consentAcceptedAt);
       acceptPrivateTerms();
-      router.push('/(main)/phase2-onboarding/select-photos' as any);
+      router.push(PHASE2_ONBOARDING_ROUTE_MAP['select-photos'] as any);
     } catch (error) {
       Alert.alert(
         'Unable to continue',
@@ -213,7 +167,7 @@ export default function Phase2OnboardingConsentScreen() {
         <TouchableOpacity onPress={handleExit} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="close" size={22} color={C.textLight} />
         </TouchableOpacity>
-        <Text style={styles.stepIndicator}>Step 1 of 4</Text>
+        <Text style={styles.stepIndicator}>Step 1 of 5</Text>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
@@ -269,7 +223,7 @@ export default function Phase2OnboardingConsentScreen() {
           <Text style={styles.sectionTitle}>Private Mode rules</Text>
           <View style={styles.rulesCard}>
             <Text style={styles.ruleBullet}>• Adults 18+ only</Text>
-            <Text style={styles.ruleBullet}>• Consent and boundaries come first</Text>
+            <Text style={styles.ruleBullet}>• Consent and respect come first</Text>
             <Text style={styles.ruleBullet}>• No screenshots, recording, or sharing private content</Text>
             <Text style={styles.ruleBullet}>• Harassment, coercion, and abuse lead to removal</Text>
           </View>

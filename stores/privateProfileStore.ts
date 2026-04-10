@@ -65,7 +65,6 @@ interface PrivateProfileState {
   markSetup: () => void;
 
   // Wizard state
-  currentStep: number;
   selectedPhotoIds: string[];
   selectedPhotoUrls: string[];
   blurredPhotoLocalUris: string[];
@@ -77,7 +76,6 @@ interface PrivateProfileState {
   desireTags: PrivateDesireTag[];
   boundaries: PrivateBoundary[];
   privateBio: string;
-  consentAgreed: boolean;
 
   // Auto-imported from main profile (Phase-1 → Phase-2)
   displayName: string;
@@ -112,10 +110,9 @@ interface PrivateProfileState {
   blurMyPhoto: boolean;
   photoBlurSlots: boolean[];  // Per-slot blur state (9 slots, true=blurred)
   phase1PhotoSlots: PhotoSlots9;  // Slot-preserving photos from Phase-1 (9 slots)
-  phase2PhotosConfirmed: boolean; // True after initial photo selection in Step-2
 
-  // Phase-2 Onboarding Step 3: Prompt answers
-  promptAnswers: Phase2PromptAnswer[]; // Answered prompts from Step 3
+  // Phase-2 Onboarding Step 4: Prompt answers
+  promptAnswers: Phase2PromptAnswer[]; // Answered prompts from Step 4
 
   // Phase-2 Preference Strength (ranking signal)
   preferenceStrength: PreferenceStrength;
@@ -155,9 +152,6 @@ interface PrivateProfileState {
   notificationsEnabled: boolean;
   notificationCategories: Record<string, boolean>;
 
-  // Actions — wizard navigation
-  setCurrentStep: (step: number) => void;
-
   // Actions — photo selection
   setSelectedPhotos: (ids: string[], urls: string[]) => void;
 
@@ -171,7 +165,6 @@ interface PrivateProfileState {
   setDesireTags: (tags: PrivateDesireTag[]) => void;
   setBoundaries: (boundaries: PrivateBoundary[]) => void;
   setPrivateBio: (bio: string) => void;
-  setConsentAgreed: (agreed: boolean) => void;
 
   // Actions — profile info
   setProfileInfo: (info: { displayName: string; age: number; city: string; gender: string }) => void;
@@ -190,7 +183,6 @@ interface PrivateProfileState {
   setConvexProfileId: (id: string | null) => void;
 
   // Actions — reset
-  resetWizard: () => void;
   resetPhase2: () => void; // Full Phase-2 profile reset (clears everything)
   resetPhase2ForTesting: () => void; // DEV ONLY: Full reset including completion flag
 
@@ -204,10 +196,9 @@ interface PrivateProfileState {
   togglePhotoBlurSlot: (slotIndex: number) => void;
   importPhase1Data: (data: Phase1ProfileData) => void;
   completeSetup: () => void;
-  setPhase2PhotosConfirmed: (confirmed: boolean) => void;
   setPrivateEntryNavLock: (locked: boolean) => void;
 
-  // Phase-2 Onboarding Step 3: Prompt answer actions
+  // Phase-2 Onboarding Step 4: Prompt answer actions
   setPromptAnswer: (promptId: string, question: string, answer: string) => void;
   setPromptAnswers: (answers: Phase2PromptAnswer[]) => void;
   removePromptAnswer: (promptId: string) => void;
@@ -243,9 +234,6 @@ interface PrivateProfileState {
   setNotificationsEnabled: (value: boolean) => void;
   setNotificationCategory: (key: string, value: boolean) => void;
 
-  // P0-002 FIX: Save/restore onboarding progress to AsyncStorage
-  saveOnboardingProgress: () => Promise<void>;
-  restoreOnboardingProgress: () => Promise<boolean>; // Returns true if progress was restored
   clearOnboardingProgress: () => Promise<void>;
 
   // ST-001 FIX: Hydrate store from Convex on app restart
@@ -272,7 +260,7 @@ interface PrivateProfileState {
     religion?: string | null;
     // Profile visibility
     isPrivateEnabled?: boolean;
-    // Phase-2 Onboarding Step 3 prompt answers
+    // Phase-2 Onboarding Step 4 prompt answers
     promptAnswers?: Phase2PromptAnswer[];
     // Phase-2 Preference Strength
     preferenceStrength?: PreferenceStrength;
@@ -297,7 +285,6 @@ interface PrivateProfileState {
 }
 
 const initialWizardState = {
-  currentStep: 1,
   selectedPhotoIds: [] as string[],
   selectedPhotoUrls: [] as string[],
   blurredPhotoLocalUris: [] as string[],
@@ -307,7 +294,6 @@ const initialWizardState = {
   desireTags: [] as PrivateDesireTag[],
   boundaries: [] as PrivateBoundary[],
   privateBio: '',
-  consentAgreed: false,
   displayName: '',
   age: 0,
   city: '',
@@ -333,8 +319,7 @@ const initialWizardState = {
   blurMyPhoto: true, // Default blur ON
   photoBlurSlots: [true, true, true, true, true, true, true, true, true] as boolean[], // Per-slot blur (default all blurred)
   phase1PhotoSlots: createEmptyPhotoSlots(),
-  phase2PhotosConfirmed: false, // True after Step-2 photo selection
-  promptAnswers: [] as Phase2PromptAnswer[], // Phase-2 Step 3 prompt answers
+  promptAnswers: [] as Phase2PromptAnswer[], // Phase-2 Step 4 prompt answers
   preferenceStrength: { smoking: null, drinking: null, intent: null } as PreferenceStrength,
   privateEntryNavLock: false, // Navigation lock for PrivateEntryGuard
   // PHASE 1 Settings — Defaults
@@ -376,10 +361,9 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
 
   // Wizard state
   ...initialWizardState,
-  _hasHydrated: true,
+  _hasHydrated: false,
 
   // Actions
-  setCurrentStep: (step) => set({ currentStep: step }),
   setSelectedPhotos: (ids, urls) => set({ selectedPhotoIds: ids, selectedPhotoUrls: urls }),
   setBlurredPhotoLocalUris: (uris) => set({ blurredPhotoLocalUris: uris }),
   setBlurredStorageIds: (ids) => set({ blurredStorageIds: ids }),
@@ -388,7 +372,6 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   setDesireTags: (tags) => set({ desireTags: tags }),
   setBoundaries: (boundaries) => set({ boundaries }),
   setPrivateBio: (bio) => set({ privateBio: bio }),
-  setConsentAgreed: (agreed) => set({ consentAgreed: agreed }),
   setProfileInfo: (info) => set(info),
   // Individual profile field setters
   setGender: (gender) => set({ gender }),
@@ -401,14 +384,11 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   setHobbies: (hobbies) => set({ hobbies }),
   setIsSetupComplete: (complete) => set({ isSetupComplete: complete }),
   setConvexProfileId: (id) => set({ convexProfileId: id }),
-  resetWizard: () => set(initialWizardState),
   resetPhase2: () => set((state) => ({
     // Reset all wizard state EXCEPT permanent onboarding flag
     ...initialWizardState,
     // PRESERVE permanent flag - onboarding never shows again once completed
     phase2OnboardingCompleted: state.phase2OnboardingCompleted,
-    // Reset photos confirmed flag
-    phase2PhotosConfirmed: false,
     // Also reset legacy profile fields
     profile: {
       username: 'Anonymous_User',
@@ -417,6 +397,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       blurPhoto: true,
     },
     isSetup: false,
+    _hasHydrated: false,
   })),
   // DEV ONLY: Full reset including completion flag (for testing onboarding)
   resetPhase2ForTesting: () => set(() => ({
@@ -425,7 +406,6 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     // ALSO reset completion flag so onboarding shows again
     phase2OnboardingCompleted: false,
     isSetupComplete: false,
-    phase2PhotosConfirmed: false,
     convexProfileId: null,
     acceptedTermsAt: null,
     phase2SetupVersion: null,
@@ -438,17 +418,43 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       blurPhoto: true,
     },
     isSetup: false,
+    _hasHydrated: false,
   })),
-  setHasHydrated: (hydrated) => set({ _hasHydrated: true }), // No-op
+  setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
 
   // Phase-2 setup actions
   setAcceptedTermsAt: (timestamp) => set({ acceptedTermsAt: timestamp }),
-  setBlurMyPhoto: (blur) => set({ blurMyPhoto: blur }),
-  setPhotoBlurSlots: (slots) => set({ photoBlurSlots: slots }),
+  setBlurMyPhoto: (blur) => set((state) => {
+    if (!blur) {
+      return {
+        blurMyPhoto: false,
+        photoBlurSlots: Array.from({ length: 9 }, () => false),
+      };
+    }
+
+    const nextSlots = state.photoBlurSlots.some(Boolean)
+      ? state.photoBlurSlots
+      : Array.from({ length: 9 }, () => true);
+
+    return {
+      blurMyPhoto: nextSlots.some(Boolean),
+      photoBlurSlots: nextSlots,
+    };
+  }),
+  setPhotoBlurSlots: (slots) => {
+    const normalizedSlots = Array.from({ length: 9 }, (_, index) => slots[index] ?? false);
+    set({
+      photoBlurSlots: normalizedSlots,
+      blurMyPhoto: normalizedSlots.some(Boolean),
+    });
+  },
   togglePhotoBlurSlot: (slotIndex) => set((state) => {
     const next = [...state.photoBlurSlots];
     next[slotIndex] = !next[slotIndex];
-    return { photoBlurSlots: next };
+    return {
+      photoBlurSlots: next,
+      blurMyPhoto: next.some(Boolean),
+    };
   }),
   importPhase1Data: (data) => {
     const startTime = __DEV__ ? Date.now() : 0;
@@ -470,6 +476,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         displayName: data.handle || '',
         gender: data.gender || '',
         phase1PhotoSlots: createEmptyPhotoSlots(),
+        _hasHydrated: true,
       });
       if (__DEV__) {
         console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms, minimal)`);
@@ -541,6 +548,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       education: data.education ?? null,
       religion: data.religion ?? null,
       maxDistanceKm,
+      _hasHydrated: true,
     });
 
     if (__DEV__) {
@@ -552,14 +560,14 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       isSetupComplete: true,
       phase2OnboardingCompleted: true, // Permanent flag - never shows onboarding again
       phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
+      _hasHydrated: true,
     });
     // P0-002 FIX: Clear saved onboarding progress when setup completes
     usePrivateProfileStore.getState().clearOnboardingProgress();
   },
-  setPhase2PhotosConfirmed: (confirmed) => set({ phase2PhotosConfirmed: confirmed }),
   setPrivateEntryNavLock: (locked) => set({ privateEntryNavLock: locked }),
 
-  // Phase-2 Onboarding Step 3: Prompt answer actions
+  // Phase-2 Onboarding Step 4: Prompt answer actions
   setPromptAnswer: (promptId, question, answer) => set((state) => {
     // Replace existing answer for this promptId, or add new
     const existing = state.promptAnswers.findIndex((a) => a.promptId === promptId);
@@ -622,24 +630,6 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     notificationCategories: { ...state.notificationCategories, [key]: value },
   })),
 
-  // Legacy no-op: active Phase-2 onboarding no longer trusts AsyncStorage progress.
-  saveOnboardingProgress: async () => {
-    return;
-  },
-
-  // Legacy cleanup: clear stale saved progress and never restore it into live onboarding.
-  restoreOnboardingProgress: async () => {
-    try {
-      await AsyncStorage.removeItem(ONBOARDING_PROGRESS_KEY);
-      return false;
-    } catch (error) {
-      if (__DEV__) {
-        console.error('[P2 ONBOARDING] Failed to clear legacy progress:', error);
-      }
-      return false;
-    }
-  },
-
   // P0-002 FIX: Clear saved onboarding progress (called when setup completes)
   clearOnboardingProgress: async () => {
     try {
@@ -658,7 +648,48 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   // This ensures Phase-2 profile state survives app restarts
   hydrateFromConvex: (convexProfile) => {
     if (!convexProfile) {
-      // No profile exists - keep default state, onboarding will show
+      set({
+        displayName: '',
+        age: 0,
+        city: '',
+        gender: '',
+        selectedPhotoIds: [],
+        selectedPhotoUrls: [],
+        blurredPhotoLocalUris: [],
+        blurredStorageIds: [],
+        blurredPhotoUrls: [],
+        intentKeys: [],
+        desireTags: [],
+        boundaries: [],
+        privateBio: '',
+        hobbies: [],
+        isVerified: false,
+        height: null,
+        weight: null,
+        smoking: null,
+        drinking: null,
+        education: null,
+        religion: null,
+        acceptedTermsAt: null,
+        isSetupComplete: false,
+        phase2OnboardingCompleted: false,
+        phase2SetupVersion: null,
+        convexProfileId: null,
+        isPrivateEnabled: true,
+        blurMyPhoto: true,
+        promptAnswers: [],
+        preferenceStrength: { smoking: null, drinking: null, intent: null },
+        photoBlurSlots: [true, true, true, true, true, true, true, true, true],
+        phase1PhotoSlots: createEmptyPhotoSlots(),
+        hideFromDeepConnect: false,
+        hideAge: false,
+        hideDistance: false,
+        disableReadReceipts: false,
+        safeMode: false,
+        notificationsEnabled: true,
+        notificationCategories: {},
+        _hasHydrated: true,
+      });
       return;
     }
 
@@ -713,13 +744,13 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
 
       // Completion flags
       isSetupComplete: convexProfile.isSetupComplete,
-      phase2OnboardingCompleted: state.phase2OnboardingCompleted,
+      phase2OnboardingCompleted: convexProfile.isSetupComplete === true,
       convexProfileId: convexProfile._id,
 
       // Profile visibility (Pause Profile)
       isPrivateEnabled: convexProfile.isPrivateEnabled ?? true, // Default to visible if undefined
 
-      // Phase-2 Onboarding Step 3 prompt answers
+      // Phase-2 Onboarding Step 4 prompt answers
       promptAnswers: convexProfile.promptAnswers || [],
 
       // Phase-2 Preference Strength
@@ -727,6 +758,9 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
 
       // Per-photo blur slots (9 slots, true = blurred)
       // Hydrate from backend or keep default (all blurred for privacy)
+      blurMyPhoto: convexProfile.photoBlurSlots
+        ? convexProfile.photoBlurSlots.some(Boolean)
+        : true,
       photoBlurSlots: convexProfile.photoBlurSlots || [true, true, true, true, true, true, true, true, true],
 
       // P0-1 FIX: Privacy settings (hydrate from backend)
@@ -760,143 +794,9 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   },
 }));
 
-// Helper to validate photo URLs
-function isValidPhotoUrl(url: unknown): url is string {
-  return (
-    typeof url === 'string' &&
-    url.length > 0 &&
-    url !== 'undefined' &&
-    url !== 'null' &&
-    (url.startsWith('http') || url.startsWith('file://'))
-  );
-}
-
-function isPersistedPhotoUrl(url: unknown): url is string {
-  return (
-    typeof url === 'string' &&
-    url.length > 0 &&
-    url !== 'undefined' &&
-    url !== 'null' &&
-    (url.startsWith('http://') || url.startsWith('https://'))
-  );
-}
-
 // Phase-2 onboarding validation constants
 export const PHASE2_MIN_PHOTOS = 2;
 export const PHASE2_MIN_INTENTS = 1;
 export const PHASE2_MAX_INTENTS = 3;
 export const PHASE2_DESIRE_MIN_LENGTH = 30;
 export const PHASE2_DESIRE_MAX_LENGTH = 300;
-
-// Selector: Check if Phase-2 setup is complete and valid
-export const selectIsSetupValid = (state: PrivateProfileState): boolean => {
-  // Must be hydrated first
-  if (!state._hasHydrated) return false;
-
-  // Must have completed setup
-  if (!state.isSetupComplete) return false;
-
-  // Version must match current
-  if (state.phase2SetupVersion !== CURRENT_PHASE2_SETUP_VERSION) return false;
-
-  // Must have accepted terms
-  if (state.acceptedTermsAt === null) return false;
-
-  // Must have at least 2 valid photos
-  const validPhotos = state.selectedPhotoUrls.filter(isPersistedPhotoUrl);
-  if (validPhotos.length < PHASE2_MIN_PHOTOS) return false;
-
-  // Must have 1-3 intent categories
-  if (state.intentKeys.length < PHASE2_MIN_INTENTS || state.intentKeys.length > PHASE2_MAX_INTENTS) return false;
-
-  // Desire (bio) must be at least 30 characters
-  if (state.privateBio.trim().length < PHASE2_DESIRE_MIN_LENGTH) return false;
-
-  return true;
-};
-
-// Selector: Check if photos step is valid (min 2 selected)
-export const selectCanContinuePhotos = (state: PrivateProfileState): boolean => {
-  const validPhotos = state.selectedPhotoUrls.filter(isPersistedPhotoUrl);
-  return validPhotos.length >= PHASE2_MIN_PHOTOS;
-};
-
-// Selector: Check if intents are valid (1-3 selected)
-export const selectCanContinueIntents = (state: PrivateProfileState): boolean => {
-  return (
-    state.intentKeys.length >= PHASE2_MIN_INTENTS &&
-    state.intentKeys.length <= PHASE2_MAX_INTENTS
-  );
-};
-
-// Selector: Check if desire (bio) is valid (30-300 chars)
-export const selectCanContinueDesire = (state: PrivateProfileState): boolean => {
-  const length = state.privateBio.trim().length;
-  return length >= PHASE2_DESIRE_MIN_LENGTH && length <= PHASE2_DESIRE_MAX_LENGTH;
-};
-
-// Legacy selector: Check if categories step is valid (kept for backward compatibility)
-export const selectCanContinueCategories = (state: PrivateProfileState): boolean => {
-  return (
-    state.intentKeys.length >= PHASE2_MIN_INTENTS &&
-    state.intentKeys.length <= PHASE2_MAX_INTENTS &&
-    state.privateBio.trim().length >= PHASE2_DESIRE_MIN_LENGTH
-  );
-};
-
-// Selector: Check if profile details are complete (mandatory fields)
-export const selectIsProfileDetailsComplete = (state: PrivateProfileState): boolean => {
-  return (
-    !!state.gender &&
-    state.height !== null && state.height > 0 &&
-    !!state.smoking &&
-    !!state.drinking &&
-    !!state.education &&
-    !!state.religion
-  );
-};
-
-// Selector: Get list of missing mandatory fields
-export const selectMissingProfileFields = (state: PrivateProfileState): string[] => {
-  const missing: string[] = [];
-  if (!state.gender) missing.push('Gender');
-  if (state.height === null || state.height <= 0) missing.push('Height');
-  if (!state.smoking) missing.push('Smoking');
-  if (!state.drinking) missing.push('Drinking');
-  if (!state.education) missing.push('Education');
-  if (!state.religion) missing.push('Religion');
-  return missing;
-};
-
-// Selector: Check if entire Phase-2 profile is complete (photos + intents + desire + profile details)
-export const selectIsPhase2ProfileComplete = (state: PrivateProfileState): boolean => {
-  const validPhotos = state.selectedPhotoUrls.filter(isPersistedPhotoUrl);
-  const hasEnoughPhotos = validPhotos.length >= PHASE2_MIN_PHOTOS;
-  const hasValidIntents = state.intentKeys.length >= PHASE2_MIN_INTENTS && state.intentKeys.length <= PHASE2_MAX_INTENTS;
-  const hasValidDesire = state.privateBio.trim().length >= PHASE2_DESIRE_MIN_LENGTH && state.privateBio.trim().length <= PHASE2_DESIRE_MAX_LENGTH;
-
-  return hasEnoughPhotos && hasValidIntents && hasValidDesire;
-};
-
-// Selector: Get all missing items for Phase-2 completion
-export const selectAllMissingItems = (state: PrivateProfileState): string[] => {
-  const missing: string[] = [];
-
-  // Photos
-  const validPhotos = state.selectedPhotoUrls.filter(isPersistedPhotoUrl);
-  if (validPhotos.length < PHASE2_MIN_PHOTOS) {
-    missing.push(`${PHASE2_MIN_PHOTOS - validPhotos.length} more photo${PHASE2_MIN_PHOTOS - validPhotos.length > 1 ? 's' : ''}`);
-  }
-
-  // Intents
-  if (state.intentKeys.length < PHASE2_MIN_INTENTS) {
-    missing.push('Looking For selection');
-  }
-
-  // Desire
-  if (state.privateBio.trim().length < PHASE2_DESIRE_MIN_LENGTH) {
-    missing.push('Desire text');
-  }
-
-  return missing;
-};

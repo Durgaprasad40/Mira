@@ -37,6 +37,7 @@ const PREFETCH_COUNT = 5;
 import { COLORS, INCOGNITO_COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
 import type { TrustBadge } from '@/lib/trustBadges';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+import { MatchSignalBadge } from './MatchSignalBadge';
 
 // Gender labels for "Looking for" display
 const GENDER_LABELS: Record<string, string> = {
@@ -134,6 +135,7 @@ const PhotoStack = memo(function PhotoStack({
   photoBlurred,
   onError,
 }: PhotoStackProps) {
+  const shouldBlurPhoto = photoBlurred === true;
   // PHOTO_RENDER_FIX: Render photos around the active index for memory efficiency
   // Instead of only first 5, render a sliding window that includes the active photo
   // This ensures P6/P7 images are available when user swipes to them
@@ -162,7 +164,7 @@ const PhotoStack = memo(function PhotoStack({
             ]}
             contentFit="cover"
             cachePolicy="memory-disk"
-            blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
+            blurRadius={shouldBlurPhoto ? BLUR_RADIUS : undefined}
             // Only attach error handler to active photo
             onError={globalIdx === activeIndex ? onError : undefined}
           />
@@ -207,6 +209,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // PHASE-2 DETECTION: Check for non-empty privateIntentKeys array
   // IMPORTANT: Empty array [] is truthy, so we must check length > 0
   const isPhase2 = Array.isArray(privateIntentKeys) && privateIntentKeys.length > 0;
+  const shouldBlurPhoto = isPhase2 ? photoBlurred !== false : photoBlurred === true;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // IDENTITY SIMPLIFICATION: Single `name` field for all phases
@@ -488,6 +491,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   // Alias for backward compatibility
   const phase1SubtleHighlights = phase1CommonPoints;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1A: MATCH SIGNAL BADGE COMPUTATIONS
+  // For the "X in common" badge on Photo 1
+  // ═══════════════════════════════════════════════════════════════════════════
+  const matchSignalCount = phase1SharedInterests.length;
+  const hasSameRelationshipIntent = useMemo(() => {
+    if (isPhase2 || !viewerProfile?.relationshipIntent || !relationshipIntent) return false;
+    return viewerProfile.relationshipIntent.some(intent => relationshipIntent.includes(intent));
+  }, [isPhase2, viewerProfile?.relationshipIntent, relationshipIntent]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE-1: WAVE DISTRIBUTION CONTENT MODEL
@@ -803,20 +816,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
     // ═══════════════════════════════════════════════════════════════════════
     // SOFT FALLBACK BUILDER: Compact reinforcement for late photos
-    // Priority: prompt snippet > interests > intent > bio snippet > CTA
+    // Priority: interests > intent > bio snippet > CTA
+    // NOTE: Prompts are EXCLUDED to prevent repetition (already shown in wave distribution)
     // This prevents "dead" late photos when unique content is exhausted
     // ═══════════════════════════════════════════════════════════════════════
     const buildSoftFallback = (): Phase1PhotoContentItem['softFallback'] | undefined => {
-      // Priority 1: Best prompt answer (shortened)
-      if (selectedPrompts.length > 0) {
-        const bestPrompt = selectedPrompts[0];
-        const snippet = bestPrompt.answer.length > 60
-          ? bestPrompt.answer.slice(0, 57) + '...'
-          : bestPrompt.answer;
-        return { type: 'prompt', promptSnippet: snippet };
-      }
-
-      // Priority 2: Top interests (2-3 chips)
+      // Priority 1: Top interests (2-3 chips) - safe, no repetition with wave prompts
       if (activities && activities.length > 0) {
         const topChips = activities.slice(0, 3).map(key => {
           const activity = ACTIVITY_FILTERS.find(a => a.value === key);
@@ -827,7 +832,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         }
       }
 
-      // Priority 3: Relationship intent
+      // Priority 2: Relationship intent
       if (relationshipIntent && relationshipIntent.length > 0) {
         const intentMap: Record<string, string> = {
           serious_vibes: 'Looking for something real',
@@ -846,7 +851,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         }
       }
 
-      // Priority 4: Bio snippet (first line)
+      // Priority 3: Bio snippet (first line)
       if (hasBio && bio) {
         const firstLine = bio.split(/[.\n]/)[0].trim();
         const snippet = firstLine.length > 50 ? firstLine.slice(0, 47) + '...' : firstLine;
@@ -855,7 +860,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         }
       }
 
-      // Priority 5: Minimal CTA
+      // Priority 4: Minimal CTA (prompts excluded to avoid repetition)
       return { type: 'cta' };
     };
 
@@ -1248,11 +1253,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // PHASE-2: ADAPTIVE PHOTO-STORY DISTRIBUTION
   // - Identity (name + age + badge) is ALWAYS visible on every photo
   // - Secondary content is DISTRIBUTED across photos based on photo count
-  // - Priority: intent → interests → prompt1 → lifestyle → distance → prompt2 → bio
+  // - Priority: intent → interests → prompt1 → lifestyle → prompt2 → bio
   // - If more photos than content, stay on last meaningful section
   // - NO modulo cycling, NO rigid photo-number hardcoding
   // ═══════════════════════════════════════════════════════════════════════════
-  type ContentSlot = 'intent' | 'interests' | 'prompt1' | 'lifestyle' | 'distance' | 'prompt2' | 'bio' | 'fallback';
+  type ContentSlot = 'intent' | 'interests' | 'prompt1' | 'lifestyle' | 'prompt2' | 'bio' | 'fallback';
 
   // Priority-ordered content slots (same priority for ALL users = premium consistency)
   const CONTENT_PRIORITY: ContentSlot[] = [
@@ -1260,9 +1265,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     'interests',  // 2. Shared hobbies/activities
     'prompt1',    // 3. First personality prompt
     'lifestyle',  // 4. Height/smoking/drinking
-    'distance',   // 5. How far away
-    'prompt2',    // 6. Second personality prompt (if available)
-    'bio',        // 7. Bio snippet
+    'prompt2',    // 5. Second personality prompt (if available)
+    'bio',        // 6. Bio snippet
   ];
 
   // Get first prompt (for prompt1 slot)
@@ -1286,13 +1290,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       case 'interests': return phase2Interests.length > 0;
       case 'prompt1': return !!phase2Prompt1;
       case 'lifestyle': return phase2Lifestyle.length > 0;
-      case 'distance': return distance !== undefined && distance > 0;
       case 'prompt2': return !!phase2Prompt2;
       case 'bio': return !!bio && bio.length > 0;
       case 'fallback': return true;
       default: return false;
     }
-  }, [phase2IntentLabel, phase2Interests, phase2Prompt1, phase2Lifestyle, distance, phase2Prompt2, bio]);
+  }, [phase2IntentLabel, phase2Interests, phase2Prompt1, phase2Lifestyle, phase2Prompt2, bio]);
 
   // Build DISTRIBUTED content slots based on photo count
   // Key insight: We distribute N content sections across M photos
@@ -1490,7 +1493,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             style={styles.gridImage}
             contentFit="cover"
             cachePolicy="memory-disk"
-            blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
+            blurRadius={shouldBlurPhoto ? BLUR_RADIUS : undefined}
             onError={handleImageError}
           />
         ) : (
@@ -1518,7 +1521,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           <PhotoStack
             photos={displayPhotos}
             activeIndex={safeIndex}
-            photoBlurred={photoBlurred}
+            photoBlurred={shouldBlurPhoto}
             onError={handleImageError}
           />
         ) : (
@@ -1700,21 +1703,6 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             </Animated.View>
           )}
 
-          {/* Distance slot */}
-          {currentContentSlot === 'distance' && distance !== undefined && distance > 0 && (
-            <Animated.View
-              key={`distance-${photoIndex}`}
-              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
-              exiting={FadeOut.duration(150)}
-              style={styles.phase2RevealSection}
-            >
-              <View style={styles.phase2DistanceRow}>
-                <Ionicons name="location-outline" size={14} color="rgba(255,255,255,0.7)" />
-                <Text style={styles.phase2DistanceText}>{distance.toFixed(0)} km away</Text>
-              </View>
-            </Animated.View>
-          )}
-
           {/* Interests slot */}
           {currentContentSlot === 'interests' && phase2Interests.length > 0 && (
             <Animated.View
@@ -1828,6 +1816,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       ) : (
         /* PHASE-1: PREMIUM PROGRESSIVE REVEAL OVERLAY */
         <View style={[styles.overlay, styles.phase1PremiumOverlay]} pointerEvents="none">
+          {/* P1A: Match Signal Badge - Top-right hook on Photo 1 */}
+          <MatchSignalBadge
+            commonCount={matchSignalCount}
+            sameRelationshipIntent={hasSameRelationshipIntent}
+            visible={photoIndex === 0 && !isPhase2}
+          />
+
           {/* ═══════════════════════════════════════════════════════════════════════════
               IDENTITY LAYER - Split into two parts:
               A) Persistent (ALL photos): name + age + gender icon
@@ -1842,72 +1837,46 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             )}
 
             {/* ─────────────────────────────────────────────────────────────────────────
-                LAYER A: IDENTITY ROW (Name + Age + Gender)
-                REDESIGN: Always visible on ALL photos for consistent anchor
-                This provides a stable identity reference as users swipe through photos
+                LAYER A: IDENTITY ROW (Name + Age + Verified Tick + Presence)
+                REQUIREMENT: Visible on ALL photos for consistent identity
                 ───────────────────────────────────────────────────────────────────────── */}
             <View style={styles.phase1NameRow}>
               <Text style={styles.phase1Name}>{displayName}</Text>
               <Text style={styles.phase1Age}>{age}</Text>
-              {/* Gender icon - subtle but visible */}
-              {gender && GENDER_ICONS[gender] && (
-                <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}20` }]}>
-                  <Ionicons
-                    name={GENDER_ICONS[gender].icon as any}
-                    size={14}
-                    color={GENDER_ICONS[gender].color}
-                  />
+              {/* Compact verified tick badge - inline with name/age */}
+              {isVerified && (
+                <View style={styles.phase1VerifiedTick}>
+                  <Ionicons name="checkmark-circle" size={18} color="#10B981" />
+                </View>
+              )}
+              {/* Presence indicator - only when online or active today */}
+              {isActiveNow && (
+                <View style={styles.phase1PresencePill}>
+                  <View style={styles.phase1PresenceDotInline} />
+                  <Text style={styles.phase1PresenceText}>Online</Text>
+                </View>
+              )}
+              {isActiveToday && !isActiveNow && (
+                <View style={styles.phase1PresencePillMuted}>
+                  <Text style={styles.phase1PresenceTextMuted}>Active Today</Text>
                 </View>
               )}
             </View>
 
-            {/* ─────────────────────────────────────────────────────────────────────────
-                LAYER B: PHOTO-1-ONLY METADATA
-                Badge row + Distance - only visible on first photo
-                ───────────────────────────────────────────────────────────────────────── */}
-            {photoIndex === 0 && (
-              <>
-                {/* Premium Badge Row - Face Verified / Online Now / Active Today */}
-                {(isVerified || isActiveNow || isActiveToday) && (
-                  <View style={styles.phase1BadgeRow}>
-                    {isVerified && (
-                      <View style={styles.phase1BadgePill}>
-                        <Ionicons name="shield-checkmark" size={12} color="#10B981" />
-                        <Text style={styles.phase1BadgeText}>Face Verified</Text>
-                      </View>
-                    )}
-                    {isActiveNow && (
-                      <View style={[styles.phase1BadgePill, styles.phase1BadgePillOnline]}>
-                        <View style={styles.phase1OnlineDot} />
-                        <Text style={[styles.phase1BadgeText, styles.phase1BadgeTextOnline]}>Online Now</Text>
-                      </View>
-                    )}
-                    {isActiveToday && !isActiveNow && (
-                      <View style={styles.phase1BadgePill}>
-                        <Ionicons name="time-outline" size={12} color="rgba(255,255,255,0.7)" />
-                        <Text style={styles.phase1BadgeText}>Active Today</Text>
-                      </View>
-                    )}
-                  </View>
-                )}
-
-                {/* Distance row */}
-                {!!distance && (
-                  <View style={styles.phase1DistanceRow}>
-                    <Ionicons name="location-outline" size={14} color="rgba(255,255,255,0.8)" />
-                    <Text style={styles.phase1IdentityDistanceText}>{distance.toFixed(0)} km away</Text>
-                  </View>
-                )}
-
-                {/* ─────────────────────────────────────────────────────────────────────────
-                    LAYER C: REMOVED - Wave distribution handles all content
-                    - 1 photo: Wave adds bio/prompt/fallback (ONE hook only)
-                    - 2-4 photos: Photo 1 = identity only (no content)
-                    - 5+ photos: Photo 1 = identity only (no content)
-                    Content now renders via identity_bio/wave_content slots below
-                    ───────────────────────────────────────────────────────────────────────── */}
-              </>
+            {/* Distance row - visible on FIRST photo only (no repetition) */}
+            {!isPhase2 && photoIndex === 0 && distance !== undefined && distance >= 0 && (
+              <View style={styles.phase1DistanceRowPersistent}>
+                <Ionicons name="location-outline" size={13} color="rgba(255,255,255,0.75)" />
+                <Text style={styles.phase1DistanceTextPersistent}>
+                  {distance < 1 ? '< 1 km away' : `${distance.toFixed(0)} km away`}
+                </Text>
+              </View>
             )}
+
+            {/* ─────────────────────────────────────────────────────────────────────────
+                LAYER B: Wave distribution handles content below
+                Identity, verified tick, presence, and distance are now in LAYER A (all photos)
+                ───────────────────────────────────────────────────────────────────────── */}
           </View>
 
           {/* ═══════════════════════════════════════════════════════════════════════════
@@ -2714,17 +2683,6 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.9)',
     letterSpacing: 0.2,
   },
-  // Photo 2: Distance
-  phase2DistanceRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  phase2DistanceText: {
-    fontSize: 14,
-    fontWeight: '400',
-    color: 'rgba(255,255,255,0.7)',
-  },
   // Photo 3 & 5: Chips row (interests, lifestyle)
   phase2ChipsRow: {
     flexDirection: 'row',
@@ -2878,6 +2836,86 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.9)',
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 10,
+  },
+  // P1A: Presence dot styles - compact indicator next to name
+  phase1PresenceDotOnline: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#22c55e', // green-500
+    marginLeft: 6,
+    alignSelf: 'center',
+    // Shadow for depth
+    shadowColor: '#22c55e',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  phase1PresenceDotActive: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#86efac', // green-300 (lighter for active today)
+    marginLeft: 6,
+    alignSelf: 'center',
+    opacity: 0.8,
+  },
+  // Compact verified tick - inline with name/age
+  phase1VerifiedTick: {
+    marginLeft: 4,
+    alignSelf: 'center',
+  },
+  // Presence pill - compact "Online" indicator
+  phase1PresencePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    marginLeft: 8,
+    gap: 4,
+  },
+  phase1PresenceDotInline: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#10B981',
+  },
+  phase1PresenceText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#10B981',
+  },
+  phase1PresencePillMuted: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    marginLeft: 8,
+  },
+  phase1PresenceTextMuted: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: 'rgba(255, 255, 255, 0.7)',
+  },
+  // Distance row - persistent on all photos
+  phase1DistanceRowPersistent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    gap: 4,
+  },
+  phase1DistanceTextPersistent: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255, 255, 255, 0.75)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   phase1VerifiedBadge: {
     width: 20,

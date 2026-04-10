@@ -9,7 +9,7 @@
  */
 
 import { v } from 'convex/values';
-import { query, mutation, MutationCtx, QueryCtx } from './_generated/server';
+import { query, mutation, internalQuery, MutationCtx, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { validateSessionToken, resolveUserIdByAuthId } from './helpers';
 import { softMaskText } from './softMask';
@@ -1494,6 +1494,143 @@ export const getPrivateTypingStatus = query({
     const isStale = now - typingStatus.updatedAt > TYPING_TIMEOUT;
     return {
       isTyping: typingStatus.isTyping && !isStale,
+    };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INTERNAL EXPORT: Full Phase-2 message dataset for forensic audit
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Export all Phase-2 private messages with conversation and participant context.
+ *
+ * This is intentionally an internal query so it is not exposed to the client API.
+ * It is meant for developer/admin use via the Convex CLI when preparing
+ * forensic datasets or offline audits.
+ */
+export const exportAllPhase2Messages = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const messages = await ctx.db.query('privateMessages').collect();
+
+    const sortedMessages = [...messages].sort((a, b) => {
+      const createdDiff = a.createdAt - b.createdAt;
+      if (createdDiff !== 0) return createdDiff;
+      return String(a._id).localeCompare(String(b._id));
+    });
+
+    const conversationIds = Array.from(
+      new Set(sortedMessages.map((message) => String(message.conversationId)))
+    ) as Id<'privateConversations'>[];
+
+    const conversations = await Promise.all(
+      conversationIds.map((conversationId) => ctx.db.get(conversationId))
+    );
+    const conversationMap = new Map(
+      conversations
+        .filter((conversation): conversation is NonNullable<typeof conversation> => conversation !== null)
+        .map((conversation) => [String(conversation._id), conversation])
+    );
+
+    const userIds = Array.from(
+      new Set(
+        conversations
+          .flatMap((conversation) => conversation?.participants ?? [])
+          .map((userId) => String(userId))
+      )
+    ) as Id<'users'>[];
+
+    const users = await Promise.all(userIds.map((userId) => ctx.db.get(userId)));
+    const userMap = new Map(
+      users
+        .filter((user): user is NonNullable<typeof user> => user !== null)
+        .map((user) => [String(user._id), user])
+    );
+
+    const rows = sortedMessages.map((message) => {
+      const conversation = conversationMap.get(String(message.conversationId)) ?? null;
+      const participantIds = conversation?.participants ?? [];
+      const receiverId =
+        participantIds.find((participantId) => participantId !== message.senderId) ?? null;
+
+      const sender = userMap.get(String(message.senderId)) ?? null;
+      const receiver = receiverId ? userMap.get(String(receiverId)) ?? null : null;
+
+      const derivedStatus =
+        message.readAt != null
+          ? 'read'
+          : message.deliveredAt != null
+            ? 'delivered'
+            : 'sent';
+
+      return {
+        message_id: String(message._id),
+        conversation_id: String(message.conversationId),
+        sender_id: String(message.senderId),
+        sender_auth_user_id: sender?.authUserId ?? null,
+        sender_handle: sender?.handle ?? null,
+        receiver_id: receiverId ? String(receiverId) : null,
+        receiver_auth_user_id: receiver?.authUserId ?? null,
+        receiver_handle: receiver?.handle ?? null,
+        participant_1_id: participantIds[0] ? String(participantIds[0]) : null,
+        participant_2_id: participantIds[1] ? String(participantIds[1]) : null,
+        conversation_participants: participantIds.map((participantId) => String(participantId)),
+        connection_source: conversation?.connectionSource ?? null,
+        conversation_match_id: conversation?.matchId ?? null,
+        conversation_is_pre_match: conversation?.isPreMatch ?? null,
+        conversation_created_at_ms: conversation?.createdAt ?? null,
+        conversation_created_at_iso:
+          conversation?.createdAt != null ? new Date(conversation.createdAt).toISOString() : null,
+        timestamp_ms: message.createdAt,
+        timestamp_iso: new Date(message.createdAt).toISOString(),
+        message_type: message.type,
+        message_content: message.content,
+        status: derivedStatus,
+        delivered_at_ms: message.deliveredAt ?? null,
+        delivered_at_iso:
+          message.deliveredAt != null ? new Date(message.deliveredAt).toISOString() : null,
+        read_at_ms: message.readAt ?? null,
+        read_at_iso: message.readAt != null ? new Date(message.readAt).toISOString() : null,
+        viewed_at_ms: message.viewedAt ?? null,
+        viewed_at_iso: message.viewedAt != null ? new Date(message.viewedAt).toISOString() : null,
+        timer_ends_at_ms: message.timerEndsAt ?? null,
+        timer_ends_at_iso:
+          message.timerEndsAt != null ? new Date(message.timerEndsAt).toISOString() : null,
+        image_storage_id: message.imageStorageId ? String(message.imageStorageId) : null,
+        audio_storage_id: message.audioStorageId ? String(message.audioStorageId) : null,
+        audio_duration_ms: message.audioDurationMs ?? null,
+        is_protected: message.isProtected ?? false,
+        protected_media_timer: message.protectedMediaTimer ?? null,
+        protected_media_viewing_mode: message.protectedMediaViewingMode ?? null,
+        protected_media_is_mirrored: message.protectedMediaIsMirrored ?? null,
+        is_expired: message.isExpired ?? false,
+        client_message_id: message.clientMessageId ?? null,
+        metadata_json: JSON.stringify({
+          imageStorageId: message.imageStorageId ? String(message.imageStorageId) : null,
+          audioStorageId: message.audioStorageId ? String(message.audioStorageId) : null,
+          audioDurationMs: message.audioDurationMs ?? null,
+          isProtected: message.isProtected ?? false,
+          protectedMediaTimer: message.protectedMediaTimer ?? null,
+          protectedMediaViewingMode: message.protectedMediaViewingMode ?? null,
+          protectedMediaIsMirrored: message.protectedMediaIsMirrored ?? null,
+          viewedAt: message.viewedAt ?? null,
+          timerEndsAt: message.timerEndsAt ?? null,
+          isExpired: message.isExpired ?? false,
+          deliveredAt: message.deliveredAt ?? null,
+          readAt: message.readAt ?? null,
+          clientMessageId: message.clientMessageId ?? null,
+          conversationConnectionSource: conversation?.connectionSource ?? null,
+          conversationMatchId: conversation?.matchId ?? null,
+          conversationIsPreMatch: conversation?.isPreMatch ?? null,
+        }),
+      };
+    });
+
+    return {
+      exportedAt: new Date().toISOString(),
+      rowCount: rows.length,
+      rows,
     };
   },
 });

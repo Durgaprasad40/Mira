@@ -38,6 +38,7 @@ import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import { uploadPhotoToConvex } from '@/lib/uploadUtils';
 import { INCOGNITO_COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
 import { cmToFeetInches } from '@/lib/utils';
@@ -53,6 +54,19 @@ const PHOTO_PADDING = 16;
 const PHOTO_SIZE = (SCREEN_WIDTH - PHOTO_PADDING * 2 - PHOTO_GAP * 2) / 3;
 const MAX_PHOTOS = 9;
 const PRIVATE_PHOTOS_DIR_NAME = 'private_photos';
+
+type PersistedProfileUpdates = {
+  privatePhotoUrls?: string[];
+  photoBlurSlots?: boolean[];
+  privateBio?: string;
+  height?: number | null;
+  weight?: number | null;
+  smoking?: string | null;
+  drinking?: string | null;
+  education?: string | null;
+  religion?: string | null;
+  hobbies?: string[];
+};
 
 function getPrivatePhotosDir(): Directory {
   return new Directory(Paths.document, PRIVATE_PHOTOS_DIR_NAME);
@@ -157,10 +171,15 @@ export default function EditProfileScreen() {
     api.privateProfiles.getByAuthUserId,
     !isDemoMode && userId ? { authUserId: userId } : 'skip'
   );
+  const isSignedOut = !isDemoMode && !userId;
+  const isBackendLoading = !isDemoMode && !!userId && backendProfile === undefined;
+  const isMissingBackendProfile = !isDemoMode && !!userId && backendProfile === null;
 
   // Backend mutations
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
   const getStorageUrl = useMutation(api.photos.getStorageUrl);
+  const trackPendingUpload = useMutation(api.photos.trackPendingUpload);
+  const cleanupPendingUpload = useMutation(api.photos.cleanupPendingUpload);
   const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
   const updatePhotoBlurSlots = useMutation(api.privateProfiles.updatePhotoBlurSlots);
 
@@ -182,6 +201,20 @@ export default function EditProfileScreen() {
   const storeEducation = usePrivateProfileStore((s) => s.education);
   const storeReligion = usePrivateProfileStore((s) => s.religion);
   const storeHobbies = usePrivateProfileStore((s) => s.hobbies);
+  const resolvedPrivateBio = useMemo(() => {
+    if (!isDemoMode && backendProfile !== undefined) {
+      return backendProfile?.privateBio || '';
+    }
+    return privateBio;
+  }, [backendProfile, privateBio]);
+  const resolvedPromptAnswers = useMemo(() => {
+    if (!isDemoMode && backendProfile !== undefined) {
+      return backendProfile?.promptAnswers || [];
+    }
+    return promptAnswers;
+  }, [backendProfile, promptAnswers]);
+  const activeSelectedPhotoUrls = selectedPhotoUrls;
+  const activePhotoBlurSlots = photoBlurSlots;
 
   // Resolve display values from backend or store (backend takes priority)
   const displayName = useMemo(() => {
@@ -221,29 +254,29 @@ export default function EditProfileScreen() {
   }, [backendProfile?.weight, storeWeight]);
 
   const smoking = useMemo(() => {
-    if (!isDemoMode && backendProfile?.smoking) {
-      return backendProfile.smoking;
+    if (!isDemoMode && backendProfile?.smoking !== undefined) {
+      return backendProfile.smoking ?? null;
     }
     return storeSmoking;
   }, [backendProfile?.smoking, storeSmoking]);
 
   const drinking = useMemo(() => {
-    if (!isDemoMode && backendProfile?.drinking) {
-      return backendProfile.drinking;
+    if (!isDemoMode && backendProfile?.drinking !== undefined) {
+      return backendProfile.drinking ?? null;
     }
     return storeDrinking;
   }, [backendProfile?.drinking, storeDrinking]);
 
   const education = useMemo(() => {
-    if (!isDemoMode && backendProfile?.education) {
-      return backendProfile.education;
+    if (!isDemoMode && backendProfile?.education !== undefined) {
+      return backendProfile.education ?? null;
     }
     return storeEducation;
   }, [backendProfile?.education, storeEducation]);
 
   const religion = useMemo(() => {
-    if (!isDemoMode && backendProfile?.religion) {
-      return backendProfile.religion;
+    if (!isDemoMode && backendProfile?.religion !== undefined) {
+      return backendProfile.religion ?? null;
     }
     return storeReligion;
   }, [backendProfile?.religion, storeReligion]);
@@ -257,8 +290,7 @@ export default function EditProfileScreen() {
 
   // Store actions
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
-  const setBlurMyPhoto = usePrivateProfileStore((s) => s.setBlurMyPhoto);
-  const togglePhotoBlurSlot = usePrivateProfileStore((s) => s.togglePhotoBlurSlot);
+  const setPhotoBlurSlots = usePrivateProfileStore((s) => s.setPhotoBlurSlots);
   const setPrivateBio = usePrivateProfileStore((s) => s.setPrivateBio);
   const setHeight = usePrivateProfileStore((s) => s.setHeight);
   const setWeight = usePrivateProfileStore((s) => s.setWeight);
@@ -298,7 +330,7 @@ export default function EditProfileScreen() {
   // NOTE: saveSuccess state removed - we now navigate back on success instead
   const [promptsExpanded, setPromptsExpanded] = useState(false);
   const [editingBio, setEditingBio] = useState(false);
-  const [draftBio, setDraftBio] = useState(privateBio);
+  const [draftBio, setDraftBio] = useState(resolvedPrivateBio);
   const [missingPhotos, setMissingPhotos] = useState<Set<string>>(new Set());
 
   // Track mount state
@@ -314,13 +346,13 @@ export default function EditProfileScreen() {
   // Sync draft bio with store
   useEffect(() => {
     if (!editingBio) {
-      setDraftBio(privateBio);
+      setDraftBio(resolvedPrivateBio);
     }
-  }, [privateBio, editingBio]);
+  }, [resolvedPrivateBio, editingBio]);
 
   // Check for missing photos
   const checkPhotosExist = useCallback(async () => {
-    const photos = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
+    const photos = Array.isArray(activeSelectedPhotoUrls) ? activeSelectedPhotoUrls : [];
     const photosKey = photos.join('|');
     if (photosKey === lastCheckedRef.current) return;
     lastCheckedRef.current = photosKey;
@@ -345,17 +377,95 @@ export default function EditProfileScreen() {
     }
 
     if (mountedRef.current) setMissingPhotos(missing);
-  }, [selectedPhotoUrls]);
+  }, [activeSelectedPhotoUrls]);
 
   useEffect(() => {
     checkPhotosExist();
   }, [checkPhotosExist]);
 
+  const persistProfileUpdate = useCallback(
+    async (
+      updates: PersistedProfileUpdates,
+      {
+        onSuccess,
+        onFailure,
+        failureMessage,
+      }: {
+        onSuccess?: () => void;
+        onFailure?: () => void;
+        failureMessage: string;
+      }
+    ) => {
+      try {
+        if (!isDemoMode) {
+          if (!userId) {
+            throw new Error('Please sign in to save changes.');
+          }
+
+          await updatePrivateProfile({
+            authUserId: userId,
+            ...updates,
+          });
+        }
+
+        onSuccess?.();
+        return true;
+      } catch (error) {
+        if (__DEV__) {
+          console.error('[EditProfile] Save failed:', error);
+        }
+        onFailure?.();
+        Alert.alert('Error', failureMessage);
+        return false;
+      }
+    },
+    [isDemoMode, updatePrivateProfile, userId]
+  );
+
+  const persistPhotoBlurSlots = useCallback(
+    async (
+      nextSlots: boolean[],
+      {
+        onSuccess,
+        onFailure,
+        failureMessage,
+      }: {
+        onSuccess?: () => void;
+        onFailure?: () => void;
+        failureMessage: string;
+      }
+    ) => {
+      try {
+        if (!isDemoMode) {
+          if (!userId) {
+            throw new Error('Please sign in to save changes.');
+          }
+
+          await updatePhotoBlurSlots({
+            authUserId: userId,
+            photoBlurSlots: nextSlots,
+          });
+        }
+
+        onSuccess?.();
+        return true;
+      } catch (error) {
+        if (__DEV__) {
+          console.error('[EditProfile] Photo blur save failed:', error);
+        }
+        onFailure?.();
+        Alert.alert('Error', failureMessage);
+        return false;
+      }
+    },
+    [isDemoMode, updatePhotoBlurSlots, userId]
+  );
+
   // Valid photos
   const validPhotos = useMemo(() => {
-    const photos = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
+    const photos = Array.isArray(activeSelectedPhotoUrls) ? activeSelectedPhotoUrls : [];
     return photos.filter((url) => isValidPhotoUrl(url) && !missingPhotos.has(url));
-  }, [selectedPhotoUrls, missingPhotos]);
+  }, [activeSelectedPhotoUrls, missingPhotos]);
 
   // Create 9-slot array
   const photoSlots = useMemo(() => {
@@ -392,15 +502,21 @@ export default function EditProfileScreen() {
 
       const asset = result.assets[0];
       let backendUrl: string | null = null;
+      let uploadedStorageId: Id<'_storage'> | null = null;
 
       if (!isDemoMode && userId) {
         try {
           const storageId = await uploadPhotoToConvex(asset.uri, generateUploadUrl);
+          uploadedStorageId = storageId;
+          await trackPendingUpload({ userId, storageId });
           const permanentUrl = await getStorageUrl({ storageId });
           if (!permanentUrl) throw new Error('Failed to get URL');
           backendUrl = permanentUrl;
-        } catch {
-          backendUrl = await copyToPermamentStorage(asset.uri, Date.now());
+        } catch (error) {
+          if (__DEV__) {
+            console.error('[EditProfile] Photo upload failed:', error);
+          }
+          throw new Error('Failed to upload photo.');
         }
       } else {
         backendUrl = await copyToPermamentStorage(asset.uri, Date.now());
@@ -409,7 +525,7 @@ export default function EditProfileScreen() {
       if (!mountedRef.current) return;
 
       if (backendUrl) {
-        const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+        const currentPhotos = activeSelectedPhotoUrls.filter(isValidPhotoUrl);
         const newPhotos = [...currentPhotos];
 
         if (slotIndex >= newPhotos.length) {
@@ -419,17 +535,23 @@ export default function EditProfileScreen() {
         }
 
         const finalPhotos = newPhotos.slice(0, MAX_PHOTOS);
-        setSelectedPhotos([], finalPhotos);
-
-        if (!isDemoMode && userId) {
-          try {
-            await updatePrivateProfile({
-              authUserId: userId,
-              privatePhotoUrls: finalPhotos,
-            });
-          } catch (e) {
-            if (__DEV__) console.error('[EditProfile] Backend sync failed:', e);
+        const saved = await persistProfileUpdate(
+          { privatePhotoUrls: finalPhotos },
+          {
+            onSuccess: () => setSelectedPhotos([], finalPhotos),
+            failureMessage: 'Failed to add photo. Please try again.',
           }
+        );
+
+        if (!saved) {
+          if (uploadedStorageId && userId) {
+            try {
+              await cleanupPendingUpload({ userId, storageId: uploadedStorageId });
+            } catch {
+              // Best-effort cleanup only.
+            }
+          }
+          return;
         }
       }
     } catch (error) {
@@ -441,28 +563,42 @@ export default function EditProfileScreen() {
 
   // Remove photo
   const handleRemovePhoto = async (index: number) => {
-    const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+    const currentPhotos = activeSelectedPhotoUrls.filter(isValidPhotoUrl);
     if (index < 0 || index >= currentPhotos.length) return;
 
     const removedUrl = currentPhotos[index];
     const newPhotos = currentPhotos.filter((_, i) => i !== index);
-    setSelectedPhotos([], newPhotos);
+    const nextBlurSlots = [
+      ...activePhotoBlurSlots.filter((_, i) => i !== index),
+      blurMyPhoto,
+    ].slice(0, 9);
+    const saved = await persistProfileUpdate(
+      {
+        privatePhotoUrls: newPhotos,
+        photoBlurSlots: nextBlurSlots,
+      },
+      {
+        onSuccess: () => {
+          setSelectedPhotos([], newPhotos);
+          setPhotoBlurSlots(nextBlurSlots);
 
-    // Clean up local file
-    if (removedUrl.includes(PRIVATE_PHOTOS_DIR_NAME) && !removedUrl.startsWith('http')) {
-      try {
-        const file = new ExpoFile(removedUrl);
-        if (file.exists) file.delete();
-      } catch {}
-    }
+          if (removedUrl.includes(PRIVATE_PHOTOS_DIR_NAME) && !removedUrl.startsWith('http')) {
+            try {
+              const file = new ExpoFile(removedUrl);
+              if (file.exists) file.delete();
+            } catch (error) {
+              if (__DEV__) {
+                console.error('[EditProfile] Local photo cleanup failed:', error);
+              }
+            }
+          }
+        },
+        failureMessage: 'Failed to remove photo. Please try again.',
+      }
+    );
 
-    if (!isDemoMode && userId) {
-      try {
-        await updatePrivateProfile({
-          authUserId: userId,
-          privatePhotoUrls: newPhotos,
-        });
-      } catch {}
+    if (!saved) {
+      return;
     }
   };
 
@@ -470,7 +606,7 @@ export default function EditProfileScreen() {
   const handleSetMainPhoto = async (fromIndex: number) => {
     if (fromIndex === 0) return; // Already main
 
-    const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+    const currentPhotos = activeSelectedPhotoUrls.filter(isValidPhotoUrl);
     if (fromIndex < 0 || fromIndex >= currentPhotos.length) return;
 
     // Swap: move selected photo to index 0, shift others down
@@ -478,77 +614,81 @@ export default function EditProfileScreen() {
     const selectedPhoto = newPhotos[fromIndex];
     newPhotos.splice(fromIndex, 1); // Remove from current position
     newPhotos.unshift(selectedPhoto); // Add to beginning
+    const nextBlurSlots = [...activePhotoBlurSlots];
+    const selectedBlur = nextBlurSlots[fromIndex] ?? blurMyPhoto;
+    nextBlurSlots.splice(fromIndex, 1);
+    nextBlurSlots.unshift(selectedBlur);
 
-    // Update store immediately for responsive UI
-    setSelectedPhotos([], newPhotos);
-
-    if (__DEV__) {
-      console.log('[P2_EditProfile] 🔄 setMainPhoto', { fromIndex, newFirst: selectedPhoto?.slice(-30) });
-    }
-
-    // Persist to backend
-    if (!isDemoMode && userId) {
-      try {
-        await updatePrivateProfile({
-          authUserId: userId,
-          privatePhotoUrls: newPhotos,
-        });
-        if (__DEV__) {
-          console.log('[P2_EditProfile] ✅ Main photo persisted');
-        }
-      } catch (error) {
-        if (__DEV__) console.error('[P2_EditProfile] ❌ Failed to persist main photo:', error);
-        // Revert on failure
-        setSelectedPhotos([], currentPhotos);
-        Alert.alert('Error', 'Failed to set main photo. Please try again.');
+    const saved = await persistProfileUpdate(
+      {
+        privatePhotoUrls: newPhotos,
+        photoBlurSlots: nextBlurSlots,
+      },
+      {
+        onSuccess: () => {
+          setSelectedPhotos([], newPhotos);
+          setPhotoBlurSlots(nextBlurSlots);
+          if (__DEV__) {
+            console.log('[P2_EditProfile] ✅ Main photo persisted');
+          }
+        },
+        failureMessage: 'Failed to set main photo. Please try again.',
       }
+    );
+
+    if (!saved && __DEV__) {
+      console.error('[P2_EditProfile] ❌ Failed to persist main photo');
     }
   };
 
   // Toggle photo blur
   const handleTogglePhotoBlur = async (slotIndex: number) => {
-    togglePhotoBlurSlot(slotIndex);
-
-    const newSlots = [...photoBlurSlots];
+    const newSlots = [...activePhotoBlurSlots];
     newSlots[slotIndex] = !newSlots[slotIndex];
-
-    if (!isDemoMode && userId) {
-      try {
-        await updatePhotoBlurSlots({
-          authUserId: userId,
-          photoBlurSlots: newSlots,
-        });
-      } catch {}
-    }
+    await persistPhotoBlurSlots(newSlots, {
+      onSuccess: () => setPhotoBlurSlots(newSlots),
+      failureMessage: 'Failed to update photo blur. Please try again.',
+    });
   };
 
   // Save bio
   const saveBio = async () => {
-    setPrivateBio(draftBio.trim());
-    setEditingBio(false);
-    Keyboard.dismiss();
+    const trimmedBio = draftBio.trim();
+    const saved = await persistProfileUpdate(
+      { privateBio: trimmedBio },
+      {
+        onSuccess: () => {
+          setPrivateBio(trimmedBio);
+          setEditingBio(false);
+          Keyboard.dismiss();
+        },
+        failureMessage: 'Failed to save your bio. Please try again.',
+      }
+    );
 
-    if (!isDemoMode && userId) {
-      try {
-        await updatePrivateProfile({
-          authUserId: userId,
-          privateBio: draftBio.trim(),
-        });
-      } catch {}
+    if (!saved) {
+      return;
     }
   };
 
   // Save field to backend
-  const saveField = async (field: string, value: any) => {
-    if (!isDemoMode && userId) {
-      try {
-        await updatePrivateProfile({
-          authUserId: userId,
-          [field]: value,
-        });
-      } catch {}
-    }
-  };
+  const saveField = useCallback(
+    async (
+      updates: PersistedProfileUpdates,
+      {
+        onSuccess,
+        onFailure,
+        failureMessage,
+      }: {
+        onSuccess?: () => void;
+        onFailure?: () => void;
+        failureMessage: string;
+      }
+    ) => {
+      return await persistProfileUpdate(updates, { onSuccess, onFailure, failureMessage });
+    },
+    [persistProfileUpdate]
+  );
 
   // Save ALL changes at once
   const handleSaveAll = async () => {
@@ -558,25 +698,16 @@ export default function EditProfileScreen() {
     Keyboard.dismiss();
 
     try {
-      // Update local store with current values
-      setHeight(localHeight);
-      setWeight(localWeight);
-      setSmoking(localSmoking);
-      setDrinking(localDrinking);
-      setEducation(localEducation);
-      setReligion(localReligion);
+      const nextBio = editingBio ? draftBio.trim() : resolvedPrivateBio;
 
-      // If bio was being edited, save it
-      if (editingBio && draftBio !== privateBio) {
-        setPrivateBio(draftBio.trim());
-        setEditingBio(false);
-      }
+      if (!isDemoMode) {
+        if (!userId) {
+          throw new Error('Please sign in to save changes.');
+        }
 
-      // Save all fields to backend in one call
-      if (!isDemoMode && userId) {
         await updatePrivateProfile({
           authUserId: userId,
-          privateBio: editingBio ? draftBio.trim() : privateBio,
+          privateBio: nextBio,
           height: localHeight,
           weight: localWeight,
           smoking: localSmoking,
@@ -592,6 +723,17 @@ export default function EditProfileScreen() {
         });
       }
 
+      setHeight(localHeight);
+      setWeight(localWeight);
+      setSmoking(localSmoking);
+      setDrinking(localDrinking);
+      setEducation(localEducation);
+      setReligion(localReligion);
+      if (editingBio || nextBio !== resolvedPrivateBio) {
+        setPrivateBio(nextBio);
+        setEditingBio(false);
+      }
+
       // SUCCESS: Navigate back to profile tab (clean UX, no "Saved" button state)
       // Using router.back() to return to the Phase-2 profile tab the user came from
       router.back();
@@ -601,19 +743,87 @@ export default function EditProfileScreen() {
         console.error('[EditProfile] Save failed:', error);
       }
       Alert.alert('Error', 'Failed to save changes. Please try again.');
-      // On failure: stay on page, reset saving state
+    } finally {
       if (mountedRef.current) {
         setIsSaving(false);
       }
     }
-    // NOTE: No finally block needed - on success we navigate away,
-    // on failure we reset isSaving in the catch block
   };
 
   // Go back
   const handleBack = () => {
     router.back();
   };
+
+  if (isSignedOut) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={handleBack}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Edit Profile</Text>
+          <View style={{ width: 24 }} />
+        </View>
+        <View style={styles.loadingState}>
+          <Ionicons name="person-circle-outline" size={48} color={C.textLight} />
+          <Text style={styles.loadingStateTitle}>Sign in required</Text>
+          <Text style={styles.loadingStateText}>Please sign in again to edit your private profile.</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (isBackendLoading) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={handleBack}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Edit Profile</Text>
+          <View style={{ width: 24 }} />
+        </View>
+        <View style={styles.loadingState}>
+          <ActivityIndicator size="large" color={C.primary} />
+          <Text style={styles.loadingStateText}>Loading profile...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (isMissingBackendProfile) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={handleBack}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Edit Profile</Text>
+          <View style={{ width: 24 }} />
+        </View>
+        <View style={styles.loadingState}>
+          <Ionicons name="person-circle-outline" size={48} color={C.textLight} />
+          <Text style={styles.loadingStateTitle}>Private profile unavailable</Text>
+          <Text style={styles.loadingStateText}>
+            We couldn&apos;t load your saved private profile. Return to your profile tab and try again.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -699,7 +909,7 @@ export default function EditProfileScreen() {
 
                 if (hasPhoto) {
                   // Per-photo blur: apply blur radius when blurMyPhoto is ON and this slot is marked blurred
-                  const isPhotoBlurred = blurMyPhoto && photoBlurSlots[slotIndex];
+                  const isPhotoBlurred = blurMyPhoto && activePhotoBlurSlots[slotIndex];
 
                   return (
                     <View key={`slot-${slotIndex}`} style={styles.photoSlot}>
@@ -728,12 +938,12 @@ export default function EditProfileScreen() {
 
                       {blurMyPhoto && (
                         <TouchableOpacity
-                          style={[styles.blurBtn, photoBlurSlots[slotIndex] && styles.blurBtnActive]}
+                          style={[styles.blurBtn, activePhotoBlurSlots[slotIndex] && styles.blurBtnActive]}
                           onPress={() => handleTogglePhotoBlur(slotIndex)}
                           activeOpacity={0.7}
                         >
                           <Ionicons
-                            name={photoBlurSlots[slotIndex] ? 'eye-off' : 'eye'}
+                            name={activePhotoBlurSlots[slotIndex] ? 'eye-off' : 'eye'}
                             size={14}
                             color="#FFFFFF"
                           />
@@ -783,10 +993,13 @@ export default function EditProfileScreen() {
             <View style={styles.visibilityCard}>
               <TouchableOpacity
                 style={styles.toggleRow}
-                onPress={() => {
-                  // Toggle blur mode - enables/disables per-photo blur controls
-                  // Does NOT change individual photo blur states
-                  setBlurMyPhoto(!blurMyPhoto);
+                onPress={async () => {
+                  const nextBlurEnabled = !blurMyPhoto;
+                  const nextSlots = Array.from({ length: 9 }, () => nextBlurEnabled);
+                  await persistPhotoBlurSlots(nextSlots, {
+                    onSuccess: () => setPhotoBlurSlots(nextSlots),
+                    failureMessage: 'Failed to update photo blur. Please try again.',
+                  });
                 }}
                 activeOpacity={0.7}
               >
@@ -796,7 +1009,7 @@ export default function EditProfileScreen() {
                     <Text style={styles.toggleLabel}>Enable photo blur</Text>
                     <Text style={styles.toggleHint}>
                       {blurMyPhoto
-                        ? 'Tap eye icon on photos to blur them'
+                        ? 'Photos start blurred. Use the eye icon on each photo to reveal specific photos.'
                         : 'All photos visible in Deep Connect'}
                     </Text>
                   </View>
@@ -854,7 +1067,7 @@ export default function EditProfileScreen() {
                     style={styles.cancelBtn}
                     onPress={() => {
                       setEditingBio(false);
-                      setDraftBio(privateBio);
+                      setDraftBio(resolvedPrivateBio);
                     }}
                   >
                     <Text style={styles.cancelBtnText}>Cancel</Text>
@@ -866,8 +1079,8 @@ export default function EditProfileScreen() {
               </View>
             ) : (
               <View style={styles.bioCard}>
-                {privateBio && privateBio.trim().length > 0 ? (
-                  <Text style={styles.bioText}>{privateBio}</Text>
+                {resolvedPrivateBio && resolvedPrivateBio.trim().length > 0 ? (
+                  <Text style={styles.bioText}>{resolvedPrivateBio}</Text>
                 ) : (
                   <Text style={styles.bioEmpty}>Share what you're looking for...</Text>
                 )}
@@ -878,42 +1091,50 @@ export default function EditProfileScreen() {
           {/* ────────────────────────────────────────────────────────────── */}
           {/* SECTION 5: PROMPTS */}
           {/* ────────────────────────────────────────────────────────────── */}
-          {promptAnswers && promptAnswers.length > 0 && (
-            <View style={styles.section}>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>My Answers</Text>
-                <TouchableOpacity onPress={() => router.push('/(main)/(private)/edit-prompts' as any)}>
-                  <Text style={styles.editLink}>Edit</Text>
-                </TouchableOpacity>
-              </View>
-
-              <View style={styles.promptsContainer}>
-                {(promptsExpanded ? promptAnswers : promptAnswers.slice(0, 2)).map((prompt, idx) => (
-                  <View key={prompt.promptId || idx} style={styles.promptCard}>
-                    <Text style={styles.promptQuestion} numberOfLines={2}>{prompt.question}</Text>
-                    <Text style={styles.promptAnswer} numberOfLines={3}>{prompt.answer}</Text>
-                  </View>
-                ))}
-              </View>
-
-              {promptAnswers.length > 2 && (
-                <TouchableOpacity
-                  style={styles.showMoreBtn}
-                  onPress={() => setPromptsExpanded(!promptsExpanded)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.showMoreText}>
-                    {promptsExpanded ? 'Show less' : `+${promptAnswers.length - 2} more`}
-                  </Text>
-                  <Ionicons
-                    name={promptsExpanded ? 'chevron-up' : 'chevron-down'}
-                    size={16}
-                    color={C.primary}
-                  />
-                </TouchableOpacity>
-              )}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>My Answers</Text>
+              <TouchableOpacity onPress={() => router.push('/(main)/(private)/edit-prompts' as any)}>
+                <Text style={styles.editLink}>
+                  {resolvedPromptAnswers.length > 0 ? 'Edit' : 'Add'}
+                </Text>
+              </TouchableOpacity>
             </View>
-          )}
+
+            {resolvedPromptAnswers.length > 0 ? (
+              <>
+                <View style={styles.promptsContainer}>
+                  {(promptsExpanded ? resolvedPromptAnswers : resolvedPromptAnswers.slice(0, 2)).map((prompt, idx) => (
+                    <View key={prompt.promptId || idx} style={styles.promptCard}>
+                      <Text style={styles.promptQuestion} numberOfLines={2}>{prompt.question}</Text>
+                      <Text style={styles.promptAnswer} numberOfLines={3}>{prompt.answer}</Text>
+                    </View>
+                  ))}
+                </View>
+
+                {resolvedPromptAnswers.length > 2 && (
+                  <TouchableOpacity
+                    style={styles.showMoreBtn}
+                    onPress={() => setPromptsExpanded(!promptsExpanded)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.showMoreText}>
+                      {promptsExpanded ? 'Show less' : `+${resolvedPromptAnswers.length - 2} more`}
+                    </Text>
+                    <Ionicons
+                      name={promptsExpanded ? 'chevron-up' : 'chevron-down'}
+                      size={16}
+                      color={C.primary}
+                    />
+                  </TouchableOpacity>
+                )}
+              </>
+            ) : (
+              <View style={styles.bioCard}>
+                <Text style={styles.bioEmpty}>Add answers so people can get to know you faster.</Text>
+              </View>
+            )}
+          </View>
 
           {/* ────────────────────────────────────────────────────────────── */}
           {/* SECTION 6: DETAILS */}
@@ -942,8 +1163,15 @@ export default function EditProfileScreen() {
                     }
                   }}
                   onBlur={() => {
-                    setHeight(localHeight);
-                    saveField('height', localHeight);
+                    const previousHeight = height ?? null;
+                    void saveField(
+                      { height: localHeight },
+                      {
+                        onSuccess: () => setHeight(localHeight),
+                        onFailure: () => setLocalHeight(previousHeight),
+                        failureMessage: 'Failed to save height. Please try again.',
+                      }
+                    );
                   }}
                   keyboardType="number-pad"
                   placeholder="175"
@@ -969,8 +1197,15 @@ export default function EditProfileScreen() {
                     }
                   }}
                   onBlur={() => {
-                    setWeight(localWeight);
-                    saveField('weight', localWeight);
+                    const previousWeight = weight ?? null;
+                    void saveField(
+                      { weight: localWeight },
+                      {
+                        onSuccess: () => setWeight(localWeight),
+                        onFailure: () => setLocalWeight(previousWeight),
+                        failureMessage: 'Failed to save weight. Please try again.',
+                      }
+                    );
                   }}
                   keyboardType="number-pad"
                   placeholder="70"
@@ -988,10 +1223,17 @@ export default function EditProfileScreen() {
                   <TouchableOpacity
                     key={opt.value}
                     style={[styles.chip, localSmoking === opt.value && styles.chipSelected]}
-                    onPress={() => {
+                    onPress={async () => {
+                      const previousSmoking = localSmoking;
                       setLocalSmoking(opt.value);
-                      setSmoking(opt.value);
-                      saveField('smoking', opt.value);
+                      await saveField(
+                        { smoking: opt.value },
+                        {
+                          onSuccess: () => setSmoking(opt.value),
+                          onFailure: () => setLocalSmoking(previousSmoking),
+                          failureMessage: 'Failed to save smoking preference. Please try again.',
+                        }
+                      );
                     }}
                     activeOpacity={0.7}
                   >
@@ -1011,10 +1253,17 @@ export default function EditProfileScreen() {
                   <TouchableOpacity
                     key={opt.value}
                     style={[styles.chip, localDrinking === opt.value && styles.chipSelected]}
-                    onPress={() => {
+                    onPress={async () => {
+                      const previousDrinking = localDrinking;
                       setLocalDrinking(opt.value);
-                      setDrinking(opt.value);
-                      saveField('drinking', opt.value);
+                      await saveField(
+                        { drinking: opt.value },
+                        {
+                          onSuccess: () => setDrinking(opt.value),
+                          onFailure: () => setLocalDrinking(previousDrinking),
+                          failureMessage: 'Failed to save drinking preference. Please try again.',
+                        }
+                      );
                     }}
                     activeOpacity={0.7}
                   >
@@ -1034,10 +1283,17 @@ export default function EditProfileScreen() {
                   <TouchableOpacity
                     key={opt.value}
                     style={[styles.chip, localEducation === opt.value && styles.chipSelected]}
-                    onPress={() => {
+                    onPress={async () => {
+                      const previousEducation = localEducation;
                       setLocalEducation(opt.value);
-                      setEducation(opt.value);
-                      saveField('education', opt.value);
+                      await saveField(
+                        { education: opt.value },
+                        {
+                          onSuccess: () => setEducation(opt.value),
+                          onFailure: () => setLocalEducation(previousEducation),
+                          failureMessage: 'Failed to save education. Please try again.',
+                        }
+                      );
                     }}
                     activeOpacity={0.7}
                   >
@@ -1057,10 +1313,17 @@ export default function EditProfileScreen() {
                   <TouchableOpacity
                     key={opt.value}
                     style={[styles.chip, localReligion === opt.value && styles.chipSelected]}
-                    onPress={() => {
+                    onPress={async () => {
+                      const previousReligion = localReligion;
                       setLocalReligion(opt.value);
-                      setReligion(opt.value);
-                      saveField('religion', opt.value);
+                      await saveField(
+                        { religion: opt.value },
+                        {
+                          onSuccess: () => setReligion(opt.value),
+                          onFailure: () => setLocalReligion(previousReligion),
+                          failureMessage: 'Failed to save religion. Please try again.',
+                        }
+                      );
                     }}
                     activeOpacity={0.7}
                   >
@@ -1089,7 +1352,7 @@ export default function EditProfileScreen() {
                   <TouchableOpacity
                     key={activity.value}
                     style={[styles.chip, isSelected && styles.chipSelected]}
-                    onPress={() => {
+                    onPress={async () => {
                       let newHobbies: string[];
                       if (isSelected) {
                         newHobbies = localHobbies.filter((h) => h !== activity.value);
@@ -1098,9 +1361,16 @@ export default function EditProfileScreen() {
                       } else {
                         return; // Max 6 reached
                       }
+                      const previousHobbies = localHobbies;
                       setLocalHobbies(newHobbies);
-                      setHobbies(newHobbies);
-                      saveField('hobbies', newHobbies);
+                      await saveField(
+                        { hobbies: newHobbies },
+                        {
+                          onSuccess: () => setHobbies(newHobbies),
+                          onFailure: () => setLocalHobbies(previousHobbies),
+                          failureMessage: 'Failed to save interests. Please try again.',
+                        }
+                      );
                     }}
                     activeOpacity={0.7}
                   >
@@ -1146,6 +1416,25 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: C.background,
+  },
+  loadingState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+    gap: 12,
+  },
+  loadingStateTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: C.text,
+    textAlign: 'center',
+  },
+  loadingStateText: {
+    fontSize: 14,
+    color: C.textLight,
+    textAlign: 'center',
+    lineHeight: 20,
   },
   header: {
     flexDirection: 'row',

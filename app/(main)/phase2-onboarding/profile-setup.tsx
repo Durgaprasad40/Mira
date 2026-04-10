@@ -14,10 +14,14 @@ import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+import {
+  PRIVATE_INTENT_CATEGORIES,
+  PHASE2_PROMPT_MIN_TEXT_LENGTH,
+  PHASE2_PROMPT_MAX_TEXT_LENGTH,
+} from '@/lib/privateConstants';
 import {
   PHASE2_DESIRE_MAX_LENGTH,
   PHASE2_DESIRE_MIN_LENGTH,
@@ -28,11 +32,20 @@ import {
 } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useScreenTrace } from '@/lib/devTrace';
+import { PHASE2_ONBOARDING_ROUTE_MAP } from '@/lib/phase2Onboarding';
 
 const C = INCOGNITO_COLORS;
+const SECTION1_PROMPT_IDS = new Set(['prompt_1', 'prompt_2', 'prompt_3']);
+const SECTION2_PROMPT_IDS = new Set(['prompt_4', 'prompt_5', 'prompt_6']);
+const SECTION3_PROMPT_IDS = new Set(['prompt_7', 'prompt_8', 'prompt_9']);
 
 function isPersistedPhotoUrl(url: string): boolean {
   return url.startsWith('http://') || url.startsWith('https://');
+}
+
+function isValidTextPrompt(answer: string) {
+  const length = answer.trim().length;
+  return length >= PHASE2_PROMPT_MIN_TEXT_LENGTH && length <= PHASE2_PROMPT_MAX_TEXT_LENGTH;
 }
 
 export default function Phase2ReviewScreen() {
@@ -41,24 +54,38 @@ export default function Phase2ReviewScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const token = useAuthStore((s) => s.token);
-
-  const displayName = usePrivateProfileStore((s) => s.displayName);
-  const age = usePrivateProfileStore((s) => s.age);
-  const gender = usePrivateProfileStore((s) => s.gender);
-  const city = usePrivateProfileStore((s) => s.city);
-  const hobbies = usePrivateProfileStore((s) => s.hobbies);
-  const isVerified = usePrivateProfileStore((s) => s.isVerified);
-  const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
-  const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
-  const privateBio = usePrivateProfileStore((s) => s.privateBio);
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
 
+  const currentUser = useQuery(
+    api.users.getCurrentUserFromToken,
+    token ? { token } : 'skip'
+  );
+  const currentPrivateProfile = useQuery(
+    api.privateProfiles.getCurrentOnboardingProfile,
+    token ? { token } : 'skip'
+  );
+  const onboardingState = useQuery(
+    api.privateProfiles.getPhase2OnboardingState,
+    token ? { token } : 'skip'
+  );
+
   const finalizeOnboardingProfile = useMutation(api.privateProfiles.finalizeOnboardingProfile);
-  const setPhase2Completed = useMutation(api.users.setPhase2OnboardingCompleted);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const isFinalizingRef = useRef(false);
+
+  const displayName = currentUser?.handle || currentPrivateProfile?.displayName || 'Anonymous';
+  const age = currentPrivateProfile?.age ?? 0;
+  const gender = currentPrivateProfile?.gender || currentUser?.gender || '';
+  const city = currentPrivateProfile?.city || currentUser?.city || '';
+  const hobbies: string[] = currentPrivateProfile?.hobbies || currentUser?.activities || [];
+  const isVerified = currentPrivateProfile?.isVerified ?? !!currentUser?.isVerified;
+  const selectedPhotoUrls: string[] = currentPrivateProfile?.privatePhotoUrls || [];
+  const intentKeys = currentPrivateProfile?.privateIntentKeys || [];
+  const privateBio = currentPrivateProfile?.privateBio || '';
+  const promptAnswers: Array<{ promptId: string; question: string; answer: string }> =
+    currentPrivateProfile?.promptAnswers || [];
 
   const validPhotoUrls = useMemo(
     () => selectedPhotoUrls.filter((url) => isPersistedPhotoUrl(url)),
@@ -69,6 +96,31 @@ export default function Phase2ReviewScreen() {
     () => PRIVATE_INTENT_CATEGORIES.filter((intent) => intentKeys.includes(intent.key as any)),
     [intentKeys]
   );
+  const validPromptAnswers = useMemo(
+    () =>
+      promptAnswers.filter((prompt) => {
+        if (SECTION1_PROMPT_IDS.has(prompt.promptId)) {
+          return prompt.answer.trim().length > 0;
+        }
+        if (SECTION2_PROMPT_IDS.has(prompt.promptId) || SECTION3_PROMPT_IDS.has(prompt.promptId)) {
+          return isValidTextPrompt(prompt.answer);
+        }
+        return false;
+      }),
+    [promptAnswers]
+  );
+  const hasSection1Prompt = useMemo(
+    () => validPromptAnswers.some((prompt) => SECTION1_PROMPT_IDS.has(prompt.promptId)),
+    [validPromptAnswers]
+  );
+  const hasSection2Prompt = useMemo(
+    () => validPromptAnswers.some((prompt) => SECTION2_PROMPT_IDS.has(prompt.promptId)),
+    [validPromptAnswers]
+  );
+  const hasSection3Prompt = useMemo(
+    () => validPromptAnswers.some((prompt) => SECTION3_PROMPT_IDS.has(prompt.promptId)),
+    [validPromptAnswers]
+  );
 
   const bioLength = privateBio.trim().length;
   const canComplete =
@@ -77,7 +129,11 @@ export default function Phase2ReviewScreen() {
     intentKeys.length >= PHASE2_MIN_INTENTS &&
     intentKeys.length <= PHASE2_MAX_INTENTS &&
     bioLength >= PHASE2_DESIRE_MIN_LENGTH &&
-    bioLength <= PHASE2_DESIRE_MAX_LENGTH;
+    bioLength <= PHASE2_DESIRE_MAX_LENGTH &&
+    hasSection1Prompt &&
+    hasSection2Prompt &&
+    hasSection3Prompt &&
+    onboardingState?.nextStep === 'profile-setup';
 
   const missingItems = useMemo(() => {
     const missing: string[] = [];
@@ -90,8 +146,11 @@ export default function Phase2ReviewScreen() {
     if (bioLength < PHASE2_DESIRE_MIN_LENGTH || bioLength > PHASE2_DESIRE_MAX_LENGTH) {
       missing.push('private bio');
     }
+    if (!hasSection1Prompt || !hasSection2Prompt || !hasSection3Prompt) {
+      missing.push('prompts');
+    }
     return missing;
-  }, [bioLength, intentKeys.length, validPhotoUrls.length]);
+  }, [bioLength, hasSection1Prompt, hasSection2Prompt, hasSection3Prompt, intentKeys.length, validPhotoUrls.length]);
 
   const handleComplete = async () => {
     if (!token || !canComplete || isFinalizingRef.current) return;
@@ -103,11 +162,6 @@ export default function Phase2ReviewScreen() {
       const profileResult = await finalizeOnboardingProfile({ token });
       if (!profileResult?.success) {
         throw new Error('Profile save did not succeed');
-      }
-
-      const completionResult = await setPhase2Completed({ token });
-      if (!completionResult?.success) {
-        throw new Error('Onboarding completion flag did not succeed');
       }
 
       completeSetup();
@@ -122,6 +176,48 @@ export default function Phase2ReviewScreen() {
     }
   };
 
+  if (!token) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.centerState}>
+          <Ionicons name="alert-circle-outline" size={42} color={C.textLight} />
+          <Text style={styles.stateTitle}>Session required</Text>
+          <Text style={styles.stateText}>Please sign in again before finishing Private Mode.</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (currentUser === undefined || currentPrivateProfile === undefined || onboardingState === undefined) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.centerState}>
+          <ActivityIndicator size="large" color={C.primary} />
+          <Text style={styles.stateText}>Loading your Private Mode review…</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (!currentUser || !currentPrivateProfile) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.centerState}>
+          <Ionicons name="alert-circle-outline" size={42} color={C.textLight} />
+          <Text style={styles.stateTitle}>Finish the earlier steps first</Text>
+          <Text style={styles.stateText}>We need your saved Private Mode draft before you can review it.</Text>
+          <TouchableOpacity
+            style={styles.recoveryButton}
+            onPress={() => router.replace(PHASE2_ONBOARDING_ROUTE_MAP[onboardingState?.nextStep === 'complete' ? 'profile-setup' : onboardingState?.nextStep || 'index'] as any)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.recoveryButtonText}>Go back to your next step</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
@@ -129,7 +225,7 @@ export default function Phase2ReviewScreen() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Review & create</Text>
-        <Text style={styles.stepLabel}>Step 4 of 4</Text>
+        <Text style={styles.stepLabel}>Step 5 of 5</Text>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
@@ -206,6 +302,20 @@ export default function Phase2ReviewScreen() {
             <Text style={styles.bioText}>{privateBio.trim()}</Text>
           </View>
         </View>
+
+        {validPromptAnswers.length > 0 ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Prompt answers</Text>
+            <View style={styles.promptList}>
+              {validPromptAnswers.map((prompt) => (
+                <View key={prompt.promptId} style={styles.promptCard}>
+                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : null}
       </ScrollView>
 
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}>
@@ -278,6 +388,37 @@ const styles = StyleSheet.create({
   },
   section: {
     marginBottom: 24,
+  },
+  centerState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    gap: 12,
+  },
+  stateTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: C.text,
+    textAlign: 'center',
+  },
+  stateText: {
+    fontSize: 14,
+    color: C.textLight,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  recoveryButton: {
+    marginTop: 8,
+    backgroundColor: C.primary,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  recoveryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
   },
   mainTitle: {
     fontSize: 24,
@@ -380,6 +521,25 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: C.text,
     lineHeight: 22,
+  },
+  promptList: {
+    gap: 12,
+  },
+  promptCard: {
+    backgroundColor: C.surface,
+    borderRadius: 14,
+    padding: 16,
+  },
+  promptQuestion: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 8,
+  },
+  promptAnswer: {
+    fontSize: 14,
+    lineHeight: 21,
+    color: C.textLight,
   },
   bottomBar: {
     paddingHorizontal: 16,

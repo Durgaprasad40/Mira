@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -15,12 +15,14 @@ import * as ImagePicker from 'expo-image-picker';
 import { Image } from 'expo-image';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import { uploadPhotoToConvex } from '@/lib/uploadUtils';
 import { usePrivateProfileStore, PHASE2_MIN_PHOTOS } from '@/stores/privateProfileStore';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PhotoSelectionGrid } from '@/components/private/PhotoSelectionGrid';
 import { useAuthStore } from '@/stores/authStore';
 import { useScreenTrace } from '@/lib/devTrace';
+import { PHASE2_ONBOARDING_ROUTE_MAP } from '@/lib/phase2Onboarding';
 
 const C = INCOGNITO_COLORS;
 const MAX_PHASE2_PHOTOS = 9;
@@ -35,6 +37,7 @@ export default function Phase2SelectPhotosScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
 
   const selectedPhotoIds = usePrivateProfileStore((s) => s.selectedPhotoIds);
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
@@ -44,9 +47,13 @@ export default function Phase2SelectPhotosScreen() {
   const saveOnboardingPhotos = useMutation(api.privateProfiles.saveOnboardingPhotos);
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
   const getStorageUrl = useMutation(api.photos.getStorageUrl);
+  const trackPendingUpload = useMutation(api.photos.trackPendingUpload);
+  const cleanupPendingUpload = useMutation(api.photos.cleanupPendingUpload);
 
   const [isUploading, setIsUploading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSyncingDraft, setIsSyncingDraft] = useState(false);
+  const [sessionUploads, setSessionUploads] = useState<Record<string, Id<'_storage'>>>({});
 
   const phase1Photos = useMemo(() => {
     const photos: { id: string; url: string }[] = [];
@@ -89,15 +96,50 @@ export default function Phase2SelectPhotosScreen() {
     !!token &&
     validSelectedPhotoUrls.length >= PHASE2_MIN_PHOTOS &&
     !isUploading &&
+    !isSyncingDraft &&
     !isSaving;
 
+  const persistDraftPhotos = useCallback(async (nextUrls: string[]) => {
+    if (!token) {
+      return nextUrls;
+    }
+
+    const persistedUrls = Array.from(new Set(nextUrls.filter(isPersistedPhotoUrl))).slice(0, MAX_PHASE2_PHOTOS);
+    setIsSyncingDraft(true);
+
+    try {
+      const result = await saveOnboardingPhotos({
+        token,
+        privatePhotoUrls: persistedUrls,
+      });
+
+      if (!result?.success) {
+        throw new Error('Photo draft save did not succeed');
+      }
+
+      return persistedUrls;
+    } finally {
+      setIsSyncingDraft(false);
+    }
+  }, [saveOnboardingPhotos, token]);
+
   const handleTogglePhase1Photo = (id: string, url: string) => {
+    if (isUploading || isSaving || isSyncingDraft) {
+      return;
+    }
+
     const isSelected = selectedPhotoUrls.includes(url);
+    const previousIds = selectedPhotoIds;
+    const previousUrls = selectedPhotoUrls;
+
     if (isSelected) {
-      setSelectedPhotos(
-        selectedPhotoIds.filter((existingId) => existingId !== id),
-        selectedPhotoUrls.filter((existingUrl) => existingUrl !== url)
-      );
+      const nextIds = selectedPhotoIds.filter((existingId) => existingId !== id);
+      const nextUrls = selectedPhotoUrls.filter((existingUrl) => existingUrl !== url);
+      setSelectedPhotos(nextIds, nextUrls);
+      persistDraftPhotos(nextUrls).catch(() => {
+        setSelectedPhotos(previousIds, previousUrls);
+        Alert.alert('Unable to update photos', 'We could not save your photo selection. Please try again.');
+      });
       return;
     }
 
@@ -105,14 +147,18 @@ export default function Phase2SelectPhotosScreen() {
       return;
     }
 
-    setSelectedPhotos(
-      [...selectedPhotoIds, id],
-      [...selectedPhotoUrls, url]
-    );
+    const nextIds = [...selectedPhotoIds, id];
+    const nextUrls = [...selectedPhotoUrls, url];
+    setSelectedPhotos(nextIds, nextUrls);
+    persistDraftPhotos(nextUrls).catch(() => {
+      setSelectedPhotos(previousIds, previousUrls);
+      Alert.alert('Unable to update photos', 'We could not save your photo selection. Please try again.');
+    });
   };
 
   const handleAddFromPhone = async () => {
-    if (!token) return;
+    if (!token || !userId) return;
+    if (isSyncingDraft || isSaving) return;
     if (selectedPhotoUrls.length >= MAX_PHASE2_PHOTOS) {
       Alert.alert('Photo limit reached', `You can use up to ${MAX_PHASE2_PHOTOS} photos in Private Mode.`);
       return;
@@ -137,6 +183,7 @@ export default function Phase2SelectPhotosScreen() {
 
       setIsUploading(true);
       const storageId = await uploadPhotoToConvex(result.assets[0].uri, generateUploadUrl);
+      await trackPendingUpload({ userId, storageId });
       const permanentUrl = await getStorageUrl({ storageId });
 
       if (!permanentUrl || !isPersistedPhotoUrl(permanentUrl)) {
@@ -144,7 +191,26 @@ export default function Phase2SelectPhotosScreen() {
       }
 
       if (!selectedPhotoUrls.includes(permanentUrl)) {
-        setSelectedPhotos(selectedPhotoIds, [...selectedPhotoUrls, permanentUrl]);
+        const nextUrls = [...selectedPhotoUrls, permanentUrl];
+        const previousUrls = selectedPhotoUrls;
+        setSelectedPhotos(selectedPhotoIds, nextUrls);
+
+        try {
+          const persistedUrls = await persistDraftPhotos(nextUrls);
+          setSelectedPhotos(selectedPhotoIds, persistedUrls);
+          setSessionUploads((current) => ({
+            ...current,
+            [permanentUrl]: storageId,
+          }));
+        } catch (error) {
+          setSelectedPhotos(selectedPhotoIds, previousUrls);
+          try {
+            await cleanupPendingUpload({ userId, storageId });
+          } catch {
+            // Best-effort cleanup only.
+          }
+          throw error;
+        }
       }
     } catch (error) {
       Alert.alert('Upload failed', 'We could not add that photo. Please try again.');
@@ -154,10 +220,34 @@ export default function Phase2SelectPhotosScreen() {
   };
 
   const handleRemoveExtraPhoto = (url: string) => {
-    setSelectedPhotos(
-      selectedPhotoIds,
-      selectedPhotoUrls.filter((existingUrl) => existingUrl !== url)
-    );
+    if (isUploading || isSaving || isSyncingDraft) {
+      return;
+    }
+
+    const previousUrls = selectedPhotoUrls;
+    const nextUrls = selectedPhotoUrls.filter((existingUrl) => existingUrl !== url);
+    const uploadedStorageId = sessionUploads[url];
+    setSelectedPhotos(selectedPhotoIds, nextUrls);
+    persistDraftPhotos(nextUrls)
+      .then(async (persistedUrls) => {
+        setSelectedPhotos(selectedPhotoIds, persistedUrls);
+        if (uploadedStorageId && userId) {
+          try {
+            await cleanupPendingUpload({ userId, storageId: uploadedStorageId });
+          } catch {
+            // Best-effort cleanup only.
+          }
+          setSessionUploads((current) => {
+            const next = { ...current };
+            delete next[url];
+            return next;
+          });
+        }
+      })
+      .catch(() => {
+        setSelectedPhotos(selectedPhotoIds, previousUrls);
+        Alert.alert('Unable to update photos', 'We could not save your photo selection. Please try again.');
+      });
   };
 
   const handleContinue = async () => {
@@ -165,19 +255,10 @@ export default function Phase2SelectPhotosScreen() {
 
     setIsSaving(true);
     try {
-      const persistedUrls = Array.from(new Set(validSelectedPhotoUrls)).slice(0, MAX_PHASE2_PHOTOS);
-
-      const result = await saveOnboardingPhotos({
-        token,
-        privatePhotoUrls: persistedUrls,
-      });
-
-      if (!result?.success) {
-        throw new Error('Photos could not be saved');
-      }
+      const persistedUrls = await persistDraftPhotos(validSelectedPhotoUrls);
 
       setSelectedPhotos(selectedPhotoIds, persistedUrls);
-      router.push('/(main)/phase2-onboarding/profile-edit' as any);
+      router.push(PHASE2_ONBOARDING_ROUTE_MAP['profile-edit'] as any);
     } catch (error) {
       Alert.alert(
         'Unable to continue',
@@ -195,7 +276,7 @@ export default function Phase2SelectPhotosScreen() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Choose photos</Text>
-        <Text style={styles.stepLabel}>Step 2 of 4</Text>
+        <Text style={styles.stepLabel}>Step 2 of 5</Text>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
@@ -252,7 +333,7 @@ export default function Phase2SelectPhotosScreen() {
             </TouchableOpacity>
           </View>
           <Text style={styles.sectionSubtitle}>
-            Existing main-profile photos can be used directly. New photos upload before this step can continue.
+            Existing main-profile photos can be used directly. New photos upload and save to your Private Mode draft before you continue.
           </Text>
 
           {phase1Photos.length > 0 ? (
@@ -278,10 +359,14 @@ export default function Phase2SelectPhotosScreen() {
           <Text style={styles.bottomHint}>
             {validSelectedPhotoUrls.length < PHASE2_MIN_PHOTOS
               ? `Select ${PHASE2_MIN_PHOTOS - validSelectedPhotoUrls.length} more photo${PHASE2_MIN_PHOTOS - validSelectedPhotoUrls.length > 1 ? 's' : ''}`
-              : 'Finish any pending photo upload'}
+              : isSyncingDraft
+                ? 'Saving your photo draft...'
+                : 'Finish any pending photo upload'}
           </Text>
         ) : (
-          <Text style={styles.bottomHint}>Your selection order will be your Private Mode photo order.</Text>
+          <Text style={styles.bottomHint}>
+            {isSyncingDraft ? 'Saving your photo draft...' : 'Your selection order will be your Private Mode photo order.'}
+          </Text>
         )}
         <TouchableOpacity
           style={[styles.continueButton, !canContinue && styles.continueButtonDisabled]}

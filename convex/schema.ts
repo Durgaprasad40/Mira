@@ -750,6 +750,7 @@ export default defineSchema({
     data: v.optional(v.object({
       matchId: v.optional(v.string()),
       conversationId: v.optional(v.string()),
+      otherUserId: v.optional(v.string()),
       userId: v.optional(v.string()),
       roomId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
@@ -864,7 +865,7 @@ export default defineSchema({
     ownerUserId: v.id('users'),
     viewerUserId: v.id('users'),
     status: v.union(v.literal('pending'), v.literal('approved'), v.literal('declined')),
-    requestSource: v.literal('phase2_messages'),
+    requestSource: v.union(v.literal('phase2_messages'), v.literal('phase2_profile')),
     conversationId: v.optional(v.id('privateConversations')),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -1283,7 +1284,10 @@ export default defineSchema({
     ageConfirmed18Plus: v.boolean(),
     ageConfirmedAt: v.optional(v.number()),
     privatePhotosBlurred: v.array(v.id('_storage')),
-    privatePhotoUrls: v.array(v.string()),
+    // Canonical Phase-2 private photo storage. Clear URLs must never be persisted.
+    privatePhotoStorageIds: v.optional(v.array(v.id('_storage'))),
+    // Legacy fallback only for pre-migration records. New writes must leave this empty.
+    privatePhotoUrls: v.optional(v.array(v.string())),
     privatePhotoBlurLevel: v.optional(v.number()),
     photoBlurSlots: v.optional(v.array(v.boolean())),
     privateIntentKeys: v.array(v.string()),

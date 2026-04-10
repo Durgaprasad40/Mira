@@ -55,7 +55,6 @@ import { useInteractionStore } from "@/stores/interactionStore";
 import { asUserId } from "@/convex/id";
 import { ProfileData, toProfileData } from "@/lib/profileData";
 import { rankProfiles } from "@/lib/rankProfiles";
-import { sortProfilesByScore } from "@/lib/profileRanking";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
 // usePrivateChatStore - read-only for retention UI hints (conversations count)
@@ -387,11 +386,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [showNotificationPopover, setShowNotificationPopover] = useState(false);
 
-  // Random Match popup state (F2-D)
-  const [showRandomMatchPopup, setShowRandomMatchPopup] = useState(false);
-  const randomMatchPopupShownRef = useRef(false); // Anti-spam: one popup per component lifecycle
-  const randomMatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // DL-004: cleanup on unmount
-
   // Super-like star-burst animation state
   const [showSuperLikeAnimation, setShowSuperLikeAnimation] = useState(false);
   const clearSuperLikeAnimation = useCallback(() => setShowSuperLikeAnimation(false), []);
@@ -490,9 +484,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const incrementLikes = useDiscoverStore((s) => s.incrementLikes);
   const incrementStandOuts = useDiscoverStore((s) => s.incrementStandOuts);
   const checkAndResetIfNewDay = useDiscoverStore((s) => s.checkAndResetIfNewDay);
-  // F2-A/F2-B: Random match control — swipe tracking + trigger entry point
-  const incSwipe = useDiscoverStore((s) => s.incSwipe);
-  const maybeTriggerRandomMatch = useDiscoverStore((s) => s.maybeTriggerRandomMatch);
 
   // Engagement triggers - swipe progress tracking
   const trackSwipe = useExplorePrefsStore((s) => s.trackSwipe);
@@ -518,6 +509,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // This prevents stale async callbacks (from animation, network, timeout) from releasing
   // a lock that belongs to a newer swipe.
   const swipeIdRef = useRef(0);
+  const pendingPhase2SwipeRef = useRef<{ swipeId: number; profileId: string } | null>(null);
+  const reconciledPhase2SwipeIdsRef = useRef<Set<number>>(new Set());
 
   /**
    * Acquire the swipe lock and return a unique swipe ID.
@@ -563,11 +556,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // Clean up locks so a future remount starts fresh
       navigatingRef.current = false;
       swipeLockRef.current = false;
-      // DL-004: Clear random match timer on unmount
-      if (randomMatchTimerRef.current) {
-        clearTimeout(randomMatchTimerRef.current);
-        randomMatchTimerRef.current = null;
-      }
+      pendingPhase2SwipeRef.current = null;
+      reconciledPhase2SwipeIdsRef.current.clear();
     };
   }, [isPhase2]);
 
@@ -730,7 +720,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const privateDiscoverArgs = useMemo(
     () =>
       !isDemoMode && convexUserId && !skipInternalQuery && isPhase2 && isAuthReadyForQuery
-        ? { authUserId: userId ?? undefined, limit: 50 }
+        ? { limit: 50 }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [convexUserId, userId, skipInternalQuery, retryKey, isPhase2, queryTrigger, isAuthReadyForQuery],
@@ -830,10 +820,24 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // 3B-6: Filter excluded from external profiles for both demo and live mode
       // (blocked users, matched users, swiped users should not appear in explore categories)
       const filtered = externalProfiles.filter((p: any) => !excludedSet.has(p._id ?? p.id));
-      const mapped = filtered.map(toProfileData);
+      const mapped = filtered.map((p: any) => {
+        const normalized = toProfileData(p);
 
-      // Demo mode: preserve array order for deterministic Discover feed
-      return isDemoMode ? mapped : rankProfiles(mapped);
+        if (!isPhase2) {
+          return normalized;
+        }
+
+        return {
+          ...normalized,
+          distance: undefined,
+          lastActive: undefined,
+          createdAt: undefined,
+          photoBlurred: true,
+        };
+      });
+
+      // Phase-2 and demo mode: preserve source order exactly as provided.
+      return (isDemoMode || isPhase2) ? mapped : rankProfiles(mapped);
     }
     if (isDemoMode) {
       // Phase-2 demo mode: use DEMO_INCOGNITO_PROFILES (with privateIntentKeys)
@@ -954,9 +958,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           privateIntentKey: p.intentKeys?.[0],
           // PHASE2_PARITY: Include gender for identity display
           gender: p.gender,
-          // PHASE2_PARITY: Use actual lastActive if available, else fallback
-          lastActive: p.lastActive ?? (Date.now() - 2 * 60 * 60 * 1000),
-          createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+          photoBlurred: true,
           // SOFT_MATCH_FIX: Pass through completeness flags
           isSetupComplete: p.isSetupComplete ?? false,
           hasPhotos: p.hasPhotos ?? (photoUrls.length > 0),
@@ -1085,15 +1087,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const refetchRetryCountRef = useRef(0);
   const MAX_REFETCH_RETRIES = 2;
 
-  // Source profiles for queue refill (use filtered for Phase-2, regular for Phase-1)
+  // Source profiles for queue refill (preserve backend order for live Phase-2)
   const baseProfiles = isPhase2 ? filteredProfiles : profiles;
-
-  // INVISIBLE RANKING: Sort profiles by score (activity + completeness + stable random)
-  // This is invisible to users - no UI changes, just better ordering
-  const sourceProfiles = useMemo(
-    () => sortProfilesByScore(baseProfiles),
-    [baseProfiles]
-  );
+  const sourceProfiles = baseProfiles;
 
   // Build a map from profile ID to profile data for O(1) lookup
   // FLICKER_FIX: Don't clear map when sourceProfiles is transiently empty
@@ -1380,6 +1376,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // from the previous focus session. Their releaseSwipeLock(oldId) calls will no-op.
       swipeIdRef.current += 1;
       swipeLockRef.current = false;
+      pendingPhase2SwipeRef.current = null;
+      reconciledPhase2SwipeIdsRef.current.clear();
       // Reset all shared values on blur
       panAX.value = 0;
       panAY.value = 0;
@@ -1461,7 +1459,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // STABLE QUEUE: Use queue-based current/next instead of index-based access
   // This ensures the back card doesn't change during swipe animation
-  const displayProfiles = isPhase2 ? filteredProfiles : profiles; // Keep for compatibility
   const current = queueCurrent; // From stable queue
   const next = queueNext; // From stable queue
 
@@ -1539,43 +1536,24 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     });
   }, [isPhase2, current?.id]);
 
-  // Phase-2 only: Record impressions for ranking system (fire-and-forget)
-  // Guard: track which profile batch was recorded to avoid duplicate calls on rerender
-  const recordedImpressionSignatureRef = useRef<string | null>(null);
+  // Phase-2 only: Record impressions when the top card becomes visible.
+  const recordedTopImpressionRef = useRef<string | null>(null);
   useEffect(() => {
-    // Only for Phase-2, non-demo mode, with valid profiles
-    if (!isPhase2 || isDemoMode || displayProfiles.length === 0 || !userId) return;
+    if (!isPhase2 || isDemoMode || !userId || !current) return;
 
-    // Build a signature of the current batch (sorted user IDs joined)
-    // Using userId ?? id to handle both Phase-2 (userId) and Phase-1 (id = userId) shapes
-    const userIds = displayProfiles
-      .map((p) => (p.userId ?? p.id) as string)
-      .filter(Boolean)
-      .sort()
-      .join(',');
+    const currentViewedUserId = (current.userId ?? current.id) as Id<'users'> | undefined;
+    if (!currentViewedUserId) return;
 
-    // Skip if already recorded this exact batch
-    if (recordedImpressionSignatureRef.current === userIds) return;
-    recordedImpressionSignatureRef.current = userIds;
+    const signature = `${userId}:${currentViewedUserId}`;
+    if (recordedTopImpressionRef.current === signature) return;
+    recordedTopImpressionRef.current = signature;
 
-    // Fire-and-forget: record impressions for displayed profiles
-    const viewedUserIds = displayProfiles
-      .map((p) => p.userId ?? p.id)
-      .filter(Boolean) as Id<'users'>[];
-
-    // DL-007: Batch into chunks of 10 to reduce backend load
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < viewedUserIds.length; i += BATCH_SIZE) {
-      const batch = viewedUserIds.slice(i, i + BATCH_SIZE);
-      if (batch.length > 0) {
-        recordImpressionsMutation({
-          viewedUserIds: batch,
-        }).catch(() => {
-          // Silently ignore errors - impression recording is non-critical
-        });
-      }
-    }
-  }, [isPhase2, displayProfiles, userId, recordImpressionsMutation]);
+    recordImpressionsMutation({
+      viewedUserIds: [currentViewedUserId],
+    }).catch(() => {
+      // Silently ignore errors - impression recording is non-critical
+    });
+  }, [isPhase2, isDemoMode, userId, current?.userId, current?.id, recordImpressionsMutation]);
 
   // Stable refs for panResponder callbacks — prevents panResponder recreation
   // when current/handleSwipe/animateSwipe change between renders.
@@ -1687,6 +1665,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // swiped-away card snaps back to center before the slot switch renders.
   }, [panAX, panAY, panBX, panBY, overlayOpacity, activeSlotShared, advanceQueue, trackSwipe, shouldShowSwipeProgress]);
 
+  useEffect(() => {
+    if (!isPhase2 || isDemoMode) return;
+
+    const pendingSwipe = pendingPhase2SwipeRef.current;
+    if (!pendingSwipe) return;
+    if (current?.id !== pendingSwipe.profileId) return;
+
+    const stillInFeed = sourceProfiles.some((profile) => profile.id === pendingSwipe.profileId);
+    if (stillInFeed) return;
+
+    pendingPhase2SwipeRef.current = null;
+    reconciledPhase2SwipeIdsRef.current.add(pendingSwipe.swipeId);
+    advanceCard();
+    releaseSwipeLock(pendingSwipe.swipeId);
+  }, [isPhase2, isDemoMode, current?.id, sourceProfiles, advanceCard, releaseSwipeLock]);
+
   // Reset the now-inactive pan AFTER React commits the new activeSlot.
   // This avoids the race where requestAnimationFrame fires before the
   // batched state update, causing the old card to flash at center.
@@ -1721,41 +1715,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       if (direction === "right" && hasReachedLikeLimit()) { releaseSwipeLock(activeSwipeId); return; }
       if (direction === "up" && hasReachedStandOutLimit()) { releaseSwipeLock(activeSwipeId); return; }
 
-      // ★ ALWAYS advance card FIRST — this guarantees the index moves
-      // regardless of match/navigation/error below.
-      advanceCard();
+      const shouldAdvanceOptimistically = !isPhase2 || isDemoMode;
+      if (shouldAdvanceOptimistically) {
+        advanceCard();
+      }
 
       // Task 3: Light haptic feedback on swipe
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-      // F2-A: Track swipe for random match control
-      incSwipe();
-
-      // F2-D: Random match popup trigger (Option C: only on positive interaction)
-      // Only trigger on like (right) or super_like (up), NOT on pass (left)
-      if ((direction === "right" || direction === "up") && !randomMatchPopupShownRef.current) {
-        const shouldTriggerRandomMatch = maybeTriggerRandomMatch();
-        if (shouldTriggerRandomMatch && mountedRef.current && isFocusedRef.current) {
-          // Anti-spam: mark as shown in this component lifecycle
-          randomMatchPopupShownRef.current = true;
-          // DL-004: Clear any existing timer before scheduling new one
-          if (randomMatchTimerRef.current) {
-            clearTimeout(randomMatchTimerRef.current);
-          }
-          // Defer popup slightly to let swipe animation complete
-          randomMatchTimerRef.current = setTimeout(() => {
-            randomMatchTimerRef.current = null;
-            if (mountedRef.current && isFocusedRef.current) {
-              setShowRandomMatchPopup(true);
-              if (__DEV__) console.log('[F2-D] Random match popup shown');
-            }
-          }, 400);
-        }
+      if (shouldAdvanceOptimistically) {
+        if (direction === "right") incrementLikes();
+        if (direction === "up") incrementStandOuts();
       }
-
-      // Increment daily counters
-      if (direction === "right") incrementLikes();
-      if (direction === "up") incrementStandOuts();
 
       try {
         if (isDemoMode) {
@@ -1829,12 +1800,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           });
         }
 
-        // B5 fix: wrap mutation in Promise.race with 6s timeout to prevent stuck swipe lock
         const SWIPE_TIMEOUT_MS = 6000;
-        const timeoutPromise = new Promise<null>((_, reject) =>
-          setTimeout(() => reject(new Error("Swipe timed out")), SWIPE_TIMEOUT_MS)
-        );
-
         // PHASE-2 ISOLATION: Use separate mutation path for Phase-2 (Desire Land)
         // Phase-2 writes to privateLikes/privateMatches/privateConversations
         // Phase-1 writes to likes/matches/conversations (shared tables)
@@ -1855,9 +1821,49 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               message: message,
             });
 
-        const result = await Promise.race([swipePromise, timeoutPromise]);
+        let result;
+        if (isPhase2 && !isDemoMode) {
+          // Phase-2 live swipes stay locked until the backend definitively settles.
+          // After 6s we switch to an honest "still confirming" state instead of
+          // pretending the swipe can be safely retried while the mutation may still succeed.
+          const slowSwipeTimer = setTimeout(() => {
+            if (!mountedRef.current || swipeIdRef.current !== activeSwipeId) {
+              return;
+            }
+
+            pendingPhase2SwipeRef.current = {
+              swipeId: activeSwipeId,
+              profileId: swipedProfile.id,
+            };
+            setRetryKey((currentRetryKey) => currentRetryKey + 1);
+            Toast.show("Still confirming that swipe...");
+          }, SWIPE_TIMEOUT_MS);
+
+          try {
+            result = await swipePromise;
+          } finally {
+            clearTimeout(slowSwipeTimer);
+          }
+        } else {
+          const timeoutPromise = new Promise<null>((_, reject) =>
+            setTimeout(() => reject(new Error("Swipe timed out")), SWIPE_TIMEOUT_MS)
+          );
+          result = await Promise.race([swipePromise, timeoutPromise]);
+        }
 
         // LOG_NOISE_FIX: Match logging moved to trackAction/analytics
+
+        if (isPhase2 && !isDemoMode) {
+          const reconciledFromRefresh = reconciledPhase2SwipeIdsRef.current.has(activeSwipeId);
+          pendingPhase2SwipeRef.current = null;
+          if (reconciledFromRefresh) {
+            reconciledPhase2SwipeIdsRef.current.delete(activeSwipeId);
+          } else {
+            advanceCard();
+          }
+          if (direction === "right") incrementLikes();
+          if (direction === "up") incrementStandOuts();
+        }
 
         // Guard: check mounted/focused before navigating on match
         if (!mountedRef.current || !isFocusedRef.current) return;
@@ -1920,11 +1926,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
       } catch (error: any) {
         if (!mountedRef.current) return;
-        // DL-003: Don't show error toast for timeout - card already advanced and swipe likely recorded server-side
-        const isTimeout = error?.message === "Swipe timed out";
-        if (!isTimeout) {
-          Toast.show("Something went wrong. Please try again.");
+        if (pendingPhase2SwipeRef.current?.swipeId === activeSwipeId) {
+          pendingPhase2SwipeRef.current = null;
         }
+        reconciledPhase2SwipeIdsRef.current.delete(activeSwipeId);
+        const isTimeout = error?.message === "Swipe timed out";
+        Toast.show(isTimeout ? "We couldn't confirm that swipe. Please try again." : "Something went wrong. Please try again.");
       } finally {
         // P1-001 FIX: Only release here if not deferred to callback
         if (!releaseDeferredToCallback) {
@@ -1932,7 +1939,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
       }
     },
-    [convexUserId, swipeMutation, phase2SwipeMutation, isPhase2, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch, releaseSwipeLock],
+    [convexUserId, swipeMutation, phase2SwipeMutation, isPhase2, isDemoMode, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, releaseSwipeLock],
   );
 
   const animateSwipe = useCallback(
@@ -2371,7 +2378,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           <Text style={[styles.limitSubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Likes refresh at midnight</Text>
           <TouchableOpacity
             style={styles.limitButton}
-            onPress={() => router.push("/(main)/likes" as any)}
+            onPress={() => router.push("/(main)/(private)/phase2-likes" as any)}
           >
             <Ionicons name="heart" size={18} color={COLORS.white} />
             <Text style={styles.limitButtonText}>Check who liked you</Text>
@@ -2439,7 +2446,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           <Animated.View
             style={[styles.card, { zIndex: 0 }, nextCardAnimatedStyle]}
           >
+            {/* KEY PROP: Forces React to create new instance when profile changes,
+                ensuring photoIndex state resets to 0 for each new profile */}
             <ProfileCard
+              key={next.id}
               name={next.name}
               age={next.age}
               bio={next.bio}
@@ -2477,7 +2487,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         {current && (
           <GestureDetector gesture={panGesture}>
             <Animated.View style={[styles.card, { zIndex: 1 }, cardAnimatedStyle]}>
+              {/* KEY PROP: Forces React to create new instance when profile changes,
+                  ensuring photoIndex state resets to 0 for each new profile */}
               <ProfileCard
+                key={current.id}
                 name={current.name}
                 age={current.age}
                 bio={current.bio}
@@ -2624,54 +2637,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           </Animated.View>
         </TouchableOpacity>
       )}
-
-      {/* Random Match Popup (F2-D) */}
-      <Modal
-        visible={showRandomMatchPopup}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowRandomMatchPopup(false)}
-      >
-        <View style={styles.randomMatchOverlay}>
-          <View style={styles.randomMatchPopup}>
-            {/* Sparkle icon */}
-            <View style={styles.randomMatchIconWrap}>
-              <Ionicons name="sparkles" size={48} color={COLORS.primary} />
-            </View>
-
-            {/* Title */}
-            <Text style={styles.randomMatchTitle}>Someone&apos;s interested!</Text>
-
-            {/* Subtitle */}
-            <Text style={styles.randomMatchSubtitle}>
-              A match is waiting for you. Would you like to see who liked you?
-            </Text>
-
-            {/* Primary CTA */}
-            <TouchableOpacity
-              style={styles.randomMatchCta}
-              onPress={() => {
-                setShowRandomMatchPopup(false);
-                // Navigate to likes screen to see who liked them
-                router.push("/(main)/likes" as any);
-              }}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="heart" size={20} color={COLORS.white} style={{ marginRight: 8 }} />
-              <Text style={styles.randomMatchCtaText}>See Who Liked Me</Text>
-            </TouchableOpacity>
-
-            {/* Dismiss */}
-            <TouchableOpacity
-              style={styles.randomMatchDismiss}
-              onPress={() => setShowRandomMatchPopup(false)}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.randomMatchDismissText}>Maybe later</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
 
       {/* P2_MATCH: Premium Deep Connect Match Celebration */}
       {phase2MatchCelebration.visible && phase2MatchCelebration.matchedProfile && (

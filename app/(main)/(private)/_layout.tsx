@@ -130,7 +130,6 @@ export default function PrivateLayout() {
     if (!isInPhase2) return; // PHASE GUARD
     if (!mountedRef.current) return;
     if (didRedirectRef.current) return;
-    if (!hasHydrated) return;
     if (isDemoMode) return; // Demo mode uses local state
 
     if (!userId) {
@@ -139,7 +138,10 @@ export default function PrivateLayout() {
         if (!mountedRef.current) return;
         router.replace(PHASE1_DISCOVER_ROUTE);
       });
+      return;
     }
+
+    if (!hasHydrated) return;
   }, [userId, hasHydrated, router, isInPhase2]);
 
   // 🚨 CRITICAL: Collapse phantom "/" route inside Phase-2
@@ -521,10 +523,8 @@ export default function PrivateLayout() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(tabs)" />
-      <Stack.Screen name="profile/[userId]" />
+      <Stack.Screen name="p2-profile/[userId]" />
       <Stack.Screen name="phase2-likes" />
-      <Stack.Screen name="edit-desire" options={{ presentation: 'modal' }} />
-      <Stack.Screen name="edit-profile-details" options={{ presentation: 'modal' }} />
     </Stack>
   );
 }

@@ -46,27 +46,31 @@ export default function Phase2LikesScreen() {
   // P0-AUTH-CRASH-FIX: Simple gating - requires userId + authReady
   // Note: useConvexAuth was removed as it caused release crashes
   const isAuthReadyForQueries = !!(userId && authReady);
+  const isAuthWarming = !isAuthReadyForQueries;
 
   // P2-003: Error and retry state
   const [retryKey, setRetryKey] = useState(0);
   const [hasError, setHasError] = useState(false);
-  const [loadStartTime, setLoadStartTime] = useState(Date.now());
 
   // Phase-2 incoming likes query
   // P0-AUTH-FIX: Gate on isAuthReadyForQueries to prevent early query errors
-  // Note: retryKey is tracked locally but not passed to query (forces React to re-render)
   const incomingLikes = useQuery(
     api.privateSwipes.getIncomingLikes,
-    isAuthReadyForQueries ? { userId: userId as any } : 'skip'
+    isAuthReadyForQueries ? { userId: userId as any, refreshKey: retryKey } : 'skip'
   );
 
   // P2-003: Query states
-  const isLoading = incomingLikes === undefined && !hasError;
+  const isLoading = !hasError && (isAuthWarming || incomingLikes === undefined);
 
   // P2-003: Error detection - timeout after 15s of loading
   // FIX: Use functional update to clear error without needing hasError in deps
   // This prevents potential re-render cycles from deps including state we're updating
   useEffect(() => {
+    if (!isAuthReadyForQueries) {
+      setHasError(false);
+      return;
+    }
+
     if (incomingLikes !== undefined) {
       // Clear error state using functional update (only changes if currently true)
       setHasError((prev) => (prev ? false : prev));
@@ -81,12 +85,11 @@ export default function Phase2LikesScreen() {
     }, 15000);
 
     return () => clearTimeout(timeout);
-  }, [incomingLikes, retryKey]);
+  }, [incomingLikes, retryKey, isAuthReadyForQueries]);
 
   // P2-003: Retry handler
   const handleRetry = useCallback(() => {
     setHasError(false);
-    setLoadStartTime(Date.now());
     setRetryKey((k) => k + 1);
   }, []);
 
@@ -190,7 +193,19 @@ export default function Phase2LikesScreen() {
             />
           ) : (
             <View style={[styles.cardImage, styles.cardImagePlaceholder]}>
-              <Ionicons name="person" size={48} color={C.textLight} />
+              <Ionicons
+                name={like.profile?.hasPrivatePhotos ? 'lock-closed' : 'image-outline'}
+                size={34}
+                color={C.textLight}
+              />
+              <Text style={styles.cardImagePlaceholderTitle}>
+                {like.profile?.hasPrivatePhotos ? 'Private photo hidden' : 'No private photo yet'}
+              </Text>
+              <Text style={styles.cardImagePlaceholderSubtitle}>
+                {like.profile?.hasPrivatePhotos
+                  ? 'Open their profile to request access if you match.'
+                  : 'Their preview will show up here once they add one.'}
+              </Text>
             </View>
           )}
 
@@ -280,7 +295,9 @@ export default function Phase2LikesScreen() {
       {isLoading && (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={C.primary} />
-          <Text style={styles.loadingText}>Loading likes...</Text>
+          <Text style={styles.loadingText}>
+            {isAuthWarming ? 'Connecting securely...' : 'Loading likes...'}
+          </Text>
         </View>
       )}
 
@@ -420,6 +437,20 @@ const styles = StyleSheet.create({
   cardImagePlaceholder: {
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 16,
+    gap: 8,
+  },
+  cardImagePlaceholderTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text,
+    textAlign: 'center',
+  },
+  cardImagePlaceholderSubtitle: {
+    fontSize: 12,
+    lineHeight: 16,
+    color: C.textLight,
+    textAlign: 'center',
   },
   superLikeBadge: {
     position: 'absolute',

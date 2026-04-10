@@ -30,7 +30,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
@@ -70,25 +69,21 @@ export default function PrivateProfileScreen() {
 
   // Auth
   const { userId } = useAuthStore();
+  const demoUser = isDemoMode ? getDemoCurrentUser() : null;
+  const [queryPaused, setQueryPaused] = useState(false);
 
   // Backend profile query
   const backendProfile = useQuery(
     api.privateProfiles.getByAuthUserId,
-    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+    !isDemoMode && userId && !queryPaused ? { authUserId: userId } : 'skip'
   );
   const backendProfileLoaded = backendProfile !== undefined;
 
   // Loading and error states
   const [hasLoadError, setHasLoadError] = useState(false);
-  const [retryKey, setRetryKey] = useState(0);
   const isLoading = !isDemoMode && userId && backendProfile === undefined && !hasLoadError;
-
-  // Local store data
-  const localSelectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
-  const localDisplayName = usePrivateProfileStore((s) => s.displayName);
-  const localAge = usePrivateProfileStore((s) => s.age);
-  const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
-  const photoBlurSlots = usePrivateProfileStore((s) => s.photoBlurSlots);
+  const isMissingProfile = !isDemoMode && backendProfileLoaded && backendProfile === null;
+  const isSignedOut = !isDemoMode && !userId;
 
   // Track mount state
   const mountedRef = useRef(true);
@@ -115,51 +110,44 @@ export default function PrivateProfileScreen() {
     }, 15000);
 
     return () => clearTimeout(timeout);
-  }, [backendProfile, hasLoadError, retryKey]);
+  }, [backendProfile, hasLoadError, queryPaused, isDemoMode]);
 
   const handleRetry = useCallback(() => {
     setHasLoadError(false);
-    setRetryKey((k) => k + 1);
+    setQueryPaused(true);
+    requestAnimationFrame(() => {
+      if (mountedRef.current) {
+        setQueryPaused(false);
+      }
+    });
   }, []);
 
-  // Resolve data from backend or local store
+  // Resolve data from backend only in live mode
   const displayName = useMemo(() => {
-    if (isDemoMode) return localDisplayName;
-    if (backendProfile?.displayName) return backendProfile.displayName;
-    return localDisplayName;
-  }, [isDemoMode, backendProfile, localDisplayName]);
+    if (isDemoMode) return demoUser?.name || 'Anonymous';
+    return backendProfile?.displayName?.trim() || 'Anonymous';
+  }, [backendProfile?.displayName, demoUser, isDemoMode]);
 
   const age = useMemo(() => {
-    if (isDemoMode) return localAge;
-    if (backendProfile?.age) return backendProfile.age;
-    return localAge;
-  }, [isDemoMode, backendProfile, localAge]);
+    if (isDemoMode) {
+      return demoUser?.dateOfBirth ? calculateAgeFromDOB(demoUser.dateOfBirth) : 0;
+    }
+    return backendProfile?.age || 0;
+  }, [backendProfile?.age, demoUser, isDemoMode]);
 
   // Get main photo URL for avatar
   const mainPhoto = useMemo(() => {
     const photos = isDemoMode
-      ? localSelectedPhotoUrls
-      : (localSelectedPhotoUrls.length > 0
-          ? localSelectedPhotoUrls
-          : backendProfile?.privatePhotoUrls || []);
+      ? (demoUser?.photos?.map((photo) => photo.url) || [])
+      : (backendProfile?.privatePhotoUrls || []);
     const validPhotos = photos.filter(isValidPhotoUrl);
     return validPhotos[0] || null;
-  }, [isDemoMode, localSelectedPhotoUrls, backendProfile?.privatePhotoUrls]);
+  }, [backendProfile?.privatePhotoUrls, demoUser, isDemoMode]);
 
-  // Check if main photo (slot 0) should be blurred
-  // Matches the same blur logic used in Edit Profile
   const isMainPhotoBlurred = useMemo(() => {
-    return blurMyPhoto && photoBlurSlots[0];
-  }, [blurMyPhoto, photoBlurSlots]);
-
-  // Age fallback from Phase-1
-  const phase1Age = useMemo(() => {
-    if (isDemoMode) {
-      const demoUser = getDemoCurrentUser();
-      return demoUser?.dateOfBirth ? calculateAgeFromDOB(demoUser.dateOfBirth) : 0;
-    }
-    return 0;
-  }, []);
+    if (isDemoMode) return false;
+    return Boolean(backendProfile?.photoBlurSlots?.[0]);
+  }, [backendProfile?.photoBlurSlots, isDemoMode]);
 
   const resolvedName = useMemo(() => {
     if (displayName && displayName.trim().length > 0) {
@@ -170,8 +158,71 @@ export default function PrivateProfileScreen() {
 
   const resolvedAge = useMemo(() => {
     if (age && age > 0) return age;
-    return phase1Age;
-  }, [age, phase1Age]);
+    return 0;
+  }, [age]);
+
+  const photoCount = useMemo(() => {
+    if (isDemoMode) {
+      return (demoUser?.photos?.map((photo) => photo.url).filter(isValidPhotoUrl) || []).length;
+    }
+    return (backendProfile?.privatePhotoUrls || []).filter(isValidPhotoUrl).length;
+  }, [backendProfile?.privatePhotoUrls, demoUser, isDemoMode]);
+
+  const hasBio = useMemo(() => {
+    if (isDemoMode) {
+      return false;
+    }
+    return Boolean(backendProfile?.privateBio?.trim());
+  }, [backendProfile?.privateBio, isDemoMode]);
+
+  const promptCount = useMemo(() => {
+    if (isDemoMode) {
+      return 0;
+    }
+    return (backendProfile?.promptAnswers || []).filter((answer) => answer.answer.trim().length > 0).length;
+  }, [backendProfile?.promptAnswers, isDemoMode]);
+
+  const hasIntentSelection = useMemo(() => {
+    if (isDemoMode) {
+      return false;
+    }
+    return (backendProfile?.privateIntentKeys?.length || 0) > 0;
+  }, [backendProfile?.privateIntentKeys, isDemoMode]);
+
+  const completionItems = useMemo(() => ([
+    {
+      label: 'Photos',
+      complete: photoCount >= 2,
+      detail: photoCount >= 2 ? `${photoCount} added` : `Add at least 2 photos (${photoCount}/2)`,
+    },
+    {
+      label: 'Bio',
+      complete: hasBio,
+      detail: hasBio ? 'Added' : 'Add a short bio',
+    },
+    {
+      label: 'Prompts',
+      complete: promptCount > 0,
+      detail: promptCount > 0 ? `${promptCount} answered` : 'Add at least 1 answer',
+    },
+    {
+      label: 'Looking for',
+      complete: hasIntentSelection,
+      detail: hasIntentSelection ? 'Selected' : 'Choose what you are looking for',
+    },
+  ]), [hasBio, hasIntentSelection, photoCount, promptCount]);
+
+  const missingCompletionItems = useMemo(
+    () => completionItems.filter((item) => !item.complete),
+    [completionItems]
+  );
+
+  const isProfileReady = useMemo(() => {
+    if (isDemoMode) {
+      return true;
+    }
+    return Boolean(backendProfile?.isSetupComplete) && missingCompletionItems.length === 0;
+  }, [backendProfile?.isSetupComplete, isDemoMode, missingCompletionItems.length]);
 
   // Navigate to Edit Profile
   const handleEditProfile = () => {
@@ -195,6 +246,23 @@ export default function PrivateProfileScreen() {
     );
   }
 
+  if (isSignedOut) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <Ionicons name="person-circle" size={24} color={C.primary} />
+          <Text style={styles.headerTitle}>My Private Profile</Text>
+          <View style={{ width: 22 }} />
+        </View>
+        <View style={styles.errorContainer}>
+          <Ionicons name="person-circle-outline" size={48} color={C.textLight} />
+          <Text style={styles.errorTitle}>Sign in required</Text>
+          <Text style={styles.errorText}>Please sign in again to load your private profile.</Text>
+        </View>
+      </View>
+    );
+  }
+
   // Error state
   if (hasLoadError) {
     return (
@@ -208,6 +276,29 @@ export default function PrivateProfileScreen() {
           <Ionicons name="cloud-offline-outline" size={48} color={C.textLight} />
           <Text style={styles.errorTitle}>Unable to load profile</Text>
           <Text style={styles.errorText}>Please check your connection and try again.</Text>
+          <TouchableOpacity style={styles.retryButton} onPress={handleRetry} activeOpacity={0.7}>
+            <Ionicons name="refresh" size={18} color="#FFFFFF" />
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  if (isMissingProfile) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <Ionicons name="person-circle" size={24} color={C.primary} />
+          <Text style={styles.headerTitle}>My Private Profile</Text>
+          <View style={{ width: 22 }} />
+        </View>
+        <View style={styles.errorContainer}>
+          <Ionicons name="person-circle-outline" size={48} color={C.textLight} />
+          <Text style={styles.errorTitle}>Private profile unavailable</Text>
+          <Text style={styles.errorText}>
+            We couldn&apos;t find your saved private profile data. Complete setup or try again after reconnecting.
+          </Text>
           <TouchableOpacity style={styles.retryButton} onPress={handleRetry} activeOpacity={0.7}>
             <Ionicons name="refresh" size={18} color="#FFFFFF" />
             <Text style={styles.retryButtonText}>Retry</Text>
@@ -261,6 +352,57 @@ export default function PrivateProfileScreen() {
               <Text style={styles.labelText}>Private Profile</Text>
             </View>
           </View>
+        </View>
+
+        <View style={styles.statusCard}>
+          <View style={styles.statusHeader}>
+            <View style={[styles.statusIcon, isProfileReady ? styles.statusIconReady : styles.statusIconNeedsWork]}>
+              <Ionicons
+                name={isProfileReady ? 'checkmark-circle' : 'construct-outline'}
+                size={16}
+                color="#FFFFFF"
+              />
+            </View>
+            <View style={styles.statusCopy}>
+              <Text style={styles.statusTitle}>
+                {isProfileReady ? 'Profile ready' : 'Keep building your profile'}
+              </Text>
+              <Text style={styles.statusText}>
+                {isProfileReady
+                  ? 'Your photos, bio, prompts, and intent are ready for Deep Connect.'
+                  : missingCompletionItems.length === 1
+                    ? `One thing still needs attention: ${missingCompletionItems[0]?.label.toLowerCase()}.`
+                    : `${missingCompletionItems.length} areas still need attention before your profile feels complete.`}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.checklist}>
+            {completionItems.map((item) => (
+              <View key={item.label} style={styles.checklistRow}>
+                <Ionicons
+                  name={item.complete ? 'checkmark-circle' : 'ellipse-outline'}
+                  size={18}
+                  color={item.complete ? C.primary : C.textLight}
+                />
+                <View style={styles.checklistCopy}>
+                  <Text style={styles.checklistLabel}>{item.label}</Text>
+                  <Text style={styles.checklistDetail}>{item.detail}</Text>
+                </View>
+              </View>
+            ))}
+          </View>
+
+          {!isProfileReady && (
+            <TouchableOpacity
+              style={styles.statusAction}
+              onPress={handleEditProfile}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.statusActionText}>Continue editing</Text>
+              <Ionicons name="chevron-forward" size={16} color={C.primary} />
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Settings Menu */}
@@ -415,6 +557,82 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   labelText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.primary,
+  },
+  statusCard: {
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 20,
+  },
+  statusHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  statusIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  statusIconReady: {
+    backgroundColor: C.primary,
+  },
+  statusIconNeedsWork: {
+    backgroundColor: C.textLight,
+  },
+  statusCopy: {
+    flex: 1,
+  },
+  statusTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: C.text,
+  },
+  statusText: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: C.textLight,
+    marginTop: 4,
+  },
+  checklist: {
+    marginTop: 16,
+    gap: 12,
+  },
+  checklistRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  checklistCopy: {
+    flex: 1,
+  },
+  checklistLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text,
+  },
+  checklistDetail: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: C.textLight,
+    marginTop: 2,
+  },
+  statusAction: {
+    marginTop: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+  },
+  statusActionText: {
     fontSize: 14,
     fontWeight: '600',
     color: C.primary,

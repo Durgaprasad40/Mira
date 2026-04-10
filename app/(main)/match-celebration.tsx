@@ -80,7 +80,7 @@ export default function MatchCelebrationScreen() {
   const phase2ProfileQuery = useQuery(
     api.privateDiscover.getProfileByUserId,
     !isDemo && isPhase2 && otherUserIdValue && viewerId
-      ? { userId: otherUserIdValue, viewerId }
+      ? { userId: otherUserIdValue }
       : "skip",
   );
 

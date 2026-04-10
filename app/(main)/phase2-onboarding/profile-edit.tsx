@@ -84,7 +84,7 @@ export default function Phase2LookingForScreen() {
         throw new Error('Looking For could not be saved');
       }
 
-      router.push('/(main)/phase2-onboarding/profile-setup' as any);
+      router.push('/(main)/phase2-onboarding/prompts' as any);
     } catch (error) {
       Alert.alert(
         'Unable to continue',
@@ -108,7 +108,7 @@ export default function Phase2LookingForScreen() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Looking for</Text>
-        <Text style={styles.stepLabel}>Step 3 of 4</Text>
+        <Text style={styles.stepLabel}>Step 3 of 5</Text>
       </View>
 
       <KeyboardAvoidingView
@@ -119,7 +119,7 @@ export default function Phase2LookingForScreen() {
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Pick 1–3 intents</Text>
             <Text style={styles.sectionSubtitle}>
-              These are the only matching signals you need to set before you enter Private Mode.
+              Set your intent and bio here, then continue to your Private Mode prompts.
             </Text>
             <View style={styles.intentGrid}>
               {PRIVATE_INTENT_CATEGORIES.map((category) => {
@@ -152,7 +152,7 @@ export default function Phase2LookingForScreen() {
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Private bio</Text>
             <Text style={styles.sectionSubtitle}>
-              Keep it short and clear. This is the only text we need before you enter.
+              Keep it short and clear. You will answer your Private Mode prompts on the next step.
             </Text>
             <View style={styles.bioCard}>
               <TextInput
@@ -196,7 +196,7 @@ export default function Phase2LookingForScreen() {
             <ActivityIndicator size="small" color="#FFFFFF" />
           ) : (
             <>
-              <Text style={styles.continueButtonText}>Continue to review</Text>
+              <Text style={styles.continueButtonText}>Continue to prompts</Text>
               <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
             </>
           )}

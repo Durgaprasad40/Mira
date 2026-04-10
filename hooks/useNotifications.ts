@@ -495,6 +495,7 @@ let __notifLogged = false;
  */
 export function useNotifications() {
   const userId = useAuthStore((s) => s.userId);
+  const authReady = useAuthStore((s) => s.authReady);
   const convexUserId = asUserId(userId);
 
   // ══════════════════════════════════════════════════════════════════════════════
@@ -578,7 +579,7 @@ export function useNotifications() {
   // ── Convex queries (skipped in demo mode) ──
   const convexNotifications = useQuery(
     api.notifications.getNotifications,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip',
+    !isDemoMode && convexUserId && authReady ? {} : 'skip',
   );
   const markAsReadMutation = useMutation(api.notifications.markAsRead);
   const markAllAsReadMutation = useMutation(api.notifications.markAllAsRead);
@@ -688,10 +689,10 @@ export function useNotifications() {
       demoMarkAllRead();
       return;
     }
-    if (userId) {
-      markAllAsReadMutation({ authUserId: userId as string }).catch(console.error);
+    if (convexUserId) {
+      markAllAsReadMutation({}).catch(console.error);
     }
-  }, [userId, markAllAsReadMutation, demoMarkAllRead]);
+  }, [convexUserId, markAllAsReadMutation, demoMarkAllRead]);
 
   // ── Mark single notification as read ──
   // BUGFIX #33: Uses ref for pending reads to avoid setState on unmount warnings
@@ -708,7 +709,6 @@ export function useNotifications() {
 
         markAsReadMutation({
           notificationId: notificationId as any,
-          authUserId: userId as string,
         })
           .then(() => {
             // BUGFIX #33: Remove from ref on success (Convex query update triggers re-render)
@@ -730,11 +730,11 @@ export function useNotifications() {
     (dedupeKey: string) => {
       if (isDemoMode) {
         demoMarkReadByDedupeKey(dedupeKey);
-      } else if (userId) {
-        markReadByDedupeKeyMutation({ authUserId: userId, dedupeKey }).catch(console.error);
+      } else if (convexUserId) {
+        markReadByDedupeKeyMutation({ dedupeKey }).catch(console.error);
       }
     },
-    [demoMarkReadByDedupeKey, userId, markReadByDedupeKeyMutation],
+    [demoMarkReadByDedupeKey, convexUserId, markReadByDedupeKeyMutation],
   );
 
   // ── Mark all message notifications for a conversation as read (A2 fix: now supports Convex mode) ──
@@ -744,11 +744,11 @@ export function useNotifications() {
       const normalizedId = String(conversationId);
       if (isDemoMode) {
         demoMarkReadForConversation(normalizedId);
-      } else if (userId) {
-        markReadForConversationMutation({ authUserId: userId, conversationId: normalizedId }).catch(console.error);
+      } else if (convexUserId) {
+        markReadForConversationMutation({ conversationId: normalizedId }).catch(console.error);
       }
     },
-    [demoMarkReadForConversation, userId, markReadForConversationMutation],
+    [demoMarkReadForConversation, convexUserId, markReadForConversationMutation],
   );
 
   // ── Add notification (demo mode only — Convex mode uses server push) ──

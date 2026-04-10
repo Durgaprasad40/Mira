@@ -1,8 +1,8 @@
 /**
  * Phase-2 Private Photo Access Request System
  *
- * Allows users to request access to view another user's blurred profile photo
- * in the Phase-2 Messages context only. Access is granted one-to-one.
+ * Allows users to request access to view another user's private profile photos.
+ * Requests are auth-bound, one-to-one, and limited to real Phase-2 matches.
  *
  * Flow:
  * 1. Viewer requests access to owner's blurred photo
@@ -13,34 +13,44 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { getPhase2DisplayName, requireAuthenticatedUserId } from './helpers';
 
-// Helper to resolve auth ID to Convex user ID
-async function resolveUserIdByAuthId(
+function getSortedUserPair(
+  userA: Id<'users'>,
+  userB: Id<'users'>
+): [Id<'users'>, Id<'users'>] {
+  return userA < userB ? [userA, userB] : [userB, userA];
+}
+
+async function hasActivePhase2Match(
   ctx: any,
-  authUserId: string
-): Promise<Id<'users'> | null> {
-  // If it's already a valid Convex ID, try to use it directly
-  if (authUserId.includes(':')) {
-    // It's likely an auth token format, not a user ID
-    return null;
-  }
-
-  // Try to find user by ID directly
-  try {
-    const user = await ctx.db.get(authUserId as Id<'users'>);
-    if (user) return authUserId as Id<'users'>;
-  } catch {
-    // Not a valid ID format
-  }
-
-  // Try to find by externalId (for auth providers)
-  const userByExternal = await ctx.db
-    .query('users')
-    .filter((q: any) => q.eq(q.field('externalId'), authUserId))
+  userA: Id<'users'>,
+  userB: Id<'users'>
+): Promise<boolean> {
+  const [user1Id, user2Id] = getSortedUserPair(userA, userB);
+  const match = await ctx.db
+    .query('privateMatches')
+    .withIndex('by_users', (q: any) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
     .first();
-  if (userByExternal) return userByExternal._id;
+  return match?.isActive === true;
+}
 
-  return null;
+async function validateConversationParticipants(
+  ctx: any,
+  conversationId: Id<'privateConversations'>,
+  userA: Id<'users'>,
+  userB: Id<'users'>
+) {
+  const conversation = await ctx.db.get(conversationId);
+  if (!conversation) {
+    return { ok: false, error: 'conversation_not_found' as const };
+  }
+
+  if (!conversation.participants.includes(userA) || !conversation.participants.includes(userB)) {
+    return { ok: false, error: 'not_participant' as const };
+  }
+
+  return { ok: true as const };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -48,17 +58,17 @@ async function resolveUserIdByAuthId(
 // ═══════════════════════════════════════════════════════════════════════════
 export const requestPrivatePhotoAccess = mutation({
   args: {
-    authUserId: v.string(), // The viewer (requester)
     ownerUserId: v.id('users'), // The photo owner
     conversationId: v.optional(v.id('privateConversations')),
   },
   handler: async (ctx, args) => {
-    const { authUserId, ownerUserId, conversationId } = args;
+    const { ownerUserId, conversationId } = args;
     const now = Date.now();
 
-    // Resolve viewer ID
-    const viewerId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!viewerId) {
+    let viewerId: Id<'users'>;
+    try {
+      viewerId = await requireAuthenticatedUserId(ctx);
+    } catch {
       return { success: false, error: 'unauthorized' };
     }
 
@@ -76,16 +86,21 @@ export const requestPrivatePhotoAccess = mutation({
       return { success: false, error: 'blocked' };
     }
 
-    // Check if they have a valid Phase-2 conversation (must be matched)
+    // Must be a real matched Phase-2 pair before requests are allowed.
+    const hasMatch = await hasActivePhase2Match(ctx, viewerId, ownerUserId);
+    if (!hasMatch) {
+      return { success: false, error: 'not_matched' };
+    }
+
     if (conversationId) {
-      const conversation = await ctx.db.get(conversationId);
-      if (!conversation) {
-        return { success: false, error: 'conversation_not_found' };
-      }
-      // Verify both users are participants
-      if (!conversation.participants.includes(viewerId) ||
-          !conversation.participants.includes(ownerUserId)) {
-        return { success: false, error: 'not_participant' };
+      const conversationValidation = await validateConversationParticipants(
+        ctx,
+        conversationId,
+        viewerId,
+        ownerUserId
+      );
+      if (!conversationValidation.ok) {
+        return { success: false, error: conversationValidation.error };
       }
     }
 
@@ -120,7 +135,7 @@ export const requestPrivatePhotoAccess = mutation({
       ownerUserId,
       viewerUserId: viewerId,
       status: 'pending',
-      requestSource: 'phase2_messages',
+      requestSource: conversationId ? 'phase2_messages' : 'phase2_profile',
       conversationId,
       createdAt: now,
       updatedAt: now,
@@ -135,17 +150,17 @@ export const requestPrivatePhotoAccess = mutation({
 // ═══════════════════════════════════════════════════════════════════════════
 export const respondPrivatePhotoAccessRequest = mutation({
   args: {
-    authUserId: v.string(), // The owner (responder)
     requestId: v.id('privatePhotoAccessRequests'),
     approve: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, requestId, approve } = args;
+    const { requestId, approve } = args;
     const now = Date.now();
 
-    // Resolve owner ID
-    const ownerId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!ownerId) {
+    let ownerId: Id<'users'>;
+    try {
+      ownerId = await requireAuthenticatedUserId(ctx);
+    } catch {
       return { success: false, error: 'unauthorized' };
     }
 
@@ -176,21 +191,26 @@ export const respondPrivatePhotoAccessRequest = mutation({
 // ═══════════════════════════════════════════════════════════════════════════
 export const getPrivatePhotoAccessStatus = query({
   args: {
-    authUserId: v.string(),
     ownerUserId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { authUserId, ownerUserId } = args;
+    const { ownerUserId } = args;
 
-    // Resolve viewer ID
-    const viewerId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!viewerId) {
-      return { status: 'none', canViewClear: false };
+    let viewerId: Id<'users'>;
+    try {
+      viewerId = await requireAuthenticatedUserId(ctx);
+    } catch {
+      return { status: 'none', canViewClear: false, canRequest: false };
     }
 
     // Self always can view own photo
     if (viewerId === ownerUserId) {
-      return { status: 'self', canViewClear: true };
+      return { status: 'self', canViewClear: true, canRequest: false };
+    }
+
+    const hasMatch = await hasActivePhase2Match(ctx, viewerId, ownerUserId);
+    if (!hasMatch) {
+      return { status: 'none', canViewClear: false, canRequest: false };
     }
 
     // Check for existing request
@@ -202,12 +222,13 @@ export const getPrivatePhotoAccessStatus = query({
       .first();
 
     if (!request) {
-      return { status: 'none', canViewClear: false };
+      return { status: 'none', canViewClear: false, canRequest: true };
     }
 
     return {
       status: request.status,
       canViewClear: request.status === 'approved',
+      canRequest: true,
       requestId: request._id,
       requestedAt: request.createdAt,
       respondedAt: request.respondedAt,
@@ -219,15 +240,12 @@ export const getPrivatePhotoAccessStatus = query({
 // GET PENDING REQUESTS: Owner sees all pending requests to their photo
 // ═══════════════════════════════════════════════════════════════════════════
 export const getPendingPhotoAccessRequests = query({
-  args: {
-    authUserId: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const { authUserId } = args;
-
-    // Resolve owner ID
-    const ownerId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!ownerId) {
+  args: {},
+  handler: async (ctx) => {
+    let ownerId: Id<'users'>;
+    try {
+      ownerId = await requireAuthenticatedUserId(ctx);
+    } catch {
       return [];
     }
 
@@ -242,17 +260,13 @@ export const getPendingPhotoAccessRequests = query({
     // Enrich with viewer info
     const enrichedRequests = await Promise.all(
       requests.map(async (request) => {
-        const viewer = await ctx.db.get(request.viewerUserId);
-        const viewerProfile = await ctx.db
-          .query('userPrivateProfiles')
-          .withIndex('by_user', (q: any) => q.eq('userId', request.viewerUserId))
-          .first();
+        const viewerName = await getPhase2DisplayName(ctx, request.viewerUserId);
 
         return {
           requestId: request._id,
           viewerUserId: request.viewerUserId,
-          viewerName: viewerProfile?.displayName ?? viewer?.name ?? 'Unknown',
-          viewerPhotoUrl: viewerProfile?.privatePhotoUrls?.[0] ?? null,
+          viewerName,
+          viewerPhotoUrl: null,
           conversationId: request.conversationId,
           createdAt: request.createdAt,
         };
@@ -282,13 +296,15 @@ export const isPhotoBlurredForOwner = query({
       return { isBlurred: false, hasPhoto: false };
     }
 
-    // Check if user has blurred photos or blur level set
     const hasBlurredPhotos = profile.privatePhotosBlurred?.length > 0;
     const hasBlurLevel = (profile.privatePhotoBlurLevel ?? 0) > 0;
-    const hasPhotos = profile.privatePhotoUrls?.length > 0;
+    const hasBlurSlots = Array.isArray(profile.photoBlurSlots) && profile.photoBlurSlots.some(Boolean);
+    const hasPhotos =
+      (Array.isArray((profile as any).privatePhotoStorageIds) && (profile as any).privatePhotoStorageIds.length > 0) ||
+      (Array.isArray((profile as any).privatePhotoUrls) && (profile as any).privatePhotoUrls.length > 0);
 
     return {
-      isBlurred: hasBlurredPhotos || hasBlurLevel,
+      isBlurred: hasBlurredPhotos || hasBlurLevel || hasBlurSlots,
       hasPhoto: hasPhotos,
       blurLevel: profile.privatePhotoBlurLevel ?? 0,
     };

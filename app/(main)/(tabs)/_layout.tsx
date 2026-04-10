@@ -11,7 +11,6 @@ import { Tabs, useRouter, usePathname, useSegments, useFocusEffect } from "expo-
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
-import { stringToUserId } from "@/convex/helpers";
 import { COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useAuthStore } from "@/stores/authStore";
@@ -133,7 +132,7 @@ export default function MainTabsLayout() {
   // Query deletion state for Private tab entry gating (non-demo mode)
   const privateDeletionState = useQuery(
     api.privateDeletion.getPrivateDeletionState,
-    !isDemoMode && userId ? { userId: stringToUserId(userId) } : 'skip'
+    !isDemoMode && userId ? {} : 'skip'
   );
 
   // STABILITY FIX: Query users.phase2OnboardingCompleted for durable routing decision
@@ -150,7 +149,6 @@ export default function MainTabsLayout() {
   const phase2OnboardingCompleted = isDemoMode
     ? localPhase2OnboardingCompleted
     : (localPhase2OnboardingCompleted || userOnboardingStatus?.phase2OnboardingCompleted === true);
-  const privateStoreHydrated = usePrivateProfileStore((s) => s._hasHydrated);
   const localDeletionStatus = usePrivateProfileStore((s) => s.deletionStatus);
   // N-001/C-004 FIX: Permanent guard to prevent duplicate router.replace calls
   // Only resets on component remount (not timeout-based)
@@ -183,10 +181,10 @@ export default function MainTabsLayout() {
     // Prevent default tab navigation (we handle it manually)
     e.preventDefault();
 
-    // P2-001 FIX: Wait for store hydration before routing
-    // Prevents mis-routing to onboarding when store hasn't loaded persisted state yet
-    if (!privateStoreHydrated) {
-      if (__DEV__) console.log('[PRIVATE TAP] ignored: not hydrated');
+    // Wait for durable backend onboarding state before routing into Phase-2.
+    // The private profile store is hydrated only after the private area mounts.
+    if (!isDemoMode && userOnboardingStatus === undefined) {
+      if (__DEV__) console.log('[PRIVATE TAP] ignored: onboarding status not ready');
       return;
     }
 

@@ -2547,9 +2547,9 @@ export const acceptPrivateOnboardingConsent = mutation({
 });
 
 /**
- * Set Phase-2 onboarding as completed for a user.
- * This is a one-time operation - once set, onboarding never shows again.
- * Called from profile-setup.tsx when user completes Phase-2 onboarding.
+ * Legacy helper retained for compatibility.
+ * Active Phase-2 onboarding now marks completion inside privateProfiles.finalizeOnboardingProfile
+ * so profile creation and onboarding gating cannot drift apart.
  */
 export const setPhase2OnboardingCompleted = mutation({
   args: {
@@ -2882,17 +2882,10 @@ export const getMyBlockedUsers = query({
         const user = await ctx.db.get(block.blockedUserId);
         if (!user) return null;
 
-        // Get Phase-2 nickname from private profile
-        const privateProfile = await ctx.db
-          .query('userPrivateProfiles')
-          .withIndex('by_user', (q) => q.eq('userId', block.blockedUserId))
-          .first();
-        const nickname = privateProfile?.displayName || 'Anonymous';
-
         return {
           blockId: block._id,
           blockedUserId: block.blockedUserId,
-          displayName: nickname,
+          displayName: user.handle || 'Anonymous',
           blockedAt: block.createdAt,
         };
       })

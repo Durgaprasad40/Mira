@@ -89,21 +89,33 @@ export async function resolveUserIdByAuthId(
     return primary._id;
   }
 
-  // EMERGENCY FALLBACK: Try to find user by ID prefix match
-  // This handles cases where frontend has a truncated ID (data corruption issue)
-  // TODO: Remove this once the root cause of ID truncation is fixed
-  if (authUserId.length >= 8 && authUserId.length < 32) {
-    console.warn(`[resolveUserIdByAuthId] Attempting prefix match for truncated ID: ${authUserId}`);
-    const allUsers = await ctx.db.query("users").take(100);
-    const matchingUser = allUsers.find(u => (u._id as string).startsWith(authUserId));
-    if (matchingUser) {
-      console.log(`[resolveUserIdByAuthId] Found user by prefix match: ${matchingUser.name} (${matchingUser._id})`);
-      return matchingUser._id;
-    }
-  }
-
   // Not found
   return null;
+}
+
+export async function requireAuthenticatedUserId(
+  ctx: QueryCtx | MutationCtx
+): Promise<Id<"users">> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity?.subject) {
+    throw new Error("Authentication required");
+  }
+
+  const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+  if (!userId) {
+    throw new Error("Authenticated user not found");
+  }
+
+  return userId;
+}
+
+export async function getPhase2DisplayName(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<"users">
+): Promise<string> {
+  const user = await ctx.db.get(userId);
+  const handle = user?.handle?.trim();
+  return handle && handle.length > 0 ? handle : "Anonymous";
 }
 
 /**

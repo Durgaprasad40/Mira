@@ -131,9 +131,8 @@ export function NotificationPopover({
       // P1-001 FIX: Phase-2 like notification - navigate to Phase-2 likes screen
       case 'phase2_like':
         router.push({
-          pathname: '/(main)/(private)/(tabs)/desire',
+          pathname: '/(main)/(private)/phase2-likes',
           params: {
-            focus: 'likes',
             profileId: notification.data?.otherUserId,
             source: 'notification',
             notificationId: notification._id,
