@@ -21,7 +21,6 @@ import Animated, {
 } from 'react-native-reanimated';
 import { cmToFeetInches } from '@/lib/utils';
 import { trackAction } from '@/lib/sentry';
-import { getDisplayBio, FALLBACK_BIO } from '@/lib/profileFallbacks';
 import { getRenderableProfilePhotos } from '@/lib/profileData';
 import {
   DEBUG_PHOTO_RENDER,
@@ -32,12 +31,16 @@ import {
 } from '@/lib/debugFlags';
 import type { PresenceStatus } from '@/hooks/usePresence';
 
-// PERF: Max photos to prefetch when card becomes visible
-const PREFETCH_COUNT = 5;
 import { COLORS, INCOGNITO_COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
 import type { TrustBadge } from '@/lib/trustBadges';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { MatchSignalBadge } from './MatchSignalBadge';
+
+const PHASE1_ACTIVE_CARD_LOOKAHEAD = 2;
+const PHASE2_ACTIVE_CARD_LOOKAHEAD = 4;
+const PHASE2_ACTIVE_CARD_PREVIOUS = 2;
+const PHASE1_PREFETCH_AHEAD = 2;
+const PHASE2_PREFETCH_COUNT = 8;
 
 // Gender labels for "Looking for" display
 const GENDER_LABELS: Record<string, string> = {
@@ -59,7 +62,7 @@ const GENDER_ICONS: Record<string, { icon: string; color: string }> = {
 export interface ProfileCardProps {
   name: string;
   // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
-  age: number;
+  age?: number;
   bio?: string;
   city?: string;
   isVerified?: boolean;
@@ -127,6 +130,8 @@ interface PhotoStackProps {
   activeIndex: number;
   photoBlurred?: boolean;
   onError?: () => void;
+  lookaheadCount: number;
+  previousCount?: number;
 }
 
 const PhotoStack = memo(function PhotoStack({
@@ -134,13 +139,12 @@ const PhotoStack = memo(function PhotoStack({
   activeIndex,
   photoBlurred,
   onError,
+  lookaheadCount,
+  previousCount = 0,
 }: PhotoStackProps) {
   const shouldBlurPhoto = photoBlurred === true;
-  // PHOTO_RENDER_FIX: Render photos around the active index for memory efficiency
-  // Instead of only first 5, render a sliding window that includes the active photo
-  // This ensures P6/P7 images are available when user swipes to them
-  const windowStart = Math.max(0, activeIndex - 2);
-  const windowEnd = Math.min(photos.length, activeIndex + PREFETCH_COUNT);
+  const windowStart = Math.max(0, activeIndex - previousCount);
+  const windowEnd = Math.min(photos.length, activeIndex + 1 + lookaheadCount);
   const visiblePhotos = photos.slice(windowStart, windowEnd);
   const indexOffset = windowStart; // Offset to map local index to global
 
@@ -218,6 +222,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const displayName = useMemo(() => {
     return name || 'Anonymous';
   }, [name]);
+  const ageLabel = useMemo(() => {
+    return typeof age === 'number' && age > 0 ? String(age) : null;
+  }, [age]);
   const TC = dark ? INCOGNITO_COLORS : COLORS;
   const { height: windowHeight } = useWindowDimensions();
 
@@ -265,6 +272,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       .slice(0, 5) // Show max 5 on reveal photo
       .map(a => ({ emoji: a!.emoji, label: a!.label }));
   }, [isPhase2, activities]);
+
+  const phase1SupplementalTrustBadges = useMemo(() => {
+    if (isPhase2 || !trustBadges || trustBadges.length === 0) return [];
+    return trustBadges
+      .filter((badge) => badge.key !== 'active' && badge.key !== 'verified')
+      .slice(0, 2);
+  }, [isPhase2, trustBadges]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE-1: PROMPT-FIRST DISCOVERY MODEL (UX REFACTOR)
@@ -875,7 +889,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       // ─────────────────────────────────────────────────────────────────────
       // 1 PHOTO: Identity + ONE personality hook (bio OR prompt OR fallback)
       // UX FIX: Single photo profiles need personality context for swipe decision
-      // Priority: bio > first prompt > fallback bio
+      // Priority: bio > first prompt > honest minimal cue
       // ─────────────────────────────────────────────────────────────────────
       const content = createEmptyContent();
 
@@ -892,10 +906,10 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         content.waveDensity = 'medium';
         usedUnitKeys.add('prompt1');
       } else {
-        // Priority 3: Use fallback bio
-        content.bio = getDisplayBio(bio, true) ?? undefined;
-        content.slotType = 'identity_bio';
-        content.waveDensity = 'medium';
+        // Priority 3: Keep sparse profiles honest with a neutral minimal cue
+        content.slotType = 'soft_fallback';
+        content.softFallback = softFallbackContent ?? { type: 'cta' };
+        content.waveDensity = 'low';
       }
 
       contents.push(content);
@@ -1417,18 +1431,20 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     setImageError(false);
   }, [photoIndex]);
 
-  // PERF: Prefetch ALL photos on mount for instant switching (up to 8)
-  // PHOTO_RENDER_FIX: Increased from 5 to 8 to support profiles with 6-8 photos
-  const prefetchedRef = useRef(false);
+  const prefetchedPhotoUrlsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (prefetchedRef.current || displayPhotos.length === 0) return;
-    prefetchedRef.current = true;
+    if (!showCarousel || displayPhotos.length === 0) return;
 
-    // Prefetch all photos up to 8 for profiles with many photos
-    const MAX_PREFETCH = 8;
-    const toPrefetch = displayPhotos.slice(0, MAX_PREFETCH);
+    const toPrefetch = isPhase2
+      ? displayPhotos.slice(0, PHASE2_PREFETCH_COUNT)
+      : displayPhotos.slice(photoIndex + 1, photoIndex + 1 + PHASE1_PREFETCH_AHEAD);
+
     toPrefetch.forEach((photo, index) => {
       if (photo?.url) {
+        if (prefetchedPhotoUrlsRef.current.has(photo.url)) {
+          return;
+        }
+        prefetchedPhotoUrlsRef.current.add(photo.url);
         Image.prefetch(photo.url).catch((error) => {
           // P2-005 FIX: Log prefetch failures for debugging (dev only)
           // Image will still load on-demand, but logging helps identify CDN/network issues
@@ -1438,7 +1454,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         });
       }
     });
-  }, [displayPhotos]);
+  }, [displayPhotos, isPhase2, photoIndex, showCarousel]);
 
   // 3B-2: Safe access with clamping
   const safeIndex = Math.min(Math.max(0, photoIndex), Math.max(0, photoCount - 1));
@@ -1503,7 +1519,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         )}
         <View style={styles.gridOverlay}>
           <Text style={styles.gridName} numberOfLines={1}>
-            {displayName}, {age}
+            {displayName}{ageLabel ? `, ${ageLabel}` : ''}
           </Text>
           {isVerified && <Ionicons name="checkmark-circle" size={14} color={COLORS.superLike} />}
         </View>
@@ -1523,6 +1539,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             activeIndex={safeIndex}
             photoBlurred={shouldBlurPhoto}
             onError={handleImageError}
+            lookaheadCount={isPhase2 ? PHASE2_ACTIVE_CARD_LOOKAHEAD : PHASE1_ACTIVE_CARD_LOOKAHEAD}
+            previousCount={isPhase2 ? PHASE2_ACTIVE_CARD_PREVIOUS : 0}
           />
         ) : (
           // Premium placeholder for no-photo state
@@ -1636,7 +1654,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             {/* LAYER A: PERSISTENT IDENTITY (ALL PHOTOS) - Name + Age + Gender */}
             <View style={styles.phase2IdentityRow}>
               <Text style={styles.phase2Name}>{name}</Text>
-              <Text style={styles.phase2Age}>{age}</Text>
+              {ageLabel && <Text style={styles.phase2Age}>{ageLabel}</Text>}
               {/* Gender icon - matches Phase-1 styling */}
               {gender && GENDER_ICONS[gender] && (
                 <View style={[styles.phase2GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}30` }]}>
@@ -1841,8 +1859,19 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 REQUIREMENT: Visible on ALL photos for consistent identity
                 ───────────────────────────────────────────────────────────────────────── */}
             <View style={styles.phase1NameRow}>
-              <Text style={styles.phase1Name}>{displayName}</Text>
-              <Text style={styles.phase1Age}>{age}</Text>
+              <Text style={styles.phase1Name} numberOfLines={1}>
+                {displayName}
+              </Text>
+              {ageLabel && <Text style={styles.phase1Age}>{ageLabel}</Text>}
+              {gender && GENDER_ICONS[gender] && (
+                <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}26` }]}>
+                  <Ionicons
+                    name={GENDER_ICONS[gender].icon as any}
+                    size={12}
+                    color={GENDER_ICONS[gender].color}
+                  />
+                </View>
+              )}
               {/* Compact verified tick badge - inline with name/age */}
               {isVerified && (
                 <View style={styles.phase1VerifiedTick}>
@@ -1870,6 +1899,17 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 <Text style={styles.phase1DistanceTextPersistent}>
                   {distance < 1 ? '< 1 km away' : `${distance.toFixed(0)} km away`}
                 </Text>
+              </View>
+            )}
+
+            {photoIndex === 0 && phase1SupplementalTrustBadges.length > 0 && (
+              <View style={styles.phase1BadgeRow}>
+                {phase1SupplementalTrustBadges.map((badge) => (
+                  <View key={badge.key} style={styles.phase1BadgePill}>
+                    <Ionicons name={badge.icon as any} size={12} color={badge.color} />
+                    <Text style={styles.phase1BadgeText}>{badge.label}</Text>
+                  </View>
+                ))}
               </View>
             )}
 
@@ -2768,7 +2808,7 @@ const styles = StyleSheet.create({
     paddingTop: 20,
   },
   phase1IdentitySection: {
-    marginBottom: 2,
+    marginBottom: 6,
   },
   // Active Now badge (legacy - kept for compatibility)
   phase1ActiveBadge: {
@@ -2814,14 +2854,16 @@ const styles = StyleSheet.create({
   // Name + Age row - Premium typography, larger and bolder
   phase1NameRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'baseline',
-    marginBottom: 4,
+    marginBottom: 6,
   },
   phase1Name: {
     fontSize: 34,
     fontWeight: '700',
     color: COLORS.white,
     marginRight: 8,
+    flexShrink: 1,
     letterSpacing: -0.8,
     // Strong shadow for readability on any photo
     textShadowColor: 'rgba(0,0,0,0.9)',
@@ -2906,7 +2948,7 @@ const styles = StyleSheet.create({
   phase1DistanceRowPersistent: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 4,
+    marginTop: 2,
     gap: 4,
   },
   phase1DistanceTextPersistent: {
@@ -2940,16 +2982,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
-    marginBottom: 6,
+    marginTop: 8,
   },
   phase1BadgePill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    backgroundColor: 'rgba(0,0,0,0.24)',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
   },
   phase1BadgePillOnline: {
     backgroundColor: 'rgba(16, 185, 129, 0.25)',
@@ -3075,7 +3119,7 @@ const styles = StyleSheet.create({
   },
   // Content reveal section - tighter spacing for immersive feel
   phase1RevealSection: {
-    marginTop: 12,
+    marginTop: 14,
   },
   // Intent display - NO box, just elegant inline text with icon
   phase1IntentCard: {
@@ -3143,6 +3187,7 @@ const styles = StyleSheet.create({
   phase1BioCard: {
     // NO background, NO border - pure typography
     maxHeight: 90,
+    paddingRight: 12,
   },
   phase1BioLabel: {
     fontSize: 10,
@@ -3520,6 +3565,7 @@ const styles = StyleSheet.create({
   phase1PromptCard: {
     // NO background, NO border - pure text hierarchy
     maxHeight: 90,
+    paddingRight: 12,
   },
   phase1PromptQuestion: {
     fontSize: 10,
@@ -3546,7 +3592,7 @@ const styles = StyleSheet.create({
   // Visually lighter than wave_content - feels like continuity, not repetition
   // ═══════════════════════════════════════════════════════════════════════════
   phase1SoftFallbackSection: {
-    marginTop: 10,
+    marginTop: 12,
   },
   phase1SoftFallbackCard: {
     backgroundColor: 'rgba(0,0,0,0.2)',

@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { query, mutation, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+import { resolveUserIdByAuthId } from './helpers';
 import {
   CandidateProfile,
   CurrentUser,
@@ -76,14 +76,39 @@ function getSafeDiscoverPhotos<T extends { url?: string; isNsfw?: boolean; order
     .sort((a, b) => a.order - b.order);
 }
 
+function sanitizeDiscoverCandidateForClient<
+  T extends {
+    age?: number;
+    distance?: number;
+    lastActive?: number;
+    hideAge?: boolean;
+    hideDistance?: boolean;
+    showLastSeen?: boolean;
+  }
+>(candidate: T) {
+  const {
+    hideAge,
+    hideDistance,
+    showLastSeen,
+    ...rest
+  } = candidate;
+
+  return {
+    ...rest,
+    age: hideAge ? undefined : candidate.age,
+    distance: hideDistance ? undefined : candidate.distance,
+    lastActive: showLastSeen === false ? undefined : candidate.lastActive,
+  };
+}
+
 function getDiscoverFetchLimit(
   offset: number,
   limit: number,
   sortBy: 'recommended' | 'distance' | 'age' | 'recently_active' | 'newest',
 ): number {
   const requestedWindow = Math.max(offset + limit, limit, 1);
-  const bufferMultiplier = sortBy === 'recommended' ? 25 : 15;
-  return Math.min(Math.max(requestedWindow * bufferMultiplier, 300), 1000);
+  const bufferMultiplier = sortBy === 'recommended' ? 12 : 8;
+  return Math.min(Math.max(requestedWindow * bufferMultiplier, 120), 400);
 }
 
 function shouldIncludeReducedReachCandidate(viewerId: string, candidateId: string): boolean {
@@ -93,6 +118,351 @@ function shouldIncludeReducedReachCandidate(viewerId: string, candidateId: strin
     hash = (hash + pairId.charCodeAt(i)) % 100;
   }
   return hash < 50;
+}
+
+const DISCOVER_BOOTSTRAP_SHORTLIST_MIN = 60;
+const DISCOVER_BOOTSTRAP_SHORTLIST_MAX = 120;
+const DISCOVER_BOOTSTRAP_WINDOW_MULTIPLIER = 4;
+const DISCOVER_NON_RECOMMENDED_BUFFER = 12;
+const DISCOVER_PHOTO_HYDRATION_CHUNK_SIZE = 20;
+
+type DiscoverSort =
+  'recommended' | 'distance' | 'age' | 'recently_active' | 'newest';
+
+type DiscoverGender =
+  'male' | 'female' | 'non_binary' | 'lesbian' | 'other';
+
+type DiscoverBootstrapCandidate = {
+  id: Id<'users'>;
+  name: string;
+  age: number;
+  gender: string;
+  bio: string;
+  height?: number;
+  smoking?: string;
+  drinking?: string;
+  kids?: string;
+  education?: string;
+  religion?: string;
+  jobTitle?: string;
+  company?: string;
+  school?: string;
+  isVerified: boolean;
+  city?: string;
+  distance?: number;
+  lastActive: number;
+  createdAt: number;
+  lookingFor: string[];
+  relationshipIntent: string[];
+  activities: string[];
+  profilePrompts?: { question: string; answer: string }[];
+  photoBlurred: boolean;
+  isBoosted: boolean;
+  theyLikedMe: boolean;
+  photoCount: number;
+  isIncognito: boolean;
+  hideAge: boolean;
+  hideDistance: boolean;
+  showLastSeen: boolean;
+};
+
+type DiscoverHydratedCandidate = DiscoverBootstrapCandidate & {
+  photos: { _id: Id<'photos'>; url: string }[];
+};
+
+function createDiscoverBootstrapCandidate(
+  user: any,
+  distance: number | undefined,
+  theyLikedMe: boolean,
+): DiscoverBootstrapCandidate {
+  return {
+    id: user._id,
+    name: user.name,
+    age: calculateAge(user.dateOfBirth),
+    gender: user.gender,
+    bio: user.bio,
+    height: user.height,
+    smoking: user.smoking,
+    drinking: user.drinking,
+    kids: user.kids,
+    education: user.education,
+    religion: user.religion,
+    jobTitle: user.jobTitle,
+    company: user.company,
+    school: user.school,
+    isVerified: user.isVerified,
+    city: user.city,
+    distance,
+    lastActive: user.lastActive,
+    createdAt: user.createdAt,
+    lookingFor: Array.isArray(user.lookingFor) ? user.lookingFor : [],
+    relationshipIntent: Array.isArray(user.relationshipIntent) ? user.relationshipIntent : [],
+    activities: Array.isArray(user.activities) ? user.activities : [],
+    profilePrompts: Array.isArray(user.profilePrompts) ? user.profilePrompts : [],
+    photoBlurred: user.photoBlurred === true,
+    isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
+    theyLikedMe,
+    // Bootstrap phase only needs an approximate photo presence signal.
+    // Full photo count is hydrated later for the shortlisted pool.
+    photoCount: user.primaryPhotoUrl ? 1 : 0,
+    isIncognito: user.incognitoMode === true,
+    hideAge: user.hideAge === true,
+    hideDistance: user.hideDistance === true,
+    showLastSeen: user.showLastSeen !== false,
+  };
+}
+
+function toRankingCandidate(candidate: DiscoverBootstrapCandidate): CandidateProfile {
+  return {
+    id: candidate.id as string,
+    name: candidate.name,
+    age: candidate.age,
+    gender: candidate.gender,
+    bio: candidate.bio,
+    city: candidate.city,
+    distance: candidate.distance,
+    lastActive: candidate.lastActive,
+    createdAt: candidate.createdAt,
+    isVerified: candidate.isVerified,
+    lookingFor: candidate.lookingFor,
+    relationshipIntent: candidate.relationshipIntent,
+    activities: candidate.activities,
+    profilePrompts: candidate.profilePrompts,
+    height: candidate.height,
+    jobTitle: candidate.jobTitle,
+    education: candidate.education,
+    smoking: candidate.smoking,
+    drinking: candidate.drinking,
+    religion: candidate.religion,
+    kids: candidate.kids,
+    photoCount: candidate.photoCount,
+    theyLikedMe: candidate.theyLikedMe,
+    isBoosted: candidate.isBoosted,
+  };
+}
+
+function mapDiscoverPhotosForClient(
+  photos: Array<{ _id: Id<'photos'>; url: string }>,
+): Array<{ _id: Id<'photos'>; url: string }> {
+  return photos.map((photo) => ({
+    _id: photo._id,
+    url: photo.url,
+  }));
+}
+
+async function getDiscoverSourceUsers(
+  ctx: QueryCtx,
+  currentUser: any,
+  sortBy: DiscoverSort,
+  fetchLimit: number,
+) {
+  const desiredGenders = Array.isArray(currentUser.lookingFor)
+    ? (currentUser.lookingFor as unknown[])
+    : [];
+  const targetGenders = Array.from(new Set<DiscoverGender>(
+    desiredGenders.filter(
+      (gender: unknown): gender is DiscoverGender =>
+        gender === 'male' ||
+        gender === 'female' ||
+        gender === 'non_binary' ||
+        gender === 'lesbian' ||
+        gender === 'other',
+    ),
+  ));
+  if (targetGenders.length === 0) {
+    return [];
+  }
+
+  // Recommended/recently_active benefit most from recent activity ordering.
+  if (sortBy === 'recommended' || sortBy === 'recently_active') {
+    const indexedLimit = Math.min(Math.max(fetchLimit, 120), 400);
+    return ctx.db
+      .query('users')
+      .withIndex('by_last_active')
+      .order('desc')
+      .take(indexedLimit);
+  }
+
+  // Other sorts still benefit from narrowing the source pool to the viewer's
+  // target genders before applying the remaining in-memory filters.
+  const perGenderLimit = Math.max(
+    Math.ceil(fetchLimit / Math.max(targetGenders.length, 1)),
+    40,
+  );
+
+  const buckets = await Promise.all(
+    targetGenders.map((gender) =>
+      ctx.db
+        .query('users')
+        .withIndex('by_gender', (q) => q.eq('gender', gender))
+        .take(perGenderLimit),
+    ),
+  );
+
+  const merged: any[] = [];
+  const seenUserIds = new Set<string>();
+  for (const bucket of buckets) {
+    for (const user of bucket) {
+      const candidateId = String(user._id);
+      if (seenUserIds.has(candidateId)) continue;
+      seenUserIds.add(candidateId);
+      merged.push(user);
+    }
+  }
+
+  return merged;
+}
+
+function sortBootstrapCandidates(
+  candidates: DiscoverBootstrapCandidate[],
+  sortBy: Exclude<DiscoverSort, 'recommended'>,
+) {
+  const sorted = [...candidates];
+  sorted.sort((a, b) => {
+    if (a.isBoosted && !b.isBoosted) return -1;
+    if (!a.isBoosted && b.isBoosted) return 1;
+
+    switch (sortBy) {
+      case 'distance':
+        return (a.distance ?? 999) - (b.distance ?? 999);
+      case 'age':
+        return a.age - b.age;
+      case 'recently_active':
+        return b.lastActive - a.lastActive;
+      case 'newest':
+        return b.createdAt - a.createdAt;
+      default:
+        return 0;
+    }
+  });
+  return sorted;
+}
+
+async function hydrateDiscoverCandidates(
+  ctx: QueryCtx,
+  orderedCandidates: DiscoverBootstrapCandidate[],
+  targetCount: number,
+): Promise<DiscoverHydratedCandidate[]> {
+  const hydrated: DiscoverHydratedCandidate[] = [];
+
+  for (
+    let i = 0;
+    i < orderedCandidates.length && hydrated.length < targetCount;
+    i += DISCOVER_PHOTO_HYDRATION_CHUNK_SIZE
+  ) {
+    const chunk = orderedCandidates.slice(
+      i,
+      i + DISCOVER_PHOTO_HYDRATION_CHUNK_SIZE,
+    );
+
+    const chunkPhotos = await Promise.all(
+      chunk.map((candidate) =>
+        ctx.db
+          .query('photos')
+          .withIndex('by_user_order', (q) => q.eq('userId', candidate.id))
+          .collect(),
+      ),
+    );
+
+    for (let j = 0; j < chunk.length; j++) {
+      const rawPhotos = chunkPhotos[j];
+      const safePhotos = getSafeDiscoverPhotos(
+        rawPhotos.filter((photo: any) => photo.photoType !== 'verification_reference'),
+      );
+      if (safePhotos.length === 0) continue;
+
+      hydrated.push({
+        ...chunk[j],
+        photos: mapDiscoverPhotosForClient(safePhotos),
+        photoCount: safePhotos.length,
+      });
+
+      if (hydrated.length >= targetCount) {
+        break;
+      }
+    }
+  }
+
+  return hydrated;
+}
+
+async function fetchDiscoverTrustSignals(
+  ctx: QueryCtx,
+  candidateIds: Id<'users'>[],
+  viewerBlockedIds: Set<string>,
+  viewerReportedIds: Set<string>,
+): Promise<TrustSignals> {
+  const aggregateReportCounts = new Map<string, number>();
+  const aggregateBlockCounts = new Map<string, number>();
+
+  const TRUST_BATCH_SIZE = 50;
+  for (let i = 0; i < candidateIds.length; i += TRUST_BATCH_SIZE) {
+    const batch = candidateIds.slice(i, i + TRUST_BATCH_SIZE);
+    const batchResults = await Promise.all(
+      batch.flatMap((candidateId) => [
+        ctx.db
+          .query('reports')
+          .withIndex('by_reported_user', (q) => q.eq('reportedUserId', candidateId))
+          .collect(),
+        ctx.db
+          .query('blocks')
+          .withIndex('by_blocked', (q) => q.eq('blockedUserId', candidateId))
+          .collect(),
+      ]),
+    );
+
+    for (let j = 0; j < batch.length; j++) {
+      const candidateId = batch[j] as string;
+      const reports = batchResults[j * 2] || [];
+      const blocks = batchResults[j * 2 + 1] || [];
+
+      if (reports.length > 0) {
+        aggregateReportCounts.set(candidateId, reports.length);
+      }
+      if (blocks.length > 0) {
+        aggregateBlockCounts.set(candidateId, blocks.length);
+      }
+    }
+  }
+
+  return {
+    viewerBlockedIds,
+    viewerReportedIds,
+    aggregateReportCounts,
+    aggregateBlockCounts,
+  };
+}
+
+function finalizeDiscoverCandidatesForClient(
+  candidates: DiscoverHydratedCandidate[],
+) {
+  return candidates.map((candidate) =>
+    sanitizeDiscoverCandidateForClient({
+      id: candidate.id,
+      name: candidate.name,
+      age: candidate.age,
+      gender: candidate.gender,
+      bio: candidate.bio,
+      height: candidate.height,
+      smoking: candidate.smoking,
+      drinking: candidate.drinking,
+      isVerified: candidate.isVerified,
+      city: candidate.city,
+      distance: candidate.distance,
+      lastActive: candidate.lastActive,
+      createdAt: candidate.createdAt,
+      lookingFor: candidate.lookingFor,
+      relationshipIntent: candidate.relationshipIntent,
+      activities: candidate.activities,
+      profilePrompts: candidate.profilePrompts,
+      photos: candidate.photos,
+      photoBlurred: candidate.photoBlurred,
+      isIncognito: candidate.isIncognito,
+      hideAge: candidate.hideAge,
+      hideDistance: candidate.hideDistance,
+      showLastSeen: candidate.showLastSeen,
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -571,15 +941,19 @@ export const getDiscoverProfiles = query({
     // are now fetched AFTER filtering, only for the filtered candidate set.
     // This avoids loading full reports/blocks tables. See below after candidates are built.
 
-    // PERF #8: Use take() with buffer to avoid loading entire user table
-    // Fetch more than needed since many will be filtered out
+    const requestedWindow = Math.max(offset + limit, limit, 1);
     const fetchLimit = getDiscoverFetchLimit(offset, limit, sortBy);
-    const allUsers = await ctx.db.query('users').take(fetchLimit);
+    const sourcedUsers = await getDiscoverSourceUsers(
+      ctx,
+      currentUser,
+      sortBy,
+      fetchLimit,
+    );
 
-    // First pass: filter candidates without photo queries
-    const filteredCandidates: { user: typeof allUsers[number]; distance?: number }[] = [];
+    // First pass: build a lightweight shortlist without photo or trust hydration.
+    const bootstrapCandidates: DiscoverBootstrapCandidate[] = [];
 
-    for (const user of allUsers) {
+    for (const user of sourcedUsers) {
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
       if (isUserPaused(user)) continue;
@@ -605,10 +979,10 @@ export const getDiscoverProfiles = query({
 
       // Distance
       let distance: number | undefined;
-      if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
+      if (currentUser.publishedLat && currentUser.publishedLng && user.publishedLat && user.publishedLng) {
         distance = calculateDistance(
-          currentUser.latitude, currentUser.longitude,
-          user.latitude, user.longitude,
+          currentUser.publishedLat, currentUser.publishedLng,
+          user.publishedLat, user.publishedLng,
         );
         if (!isDistanceAllowed(distance, currentUser.maxDistance)) continue;
       }
@@ -633,169 +1007,32 @@ export const getDiscoverProfiles = query({
         continue;
       }
 
-      filteredCandidates.push({ user, distance });
-    }
-
-    // PERF #8: Only fetch photos for candidates that passed all filters
-    // Batch fetch photos in parallel
-    const photoResults = await Promise.all(
-      filteredCandidates.map(({ user }) =>
-        ctx.db
-          .query('photos')
-          .withIndex('by_user_order', (q) => q.eq('userId', user._id))
-          .collect()
-      )
-    );
-
-    // Build final candidates with photos
-    const candidates = [];
-    for (let i = 0; i < filteredCandidates.length; i++) {
-      const { user, distance } = filteredCandidates[i];
-      const rawPhotos = photoResults[i];
-
-      // ═══════════════════════════════════════════════════════════════════════
-      // PHOTO FILTER DEBUG: Detailed logging to identify filtering issues
-      // ═══════════════════════════════════════════════════════════════════════
-      console.log('[DISCOVER_PHOTO_FILTER_DEBUG]', {
-        userId: user._id,
-        userName: user.name,
-        rawCount: rawPhotos?.length ?? 0,
-        rawPhotoDetails: rawPhotos?.map((p) => ({
-          id: p._id,
-          order: p.order,
-          photoType: p.photoType,
-          isNsfw: p.isNsfw,
-          hasUrl: !!p.url,
-          hasStorageId: !!p.storageId,
-        })) ?? [],
-      });
-
-      // PHOTO SOURCE FIX: Filter out ONLY verification_reference photos
-      // These are private verification photos used for face verification, NOT display photos
-      // Any photo with photoType undefined, null, or 'display' should be kept
-      const displayPhotos = rawPhotos.filter((p) => p.photoType !== 'verification_reference');
-
-      // Filter out NSFW photos - these should never be shown in Discover
-      const safePhotos = getSafeDiscoverPhotos(displayPhotos);
-
-      // Log filtering results
-      console.log('[DISCOVER_PHOTO_FILTER_RESULT]', {
-        userId: user._id,
-        userName: user.name,
-        rawCount: rawPhotos.length,
-        afterVerificationFilter: displayPhotos.length,
-        afterSafetyFilter: safePhotos.length,
-        verificationFiltered: rawPhotos
-          .filter((p) => p.photoType === 'verification_reference')
-          .map((p) => ({ id: p._id, order: p.order })),
-        nsfwFiltered: displayPhotos
-          .filter((p) => p.isNsfw || !(typeof p.url === 'string' && p.url.trim().length > 0))
-          .map((p) => ({ id: p._id, order: p.order })),
-        finalPhotoIds: safePhotos.map((p) => p._id),
-      });
-
-      if (safePhotos.length === 0) continue; // at least 1 safe photo required
-
-      const userAge = calculateAge(user.dateOfBirth);
-      const theyLikedMe = usersWhoLikedMe.has(user._id as string);
-
-      candidates.push({
-        id: user._id,
-        name: user.name,
-        age: userAge,
-        gender: user.gender,
-        bio: user.bio,
-        height: user.height,
-        smoking: user.smoking,
-        drinking: user.drinking,
-        kids: user.kids,
-        education: user.education,
-        religion: user.religion,
-        jobTitle: user.jobTitle,
-        company: user.company,
-        school: user.school,
-        isVerified: user.isVerified,
-        verificationStatus: user.verificationStatus || 'unverified',
-        city: user.city,
-        distance,
-        // LIVE_LOCATION: Include lat/lng for client-side instant distance calculation
-        // Client uses this with device GPS for sub-second distance refresh
-        latitude: user.latitude,
-        longitude: user.longitude,
-        lastActive: user.lastActive,
-        createdAt: user.createdAt,
-        lookingFor: user.lookingFor,
-        relationshipIntent: user.relationshipIntent,
-        activities: user.activities,
-        profilePrompts: user.profilePrompts,
-        photos: safePhotos,
-        photoBlurred: user.photoBlurred === true,
-        isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
-        theyLikedMe,
-        photoCount: safePhotos.length,
-        isIncognito: user.incognitoMode === true,
-      });
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // P1-004 SCALABILITY FIX: Fetch trust signals ONLY for filtered candidates
-    // Uses indexed queries instead of global .collect() - scales efficiently
-    // ═══════════════════════════════════════════════════════════════════════════
-    const candidateIds = candidates.map(c => c.id as Id<'users'>);
-
-    // Batch fetch reports/blocks only for candidates being ranked (uses indexes)
-    const TRUST_BATCH_SIZE = 50;
-    const aggregateReportCounts = new Map<string, number>();
-    const aggregateBlockCounts = new Map<string, number>();
-
-    // Process in batches to avoid overwhelming the database
-    for (let i = 0; i < candidateIds.length; i += TRUST_BATCH_SIZE) {
-      const batch = candidateIds.slice(i, i + TRUST_BATCH_SIZE);
-
-      // Fetch reports and blocks for this batch in parallel
-      const batchResults = await Promise.all(
-        batch.flatMap(candidateId => [
-          // Reports against this candidate (using by_reported_user index)
-          ctx.db
-            .query('reports')
-            .withIndex('by_reported_user', (q) => q.eq('reportedUserId', candidateId))
-            .collect(),
-          // Blocks against this candidate (using by_blocked index)
-          ctx.db
-            .query('blocks')
-            .withIndex('by_blocked', (q) => q.eq('blockedUserId', candidateId))
-            .collect(),
-        ])
+      bootstrapCandidates.push(
+        createDiscoverBootstrapCandidate(
+          user,
+          distance,
+          usersWhoLikedMe.has(user._id as string),
+        ),
       );
-
-      // Process results (interleaved reports and blocks)
-      for (let j = 0; j < batch.length; j++) {
-        const candidateId = batch[j] as string;
-        const reports = batchResults[j * 2] || [];
-        const blocks = batchResults[j * 2 + 1] || [];
-
-        if (reports.length > 0) {
-          aggregateReportCounts.set(candidateId, reports.length);
-        }
-        if (blocks.length > 0) {
-          aggregateBlockCounts.set(candidateId, blocks.length);
-        }
-      }
     }
-    // ═══════════════════════════════════════════════════════════════════════════
 
     // Sort
     if (sortBy === 'recommended') {
+      if (bootstrapCandidates.length === 0) {
+        return [];
+      }
+
+      const shortlistTarget = Math.min(
+        bootstrapCandidates.length,
+        Math.max(
+          requestedWindow * DISCOVER_BOOTSTRAP_WINDOW_MULTIPLIER,
+          DISCOVER_BOOTSTRAP_SHORTLIST_MIN,
+        ),
+        DISCOVER_BOOTSTRAP_SHORTLIST_MAX,
+      );
+
       // Phase 3: Shadow mode decision (once per request)
       const runShadow = shouldRunShadowComparison();
-
-      // NEW RANKING: Use Phase-1 Discover ranking system
-      const trustSignals: TrustSignals = {
-        viewerBlockedIds: blockedUserIds,
-        viewerReportedIds,
-        aggregateReportCounts,
-        aggregateBlockCounts,
-      };
 
       // Build CurrentUser object for ranking
       const rankingCurrentUser: CurrentUser = {
@@ -817,59 +1054,72 @@ export const getDiscoverProfiles = query({
         seedQuestions: currentUser.onboardingDraft?.profileDetails?.seedQuestions,
       };
 
-      // Map candidates to CandidateProfile format
-      const candidateProfiles: CandidateProfile[] = candidates.map(c => ({
-        id: c.id as string,
-        name: c.name,
-        age: c.age,
-        gender: c.gender,
-        bio: c.bio,
-        city: c.city,
-        distance: c.distance,
-        lastActive: c.lastActive,
-        createdAt: c.createdAt,
-        isVerified: c.isVerified,
-        lookingFor: c.lookingFor,
-        relationshipIntent: c.relationshipIntent,
-        activities: c.activities,
-        profilePrompts: c.profilePrompts,
-        height: c.height,
-        jobTitle: c.jobTitle,
-        education: c.education,
-        smoking: c.smoking,
-        drinking: c.drinking,
-        religion: c.religion,
-        kids: c.kids,
-        photoCount: c.photoCount,
-        theyLikedMe: c.theyLikedMe,
-        isBoosted: c.isBoosted,
-      }));
+      // Bootstrap ranking runs on lightweight user docs first so we only hydrate
+      // full photo arrays for the near-final recommendation pool.
+      const bootstrapTrustSignals: TrustSignals = {
+        viewerBlockedIds: blockedUserIds,
+        viewerReportedIds,
+        aggregateReportCounts: new Map(),
+        aggregateBlockCounts: new Map(),
+      };
+      const bootstrapProfiles = bootstrapCandidates.map(toRankingCandidate);
+      const { rankedCandidates: bootstrapRankedCandidates } = rankDiscoverCandidates(
+        bootstrapProfiles,
+        rankingCurrentUser,
+        bootstrapTrustSignals,
+        shortlistTarget,
+        false // useFallback flag - fallback logic handled below
+      );
+      const bootstrapRankMap = new Map(
+        bootstrapRankedCandidates.map((candidate, index) => [candidate.id, index]),
+      );
+      const bootstrapShortlist = bootstrapCandidates
+        .filter((candidate) => bootstrapRankMap.has(candidate.id as string))
+        .sort(
+          (a, b) =>
+            (bootstrapRankMap.get(a.id as string) ?? 0) -
+            (bootstrapRankMap.get(b.id as string) ?? 0),
+        );
 
-      // Apply new ranking with exploration mix
+      const hydratedCandidates = await hydrateDiscoverCandidates(
+        ctx,
+        bootstrapShortlist,
+        shortlistTarget,
+      );
+      if (hydratedCandidates.length === 0) {
+        return [];
+      }
+
+      const trustSignals = await fetchDiscoverTrustSignals(
+        ctx,
+        hydratedCandidates.map((candidate) => candidate.id),
+        blockedUserIds,
+        viewerReportedIds,
+      );
+      const candidateProfiles = hydratedCandidates.map(toRankingCandidate);
+
+      // Apply final ranking only after full hydration for the near-final pool.
       const { rankedCandidates, exhausted } = rankDiscoverCandidates(
         candidateProfiles,
         rankingCurrentUser,
         trustSignals,
-        limit,
-        false // useFallback flag - fallback logic handled below
+        requestedWindow,
+        false,
       );
-
-      // Map back to original candidate format (preserve photos, etc.)
       const rankedIds = new Set(rankedCandidates.map(c => c.id));
       const rankedMap = new Map(rankedCandidates.map((c, i) => [c.id, i]));
-      let result = candidates
+      let result = hydratedCandidates
         .filter(c => rankedIds.has(c.id as string))
         .sort((a, b) => (rankedMap.get(a.id as string) || 0) - (rankedMap.get(b.id as string) || 0));
 
       // P1 FIX: Fallback mechanism when primary pool is exhausted
       // If we have fewer results than requested, activate fallback pool
-      // Fallback candidates must have 2+ compatibility signals
-      if (exhausted && result.length < limit) {
-        const needed = limit - result.length;
+      // Fallback candidates must have 2+ compatibility signals.
+      // Safe incremental version: fallback is limited to the hydrated shortlist.
+      if (exhausted && result.length < requestedWindow) {
+        const needed = requestedWindow - result.length;
         const usedIds = new Set(result.map(r => r.id as string));
 
-        // P2-018 FIX: Find and RANK candidates for fallback
-        // Sort by ranking score to ensure best fallback candidates are selected first
         const fallbackCandidates = candidateProfiles
           .filter(c => !usedIds.has(c.id) && qualifiesForFallback(c, rankingCurrentUser))
           .map(c => ({ c, score: calculateRankScore(c, rankingCurrentUser, trustSignals) }))
@@ -877,15 +1127,13 @@ export const getDiscoverProfiles = query({
           .slice(0, needed)
           .map(({ c }) => c);
 
-        // P2-018 FIX: Map fallback candidates back to original format, preserving rank order
-        const candidateById = new Map(candidates.map(c => [c.id as string, c]));
-        const fallbackResults: typeof candidates = [];
+        const candidateById = new Map(hydratedCandidates.map(c => [c.id as string, c]));
+        const fallbackResults: DiscoverHydratedCandidate[] = [];
         for (const c of fallbackCandidates) {
           const original = candidateById.get(c.id);
           if (original) fallbackResults.push(original);
         }
 
-        // Append fallback results (they appear after ranked results)
         result = [...result, ...fallbackResults];
       }
 
@@ -912,7 +1160,7 @@ export const getDiscoverProfiles = query({
             reportedIds: viewerReportedIds,
           };
 
-          // Build normalized candidates inline from candidateProfiles
+          // Build normalized candidates inline from the hydrated shortlist only.
           const normalizedCandidates: import('./ranking/rankingTypes').NormalizedCandidate[] = candidateProfiles.map(c => ({
             id: c.id,
             phase: 'phase1' as const,
@@ -974,24 +1222,28 @@ export const getDiscoverProfiles = query({
         }
       }
 
-      return result.slice(offset, offset + limit);
+      return finalizeDiscoverCandidatesForClient(
+        result.slice(offset, offset + limit),
+      );
     } else {
-      candidates.sort((a, b) => {
-        // Boosted first
-        if (a.isBoosted && !b.isBoosted) return -1;
-        if (!a.isBoosted && b.isBoosted) return 1;
+      const orderedBootstrapCandidates = sortBootstrapCandidates(
+        bootstrapCandidates,
+        sortBy,
+      );
+      const hydrationTarget = Math.min(
+        orderedBootstrapCandidates.length,
+        requestedWindow + Math.max(limit, DISCOVER_NON_RECOMMENDED_BUFFER),
+      );
+      const hydratedCandidates = await hydrateDiscoverCandidates(
+        ctx,
+        orderedBootstrapCandidates,
+        hydrationTarget,
+      );
 
-        switch (sortBy) {
-          case 'distance':       return (a.distance || 999) - (b.distance || 999);
-          case 'age':            return a.age - b.age;
-          case 'recently_active': return b.lastActive - a.lastActive;
-          case 'newest':         return b.createdAt - a.createdAt;
-          default:               return 0;
-        }
-      });
+      return finalizeDiscoverCandidatesForClient(
+        hydratedCandidates.slice(offset, offset + limit),
+      );
     }
-
-    return candidates.slice(offset, offset + limit);
   },
 });
 

@@ -112,6 +112,23 @@ export function getDiscoverPrefetch(userId: string, authVersion: number): any[] 
   return prefetchState.result;
 }
 
+export function getDiscoverPrefetchSnapshot(
+  userId: string,
+  authVersion: number
+): DiscoverPrefetchState | null {
+  if (!prefetchState) return null;
+  if (prefetchState.userId !== userId) return null;
+  if (prefetchState.authVersion !== authVersion) return null;
+
+  return {
+    userId: prefetchState.userId,
+    authVersion: prefetchState.authVersion,
+    promise: prefetchState.promise,
+    result: prefetchState.result,
+    startedAt: prefetchState.startedAt,
+  };
+}
+
 /**
  * Mark prefetch as used (called after consuming in DiscoverCardStack).
  * This allows cleanup once useQuery takes over.

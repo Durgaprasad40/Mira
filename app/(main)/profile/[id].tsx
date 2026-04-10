@@ -84,6 +84,8 @@ export default function ViewProfileScreen() {
   const { userId: currentUserId, token } = useAuthStore();
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [showReportBlock, setShowReportBlock] = useState(false);
+  const [isActionPending, setIsActionPending] = useState(false);
+  const [sharedPlacesReady, setSharedPlacesReady] = useState(false);
   const setDiscoverProfileActionResult = useInteractionStore((s) => s.setDiscoverProfileActionResult);
 
   // Phase-1: Use users.getUserById
@@ -97,7 +99,7 @@ export default function ViewProfileScreen() {
   // Shared Places query (Phase-1 only, not for demo mode)
   const sharedPlaces = useQuery(
     api.crossedPaths.getSharedPlaces,
-    !isDemoMode && !isPhase2 && userId && token
+    !isDemoMode && !isPhase2 && userId && token && sharedPlacesReady
       ? { token, profileUserId: userId as any }
       : 'skip'
   );
@@ -214,7 +216,10 @@ export default function ViewProfileScreen() {
   // P0 UNIFIED PRESENCE: Get presence status for this profile user
   // Use profile.userId if available (Phase-2), otherwise use userId from params
   const profileUserId = profile?.userId || userId;
-  const presence = useUserPresence(profileUserId ? profileUserId as Id<'users'> : null);
+  const presence = useUserPresence(
+    !isDemoMode && profileUserId ? profileUserId as Id<'users'> : null,
+    { respectPrivacy: !isPhase2 }
+  );
   const presenceStatus = presence?.status;
 
   const displayPhotos = useMemo(() => getRenderableProfilePhotos(profile?.photos), [profile?.photos]);
@@ -244,6 +249,26 @@ export default function ViewProfileScreen() {
     }
   }, [currentPhotoIndex, visiblePhotos.length]);
 
+  useEffect(() => {
+    if (isDemoMode || isPhase2 || !userId || !token) {
+      setSharedPlacesReady(false);
+      return;
+    }
+
+    setSharedPlacesReady(false);
+    let cancelled = false;
+    const frameId = requestAnimationFrame(() => {
+      if (!cancelled) {
+        setSharedPlacesReady(true);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frameId);
+    };
+  }, [isDemoMode, isPhase2, token, userId]);
+
   const syncPhase1DiscoverAction = (action: 'like' | 'pass' | 'super_like') => {
     if (source !== 'phase1_discover' || isPhase2 || !userId) return;
     setDiscoverProfileActionResult({
@@ -254,7 +279,7 @@ export default function ViewProfileScreen() {
   };
 
   const handleSwipe = async (action: 'like' | 'pass' | 'super_like') => {
-    if (!currentUserId || !userId) return;
+    if (!currentUserId || !userId || isActionPending) return;
 
     if (isDemoMode) {
       if (action === 'pass') {
@@ -291,6 +316,7 @@ export default function ViewProfileScreen() {
       return;
     }
 
+    setIsActionPending(true);
     try {
       const result = await swipe({
         token: token!,
@@ -307,6 +333,8 @@ export default function ViewProfileScreen() {
       }
     } catch {
       Toast.show('Something went wrong. Please try again.');
+    } finally {
+      setIsActionPending(false);
     }
   };
 
@@ -348,8 +376,8 @@ export default function ViewProfileScreen() {
     );
   }
 
-  // profile.age is already the age in years (not a date), use it directly
-  const age = profile.age || 0;
+  const age = typeof profile.age === 'number' && profile.age > 0 ? profile.age : null;
+  const profileIdentity = age ? `${profile.name}, ${age}` : profile.name;
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
@@ -379,6 +407,10 @@ export default function ViewProfileScreen() {
           disableIntervalMomentum
           data={visiblePhotos}
           keyExtractor={(item, index) => item._id || `photo-${index}`}
+          initialNumToRender={1}
+          windowSize={2}
+          maxToRenderPerBatch={1}
+          removeClippedSubviews
           onMomentumScrollEnd={(e) => {
             const index = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
             setCurrentPhotoIndex(index);
@@ -417,9 +449,7 @@ export default function ViewProfileScreen() {
 
       <View style={styles.content}>
         <View style={styles.nameRow}>
-          <Text style={styles.name}>
-            {profile.name}, {age}
-          </Text>
+          <Text style={styles.name}>{profileIdentity}</Text>
           {distanceLabel && (
             <Text style={styles.distance}>{distanceLabel}</Text>
           )}
@@ -706,23 +736,26 @@ export default function ViewProfileScreen() {
         {fromChat === '1' || isConfessPreview ? null : (
           <View style={styles.actions}>
             <TouchableOpacity
-              style={[styles.actionButton, styles.passButton]}
+              style={[styles.actionButton, styles.passButton, isActionPending && styles.actionButtonDisabled]}
               onPress={() => handleSwipe('pass')}
-              activeOpacity={0.7}
+              activeOpacity={isActionPending ? 1 : 0.7}
+              disabled={isActionPending}
             >
               <Ionicons name="close" size={28} color={COLORS.pass} />
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.actionButton, styles.superLikeButton]}
+              style={[styles.actionButton, styles.superLikeButton, isActionPending && styles.actionButtonDisabled]}
               onPress={() => handleSwipe('super_like')}
-              activeOpacity={0.7}
+              activeOpacity={isActionPending ? 1 : 0.7}
+              disabled={isActionPending}
             >
               <Ionicons name="star" size={28} color={COLORS.superLike} />
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.actionButton, styles.likeButton]}
+              style={[styles.actionButton, styles.likeButton, isActionPending && styles.actionButtonDisabled]}
               onPress={() => handleSwipe('like')}
-              activeOpacity={0.7}
+              activeOpacity={isActionPending ? 1 : 0.7}
+              disabled={isActionPending}
             >
               <Ionicons name="heart" size={28} color={COLORS.like} />
             </TouchableOpacity>
@@ -1056,6 +1089,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.backgroundDark,
+  },
+  actionButtonDisabled: {
+    opacity: 0.55,
   },
   passButton: {
     backgroundColor: COLORS.backgroundDark,

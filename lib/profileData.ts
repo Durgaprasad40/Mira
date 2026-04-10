@@ -7,7 +7,7 @@ export interface ProfileData {
   userId?: string;
   name: string;
   // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
-  age: number;
+  age?: number;
   bio?: string;
   city?: string;
   isVerified?: boolean;
@@ -80,7 +80,7 @@ export function toProfileData(p: any): ProfileData {
     userId: p.userId,
     name: p.name,
     // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
-    age: p.age,
+    age: typeof p.age === "number" ? p.age : undefined,
     bio: p.bio,
     city: p.city,
     isVerified: p.isVerified,

@@ -205,6 +205,12 @@ interface LocationState {
   /** Get best available location (current > lastKnown > null) */
   getBestLocation: () => LocationCoords | null;
 
+  /** Age of the live location cache in milliseconds, or null if unavailable */
+  getLocationCacheAgeMs: () => number | null;
+
+  /** Whether the current cached location is still usable for fast screen revisit */
+  hasUsableLocationCache: () => boolean;
+
   /**
    * Two-step refresh for screen focus events (Discover/DeepConnect):
    * 1. Returns cached location immediately if fresh (< 45s) — fast UX
@@ -542,6 +548,21 @@ export const useLocationStore = create<LocationState>((set, get) => ({
   getBestLocation: () => {
     const state = get();
     return state.currentLocation || state.lastKnownLocation;
+  },
+
+  getLocationCacheAgeMs: () => {
+    const state = get();
+    const cached = state.getBestLocation();
+    if (!cached || !state.lastLiveRefreshAt) {
+      return null;
+    }
+    return Date.now() - state.lastLiveRefreshAt;
+  },
+
+  hasUsableLocationCache: () => {
+    const state = get();
+    const cacheAgeMs = state.getLocationCacheAgeMs();
+    return cacheAgeMs !== null && cacheAgeMs < LIVE_REFRESH_CACHE_MS;
   },
 
   // ---------------------------------------------------------------------------

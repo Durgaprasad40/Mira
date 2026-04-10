@@ -30,6 +30,18 @@ const PHASE2_ONLY_TYPES = new Set([
 // Push notifications for messages still work; this only affects the bell popover
 const BELL_EXCLUDED_TYPES = new Set(['message', 'new_message']);
 
+function shouldIncludeBellNotification(type: string, isInPhase2: boolean): boolean {
+  if (BELL_EXCLUDED_TYPES.has(type)) {
+    return false;
+  }
+
+  if (isInPhase2) {
+    return !PHASE1_ONLY_TYPES.has(type);
+  }
+
+  return !PHASE2_ONLY_TYPES.has(type);
+}
+
 // REMOVED: Module-level phase tracking (_isInPhase2, setPhase2Active)
 // This was causing infinite loops when navigating to shared routes.
 // Phase is now derived directly from route in the hook below.
@@ -659,15 +671,7 @@ export function useNotifications() {
   // 2. Phase separation: Phase 1 excludes Phase-2 types, Phase 2 excludes Phase-1 types
   const notifications: AppNotification[] = useMemo(
     () => {
-      let filtered = baseNotifications.filter((n) => !BELL_EXCLUDED_TYPES.has(n.type));
-      if (isInPhase2) {
-        // In Phase 2: show Phase-2 notifications, hide Phase-1 only types
-        filtered = filtered.filter((n) => !PHASE1_ONLY_TYPES.has(n.type));
-      } else {
-        // In Phase 1: show Phase-1 notifications, hide Phase-2 only types
-        filtered = filtered.filter((n) => !PHASE2_ONLY_TYPES.has(n.type));
-      }
-      return filtered;
+      return baseNotifications.filter((n) => shouldIncludeBellNotification(n.type, isInPhase2));
     },
     [baseNotifications, isInPhase2],
   );
@@ -780,5 +784,48 @@ export function useNotifications() {
     markReadForConversation,
     addNotification,
     cleanupExpiredNotifications,
+  };
+}
+
+export function useNotificationBellBadge() {
+  const userId = useAuthStore((s) => s.userId);
+  const authReady = useAuthStore((s) => s.authReady);
+  const convexUserId = asUserId(userId);
+  const phaseMode = usePhaseMode();
+  const isInPhase2 = phaseMode === 'phase2' || phaseMode === 'shared';
+  const phase = isInPhase2 ? 'phase2' : 'phase1';
+
+  const convexUnseenCount = useQuery(
+    api.notifications.getBellUnreadCount,
+    !isDemoMode && convexUserId && authReady ? { phase } : 'skip',
+  );
+
+  const demoNotifications = useDemoNotifStore((s) => s.notifications);
+  const [stableNow, setStableNow] = useState(() => Math.floor(Date.now() / 60000) * 60000);
+
+  useEffect(() => {
+    if (!isDemoMode) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setStableNow(Math.floor(Date.now() / 60000) * 60000);
+    }, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const demoUnseenCount = useMemo(
+    () =>
+      demoNotifications.reduce((count, notification) => {
+        if (notification.isRead || isExpired(notification, stableNow)) {
+          return count;
+        }
+        return shouldIncludeBellNotification(notification.type, isInPhase2) ? count + 1 : count;
+      }, 0),
+    [demoNotifications, isInPhase2, stableNow],
+  );
+
+  return {
+    unseenCount: isDemoMode ? demoUnseenCount : convexUnseenCount ?? 0,
   };
 }

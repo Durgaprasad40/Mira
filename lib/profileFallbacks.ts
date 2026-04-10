@@ -11,27 +11,26 @@
  * - Empty sections should hide cleanly, not show empty placeholders
  */
 
-// Fallback bio line - used when bio is empty/null
-// Keeps the profile feeling intentional rather than incomplete
-export const FALLBACK_BIO = "Say hi to know more 👋";
+// Neutral fallback line - used only when a caller explicitly opts in.
+// This is a system cue, not synthetic personality copy.
+export const FALLBACK_BIO = "Profile still getting started";
 
-// Alternative fallback lines (for variation if needed)
+// Alternative neutral fallback lines (for variation if needed)
 export const FALLBACK_BIO_OPTIONS = [
-  "Say hi to know more 👋",
-  "Still exploring...",
-  "Ask me anything!",
+  "Profile still getting started",
+  "No bio added yet",
 ];
 
 /**
- * Get display bio with fallback for empty values.
+ * Get display bio with optional neutral fallback for empty values.
  *
  * @param bio - Raw bio from profile
- * @param useFallback - Whether to show fallback text (default: true)
+ * @param useFallback - Whether to show fallback text (default: false)
  * @returns Bio text to display, or fallback if empty
  */
 export function getDisplayBio(
   bio: string | null | undefined,
-  useFallback: boolean = true
+  useFallback: boolean = false
 ): string | null {
   // Check for meaningful bio
   if (bio && bio.trim().length > 0) {

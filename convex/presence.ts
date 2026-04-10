@@ -49,6 +49,8 @@ export interface PresenceInfo {
   appState: "foreground" | "background" | "inactive";
   /** Human-readable label for UI */
   label: string;
+  /** True when presence is intentionally hidden by user privacy settings */
+  isHidden?: boolean;
 }
 
 // =============================================================================
@@ -92,6 +94,16 @@ export function computePresenceStatus(
     lastSeenAt,
     appState,
     label: "Offline",
+  };
+}
+
+function hiddenPresenceInfo(): PresenceInfo {
+  return {
+    status: "offline",
+    lastSeenAt: 0,
+    appState: "inactive",
+    label: "",
+    isHidden: true,
   };
 }
 
@@ -278,8 +290,16 @@ export const expireIfStale = internalMutation({
 export const getUserPresence = query({
   args: {
     userId: v.id("users"),
+    respectPrivacy: v.optional(v.boolean()),
   },
   handler: async (ctx, args): Promise<PresenceInfo> => {
+    if (args.respectPrivacy) {
+      const privacyUser = await ctx.db.get(args.userId);
+      if (privacyUser?.showLastSeen === false) {
+        return hiddenPresenceInfo();
+      }
+    }
+
     const presence = await ctx.db
       .query("presence")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
@@ -312,6 +332,7 @@ export const getUserPresence = query({
 export const getBatchPresence = query({
   args: {
     userIds: v.array(v.id("users")),
+    respectPrivacy: v.optional(v.boolean()),
   },
   handler: async (ctx, args): Promise<Record<string, PresenceInfo>> => {
     const result: Record<string, PresenceInfo> = {};
@@ -325,6 +346,14 @@ export const getBatchPresence = query({
           .first()
       )
     );
+
+    const privacyUsers = args.respectPrivacy
+      ? await Promise.all(args.userIds.map((userId) => ctx.db.get(userId)))
+      : [];
+    const privacyMap = new Map<string, Doc<"users"> | null>();
+    args.userIds.forEach((userId, index) => {
+      privacyMap.set(userId, privacyUsers[index] ?? null);
+    });
 
     // For users without presence records, fall back to users.lastActive
     const usersWithoutPresence: Id<"users">[] = [];
@@ -345,6 +374,12 @@ export const getBatchPresence = query({
 
     // Build result map
     args.userIds.forEach((userId, index) => {
+      const privacyUser = privacyMap.get(userId);
+      if (args.respectPrivacy && privacyUser?.showLastSeen === false) {
+        result[userId] = hiddenPresenceInfo();
+        return;
+      }
+
       const presence = presenceRecords[index];
       if (presence) {
         result[userId] = computePresenceStatus(

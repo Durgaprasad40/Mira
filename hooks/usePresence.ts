@@ -49,6 +49,11 @@ export interface PresenceInfo {
   lastSeenAt: number;
   appState: 'foreground' | 'background' | 'inactive';
   label: string;
+  isHidden?: boolean;
+}
+
+interface PresenceQueryOptions {
+  respectPrivacy?: boolean;
 }
 
 // =============================================================================
@@ -199,10 +204,13 @@ export function usePresenceHeartbeat() {
  * @param userId - The user ID to get presence for
  * @returns PresenceInfo or undefined if loading
  */
-export function useUserPresence(userId: Id<'users'> | null | undefined): PresenceInfo | undefined {
+export function useUserPresence(
+  userId: Id<'users'> | null | undefined,
+  options: PresenceQueryOptions = {}
+): PresenceInfo | undefined {
   const presence = useQuery(
     api.presence.getUserPresence,
-    userId ? { userId } : 'skip'
+    userId ? { userId, respectPrivacy: options.respectPrivacy } : 'skip'
   );
 
   return presence;
@@ -216,11 +224,14 @@ export function useUserPresence(userId: Id<'users'> | null | undefined): Presenc
  * @returns Record mapping userId to PresenceInfo
  */
 export function useBatchPresence(
-  userIds: Id<'users'>[] | null | undefined
+  userIds: Id<'users'>[] | null | undefined,
+  options: PresenceQueryOptions = {}
 ): Record<string, PresenceInfo> | undefined {
   const presence = useQuery(
     api.presence.getBatchPresence,
-    userIds && userIds.length > 0 ? { userIds } : 'skip'
+    userIds && userIds.length > 0
+      ? { userIds, respectPrivacy: options.respectPrivacy }
+      : 'skip'
   );
 
   return presence;

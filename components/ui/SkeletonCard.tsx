@@ -16,6 +16,7 @@ import Animated, {
   Easing,
   interpolate,
 } from 'react-native-reanimated';
+import type { SharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
 
@@ -24,6 +25,8 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 interface SkeletonCardProps {
   /** Phase-2 (dark) mode */
   dark?: boolean;
+  /** Whether to render the bottom action row placeholder */
+  includeActions?: boolean;
 }
 
 function ShimmerBar({
@@ -31,22 +34,14 @@ function ShimmerBar({
   height,
   borderRadius = 8,
   dark = false,
+  shimmer,
 }: {
   width: number | string;
   height: number;
   borderRadius?: number;
   dark?: boolean;
+  shimmer: SharedValue<number>;
 }) {
-  const shimmer = useSharedValue(0);
-
-  useEffect(() => {
-    shimmer.value = withRepeat(
-      withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
-      -1,
-      true
-    );
-  }, [shimmer]);
-
   const shimmerStyle = useAnimatedStyle(() => {
     const opacity = interpolate(shimmer.value, [0, 0.5, 1], [0.3, 0.6, 0.3]);
     return { opacity };
@@ -69,12 +64,21 @@ function ShimmerBar({
   );
 }
 
-export function SkeletonCard({ dark = false }: SkeletonCardProps) {
+export function SkeletonCard({ dark = false, includeActions = true }: SkeletonCardProps) {
   const insets = useSafeAreaInsets();
   const C = dark ? INCOGNITO_COLORS : COLORS;
+  const shimmer = useSharedValue(0);
 
   const cardWidth = SCREEN_WIDTH - 24;
   const cardHeight = cardWidth * 1.35;
+
+  useEffect(() => {
+    shimmer.value = withRepeat(
+      withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+      -1,
+      true
+    );
+  }, [shimmer]);
 
   return (
     <View style={[styles.container, dark && styles.containerDark]}>
@@ -82,46 +86,47 @@ export function SkeletonCard({ dark = false }: SkeletonCardProps) {
       <View style={[styles.card, { width: cardWidth, height: cardHeight }, dark && styles.cardDark]}>
         {/* Photo area skeleton */}
         <View style={styles.photoArea}>
-          <ShimmerBar width="100%" height={cardHeight * 0.7} borderRadius={0} dark={dark} />
+          <ShimmerBar width="100%" height={cardHeight * 0.7} borderRadius={0} dark={dark} shimmer={shimmer} />
         </View>
 
         {/* Content area skeleton */}
         <View style={styles.contentArea}>
           {/* Name + Age row */}
           <View style={styles.row}>
-            <ShimmerBar width={160} height={24} borderRadius={6} dark={dark} />
-            <ShimmerBar width={40} height={24} borderRadius={6} dark={dark} />
+            <ShimmerBar width={160} height={24} borderRadius={6} dark={dark} shimmer={shimmer} />
+            <ShimmerBar width={40} height={24} borderRadius={6} dark={dark} shimmer={shimmer} />
           </View>
 
           {/* Location */}
           <View style={[styles.row, { marginTop: 8 }]}>
-            <ShimmerBar width={16} height={16} borderRadius={8} dark={dark} />
-            <ShimmerBar width={100} height={16} borderRadius={4} dark={dark} />
+            <ShimmerBar width={16} height={16} borderRadius={8} dark={dark} shimmer={shimmer} />
+            <ShimmerBar width={100} height={16} borderRadius={4} dark={dark} shimmer={shimmer} />
           </View>
 
           {/* Bio lines */}
           <View style={{ marginTop: 12 }}>
-            <ShimmerBar width="90%" height={14} borderRadius={4} dark={dark} />
+            <ShimmerBar width="90%" height={14} borderRadius={4} dark={dark} shimmer={shimmer} />
             <View style={{ marginTop: 6 }}>
-              <ShimmerBar width="70%" height={14} borderRadius={4} dark={dark} />
+              <ShimmerBar width="70%" height={14} borderRadius={4} dark={dark} shimmer={shimmer} />
             </View>
           </View>
 
           {/* Tags */}
           <View style={[styles.row, { marginTop: 14, gap: 8 }]}>
-            <ShimmerBar width={70} height={28} borderRadius={14} dark={dark} />
-            <ShimmerBar width={85} height={28} borderRadius={14} dark={dark} />
-            <ShimmerBar width={60} height={28} borderRadius={14} dark={dark} />
+            <ShimmerBar width={70} height={28} borderRadius={14} dark={dark} shimmer={shimmer} />
+            <ShimmerBar width={85} height={28} borderRadius={14} dark={dark} shimmer={shimmer} />
+            <ShimmerBar width={60} height={28} borderRadius={14} dark={dark} shimmer={shimmer} />
           </View>
         </View>
       </View>
 
-      {/* Action buttons skeleton */}
-      <View style={[styles.actionRow, { paddingBottom: insets.bottom + 12 }]}>
-        <ShimmerBar width={56} height={56} borderRadius={28} dark={dark} />
-        <ShimmerBar width={64} height={64} borderRadius={32} dark={dark} />
-        <ShimmerBar width={56} height={56} borderRadius={28} dark={dark} />
-      </View>
+      {includeActions && (
+        <View style={[styles.actionRow, { paddingBottom: insets.bottom + 12 }]}>
+          <ShimmerBar width={56} height={56} borderRadius={28} dark={dark} shimmer={shimmer} />
+          <ShimmerBar width={64} height={64} borderRadius={32} dark={dark} shimmer={shimmer} />
+          <ShimmerBar width={56} height={56} borderRadius={28} dark={dark} shimmer={shimmer} />
+        </View>
+      )}
     </View>
   );
 }

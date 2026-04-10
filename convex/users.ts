@@ -123,6 +123,38 @@ export const getCurrentUser = query({
   },
 });
 
+export const getCurrentUserDiscoverContext = query({
+  args: {
+    userId: v.union(v.id("users"), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const convexUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!convexUserId) {
+      return null;
+    }
+
+    const user = await ctx.db.get(convexUserId);
+    if (!user) {
+      return null;
+    }
+
+    return {
+      _id: user._id,
+      activities: user.activities,
+      relationshipIntent: user.relationshipIntent,
+      lookingFor: user.lookingFor,
+      smoking: user.smoking,
+      drinking: user.drinking,
+      height: user.height,
+      isDiscoveryPaused: user.isDiscoveryPaused === true,
+      discoveryPausedUntil: user.discoveryPausedUntil,
+      hideAge: user.hideAge === true,
+      hideDistance: user.hideDistance === true,
+      showLastSeen: user.showLastSeen !== false,
+    };
+  },
+});
+
 export const getCurrentUserFromToken = query({
   args: {
     token: v.string(),
@@ -209,31 +241,26 @@ export const getUserById = query({
     const photos = allPhotos.filter((p) => p.photoType !== 'verification_reference');
     const safePhotos = getSafeProfilePhotos(photos);
 
-    console.log('[P1_PROFILE_PHOTOS] getUserById photo source', {
-      userId: args.userId,
-      allPhotosCount: allPhotos.length,
-      filteredCount: photos.length,
-      filteredOut: allPhotos.length - photos.length,
-      safeCount: safePhotos.length,
-      photoIds: safePhotos.map((p) => p._id),
-    });
-
     // Calculate distance if both have location
     const viewer = await ctx.db.get(args.viewerId);
     let distance: number | undefined;
     if (
-      user.latitude &&
-      user.longitude &&
-      viewer?.latitude &&
-      viewer?.longitude
+      user.publishedLat &&
+      user.publishedLng &&
+      viewer?.publishedLat &&
+      viewer?.publishedLng
     ) {
       distance = calculateDistance(
-        user.latitude,
-        user.longitude,
-        viewer.latitude,
-        viewer.longitude,
+        user.publishedLat,
+        user.publishedLng,
+        viewer.publishedLat,
+        viewer.publishedLng,
       );
     }
+
+    const publicAge = user.hideAge === true ? undefined : calculateAge(user.dateOfBirth);
+    const publicDistance = user.hideDistance === true ? undefined : distance;
+    const publicLastActive = user.showLastSeen === false ? undefined : user.lastActive;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // HARDENING FIX 3: CHECK FOR CONFESSION_COMMENT MATCH - RETURN MINI PROFILE
@@ -276,7 +303,7 @@ export const getUserById = query({
       return {
         id: user._id,
         name: firstName, // First name only
-        age: calculateAge(user.dateOfBirth),
+        age: publicAge,
         gender: user.gender,
         // Limited fields - all others are undefined/hidden
         bio: undefined,
@@ -292,7 +319,7 @@ export const getUserById = query({
         isVerified: user.isVerified,
         verificationStatus: user.verificationStatus || "unverified",
         city: user.city, // City is okay to show
-        distance,
+        distance: publicDistance,
         lastActive: undefined, // Hide last active for privacy
         lookingFor: undefined,
         relationshipIntent: undefined,
@@ -313,7 +340,7 @@ export const getUserById = query({
     return {
       id: user._id,
       name: user.name,
-      age: calculateAge(user.dateOfBirth),
+      age: publicAge,
       gender: user.gender,
       bio: user.bio,
       height: user.height,
@@ -330,8 +357,8 @@ export const getUserById = query({
       isVerified: user.isVerified,
       verificationStatus: user.verificationStatus || "unverified",
       city: user.city,
-      distance,
-      lastActive: user.lastActive,
+      distance: publicDistance,
+      lastActive: publicLastActive,
       lookingFor: user.lookingFor,
       relationshipIntent: user.relationshipIntent,
       activities: user.activities,

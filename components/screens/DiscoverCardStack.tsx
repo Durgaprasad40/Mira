@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   Dimensions,
-  ActivityIndicator,
   TouchableOpacity,
   InteractionManager,
   ScrollView,
@@ -29,7 +28,6 @@ import Animated, {
 } from "react-native-reanimated";
 import { BlurView } from "expo-blur";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import { LoadingGuard } from "@/components/safety";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -40,10 +38,11 @@ import { useAuthStore } from "@/stores/authStore";
 import { useDiscoverStore } from "@/stores/discoverStore";
 import { useFilterStore } from "@/stores/filterStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
+import { ProfileCardPreview } from "@/components/cards/ProfileCardPreview";
 import { WelcomeOverlay, SwipeGuidanceHint, SkeletonCard } from "@/components/ui";
 import { isDemoMode } from "@/hooks/useConvex";
-import { getDiscoverPrefetch, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
-import { useNotifications } from "@/hooks/useNotifications";
+import { getDiscoverPrefetchSnapshot, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
+import { useNotificationBellBadge } from "@/hooks/useNotifications";
 import { DEMO_PROFILES, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
 import { useBlockStore } from "@/stores/blockStore";
@@ -53,7 +52,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useInteractionStore } from "@/stores/interactionStore";
 import { asUserId } from "@/convex/id";
-import { ProfileData, toProfileData } from "@/lib/profileData";
+import { ProfileData, getRenderableProfilePhotos, toProfileData } from "@/lib/profileData";
 import { rankProfiles } from "@/lib/rankProfiles";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
@@ -104,6 +103,9 @@ function handlePhase2Match(profile: { id: string; name: string; age?: number; ph
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
 const EMPTY_ARRAY: any[] = [];
+const EMPTY_STRING_ARRAY: string[] = [];
+const PREFETCH_HOLD_MS = 1200;
+const PHASE1_LOCATION_FOCUS_REVISIT_GAP_MS = 30 * 1000;
 
 // ── Star-burst animation for super-like ──
 const STAR_COUNT = 8;
@@ -379,12 +381,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // LIVE_LOCATION: Get cached location refresh for screen focus events
   const refreshLocationCached = useLocationStore((s) => s.refreshLocationCached);
+  const hasUsableLocationCache = useLocationStore((s) => s.hasUsableLocationCache);
   // AUTH_READY_FIX: Wait for auth to be fully validated before running queries
   const authReady = useAuthStore((s) => s.authReady);
   const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
+  const authVersion = useAuthStore((s) => s.authVersion);
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [showNotificationPopover, setShowNotificationPopover] = useState(false);
+  const lastPhase1LocationRefreshAtRef = useRef(0);
+  const prefetchedNextHeroUrlsRef = useRef<Set<string>>(new Set());
 
   // Super-like star-burst animation state
   const [showSuperLikeAnimation, setShowSuperLikeAnimation] = useState(false);
@@ -572,7 +578,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const setDiscoverProfileActionResult = useInteractionStore((s) => s.setDiscoverProfileActionResult);
 
   // Notifications
-  const { unseenCount } = useNotifications();
+  const { unseenCount } = useNotificationBellBadge();
 
   // Demo store — single shallow selector to minimize re-renders.
   // Only subscribes to fields Discover actually needs; shallow compare
@@ -633,56 +639,96 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Phase-1 uses discover.getDiscoverProfiles (users table)
   // Phase-2 uses privateDiscover.getProfiles (userPrivateProfiles table with isSetupComplete check)
 
+  const prefetchSnapshot = useMemo(
+    () =>
+      !isPhase2 && userId && !isDemoMode && !skipInternalQuery
+        ? getDiscoverPrefetchSnapshot(userId, authVersion)
+        : null,
+    [authVersion, isDemoMode, isPhase2, skipInternalQuery, userId],
+  );
+  const [prefetchedProfiles, setPrefetchedProfiles] = useState<any[] | null>(() => prefetchSnapshot?.result ?? null);
+  const [prefetchWaitExpired, setPrefetchWaitExpired] = useState(false);
+
+  useEffect(() => {
+    setPrefetchedProfiles(prefetchSnapshot?.result ?? null);
+  }, [authVersion, prefetchSnapshot?.result, prefetchSnapshot?.startedAt, userId]);
+
+  useEffect(() => {
+    if (!prefetchSnapshot) {
+      return;
+    }
+
+    if (prefetchSnapshot.result !== null) {
+      markPrefetchUsed();
+      return;
+    }
+
+    let cancelled = false;
+    prefetchSnapshot.promise
+      ?.then((result) => {
+        if (cancelled) return;
+        markPrefetchUsed();
+        setPrefetchedProfiles(result);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPrefetchedProfiles(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [prefetchSnapshot?.promise, prefetchSnapshot?.result, prefetchSnapshot?.startedAt]);
+
+  useEffect(() => {
+    if (!prefetchSnapshot?.promise || prefetchSnapshot.result !== null) {
+      setPrefetchWaitExpired(false);
+      return;
+    }
+
+    const elapsed = Date.now() - prefetchSnapshot.startedAt;
+    if (elapsed >= PREFETCH_HOLD_MS) {
+      setPrefetchWaitExpired(true);
+      return;
+    }
+
+    setPrefetchWaitExpired(false);
+    const timer = setTimeout(() => {
+      setPrefetchWaitExpired(true);
+    }, PREFETCH_HOLD_MS - elapsed);
+
+    return () => clearTimeout(timer);
+  }, [prefetchSnapshot?.promise, prefetchSnapshot?.result, prefetchSnapshot?.startedAt]);
+
+  const shouldHoldPhase1Query =
+    !isPhase2 &&
+    !isDemoMode &&
+    !!convexUserId &&
+    !skipInternalQuery &&
+    !!prefetchSnapshot?.promise &&
+    prefetchSnapshot.result === null &&
+    prefetchedProfiles === null &&
+    !prefetchWaitExpired;
+
   // Phase-1 discover query args (skip if Phase-2 mode)
   const discoverArgs = useMemo(
     () =>
-      !isDemoMode && convexUserId && !skipInternalQuery && !isPhase2
+      !isDemoMode && convexUserId && !skipInternalQuery && !isPhase2 && !shouldHoldPhase1Query
         ? { userId: convexUserId, sortBy: (sortBy || "recommended") as any, limit: 20 }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [convexUserId, skipInternalQuery, retryKey, sortBy, isPhase2],
+    [convexUserId, skipInternalQuery, retryKey, sortBy, isPhase2, isDemoMode, shouldHoldPhase1Query],
   );
   const phase1Profiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
-
-  // PERF: Consume prefetched Discover profiles (from index.tsx parallel fetch)
-  // This provides instant first render while useQuery subscription is setting up.
-  // Ref ensures we only check for prefetch once (safe for StrictMode double-render).
-  const prefetchCheckedRef = useRef(false);
-  const prefetchResultRef = useRef<any[] | null>(null);
-
-  // Check for prefetch on first render only (Phase-1, non-demo, no external profiles)
-  // CRITICAL: NEVER use prefetch for Phase-2 - it's Phase-1 only
-  if (!prefetchCheckedRef.current) {
-    prefetchCheckedRef.current = true;
-    if (!isPhase2 && userId && !isDemoMode && !skipInternalQuery) {
-      const authVersion = useAuthStore.getState().authVersion;
-      const prefetched = getDiscoverPrefetch(userId, authVersion);
-      // EMPTY_PREFETCH_FIX: Only use prefetch if it has actual profiles
-      // Empty prefetch should NOT be used - let the live query handle it
-      if (prefetched !== null && prefetched.length > 0) {
-        prefetchResultRef.current = prefetched;
-        markPrefetchUsed();
-      } else if (prefetched !== null && prefetched.length === 0) {
-        // Empty prefetch - clear it immediately to prevent interference
-        clearUsedPrefetch();
-      }
-    }
-  }
-
-  // Use prefetch while useQuery is loading (undefined), then switch to query result
-  // EMPTY_PREFETCH_FIX: Only use prefetch if it has actual profiles
-  // If prefetch is empty, treat as if no prefetch exists - let live query handle it
-  const hasValidPrefetch = Array.isArray(prefetchResultRef.current) && prefetchResultRef.current.length > 0;
-  const phase1ProfilesWithPrefetch = phase1Profiles ?? (hasValidPrefetch ? prefetchResultRef.current : null);
+  const phase1ProfilesWithPrefetch = phase1Profiles ?? prefetchedProfiles ?? null;
 
   // Clear prefetch cache once useQuery returns real data (subscription is active)
   useEffect(() => {
-    if (phase1Profiles !== undefined && prefetchResultRef.current !== null) {
-      // Query has returned - clear prefetch to free memory
+    if (phase1Profiles !== undefined && prefetchedProfiles !== null) {
       clearUsedPrefetch();
-      prefetchResultRef.current = null;
+      setPrefetchedProfiles(null);
     }
-  }, [phase1Profiles]);
+  }, [phase1Profiles, prefetchedProfiles]);
 
   // Phase-2 private discover query args (skip if Phase-1 mode)
   // CRITICAL: This queries userPrivateProfiles table which requires isSetupComplete=true
@@ -735,7 +781,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     () => userId && !isPhase2 ? { userId } : "skip" as const,
     [userId, isPhase2]
   );
-  const viewerProfile = useQuery(api.users.getCurrentUser, viewerProfileArgs);
+  const viewerProfile = useQuery(api.users.getCurrentUserDiscoverContext, viewerProfileArgs);
 
   // Use the correct profiles based on mode
   // PERF: For Phase-1, use prefetch-aware variable that provides data during initial query loading
@@ -972,8 +1018,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       });
     }
 
-    // Phase-1: use standard mapping
-    return rankProfiles(profilesSafe.map(toProfileData));
+    // Phase-1 live results are already ranked/sorted by the backend.
+    return profilesSafe.map(toProfileData);
   }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
 
   // Drop profiles with no valid primary photo — prevents blank Discover cards
@@ -1016,12 +1062,43 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   if (validProfiles.length > 0) {
     stableProfilesRef.current = validProfiles;
   }
+  const phase1DiscoverPaused =
+    !isPhase2 &&
+    viewerProfile?.isDiscoveryPaused === true &&
+    typeof viewerProfile.discoveryPausedUntil === "number" &&
+    viewerProfile.discoveryPausedUntil > Date.now();
+  const phase1CacheResetKey = useMemo(
+    () =>
+      JSON.stringify({
+        userId: userId ?? null,
+        minAge,
+        maxAge,
+        maxDistance,
+        genderFilter,
+        sortBy: sortBy ?? "recommended",
+        paused: phase1DiscoverPaused,
+      }),
+    [genderFilter, maxAge, maxDistance, minAge, phase1DiscoverPaused, sortBy, userId],
+  );
+  const prevPhase1CacheResetKeyRef = useRef<string | null>(null);
+  if (!isPhase2 && !isDemoMode && !externalProfiles && prevPhase1CacheResetKeyRef.current !== phase1CacheResetKey) {
+    if (prevPhase1CacheResetKeyRef.current !== null) {
+      stableProfilesRef.current = [];
+    }
+    prevPhase1CacheResetKeyRef.current = phase1CacheResetKey;
+  }
   // FLICKER_FIX: Log when falling back to stable cache
-  const usingStableCache = validProfiles.length === 0 && stableProfilesRef.current.length > 0;
+  const usingStableCache = isPhase2
+    ? validProfiles.length === 0 && stableProfilesRef.current.length > 0
+    : effectiveConvexProfiles === undefined && stableProfilesRef.current.length > 0;
   if (__DEV__ && isPhase2 && usingStableCache) {
     console.log('[DISCOVER_GUARD] Using stable cache:', stableProfilesRef.current.length, 'profiles (validProfiles was empty)');
   }
-  const profilesRaw = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
+  const profilesRaw = validProfiles.length > 0
+    ? validProfiles
+    : usingStableCache
+      ? stableProfilesRef.current
+      : (EMPTY_ARRAY as ProfileData[]);
 
   // FIX: Defensive filter — never show current user's profile in Discover
   // Backend already excludes, but this protects against stale cache contamination
@@ -1086,6 +1163,27 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // P2_REFETCH_FIX: Track retry attempts to prevent infinite loops
   const refetchRetryCountRef = useRef(0);
   const MAX_REFETCH_RETRIES = 2;
+  const prevPhase1QueueResetKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (isPhase2 || isDemoMode || externalProfiles) return;
+
+    if (prevPhase1QueueResetKeyRef.current === null) {
+      prevPhase1QueueResetKeyRef.current = phase1CacheResetKey;
+      return;
+    }
+
+    if (prevPhase1QueueResetKeyRef.current !== phase1CacheResetKey) {
+      visibleQueueRef.current = [];
+      consumedIdsRef.current.clear();
+      prevPhase1QueueResetKeyRef.current = phase1CacheResetKey;
+      setIndex(0);
+      setQueueVersion((version) => version + 1);
+      return;
+    }
+
+    prevPhase1QueueResetKeyRef.current = phase1CacheResetKey;
+  }, [externalProfiles, isDemoMode, isPhase2, phase1CacheResetKey]);
 
   // Source profiles for queue refill (preserve backend order for live Phase-2)
   const baseProfiles = isPhase2 ? filteredProfiles : profiles;
@@ -1358,11 +1456,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       navigatingRef.current = false;
       swipeLockRef.current = false;
 
-      // SCREEN_FOCUS_REFRESH: Two-step location refresh for instant distance UX
-      // Step 1: Returns cached location immediately (fast UX)
-      // Step 2: If cache stale (20-45s), triggers silent background freshen
-      if (!isRefreshingLocationRef.current) {
+      const now = Date.now();
+      const shouldRefreshLocation =
+        isPhase2 ||
+        !hasUsableLocationCache() ||
+        now - lastPhase1LocationRefreshAtRef.current >= PHASE1_LOCATION_FOCUS_REVISIT_GAP_MS;
+
+      // SCREEN_FOCUS_REFRESH: Keep Phase-2 behavior unchanged, but skip
+      // quick Phase-1 revisits when a usable cached location already exists.
+      if (!isRefreshingLocationRef.current && shouldRefreshLocation) {
         isRefreshingLocationRef.current = true;
+        if (!isPhase2) {
+          lastPhase1LocationRefreshAtRef.current = now;
+        }
         refreshLocationCached({ allowBackgroundFreshen: true }).finally(() => {
           isRefreshingLocationRef.current = false;
         });
@@ -1469,13 +1575,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (current?.userId || current?.id) {
       ids.push((current.userId || current.id) as Id<'users'>);
     }
-    if (next?.userId || next?.id) {
+    if (isPhase2 && (next?.userId || next?.id)) {
       ids.push((next.userId || next.id) as Id<'users'>);
     }
     return ids;
-  }, [current?.userId, current?.id, next?.userId, next?.id]);
+  }, [current?.userId, current?.id, isPhase2, next?.userId, next?.id]);
 
-  const batchPresence = useBatchPresence(presenceUserIds.length > 0 ? presenceUserIds : null);
+  const batchPresence = useBatchPresence(
+    !isDemoMode && presenceUserIds.length > 0 ? presenceUserIds : null,
+    { respectPrivacy: !isPhase2 }
+  );
 
   // Get presence status for current and next profiles
   const currentPresenceStatus = useMemo(() => {
@@ -1512,9 +1621,66 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   );
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const nextBadges = useMemo(
-    () => next ? getTrustBadges({ isVerified: next.isVerified, presenceStatus: nextPresenceStatus, photoCount: next.photos?.length, bio: next.bio }) : [],
-    [next?.id, nextPresenceStatus],
+    () =>
+      isPhase2 && next
+        ? getTrustBadges({ isVerified: next.isVerified, presenceStatus: nextPresenceStatus, photoCount: next.photos?.length, bio: next.bio })
+        : EMPTY_ARRAY,
+    [isPhase2, next?.id, nextPresenceStatus],
   );
+  const viewerProfileForCard = useMemo(
+    () =>
+      !isPhase2 && viewerProfile
+        ? {
+            activities: viewerProfile.activities,
+            relationshipIntent: viewerProfile.relationshipIntent,
+            lookingFor: viewerProfile.lookingFor,
+            smoking: viewerProfile.smoking,
+            drinking: viewerProfile.drinking,
+            height: viewerProfile.height,
+          }
+        : undefined,
+    [
+      isPhase2,
+      viewerProfile?.activities,
+      viewerProfile?.relationshipIntent,
+      viewerProfile?.lookingFor,
+      viewerProfile?.smoking,
+      viewerProfile?.drinking,
+      viewerProfile?.height,
+    ],
+  );
+  const currentIntentKeys = useMemo(
+    () =>
+      current?.privateIntentKeys ??
+      (current as any)?.intentKeys ??
+      (current?.privateIntentKey ? [current.privateIntentKey] : EMPTY_STRING_ARRAY),
+    [current],
+  );
+  const nextIntentKeys = useMemo(
+    () =>
+      isPhase2
+        ? next?.privateIntentKeys ??
+          (next as any)?.intentKeys ??
+          (next?.privateIntentKey ? [next.privateIntentKey] : EMPTY_STRING_ARRAY)
+        : EMPTY_STRING_ARRAY,
+    [isPhase2, next],
+  );
+
+  const nextHeroPhotoUrl = useMemo(
+    () => (!isPhase2 && next ? getRenderableProfilePhotos(next.photos)[0]?.url ?? null : null),
+    [isPhase2, next],
+  );
+
+  useEffect(() => {
+    if (!nextHeroPhotoUrl || prefetchedNextHeroUrlsRef.current.has(nextHeroPhotoUrl)) {
+      return;
+    }
+
+    prefetchedNextHeroUrlsRef.current.add(nextHeroPhotoUrl);
+    Image.prefetch(nextHeroPhotoUrl).catch(() => {
+      prefetchedNextHeroUrlsRef.current.delete(nextHeroPhotoUrl);
+    });
+  }, [nextHeroPhotoUrl]);
 
   // Phase-2 only: Track profile views when card is shown
   const trackedProfileRef = useRef<string | null>(null);
@@ -2163,23 +2329,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // AUTH_READY_FIX: Show loading until authReady && onboardingCompleted for Phase-2
   const isAuthPending = isPhase2 && !isDemoMode && (!userId || !isAuthReadyForQuery);
   const isDiscoverLoading = !isDemoMode && !externalProfiles && (!effectiveConvexProfiles || isPhase2QueryLoading || isAuthPending);
-
-  if (isDiscoverLoading) {
-    return (
-      <LoadingGuard
-        isLoading={true}
-        onRetry={() => setRetryKey((k) => k + 1)}
-        title="Finding people for you…"
-        subtitle="This is taking longer than expected. Check your connection and try again."
-      >
-        {/* Show skeleton card for instant visual feedback */}
-        <SkeletonCard dark={dark} />
-      </LoadingGuard>
-    );
-  }
+  const isQueueBootstrapping =
+    profiles.length > 0 &&
+    visibleQueueRef.current.length === 0 &&
+    consumedIdsRef.current.size === 0;
+  const showCardSkeleton = (isDiscoverLoading && !usingStableCache) || isQueueBootstrapping;
+  const notificationPopover = showNotificationPopover ? (
+    <NotificationPopover
+      visible
+      onClose={() => setShowNotificationPopover(false)}
+      anchorTop={insets.top + HEADER_H + 8}
+    />
+  ) : null;
 
   // Empty state (no profiles at all)
-  if (profiles.length === 0) {
+  if (!showCardSkeleton && profiles.length === 0) {
     // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
     const handleResetDemoSwipes = () => {
       if (isDemoMode) {
@@ -2239,12 +2403,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             </>
           )}
         </View>
-        {/* Notification Popover */}
-        <NotificationPopover
-          visible={showNotificationPopover}
-          onClose={() => setShowNotificationPopover(false)}
-          anchorTop={insets.top + HEADER_H + 8}
-        />
+        {notificationPopover}
       </View>
     );
   }
@@ -2285,7 +2444,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
 
   // Deck exhausted state (swiped through all profiles)
-  if (!current) {
+  if (!showCardSkeleton && !current) {
     // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
     const handleResetDeck = () => {
       if (isDemoMode) {
@@ -2342,12 +2501,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             </>
           )}
         </View>
-        {/* Notification Popover */}
-        <NotificationPopover
-          visible={showNotificationPopover}
-          onClose={() => setShowNotificationPopover(false)}
-          anchorTop={insets.top + HEADER_H + 8}
-        />
+        {notificationPopover}
       </View>
     );
   }
@@ -2384,12 +2538,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <Text style={styles.limitButtonText}>Check who liked you</Text>
           </TouchableOpacity>
         </View>
-        {/* Notification Popover */}
-        <NotificationPopover
-          visible={showNotificationPopover}
-          onClose={() => setShowNotificationPopover(false)}
-          anchorTop={insets.top + HEADER_H + 8}
-        />
+        {notificationPopover}
       </View>
     );
   }
@@ -2441,93 +2590,95 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
       {/* Card Area (fills between header and tab bar) */}
       <View style={[styles.cardArea, { top: cardTop, bottom: cardBottom }]} pointerEvents="box-none">
-        {/* Back card */}
-        {next && (
-          <Animated.View
-            style={[styles.card, { zIndex: 0 }, nextCardAnimatedStyle]}
-          >
-            {/* KEY PROP: Forces React to create new instance when profile changes,
-                ensuring photoIndex state resets to 0 for each new profile */}
-            <ProfileCard
-              key={next.id}
-              name={next.name}
-              age={next.age}
-              bio={next.bio}
-              city={next.city}
-              isVerified={next.isVerified}
-              distance={next.distance}
-              photos={next.photos}
-              photoBlurred={next.photoBlurred}
-              trustBadges={nextBadges}
-              profilePrompt={next.profilePrompts?.[0]}
-              profilePrompts={next.profilePrompts}
-              theme={isPhase2 ? "dark" : "light"}
-              privateIntentKeys={next.privateIntentKeys ?? (next as any).intentKeys ?? (next.privateIntentKey ? [next.privateIntentKey] : [])}
-              isIncognito={next.isIncognito}
-              presenceStatus={nextPresenceStatus}
-              activities={next.activities}
-              gender={next.gender}
-              lookingFor={next.lookingFor}
-              relationshipIntent={next.relationshipIntent}
-              viewerProfile={!isPhase2 && viewerProfile ? {
-                activities: viewerProfile.activities,
-                relationshipIntent: viewerProfile.relationshipIntent,
-                lookingFor: viewerProfile.lookingFor,
-                smoking: viewerProfile.smoking,
-                drinking: viewerProfile.drinking,
-                height: viewerProfile.height,
-              } : undefined}
-              height={next.height}
-              smoking={next.smoking}
-              drinking={next.drinking}
-            />
-          </Animated.View>
-        )}
-        {/* Top card - wrapped in GestureDetector for UI thread gesture handling */}
-        {current && (
-          <GestureDetector gesture={panGesture}>
-            <Animated.View style={[styles.card, { zIndex: 1 }, cardAnimatedStyle]}>
-              {/* KEY PROP: Forces React to create new instance when profile changes,
-                  ensuring photoIndex state resets to 0 for each new profile */}
-              <ProfileCard
-                key={current.id}
-                name={current.name}
-                age={current.age}
-                bio={current.bio}
-                city={current.city}
-                isVerified={current.isVerified}
-                distance={current.distance}
-                photos={current.photos}
-                photoBlurred={current.photoBlurred}
-                trustBadges={currentBadges}
-                profilePrompt={current.profilePrompts?.[0]}
-                profilePrompts={current.profilePrompts}
-                showCarousel
-                onOpenProfile={openProfileCb}
-                theme={isPhase2 ? "dark" : "light"}
-                privateIntentKeys={current.privateIntentKeys ?? (current as any).intentKeys ?? (current.privateIntentKey ? [current.privateIntentKey] : [])}
-                isIncognito={current.isIncognito}
-                exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
-                presenceStatus={currentPresenceStatus}
-                activities={current.activities}
-                gender={current.gender}
-                lookingFor={current.lookingFor}
-                relationshipIntent={current.relationshipIntent}
-                viewerProfile={!isPhase2 && viewerProfile ? {
-                  activities: viewerProfile.activities,
-                  relationshipIntent: viewerProfile.relationshipIntent,
-                  lookingFor: viewerProfile.lookingFor,
-                  smoking: viewerProfile.smoking,
-                  drinking: viewerProfile.drinking,
-                  height: viewerProfile.height,
-                } : undefined}
-                height={current.height}
-                smoking={current.smoking}
-                drinking={current.drinking}
-              />
-              <SwipeOverlay direction={overlayDirection} opacity={overlayOpacity} dark={dark} />
-            </Animated.View>
-          </GestureDetector>
+        {showCardSkeleton ? (
+          <SkeletonCard dark={dark} includeActions={false} />
+        ) : (
+          <>
+            {/* Back card */}
+            {next && (
+              <Animated.View
+                style={[styles.card, { zIndex: 0 }, nextCardAnimatedStyle]}
+              >
+                {isPhase2 ? (
+                  <ProfileCard
+                    key={next.id}
+                    name={next.name}
+                    age={next.age}
+                    bio={next.bio}
+                    city={next.city}
+                    isVerified={next.isVerified}
+                    distance={next.distance}
+                    photos={next.photos}
+                    photoBlurred={next.photoBlurred}
+                    trustBadges={nextBadges}
+                    profilePrompt={next.profilePrompts?.[0]}
+                    profilePrompts={next.profilePrompts}
+                    theme="dark"
+                    privateIntentKeys={nextIntentKeys}
+                    isIncognito={next.isIncognito}
+                    presenceStatus={nextPresenceStatus}
+                    activities={next.activities}
+                    gender={next.gender}
+                    lookingFor={next.lookingFor}
+                    relationshipIntent={next.relationshipIntent}
+                    viewerProfile={viewerProfileForCard}
+                    height={next.height}
+                    smoking={next.smoking}
+                    drinking={next.drinking}
+                  />
+                ) : (
+                  <ProfileCardPreview
+                    key={next.id}
+                    name={next.name}
+                    age={next.age}
+                    isVerified={next.isVerified}
+                    photos={next.photos}
+                    photoBlurred={next.photoBlurred}
+                    theme="light"
+                  />
+                )}
+              </Animated.View>
+            )}
+            {/* Top card - wrapped in GestureDetector for UI thread gesture handling */}
+            {current && (
+              <GestureDetector gesture={panGesture}>
+                <Animated.View style={[styles.card, { zIndex: 1 }, cardAnimatedStyle]}>
+                  {/* KEY PROP: Forces React to create new instance when profile changes,
+                      ensuring photoIndex state resets to 0 for each new profile */}
+                  <ProfileCard
+                    key={current.id}
+                    name={current.name}
+                    age={current.age}
+                    bio={current.bio}
+                    city={current.city}
+                    isVerified={current.isVerified}
+                    distance={current.distance}
+                    photos={current.photos}
+                    photoBlurred={current.photoBlurred}
+                    trustBadges={currentBadges}
+                    profilePrompt={current.profilePrompts?.[0]}
+                    profilePrompts={current.profilePrompts}
+                    showCarousel
+                    onOpenProfile={openProfileCb}
+                    theme={isPhase2 ? "dark" : "light"}
+                    privateIntentKeys={currentIntentKeys}
+                    isIncognito={current.isIncognito}
+                    exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
+                    presenceStatus={currentPresenceStatus}
+                    activities={current.activities}
+                    gender={current.gender}
+                    lookingFor={current.lookingFor}
+                    relationshipIntent={current.relationshipIntent}
+                    viewerProfile={viewerProfileForCard}
+                    height={current.height}
+                    smoking={current.smoking}
+                    drinking={current.drinking}
+                  />
+                  <SwipeOverlay direction={overlayDirection} opacity={overlayOpacity} dark={dark} />
+                </Animated.View>
+              </GestureDetector>
+            )}
+          </>
         )}
 
         {/* Super-like star-burst animation */}
@@ -2541,8 +2692,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       <View style={[styles.actions, styles.premiumActions, { bottom: Math.max(actionRowBottom, 16) }]} pointerEvents="box-none">
         {/* Skip (X) - Light feedback */}
         <AnimatedActionButton
-          style={[styles.actionButton, styles.premiumSkipBtn]}
+          style={[styles.actionButton, styles.premiumSkipBtn, (showCardSkeleton || !current) && styles.premiumBtnDisabled]}
           onPress={() => animateSwipeRef.current("left")}
+          disabled={showCardSkeleton || !current}
           feedbackScale={0.92}
           hapticType="light"
         >
@@ -2554,7 +2706,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           style={[
             styles.actionButton,
             styles.premiumStandOutBtn,
-            hasReachedStandOutLimit() && styles.premiumBtnDisabled,
+            (hasReachedStandOutLimit() || showCardSkeleton || !current) && styles.premiumBtnDisabled,
           ]}
           onPress={() => {
             const c = currentRef.current;
@@ -2562,7 +2714,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsLeft}` as any);
             }
           }}
-          disabled={hasReachedStandOutLimit()}
+          disabled={hasReachedStandOutLimit() || showCardSkeleton || !current}
           feedbackScale={0.9}
           hapticType="medium"
         >
@@ -2574,8 +2726,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
         {/* Like (heart) - Medium feedback with stronger scale */}
         <AnimatedActionButton
-          style={[styles.actionButton, styles.premiumLikeBtn]}
+          style={[styles.actionButton, styles.premiumLikeBtn, (showCardSkeleton || !current) && styles.premiumBtnDisabled]}
           onPress={() => animateSwipeRef.current("right")}
+          disabled={showCardSkeleton || !current}
           feedbackScale={0.9}
           hapticType="medium"
         >
@@ -2583,12 +2736,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         </AnimatedActionButton>
       </View>
 
-      {/* Notification Popover */}
-      <NotificationPopover
-        visible={showNotificationPopover}
-        onClose={() => setShowNotificationPopover(false)}
-        anchorTop={insets.top + HEADER_H + 8}
-      />
+      {notificationPopover}
 
       {/* ══════════════════════════════════════════════════════════════════════════
           PHASE TRANSITION OVERLAY (Phase-2 Entry Experience)

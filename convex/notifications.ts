@@ -5,6 +5,29 @@ import { requireAuthenticatedUserId, resolveUserIdByAuthId } from './helpers';
 
 // 4-2: Notification TTL (24 hours in milliseconds)
 const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
+const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
+const PHASE2_ONLY_TYPES = new Set([
+  'phase2_match',
+  'phase2_like',
+  'comment_connect',
+  'tod_connect',
+]);
+const BELL_EXCLUDED_TYPES = new Set(['message', 'new_message']);
+
+function shouldIncludeBellNotification(
+  type: string,
+  phase: 'phase1' | 'phase2',
+): boolean {
+  if (BELL_EXCLUDED_TYPES.has(type)) {
+    return false;
+  }
+
+  if (phase === 'phase2') {
+    return !PHASE1_ONLY_TYPES.has(type);
+  }
+
+  return !PHASE2_ONLY_TYPES.has(type);
+}
 
 // Get notifications for a user
 // 4-3: Filters out expired notifications server-side to prevent render race
@@ -76,6 +99,40 @@ export const getUnreadCount = query({
       .collect();
 
     return notifications.length;
+  },
+});
+
+// Get unread bell badge count with phase-aware filtering.
+// Used on hot surfaces so the client does not need the full notification list.
+export const getBellUnreadCount = query({
+  args: {
+    phase: v.union(v.literal('phase1'), v.literal('phase2')),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireAuthenticatedUserId(ctx);
+    const now = Date.now();
+
+    const unreadNotifications = await ctx.db
+      .query('notifications')
+      .withIndex('by_user_unread', (q) =>
+        q.eq('userId', userId).eq('readAt', undefined),
+      )
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('expiresAt'), undefined),
+          q.gt(q.field('expiresAt'), now),
+        ),
+      )
+      .collect();
+
+    let count = 0;
+    for (const notification of unreadNotifications) {
+      if (shouldIncludeBellNotification(notification.type, args.phase)) {
+        count++;
+      }
+    }
+
+    return count;
   },
 });
 

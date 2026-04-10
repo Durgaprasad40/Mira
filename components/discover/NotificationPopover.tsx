@@ -42,6 +42,26 @@ export function NotificationPopover({
   anchorRight = 16,
   anchorTop = 56,
 }: NotificationPopoverProps) {
+  if (!visible) {
+    return null;
+  }
+
+  return (
+    <NotificationPopoverContent
+      visible={visible}
+      onClose={onClose}
+      anchorRight={anchorRight}
+      anchorTop={anchorTop}
+    />
+  );
+}
+
+function NotificationPopoverContent({
+  visible,
+  onClose,
+  anchorRight = 16,
+  anchorTop = 56,
+}: NotificationPopoverProps) {
   const { notifications, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
 
   // BUGFIX: Do NOT mark all as read when popover opens.

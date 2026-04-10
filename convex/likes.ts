@@ -175,6 +175,45 @@ export const swipe = mutation({
       throw new Error('This user is not available');
     }
 
+    const existingLike = await ctx.db
+      .query('likes')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', fromUserId).eq('toUserId', toUserId)
+      )
+      .first();
+
+    const existingMatchId = (() => {
+      const user1Id = fromUserId < toUserId ? fromUserId : toUserId;
+      const user2Id = fromUserId < toUserId ? toUserId : fromUserId;
+      return ctx.db
+        .query('matches')
+        .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+        .first();
+    })();
+
+    if (existingLike) {
+      const sameAction = existingLike.action === action;
+      const sameMessage = (existingLike.message ?? '') === (message ?? '');
+
+      if (sameAction && sameMessage) {
+        const existingMatch = await existingMatchId;
+        return existingMatch
+          ? { success: true, isMatch: true, matchId: existingMatch._id }
+          : { success: true, isMatch: false };
+      }
+
+      throw new Error('Already swiped on this user');
+    }
+
+    // P1 SECURITY: Block check for like/super_like actions (not just text)
+    // Prevents blocked users from liking each other and creating matches
+    // P1-009 FIX: Use generic error message to prevent user enumeration
+    if (action === 'like' || action === 'super_like' || action === 'text') {
+      if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
+        throw new Error('This user is not available');
+      }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // P0-004 FIX: Rate limiting BEFORE insert (not after)
     // P0-005 FIX: Re-enable server-side daily limit enforcement
@@ -220,6 +259,14 @@ export const swipe = mutation({
 
     // 2. Check and enforce daily limits BEFORE insert (P0-005)
     // Daily limits only apply to like/super_like actions (pass is always allowed)
+    let pendingDailyUsagePatch:
+      | {
+          likesRemaining: number;
+          superLikesRemaining: number;
+          likesResetAt: number;
+          superLikesResetAt: number;
+        }
+      | null = null;
     if (action === 'like' || action === 'super_like') {
       const oneDayMs = 24 * 60 * 60 * 1000;
 
@@ -263,43 +310,20 @@ export const swipe = mutation({
       const newLikesResetAt = shouldResetLikes ? now : likesResetAt;
       const newSuperLikesResetAt = shouldResetSuperLikes ? now : superLikesResetAt;
 
-      // Update user's remaining counts atomically with the swipe
-      // This prevents race conditions where multiple swipes could bypass limits
-      await ctx.db.patch(fromUserId, {
+      pendingDailyUsagePatch = {
         likesRemaining: newLikesRemaining,
         superLikesRemaining: newSuperLikesRemaining,
         likesResetAt: newLikesResetAt,
         superLikesResetAt: newSuperLikesResetAt,
-      });
+      };
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // END P0-004/P0-005 FIXES
     // ═══════════════════════════════════════════════════════════════════════════
 
-    // Check if already swiped
-    const existingLike = await ctx.db
-      .query('likes')
-      .withIndex('by_from_to', (q) =>
-        q.eq('fromUserId', fromUserId).eq('toUserId', toUserId)
-      )
-      .first();
-
-    if (existingLike) {
-      throw new Error('Already swiped on this user');
-    }
-
-    // P1 SECURITY: Block check for like/super_like actions (not just text)
-    // Prevents blocked users from liking each other and creating matches
-    // P1-009 FIX: Use generic error message to prevent user enumeration
-    if (action === 'like' || action === 'super_like') {
-      if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
-        throw new Error('This user is not available');
-      }
-    }
-
     // Record the like (P0-004/P0-005: Rate limiting and daily limits already checked above)
-    await ctx.db.insert('likes', {
+    const insertedLikeId = await ctx.db.insert('likes', {
       fromUserId,
       toUserId,
       action,
@@ -307,16 +331,38 @@ export const swipe = mutation({
       createdAt: now,
     });
 
+    const duplicateLikes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', fromUserId).eq('toUserId', toUserId)
+      )
+      .collect();
+
+    if (duplicateLikes.length > 1) {
+      duplicateLikes.sort((a, b) => a._id.localeCompare(b._id));
+      const winningLike = duplicateLikes[0];
+
+      if (winningLike._id !== insertedLikeId) {
+        await ctx.db.delete(insertedLikeId);
+        const existingMatch = await existingMatchId;
+        return existingMatch
+          ? { success: true, isMatch: true, matchId: existingMatch._id }
+          : { success: true, isMatch: false };
+      }
+
+      for (let i = 1; i < duplicateLikes.length; i++) {
+        await ctx.db.delete(duplicateLikes[i]._id);
+      }
+    }
+
+    if (pendingDailyUsagePatch) {
+      await ctx.db.patch(fromUserId, pendingDailyUsagePatch);
+    }
+
     // Handle text action: send a direct message via message token (pre-match conversation)
     if (action === 'text') {
       if (!message) {
         throw new Error('Message is required for text action');
-      }
-
-      // D1-REPAIR: Check if either user has blocked the other
-      // P1-009 FIX: Use generic error message to prevent user enumeration
-      if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
-        throw new Error('This user is not available');
       }
 
       // Create a pre-match conversation for the direct message
