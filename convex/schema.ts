@@ -1639,7 +1639,9 @@ export default defineSchema({
     respondedAt: v.optional(v.number()),
     expiresAt: v.optional(v.number()),
   })
-    .index('by_from_user', ['fromUserId']),
+    .index('by_from_user', ['fromUserId'])
+    .index('by_to_user', ['toUserId'])
+    .index('by_expires', ['expiresAt']),
 
   // Confession Replies table
   confessionReplies: defineTable({

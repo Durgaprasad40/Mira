@@ -38,7 +38,7 @@ export default function PersonPickerScreen() {
   // Convex query for eligible tag targets (only in live mode)
   const convexTargets = useQuery(
     api.confessions.getEligibleTagTargets,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && userId ? {} : 'skip'
   );
 
   // Determine loading state

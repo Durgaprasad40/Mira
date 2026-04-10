@@ -174,7 +174,7 @@ export default function ConfessionsScreen() {
   const [hiddenConfessionIds, setHiddenConfessionIds] = useState<string[]>([]);
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('Posted anonymously');
-  const [toastIcon, setToastIcon] = useState<'checkmark-circle' | 'chatbubbles'>('checkmark-circle');
+  const [toastIcon, setToastIcon] = useState<'checkmark-circle' | 'chatbubbles' | 'alert-circle'>('checkmark-circle');
   const toastOpacity = useRef(new Animated.Value(0)).current;
   const pendingBlockAuthorsRef = useRef<Set<string>>(new Set());
 
@@ -297,21 +297,21 @@ export default function ConfessionsScreen() {
   // Convex queries (only when not in demo mode)
   const convexConfessions = useQuery(
     api.confessions.listConfessions,
-    !isDemoMode ? { sortBy: 'latest' as const, viewerId: currentUserId, refreshKey: retryKey, limit: 50 } : 'skip'
+    !isDemoMode ? { sortBy: 'latest' as const, refreshKey: retryKey, limit: 50 } : 'skip'
   );
   const convexTrending = useQuery(
     api.confessions.getTrendingConfessions,
-    !isDemoMode ? { viewerId: currentUserId, refreshKey: retryKey, limit: 5 } : 'skip'
+    !isDemoMode ? { refreshKey: retryKey, limit: 5 } : 'skip'
   );
 
   // Tagged confessions (confessions where I'm tagged)
   const convexTaggedConfessions = useQuery(
     api.confessions.listTaggedConfessionsForUser,
-    !isDemoMode && convexUserId ? { userId: convexUserId, refreshKey: retryKey } : 'skip'
+    !isDemoMode && currentUserId ? { refreshKey: retryKey } : 'skip'
   );
   const convexTaggedBadgeCount = useQuery(
     api.confessions.getTaggedConfessionBadgeCount,
-    !isDemoMode && convexUserId ? { userId: convexUserId, refreshKey: retryKey } : 'skip'
+    !isDemoMode && currentUserId ? { refreshKey: retryKey } : 'skip'
   );
 
   // Convex mutations
@@ -515,7 +515,7 @@ export default function ConfessionsScreen() {
   const isRefreshReady = !isDemoMode
     ? convexConfessions !== undefined &&
       convexTrending !== undefined &&
-      (!convexUserId || (convexTaggedConfessions !== undefined && convexTaggedBadgeCount !== undefined))
+      (!currentUserId || (convexTaggedConfessions !== undefined && convexTaggedBadgeCount !== undefined))
     : true;
 
   useEffect(() => {
@@ -527,8 +527,8 @@ export default function ConfessionsScreen() {
   const handleOpenTaggedSection = useCallback(() => {
     setShowTaggedSection(true);
     // Mark all as seen
-    if (!isDemoMode && convexUserId) {
-      markTaggedSeenMutation({ userId: convexUserId }).catch((e) => console.warn('[MarkSeen] Silent fail:', e));
+    if (!isDemoMode && currentUserId) {
+      markTaggedSeenMutation({}).catch((e) => console.warn('[MarkSeen] Silent fail:', e));
     } else if (isDemoMode) {
       // Demo mode: mark all tagged confessions as seen via store action
       const unseenIds = taggedConfessions.filter((t) => !t.seen).map((t) => t.confessionId);
@@ -536,7 +536,7 @@ export default function ConfessionsScreen() {
         markAllTaggedConfessionsSeen(unseenIds);
       }
     }
-  }, [isDemoMode, convexUserId, markTaggedSeenMutation, taggedConfessions, markAllTaggedConfessionsSeen]);
+  }, [isDemoMode, currentUserId, markTaggedSeenMutation, taggedConfessions, markAllTaggedConfessionsSeen]);
 
   const handleCloseTaggedSection = useCallback(() => {
     setShowTaggedSection(false);
@@ -560,7 +560,7 @@ export default function ConfessionsScreen() {
   }, []);
 
   // Show toast with custom message
-  const showToastMessage = useCallback((message: string, icon: 'checkmark-circle' | 'chatbubbles' = 'checkmark-circle') => {
+  const showToastMessage = useCallback((message: string, icon: 'checkmark-circle' | 'chatbubbles' | 'alert-circle' = 'checkmark-circle') => {
     setToastMessage(message);
     setToastIcon(icon);
     setShowToast(true);
@@ -594,12 +594,9 @@ export default function ConfessionsScreen() {
         notifyReaction(confessionId);
         return;
       }
-      const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
-      // BUGFIX #24: Don't call demoToggleReaction in Convex mode - causes duplicate state updates
-      if (!convexUserId) return; // no valid user id — skip mutation
+      if (!currentUserId) return;
       toggleReactionMutation({
         confessionId: confessionId as Id<'confessions'>,
-        userId: convexUserId,
         type: emoji,
       }).then((result) => {
         if (result?.chatUnlocked) {
@@ -609,6 +606,7 @@ export default function ConfessionsScreen() {
         notifyReaction(confessionId);
       }).catch((err) => {
         console.error('[Confessions] toggleReaction failed:', err);
+        showToastMessage("Couldn't save your reaction. Please try again.", 'alert-circle');
       });
       // BUGFIX #24: Removed duplicate notifyReaction call here
     },
@@ -702,6 +700,7 @@ export default function ConfessionsScreen() {
 
     try {
       if (isDemoMode) {
+        const createdAt = Date.now();
         const confessionId = `conf_new_${Date.now()}`;
         useConfessionStore.getState().addConfession({
           id: confessionId,
@@ -714,7 +713,8 @@ export default function ConfessionsScreen() {
           visibility: 'global' as const,
           replyCount: 0,
           reactionCount: 0,
-          createdAt: Date.now(),
+          createdAt,
+          expiresAt: createdAt + 24 * 60 * 60 * 1000,
           revealPolicy: 'never',
           targetUserId: taggedUser?.id,
           targetUserName: taggedUser?.name,
@@ -726,7 +726,6 @@ export default function ConfessionsScreen() {
         recordConfessionTimestamp();
       } else {
         await createConfessionMutation({
-          userId: currentUserId as any,
           text: trimmed,
           isAnonymous: composerAnonymous,
           mood: 'emotional',
@@ -821,7 +820,6 @@ export default function ConfessionsScreen() {
       try {
         await reportConfessionMutation({
           confessionId: confessionId as any,
-          reporterId: currentUserId as any,
           reason,
         });
         setHiddenConfessionIds((current) =>
@@ -870,12 +868,8 @@ export default function ConfessionsScreen() {
       // Real mode: Use Convex conversation and route to Messages chat
       if (!isDemoMode) {
         try {
-          const convexId = asUserId(currentUserId);
-          if (!convexId) return;
-
           const result = await getOrCreateForConfessionMutation({
             confessionId: confessionId as Id<'confessions'>,
-            userId: convexId,
           });
 
           // Route to Messages chat with confession source
@@ -1035,7 +1029,6 @@ export default function ConfessionsScreen() {
 
       try {
         const result = await consumePreviewMutation({
-          viewerId: currentUserId as any,
           targetUserId: targetUserId as any,
           confessionId: confessionId as any,
         });
@@ -1191,7 +1184,6 @@ export default function ConfessionsScreen() {
               if (!isDemoMode && currentUserId) {
                 deleteConfessionMutation({
                   confessionId: confessionId as Id<'confessions'>,
-                  userId: currentUserId as Id<'users'>,
                 }).catch((err) => {
                   if (__DEV__) console.warn('[CONFESS] Backend delete failed:', err);
                 });
@@ -1218,7 +1210,6 @@ export default function ConfessionsScreen() {
                 if (!isDemoMode && currentUserId) {
                   deleteConfessionMutation({
                     confessionId: confessionId as Id<'confessions'>,
-                    userId: currentUserId as Id<'users'>,
                   }).catch((err) => {
                     if (__DEV__) console.warn('[CONFESS] Backend delete failed:', err);
                   });
@@ -1235,7 +1226,7 @@ export default function ConfessionsScreen() {
   const isLoading = !isDemoMode
     ? convexConfessions === undefined ||
       convexTrending === undefined ||
-      (!!convexUserId && (convexTaggedConfessions === undefined || convexTaggedBadgeCount === undefined))
+      (!!currentUserId && (convexTaggedConfessions === undefined || convexTaggedBadgeCount === undefined))
     : false;
 
   // BUGFIX #20: Trending hero card with null/empty guards
@@ -1319,8 +1310,8 @@ export default function ConfessionsScreen() {
     <LoadingGuard
       isLoading={isLoading}
       onRetry={triggerRefetch}
-      title="Finding confessions…"
-      subtitle="This is taking longer than expected. Check your connection and try again."
+      title="Couldn't load confessions"
+      subtitle="Check your connection and try again."
     >
       <SafeAreaView style={styles.container} edges={['top']}>
         {/* Compact header */}
@@ -1413,7 +1404,7 @@ export default function ConfessionsScreen() {
           <Ionicons
             name={toastIcon}
             size={18}
-            color={toastIcon === 'chatbubbles' ? COLORS.primary : '#34C759'}
+            color={toastIcon === 'chatbubbles' ? COLORS.primary : toastIcon === 'alert-circle' ? COLORS.error : '#34C759'}
           />
           <Text style={styles.toastText}>{toastMessage}</Text>
         </Animated.View>

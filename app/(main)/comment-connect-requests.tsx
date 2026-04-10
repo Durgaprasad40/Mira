@@ -15,6 +15,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS, SPACING, SIZES, FONT_SIZE, FONT_WEIGHT, HAIRLINE, moderateScale } from '@/lib/constants';
 import { Toast } from '@/components/ui/Toast';
+import { LoadingGuard } from '@/components/safety';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asCommentConnectId } from '@/convex/id';
@@ -57,11 +58,12 @@ export default function CommentConnectRequestsScreen() {
   // State for tracking which request is being responded to
   const [respondingId, setRespondingId] = useState<string | null>(null);
   const [respondingAction, setRespondingAction] = useState<'accept' | 'reject' | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   // Query pending connect requests
   const pendingConnects = useQuery(
     api.confessions.getPendingCommentConnects,
-    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+    !isDemoMode && currentUserId ? { refreshKey: retryKey } : 'skip'
   );
 
   // Mutation to respond
@@ -82,7 +84,6 @@ export default function CommentConnectRequestsScreen() {
 
       const result = await respondMutation({
         connectId: connectRowId,
-        userId: currentUserId,
         action,
       });
 
@@ -132,6 +133,10 @@ export default function CommentConnectRequestsScreen() {
   const handleOpenConfession = useCallback((confessionId: string) => {
     router.push(`/(main)/confession-thread?confessionId=${confessionId}` as any);
   }, [router]);
+
+  const handleRetry = useCallback(() => {
+    setRetryKey((current) => current + 1);
+  }, []);
 
   const renderItem = ({ item }: { item: PendingConnect }) => {
     const moodInfo = MOOD_CONFIG[item.confessionMood] || MOOD_CONFIG.romantic;
@@ -226,18 +231,25 @@ export default function CommentConnectRequestsScreen() {
   // Loading state
   if (pendingConnects === undefined && !isDemoMode) {
     return (
-      <SafeAreaView style={styles.container} edges={['top']}>
-        <View style={styles.navBar}>
-          <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.navTitle}>Connect Requests</Text>
-          <View style={{ width: 24 }} />
-        </View>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
-        </View>
-      </SafeAreaView>
+      <LoadingGuard
+        isLoading
+        onRetry={handleRetry}
+        title="Couldn't load connect requests"
+        subtitle="Check your connection and try again."
+      >
+        <SafeAreaView style={styles.container} edges={['top']}>
+          <View style={styles.navBar}>
+            <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+            </TouchableOpacity>
+            <Text style={styles.navTitle}>Connect Requests</Text>
+            <View style={{ width: 24 }} />
+          </View>
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={COLORS.primary} />
+          </View>
+        </SafeAreaView>
+      </LoadingGuard>
     );
   }
 

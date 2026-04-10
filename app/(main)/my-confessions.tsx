@@ -16,7 +16,6 @@ import { COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { asUserId } from '@/convex/id';
 import { ConfessionMood } from '@/types';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 
@@ -31,10 +30,9 @@ export default function MyConfessionsScreen() {
   const userReactions = useConfessionStore((s) => s.userReactions);
 
   // Convex query (only when not in demo mode)
-  const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
   const convexMyConfessions = useQuery(
     api.confessions.getMyConfessions,
-    !isDemoMode && convexUserId ? { userId: convexUserId, limit: 100 } : 'skip'
+    !isDemoMode && currentUserId ? { limit: 100 } : 'skip'
   );
 
   // Unified confession type for the list
@@ -69,7 +67,6 @@ export default function MyConfessionsScreen() {
     }
     // Demo mode: filter to current user's confessions and add isExpired flag
     const now = Date.now();
-    const EXPIRY_MS = 24 * 60 * 60 * 1000;
     return demoConfessions
       .filter((c) => c.userId === currentUserId)
       .map((c) => ({
@@ -82,7 +79,7 @@ export default function MyConfessionsScreen() {
         replyCount: c.replyCount,
         reactionCount: c.reactionCount,
         createdAt: c.createdAt,
-        isExpired: c.createdAt + EXPIRY_MS < now,
+        isExpired: (c.expiresAt ?? (c.createdAt + 24 * 60 * 60 * 1000)) < now,
       }))
       .sort((a, b) => b.createdAt - a.createdAt);
   }, [isDemoMode, convexMyConfessions, demoConfessions, currentUserId]);

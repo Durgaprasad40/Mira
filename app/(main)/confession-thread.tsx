@@ -23,6 +23,7 @@ import * as Clipboard from 'expo-clipboard';
 import { COLORS } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
 import { Toast } from '@/components/ui/Toast';
+import { LoadingGuard } from '@/components/safety';
 import { ConfessionMood, ConfessionReply, ConfessionChat } from '@/types';
 import ReactionBar from '@/components/confessions/ReactionBar';
 import { useAuthStore } from '@/stores/authStore';
@@ -77,6 +78,7 @@ export default function ConfessionThreadScreen() {
   const insets = useSafeAreaInsets();
   const { confessionId } = useLocalSearchParams<{ confessionId: string }>();
   const { userId } = useAuthStore();
+  const [retryKey, setRetryKey] = useState(0);
 
   // In live mode, never use demo fallback for Convex mutations
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
@@ -102,7 +104,7 @@ export default function ConfessionThreadScreen() {
   // ──────────────────────────────────────────────────────────────────────────
   const convexConfession = useQuery(
     api.confessions.getConfession,
-    !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+    !isDemoMode && confessionId ? { confessionId: confessionId as any, refreshKey: retryKey } : 'skip'
   );
 
   const convexUserQueryArgs = !isDemoMode && currentUserId
@@ -112,7 +114,7 @@ export default function ConfessionThreadScreen() {
 
   const convexReplies = useQuery(
     (api as any).confessions.getReplies,
-    !isDemoMode && confessionId ? { confessionId: confessionId as any, viewerId: currentUserId, limit: 200 } : 'skip'
+    !isDemoMode && confessionId ? { confessionId: confessionId as any, limit: 200, refreshKey: retryKey } : 'skip'
   );
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -227,30 +229,23 @@ export default function ConfessionThreadScreen() {
   const [showReactionPicker, setShowReactionPicker] = useState(false);
   const [replyingToReplyId, setReplyingToReplyId] = useState<string | null>(null);
   const [replyToReplyText, setReplyToReplyText] = useState('');
-  const [guardTriggered, setGuardTriggered] = useState(false);
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // NAVIGATION GUARD: Block expired/reported confessions
-  // ──────────────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (guardTriggered || !confessionId || isLoadingConfession) return;
+  const confessionBlockReason = useMemo(() => {
+    if (!confessionId || isLoadingConfession) return null;
 
-    const blockReason = shouldBlockConfessionOpen(
+    return shouldBlockConfessionOpen(
       confessionId,
       confession ? [confession as any] : [],
       globalBlockedIds,
       reportedIds,
     );
+  }, [confessionId, confession, globalBlockedIds, reportedIds, isLoadingConfession]);
 
-    if (blockReason && blockReason !== 'not_found') {
-      setGuardTriggered(true);
-      logDebugEvent('CHAT_EXPIRED', `Confession thread blocked: ${blockReason}`);
-      if (blockReason === 'expired') {
-        cleanupExpiredConfessions([confessionId]);
-      }
-      router.back();
-    }
-  }, [confessionId, confession, globalBlockedIds, reportedIds, guardTriggered, router, cleanupExpiredConfessions, isLoadingConfession]);
+  useEffect(() => {
+    if (!isDemoMode || confessionBlockReason !== 'expired' || !confessionId) return;
+    logDebugEvent('CHAT_EXPIRED', `Confession thread blocked: ${confessionBlockReason}`);
+    cleanupExpiredConfessions([confessionId]);
+  }, [cleanupExpiredConfessions, confessionBlockReason, confessionId]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // CONVEX MUTATIONS
@@ -287,7 +282,6 @@ export default function ConfessionThreadScreen() {
       try {
         await createReplyMutation({
           confessionId: confessionId as any,
-          userId: currentUserId as any,
           text: submittedText,
           isAnonymous: true,
           type: 'text',
@@ -324,7 +318,6 @@ export default function ConfessionThreadScreen() {
       try {
         await createReplyMutation({
           confessionId: confessionId as any,
-          userId: currentUserId as any,
           text: submittedText,
           isAnonymous: false,
           type: 'text',
@@ -353,7 +346,6 @@ export default function ConfessionThreadScreen() {
             try {
               await deleteReplyMutation({
                 replyId: reply.id as any,
-                userId: currentUserId as any,
               });
             } catch {
               addReplyToStore(confessionId, reply);
@@ -372,9 +364,11 @@ export default function ConfessionThreadScreen() {
     if (!isDemoMode && currentUserId) {
       toggleReactionMutation({
         confessionId: confession.id as any,
-        userId: currentUserId as any,
         type: emoji,
-      }).catch(() => toggleReaction(confession.id, emoji));
+      }).catch(() => {
+        toggleReaction(confession.id, emoji);
+        Toast.show("Couldn't save your reaction. Please try again.");
+      });
     }
   }, [confession, toggleReaction, toggleReactionMutation, currentUserId]);
 
@@ -384,9 +378,11 @@ export default function ConfessionThreadScreen() {
     if (!isDemoMode && currentUserId) {
       toggleReactionMutation({
         confessionId: confession.id as any,
-        userId: currentUserId as any,
         type: emoji,
-      }).catch(() => toggleReaction(confession.id, emoji));
+      }).catch(() => {
+        toggleReaction(confession.id, emoji);
+        Toast.show("Couldn't save your reaction. Please try again.");
+      });
     }
   }, [confession, toggleReaction, toggleReactionMutation, currentUserId]);
 
@@ -396,11 +392,8 @@ export default function ConfessionThreadScreen() {
 
     if (!isDemoMode) {
       try {
-        const convexId = asUserId(currentUserId);
-        if (!convexId) return;
         const result = await getOrCreateForConfessionMutation({
           confessionId: confessionId as any,
-          userId: convexId,
         });
         safePush(
           router,
@@ -463,7 +456,6 @@ export default function ConfessionThreadScreen() {
       try {
         await reportMutation({
           confessionId: confessionId as any,
-          reporterId: currentUserId as any,
           reason,
         });
         router.back();
@@ -509,7 +501,6 @@ export default function ConfessionThreadScreen() {
       try {
         await reportReplyMutation({
           replyId: reply.id as any,
-          reporterId: currentUserId as any,
           reason,
         });
         setHiddenReplyIds((current) => (current.includes(reply.id) ? current : [...current, reply.id]));
@@ -584,40 +575,73 @@ export default function ConfessionThreadScreen() {
     setReplyText((prev) => prev + emoji.emoji);
   }, []);
 
+  const handleRetry = useCallback(() => {
+    setRetryKey((current) => current + 1);
+  }, []);
+
+  const unavailableReason = isUnavailableConfession ? 'unavailable' : confessionBlockReason;
+
+  const unavailableCopy = useMemo(() => {
+    switch (unavailableReason) {
+      case 'blocked_user':
+        return {
+          title: 'This confession is no longer available',
+          subtitle: 'It was hidden because the author is blocked.',
+        };
+      case 'reported':
+        return {
+          title: 'This confession is no longer available',
+          subtitle: 'It has already been removed from your view.',
+        };
+      case 'expired':
+      case 'unavailable':
+        return {
+          title: 'This confession is no longer available',
+          subtitle: 'It may have expired, been deleted, or been removed.',
+        };
+      default:
+        return {
+          title: 'Confession not found',
+          subtitle: 'It may have been removed or is no longer available.',
+        };
+    }
+  }, [unavailableReason]);
+
   // ──────────────────────────────────────────────────────────────────────────
   // LOADING/EMPTY STATE
   // ──────────────────────────────────────────────────────────────────────────
-  if (!confession) {
+  if (!confession || unavailableReason) {
     return (
-      <SafeAreaView style={styles.container} edges={['top']}>
-        <View style={styles.navBar}>
-          <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.navTitle}>Thread</Text>
-          <View style={{ width: 24 }} />
-        </View>
-        <View style={styles.loadingContainer}>
-          {isLoadingConfession ? (
-            <>
-              <ActivityIndicator size="large" color={COLORS.primary} />
-              <Text style={styles.loadingText}>Loading...</Text>
-            </>
-          ) : (
-            <>
-              <Text style={styles.emptyEmoji}>💬</Text>
-              <Text style={styles.emptyTitle}>
-                {isUnavailableConfession ? 'This confession is no longer available' : 'Confession not found'}
-              </Text>
-              <Text style={styles.emptySubtitle}>
-                {isUnavailableConfession
-                  ? 'It may have been deleted or removed.'
-                  : 'It may have been removed or is no longer available.'}
-              </Text>
-            </>
-          )}
-        </View>
-      </SafeAreaView>
+      <LoadingGuard
+        isLoading={isLoadingConfession}
+        onRetry={handleRetry}
+        title="Couldn't load confession"
+        subtitle="Check your connection and try again."
+      >
+        <SafeAreaView style={styles.container} edges={['top']}>
+          <View style={styles.navBar}>
+            <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+            </TouchableOpacity>
+            <Text style={styles.navTitle}>Thread</Text>
+            <View style={{ width: 24 }} />
+          </View>
+          <View style={styles.loadingContainer}>
+            {isLoadingConfession ? (
+              <>
+                <ActivityIndicator size="large" color={COLORS.primary} />
+                <Text style={styles.loadingText}>Loading...</Text>
+              </>
+            ) : (
+              <>
+                <Text style={styles.emptyEmoji}>💬</Text>
+                <Text style={styles.emptyTitle}>{unavailableCopy.title}</Text>
+                <Text style={styles.emptySubtitle}>{unavailableCopy.subtitle}</Text>
+              </>
+            )}
+          </View>
+        </SafeAreaView>
+      </LoadingGuard>
     );
   }
 

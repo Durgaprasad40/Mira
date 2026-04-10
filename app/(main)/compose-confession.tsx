@@ -43,6 +43,8 @@ export default function ComposeConfessionScreen() {
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
   const addConfession = useConfessionStore((s) => s.addConfession);
+  const canPostConfession = useConfessionStore((s) => s.canPostConfession);
+  const recordConfessionTimestamp = useConfessionStore((s) => s.recordConfessionTimestamp);
   const setTimedReveal = useConfessionStore((s) => s.setTimedReveal);
   const createConfessionMutation = useMutation(api.confessions.createConfession);
 
@@ -124,6 +126,15 @@ export default function ComposeConfessionScreen() {
   const handleSubmit = useCallback(async () => {
     if (!canSubmit || isSubmitting) return;
     const trimmed = text.trim();
+
+    if (isDemoMode && !canPostConfession()) {
+      Alert.alert(
+        'Limit Reached',
+        "You've reached today's confession limit. Try again later."
+      );
+      return;
+    }
+
     const phonePattern = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
     const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
     if (phonePattern.test(trimmed) || emailPattern.test(trimmed)) {
@@ -162,6 +173,7 @@ export default function ComposeConfessionScreen() {
 
     try {
       if (isDemoMode) {
+        const createdAt = Date.now();
         const confessionId = `conf_new_${Date.now()}`;
 
         addConfession({
@@ -176,13 +188,15 @@ export default function ComposeConfessionScreen() {
           visibility: 'global' as const,
           replyCount: 0,
           reactionCount: 0,
-          createdAt: Date.now(),
+          createdAt,
+          expiresAt: createdAt + 24 * 60 * 60 * 1000,
           revealPolicy: revealPolicy || 'never',
           ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
           ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
           ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
           ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
         });
+        recordConfessionTimestamp();
 
         if (timedRevealOption && timedRevealOption !== 'never' && finalTarget) {
           setTimedReveal(confessionId, timedRevealOption, finalTarget);
@@ -202,7 +216,6 @@ export default function ComposeConfessionScreen() {
         }
       } else {
         const mutationPayload = {
-          userId: currentUserId as any,
           text: trimmed,
           isAnonymous,
           mood: 'emotional' as any,
@@ -227,7 +240,7 @@ export default function ComposeConfessionScreen() {
       setIsSubmitting(false);
       Alert.alert('Error', error?.message || 'Failed to post confession');
     }
-  }, [canSubmit, isSubmitting, text, isAnonymous, confessToSomeone, targetUserId, revealPolicy, timedRevealOption, currentUserId, addConfession, setTimedReveal, createConfessionMutation, router, isDemoMode]);
+  }, [canSubmit, isSubmitting, text, isAnonymous, confessToSomeone, targetUserId, revealPolicy, timedRevealOption, currentUserId, addConfession, canPostConfession, recordConfessionTimestamp, setTimedReveal, createConfessionMutation, router, isDemoMode]);
 
   const handleEmojiSelected = (emoji: any) => {
     setText((prev) => prev + emoji.emoji);

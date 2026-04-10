@@ -431,7 +431,7 @@ export function shouldBlockConfessionThreadOpen(
   // Check linked confession expiry
   const linkedConfession = confessions.find((c) => c.id === confessionId);
   if (linkedConfession) {
-    const confessionExpiresAt = linkedConfession.createdAt + TWENTY_FOUR_HOURS_MS;
+    const confessionExpiresAt = linkedConfession.expiresAt ?? (linkedConfession.createdAt + TWENTY_FOUR_HOURS_MS);
     if (now > confessionExpiresAt) {
       return 'confession_expired';
     }
@@ -481,8 +481,8 @@ export function buildDemoTaggedConfessions(
       confessionText: c.text,
       confessionMood: c.mood,
       confessionCreatedAt: c.createdAt,
-      confessionExpiresAt: c.createdAt + TWENTY_FOUR_HOURS_MS,
-      isExpired: now > c.createdAt + TWENTY_FOUR_HOURS_MS,
+      confessionExpiresAt: c.expiresAt ?? (c.createdAt + TWENTY_FOUR_HOURS_MS),
+      isExpired: now > (c.expiresAt ?? (c.createdAt + TWENTY_FOUR_HOURS_MS)),
       replyCount: c.replyCount,
       reactionCount: c.reactionCount,
     }))

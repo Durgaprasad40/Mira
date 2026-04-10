@@ -10,6 +10,13 @@ crons.hourly(
   internal.notifications.cleanupExpiredNotifications
 );
 
+// Confessions: Cleanup expired pending comment connect requests every hour
+crons.hourly(
+  'cleanup-expired-confession-comment-connects',
+  { minuteUTC: 40 },
+  internal.confessions.cleanupExpiredCommentConnects
+);
+
 // 8C: Cleanup verification photos older than 90 days (daily at 3:00 AM UTC)
 crons.daily(
   'cleanup-verification-photos',

@@ -1,6 +1,6 @@
-import { mutation, query } from './_generated/server';
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import { v } from 'convex/values';
-import { Id } from './_generated/dataModel';
+import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
 // Phone number & email patterns for server-side validation
@@ -21,6 +21,57 @@ const CONFESSION_TRENDING_SCAN_LIMIT = 200;
 const CONFESSION_REPLY_LIMIT = 200;
 const MY_CONFESSIONS_LIMIT = 100;
 const TAGGED_CONFESSION_LIMIT = 50;
+const CONNECT_CLEANUP_BATCH = 100;
+
+async function getCachedConfession(
+  ctx: { db: any },
+  cache: Map<Id<'confessions'>, Doc<'confessions'> | null>,
+  confessionId: Id<'confessions'>
+) {
+  if (cache.has(confessionId)) {
+    return cache.get(confessionId) ?? null;
+  }
+
+  const confession = await ctx.db.get(confessionId);
+  cache.set(confessionId, confession ?? null);
+  return confession ?? null;
+}
+
+async function getCachedReply(
+  ctx: { db: any },
+  cache: Map<Id<'confessionReplies'>, Doc<'confessionReplies'> | null>,
+  replyId: Id<'confessionReplies'>
+) {
+  if (cache.has(replyId)) {
+    return cache.get(replyId) ?? null;
+  }
+
+  const reply = await ctx.db.get(replyId);
+  cache.set(replyId, reply ?? null);
+  return reply ?? null;
+}
+
+async function getAuthenticatedConfessionUserIdOrNull(
+  ctx: QueryCtx | MutationCtx
+): Promise<Id<'users'> | null> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity?.subject) {
+    return null;
+  }
+
+  return await resolveUserIdByAuthId(ctx, identity.subject);
+}
+
+async function requireAuthenticatedConfessionMutationUserId(
+  ctx: MutationCtx
+): Promise<Id<'users'>> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity?.subject) {
+    throw new Error('Authentication required');
+  }
+
+  return await ensureUserByAuthId(ctx, identity.subject);
+}
 
 function clampLimit(requested: number | undefined, fallback: number, max: number): number {
   if (typeof requested !== 'number' || !Number.isFinite(requested)) {
@@ -34,7 +85,6 @@ function clampLimit(requested: number | undefined, fallback: number, max: number
 // Create a new confession
 export const createConfession = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()),
     text: v.string(),
     isAnonymous: v.boolean(),
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
@@ -47,8 +97,7 @@ export const createConfession = mutation({
     taggedUserId: v.optional(v.union(v.id('users'), v.string())), // User being confessed to
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireAuthenticatedConfessionMutationUserId(ctx);
 
     // P1-01: Server-side rate limiting - count confessions in last 24 hours
     const now = Date.now();
@@ -66,7 +115,10 @@ export const createConfession = mutation({
     // Map taggedUserId if provided (MUTATION: can create)
     let taggedUserId: Id<'users'> | undefined;
     if (args.taggedUserId) {
-      taggedUserId = await ensureUserByAuthId(ctx, args.taggedUserId as string);
+      taggedUserId = await resolveUserIdByAuthId(ctx, args.taggedUserId as string) ?? undefined;
+      if (!taggedUserId) {
+        throw new Error('Tagged user not found.');
+      }
     }
 
     const trimmed = args.text.trim();
@@ -145,13 +197,12 @@ export const createConfession = mutation({
 export const listConfessions = query({
   args: {
     sortBy: v.union(v.literal('trending'), v.literal('latest')),
-    viewerId: v.optional(v.union(v.id('users'), v.string())),
     refreshKey: v.optional(v.number()),
     limit: v.optional(v.number()),
   },
-  handler: async (ctx, { sortBy, viewerId: viewerArg, limit: limitArg }) => {
+  handler: async (ctx, { sortBy, limit: limitArg }) => {
     const now = Date.now();
-    const viewerId = viewerArg ? await resolveUserIdByAuthId(ctx, viewerArg as string) : null;
+    const viewerId = await getAuthenticatedConfessionUserIdOrNull(ctx);
     const limit = clampLimit(limitArg, CONFESSION_FEED_LIMIT, CONFESSION_FEED_LIMIT);
     const fetchLimit = Math.min(Math.max(limit * 3, CONFESSION_FEED_LIMIT), CONFESSION_FEED_SCAN_LIMIT);
 
@@ -265,14 +316,13 @@ export const listConfessions = query({
 // Only returns non-expired confessions
 export const getTrendingConfessions = query({
   args: {
-    viewerId: v.optional(v.union(v.id('users'), v.string())),
     refreshKey: v.optional(v.number()),
     limit: v.optional(v.number()),
   },
-  handler: async (ctx, { viewerId: viewerArg, limit: limitArg }) => {
+  handler: async (ctx, { limit: limitArg }) => {
     const now = Date.now();
     const cutoff = now - 48 * 60 * 60 * 1000; // 48 hours ago
-    const viewerId = viewerArg ? await resolveUserIdByAuthId(ctx, viewerArg as string) : null;
+    const viewerId = await getAuthenticatedConfessionUserIdOrNull(ctx);
     const limit = clampLimit(limitArg, CONFESSION_TRENDING_LIMIT, CONFESSION_TRENDING_LIMIT);
 
     let blockedAuthorIds = new Set<Id<'users'>>();
@@ -334,7 +384,10 @@ export const getTrendingConfessions = query({
 
 // Get a single confession by ID
 export const getConfession = query({
-  args: { confessionId: v.id('confessions') },
+  args: {
+    confessionId: v.id('confessions'),
+    refreshKey: v.optional(v.number()),
+  },
   handler: async (ctx, { confessionId }) => {
     const confession = await ctx.db.get(confessionId);
     if (!confession) return null;
@@ -352,7 +405,6 @@ export const getConfession = query({
 export const createReply = mutation({
   args: {
     confessionId: v.id('confessions'),
-    userId: v.union(v.id('users'), v.string()),
     text: v.string(),
     isAnonymous: v.boolean(),
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
@@ -361,8 +413,7 @@ export const createReply = mutation({
     parentReplyId: v.optional(v.id('confessionReplies')), // For OP reply-to-reply
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireAuthenticatedConfessionMutationUserId(ctx);
     const confession = await ctx.db.get(args.confessionId);
 
     if (!confession || confession.isDeleted) {
@@ -411,11 +462,9 @@ export const createReply = mutation({
 export const deleteReply = mutation({
   args: {
     replyId: v.id('confessionReplies'),
-    userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireAuthenticatedConfessionMutationUserId(ctx);
 
     const reply = await ctx.db.get(args.replyId);
     if (!reply) throw new Error('Reply not found.');
@@ -443,16 +492,16 @@ export const deleteReply = mutation({
 export const getReplies = query({
   args: {
     confessionId: v.id('confessions'),
-    viewerId: v.optional(v.union(v.id('users'), v.string())),
     limit: v.optional(v.number()),
+    refreshKey: v.optional(v.number()),
   },
-  handler: async (ctx, { confessionId, viewerId: viewerArg, limit: limitArg }) => {
+  handler: async (ctx, { confessionId, limit: limitArg }) => {
     const confession = await ctx.db.get(confessionId);
     if (!confession || confession.isDeleted) {
       return [];
     }
 
-    const viewerId = viewerArg ? await resolveUserIdByAuthId(ctx, viewerArg as string) : null;
+    const viewerId = await getAuthenticatedConfessionUserIdOrNull(ctx);
     const limit = clampLimit(limitArg, CONFESSION_REPLY_LIMIT, CONFESSION_REPLY_LIMIT);
     let reportedReplyIds = new Set<Id<'confessionReplies'>>();
 
@@ -481,12 +530,10 @@ export const getReplies = query({
 export const toggleReaction = mutation({
   args: {
     confessionId: v.id('confessions'),
-    userId: v.union(v.id('users'), v.string()),
     type: v.string(), // any emoji string
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireAuthenticatedConfessionMutationUserId(ctx);
 
     // Find existing reaction from this user on this confession
     const existing = await ctx.db
@@ -610,13 +657,10 @@ export const getReactionCounts = query({
 export const getUserReaction = query({
   args: {
     confessionId: v.id('confessions'),
-    userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await getAuthenticatedConfessionUserIdOrNull(ctx);
     if (!userId) {
-      console.log('[getUserReaction] User not found for authUserId:', args.userId);
       return null;
     }
 
@@ -633,14 +677,11 @@ export const getUserReaction = query({
 // Get user's own confessions (all, including expired, with isExpired flag)
 export const getMyConfessions = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await getAuthenticatedConfessionUserIdOrNull(ctx);
     if (!userId) {
-      console.log('[getMyConfessions] User not found for authUserId:', args.userId);
       return [];
     }
 
@@ -669,7 +710,6 @@ export const getMyConfessions = query({
 export const reportConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
-    reporterId: v.union(v.id('users'), v.string()),
     reason: v.union(
       v.literal('spam'),
       v.literal('harassment'),
@@ -680,8 +720,7 @@ export const reportConfession = mutation({
     description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users">
-    const reporterId = await ensureUserByAuthId(ctx, args.reporterId as string);
+    const reporterId = await requireAuthenticatedConfessionMutationUserId(ctx);
 
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) {
@@ -724,14 +763,11 @@ export const reportConfession = mutation({
 // Get badge count of unseen tagged confessions for a user
 export const getTaggedConfessionBadgeCount = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
     refreshKey: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+  handler: async (ctx) => {
+    const userId = await getAuthenticatedConfessionUserIdOrNull(ctx);
     if (!userId) {
-      console.log('[getTaggedConfessionBadgeCount] User not found for authUserId:', args.userId);
       return 0;
     }
 
@@ -740,9 +776,10 @@ export const getTaggedConfessionBadgeCount = query({
       .withIndex('by_user_seen', (q) => q.eq('userId', userId).eq('seen', false))
       .collect();
 
+    const confessionCache = new Map<Id<'confessions'>, Doc<'confessions'> | null>();
     let count = 0;
     for (const notification of notifications) {
-      const confession = await ctx.db.get(notification.confessionId);
+      const confession = await getCachedConfession(ctx, confessionCache, notification.confessionId);
       if (!confession || confession.isDeleted) continue;
       count += 1;
     }
@@ -754,14 +791,11 @@ export const getTaggedConfessionBadgeCount = query({
 // List tagged confessions for a user (privacy-safe: only for the tagged user's view)
 export const listTaggedConfessionsForUser = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
     refreshKey: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+  handler: async (ctx) => {
+    const userId = await getAuthenticatedConfessionUserIdOrNull(ctx);
     if (!userId) {
-      console.log('[listTaggedConfessionsForUser] User not found for authUserId:', args.userId);
       return [];
     }
 
@@ -776,8 +810,9 @@ export const listTaggedConfessionsForUser = query({
 
     // Join with confession data
     const result = [];
+    const confessionCache = new Map<Id<'confessions'>, Doc<'confessions'> | null>();
     for (const notif of notifications) {
-      const confession = await ctx.db.get(notif.confessionId);
+      const confession = await getCachedConfession(ctx, confessionCache, notif.confessionId);
       if (!confession || confession.isDeleted) continue;
 
       result.push({
@@ -803,12 +838,10 @@ export const listTaggedConfessionsForUser = query({
 // Mark tagged confession notifications as seen
 export const markTaggedConfessionsSeen = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()),
     notificationIds: v.optional(v.array(v.id('confessionNotifications'))),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireAuthenticatedConfessionMutationUserId(ctx);
     const { notificationIds } = args;
 
     if (notificationIds && notificationIds.length > 0) {
@@ -836,11 +869,9 @@ export const markTaggedConfessionsSeen = mutation({
 });
 
 export const getEligibleTagTargets = query({
-  args: {
-    userId: v.union(v.id('users'), v.string()),
-  },
-  handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+  args: {},
+  handler: async (ctx) => {
+    const userId = await getAuthenticatedConfessionUserIdOrNull(ctx);
     if (!userId) {
       return [];
     }
@@ -878,10 +909,10 @@ export const getEligibleTagTargets = query({
 
 export const getPendingCommentConnects = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    refreshKey: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+  handler: async (ctx) => {
+    const userId = await getAuthenticatedConfessionUserIdOrNull(ctx);
     if (!userId) {
       return [];
     }
@@ -889,6 +920,7 @@ export const getPendingCommentConnects = query({
     const now = Date.now();
     const connects = await ctx.db
       .query('confessionCommentConnects')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
       .collect();
 
     const pendingConnects = connects
@@ -912,10 +944,12 @@ export const getPendingCommentConnects = query({
       replyText: string;
       requestedAt: number;
     }> = [];
+    const confessionCache = new Map<Id<'confessions'>, Doc<'confessions'> | null>();
+    const replyCache = new Map<Id<'confessionReplies'>, Doc<'confessionReplies'> | null>();
 
     for (const connect of pendingConnects) {
-      const confession = await ctx.db.get(connect.confessionId!);
-      const reply = await ctx.db.get(connect.replyId!);
+      const confession = await getCachedConfession(ctx, confessionCache, connect.confessionId!);
+      const reply = await getCachedReply(ctx, replyCache, connect.replyId!);
 
       if (!confession || confession.isDeleted || !reply) {
         continue;
@@ -936,14 +970,54 @@ export const getPendingCommentConnects = query({
   },
 });
 
+export const cleanupExpiredCommentConnects = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const expiredConnects = await ctx.db
+      .query('confessionCommentConnects')
+      .withIndex('by_expires')
+      .filter((q) =>
+        q.and(
+          q.neq(q.field('expiresAt'), undefined),
+          q.lte(q.field('expiresAt'), now)
+        )
+      )
+      .take(CONNECT_CLEANUP_BATCH);
+
+    let deletedCount = 0;
+
+    for (const connect of expiredConnects) {
+      const status = connect.status ?? 'pending';
+      if (status !== 'pending') {
+        continue;
+      }
+
+      if (connect.replyId) {
+        const reply = await ctx.db.get(connect.replyId);
+        if (reply?.hasActiveConnectRequest) {
+          await ctx.db.patch(connect.replyId, { hasActiveConnectRequest: false });
+        }
+      }
+
+      await ctx.db.delete(connect._id);
+      deletedCount++;
+    }
+
+    return {
+      deletedCount,
+      hasMore: expiredConnects.length === CONNECT_CLEANUP_BATCH,
+    };
+  },
+});
+
 export const respondToCommentConnect = mutation({
   args: {
     connectId: v.id('confessionCommentConnects'),
-    userId: v.union(v.id('users'), v.string()),
     action: v.union(v.literal('accept'), v.literal('reject')),
   },
   handler: async (ctx, args) => {
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireAuthenticatedConfessionMutationUserId(ctx);
     const connect = await ctx.db.get(args.connectId);
 
     if (!connect) {
@@ -1023,7 +1097,6 @@ export const respondToCommentConnect = mutation({
 export const reportReply = mutation({
   args: {
     replyId: v.id('confessionReplies'),
-    reporterId: v.union(v.id('users'), v.string()),
     reason: v.union(
       v.literal('spam'),
       v.literal('abuse'),
@@ -1033,7 +1106,7 @@ export const reportReply = mutation({
     description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const reporterId = await ensureUserByAuthId(ctx, args.reporterId as string);
+    const reporterId = await requireAuthenticatedConfessionMutationUserId(ctx);
     const reply = await ctx.db.get(args.replyId);
 
     if (!reply) {
@@ -1075,12 +1148,11 @@ export const reportReply = mutation({
 // Backend is the source of truth for whether a viewer has already used their preview.
 export const consumePreview = mutation({
   args: {
-    viewerId: v.union(v.id('users'), v.string()),
     targetUserId: v.union(v.id('users'), v.string()),
     confessionId: v.optional(v.id('confessions')),
   },
   handler: async (ctx, args) => {
-    const viewerId = await ensureUserByAuthId(ctx, args.viewerId as string);
+    const viewerId = await requireAuthenticatedConfessionMutationUserId(ctx);
     const targetUserId = await resolveUserIdByAuthId(ctx, args.targetUserId as string);
 
     if (!targetUserId) {
@@ -1156,11 +1228,9 @@ export const consumePreview = mutation({
 export const getOrCreateForConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
-    userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users">
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireAuthenticatedConfessionMutationUserId(ctx);
 
     // Get the confession to find the author
     const confession = await ctx.db.get(args.confessionId);
@@ -1226,11 +1296,9 @@ export const getOrCreateForConfession = mutation({
 export const deleteConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
-    userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users">
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireAuthenticatedConfessionMutationUserId(ctx);
 
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) {

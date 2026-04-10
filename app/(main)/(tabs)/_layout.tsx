@@ -90,7 +90,7 @@ export default function MainTabsLayout() {
   // Tagged confession badge count (convexUserId already defined above)
   const convexTaggedCount = useQuery(
     api.confessions.getTaggedConfessionBadgeCount,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemoMode && userId ? {} : 'skip'
   );
 
   // PRELOAD: Prefetch confessions data so Confessions tab feels instant

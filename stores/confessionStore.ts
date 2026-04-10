@@ -271,11 +271,18 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
   },
 
   addConfession: (confession) => {
+    const normalizedConfession = confession.expiresAt
+      ? confession
+      : {
+          ...confession,
+          expiresAt: confession.createdAt + CONFESSION_EXPIRY_MS,
+        };
+
     // RANKING FIX: APPEND new confession to END of list (not prepend)
     // New posts start at bottom with negative ranking score
     // They rise based on engagement (likes, comments, reactions)
     set((state) => ({
-      confessions: [...state.confessions, confession],
+      confessions: [...state.confessions, normalizedConfession],
     }));
   },
 
@@ -968,11 +975,6 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
   // ── Rate Limiting ──
 
   canPostConfession: () => {
-    // TESTING: Rate limit bypassed for testing
-    // TODO: Re-enable rate limit for production by uncommenting the code below
-    return true;
-
-    /* RATE LIMIT CODE - Re-enable for production:
     const state = get();
     const now = Date.now();
     // Filter timestamps within the 24h window
@@ -980,7 +982,6 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       (ts) => now - ts < RATE_LIMIT_WINDOW_MS
     );
     return recentTimestamps.length < CONFESSION_RATE_LIMIT;
-    */
   },
 
   getConfessionCountToday: () => {

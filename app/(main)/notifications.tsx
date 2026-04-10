@@ -6,14 +6,17 @@ import {
   SectionList,
   TouchableOpacity,
   RefreshControl,
+  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useConvex } from 'convex/react';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
 import { useNotifications, useDemoNotifStore, type AppNotification } from '@/hooks/useNotifications';
 import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { api } from '@/convex/_generated/api';
 import { log } from '@/utils/logger';
 
 interface NotificationSection {
@@ -26,6 +29,7 @@ const BELL_RENDER_EXCLUDED = new Set(['message', 'new_message']);
 
 export default function NotificationsScreen() {
   const router = useRouter();
+  const convex = useConvex();
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
   // STABILITY: Track refresh timeout for cleanup on unmount
@@ -99,7 +103,7 @@ export default function NotificationsScreen() {
   };
 
   // 4-4: Pass notificationId in navigation params so destination knows why it was opened
-  const handleNotificationPress = (notification: AppNotification) => {
+  const handleNotificationPress = async (notification: AppNotification) => {
     if (!notification.isRead) {
       markRead(notification._id);
     }
@@ -200,6 +204,31 @@ export default function NotificationsScreen() {
       case 'confession_reaction':
       case 'confession_reply':
         if (notification.data?.confessionId) {
+          try {
+            const confession = await convex.query(api.confessions.getConfession, {
+              confessionId: notification.data.confessionId as any,
+            });
+
+            if (!confession || (confession.expiresAt !== undefined && confession.expiresAt <= Date.now())) {
+              Alert.alert(
+                'Confession unavailable',
+                'That confession expired or was removed before you opened it.'
+              );
+              return;
+            }
+          } catch (error) {
+            log.warn('[Notifications]', 'failed to validate confession notification target', {
+              notificationId: notification._id,
+              confessionId: notification.data.confessionId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            Alert.alert(
+              'Unable to open confession',
+              'Please try again in a moment.'
+            );
+            return;
+          }
+
           router.push({
             pathname: '/(main)/confession-thread',
             params: {
