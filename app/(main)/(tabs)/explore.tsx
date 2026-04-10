@@ -11,15 +11,15 @@ import {
   View,
   Text,
   TouchableOpacity,
-  TextInput,
   ScrollView,
-  FlatList,
   Dimensions,
   Animated,
   ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import { safePush } from "@/lib/safeRouter";
 import { useScreenTrace } from "@/lib/devTrace";
 import { Ionicons } from "@expo/vector-icons";
@@ -34,6 +34,7 @@ import {
   RIGHT_NOW_CATEGORIES,
   INTEREST_CATEGORIES,
 } from "@/components/explore/exploreCategories";
+import { useAuthStore } from "@/stores/authStore";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { COLORS } from "@/lib/constants";
 
@@ -43,127 +44,6 @@ const GRID_GAP = 14; // Slightly more breathing room
 const TILE_WIDTH = (SCREEN_WIDTH - GRID_PADDING * 2 - GRID_GAP) / 2;
 const TILE_HEIGHT = Math.round(TILE_WIDTH * 1.1); // Responsive height based on width
 const TILE_BORDER_RADIUS = 20; // Consistent rounded corners
-
-// Category filter tabs
-const CATEGORY_FILTERS = [
-  { id: "all", label: "All", icon: "apps" },
-  { id: "relationship", label: "Relationship", icon: "heart" },
-  { id: "rightnow", label: "Right Now", icon: "flash" },
-  { id: "interests", label: "Interests", icon: "sparkles" },
-];
-
-// ══════════════════════════════════════════════════════════════════════════
-// ANIMATED FILTER PILL - Category selection with smooth animations
-// ══════════════════════════════════════════════════════════════════════════
-interface FilterPillProps {
-  filter: { id: string; label: string; icon: string };
-  isSelected: boolean;
-  onPress: () => void;
-}
-
-const AnimatedFilterPill = ({ filter, isSelected, onPress }: FilterPillProps) => {
-  const scaleAnim = useRef(new Animated.Value(1)).current;
-  const selectionAnim = useRef(new Animated.Value(isSelected ? 1 : 0)).current;
-
-  // Animate selection state changes smoothly
-  useEffect(() => {
-    Animated.timing(selectionAnim, {
-      toValue: isSelected ? 1 : 0,
-      duration: 150,
-      useNativeDriver: false, // backgroundColor interpolation needs JS
-    }).start();
-
-    // Pop animation on selection (1 → 1.05 → 1)
-    if (isSelected) {
-      Animated.sequence([
-        Animated.timing(scaleAnim, {
-          toValue: 1.05,
-          duration: 80,
-          useNativeDriver: true,
-        }),
-        Animated.timing(scaleAnim, {
-          toValue: 1,
-          duration: 70,
-          useNativeDriver: true,
-        }),
-      ]).start();
-    }
-  }, [isSelected, scaleAnim, selectionAnim]);
-
-  const handlePressIn = useCallback(() => {
-    // Instant press feedback
-    Animated.timing(scaleAnim, {
-      toValue: 0.97,
-      duration: 60,
-      useNativeDriver: true,
-    }).start();
-  }, [scaleAnim]);
-
-  const handlePressOut = useCallback(() => {
-    Animated.timing(scaleAnim, {
-      toValue: 1,
-      duration: 100,
-      useNativeDriver: true,
-    }).start();
-  }, [scaleAnim]);
-
-  const handlePress = useCallback(() => {
-    try {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    } catch {}
-    onPress();
-  }, [onPress]);
-
-  // Interpolate background color for smooth transition
-  const backgroundColor = selectionAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [COLORS.backgroundDark, COLORS.primary],
-  });
-
-  // Interpolate shadow opacity for selected state
-  const shadowOpacity = selectionAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 0.15],
-  });
-
-  return (
-    <Animated.View
-      style={[
-        styles.filterPillWrapper,
-        {
-          transform: [{ scale: scaleAnim }],
-          shadowOpacity,
-        },
-      ]}
-    >
-      <Animated.View
-        style={[
-          styles.filterPill,
-          { backgroundColor },
-          isSelected && styles.filterPillSelectedBorder,
-        ]}
-      >
-        <TouchableOpacity
-          style={styles.filterPillTouchable}
-          onPress={handlePress}
-          onPressIn={handlePressIn}
-          onPressOut={handlePressOut}
-          activeOpacity={1}
-        >
-          <Ionicons
-            name={filter.icon as any}
-            size={16}
-            color={isSelected ? COLORS.white : COLORS.textLight}
-            style={styles.filterPillIcon}
-          />
-          <Text style={[styles.filterPillText, isSelected && styles.filterPillTextSelected]}>
-            {filter.label}
-          </Text>
-        </TouchableOpacity>
-      </Animated.View>
-    </Animated.View>
-  );
-};
 
 // ══════════════════════════════════════════════════════════════════════════
 // SKELETON LOADING CARD
@@ -207,21 +87,27 @@ const SkeletonTile = ({ index }: { index: number }) => {
 
 // ══════════════════════════════════════════════════════════════════════════
 // EXPLORE TILE - Premium grid item with gradient overlay
+// Memoized to prevent unnecessary re-renders when parent state changes
 // ══════════════════════════════════════════════════════════════════════════
-const ExploreTile = ({
+const ExploreTile = React.memo(function ExploreTile({
   category,
   count,
   onPress,
   index,
+  disabled = false,
+  statusLabel,
 }: {
   category: ExploreCategory;
   count: number;
   onPress: () => void;
   index: number;
-}) => {
+  disabled?: boolean;
+  statusLabel?: string;
+}) {
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
   const handlePressIn = () => {
+    if (disabled) return;
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } catch {}
@@ -234,6 +120,7 @@ const ExploreTile = ({
   };
 
   const handlePressOut = () => {
+    if (disabled) return;
     Animated.timing(scaleAnim, {
       toValue: 1,
       duration: 150,
@@ -249,15 +136,22 @@ const ExploreTile = ({
   return (
     <TouchableOpacity
       activeOpacity={1}
-      onPress={onPress}
+      onPress={disabled ? undefined : onPress}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
+      disabled={disabled}
       style={[
         styles.tileContainer,
         index % 2 === 0 ? { marginRight: GRID_GAP / 2 } : { marginLeft: GRID_GAP / 2 },
       ]}
     >
-      <Animated.View style={[styles.tileWrapper, { transform: [{ scale: scaleAnim }] }]}>
+      <Animated.View
+        style={[
+          styles.tileWrapper,
+          disabled && styles.tileWrapperDisabled,
+          { transform: [{ scale: scaleAnim }] },
+        ]}
+      >
         {/* Main gradient background */}
         <LinearGradient
           colors={[lighterColor, baseColor, darkerColor]}
@@ -283,7 +177,11 @@ const ExploreTile = ({
             </View>
 
             {/* Count badge (top-right) */}
-            {count > 0 && (
+            {statusLabel ? (
+              <View style={[styles.tileBadge, styles.tileStatusBadge]}>
+                <Text style={[styles.tileBadgeText, styles.tileStatusBadgeText]}>{statusLabel}</Text>
+              </View>
+            ) : count > 0 && (
               <View style={styles.tileBadge}>
                 <Text style={styles.tileBadgeText}>{count}</Text>
               </View>
@@ -300,7 +198,18 @@ const ExploreTile = ({
       </Animated.View>
     </TouchableOpacity>
   );
-};
+}, (prev, next) => {
+  // Custom comparison: only re-render if visual content changes
+  // Ignore onPress reference changes (closure is stable via handleCategoryPress)
+  // Category uses reference equality (objects from static arrays are stable)
+  return (
+    prev.category === next.category &&
+    prev.count === next.count &&
+    prev.index === next.index &&
+    prev.disabled === next.disabled &&
+    prev.statusLabel === next.statusLabel
+  );
+});
 
 // Helper to adjust color brightness
 function adjustColorBrightness(hex: string, percent: number): string {
@@ -315,15 +224,51 @@ function adjustColorBrightness(hex: string, percent: number): string {
 export default function ExploreScreen() {
   useScreenTrace("EXPLORE");
   const router = useRouter();
+  const userId = useAuthStore((s) => s.userId);
+  const authReady = useAuthStore((s) => s.authReady);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [searchQuery, setSearchQuery] = useState("");
   const hasFocusedOnceRef = useRef(false);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // INSTANT RENDER FIX: Track data state for shell UI pattern
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Track if we've ever loaded data successfully (for showing shell vs skeleton)
+  const hasLoadedDataOnceRef = useRef(false);
+  // Track last fetch timestamp for staleness check (prevents unnecessary refetch)
+  const lastFetchTimestampRef = useRef<number>(0);
+  // Staleness threshold: only refetch if data is older than 30 seconds
+  const STALE_THRESHOLD_MS = 30000;
 
   // ScrollView ref for scroll-to-top
   const scrollViewRef = useRef<ScrollView>(null);
 
   // Backend counts for tile badges
-  const { data: backendCounts, isLoading, isError, error } = useExploreCategoryCounts(refreshKey);
+  const {
+    data: backendCounts,
+    status: countsStatus,
+    isLoading,
+    isError,
+    error,
+  } = useExploreCategoryCounts(refreshKey);
+  const viewerDiscoverContext = useQuery(
+    api.users.getCurrentUserDiscoverContext,
+    authReady && userId ? {} : "skip"
+  );
+  const nearbyUnavailable = viewerDiscoverContext?.hasDiscoverLocation === false;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // INSTANT RENDER FIX: Mark data as loaded once we have it
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (backendCounts && countsStatus === "ok" && !isLoading && !isError) {
+      hasLoadedDataOnceRef.current = true;
+      lastFetchTimestampRef.current = Date.now();
+    }
+  }, [backendCounts, countsStatus, isLoading, isError]);
+
+  // Determine if this is true first load (no data ever loaded)
+  // After first successful load, we show content immediately (shell UI pattern)
+  const isFirstLoad = !hasLoadedDataOnceRef.current && isLoading;
 
   // Explore preferences
   const trackCategoryClick = useExplorePrefsStore((s) => s.trackCategoryClick);
@@ -340,30 +285,10 @@ export default function ExploreScreen() {
     [returnCategoryId]
   );
 
-  // Filter categories by search query for each section
-  const filterBySearch = useCallback((categories: ExploreCategory[]) => {
-    if (!searchQuery.trim()) return categories;
-    const query = searchQuery.toLowerCase().trim();
-    return categories.filter(
-      (c) =>
-        c.label.toLowerCase().includes(query) ||
-        c.id.toLowerCase().includes(query)
-    );
-  }, [searchQuery]);
-
-  // Filtered section data
-  const relationshipItems = useMemo(
-    () => filterBySearch(RELATIONSHIP_CATEGORIES),
-    [filterBySearch]
-  );
-  const rightNowItems = useMemo(
-    () => filterBySearch(RIGHT_NOW_CATEGORIES),
-    [filterBySearch]
-  );
-  const interestItems = useMemo(
-    () => filterBySearch(INTEREST_CATEGORIES),
-    [filterBySearch]
-  );
+  // Section data (static category arrays)
+  const relationshipItems = RELATIONSHIP_CATEGORIES;
+  const rightNowItems = RIGHT_NOW_CATEGORIES;
+  const interestItems = INTEREST_CATEGORIES;
 
   // Check if any items exist (for empty state)
   const hasAnyItems = relationshipItems.length > 0 || rightNowItems.length > 0 || interestItems.length > 0;
@@ -387,6 +312,9 @@ export default function ExploreScreen() {
   // Navigate to category detail
   const handleCategoryPress = useCallback(
     (category: ExploreCategory) => {
+      if (category.id === "nearby" && nearbyUnavailable) {
+        return;
+      }
       trackCategoryClick(category.id);
       safePush(
         router,
@@ -397,7 +325,7 @@ export default function ExploreScreen() {
         "explore->category"
       );
     },
-    [router, trackCategoryClick]
+    [nearbyUnavailable, router, trackCategoryClick]
   );
 
   // Handle return hook press
@@ -415,11 +343,19 @@ export default function ExploreScreen() {
     }
   }, [returnCategoryId, router]);
 
-  // Refresh on focus
+  // Refresh on focus (with staleness check to prevent unnecessary refetch)
   useFocusEffect(
     useCallback(() => {
+      const now = Date.now();
+      const timeSinceLastFetch = now - lastFetchTimestampRef.current;
+      const isStale = timeSinceLastFetch > STALE_THRESHOLD_MS;
+
       if (hasFocusedOnceRef.current) {
-        setRefreshKey((k) => k + 1);
+        // Only refresh if data is stale (>30 seconds old)
+        // This prevents the delay on quick tab switches
+        if (isStale) {
+          setRefreshKey((k) => k + 1);
+        }
       } else {
         hasFocusedOnceRef.current = true;
       }
@@ -446,9 +382,11 @@ export default function ExploreScreen() {
         count={categoryCounts[item.id] ?? 0}
         onPress={() => handleCategoryPress(item)}
         index={index}
+        disabled={item.id === "nearby" && nearbyUnavailable}
+        statusLabel={item.id === "nearby" && nearbyUnavailable ? "Enable location" : undefined}
       />
     ),
-    [categoryCounts, handleCategoryPress]
+    [categoryCounts, handleCategoryPress, nearbyUnavailable]
   );
 
   // Render a 2-column grid for a section
@@ -498,11 +436,27 @@ export default function ExploreScreen() {
     </View>
   );
 
+  const renderUnavailableState = (title: string, subtitle: string, iconName: React.ComponentProps<typeof Ionicons>["name"]) => (
+    <View style={styles.emptyContainer}>
+      <Ionicons name={iconName} size={52} color={COLORS.textLight} />
+      <Text style={styles.emptyTitle}>{title}</Text>
+      <Text style={styles.emptySubtitle}>{subtitle}</Text>
+    </View>
+  );
+
   return (
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
-      {/* Header */}
+      {/* Header - Always renders immediately (shell UI pattern) */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Explore</Text>
+        {/* Subtle refresh indicator during background refresh (not first load) */}
+        {isLoading && hasLoadedDataOnceRef.current && (
+          <ActivityIndicator
+            size="small"
+            color={COLORS.primary}
+            style={styles.headerRefreshIndicator}
+          />
+        )}
       </View>
 
       {/* Return Hook */}
@@ -520,9 +474,25 @@ export default function ExploreScreen() {
       )}
 
       {/* Main Section-Based Content */}
-      {isLoading ? (
+      {/* INSTANT RENDER FIX: Only show skeleton on true first load (no data ever loaded)
+          After first successful load, show content immediately during background refresh */}
+      {isFirstLoad ? (
         renderLoadingState()
-      ) : isError ? (
+      ) : countsStatus === "viewer_missing" ? (
+        renderUnavailableState(
+          "Explore is unavailable",
+          "We couldn't load your Explore profile right now.",
+          "person-circle-outline"
+        )
+      ) : countsStatus === "discovery_paused" ? (
+        renderUnavailableState(
+          "Discover is paused",
+          "Unpause discovery to browse Explore categories again.",
+          "pause-circle-outline"
+        )
+      ) : isError && !hasLoadedDataOnceRef.current ? (
+        // Only show error state if we've never loaded data
+        // If we have stale data, keep showing it
         renderErrorState()
       ) : !hasAnyItems ? (
         renderEmptyState()
@@ -553,6 +523,11 @@ export default function ExploreScreen() {
                 <Text style={styles.sectionIcon}>⚡</Text>
                 <Text style={styles.sectionTitle}>Right Now</Text>
               </View>
+              {nearbyUnavailable && (
+                <Text style={styles.sectionHelperText}>
+                  Enable location access for Mira to use Nearby.
+                </Text>
+              )}
               <View style={styles.sectionGrid}>
                 {renderSectionGrid(rightNowItems)}
               </View>
@@ -585,6 +560,9 @@ const styles = StyleSheet.create({
 
   // Header
   header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: GRID_PADDING,
     paddingTop: 8,
     paddingBottom: 12,
@@ -595,73 +573,9 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     letterSpacing: -0.5,
   },
-
-  // Search Bar
-  searchContainer: {
-    paddingHorizontal: GRID_PADDING,
-    paddingBottom: 12,
-  },
-  searchBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: COLORS.backgroundDark,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    gap: 10,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 15,
-    color: COLORS.text,
-    padding: 0,
-  },
-
-  // Filter Scroller
-  filterScroller: {
-    maxHeight: 48,
-    marginBottom: 12,
-  },
-  filterScrollContent: {
-    paddingHorizontal: GRID_PADDING,
-    gap: 8,
-    alignItems: "center",
-  },
-  // Wrapper for shadow and scale animation
-  filterPillWrapper: {
-    // iOS shadow for selected state (animated via shadowOpacity)
-    shadowColor: COLORS.primary,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 6,
-    // Android elevation handled separately
-    elevation: 0,
-  },
-  filterPill: {
-    borderRadius: 20,
-    overflow: "hidden",
-  },
-  filterPillSelectedBorder: {
-    // Slight elevation on Android for selected state
-    elevation: 3,
-  },
-  filterPillTouchable: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    minHeight: 36,
-  },
-  filterPillIcon: {
-    marginRight: 6,
-  },
-  filterPillText: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: COLORS.textLight,
-  },
-  filterPillTextSelected: {
-    color: COLORS.white,
-    fontWeight: "700",
+  // Subtle refresh indicator (shell UI pattern - non-blocking background refresh)
+  headerRefreshIndicator: {
+    marginLeft: 12,
   },
 
   // Return Hook
@@ -723,15 +637,16 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     letterSpacing: -0.3,
   },
+  sectionHelperText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    marginBottom: 10,
+  },
   sectionGrid: {
     // Container for the grid rows
   },
 
   // Grid Layout
-  gridContent: {
-    paddingHorizontal: GRID_PADDING,
-    paddingBottom: 100,
-  },
   gridRow: {
     flexDirection: "row",
     marginBottom: GRID_GAP,
@@ -755,6 +670,9 @@ const styles = StyleSheet.create({
     elevation: 5,
     // Ensure clipping respects border radius
     backgroundColor: COLORS.backgroundDark,
+  },
+  tileWrapperDisabled: {
+    opacity: 0.7,
   },
   tile: {
     height: TILE_HEIGHT,
@@ -796,11 +714,19 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.overlaySubtle,
   },
+  tileStatusBadge: {
+    maxWidth: 110,
+    paddingHorizontal: 8,
+  },
   tileBadgeText: {
     color: COLORS.white,
     fontSize: 12,
     fontWeight: "700",
     letterSpacing: 0.3,
+  },
+  tileStatusBadgeText: {
+    fontSize: 11,
+    letterSpacing: 0,
   },
   // Title container with proper bottom spacing
   tileTitleContainer: {

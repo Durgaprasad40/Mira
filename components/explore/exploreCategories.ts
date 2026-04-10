@@ -175,8 +175,8 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
 ];
 
 // ============================================
-// RIGHT NOW CATEGORIES (4 activity signals)
-// IDs match backend CATEGORY_IDS exactly
+// RIGHT NOW CATEGORIES
+// Live Explore currently supports only the backend-backed nearby tile.
 // ============================================
 const RIGHT_NOW_TILES: ExploreCategory[] = [
   {
@@ -188,111 +188,13 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     kind: "relationship",
     predicate: (p) => typeof p?.distance === "number" && isWithinAllowedDistance(p, NEAR_ME_DISTANCE_KM),
   },
-  {
-    id: "online_now",
-    label: "Online Now",
-    title: "Online Now",
-    icon: "🟢",
-    color: TILE_COLORS.mint,
-    kind: "relationship",
-    predicate: (p) => p?.isOnline === true || minutesAgo(p?.lastActive ?? p?.lastActiveAt) <= 10,
-  },
-  {
-    id: "active_today",
-    label: "Active Today",
-    title: "Active Today",
-    icon: "📱",
-    color: TILE_COLORS.blue,
-    kind: "relationship",
-    predicate: (p) => minutesAgo(p?.lastActive ?? p?.lastActiveAt) <= 24 * 60,
-  },
-  {
-    id: "free_tonight",
-    label: "Free Tonight",
-    title: "Free Tonight",
-    icon: "🌙",
-    color: TILE_COLORS.indigo,
-    kind: "relationship",
-    predicate: (p) => p?.activities?.includes('free_tonight'),
-  },
 ];
 
 // ============================================
-// INTEREST CATEGORIES (7 tiles)
-// IDs match backend CATEGORY_IDS exactly
+// INTEREST CATEGORIES
+// Hidden for now until the backend has a truthful live category source.
 // ============================================
-const INTEREST_TILES: ExploreCategory[] = [
-  {
-    id: "coffee_date",
-    label: "Coffee Date",
-    title: "Coffee Date",
-    icon: "☕",
-    color: TILE_COLORS.amber,
-    kind: "interest",
-    predicate: (p) =>
-      p?.tags?.includes("coffee") || p?.activities?.includes("coffee"),
-  },
-  {
-    id: "nature_lovers",
-    label: "Nature Lovers",
-    title: "Nature Lovers",
-    icon: "🌿",
-    color: TILE_COLORS.emerald,
-    kind: "interest",
-    predicate: (p) =>
-      p?.tags?.includes("outdoors") || p?.activities?.includes("outdoors"),
-  },
-  {
-    id: "binge_watchers",
-    label: "Binge Watchers",
-    title: "Binge Watchers",
-    icon: "🎬",
-    color: TILE_COLORS.coral,
-    kind: "interest",
-    predicate: (p) =>
-      p?.tags?.includes("movies") || p?.activities?.includes("movies"),
-  },
-  {
-    id: "travel",
-    label: "Travel",
-    title: "Travel",
-    icon: "✈️",
-    color: TILE_COLORS.sky,
-    kind: "interest",
-    predicate: (p) =>
-      p?.tags?.includes("travel") || p?.activities?.includes("travel"),
-  },
-  {
-    id: "gaming",
-    label: "Gaming",
-    title: "Gaming",
-    icon: "🎮",
-    color: TILE_COLORS.purple,
-    kind: "interest",
-    predicate: (p) =>
-      p?.tags?.includes("gaming") || p?.activities?.includes("gaming"),
-  },
-  {
-    id: "fitness",
-    label: "Fitness",
-    title: "Fitness",
-    icon: "💪",
-    color: TILE_COLORS.lime,
-    kind: "interest",
-    predicate: (p) =>
-      p?.activities?.includes("gym_partner") || p?.activities?.includes("gym"),
-  },
-  {
-    id: "music",
-    label: "Music",
-    title: "Music",
-    icon: "🎵",
-    color: TILE_COLORS.pink,
-    kind: "interest",
-    predicate: (p) =>
-      p?.activities?.includes("music_lover") || p?.activities?.includes("concerts"),
-  },
-];
+const INTEREST_TILES: ExploreCategory[] = [];
 
 // ============================================
 // COMBINED EXPORT (all categories)
@@ -303,7 +205,7 @@ export const EXPLORE_CATEGORIES: ExploreCategory[] = [
   ...INTEREST_TILES,
 ];
 
-// Separate exports for easy access
+// Live Explore currently exposes only backend-backed categories.
 export const RELATIONSHIP_CATEGORIES = RELATIONSHIP_TILES;
 export const RIGHT_NOW_CATEGORIES = RIGHT_NOW_TILES;
 export const INTEREST_CATEGORIES = INTEREST_TILES;

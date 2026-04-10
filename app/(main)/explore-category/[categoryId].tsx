@@ -10,25 +10,40 @@ import { DiscoverCardStack } from '@/components/screens/DiscoverCardStack';
 import { COLORS } from '@/lib/constants';
 
 const HEADER_H = 48;
+const PAGE_SIZE = 50;
 
 export default function ExploreCategoryScreen() {
-  const { categoryId } = useLocalSearchParams<{ categoryId: string }>();
+  const { categoryId } = useLocalSearchParams<{ categoryId?: string | string[] }>();
+  const normalizedCategoryId = Array.isArray(categoryId) ? categoryId[0] : categoryId;
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [refreshKey, setRefreshKey] = useState(0);
+  const [pageOffset, setPageOffset] = useState(0);
   // Track when user has swiped through all profiles
   const [stackExhausted, setStackExhausted] = useState(false);
+  const [showLoadMorePrompt, setShowLoadMorePrompt] = useState(false);
+  const [isLoadingNextBatch, setIsLoadingNextBatch] = useState(false);
   const hadProfilesRef = useRef(false);
 
-  const { profiles, isLoading, isUsingBackend, totalCount, isError, error } = useExploreCategoryProfiles({
-    categoryId: categoryId ?? '',
-    limit: 50,
+  const {
+    profiles,
+    totalCount,
+    hasMore,
+    status,
+    partialBatchExhausted,
+    isLoading,
+    isError,
+    error,
+  } = useExploreCategoryProfiles({
+    categoryId: normalizedCategoryId ?? '',
+    limit: PAGE_SIZE,
+    offset: pageOffset,
     refreshKey,
   });
 
   const cat = useMemo(
-    () => EXPLORE_CATEGORIES.find((c) => c.id === categoryId),
-    [categoryId],
+    () => EXPLORE_CATEGORIES.find((c) => c.id === normalizedCategoryId),
+    [normalizedCategoryId],
   );
 
   // Engagement triggers
@@ -39,49 +54,78 @@ export default function ExploreCategoryScreen() {
 
   // Track category visit on mount
   useEffect(() => {
-    if (categoryId) {
-      trackCategoryVisit(categoryId);
+    if (normalizedCategoryId && cat) {
+      trackCategoryVisit(normalizedCategoryId);
     }
-  }, [categoryId, trackCategoryVisit]);
+  }, [cat, normalizedCategoryId, trackCategoryVisit]);
 
   // Scarcity trigger: show when profiles <= 3 (Task 1)
   const showScarcityHint = useMemo(() => {
-    if (!categoryId || profiles.length === 0 || profiles.length > 3) return false;
-    const triggerId = `scarcity-${categoryId}`;
+    if (!normalizedCategoryId || profiles.length === 0 || profiles.length > 3) return false;
+    const triggerId = `scarcity-${normalizedCategoryId}`;
     return !hasTriggerBeenShown(triggerId);
-  }, [categoryId, profiles.length, hasTriggerBeenShown]);
+  }, [normalizedCategoryId, profiles.length, hasTriggerBeenShown]);
 
   // Time-based nudge: show when revisiting category in session (Task 2)
   const showRevisitNudge = useMemo(() => {
-    if (!categoryId) return false;
-    const triggerId = `revisit-nudge-${categoryId}`;
+    if (!normalizedCategoryId) return false;
+    const triggerId = `revisit-nudge-${normalizedCategoryId}`;
     if (hasTriggerBeenShown(triggerId)) return false;
-    return isRevisitInSession(categoryId);
-  }, [categoryId, isRevisitInSession, hasTriggerBeenShown]);
+    return isRevisitInSession(normalizedCategoryId);
+  }, [normalizedCategoryId, isRevisitInSession, hasTriggerBeenShown]);
 
   // Mark scarcity trigger as shown when displayed
   useEffect(() => {
-    if (showScarcityHint && categoryId) {
-      markTriggerShown(`scarcity-${categoryId}`);
+    if (showScarcityHint && normalizedCategoryId) {
+      markTriggerShown(`scarcity-${normalizedCategoryId}`);
     }
-  }, [showScarcityHint, categoryId, markTriggerShown]);
+  }, [showScarcityHint, normalizedCategoryId, markTriggerShown]);
 
   // Mark revisit nudge as shown when displayed
   useEffect(() => {
-    if (showRevisitNudge && categoryId) {
-      markTriggerShown(`revisit-nudge-${categoryId}`);
+    if (showRevisitNudge && normalizedCategoryId) {
+      markTriggerShown(`revisit-nudge-${normalizedCategoryId}`);
     }
-  }, [showRevisitNudge, categoryId, markTriggerShown]);
+  }, [showRevisitNudge, normalizedCategoryId, markTriggerShown]);
+
+  useEffect(() => {
+    setPageOffset(0);
+    setStackExhausted(false);
+    setShowLoadMorePrompt(false);
+    setIsLoadingNextBatch(false);
+    hadProfilesRef.current = false;
+  }, [normalizedCategoryId]);
 
   // Refresh handler
   const handleRefresh = useCallback(() => {
     setRefreshKey((k) => k + 1);
+    setPageOffset(0);
     // Reset exhausted state on refresh
     setStackExhausted(false);
+    setShowLoadMorePrompt(false);
+    setIsLoadingNextBatch(false);
+    hadProfilesRef.current = false;
+  }, []);
+
+  const handleLoadMore = useCallback(() => {
+    setShowLoadMorePrompt(false);
+    setStackExhausted(false);
+    setIsLoadingNextBatch(true);
+    hadProfilesRef.current = false;
+    setPageOffset((currentOffset) => currentOffset + PAGE_SIZE);
   }, []);
 
   // Use the profiles directly from the hook (already filtered by category)
   const items = profiles;
+  const isInitialLoading = isLoading && items.length === 0;
+  const isRefreshingLoadedPage = isLoading && items.length > 0;
+  const profileActionScope = `${normalizedCategoryId ?? 'invalid'}:${refreshKey}:${pageOffset}`;
+
+  useEffect(() => {
+    if (!isLoading) {
+      setIsLoadingNextBatch(false);
+    }
+  }, [isLoading]);
 
   // Track if we ever had profiles
   useEffect(() => {
@@ -92,10 +136,81 @@ export default function ExploreCategoryScreen() {
 
   // Mark stack as exhausted when all profiles have been swiped
   const handleStackEmpty = useCallback(() => {
-    if (hadProfilesRef.current) {
-      setStackExhausted(true);
+    if (!hadProfilesRef.current || isLoading) {
+      return;
     }
-  }, []);
+
+    if (hasMore) {
+      setShowLoadMorePrompt(true);
+      setStackExhausted(true);
+      return;
+    }
+
+    setShowLoadMorePrompt(false);
+    setStackExhausted(true);
+  }, [hasMore, isLoading]);
+
+  const unavailableTitle = useMemo(() => {
+    if (status === 'location_required') {
+      return 'Nearby needs location';
+    }
+    if (status === 'invalid_category' || !cat) {
+      return 'This vibe is unavailable';
+    }
+    if (status === 'viewer_missing') {
+      return 'Explore is unavailable';
+    }
+    if (status === 'discovery_paused') {
+      return 'Discover is paused';
+    }
+    if (status === 'empty_category') {
+      return 'No one here yet';
+    }
+    if (showLoadMorePrompt && hasMore) {
+      return 'Load more people';
+    }
+    if (stackExhausted && partialBatchExhausted) {
+      return "You've finished this loaded set";
+    }
+    return "You're all caught up";
+  }, [cat, hasMore, partialBatchExhausted, showLoadMorePrompt, stackExhausted, status]);
+
+  const unavailableSubtitle = useMemo(() => {
+    if (status === 'location_required') {
+      return 'Enable location access for Mira, then come back to see people close to you.';
+    }
+    if (status === 'invalid_category' || !cat) {
+      return 'This Explore vibe is not live right now.';
+    }
+    if (status === 'viewer_missing') {
+      return "We couldn't load your Explore profile right now.";
+    }
+    if (status === 'discovery_paused') {
+      return 'Unpause discovery to browse people in this vibe again.';
+    }
+    if (status === 'empty_category') {
+      return "There isn't anyone in this vibe right now.\nCheck again later or explore other vibes.";
+    }
+    if (showLoadMorePrompt && hasMore) {
+      return 'You finished the people we already loaded for this vibe. Load the next batch to keep going.';
+    }
+    if (stackExhausted && partialBatchExhausted) {
+      return "You've seen everyone we loaded for this vibe. Refresh later to check for more people.";
+    }
+    if (stackExhausted && pageOffset > 0) {
+      return "You've seen everyone in this loaded set. Check back later for more people in this vibe.";
+    }
+    return "You've seen everyone in this vibe.\nCheck again later or explore other vibes.";
+  }, [cat, hasMore, pageOffset, partialBatchExhausted, showLoadMorePrompt, stackExhausted, status]);
+
+  const emptyIconName = useMemo(() => {
+    if (status === 'location_required') return 'location-outline';
+    if (status === 'discovery_paused') return 'pause-circle-outline';
+    if (status === 'viewer_missing' || status === 'invalid_category') return 'alert-circle-outline';
+    if (status === 'empty_category') return 'people-outline';
+    if (showLoadMorePrompt && hasMore) return 'chevron-down-circle-outline';
+    return 'checkmark-circle-outline';
+  }, [hasMore, showLoadMorePrompt, status]);
 
   return (
     <View style={styles.container}>
@@ -106,12 +221,18 @@ export default function ExploreCategoryScreen() {
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.title} numberOfLines={1}>
-            {cat?.title ?? 'Explore'}
+            {cat?.title ?? 'Unavailable vibe'}
           </Text>
-          <Text style={styles.headerSubtitle}>People matching this vibe</Text>
+          <Text style={styles.headerSubtitle}>
+            {cat ? 'People matching this vibe' : 'This Explore vibe is not live right now'}
+          </Text>
         </View>
         <TouchableOpacity onPress={handleRefresh} hitSlop={8} style={styles.headerBtn}>
-          <Ionicons name="refresh" size={22} color={COLORS.text} />
+          {isRefreshingLoadedPage ? (
+            <ActivityIndicator size="small" color={COLORS.text} />
+          ) : (
+            <Ionicons name="refresh" size={22} color={COLORS.text} />
+          )}
         </TouchableOpacity>
       </View>
 
@@ -126,12 +247,14 @@ export default function ExploreCategoryScreen() {
         </View>
       )}
 
-      {isLoading ? (
+      {isInitialLoading || isLoadingNextBatch ? (
         <View style={styles.loadingState}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Finding the best people for you...</Text>
+          <Text style={styles.loadingText}>
+            {isLoadingNextBatch ? 'Loading more people...' : 'Finding the best people for you...'}
+          </Text>
         </View>
-      ) : isError ? (
+      ) : isError && items.length === 0 ? (
         <View style={styles.emptyState}>
           <Ionicons name="alert-circle-outline" size={64} color={COLORS.textLight} style={styles.emptyIcon} />
           <Text style={styles.emptyTitle}>This vibe is unavailable</Text>
@@ -142,19 +265,28 @@ export default function ExploreCategoryScreen() {
         </View>
       ) : items.length > 0 && !stackExhausted ? (
         <DiscoverCardStack
+          key={`${normalizedCategoryId ?? 'explore'}-${pageOffset}-${refreshKey}`}
           externalProfiles={items}
           hideHeader
-          exploreCategoryId={categoryId}
+          exploreCategoryId={normalizedCategoryId}
+          profileActionScope={profileActionScope}
           onStackEmpty={handleStackEmpty}
         />
       ) : (
-        /* Same empty state for both "0 profiles" and "all profiles swiped" */
         <View style={styles.emptyState}>
-          <Ionicons name="checkmark-circle-outline" size={64} color={COLORS.textLight} style={styles.emptyIcon} />
-          <Text style={styles.emptyTitle}>You're all caught up</Text>
-          <Text style={styles.emptySubtitle}>
-            You've seen everyone in this vibe.{'\n'}Check again later or explore other vibes.
-          </Text>
+          <Ionicons
+            name={emptyIconName}
+            size={64}
+            color={COLORS.textLight}
+            style={styles.emptyIcon}
+          />
+          <Text style={styles.emptyTitle}>{unavailableTitle}</Text>
+          <Text style={styles.emptySubtitle}>{unavailableSubtitle}</Text>
+          {showLoadMorePrompt && hasMore && (
+            <TouchableOpacity style={styles.retryButton} onPress={handleLoadMore}>
+              <Text style={styles.retryButtonText}>Load more people</Text>
+            </TouchableOpacity>
+          )}
         </View>
       )}
     </View>

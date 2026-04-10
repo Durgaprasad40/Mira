@@ -28,7 +28,8 @@ interface StandOutResult {
 interface DiscoverProfileActionResult {
   profileId: string;
   action: 'like' | 'pass' | 'super_like';
-  source: 'phase1_discover_profile';
+  source: 'phase1_discover_profile' | 'phase1_explore_profile';
+  scopeKey?: string;
 }
 
 interface InteractionStore {

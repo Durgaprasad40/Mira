@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { query, mutation, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { requireAuthenticatedUserId, resolveUserIdByAuthId } from './helpers';
 import {
   CandidateProfile,
   CurrentUser,
@@ -76,6 +76,44 @@ function getSafeDiscoverPhotos<T extends { url?: string; isNsfw?: boolean; order
     .sort((a, b) => a.order - b.order);
 }
 
+function hasDiscoverablePrimaryPhoto(
+  user: { displayPrimaryPhotoUrl?: string | null; primaryPhotoUrl?: string | null },
+): boolean {
+  const publicDisplayPhotoUrl =
+    typeof user.displayPrimaryPhotoUrl === 'string' && user.displayPrimaryPhotoUrl.trim().length > 0
+      ? user.displayPrimaryPhotoUrl
+      : user.primaryPhotoUrl;
+
+  return typeof publicDisplayPhotoUrl === 'string' && publicDisplayPhotoUrl.trim().length > 0;
+}
+
+function getDiscoverSafeCoordinates(
+  user: { publishedLat?: number | null; publishedLng?: number | null },
+): { lat: number; lng: number } | null {
+  if (typeof user.publishedLat !== 'number' || typeof user.publishedLng !== 'number') {
+    return null;
+  }
+
+  return {
+    lat: user.publishedLat,
+    lng: user.publishedLng,
+  };
+}
+
+function calculateDiscoverSafeDistance(
+  viewer: { publishedLat?: number | null; publishedLng?: number | null },
+  user: { publishedLat?: number | null; publishedLng?: number | null },
+): number | undefined {
+  const viewerCoords = getDiscoverSafeCoordinates(viewer);
+  const userCoords = getDiscoverSafeCoordinates(user);
+
+  if (!viewerCoords || !userCoords) {
+    return undefined;
+  }
+
+  return calculateDistance(viewerCoords.lat, viewerCoords.lng, userCoords.lat, userCoords.lng);
+}
+
 function sanitizeDiscoverCandidateForClient<
   T extends {
     age?: number;
@@ -125,6 +163,23 @@ const DISCOVER_BOOTSTRAP_SHORTLIST_MAX = 120;
 const DISCOVER_BOOTSTRAP_WINDOW_MULTIPLIER = 4;
 const DISCOVER_NON_RECOMMENDED_BUFFER = 12;
 const DISCOVER_PHOTO_HYDRATION_CHUNK_SIZE = 20;
+const EXPLORE_CATEGORY_PAGE_SIZE = 50;
+const EXPLORE_CATEGORY_FETCH_MULTIPLIER = 5;
+const EXPLORE_CATEGORY_MAX_FETCH = 250;
+const EXPLORE_NEARBY_DISTANCE_KM = 5;
+const LIVE_EXPLORE_CATEGORY_IDS = [
+  'serious_vibes',
+  'keep_it_casual',
+  'exploring_vibes',
+  'see_where_it_goes',
+  'open_to_vibes',
+  'just_friends',
+  'open_to_anything',
+  'single_parent',
+  'new_to_dating',
+  'nearby',
+] as const;
+const LIVE_EXPLORE_CATEGORY_ID_SET = new Set<string>(LIVE_EXPLORE_CATEGORY_IDS);
 
 type DiscoverSort =
   'recommended' | 'distance' | 'age' | 'recently_active' | 'newest';
@@ -477,6 +532,38 @@ type ExclusionSets = {
   conversationPartnerIds: Set<string>;
 };
 
+type ExploreEligibleCandidate = {
+  user: any;
+  distance?: number;
+};
+
+type ExploreUnavailableReason = 'unsupported_category' | 'location_required';
+type ExploreCategoryStatus =
+  | 'ok'
+  | 'viewer_missing'
+  | 'discovery_paused'
+  | 'invalid_category'
+  | 'location_required'
+  | 'empty_category';
+type ExploreCategoryCountsStatus = 'ok' | 'viewer_missing' | 'discovery_paused';
+
+function createEmptyExploreCounts(): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const categoryId of LIVE_EXPLORE_CATEGORY_IDS) {
+    counts[categoryId] = 0;
+  }
+  return counts;
+}
+
+function mapExploreUnavailableReasonToStatus(
+  unavailableReason: ExploreUnavailableReason,
+): Exclude<ExploreCategoryStatus, 'ok'> {
+  if (unavailableReason === 'location_required') {
+    return 'location_required';
+  }
+  return 'invalid_category';
+}
+
 /**
  * Build exclusion sets for a viewer (swipes, matches, blocks, reports, conversations)
  * P2-007 FIX: Use QueryCtx for proper type safety instead of any
@@ -623,8 +710,8 @@ function isUserEligibleForViewer(
   }
 
   // Distance check
-  if (viewer.latitude && viewer.longitude && user.latitude && user.longitude && viewer.maxDistance) {
-    const distance = calculateDistance(viewer.latitude, viewer.longitude, user.latitude, user.longitude);
+  const distance = calculateDiscoverSafeDistance(viewer, user);
+  if (distance != null && viewer.maxDistance) {
     if (!isDistanceAllowed(distance, viewer.maxDistance)) {
       debug?.logs.push(`  [EXCLUDE] ${user.name}: distance (${distance}km > ${viewer.maxDistance}km)`);
       return false;
@@ -668,6 +755,78 @@ function isUserEligibleForViewer(
 
   debug?.logs.push(`  [ELIGIBLE] ${user.name}`);
   return true;
+}
+
+async function getEligibleExploreCategoryUsers(
+  ctx: QueryCtx,
+  viewer: any,
+  viewerId: Id<'users'>,
+  categoryId: string,
+  rawFetchLimit: number,
+  exclusions: ExclusionSets,
+  cooldownThreshold: number,
+): Promise<{
+  candidates: ExploreEligibleCandidate[];
+  unavailableReason: ExploreUnavailableReason | null;
+  sourceHitFetchLimit: boolean;
+}> {
+  if (!LIVE_EXPLORE_CATEGORY_ID_SET.has(categoryId)) {
+    return { candidates: [], unavailableReason: 'unsupported_category', sourceHitFetchLimit: false };
+  }
+
+  const debug = { categoryId, logs: [] as string[] };
+  const filteredCandidates: ExploreEligibleCandidate[] = [];
+
+  if (categoryId === 'nearby') {
+    const viewerCoords = getDiscoverSafeCoordinates(viewer);
+    if (!viewerCoords) {
+      return { candidates: [], unavailableReason: 'location_required', sourceHitFetchLimit: false };
+    }
+
+    const allActiveUsers = await ctx.db
+      .query('users')
+      .withIndex('by_last_active')
+      .order('desc')
+      .filter((q) => q.eq(q.field('isActive'), true))
+      .take(rawFetchLimit);
+    const sourceHitFetchLimit = allActiveUsers.length === rawFetchLimit;
+
+    for (const user of allActiveUsers) {
+      if (!hasDiscoverablePrimaryPhoto(user)) continue;
+
+      const distance = calculateDiscoverSafeDistance(viewer, user);
+      if (distance == null || distance > EXPLORE_NEARBY_DISTANCE_KM) continue;
+
+      if (!isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)) {
+        continue;
+      }
+
+      filteredCandidates.push({ user, distance });
+    }
+
+    return { candidates: filteredCandidates, unavailableReason: null, sourceHitFetchLimit };
+  }
+
+  const categoryUsers = await ctx.db
+    .query('users')
+    .withIndex('by_discover_category', (q) => q.eq('assignedDiscoverCategory', categoryId))
+    .take(rawFetchLimit);
+  const sourceHitFetchLimit = categoryUsers.length === rawFetchLimit;
+
+  for (const user of categoryUsers) {
+    if (!hasDiscoverablePrimaryPhoto(user)) continue;
+
+    if (!isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)) {
+      continue;
+    }
+
+    filteredCandidates.push({
+      user,
+      distance: calculateDiscoverSafeDistance(viewer, user),
+    });
+  }
+
+  return { candidates: filteredCandidates, unavailableReason: null, sourceHitFetchLimit };
 }
 
 // ---------------------------------------------------------------------------
@@ -979,7 +1138,12 @@ export const getDiscoverProfiles = query({
 
       // Distance
       let distance: number | undefined;
-      if (currentUser.publishedLat && currentUser.publishedLng && user.publishedLat && user.publishedLng) {
+      if (
+        typeof currentUser.publishedLat === 'number' &&
+        typeof currentUser.publishedLng === 'number' &&
+        typeof user.publishedLat === 'number' &&
+        typeof user.publishedLng === 'number'
+      ) {
         distance = calculateDistance(
           currentUser.publishedLat, currentUser.publishedLng,
           user.publishedLat, user.publishedLng,
@@ -1321,15 +1485,8 @@ export const getExploreProfiles = query({
       if (effectiveMinAge != null && userAge < effectiveMinAge) continue;
       if (effectiveMaxAge != null && userAge > effectiveMaxAge) continue;
 
-      let distance: number | undefined;
-      if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
-        const dist = calculateDistance(
-          currentUser.latitude, currentUser.longitude,
-          user.latitude, user.longitude,
-        );
-        if (effectiveMaxDistance != null && !isDistanceAllowed(dist, effectiveMaxDistance)) continue;
-        distance = dist;
-      }
+      const distance = calculateDiscoverSafeDistance(currentUser, user);
+      if (effectiveMaxDistance != null && !isDistanceAllowed(distance, effectiveMaxDistance)) continue;
 
       if (relationshipIntent && relationshipIntent.length > 0) {
         const userRelationshipIntent = Array.isArray(user.relationshipIntent) ? user.relationshipIntent : [];
@@ -1369,7 +1526,7 @@ export const getExploreProfiles = query({
       );
       if (photos.length === 0) continue;
 
-      candidates.push({
+      candidates.push(sanitizeDiscoverCandidateForClient({
         id: user._id,
         name: user.name,
         age: userAge,
@@ -1383,11 +1540,14 @@ export const getExploreProfiles = query({
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos,
+        photos: mapDiscoverPhotosForClient(photos),
         photoBlurred: user.photoBlurred === true,
         photoCount: photos.length,
         isIncognito: user.incognitoMode === true,
-      });
+        hideAge: user.hideAge === true,
+        hideDistance: user.hideDistance === true,
+        showLastSeen: user.showLastSeen !== false,
+      }));
     }
 
     const currentActivities = Array.isArray(currentUser.activities) ? currentUser.activities : [];
@@ -1503,30 +1663,34 @@ const SHOWN_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
  */
 export const getExploreCategoryProfiles = query({
   args: {
-    viewerId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId
     categoryId: v.string(), // Category key from exploreCategories.ts
     limit: v.optional(v.number()),
     offset: v.optional(v.number()),
     refreshKey: v.optional(v.number()), // Client-only cache busting / refetch trigger
   },
   handler: async (ctx, args) => {
-    const { categoryId, limit = 20, offset = 0 } = args;
-
-    // Resolve viewer ID
-    const viewerId = await resolveUserIdByAuthId(ctx, args.viewerId as string);
-    if (!viewerId) {
-      console.log('[getExploreCategoryProfiles] Viewer not found:', args.viewerId);
-      return { profiles: [], totalCount: 0 };
-    }
+    const { categoryId, limit = EXPLORE_CATEGORY_PAGE_SIZE, offset = 0 } = args;
+    const viewerId = await requireAuthenticatedUserId(ctx);
+    const emptyResponse = (
+      status: Exclude<ExploreCategoryStatus, 'ok'>,
+    ) => ({
+      status,
+      profiles: [] as any[],
+      totalCount: 0,
+      hasMore: false,
+      partialBatchExhausted: false,
+    });
 
     const viewer = await ctx.db.get(viewerId);
-    if (!viewer) return { profiles: [], totalCount: 0 };
-    if (isUserPaused(viewer)) return { profiles: [], totalCount: 0 };
+    if (!viewer) return emptyResponse('viewer_missing');
+    if (isUserPaused(viewer)) return emptyResponse('discovery_paused');
 
     const cooldownThreshold = Date.now() - SHOWN_COOLDOWN_MS;
-
-    // FIXED: Use shared helper to build exclusion sets (same as counts query)
     const exclusions = await buildExclusionSets(ctx, viewerId);
+    const rawFetchLimit = Math.min(
+      Math.max((offset + limit) * EXPLORE_CATEGORY_FETCH_MULTIPLIER, limit, EXPLORE_CATEGORY_PAGE_SIZE),
+      EXPLORE_CATEGORY_MAX_FETCH,
+    );
 
     // Also fetch likes for "they liked me" badge
     const likesToMe = await ctx.db
@@ -1536,84 +1700,23 @@ export const getExploreCategoryProfiles = query({
       .collect();
     const usersWhoLikedMe = new Set<string>();
     for (const like of likesToMe) usersWhoLikedMe.add(like.fromUserId as string);
+    const {
+      candidates: filteredCandidates,
+      unavailableReason,
+      sourceHitFetchLimit,
+    } = await getEligibleExploreCategoryUsers(
+      ctx,
+      viewer,
+      viewerId,
+      categoryId,
+      rawFetchLimit,
+      exclusions,
+      cooldownThreshold,
+    );
 
-    // Distance threshold for "nearby" category (5km)
-    const NEARBY_DISTANCE_KM = 5;
-
-    // DEBUG: Collect logs
-    const debug = { categoryId, logs: [] as string[] };
-    const filteredCandidates: { user: any; distance?: number }[] = [];
-
-    // Special handling for "nearby" - uses location, not assignedDiscoverCategory
-    if (categoryId === 'nearby') {
-      // Skip if viewer has no location
-      if (!viewer.latitude || !viewer.longitude) {
-        return { profiles: [], totalCount: 0 };
-      }
-
-      // Query users by recent activity and filter by distance
-      // Use by_last_active index to get recently active users
-      const fetchLimit = (offset + limit) * 5;
-      const allActiveUsers = await ctx.db
-        .query('users')
-        .withIndex('by_last_active')
-        .order('desc')
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .take(fetchLimit);
-
-      debug.logs.push(`[nearby] Raw candidates: ${allActiveUsers.length}`);
-
-      for (const user of allActiveUsers) {
-        // Skip users without location
-        if (!user.latitude || !user.longitude) continue;
-
-        // Check distance
-        const distance = calculateDistance(
-          viewer.latitude, viewer.longitude,
-          user.latitude, user.longitude
-        );
-        if (distance > NEARBY_DISTANCE_KM) continue;
-
-        // Use shared eligibility check
-        if (!isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)) {
-          continue;
-        }
-
-        filteredCandidates.push({ user, distance });
-      }
-    } else {
-      // Standard category handling - use assignedDiscoverCategory index
-      const fetchLimit = (offset + limit) * 5; // Buffer for filtering
-      const categoryUsers = await ctx.db
-        .query('users')
-        .withIndex('by_discover_category', (q) =>
-          q.eq('assignedDiscoverCategory', categoryId)
-        )
-        .take(fetchLimit);
-
-      debug.logs.push(`[${categoryId}] Raw candidates: ${categoryUsers.length}`);
-
-      // FIXED: Filter using shared eligibility helper (same as counts query)
-      for (const user of categoryUsers) {
-        // Use shared eligibility check
-        if (!isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)) {
-          continue;
-        }
-
-        // Calculate distance for display (not filtering - that's in shared helper)
-        let distance: number | undefined;
-        if (viewer.latitude && viewer.longitude && user.latitude && user.longitude) {
-          distance = calculateDistance(
-            viewer.latitude, viewer.longitude,
-            user.latitude, user.longitude,
-          );
-        }
-
-        filteredCandidates.push({ user, distance });
-      }
+    if (unavailableReason) {
+      return emptyResponse(mapExploreUnavailableReasonToStatus(unavailableReason));
     }
-
-    debug.logs.push(`[${categoryId}] Final eligible: ${filteredCandidates.length}`);
 
     // Batch fetch photos for filtered candidates
     const photoResults = await Promise.all(
@@ -1639,7 +1742,7 @@ export const getExploreCategoryProfiles = query({
       const userAge = calculateAge(user.dateOfBirth);
       const theyLikedMe = usersWhoLikedMe.has(user._id as string);
 
-      candidates.push({
+      candidates.push(sanitizeDiscoverCandidateForClient({
         id: user._id,
         name: user.name,
         age: userAge,
@@ -1664,15 +1767,16 @@ export const getExploreCategoryProfiles = query({
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos: safePhotos,
+        photos: mapDiscoverPhotosForClient(safePhotos),
         photoBlurred: user.photoBlurred === true,
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
         photoCount: safePhotos.length,
         isIncognito: user.incognitoMode === true,
-        // DISCOVER-CATEGORY-FIX: Include category info for debugging/UI
-        assignedCategory: user.assignedDiscoverCategory,
-      });
+        hideAge: user.hideAge === true,
+        hideDistance: user.hideDistance === true,
+        showLastSeen: user.showLastSeen !== false,
+      }));
     }
 
     // Sort by activity score (recently active first)
@@ -1681,12 +1785,21 @@ export const getExploreCategoryProfiles = query({
       if (a.isBoosted && !b.isBoosted) return -1;
       if (!a.isBoosted && b.isBoosted) return 1;
       // Then by recency
-      return b.lastActive - a.lastActive;
+      const aLastActive = typeof a.lastActive === 'number' ? a.lastActive : 0;
+      const bLastActive = typeof b.lastActive === 'number' ? b.lastActive : 0;
+      return bLastActive - aLastActive;
     });
 
+    const totalCount = candidates.length;
+    const hasMore = offset + limit < totalCount;
+    const status: ExploreCategoryStatus = totalCount > 0 ? 'ok' : 'empty_category';
+
     return {
+      status,
       profiles: candidates.slice(offset, offset + limit),
-      totalCount: candidates.length,
+      totalCount,
+      hasMore,
+      partialBatchExhausted: status === 'ok' && !hasMore && sourceHitFetchLimit,
     };
   },
 });
@@ -1798,110 +1911,48 @@ export const assignUserCategory = mutation({
  */
 export const getExploreCategoryCounts = query({
   args: {
-    viewerId: v.union(v.id('users'), v.string()),
     refreshKey: v.optional(v.number()), // Client-only cache busting / refetch trigger
   },
-  handler: async (ctx, args) => {
-    // Resolve viewer ID
-    const viewerId = await resolveUserIdByAuthId(ctx, args.viewerId as string);
-    if (!viewerId) {
-      console.log('[getExploreCategoryCounts] Viewer not found:', args.viewerId);
-      return {};
+  handler: async (ctx) => {
+    const viewerId = await requireAuthenticatedUserId(ctx);
+    const emptyCounts = createEmptyExploreCounts();
+    const viewer = await ctx.db.get(viewerId);
+    if (!viewer) {
+      return {
+        status: 'viewer_missing' as ExploreCategoryCountsStatus,
+        counts: emptyCounts,
+      };
     }
 
-    const viewer = await ctx.db.get(viewerId);
-    if (!viewer) return {};
-
-    // FIXED: Check if viewer is paused (same as detail query)
-    if (isUserPaused(viewer)) return {};
+    if (isUserPaused(viewer)) {
+      return {
+        status: 'discovery_paused' as ExploreCategoryCountsStatus,
+        counts: emptyCounts,
+      };
+    }
 
     const cooldownThreshold = Date.now() - SHOWN_COOLDOWN_MS;
-
-    // FIXED: Build exclusion sets using shared helper (same as detail query)
     const exclusions = await buildExclusionSets(ctx, viewerId);
 
-    // Define category IDs - CURRENT PRODUCT TAXONOMY
-    // (imported from discoverCategories would create circular dep)
-    const categoryIds = [
-      // Relationship (9)
-      'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes', 'open_to_vibes',
-      'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating',
-      // Right Now (4) - including 'nearby' with special location handling
-      'nearby', 'online_now', 'active_today', 'free_tonight',
-      // Interest (7)
-      'coffee_date', 'nature_lovers', 'binge_watchers', 'travel', 'gaming', 'fitness', 'music',
-    ];
+    const counts = createEmptyExploreCounts();
 
-    // Distance threshold for "nearby" category (5km)
-    const NEARBY_DISTANCE_KM = 5;
+    for (const categoryId of LIVE_EXPLORE_CATEGORY_IDS) {
+      const { candidates, unavailableReason } = await getEligibleExploreCategoryUsers(
+        ctx,
+        viewer,
+        viewerId,
+        categoryId,
+        EXPLORE_CATEGORY_MAX_FETCH,
+        exclusions,
+        cooldownThreshold,
+      );
 
-    const counts: Record<string, number> = {};
-
-    // Count users per category using SHARED eligibility logic
-    for (const categoryId of categoryIds) {
-      // Special handling for "nearby" - uses location, not assignedDiscoverCategory
-      if (categoryId === 'nearby') {
-        // Skip if viewer has no location
-        if (!viewer.latitude || !viewer.longitude) {
-          counts['nearby'] = 0;
-          continue;
-        }
-
-        // Query users by recent activity and filter by distance
-        // Use by_last_active index to get recently active users
-        const allActiveUsers = await ctx.db
-          .query('users')
-          .withIndex('by_last_active')
-          .order('desc')
-          .filter((q) => q.eq(q.field('isActive'), true))
-          .take(200); // Cap for efficiency
-
-        const debug = { categoryId: 'nearby', logs: [] as string[] };
-        let nearbyCount = 0;
-
-        for (const user of allActiveUsers) {
-          // Skip users without location
-          if (!user.latitude || !user.longitude) continue;
-
-          // Check distance
-          const distance = calculateDistance(
-            viewer.latitude, viewer.longitude,
-            user.latitude, user.longitude
-          );
-          if (distance > NEARBY_DISTANCE_KM) continue;
-
-          // Use shared eligibility check
-          if (isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)) {
-            nearbyCount++;
-          }
-        }
-
-        counts['nearby'] = nearbyCount;
-        continue;
-      }
-
-      // Standard category handling - use assignedDiscoverCategory index
-      const users = await ctx.db
-        .query('users')
-        .withIndex('by_discover_category', (q) =>
-          q.eq('assignedDiscoverCategory', categoryId)
-        )
-        .take(100); // Cap for efficiency
-
-      // DEBUG: Collect logs for this category
-      const debug = { categoryId, logs: [] as string[] };
-      debug.logs.push(`[${categoryId}] Raw candidates: ${users.length}`);
-
-      // FIXED: Use shared eligibility helper (same as detail query)
-      const validCount = users.filter(user =>
-        isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)
-      ).length;
-
-      debug.logs.push(`[${categoryId}] Final eligible: ${validCount}`);
-
-      counts[categoryId] = validCount;
+      counts[categoryId] = unavailableReason ? 0 : candidates.length;
     }
 
-    return counts;
+    return {
+      status: 'ok' as ExploreCategoryCountsStatus,
+      counts,
+    };
   },
 });

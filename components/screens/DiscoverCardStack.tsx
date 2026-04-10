@@ -53,7 +53,6 @@ import { Ionicons } from "@expo/vector-icons";
 import { useInteractionStore } from "@/stores/interactionStore";
 import { asUserId } from "@/convex/id";
 import { ProfileData, getRenderableProfilePhotos, toProfileData } from "@/lib/profileData";
-import { rankProfiles } from "@/lib/rankProfiles";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
 // usePrivateChatStore - read-only for retention UI hints (conversations count)
@@ -342,6 +341,8 @@ export interface DiscoverCardStackProps {
   hideHeader?: boolean;
   /** Category ID when used from Explore - shows "Why this profile" tag */
   exploreCategoryId?: string;
+  /** Scope key for profile-action sync when the stack is used outside main Discover. */
+  profileActionScope?: string;
   /** Callback when user swipes through all profiles in stack */
   onStackEmpty?: () => void;
 }
@@ -370,7 +371,7 @@ const CATEGORY_TAG_LABELS: Record<string, string> = {
   music: "Music lover",
 };
 
-export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader, exploreCategoryId, onStackEmpty }: DiscoverCardStackProps) {
+export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader, exploreCategoryId, profileActionScope, onStackEmpty }: DiscoverCardStackProps) {
   const dark = theme === "dark";
   const isPhase2 = mode === "phase2";
   const C = dark ? INCOGNITO_COLORS : COLORS;
@@ -778,7 +779,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // VIEWER PROFILE QUERY - For computing common points with candidates
   // ═══════════════════════════════════════════════════════════════════════════
   const viewerProfileArgs = useMemo(
-    () => userId && !isPhase2 ? { userId } : "skip" as const,
+    () => userId && !isPhase2 ? {} : "skip" as const,
     [userId, isPhase2]
   );
   const viewerProfile = useQuery(api.users.getCurrentUserDiscoverContext, viewerProfileArgs);
@@ -882,8 +883,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         };
       });
 
-      // Phase-2 and demo mode: preserve source order exactly as provided.
-      return (isDemoMode || isPhase2) ? mapped : rankProfiles(mapped);
+      // Preserve source order for externally supplied decks such as Explore.
+      return mapped;
     }
     if (isDemoMode) {
       // Phase-2 demo mode: use DEMO_INCOGNITO_PROFILES (with privateIntentKeys)
@@ -1020,7 +1021,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     // Phase-1 live results are already ranked/sorted by the backend.
     return profilesSafe.map(toProfileData);
-  }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
+  }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, exploreCategoryId, isDemoMode, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
 
   // Drop profiles with no valid primary photo — prevents blank Discover cards
   // SOFT_MATCH_FIX: For Phase-2, allow profiles without photos (ProfileCard shows placeholder)
@@ -1748,14 +1749,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       const profileUserId = c.userId || c.id; // Prefer userId, fallback to id
       router.push(`/(main)/(private)/p2-profile/${profileUserId}` as any);
     } else {
-      // Phase-1: mark Discover as the source so profile actions can sync the deck
-      router.push(`/(main)/profile/${c.id}?source=phase1_discover` as any);
+      const isExploreDeck = !!externalProfiles;
+      const source = isExploreDeck ? 'phase1_explore' : 'phase1_discover';
+      const scopeQuery = isExploreDeck && profileActionScope
+        ? `&actionScope=${encodeURIComponent(profileActionScope)}`
+        : '';
+      router.push(`/(main)/profile/${c.id}?source=${source}${scopeQuery}` as any);
     }
-  }, [isPhase2, mode]);
+  }, [externalProfiles, isPhase2, mode, profileActionScope]);
 
   useEffect(() => {
     if (!discoverProfileActionResult || isPhase2) return;
-    if (discoverProfileActionResult.source !== "phase1_discover_profile") return;
+    if (externalProfiles) {
+      if (discoverProfileActionResult.source !== "phase1_explore_profile") return;
+      if (!profileActionScope || discoverProfileActionResult.scopeKey !== profileActionScope) return;
+    } else if (discoverProfileActionResult.source !== "phase1_discover_profile") {
+      return;
+    }
 
     const { profileId } = discoverProfileActionResult;
     const queueBefore = visibleQueueRef.current;
@@ -1777,7 +1787,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       setIndex((prev) => prev + 1);
     }
     setDiscoverProfileActionResult(null);
-  }, [discoverProfileActionResult, isPhase2, refillQueue, setDiscoverProfileActionResult]);
+  }, [discoverProfileActionResult, externalProfiles, isPhase2, profileActionScope, refillQueue, setDiscoverProfileActionResult]);
 
   const resetPosition = useCallback(() => {
     const currentPanX = getActivePanX();
@@ -2510,21 +2520,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   if (hasReachedLikeLimit()) {
     return (
       <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        {/* Header */}
-        <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
-            <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-          </TouchableOpacity>
-          <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-            {unseenCount > 0 && (
-              <View style={styles.bellBadge}>
-                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-        </View>
+        {!hideHeader && (
+          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
+              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            </TouchableOpacity>
+            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              {unseenCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          </View>
+        )}
 
         <View style={styles.limitContainer}>
           <Ionicons name="heart-circle-outline" size={80} color={COLORS.primary} />
@@ -2532,7 +2543,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           <Text style={[styles.limitSubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Likes refresh at midnight</Text>
           <TouchableOpacity
             style={styles.limitButton}
-            onPress={() => router.push("/(main)/(private)/phase2-likes" as any)}
+            onPress={() => router.push("/(main)/likes" as any)}
           >
             <Ionicons name="heart" size={18} color={COLORS.white} />
             <Text style={styles.limitButtonText}>Check who liked you</Text>

@@ -70,12 +70,15 @@ function getVerificationBadgeState(profile: { isVerified?: boolean; verification
 }
 
 export default function ViewProfileScreen() {
-  const { id: userId, mode, fromChat, source } = useLocalSearchParams<{
+  const { id: userId, mode, fromChat, source, actionScope } = useLocalSearchParams<{
     id: string;
     mode?: string;
     fromChat?: string;
     source?: string;
+    actionScope?: string;
   }>();
+  const normalizedSource = Array.isArray(source) ? source[0] : source;
+  const normalizedActionScope = Array.isArray(actionScope) ? actionScope[0] : actionScope;
   const isPhase2 = mode === 'phase2';
   const isConfessPreview = mode === 'confess_preview';
   const router = useRouter();
@@ -92,7 +95,7 @@ export default function ViewProfileScreen() {
   const convexPhase1Profile = useQuery(
     api.users.getUserById,
     !isDemoMode && !isPhase2 && userId && currentUserId
-      ? { userId: userId as any, viewerId: currentUserId as any }
+      ? { userId: userId as any }
       : 'skip'
   );
 
@@ -270,12 +273,25 @@ export default function ViewProfileScreen() {
   }, [isDemoMode, isPhase2, token, userId]);
 
   const syncPhase1DiscoverAction = (action: 'like' | 'pass' | 'super_like') => {
-    if (source !== 'phase1_discover' || isPhase2 || !userId) return;
-    setDiscoverProfileActionResult({
-      profileId: userId,
-      action,
-      source: 'phase1_discover_profile',
-    });
+    if (isPhase2 || !userId) return;
+
+    if (normalizedSource === 'phase1_discover') {
+      setDiscoverProfileActionResult({
+        profileId: userId,
+        action,
+        source: 'phase1_discover_profile',
+      });
+      return;
+    }
+
+    if (normalizedSource === 'phase1_explore' && normalizedActionScope) {
+      setDiscoverProfileActionResult({
+        profileId: userId,
+        action,
+        source: 'phase1_explore_profile',
+        scopeKey: normalizedActionScope,
+      });
+    }
   };
 
   const handleSwipe = async (action: 'like' | 'pass' | 'super_like') => {

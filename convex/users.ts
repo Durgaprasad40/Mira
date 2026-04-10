@@ -8,6 +8,7 @@ import {
   ensureUserByAuthId,
   validateSessionToken,
   requireAuthenticatedSessionUser,
+  requireAuthenticatedUserId,
 } from "./helpers";
 
 // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
@@ -124,15 +125,9 @@ export const getCurrentUser = query({
 });
 
 export const getCurrentUserDiscoverContext = query({
-  args: {
-    userId: v.union(v.id("users"), v.string()),
-  },
-  handler: async (ctx, args) => {
-    const convexUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!convexUserId) {
-      return null;
-    }
-
+  args: {},
+  handler: async (ctx) => {
+    const convexUserId = await requireAuthenticatedUserId(ctx);
     const user = await ctx.db.get(convexUserId);
     if (!user) {
       return null;
@@ -151,6 +146,8 @@ export const getCurrentUserDiscoverContext = query({
       hideAge: user.hideAge === true,
       hideDistance: user.hideDistance === true,
       showLastSeen: user.showLastSeen !== false,
+      hasDiscoverLocation:
+        typeof user.publishedLat === 'number' && typeof user.publishedLng === 'number',
     };
   },
 });
@@ -182,9 +179,9 @@ export const ensureCurrentUser = mutation({
 export const getUserById = query({
   args: {
     userId: v.id("users"),
-    viewerId: v.id("users"),
   },
   handler: async (ctx, args) => {
+    const viewerId = await requireAuthenticatedUserId(ctx);
     const user = await ctx.db.get(args.userId);
     if (!user || !user.isActive || user.isBanned) return null;
 
@@ -192,7 +189,7 @@ export const getUserById = query({
     const blocked = await ctx.db
       .query("blocks")
       .withIndex("by_blocker_blocked", (q) =>
-        q.eq("blockerId", args.userId).eq("blockedUserId", args.viewerId),
+        q.eq("blockerId", args.userId).eq("blockedUserId", viewerId),
       )
       .first();
 
@@ -201,7 +198,7 @@ export const getUserById = query({
     const reverseBlocked = await ctx.db
       .query("blocks")
       .withIndex("by_blocker_blocked", (q) =>
-        q.eq("blockerId", args.viewerId).eq("blockedUserId", args.userId),
+        q.eq("blockerId", viewerId).eq("blockedUserId", args.userId),
       )
       .first();
 
@@ -216,8 +213,8 @@ export const getUserById = query({
         q.and(
           q.eq(q.field("anonymousParticipantId"), args.userId),
           q.or(
-            q.eq(q.field("participants"), [args.userId, args.viewerId]),
-            q.eq(q.field("participants"), [args.viewerId, args.userId])
+            q.eq(q.field("participants"), [args.userId, viewerId]),
+            q.eq(q.field("participants"), [viewerId, args.userId])
           )
         )
       )
@@ -242,7 +239,7 @@ export const getUserById = query({
     const safePhotos = getSafeProfilePhotos(photos);
 
     // Calculate distance if both have location
-    const viewer = await ctx.db.get(args.viewerId);
+    const viewer = await ctx.db.get(viewerId);
     let distance: number | undefined;
     if (
       user.publishedLat &&
@@ -272,7 +269,7 @@ export const getUserById = query({
       .withIndex("by_user1", (q) => q.eq("user1Id", args.userId))
       .filter((q) =>
         q.and(
-          q.eq(q.field("user2Id"), args.viewerId),
+          q.eq(q.field("user2Id"), viewerId),
           q.eq(q.field("matchSource"), "confession_comment" as any)
         )
       )
@@ -281,7 +278,7 @@ export const getUserById = query({
     const reverseConfessionCommentMatch = !confessionCommentMatch
       ? await ctx.db
           .query("matches")
-          .withIndex("by_user1", (q) => q.eq("user1Id", args.viewerId))
+          .withIndex("by_user1", (q) => q.eq("user1Id", viewerId))
           .filter((q) =>
             q.and(
               q.eq(q.field("user2Id"), args.userId),
@@ -1820,6 +1817,10 @@ export const completeOnboarding = mutation({
         }
       }
     }
+
+    await ctx.scheduler.runAfter(0, internal.discoverCategories.assignCategory, {
+      userId,
+    });
 
     return { success: true };
   },
