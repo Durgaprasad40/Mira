@@ -15,7 +15,8 @@ import {
   ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, ACTIVITY_FILTERS, ActivityFilter } from '@/lib/constants';
+import { COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
+import type { ActivityFilter } from '@/types';
 
 const MAX_INTERESTS = 5;
 

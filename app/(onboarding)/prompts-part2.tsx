@@ -56,6 +56,10 @@ type SectionPromptEntry = {
   answer: string;
 };
 
+function isSectionKey(value: string | undefined): value is SectionKey {
+  return value === 'builder' || value === 'performer' || value === 'seeker' || value === 'grounded';
+}
+
 // Section configuration with display labels (Section 1-4)
 const SECTIONS: { key: SectionKey; label: string; questions: { id: string; text: string }[] }[] = [
   { key: 'builder', label: 'Section 1', questions: BUILDER_PROMPTS },
@@ -125,9 +129,9 @@ export default function PromptsPart2Screen() {
       };
 
       // Try to match prompts to sections by question text
-      existingPrompts.forEach((prompt: { question: string; answer: string; section?: SectionKey }, idx: number) => {
+      existingPrompts.forEach((prompt: { question: string; answer: string; section?: string }, idx: number) => {
         // If prompt has section field, use it directly
-        if (prompt.section && SECTIONS.find(s => s.key === prompt.section)) {
+        if (isSectionKey(prompt.section)) {
           if (__DEV__) console.log(`[PROMPTS_HYDRATE] Prompt[${idx}] matched by SECTION field:`, prompt.section);
           newSectionAnswers[prompt.section] = {
             section: prompt.section,
@@ -180,8 +184,8 @@ export default function PromptsPart2Screen() {
         grounded: null,
       };
 
-      profilePrompts.forEach((prompt: { question: string; answer: string; section?: SectionKey }) => {
-        if (prompt.section && SECTIONS.find(s => s.key === prompt.section)) {
+      profilePrompts.forEach((prompt: { question: string; answer: string; section?: string }) => {
+        if (isSectionKey(prompt.section)) {
           newSectionAnswers[prompt.section] = {
             section: prompt.section,
             question: prompt.question,

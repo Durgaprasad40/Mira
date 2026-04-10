@@ -1572,6 +1572,11 @@ const styles = StyleSheet.create({
     color: C.text,
     fontWeight: '600',
   },
+  detailHint: {
+    marginTop: 10,
+    fontSize: 12,
+    color: C.textLight,
+  },
 
   // Save Button
   saveButtonContainer: {

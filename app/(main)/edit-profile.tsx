@@ -49,8 +49,8 @@ import {
   TravelStyleValue,
   WorkStyleValue,
   CoreValueValue,
-  ActivityFilter,
 } from '@/lib/constants';
+import type { ActivityFilter } from '@/types';
 
 // Section-based prompt types
 type SectionKey = 'builder' | 'performer' | 'seeker' | 'grounded';
