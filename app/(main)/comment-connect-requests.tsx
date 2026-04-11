@@ -8,7 +8,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
@@ -52,6 +52,7 @@ interface PendingConnect {
 
 export default function CommentConnectRequestsScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
@@ -220,10 +221,10 @@ export default function CommentConnectRequestsScreen() {
 
   const renderEmpty = () => (
     <View style={styles.emptyContainer}>
-      <Text style={styles.emptyEmoji}>💬</Text>
-      <Text style={styles.emptyTitle}>No connection requests</Text>
+      <Text style={styles.emptyEmoji}>💌</Text>
+      <Text style={styles.emptyTitle}>No requests yet</Text>
       <Text style={styles.emptySubtitle}>
-        When confession authors want to connect with you based on your reply, their requests will appear here.
+        If a confession author wants to continue the conversation from your reply, the request will appear here.
       </Text>
     </View>
   );
@@ -234,8 +235,8 @@ export default function CommentConnectRequestsScreen() {
       <LoadingGuard
         isLoading
         onRetry={handleRetry}
-        title="Couldn't load connect requests"
-        subtitle="Check your connection and try again."
+        title="We couldn't open connect requests"
+        subtitle="Try again when your connection is back."
       >
         <SafeAreaView style={styles.container} edges={['top']}>
           <View style={styles.navBar}>
@@ -247,6 +248,7 @@ export default function CommentConnectRequestsScreen() {
           </View>
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color={COLORS.primary} />
+            <Text style={styles.loadingText}>Checking for new requests...</Text>
           </View>
         </SafeAreaView>
       </LoadingGuard>
@@ -270,7 +272,7 @@ export default function CommentConnectRequestsScreen() {
       <View style={styles.infoBanner}>
         <Ionicons name="information-circle-outline" size={18} color={COLORS.primary} />
         <Text style={styles.infoBannerText}>
-          Authors liked your reply and want to connect. Accept to start chatting!
+          When a confession author wants to keep the conversation going, you can accept it here.
         </Text>
       </View>
 
@@ -280,7 +282,11 @@ export default function CommentConnectRequestsScreen() {
         keyExtractor={(item) => item.connectId}
         renderItem={renderItem}
         ListEmptyComponent={renderEmpty}
-        contentContainerStyle={[styles.listContent, data.length === 0 && styles.listContentEmpty]}
+        contentContainerStyle={[
+          styles.listContent,
+          { paddingBottom: Math.max(insets.bottom + SPACING.lg, SPACING.xl) },
+          data.length === 0 && styles.listContentEmpty,
+        ]}
         showsVerticalScrollIndicator={false}
       />
     </SafeAreaView>
@@ -290,7 +296,7 @@ export default function CommentConnectRequestsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: COLORS.white,
+    backgroundColor: COLORS.backgroundDark,
   },
   navBar: {
     flexDirection: 'row',
@@ -311,14 +317,26 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
+  },
+  loadingText: {
+    fontSize: FONT_SIZE.md,
+    color: COLORS.textMuted,
   },
   infoBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.sm,
+    marginHorizontal: SPACING.base,
+    marginTop: SPACING.base,
+    marginBottom: SPACING.sm,
     paddingHorizontal: SPACING.base,
     paddingVertical: SPACING.md,
-    backgroundColor: 'rgba(255,107,107,0.08)',
+    backgroundColor: COLORS.white,
+    borderRadius: moderateScale(18, 0.3),
+    borderWidth: HAIRLINE,
+    borderColor: COLORS.border,
   },
   infoBannerText: {
     flex: 1,
@@ -328,7 +346,6 @@ const styles = StyleSheet.create({
   },
   listContent: {
     padding: SPACING.base,
-    paddingBottom: SPACING.xl,
   },
   listContentEmpty: {
     flex: 1,
@@ -337,7 +354,14 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: SPACING.xl,
+    marginHorizontal: SPACING.base,
+    marginTop: SPACING.lg,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.xl,
+    backgroundColor: COLORS.white,
+    borderRadius: moderateScale(22, 0.3),
+    borderWidth: HAIRLINE,
+    borderColor: COLORS.border,
   },
   emptyEmoji: {
     fontSize: moderateScale(48, 0.3),
@@ -358,16 +382,16 @@ const styles = StyleSheet.create({
   },
   requestCard: {
     backgroundColor: COLORS.white,
-    borderRadius: SIZES.radius.md,
+    borderRadius: moderateScale(18, 0.3),
     padding: SPACING.md,
     marginBottom: SPACING.md,
     borderWidth: HAIRLINE,
     borderColor: COLORS.border,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
   },
   confessionPreview: {
     marginBottom: SPACING.md,
@@ -454,7 +478,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: SPACING.xs,
     paddingVertical: SPACING.md,
-    borderRadius: SIZES.radius.xl,
+    borderRadius: moderateScale(18, 0.3),
     backgroundColor: COLORS.backgroundDark,
     borderWidth: HAIRLINE,
     borderColor: COLORS.border,
@@ -471,7 +495,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: SPACING.xs,
     paddingVertical: SPACING.md,
-    borderRadius: SIZES.radius.xl,
+    borderRadius: moderateScale(18, 0.3),
     backgroundColor: COLORS.primary,
   },
   acceptButtonText: {

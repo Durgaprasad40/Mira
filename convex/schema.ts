@@ -737,6 +737,9 @@ export default defineSchema({
       v.literal('message'),
       v.literal('like'),
       v.literal('super_like'),
+      v.literal('comment_connect'),
+      v.literal('confession_reaction'),
+      v.literal('confession_reply'),
       v.literal('phase2_match'),
       v.literal('phase2_like'),
       v.literal('crossed_paths'),
@@ -752,6 +755,7 @@ export default defineSchema({
       conversationId: v.optional(v.string()),
       otherUserId: v.optional(v.string()),
       userId: v.optional(v.string()),
+      confessionId: v.optional(v.string()),
       roomId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
       likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
@@ -1584,6 +1588,17 @@ export default defineSchema({
     authorGender: v.optional(v.string()),
     replyCount: v.number(),
     reactionCount: v.number(),
+    topEmojis: v.optional(v.array(v.object({
+      emoji: v.string(),
+      count: v.number(),
+    }))),
+    replyPreviews: v.optional(v.array(v.object({
+      _id: v.id('confessionReplies'),
+      text: v.string(),
+      isAnonymous: v.boolean(),
+      type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
+      createdAt: v.number(),
+    }))),
     voiceReplyCount: v.optional(v.number()),
     lastEngagementAt: v.optional(v.number()),
     rankingScore: v.optional(v.number()),
@@ -1601,6 +1616,7 @@ export default defineSchema({
   })
     .index('by_created', ['createdAt'])
     .index('by_user', ['userId'])
+    .index('by_user_created', ['userId', 'createdAt'])
     .index('by_expires', ['expiresAt'])
     .index('by_tagged_user', ['taggedUserId']),
 
@@ -1662,6 +1678,7 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index('by_confession', ['confessionId'])
+    .index('by_confession_created', ['confessionId', 'createdAt'])
     .index('by_user', ['userId']),
 
   // Reply Reports table (per-reporter moderation on replies)

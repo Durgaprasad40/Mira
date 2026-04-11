@@ -1,7 +1,9 @@
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import { v } from 'convex/values';
+import { paginationOptsValidator } from 'convex/server';
 import { Doc, Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+import { ensureUserByAuthId, isPairEligibleForPhase, resolveUserIdByAuthId } from './helpers';
+import { isContentClean } from './contentFilter';
 
 // Phone number & email patterns for server-side validation
 const PHONE_PATTERN = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
@@ -22,6 +24,19 @@ const CONFESSION_REPLY_LIMIT = 200;
 const MY_CONFESSIONS_LIMIT = 100;
 const TAGGED_CONFESSION_LIMIT = 50;
 const CONNECT_CLEANUP_BATCH = 100;
+
+type StoredEmojiCount = {
+  emoji: string;
+  count: number;
+};
+
+type StoredReplyPreview = {
+  _id: Id<'confessionReplies'>;
+  text: string;
+  isAnonymous: boolean;
+  type: 'text' | 'voice';
+  createdAt: number;
+};
 
 async function getCachedConfession(
   ctx: { db: any },
@@ -82,6 +97,203 @@ function clampLimit(requested: number | undefined, fallback: number, max: number
   return Math.min(rounded, max);
 }
 
+function normalizeTopEmojis(topEmojis: StoredEmojiCount[] | undefined): StoredEmojiCount[] {
+  return Array.isArray(topEmojis) ? topEmojis.slice(0, 3) : [];
+}
+
+function normalizeReplyPreviews(
+  replyPreviews: StoredReplyPreview[] | undefined,
+  reportedReplyIds?: Set<Id<'confessionReplies'>>
+): StoredReplyPreview[] {
+  if (!Array.isArray(replyPreviews) || replyPreviews.length === 0) {
+    return [];
+  }
+
+  const filtered = reportedReplyIds?.size
+    ? replyPreviews.filter((reply) => !reportedReplyIds.has(reply._id))
+    : replyPreviews;
+
+  return filtered.slice(0, 2).map((reply) => ({
+    _id: reply._id,
+    text: reply.text,
+    isAnonymous: reply.isAnonymous,
+    type: reply.type || 'text',
+    createdAt: reply.createdAt,
+  }));
+}
+
+function buildTopEmojisFromReactions(
+  reactions: Array<Doc<'confessionReactions'>>
+): StoredEmojiCount[] {
+  const emojiCounts: Record<string, number> = {};
+  for (const reaction of reactions) {
+    if (/^[a-zA-Z0-9_\s]+$/.test(reaction.type)) continue;
+    emojiCounts[reaction.type] = (emojiCounts[reaction.type] || 0) + 1;
+  }
+
+  return Object.entries(emojiCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([emoji, count]) => ({ emoji, count }));
+}
+
+function sanitizeConfessionForViewer(
+  confession: Doc<'confessions'>,
+  options?: {
+    reportedReplyIds?: Set<Id<'confessionReplies'>>;
+    reportedTopLevelReplyCount?: number;
+  }
+) {
+  const { taggedUserId: _omitTagged, ...confessionWithoutTagged } = confession;
+  const safeConfession = confession.isAnonymous ? confessionWithoutTagged : confession;
+  const reportedTopLevelReplyCount = options?.reportedTopLevelReplyCount ?? 0;
+
+  return {
+    ...safeConfession,
+    replyCount: Math.max(0, (confession.replyCount || 0) - reportedTopLevelReplyCount),
+    replyPreviews: normalizeReplyPreviews(confession.replyPreviews as StoredReplyPreview[] | undefined, options?.reportedReplyIds),
+    topEmojis: normalizeTopEmojis(confession.topEmojis as StoredEmojiCount[] | undefined),
+  };
+}
+
+async function recomputeConfessionReactionSummary(
+  ctx: MutationCtx,
+  confessionId: Id<'confessions'>
+) {
+  const allReactions = await ctx.db
+    .query('confessionReactions')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
+    .collect();
+
+  await ctx.db.patch(confessionId, {
+    reactionCount: allReactions.length,
+    topEmojis: buildTopEmojisFromReactions(allReactions),
+  });
+}
+
+async function recomputeConfessionReplyPreviewSummary(
+  ctx: MutationCtx,
+  confessionId: Id<'confessions'>
+) {
+  const replies = await ctx.db
+    .query('confessionReplies')
+    .withIndex('by_confession_created', (q) => q.eq('confessionId', confessionId))
+    .order('asc')
+    .take(CONFESSION_PREVIEW_REPLY_SCAN_LIMIT);
+
+  const topLevelReplies = replies.filter((reply) => !reply.parentReplyId).slice(0, 2);
+
+  await ctx.db.patch(confessionId, {
+    replyPreviews: topLevelReplies.map((reply) => ({
+      _id: reply._id,
+      text: reply.text,
+      isAnonymous: reply.isAnonymous,
+      type: (reply.type || 'text') as 'text' | 'voice',
+      createdAt: reply.createdAt,
+    })),
+  });
+}
+
+async function isBlockedBidirectional(
+  ctx: QueryCtx | MutationCtx,
+  userA: Id<'users'>,
+  userB: Id<'users'>
+): Promise<boolean> {
+  if (userA === userB) {
+    return false;
+  }
+
+  const [blockA, blockB] = await Promise.all([
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userA).eq('blockedUserId', userB))
+      .first(),
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userB).eq('blockedUserId', userA))
+      .first(),
+  ]);
+
+  return !!blockA || !!blockB;
+}
+
+function getPairCacheKey(userA: Id<'users'>, userB: Id<'users'>): string {
+  const a = userA as string;
+  const b = userB as string;
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+async function isBlockedBidirectionalCached(
+  ctx: QueryCtx | MutationCtx,
+  cache: Map<string, boolean>,
+  userA: Id<'users'>,
+  userB: Id<'users'>
+): Promise<boolean> {
+  const key = getPairCacheKey(userA, userB);
+  if (cache.has(key)) {
+    return cache.get(key) ?? false;
+  }
+
+  const blocked = await isBlockedBidirectional(ctx, userA, userB);
+  cache.set(key, blocked);
+  return blocked;
+}
+
+async function createConfessionNotification(
+  ctx: MutationCtx,
+  args: {
+    userId: Id<'users'>;
+    type: 'confession_reaction' | 'confession_reply';
+    title: string;
+    body: string;
+    confessionId: Id<'confessions'>;
+    actorUserId?: Id<'users'>;
+    dedupeKey?: string;
+    now?: number;
+  }
+) {
+  const now = args.now ?? Date.now();
+  const expiresAt = now + CONFESSION_EXPIRY_MS;
+
+  if (args.dedupeKey) {
+    const existing = await ctx.db
+      .query('notifications')
+      .withIndex('by_user_dedupe', (q) =>
+        q.eq('userId', args.userId).eq('dedupeKey', args.dedupeKey!)
+      )
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        title: args.title,
+        body: args.body,
+        data: {
+          confessionId: args.confessionId as string,
+          ...(args.actorUserId ? { userId: args.actorUserId as string } : {}),
+        },
+        createdAt: now,
+        expiresAt,
+        readAt: undefined,
+      });
+      return existing._id;
+    }
+  }
+
+  return await ctx.db.insert('notifications', {
+    userId: args.userId,
+    type: args.type,
+    title: args.title,
+    body: args.body,
+    data: {
+      confessionId: args.confessionId as string,
+      ...(args.actorUserId ? { userId: args.actorUserId as string } : {}),
+    },
+    dedupeKey: args.dedupeKey,
+    createdAt: now,
+    expiresAt,
+  });
+}
+
 // Create a new confession
 export const createConfession = mutation({
   args: {
@@ -135,9 +347,17 @@ export const createConfession = mutation({
     if (EMAIL_PATTERN.test(trimmed)) {
       throw new Error('Do not include email addresses in confessions.');
     }
+    if (!isContentClean(trimmed)) {
+      throw new Error('Your confession contains inappropriate content. Please revise it.');
+    }
 
     // If taggedUserId provided, verify the current user has liked them
     if (taggedUserId) {
+      const blocked = await isBlockedBidirectional(ctx, userId, taggedUserId);
+      if (blocked) {
+        throw new Error('You cannot interact with this user.');
+      }
+
       const likeRecord = await ctx.db
         .query('likes')
         .withIndex('by_from_to', (q) =>
@@ -170,6 +390,8 @@ export const createConfession = mutation({
       authorGender: args.isAnonymous ? undefined : args.authorGender,
       replyCount: 0,
       reactionCount: 0,
+      topEmojis: [],
+      replyPreviews: [],
       voiceReplyCount: 0,
       createdAt: now,
       expiresAt: now + CONFESSION_EXPIRY_MS,
@@ -209,6 +431,7 @@ export const listConfessions = query({
     let blockedAuthorIds = new Set<Id<'users'>>();
     let reportedConfessionIds = new Set<Id<'confessions'>>();
     let reportedReplyIds = new Set<Id<'confessionReplies'>>();
+    const reportedTopLevelReplyCounts = new Map<Id<'confessions'>, number>();
 
     if (viewerId) {
       const [blocks, reports, replyReports] = await Promise.all([
@@ -229,6 +452,18 @@ export const listConfessions = query({
       blockedAuthorIds = new Set(blocks.map((block) => block.blockedUserId));
       reportedConfessionIds = new Set(reports.map((report) => report.confessionId));
       reportedReplyIds = new Set(replyReports.map((report) => report.replyId));
+
+      const replyCache = new Map<Id<'confessionReplies'>, Doc<'confessionReplies'> | null>();
+      const reportedReplies = await Promise.all(
+        replyReports.map((report) => getCachedReply(ctx, replyCache, report.replyId))
+      );
+      for (const reply of reportedReplies) {
+        if (!reply || reply.parentReplyId) continue;
+        reportedTopLevelReplyCounts.set(
+          reply.confessionId,
+          (reportedTopLevelReplyCounts.get(reply.confessionId) || 0) + 1
+        );
+      }
     }
 
     const allConfessions = await ctx.db
@@ -246,49 +481,10 @@ export const listConfessions = query({
         !blockedAuthorIds.has(c.userId)
     );
 
-    // Attach 2 reply previews per confession
-    const withPreviews = await Promise.all(
-      confessions.map(async (c) => {
-        const replies = await ctx.db
-          .query('confessionReplies')
-          .withIndex('by_confession', (q) => q.eq('confessionId', c._id))
-          .order('asc')
-          .take(CONFESSION_PREVIEW_REPLY_SCAN_LIMIT);
-        const visibleReplies = reportedReplyIds.size > 0
-          ? replies.filter((reply) => !reportedReplyIds.has(reply._id))
-          : replies;
-
-        // Get top 3 emoji reactions for display
-        const allReactions = await ctx.db
-          .query('confessionReactions')
-          .withIndex('by_confession', (q) => q.eq('confessionId', c._id))
-          .collect();
-        const emojiCounts: Record<string, number> = {};
-        for (const r of allReactions) {
-          // Skip old string-based reaction keys (e.g. "relatable", "bold")
-          if (/^[a-zA-Z0-9_\s]+$/.test(r.type)) continue;
-          emojiCounts[r.type] = (emojiCounts[r.type] || 0) + 1;
-        }
-        const topEmojis = Object.entries(emojiCounts)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 3)
-          .map(([emoji, count]) => ({ emoji, count }));
-
-        // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
-        const { taggedUserId: _omitTagged, ...confessionWithoutTagged } = c;
-        const safeConfession = c.isAnonymous ? confessionWithoutTagged : c;
-
-        return {
-          ...safeConfession,
-          replyPreviews: visibleReplies.slice(0, 2).map((r) => ({
-            _id: r._id,
-            text: r.text,
-            isAnonymous: r.isAnonymous,
-            type: r.type || 'text',
-            createdAt: r.createdAt,
-          })),
-          topEmojis,
-        };
+    const withPreviews = confessions.map((confession) =>
+      sanitizeConfessionForViewer(confession, {
+        reportedReplyIds,
+        reportedTopLevelReplyCount: reportedTopLevelReplyCounts.get(confession._id) || 0,
       })
     );
 
@@ -309,6 +505,79 @@ export const listConfessions = query({
     }
 
     return withPreviews.slice(0, limit);
+  },
+});
+
+export const listConfessionsPage = query({
+  args: {
+    refreshKey: v.optional(v.number()),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, { paginationOpts }) => {
+    const now = Date.now();
+    const viewerId = await getAuthenticatedConfessionUserIdOrNull(ctx);
+
+    let blockedAuthorIds = new Set<Id<'users'>>();
+    let reportedConfessionIds = new Set<Id<'confessions'>>();
+    let reportedReplyIds = new Set<Id<'confessionReplies'>>();
+    const reportedTopLevelReplyCounts = new Map<Id<'confessions'>, number>();
+
+    if (viewerId) {
+      const [blocks, reports, replyReports] = await Promise.all([
+        ctx.db
+          .query('blocks')
+          .withIndex('by_blocker', (q) => q.eq('blockerId', viewerId))
+          .collect(),
+        ctx.db
+          .query('confessionReports')
+          .withIndex('by_reporter', (q) => q.eq('reporterId', viewerId))
+          .collect(),
+        ctx.db
+          .query('replyReports')
+          .withIndex('by_reporter', (q) => q.eq('reporterId', viewerId))
+          .collect(),
+      ]);
+
+      blockedAuthorIds = new Set(blocks.map((block) => block.blockedUserId));
+      reportedConfessionIds = new Set(reports.map((report) => report.confessionId));
+      reportedReplyIds = new Set(replyReports.map((report) => report.replyId));
+
+      const replyCache = new Map<Id<'confessionReplies'>, Doc<'confessionReplies'> | null>();
+      const reportedReplies = await Promise.all(
+        replyReports.map((report) => getCachedReply(ctx, replyCache, report.replyId))
+      );
+      for (const reply of reportedReplies) {
+        if (!reply || reply.parentReplyId) continue;
+        reportedTopLevelReplyCounts.set(
+          reply.confessionId,
+          (reportedTopLevelReplyCounts.get(reply.confessionId) || 0) + 1
+        );
+      }
+    }
+
+    const pageResult = await ctx.db
+      .query('confessions')
+      .withIndex('by_created')
+      .order('desc')
+      .paginate(paginationOpts);
+
+    return {
+      ...pageResult,
+      page: pageResult.page
+        .filter(
+          (confession) =>
+            (confession.expiresAt === undefined || confession.expiresAt > now) &&
+            !confession.isDeleted &&
+            !reportedConfessionIds.has(confession._id) &&
+            !blockedAuthorIds.has(confession.userId)
+        )
+        .map((confession) =>
+          sanitizeConfessionForViewer(confession, {
+            reportedReplyIds,
+            reportedTopLevelReplyCount: reportedTopLevelReplyCounts.get(confession._id) || 0,
+          })
+        ),
+    };
   },
 });
 
@@ -420,6 +689,20 @@ export const createReply = mutation({
       throw new Error('Confession is no longer available.');
     }
 
+    let parentReply: Doc<'confessionReplies'> | null = null;
+    if (args.parentReplyId) {
+      parentReply = await ctx.db.get(args.parentReplyId);
+      if (!parentReply || parentReply.confessionId !== args.confessionId) {
+        throw new Error('Reply is no longer available.');
+      }
+      if (parentReply.parentReplyId) {
+        throw new Error('Replies can only be nested one level deep.');
+      }
+      if (userId !== confession.userId) {
+        throw new Error('Only the confession author can reply to a reply.');
+      }
+    }
+
     const replyType = args.type || 'text';
 
     if (replyType === 'text') {
@@ -433,8 +716,12 @@ export const createReply = mutation({
       if (EMAIL_PATTERN.test(trimmed)) {
         throw new Error('Do not include email addresses.');
       }
+      if (!isContentClean(trimmed)) {
+        throw new Error('Your reply contains inappropriate content. Please revise it.');
+      }
     }
 
+    const now = Date.now();
     const replyId = await ctx.db.insert('confessionReplies', {
       confessionId: args.confessionId,
       userId: userId,
@@ -444,15 +731,36 @@ export const createReply = mutation({
       voiceUrl: args.voiceUrl,
       voiceDurationSec: args.voiceDurationSec,
       parentReplyId: args.parentReplyId,
-      createdAt: Date.now(),
+      createdAt: now,
     });
 
-    // Increment reply count (and voice reply count if applicable)
-    const patch: any = { replyCount: confession.replyCount + 1 };
-    if (replyType === 'voice') {
+    // Increment top-level reply count only (and voice reply count if applicable)
+    const patch: any = {};
+    if (!args.parentReplyId) {
+      patch.replyCount = confession.replyCount + 1;
+    }
+    if (replyType === 'voice' && !args.parentReplyId) {
       patch.voiceReplyCount = (confession.voiceReplyCount || 0) + 1;
     }
-    await ctx.db.patch(args.confessionId, patch);
+    if (Object.keys(patch).length > 0) {
+      await ctx.db.patch(args.confessionId, patch);
+      await recomputeConfessionReplyPreviewSummary(ctx, args.confessionId);
+    }
+
+    const notificationRecipientId = args.parentReplyId ? parentReply?.userId : confession.userId;
+    if (notificationRecipientId && notificationRecipientId !== userId) {
+      await createConfessionNotification(ctx, {
+        userId: notificationRecipientId,
+        type: 'confession_reply',
+        title: 'Confess',
+        body: args.parentReplyId
+          ? 'The confession author replied to you.'
+          : 'Someone replied to your confession.',
+        confessionId: args.confessionId,
+        actorUserId: userId,
+        now,
+      });
+    }
 
     return replyId;
   },
@@ -475,13 +783,17 @@ export const deleteReply = mutation({
     // Decrement reply count
     const confession = await ctx.db.get(reply.confessionId);
     if (confession) {
-      const patch: any = {
-        replyCount: Math.max(0, confession.replyCount - 1),
-      };
-      if (reply.type === 'voice') {
+      const patch: any = {};
+      if (!reply.parentReplyId) {
+        patch.replyCount = Math.max(0, confession.replyCount - 1);
+      }
+      if (reply.type === 'voice' && !reply.parentReplyId) {
         patch.voiceReplyCount = Math.max(0, (confession.voiceReplyCount || 0) - 1);
       }
-      await ctx.db.patch(reply.confessionId, patch);
+      if (Object.keys(patch).length > 0) {
+        await ctx.db.patch(reply.confessionId, patch);
+        await recomputeConfessionReplyPreviewSummary(ctx, reply.confessionId);
+      }
     }
 
     return { success: true };
@@ -515,13 +827,56 @@ export const getReplies = query({
 
     const replies = await ctx.db
       .query('confessionReplies')
-      .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
+      .withIndex('by_confession_created', (q) => q.eq('confessionId', confessionId))
       .order('desc')
       .take(limit);
     const visibleReplies = reportedReplyIds.size > 0
       ? replies.filter((reply) => !reportedReplyIds.has(reply._id))
       : replies;
     return visibleReplies.reverse();
+  },
+});
+
+export const getRepliesPage = query({
+  args: {
+    confessionId: v.id('confessions'),
+    refreshKey: v.optional(v.number()),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, { confessionId, paginationOpts }) => {
+    const confession = await ctx.db.get(confessionId);
+    if (!confession || confession.isDeleted) {
+      return {
+        page: [],
+        isDone: true,
+        continueCursor: paginationOpts.cursor ?? '',
+        pageStatus: null,
+      };
+    }
+
+    const viewerId = await getAuthenticatedConfessionUserIdOrNull(ctx);
+    let reportedReplyIds = new Set<Id<'confessionReplies'>>();
+
+    if (viewerId) {
+      const replyReports = await ctx.db
+        .query('replyReports')
+        .withIndex('by_reporter', (q) => q.eq('reporterId', viewerId))
+        .collect();
+      reportedReplyIds = new Set(replyReports.map((report) => report.replyId));
+    }
+
+    const pageResult = await ctx.db
+      .query('confessionReplies')
+      .withIndex('by_confession_created', (q) => q.eq('confessionId', confessionId))
+      .order('desc')
+      .paginate(paginationOpts);
+
+    return {
+      ...pageResult,
+      page: reportedReplyIds.size > 0
+        ? pageResult.page.filter((reply) => !reportedReplyIds.has(reply._id))
+        : pageResult.page,
+    };
   },
 });
 
@@ -535,6 +890,14 @@ export const toggleReaction = mutation({
   handler: async (ctx, args) => {
     const userId = await requireAuthenticatedConfessionMutationUserId(ctx);
 
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession || confession.isDeleted) {
+      throw new Error('Confession is no longer available.');
+    }
+    if (await isBlockedBidirectional(ctx, userId, confession.userId)) {
+      throw new Error('You cannot interact with this user.');
+    }
+
     // Find existing reaction from this user on this confession
     const existing = await ctx.db
       .query('confessionReactions')
@@ -543,27 +906,11 @@ export const toggleReaction = mutation({
       )
       .first();
 
-    const confession = await ctx.db.get(args.confessionId);
-    if (!confession || confession.isDeleted) {
-      throw new Error('Confession is no longer available.');
-    }
-
-    // CONSISTENCY FIX B3: Helper to recompute reaction count from source of truth
-    const recomputeReactionCount = async () => {
-      const allReactions = await ctx.db
-        .query('confessionReactions')
-        .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
-        .collect();
-      return allReactions.length;
-    };
-
     if (existing) {
       if (existing.type === args.type) {
         // Same emoji → remove (toggle off)
         await ctx.db.delete(existing._id);
-        // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
-        const actualCount = await recomputeReactionCount();
-        await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
+        await recomputeConfessionReactionSummary(ctx, args.confessionId);
         return { added: false, replaced: false, chatUnlocked: false };
       } else {
         // Different emoji → replace (count stays the same)
@@ -571,6 +918,7 @@ export const toggleReaction = mutation({
           type: args.type,
           createdAt: Date.now(),
         });
+        await recomputeConfessionReactionSummary(ctx, args.confessionId);
         return { added: false, replaced: true, chatUnlocked: false };
       }
     } else {
@@ -581,9 +929,19 @@ export const toggleReaction = mutation({
         type: args.type,
         createdAt: Date.now(),
       });
-      // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
-      const actualCount = await recomputeReactionCount();
-      await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
+      await recomputeConfessionReactionSummary(ctx, args.confessionId);
+
+      if (userId !== confession.userId) {
+        await createConfessionNotification(ctx, {
+          userId: confession.userId,
+          type: 'confession_reaction',
+          title: 'Confess',
+          body: 'Someone felt the same.',
+          confessionId: args.confessionId,
+          actorUserId: userId,
+          dedupeKey: `confession_reaction:${args.confessionId}:${userId}`,
+        });
+      }
 
       // SPECIAL: If tagged user likes a tagged confession, create/find a DM thread
       let chatUnlocked = false;
@@ -690,7 +1048,7 @@ export const getMyConfessions = query({
     const fetchLimit = Math.min(limit * 2, MY_CONFESSIONS_LIMIT * 2);
     const confessions = await ctx.db
       .query('confessions')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .withIndex('by_user_created', (q) => q.eq('userId', userId))
       .order('desc')
       .take(fetchLimit);
 
@@ -702,6 +1060,40 @@ export const getMyConfessions = query({
         ...c,
         isExpired: c.expiresAt !== undefined && c.expiresAt <= now,
       }));
+  },
+});
+
+export const getMyConfessionsPage = query({
+  args: {
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, { paginationOpts }) => {
+    const userId = await getAuthenticatedConfessionUserIdOrNull(ctx);
+    if (!userId) {
+      return {
+        page: [],
+        isDone: true,
+        continueCursor: paginationOpts.cursor ?? '',
+        pageStatus: null,
+      };
+    }
+
+    const now = Date.now();
+    const pageResult = await ctx.db
+      .query('confessions')
+      .withIndex('by_user_created', (q) => q.eq('userId', userId))
+      .order('desc')
+      .paginate(paginationOpts);
+
+    return {
+      ...pageResult,
+      page: pageResult.page
+        .filter((confession) => !confession.isDeleted)
+        .map((confession) => ({
+          ...confession,
+          isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
+        })),
+    };
   },
 });
 
@@ -770,6 +1162,7 @@ export const getTaggedConfessionBadgeCount = query({
     if (!userId) {
       return 0;
     }
+    const now = Date.now();
 
     const notifications = await ctx.db
       .query('confessionNotifications')
@@ -777,10 +1170,13 @@ export const getTaggedConfessionBadgeCount = query({
       .collect();
 
     const confessionCache = new Map<Id<'confessions'>, Doc<'confessions'> | null>();
+    const blockCache = new Map<string, boolean>();
     let count = 0;
     for (const notification of notifications) {
       const confession = await getCachedConfession(ctx, confessionCache, notification.confessionId);
       if (!confession || confession.isDeleted) continue;
+      if (confession.expiresAt !== undefined && confession.expiresAt <= now) continue;
+      if (await isBlockedBidirectionalCached(ctx, blockCache, userId, confession.userId)) continue;
       count += 1;
     }
 
@@ -811,9 +1207,11 @@ export const listTaggedConfessionsForUser = query({
     // Join with confession data
     const result = [];
     const confessionCache = new Map<Id<'confessions'>, Doc<'confessions'> | null>();
+    const blockCache = new Map<string, boolean>();
     for (const notif of notifications) {
       const confession = await getCachedConfession(ctx, confessionCache, notif.confessionId);
       if (!confession || confession.isDeleted) continue;
+      if (await isBlockedBidirectionalCached(ctx, blockCache, userId, confession.userId)) continue;
 
       result.push({
         notificationId: notif._id,
@@ -826,7 +1224,7 @@ export const listTaggedConfessionsForUser = query({
         confessionCreatedAt: confession.createdAt,
         confessionExpiresAt: confession.expiresAt,
         isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
-        replyCount: confession.replyCount,
+        replyCount: confession.replyCount || 0,
         reactionCount: confession.reactionCount,
       });
     }
@@ -888,17 +1286,61 @@ export const getEligibleTagTargets = query({
       }
     }
 
-    const targets: Array<{ id: string; name: string; photoUrl: string | null }> = [];
+    const targets: Array<{
+      id: string;
+      name: string;
+      photoUrl: string | null;
+      age?: number;
+      disambiguator: string;
+    }> = [];
     for (const targetId of eligibleTargetIds) {
       const targetUser = await ctx.db.get(targetId);
       if (!targetUser || !targetUser.isActive || !!targetUser.deletedAt || !!targetUser.isBanned) {
         continue;
       }
 
+      let disambiguator = '';
+      if (targetUser.bio && targetUser.bio.length > 0) {
+        disambiguator = targetUser.bio.slice(0, 30) + (targetUser.bio.length > 30 ? '...' : '');
+      } else if (targetUser.school) {
+        disambiguator = targetUser.school;
+      } else if (targetUser.city) {
+        disambiguator = targetUser.city;
+      } else if (targetUser.dateOfBirth) {
+        const birthDate = new Date(targetUser.dateOfBirth);
+        if (!Number.isNaN(birthDate.getTime())) {
+          const today = new Date();
+          let age = today.getFullYear() - birthDate.getFullYear();
+          const monthDiff = today.getMonth() - birthDate.getMonth();
+          if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+            age--;
+          }
+          if (age > 0 && age < 120) {
+            disambiguator = `${age} years old`;
+          }
+        }
+      }
+
+      const birthDate = targetUser.dateOfBirth ? new Date(targetUser.dateOfBirth) : null;
+      const age =
+        birthDate && !Number.isNaN(birthDate.getTime())
+          ? (() => {
+              const today = new Date();
+              let result = today.getFullYear() - birthDate.getFullYear();
+              const monthDiff = today.getMonth() - birthDate.getMonth();
+              if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+                result--;
+              }
+              return result > 0 && result < 120 ? result : undefined;
+            })()
+          : undefined;
+
       targets.push({
         id: targetUser._id,
         name: targetUser.name,
         photoUrl: targetUser.primaryPhotoUrl ?? targetUser.displayPrimaryPhotoUrl ?? null,
+        age,
+        disambiguator: disambiguator || `ID: ...${targetUser._id.toString().slice(-4)}`,
       });
     }
 
@@ -946,12 +1388,16 @@ export const getPendingCommentConnects = query({
     }> = [];
     const confessionCache = new Map<Id<'confessions'>, Doc<'confessions'> | null>();
     const replyCache = new Map<Id<'confessionReplies'>, Doc<'confessionReplies'> | null>();
+    const blockCache = new Map<string, boolean>();
 
     for (const connect of pendingConnects) {
       const confession = await getCachedConfession(ctx, confessionCache, connect.confessionId!);
       const reply = await getCachedReply(ctx, replyCache, connect.replyId!);
 
       if (!confession || confession.isDeleted || !reply) {
+        continue;
+      }
+      if (await isBlockedBidirectionalCached(ctx, blockCache, connect.fromUserId, connect.toUserId)) {
         continue;
       }
 
@@ -967,6 +1413,77 @@ export const getPendingCommentConnects = query({
     }
 
     return results;
+  },
+});
+
+export const createCommentConnectRequest = mutation({
+  args: {
+    confessionId: v.id('confessions'),
+    replyId: v.id('confessionReplies'),
+  },
+  handler: async (ctx, args) => {
+    const fromUserId = await requireAuthenticatedConfessionMutationUserId(ctx);
+    const now = Date.now();
+
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession || confession.isDeleted) {
+      throw new Error('Confession is no longer available.');
+    }
+
+    if (confession.userId !== fromUserId) {
+      throw new Error('Only the confession author can send a connect request.');
+    }
+
+    const reply = await ctx.db.get(args.replyId);
+    if (!reply || reply.confessionId !== args.confessionId) {
+      throw new Error('Reply not found.');
+    }
+
+    if (reply.userId === fromUserId) {
+      throw new Error('You cannot send a connect request to your own reply.');
+    }
+
+    if (reply.parentReplyId) {
+      throw new Error('Connect requests are only available on top-level replies.');
+    }
+
+    if (reply.hasActiveConnectRequest) {
+      throw new Error('A connect request is already pending for this reply.');
+    }
+
+    if (await isBlockedBidirectional(ctx, fromUserId, reply.userId)) {
+      throw new Error('You cannot interact with this user.');
+    }
+
+    const isEligible = await isPairEligibleForPhase(ctx, fromUserId, reply.userId, 'phase1');
+    if (!isEligible) {
+      throw new Error('A new connect request is not available for this pair.');
+    }
+
+    const expiresAt = now + CONFESSION_EXPIRY_MS;
+    const connectId = await ctx.db.insert('confessionCommentConnects', {
+      fromUserId,
+      toUserId: reply.userId,
+      confessionId: args.confessionId,
+      replyId: args.replyId,
+      status: 'pending',
+      createdAt: now,
+      expiresAt,
+    });
+
+    await ctx.db.patch(args.replyId, { hasActiveConnectRequest: true });
+
+    await ctx.db.insert('notifications', {
+      userId: reply.userId,
+      type: 'comment_connect',
+      title: 'Connect request',
+      body: 'The confession author wants to connect with you.',
+      dedupeKey: `comment_connect:${args.replyId}`,
+      createdAt: now,
+      expiresAt,
+    });
+
+    return { success: true, connectId };
   },
 });
 
@@ -1044,6 +1561,19 @@ export const respondToCommentConnect = mutation({
       }
 
       throw new Error('Connect request expired.');
+    }
+
+    if (await isBlockedBidirectional(ctx, connect.fromUserId, connect.toUserId)) {
+      await ctx.db.patch(args.connectId, {
+        status: 'rejected',
+        respondedAt: now,
+      });
+
+      if (connect.replyId) {
+        await ctx.db.patch(connect.replyId, { hasActiveConnectRequest: false });
+      }
+
+      throw new Error('Connect request is no longer available.');
     }
 
     await ctx.db.patch(args.connectId, {
@@ -1243,6 +1773,10 @@ export const getOrCreateForConfession = mutation({
     // Prevent self-chat
     if (userId === authorId) {
       throw new Error('Cannot start a chat with yourself');
+    }
+
+    if (await isBlockedBidirectional(ctx, userId, authorId)) {
+      throw new Error('You cannot interact with this user.');
     }
 
     // Look for existing conversation for this confession between these users

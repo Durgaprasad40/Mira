@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { requireAuthenticatedUserId, resolveUserIdByAuthId, validateSessionToken } from './helpers';
 
 // D1-REPAIR: Helper to check if either user has blocked the other
 // Returns true if blocked (should prevent messaging)
@@ -911,11 +911,9 @@ export const getSwipeHistory = query({
 
 // Get users that the current user has liked (for confession tagging)
 export const getLikedUsers = query({
-  args: {
-    userId: v.id('users'),
-  },
-  handler: async (ctx, args) => {
-    const { userId } = args;
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireAuthenticatedUserId(ctx);
 
     // Get all likes from this user (like or super_like, not pass)
     const likes = await ctx.db

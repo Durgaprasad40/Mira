@@ -136,10 +136,18 @@ function NotificationPopoverContent({
         router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);
         break;
       case 'tod_connect':
-      case 'comment_connect':
         // Phase-2 T/D and Comment Connect: Navigate to the Phase-2 chat
         if (notification.data?.conversationId) {
           router.push(`/(main)/incognito-chat?id=${notification.data.conversationId}&${notifParams}${dedupeParam}` as any);
+        }
+        break;
+      case 'comment_connect':
+        router.push(`/(main)/comment-connect-requests?${notifParams}${dedupeParam}` as any);
+        break;
+      case 'confession_reaction':
+      case 'confession_reply':
+        if (notification.data?.confessionId) {
+          router.push(`/(main)/confession-thread?confessionId=${notification.data.confessionId}&${notifParams}${dedupeParam}` as any);
         }
         break;
       // P1-001 FIX: Phase-2 match notification - navigate to Phase-2 chat
@@ -193,6 +201,10 @@ function NotificationPopoverContent({
         return 'flame';
       case 'comment_connect':
         return 'chatbubble-ellipses';
+      case 'confession_reaction':
+        return 'heart';
+      case 'confession_reply':
+        return 'chatbubble-ellipses';
       // P1-001 FIX: Phase-2 notification icons
       case 'phase2_match':
         return 'heart';
@@ -228,6 +240,9 @@ function NotificationPopoverContent({
         return '#FF7849'; // T/D orange flame color
       case 'comment_connect':
         return '#7C6AEF'; // Phase-2 purple accent
+      case 'confession_reaction':
+      case 'confession_reply':
+        return COLORS.primary;
       // P1-001 FIX: Phase-2 notification colors
       case 'phase2_match':
         return '#7C6AEF'; // Phase-2 purple accent for match

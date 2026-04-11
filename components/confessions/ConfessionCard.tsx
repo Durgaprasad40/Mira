@@ -334,8 +334,27 @@ export default function ConfessionCard({
         </TouchableOpacity>
       )}
 
-      {/* NOTE: View Profile and Connect buttons removed from homepage cards.
-          Actions now only appear inside the thread screen for cleaner UX. */}
+      {onViewProfile && (
+        <TouchableOpacity
+          style={[styles.viewProfileButton, previewUsed && styles.viewProfileButtonUsed]}
+          onPress={(e) => {
+            e.stopPropagation?.();
+            if (!previewUsed) {
+              onViewProfile();
+            }
+          }}
+          activeOpacity={previewUsed ? 1 : 0.7}
+        >
+          <Ionicons
+            name="person-circle-outline"
+            size={16}
+            color={previewUsed ? COLORS.textMuted : COLORS.primary}
+          />
+          <Text style={[styles.viewProfileText, previewUsed && styles.viewProfileTextUsed]}>
+            {previewUsed ? 'Profile preview used' : 'View Profile'}
+          </Text>
+        </TouchableOpacity>
+      )}
 
       {/* Emoji Reactions */}
       <View style={styles.reactionBarWrap}>
