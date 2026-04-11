@@ -3,7 +3,7 @@
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
  */
 import React, { useState, useCallback, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -32,6 +32,8 @@ export default function PrivacySettingsScreen() {
   const hideFromDiscover = usePrivacyStore((s) => s.hideFromDiscover);
 
   const setHideFromDiscover = usePrivacyStore((s) => s.setHideFromDiscover);
+  const [isHydrated, setIsHydrated] = useState(isDemoMode);
+  const [timedOut, setTimedOut] = useState(false);
   const [discoveryPauseEndsAt, setDiscoveryPauseEndsAt] = useState<number | null>(null);
 
   // P1-042 FIX: Track if initial sync has been done to prevent overwriting pending changes
@@ -49,8 +51,16 @@ export default function PrivacySettingsScreen() {
           : null;
       setDiscoveryPauseEndsAt(pauseUntil);
       setHideFromDiscover(!!pauseUntil);
+      setIsHydrated(true);
     }
-  }, [currentUser]);
+  }, [currentUser, setHideFromDiscover]);
+
+  useEffect(() => {
+    if (isDemoMode || isHydrated || !token) return;
+
+    const timeout = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(timeout);
+  }, [isHydrated, token]);
 
   useEffect(() => {
     if (!discoveryPauseEndsAt) return;
@@ -72,6 +82,9 @@ export default function PrivacySettingsScreen() {
 
   // Track if warning has been shown this session (session-only, no persistence needed)
   const [warningShownThisSession, setWarningShownThisSession] = useState(false);
+
+  const isLoading = !isDemoMode && !!token && !isHydrated && currentUser !== null && !timedOut;
+  const isUnavailable = !isDemoMode && (!token || currentUser === null || (!isHydrated && timedOut));
 
   // Handle "Hide from Discover" toggle with one-time warning (session-only)
   const handleHideFromDiscoverChange = useCallback(async (newValue: boolean) => {
@@ -125,6 +138,23 @@ export default function PrivacySettingsScreen() {
         <View style={{ width: 24 }} />
       </View>
 
+      {isLoading ? (
+        <View style={styles.stateContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.stateText}>Loading your privacy settings...</Text>
+        </View>
+      ) : isUnavailable ? (
+        <View style={styles.stateContainer}>
+          <Ionicons name="shield-outline" size={40} color={COLORS.textMuted} />
+          <Text style={styles.stateText}>We couldn&apos;t load your privacy settings.</Text>
+          <TouchableOpacity
+            style={styles.stateButton}
+            onPress={() => router.replace('/(main)/(tabs)/profile' as any)}
+          >
+            <Text style={styles.stateButtonText}>Back to Profile</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         {/* Visibility Toggles */}
         <View style={styles.section}>
@@ -171,6 +201,7 @@ export default function PrivacySettingsScreen() {
         </View>
 
       </ScrollView>
+      )}
     </SafeAreaView>
   );
 }
@@ -196,6 +227,31 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  stateContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  stateText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  stateButton: {
+    marginTop: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+  },
+  stateButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   section: {
     paddingHorizontal: 16,

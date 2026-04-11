@@ -91,6 +91,7 @@ import {
 } from '@/components/profile/edit';
 
 const GRID_SIZE = 9;
+const MIN_PROFILE_PHOTOS = 2;
 
 function isValidPhotoUrl(url: unknown): url is string {
   return typeof url === 'string' && url.length > 0 && url !== 'undefined' && url !== 'null';
@@ -206,9 +207,7 @@ export default function EditProfileScreen() {
   const [drinking, setDrinking] = useState<string | null>(null);
   const [kids, setKids] = useState<string | null>(null);
   const [education, setEducation] = useState<string | null>(null);
-  const [educationOther, setEducationOther] = useState('');
   const [religion, setReligion] = useState<string | null>(null);
-  const [religionOther, setReligionOther] = useState('');
   const [jobTitle, setJobTitle] = useState('');
   const [company, setCompany] = useState('');
   const [school, setSchool] = useState('');
@@ -625,6 +624,7 @@ export default function EditProfileScreen() {
       return;
     }
 
+    let coreProfileSaved = false;
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
@@ -747,6 +747,11 @@ export default function EditProfileScreen() {
 
   // SLOT-BASED: Remove photo by setting slot to null AND deleting from backend
   const handleRemovePhoto = (slotIndex: number) => {
+    if (validPhotoCount <= MIN_PROFILE_PHOTOS) {
+      Alert.alert('Photos Required', `Keep at least ${MIN_PROFILE_PHOTOS} photos on your profile.`);
+      return;
+    }
+
     Alert.alert('Remove Photo', 'Are you sure you want to remove this photo?', [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -982,8 +987,6 @@ export default function EditProfileScreen() {
     .filter((entry): entry is SectionPromptEntry => entry !== null && entry.answer.trim().length >= PROMPT_ANSWER_MIN_LENGTH)
     .map((entry) => ({ section: entry.section, question: entry.question, answer: entry.answer }));
 
-  const allSectionsFilled = filledPrompts.length === TOTAL_SECTIONS;
-
   // Section-based handlers
   const handleSelectQuestion = useCallback((sectionKey: SectionKey, questionText: string) => {
     // SURGICAL FIX: Mark prompts as dirty when user explicitly changes them
@@ -1039,12 +1042,8 @@ export default function EditProfileScreen() {
   };
 
   const handleSave = async () => {
-    if (!allSectionsFilled) {
-      Alert.alert('Prompts Required', `Complete all ${TOTAL_SECTIONS} prompt sections to continue.`);
-      return;
-    }
-    if (validPhotoCount === 0) {
-      Alert.alert('Photos Required', 'Add at least one photo to your profile.');
+    if (validPhotoCount < MIN_PROFILE_PHOTOS) {
+      Alert.alert('Photos Required', `Add at least ${MIN_PROFILE_PHOTOS} photos to your profile.`);
       return;
     }
 
@@ -1091,8 +1090,7 @@ export default function EditProfileScreen() {
 
       const profileId = canonicalProfile.userId;
 
-      // Build WIPE-SAFE patch: only include fields that have actual values
-      // This prevents undefined/null from overwriting stored data
+      // Build patch with explicit-clearing support for the fields editable in Phase-1 Profile.
       const patch: Record<string, any> = {};
 
       // SLOT-BASED: Save canonical photoSlots (demoStore will derive photos array)
@@ -1107,24 +1105,24 @@ export default function EditProfileScreen() {
       // IDENTITY SIMPLIFICATION: Single name field
       if (displayNameField && displayNameField.trim()) patch.name = displayNameField.trim();
 
-      // Bio/About - only include if non-empty
-      if (bio && bio.trim()) patch.bio = bio.trim();
+      // Bio/About - explicit undefined clears previous saved value in demo store
+      patch.bio = bio.trim() || undefined;
 
       // Basic info - only include if set
       if (height && height.trim()) patch.height = parseInt(height);
       if (weight && weight.trim()) patch.weight = parseInt(weight);
       if (education) patch.education = education;
       if (religion) patch.religion = religion;
-      if (jobTitle && jobTitle.trim()) patch.jobTitle = jobTitle.trim();
-      if (company && company.trim()) patch.company = company.trim();
-      if (school && school.trim()) patch.school = school.trim();
+      patch.jobTitle = jobTitle.trim() || undefined;
+      patch.company = company.trim() || undefined;
+      patch.school = school.trim() || undefined;
 
       // Lifestyle - only include if set
       if (smoking) patch.smoking = smoking;
       if (drinking) patch.drinking = drinking;
       if (kids) patch.kids = kids;
       if (exercise) patch.exercise = exercise;
-      if (pets.length > 0) patch.pets = pets;
+      patch.pets = pets.length > 0 ? pets : undefined;
       if (insect) patch.insect = insect;
 
       // Activities/Interests - always save (empty array is valid)
@@ -1144,9 +1142,10 @@ export default function EditProfileScreen() {
       if (travelStyle) lifeRhythmPatch.travelStyle = travelStyle;
       if (workStyle) lifeRhythmPatch.workStyle = workStyle;
       if (coreValues.length > 0) lifeRhythmPatch.coreValues = coreValues;
-      if (Object.keys(lifeRhythmPatch).length > 0) {
-        patch.onboardingDraft = { ...(patch.onboardingDraft || {}), lifeRhythm: lifeRhythmPatch };
-      }
+      patch.onboardingDraft = {
+        ...(((canonicalProfile as any)?.onboardingDraft as Record<string, any> | undefined) || {}),
+        lifeRhythm: lifeRhythmPatch,
+      };
 
       // Compute non-null slots for logging
       const nonNullSlots = photoSlots.map((s, i) => (s ? i : -1)).filter((i) => i >= 0);
@@ -1188,6 +1187,7 @@ export default function EditProfileScreen() {
       console.log('[EditProfile] saving mode=prod userIdType=convexId', { convexUserId });
     }
 
+    let coreProfileSaved = false;
     try {
       // Get session token from authStore for secure server-side validation
       // (needed for prompts, photo reorder, and blur mutations)
@@ -1225,7 +1225,7 @@ export default function EditProfileScreen() {
       await updateProfile({
         token: sessionToken,
         name: fullName || undefined,
-        bio: bio || undefined,
+        bio: bio.trim() || null,
         height: height ? parseInt(height) : undefined,
         weight: weight ? parseInt(weight) : undefined,
         smoking: (smoking || undefined) as any,
@@ -1233,14 +1233,15 @@ export default function EditProfileScreen() {
         kids: (kids || undefined) as any,
         education: (education || undefined) as any,
         religion: (religion || undefined) as any,
-        jobTitle: jobTitle || undefined,
-        company: company || undefined,
-        school: school || undefined,
+        jobTitle: jobTitle.trim() || null,
+        company: company.trim() || null,
+        school: school.trim() || null,
         exercise: (exercise || undefined) as any,
-        pets: pets.length > 0 ? (pets as any) : undefined,
+        pets: pets.length > 0 ? (pets as any) : null,
         insect: (insect || undefined) as any,
         activities: activitiesPayload,
       });
+      coreProfileSaved = true;
 
       // SURGICAL FIX: Only save prompts if hydrated or edited
       // This prevents accidental wipe when prompts haven't loaded yet
@@ -1272,20 +1273,19 @@ export default function EditProfileScreen() {
       }
 
       // Save Life Rhythm to onboardingDraft
-      const lifeRhythmPatch: Record<string, any> = {};
-      if (lifeRhythmCity) lifeRhythmPatch.city = lifeRhythmCity;
-      if (socialRhythm) lifeRhythmPatch.socialRhythm = socialRhythm;
-      if (sleepSchedule) lifeRhythmPatch.sleepSchedule = sleepSchedule;
-      if (travelStyle) lifeRhythmPatch.travelStyle = travelStyle;
-      if (workStyle) lifeRhythmPatch.workStyle = workStyle;
-      if (coreValues.length > 0) lifeRhythmPatch.coreValues = coreValues;
-
-      if (Object.keys(lifeRhythmPatch).length > 0) {
-        await upsertOnboardingDraft({
-          token: sessionToken,
-          patch: { lifeRhythm: lifeRhythmPatch },
-        });
-      }
+      await upsertOnboardingDraft({
+        token: sessionToken,
+        patch: {
+          lifeRhythm: {
+            city: lifeRhythmCity || null,
+            socialRhythm: socialRhythm || null,
+            sleepSchedule: sleepSchedule || null,
+            travelStyle: travelStyle || null,
+            workStyle: workStyle || null,
+            coreValues: coreValues.length > 0 ? coreValues : null,
+          },
+        },
+      });
 
       // CRITICAL FIX: Persist photo ordering to backend
       // Map current photoSlots (URLs) to photo IDs using backendPhotos
@@ -1354,6 +1354,13 @@ export default function EditProfileScreen() {
       Alert.alert('Success', 'Profile updated!');
       router.back();
     } catch (error: any) {
+      if (coreProfileSaved) {
+        Alert.alert(
+          'Profile saved',
+          'Your main profile changes were saved, but some details may need another try.'
+        );
+        return;
+      }
       Alert.alert('Error', error.message || 'Failed to update profile');
     }
   };
@@ -1595,13 +1602,13 @@ export default function EditProfileScreen() {
           expanded={expandedSection === 'educationReligion'}
           onToggleExpand={() => toggleSection('educationReligion')}
           education={education}
-          educationOther={educationOther}
+          educationOther=""
           religion={religion}
-          religionOther={religionOther}
+          religionOther=""
           onChangeEducation={setEducation}
-          onChangeEducationOther={setEducationOther}
+          onChangeEducationOther={() => {}}
           onChangeReligion={setReligion}
-          onChangeReligionOther={setReligionOther}
+          onChangeReligionOther={() => {}}
           getOptionLabel={getOptionLabel}
         />
       </View>

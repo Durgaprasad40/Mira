@@ -61,6 +61,14 @@ interface VideoAttachment {
 
 type LocalAttachment = PhotoAttachment | VideoAttachment;
 
+function isValidSupportTicketId(id: string | undefined): id is string {
+  if (!id || typeof id !== 'string') return false;
+  const trimmed = id.trim();
+  if (trimmed.length < 10) return false;
+  if (trimmed.includes('/') || trimmed.includes('\\')) return false;
+  return /^[a-zA-Z0-9_-]+$/.test(trimmed);
+}
+
 // Message item for FlatList
 interface MessageItem {
   id: string;
@@ -75,9 +83,12 @@ interface MessageItem {
 export default function SupportTicketScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { id: ticketId } = useLocalSearchParams<{ id: string }>();
+  const { id: ticketIdParam } = useLocalSearchParams<{ id?: string | string[] }>();
   const { token } = useAuthStore();
   const flatListRef = useRef<FlatList>(null);
+  const normalizedTicketId = Array.isArray(ticketIdParam) ? ticketIdParam[0] : ticketIdParam;
+  const ticketId = isValidSupportTicketId(normalizedTicketId) ? normalizedTicketId.trim() : undefined;
+  const shouldQueryTicket = !!ticketId && !!token;
 
   // Form state
   const [message, setMessage] = useState('');
@@ -88,17 +99,28 @@ export default function SupportTicketScreen() {
   // Queries
   const ticket = useQuery(
     api.supportTickets.getTicketById,
-    ticketId && token ? { token, ticketId: ticketId as Id<'supportTickets'> } : 'skip'
+    shouldQueryTicket ? { token: token!, ticketId: ticketId as Id<'supportTickets'> } : 'skip'
   );
 
   const threadMessages = useQuery(
     api.supportTickets.getTicketMessages,
-    ticketId && token ? { token, ticketId: ticketId as Id<'supportTickets'> } : 'skip'
+    shouldQueryTicket ? { token: token!, ticketId: ticketId as Id<'supportTickets'> } : 'skip'
   );
+  const isTicketLoading = shouldQueryTicket && ticket === undefined;
+  const isTicketUnavailable = !isTicketLoading && (!token || !ticketId || ticket === null);
 
   // Mutations
   const addUserMessage = useMutation(api.supportTickets.addUserMessage);
   const generateUploadUrl = useMutation(api.supportTickets.generateUploadUrl);
+
+  const handleSafeBack = () => {
+    if (router.canGoBack()) {
+      router.back();
+      return;
+    }
+
+    router.replace((token ? '/(main)/settings/support-history' : '/(main)/(tabs)/profile') as any);
+  };
 
   // Build message list: original ticket message + thread messages
   const messages: MessageItem[] = React.useMemo(() => {
@@ -245,7 +267,7 @@ export default function SupportTicketScreen() {
       return;
     }
 
-    if (!token || !ticketId) {
+    if (!token || !ticketId || !ticket) {
       Toast.show('Unable to send message');
       return;
     }
@@ -350,11 +372,11 @@ export default function SupportTicketScreen() {
   };
 
   // Loading state
-  if (!ticket) {
+  if (isTicketLoading) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={handleSafeBack}>
             <Ionicons name="arrow-back" size={24} color={COLORS.text} />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Support Request</Text>
@@ -367,6 +389,39 @@ export default function SupportTicketScreen() {
     );
   }
 
+  if (isTicketUnavailable) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleSafeBack}>
+            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Support Request</Text>
+          <View style={{ width: 24 }} />
+        </View>
+        <View style={styles.loadingContainer}>
+          <Text style={styles.unavailableText}>
+            This support request is unavailable or can’t be opened from this account.
+          </Text>
+          <TouchableOpacity
+            style={styles.unavailableAction}
+            onPress={handleSafeBack}
+            accessibilityRole="button"
+            accessibilityLabel={token ? 'Back to support history' : 'Back to profile'}
+          >
+            <Text style={styles.unavailableActionText}>
+              {token ? 'Back to Support History' : 'Back to Profile'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!ticket) {
+    return null;
+  }
+
   const statusConfig = STATUS_CONFIG[ticket.status] || STATUS_CONFIG.open;
 
   return (
@@ -374,7 +429,7 @@ export default function SupportTicketScreen() {
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity
-          onPress={() => router.back()}
+          onPress={handleSafeBack}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
         >
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
@@ -561,6 +616,25 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  unavailableText: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+  },
+  unavailableAction: {
+    marginTop: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+  },
+  unavailableActionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   keyboardView: {
     flex: 1,

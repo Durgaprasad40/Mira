@@ -32,7 +32,6 @@ import { usePrivacyStore } from '@/stores/privacyStore';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useScreenTrace } from '@/lib/devTrace';
 import { ProfileCompletionCard } from '@/components/profile/ProfileCompletionCard';
-import { getProfileCompletion } from '@/lib/profileCompletion';
 
 /**
  * Calculate age from DOB string ("YYYY-MM-DD").
@@ -88,15 +87,12 @@ export default function ProfileScreen() {
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
 
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  const convexUser = useQuery(
-    api.users.getCurrentUserFromToken,
-    !isDemoMode && token ? { token } : 'skip'
+  const profileState = useQuery(
+    api.users.getCurrentUserProfileState,
+    !isDemoMode && token ? { token, refreshKey } : 'skip'
   );
-
-  const subscriptionStatus = useQuery(
-    api.subscriptions.getSubscriptionStatus,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
-  );
+  const convexUser = !isDemoMode ? (profileState?.user ?? undefined) : undefined;
+  const isCurrentUserLoading = !isDemoMode && !!token && profileState === undefined;
 
   // Admin check for showing admin menu
   const adminCheck = useQuery(
@@ -248,6 +244,20 @@ export default function ProfileScreen() {
           photos: extractPhotos(convexUser),
         }
       : null;
+  const hasCurrentUserFailure = !isDemoMode && !isCurrentUserLoading && !currentUser;
+
+  const handleProfileRetry = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+  }, []);
+
+  const handleProfileRecovery = useCallback(async () => {
+    if (!token || profileState?.status === 'auth_error') {
+      await logout();
+      safeReplace(router, '/(auth)/welcome', 'profile->auth-recovery');
+      return;
+    }
+    safeReplace(router, '/(main)/(tabs)/home', 'profile->load-recovery');
+  }, [logout, profileState?.status, router, token]);
 
   // MAIN PHOTO SOURCE OF TRUTH:
   // - Live mode: Use effectivePhotos (api.photos.getUserPhotos with hydration guard)
@@ -522,6 +532,51 @@ export default function ProfileScreen() {
       ]
     );
   };
+
+  if (isCurrentUserLoading) {
+    return (
+      <SafeAreaView edges={['top']} style={styles.container}>
+        <View style={styles.loadingContainer}>
+          <View style={styles.loadingAvatar} />
+          <Text style={styles.loadingText}>Loading your profile...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (hasCurrentUserFailure) {
+    const needsAuthRecovery = !token || profileState?.status === 'auth_error';
+
+    return (
+      <SafeAreaView edges={['top']} style={styles.container}>
+        <View style={styles.loadingContainer}>
+          <Ionicons name="person-circle-outline" size={44} color={COLORS.textMuted} />
+          <Text style={styles.loadingText}>
+            {needsAuthRecovery
+              ? 'Please sign in again to open your profile.'
+              : 'We couldn’t load your profile right now.'}
+          </Text>
+          <TouchableOpacity
+            style={styles.profileRetryButton}
+            onPress={handleProfileRetry}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading profile"
+          >
+            <Text style={styles.profileRetryButtonText}>Retry</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={handleProfileRecovery}
+            accessibilityRole="button"
+            accessibilityLabel={needsAuthRecovery ? 'Go to Sign In' : 'Go Home'}
+          >
+            <Text style={styles.profileRecoveryText}>
+              {needsAuthRecovery ? 'Go to Sign In' : 'Go Home'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   if (!currentUser) {
     return (
@@ -1000,6 +1055,24 @@ const styles = StyleSheet.create({
     height: 100,
     borderRadius: 50,
     backgroundColor: COLORS.backgroundDark,
+  },
+  profileRetryButton: {
+    marginTop: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+  },
+  profileRetryButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
+  },
+  profileRecoveryText: {
+    marginTop: 12,
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.primary,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════

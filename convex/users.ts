@@ -385,6 +385,42 @@ export const getUserById = query({
   },
 });
 
+export const getCurrentUserProfileState = query({
+  args: {
+    token: v.string(),
+    refreshKey: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    void args.refreshKey;
+
+    try {
+      const user = await requireAuthenticatedSessionUser(ctx, args.token);
+      const profile = await buildCurrentUserResponse(ctx, user._id);
+      if (!profile) {
+        return {
+          status: 'missing_user' as const,
+          user: null,
+        };
+      }
+
+      return {
+        status: 'ok' as const,
+        user: profile,
+      };
+    } catch (error: any) {
+      const message = typeof error?.message === 'string' ? error.message : 'Profile unavailable';
+      const normalized = message.toLowerCase();
+
+      return {
+        status: normalized.includes('session') || normalized.includes('token') || normalized.includes('auth')
+          ? ('auth_error' as const)
+          : ('error' as const),
+        user: null,
+      };
+    }
+  },
+});
+
 // Update profile prompts (icebreakers)
 export const updateProfilePrompts = mutation({
   args: {
@@ -454,7 +490,7 @@ export const updateProfile = mutation({
   args: {
     token: v.string(),
     name: v.optional(v.string()),
-    bio: v.optional(v.string()),
+    bio: v.optional(v.union(v.string(), v.null())),
     height: v.optional(v.number()),
     weight: v.optional(v.number()),
     exercise: v.optional(
@@ -516,9 +552,9 @@ export const updateProfile = mutation({
         v.literal("prefer_not_to_say"),
       ),
     ),
-    jobTitle: v.optional(v.string()),
-    company: v.optional(v.string()),
-    school: v.optional(v.string()),
+    jobTitle: v.optional(v.union(v.string(), v.null())),
+    company: v.optional(v.union(v.string(), v.null())),
+    school: v.optional(v.union(v.string(), v.null())),
     // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(
       v.array(
@@ -559,31 +595,34 @@ export const updateProfile = mutation({
       ),
     ),
     pets: v.optional(
-      v.array(
-        v.union(
-          v.literal("dog"),
-          v.literal("cat"),
-          v.literal("bird"),
-          v.literal("fish"),
-          v.literal("rabbit"),
-          v.literal("hamster"),
-          v.literal("guinea_pig"),
-          v.literal("turtle"),
-          v.literal("parrot"),
-          v.literal("pigeon"),
-          v.literal("chicken"),
-          v.literal("duck"),
-          v.literal("goat"),
-          v.literal("cow"),
-          v.literal("horse"),
-          v.literal("snake"),
-          v.literal("lizard"),
-          v.literal("frog"),
-          v.literal("other"),
-          v.literal("none"),
-          v.literal("want_pets"),
-          v.literal("allergic"),
+      v.union(
+        v.array(
+          v.union(
+            v.literal("dog"),
+            v.literal("cat"),
+            v.literal("bird"),
+            v.literal("fish"),
+            v.literal("rabbit"),
+            v.literal("hamster"),
+            v.literal("guinea_pig"),
+            v.literal("turtle"),
+            v.literal("parrot"),
+            v.literal("pigeon"),
+            v.literal("chicken"),
+            v.literal("duck"),
+            v.literal("goat"),
+            v.literal("cow"),
+            v.literal("horse"),
+            v.literal("snake"),
+            v.literal("lizard"),
+            v.literal("frog"),
+            v.literal("other"),
+            v.literal("none"),
+            v.literal("want_pets"),
+            v.literal("allergic"),
+          ),
         ),
+        v.null(),
       ),
     ),
     insect: v.optional(
@@ -598,12 +637,12 @@ export const updateProfile = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { token, bio, pets, insect, ...otherUpdates } = args;
+    const { token, bio, pets, insect, jobTitle, company, school, ...otherUpdates } = args;
     const user = await requireAuthenticatedSessionUser(ctx, token);
     const userId = user._id;
 
     // P2 VALIDATION: Bio length validation (max 500 chars - matches frontend)
-    if (bio !== undefined && bio.length > 500) {
+    if (bio !== undefined && bio !== null && bio.length > 500) {
       throw new Error("Bio must be 500 characters or less");
     }
 
@@ -622,14 +661,17 @@ export const updateProfile = mutation({
     }
 
     // Server-side validation: pets max 3
-    if (pets !== undefined && pets.length > 3) {
+    if (pets !== undefined && pets !== null && pets.length > 3) {
       throw new Error("You can select up to 3 pets only");
     }
 
-    // Filter out undefined values
+    // Filter out undefined values and treat null as explicit clear for editable text/list fields.
     const cleanUpdates: Record<string, unknown> = {};
-    if (bio !== undefined) cleanUpdates.bio = bio;
-    if (pets !== undefined) cleanUpdates.pets = pets;
+    if (bio !== undefined) cleanUpdates.bio = bio ?? undefined;
+    if (jobTitle !== undefined) cleanUpdates.jobTitle = jobTitle ?? undefined;
+    if (company !== undefined) cleanUpdates.company = company ?? undefined;
+    if (school !== undefined) cleanUpdates.school = school ?? undefined;
+    if (pets !== undefined) cleanUpdates.pets = pets ?? undefined;
     if (insect !== undefined) cleanUpdates.insect = insect;
     for (const [key, value] of Object.entries(otherUpdates)) {
       if (value !== undefined) {
@@ -2436,13 +2478,15 @@ export const upsertCurrentUserOnboardingDraft = mutation({
 
     const safeMerge = (existing: any, patch: any) => {
       if (!patch) return existing;
-      const merged = { ...existing };
+      const merged = { ...(existing || {}) };
       for (const [key, value] of Object.entries(patch)) {
-        if (value !== undefined) {
+        if (value === null) {
+          delete merged[key];
+        } else if (value !== undefined) {
           merged[key] = value;
         }
       }
-      return merged;
+      return Object.keys(merged).length > 0 ? merged : undefined;
     };
 
     const mergedDraft = {

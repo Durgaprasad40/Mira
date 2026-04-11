@@ -12,7 +12,6 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  TextInput,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import {
@@ -100,16 +99,6 @@ export function EducationReligionSection({
                 </TouchableOpacity>
               ))}
             </View>
-            {education === 'other' && (
-              <TextInput
-                style={styles.otherInput}
-                placeholder="Please specify..."
-                placeholderTextColor={COLORS.textMuted}
-                value={educationOther}
-                onChangeText={onChangeEducationOther}
-                maxLength={50}
-              />
-            )}
           </View>
           <View style={styles.inputRow}>
             <Text style={styles.label}>Religion</Text>
@@ -127,16 +116,6 @@ export function EducationReligionSection({
                 </TouchableOpacity>
               ))}
             </View>
-            {religion === 'other' && (
-              <TextInput
-                style={styles.otherInput}
-                placeholder="Please specify..."
-                placeholderTextColor={COLORS.textMuted}
-                value={religionOther}
-                onChangeText={onChangeReligionOther}
-                maxLength={50}
-              />
-            )}
           </View>
         </View>
       )}
@@ -216,15 +195,4 @@ const styles = StyleSheet.create({
   },
   compactChipText: { fontSize: 13, color: COLORS.text },
   compactChipTextSelected: { color: COLORS.primary, fontWeight: '600' },
-  otherInput: {
-    marginTop: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 10,
-    backgroundColor: COLORS.backgroundDark,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    fontSize: 14,
-    color: COLORS.text,
-  },
 });

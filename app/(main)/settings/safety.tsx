@@ -2,7 +2,7 @@
  * LOCKED (SAFETY SETTINGS)
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
  */
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, LayoutChangeEvent, ActivityIndicator } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -68,6 +68,7 @@ export default function SafetySettingsScreen() {
     api.verification.getVerificationStatus,
     !isDemoMode && token ? { token } : 'skip'
   );
+  const [timedOut, setTimedOut] = useState(false);
 
   // Track which safety tip section is expanded
   const [expandedTip, setExpandedTip] = useState<string | null>(null);
@@ -78,6 +79,31 @@ export default function SafetySettingsScreen() {
   // Track Y positions of tip sections for auto-scroll
   const tipPositions = useRef<Record<string, number>>({});
   const safetyCenterOffset = useRef<number>(0);
+
+  useEffect(() => {
+    if (
+      isDemoMode ||
+      !token ||
+      (currentUserQuery !== undefined && verificationDetails !== undefined)
+    ) {
+      return;
+    }
+
+    const timeout = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(timeout);
+  }, [currentUserQuery, verificationDetails, token]);
+
+  const isLoading =
+    !isDemoMode &&
+    !!token &&
+    currentUserQuery !== null &&
+    (currentUserQuery === undefined || verificationDetails === undefined) &&
+    !timedOut;
+  const isUnavailable =
+    !isDemoMode &&
+    (!token ||
+      currentUserQuery === null ||
+      ((currentUserQuery === undefined || verificationDetails === undefined) && timedOut));
 
   const faceStatus = React.useMemo(() => {
     if (isDemoMode) {
@@ -139,6 +165,20 @@ export default function SafetySettingsScreen() {
         <View style={{ width: 24 }} />
       </View>
 
+      {isLoading ? (
+        <View style={styles.stateContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.stateText}>Loading your safety settings...</Text>
+        </View>
+      ) : isUnavailable ? (
+        <View style={styles.stateContainer}>
+          <Ionicons name="shield-checkmark-outline" size={40} color={COLORS.textMuted} />
+          <Text style={styles.stateText}>We couldn&apos;t load your safety details.</Text>
+          <TouchableOpacity style={styles.stateButton} onPress={handleGoBack}>
+            <Text style={styles.stateButtonText}>Back to Profile</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
       <ScrollView ref={scrollViewRef} style={styles.content} contentContainerStyle={{ paddingBottom: insets.bottom + 20 }} showsVerticalScrollIndicator={false}>
         {/* Verification Section */}
         <View style={styles.section}>
@@ -354,6 +394,7 @@ export default function SafetySettingsScreen() {
           </View>
         </View>
       </ScrollView>
+      )}
 
     </SafeAreaView>
   );
@@ -380,6 +421,31 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  stateContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  stateText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  stateButton: {
+    marginTop: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+  },
+  stateButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   section: {
     paddingHorizontal: 16,

@@ -3,7 +3,7 @@
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
  */
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, Switch, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, Switch, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -37,6 +37,7 @@ export default function NotificationsSettingsScreen() {
 
   // Track hydration to prevent toggle flicker on load
   const [isHydrated, setIsHydrated] = useState(isDemoMode);
+  const [timedOut, setTimedOut] = useState(false);
 
   // Local state for toggle (synced from backend)
   // Default to true until backend value loads
@@ -56,6 +57,16 @@ export default function NotificationsSettingsScreen() {
       }
     }
   }, [currentUser]);
+
+  useEffect(() => {
+    if (isDemoMode || isHydrated || !token) return;
+
+    const timeout = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(timeout);
+  }, [isHydrated, token]);
+
+  const isLoading = !isDemoMode && !!token && !isHydrated && currentUser !== null && !timedOut;
+  const isUnavailable = !isDemoMode && (!token || currentUser === null || (!isHydrated && timedOut));
 
   // Handle toggle change - persists to backend immediately
   const handleToggle = async (enabled: boolean) => {
@@ -112,8 +123,23 @@ export default function NotificationsSettingsScreen() {
         <View style={{ width: 24 }} />
       </View>
 
-      {/* Content - Only render after hydrated to prevent flicker */}
-      {isHydrated && (
+      {isLoading ? (
+        <View style={styles.stateContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.stateText}>Loading your notification settings...</Text>
+        </View>
+      ) : isUnavailable ? (
+        <View style={styles.stateContainer}>
+          <Ionicons name="notifications-off-outline" size={40} color={COLORS.textMuted} />
+          <Text style={styles.stateText}>We couldn&apos;t load your notification settings.</Text>
+          <TouchableOpacity
+            style={styles.stateButton}
+            onPress={() => router.replace('/(main)/(tabs)/profile' as any)}
+          >
+            <Text style={styles.stateButtonText}>Back to Profile</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
         <View style={styles.content}>
           {/* Single Toggle Row */}
           <View style={styles.toggleContainer}>
@@ -165,6 +191,31 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     paddingTop: 24,
+  },
+  stateContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  stateText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  stateButton: {
+    marginTop: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+  },
+  stateButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   toggleContainer: {
     paddingHorizontal: 16,

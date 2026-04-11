@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 import { Id } from '@/convex/_generated/dataModel';
+import { isDemoMode } from '@/hooks/useConvex';
 
 // Category labels
 const CATEGORY_LABELS: Record<string, string> = {
@@ -55,11 +56,41 @@ type TicketWithPreview = {
 export default function SupportHistoryScreen() {
   const router = useRouter();
   const { token } = useAuthStore();
+  const [timedOut, setTimedOut] = useState(false);
+  const [retryNonce, setRetryNonce] = useState(0);
 
   const tickets = useQuery(
     api.supportTickets.getUserTicketsWithPreview,
-    token ? { token } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
+  const resolvedTickets = isDemoMode ? [] : tickets ?? [];
+
+  const handleGoBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(main)/settings/support' as any);
+    }
+  }, [router]);
+
+  useEffect(() => {
+    if (isDemoMode || tickets !== undefined || !token) {
+      setTimedOut(false);
+      return;
+    }
+
+    setTimedOut(false);
+    const timeout = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(timeout);
+  }, [tickets, token, retryNonce]);
+
+  const isLoading = !isDemoMode && !!token && tickets === undefined && !timedOut;
+  const isUnavailable = !isDemoMode && (!token || (tickets === undefined && timedOut));
+
+  const handleRetry = useCallback(() => {
+    setTimedOut(false);
+    setRetryNonce((value) => value + 1);
+  }, []);
 
   const formatDate = (timestamp: number): string => {
     const date = new Date(timestamp);
@@ -151,7 +182,7 @@ export default function SupportHistoryScreen() {
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity
-          onPress={() => router.back()}
+          onPress={handleGoBack}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
         >
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
@@ -161,18 +192,35 @@ export default function SupportHistoryScreen() {
       </View>
 
       {/* Content */}
-      {tickets === undefined ? (
+      {isLoading ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading your support requests...</Text>
+        </View>
+      ) : isUnavailable ? (
+        <View style={styles.emptyContainer}>
+          <Ionicons name="alert-circle-outline" size={48} color={COLORS.textMuted} />
+          <Text style={styles.emptyTitle}>Support history unavailable</Text>
+          <Text style={styles.emptyText}>
+            We couldn&apos;t load your support requests right now.
+          </Text>
+          <TouchableOpacity
+            style={styles.createButton}
+            onPress={token ? handleRetry : handleGoBack}
+          >
+            <Text style={styles.createButtonText}>
+              {token ? 'Try Again' : 'Back to Support'}
+            </Text>
+          </TouchableOpacity>
         </View>
       ) : (
         <FlatList
-          data={tickets}
+          data={resolvedTickets}
           renderItem={renderTicket}
           keyExtractor={(item) => item._id}
           contentContainerStyle={[
             styles.listContent,
-            tickets.length === 0 && styles.listContentEmpty,
+            resolvedTickets.length === 0 && styles.listContentEmpty,
           ]}
           ListEmptyComponent={renderEmpty}
           showsVerticalScrollIndicator={false}
@@ -205,6 +253,11 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
   },
   listContent: {
     padding: 16,

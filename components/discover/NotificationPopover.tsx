@@ -111,7 +111,7 @@ export function NotificationPopover({
         router.push(`/(main)/(tabs)/home?${notifParams}${dedupeParam}` as any);
         break;
       case 'system':
-        router.push(`/(main)/settings?${notifParams}${dedupeParam}` as any);
+        router.push(`/(main)/(tabs)/profile?${notifParams}${dedupeParam}` as any);
         break;
       case 'subscription':
         router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);

@@ -246,8 +246,12 @@ export const getTicketById = query({
     ticketId: v.id('supportTickets'),
   },
   handler: async (ctx, args) => {
-    const { ticket } = await getAuthorizedTicket(ctx, args.token, args.ticketId);
-    return ticket;
+    try {
+      const { ticket } = await getAuthorizedTicket(ctx, args.token, args.ticketId);
+      return ticket;
+    } catch (error) {
+      return null;
+    }
   },
 });
 
@@ -261,14 +265,18 @@ export const getTicketMessages = query({
     ticketId: v.id('supportTickets'),
   },
   handler: async (ctx, args) => {
-    await getAuthorizedTicket(ctx, args.token, args.ticketId);
-    const messages = await ctx.db
-      .query('supportTicketMessages')
-      .withIndex('by_ticket', (q) => q.eq('ticketId', args.ticketId))
-      .collect();
+    try {
+      await getAuthorizedTicket(ctx, args.token, args.ticketId);
+      const messages = await ctx.db
+        .query('supportTicketMessages')
+        .withIndex('by_ticket', (q) => q.eq('ticketId', args.ticketId))
+        .collect();
 
-    // Sort by createdAt ascending (oldest first for conversation view)
-    return messages.sort((a, b) => a.createdAt - b.createdAt);
+      // Sort by createdAt ascending (oldest first for conversation view)
+      return messages.sort((a, b) => a.createdAt - b.createdAt);
+    } catch (error) {
+      return [];
+    }
   },
 });
 
@@ -313,7 +321,6 @@ export const getUserTicketsWithPreview = query({
       .order('desc')
       .collect();
 
-    // For each ticket, get the last message (if any)
     const ticketsWithPreview = await Promise.all(
       tickets.map(async (ticket) => {
         const messages = await ctx.db
@@ -321,9 +328,17 @@ export const getUserTicketsWithPreview = query({
           .withIndex('by_ticket', (q) => q.eq('ticketId', ticket._id))
           .collect();
 
-        const sortedMessages = messages.sort((a, b) => b.createdAt - a.createdAt);
-        const lastMessage = sortedMessages[0];
-        const hasAdminReply = messages.some((m) => m.senderType === 'admin');
+        let lastMessage: (typeof messages)[number] | null = null;
+        let hasAdminReply = false;
+
+        for (const message of messages) {
+          if (!lastMessage || message.createdAt > lastMessage.createdAt) {
+            lastMessage = message;
+          }
+          if (message.senderType === 'admin') {
+            hasAdminReply = true;
+          }
+        }
 
         return {
           ...ticket,

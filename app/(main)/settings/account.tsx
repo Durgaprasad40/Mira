@@ -2,7 +2,7 @@
  * LOCKED (ACCOUNT SETTINGS)
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
  */
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   TouchableOpacity,
   Alert,
   Modal,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -38,6 +39,7 @@ export default function AccountSettingsScreen() {
     !isDemoMode && token ? { token } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
+  const [timedOut, setTimedOut] = useState(false);
 
   // Safe back navigation - ensures return to Profile tab
   const handleGoBack = useCallback(() => {
@@ -47,6 +49,17 @@ export default function AccountSettingsScreen() {
       router.replace('/(main)/(tabs)/profile' as any);
     }
   }, [router]);
+
+  useEffect(() => {
+    if (isDemoMode || currentUserQuery !== undefined || !token) return;
+
+    const timeout = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(timeout);
+  }, [currentUserQuery, token]);
+
+  const isLoading = !isDemoMode && !!token && currentUserQuery === undefined && !timedOut;
+  const isUnavailable =
+    !isDemoMode && (!token || currentUserQuery === null || (currentUserQuery === undefined && timedOut));
 
   // Delete confirmation modal state (Step 1: info modal)
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -154,6 +167,20 @@ export default function AccountSettingsScreen() {
         <View style={{ width: 24 }} />
       </View>
 
+      {isLoading ? (
+        <View style={styles.stateContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.stateText}>Loading your account details...</Text>
+        </View>
+      ) : isUnavailable ? (
+        <View style={styles.stateContainer}>
+          <Ionicons name="person-circle-outline" size={40} color={COLORS.textMuted} />
+          <Text style={styles.stateText}>We couldn&apos;t load your account details.</Text>
+          <TouchableOpacity style={styles.stateButton} onPress={handleGoBack}>
+            <Text style={styles.stateButtonText}>Back to Profile</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         {/* Account Info Section */}
         <View style={styles.section}>
@@ -209,6 +236,7 @@ export default function AccountSettingsScreen() {
           </View>
         </View>
       </ScrollView>
+      )}
 
       {/* Delete Info Modal (Step 1) */}
       <Modal
@@ -273,6 +301,31 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  stateContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  stateText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  stateButton: {
+    marginTop: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+  },
+  stateButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   section: {
     paddingHorizontal: 16,
