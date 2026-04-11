@@ -55,6 +55,7 @@ import {
   getOtherUserIdFromMeta,
 } from '@/lib/threadsIntegrity';
 import { preloadVideos } from '@/lib/videoCache';
+import { formatBottleSpinCooldown } from '@/lib/bottleSpin';
 
 /** Resolve the current demo user ID at call-time from authStore.
  *  Falls back to 'demo_user_1' for legacy data compatibility. */
@@ -373,11 +374,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // LIVE-TICK-DEBUG: Log when hash changes (tracks sender seeing tick updates)
     if (__DEV__) {
       const lastMsg = recentMessages[recentMessages.length - 1];
+      const lastMsgStatus = lastMsg as { _id?: string; deliveredAt?: number; readAt?: number } | undefined;
       console.log('[LIVE-TICK-HASH] Hash computed:', {
         msgCount: recentMessages.length,
-        lastMsgId: lastMsg?._id?.slice(-6),
-        lastDelivered: !!lastMsg?.deliveredAt,
-        lastRead: !!lastMsg?.readAt,
+        lastMsgId: lastMsgStatus?._id?.slice(-6),
+        lastDelivered: !!lastMsgStatus?.deliveredAt,
+        lastRead: !!lastMsgStatus?.readAt,
       });
     }
 
@@ -445,7 +447,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // Track cooldown state for inline UI feedback (instead of Alert spam)
   const [showCooldownMessage, setShowCooldownMessage] = useState(false);
-  const [cooldownRemainingMin, setCooldownRemainingMin] = useState(0);
+  const [cooldownRemainingLabel, setCooldownRemainingLabel] = useState('');
+  const cooldownHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (cooldownHideTimeoutRef.current) {
+        clearTimeout(cooldownHideTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-CLOSE: Watch game session state changes for cross-device sync
@@ -498,17 +509,21 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // Check if it's MY turn
     const isMyTurn = gameSession.currentTurnRole === myRole;
 
-    console.log('[BOTTLE_SPIN_AUTO_OPEN]', {
-      turnPhase: gameSession.turnPhase,
-      currentTurnRole: gameSession.currentTurnRole,
-      myRole,
-      isMyTurn,
-      modalCurrentlyOpen: showTruthDareGame,
-    });
+    if (__DEV__) {
+      console.log('[BOTTLE_SPIN_AUTO_OPEN]', {
+        turnPhase: gameSession.turnPhase,
+        currentTurnRole: gameSession.currentTurnRole,
+        myRole,
+        isMyTurn,
+        modalCurrentlyOpen: showTruthDareGame,
+      });
+    }
 
     // If it's my turn and modal is closed, open it automatically
     if (isMyTurn && !showTruthDareGame) {
-      console.log('[BOTTLE_SPIN_AUTO_OPEN] Opening modal - it is my turn to choose!');
+      if (__DEV__) {
+        console.log('[BOTTLE_SPIN_AUTO_OPEN] Opening modal - it is my turn to choose!');
+      }
       setShowTruthDareGame(true);
     }
   }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, userId, showTruthDareGame]);
@@ -516,8 +531,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Handle T/D button press based on current state
   const handleTruthDarePress = useCallback(() => {
     if (isDemo) {
-      // Demo mode: skip invite flow, go directly to game
-      setShowTruthDareGame(true);
+      Alert.alert(
+        'Live Chat Only',
+        'Spin the Bottle is available in live Messages conversations.'
+      );
       return;
     }
 
@@ -525,11 +542,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // Priority 1: Cooldown active - show inline message instead of Alert
     if (gameSession.state === 'cooldown') {
-      const remainingMin = Math.ceil((gameSession.remainingMs || 0) / 60000);
-      setCooldownRemainingMin(remainingMin);
+      const remainingLabel = formatBottleSpinCooldown(gameSession.remainingMs || 0);
+      setCooldownRemainingLabel(remainingLabel);
       setShowCooldownMessage(true);
-      // Auto-hide after 3 seconds
-      setTimeout(() => setShowCooldownMessage(false), 3000);
+      if (cooldownHideTimeoutRef.current) {
+        clearTimeout(cooldownHideTimeoutRef.current);
+      }
+      cooldownHideTimeoutRef.current = setTimeout(() => {
+        setShowCooldownMessage(false);
+        cooldownHideTimeoutRef.current = null;
+      }, 3000);
       return;
     }
 
@@ -548,7 +570,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // Priority 4: No game - show invite modal
     setShowTruthDareInvite(true);
-  }, [isDemo, gameSession, userId]);
+  }, [isDemo, gameSession]);
 
   // Send game invite
   const handleSendInvite = useCallback(async () => {
@@ -622,8 +644,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         conversationId,
       });
     } catch (error) {
-      // Silent fail - UI will close anyway
-      console.warn('[TD] Failed to end game:', error);
+      if (__DEV__) {
+        console.warn('[TD] Failed to end game:', error);
+      }
+      throw error;
     }
   }, [isDemo, userId, conversationId, endGameMutation]);
 
@@ -631,11 +655,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Uses system message style: demo mode uses type:'system', Convex uses [SYSTEM:truthdare] marker
   const handleSendTruthDareResult = useCallback(async (message: string) => {
     if (!conversationId) return;
-
-    // Handle "ended the game" message - also call backend
-    if (message.includes('ended the game')) {
-      handleEndGame();
-    }
 
     try {
       if (isDemo) {
@@ -662,7 +681,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     } catch {
       // Silent fail - game continues even if message fails
     }
-  }, [conversationId, isDemo, userId, addDemoMessage, sendMessage, handleEndGame]);
+  }, [conversationId, isDemo, userId, addDemoMessage, sendMessage]);
 
   const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
   const markNotifReadForConvo = useDemoNotifStore((s) => s.markReadForConversation);
@@ -763,6 +782,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     );
 
     if (__DEV__) {
+      const latestMsgStatus = latestMsg as { deliveredAt?: number; readAt?: number } | undefined;
       console.log('[LIVE-TICK-V2] State check:', {
         latestMsgId,
         lastProcessedMsgIdRef: lastProcessedMsgIdRef.current,
@@ -770,8 +790,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         currentUserId,
         hasUnreadFromOther,
         isFromOther: latestMsg?.senderId !== currentUserId,
-        latestReadAt: latestMsg?.readAt,
-        latestDeliveredAt: latestMsg?.deliveredAt,
+        latestReadAt: latestMsgStatus?.readAt,
+        latestDeliveredAt: latestMsgStatus?.deliveredAt,
       });
     }
 
@@ -1520,7 +1540,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         <View style={styles.cooldownBanner}>
           <Ionicons name="timer-outline" size={16} color={COLORS.warning} />
           <Text style={styles.cooldownBannerText}>
-            Cooldown: wait {cooldownRemainingMin} min{cooldownRemainingMin !== 1 ? 's' : ''} before playing again
+            Cooldown: wait {cooldownRemainingLabel} before playing again
           </Text>
         </View>
       )}
@@ -1820,6 +1840,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         conversationId={conversationId || ''}
         userId={userId || getDemoUserId()}
         onSendResultMessage={handleSendTruthDareResult}
+        onEndGame={handleEndGame}
       />
     </View>
   );

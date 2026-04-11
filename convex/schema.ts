@@ -1659,15 +1659,26 @@ export default defineSchema({
       v.literal('pending'),          // Invite sent, waiting for response
       v.literal('active'),           // Invite accepted, game in progress
       v.literal('rejected'),         // Invite rejected
-      v.literal('ended')             // Game ended
+      v.literal('ended'),            // Game ended
+      v.literal('expired')           // Pending invite timed out
     ),
     createdAt: v.number(),
     respondedAt: v.optional(v.number()),  // When invite was accepted/rejected
     endedAt: v.optional(v.number()),      // When game was ended
-    cooldownUntil: v.optional(v.number()), // Cooldown end time (10 min after rejection/end)
+    endedReason: v.optional(v.string()),  // Legacy reason metadata from older Bottle Spin sessions
+    cooldownUntil: v.optional(v.number()), // Cooldown end time (1 hour after rejection/end)
     // Turn tracking for real-time sync across devices
     // NOTE: Using role-based turn tracking to avoid ID format mismatch issues
     currentTurnUserId: v.optional(v.string()), // Legacy - kept for compatibility
+    spinTurnRole: v.optional(v.union(
+      v.literal('inviter'),
+      v.literal('invitee')
+    )), // Legacy turn-role metadata from older Bottle Spin sessions
+    lastSelectedRole: v.optional(v.union(
+      v.literal('inviter'),
+      v.literal('invitee')
+    )), // Legacy spin history metadata from older Bottle Spin sessions
+    consecutiveSelectedCount: v.optional(v.number()), // Legacy anti-repeat counter from older Bottle Spin sessions
     currentTurnRole: v.optional(v.union(
       v.literal('inviter'),          // Inviter's turn to choose
       v.literal('invitee')           // Invitee's turn to choose

@@ -21,6 +21,8 @@ import {
   TouchableOpacity,
   Animated,
   Easing,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
@@ -44,7 +46,9 @@ interface BottleSpinGameProps {
   conversationId: string;
   userId: string;
   /** Called when spin completes to send result message to chat */
-  onSendResultMessage?: (message: string) => void;
+  onSendResultMessage?: (message: string) => void | Promise<void>;
+  /** Called when a participant explicitly ends the game */
+  onEndGame?: () => void | Promise<void>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -60,6 +64,7 @@ export function BottleSpinGame({
   conversationId,
   userId,
   onSendResultMessage,
+  onEndGame,
 }: BottleSpinGameProps) {
   // ═══════════════════════════════════════════════════════════════════════════
   // LOCAL STATE - Only for animation and UI helpers, NOT for turn ownership
@@ -67,9 +72,11 @@ export function BottleSpinGame({
   const [isSpinningLocally, setIsSpinningLocally] = useState(false);
   const [chosenOption, setChosenOption] = useState<'truth' | 'dare' | 'skip' | null>(null);
   const [showEndConfirmation, setShowEndConfirmation] = useState(false);
+  const [isEndingGame, setIsEndingGame] = useState(false);
 
   // Stale callback guard: increments on reset, animation checks before applying
   const spinSessionRef = useRef(0);
+  const spinAgainTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const spinAnim = useRef(new Animated.Value(0)).current;
   const currentRotation = useRef(0);
@@ -82,6 +89,7 @@ export function BottleSpinGame({
     visible && conversationId ? { conversationId } : 'skip'
   );
   const setTurnMutation = useMutation(api.games.setBottleSpinTurn);
+  const isSessionLoading = visible && !!conversationId && gameSession === undefined;
 
   // Extract backend values (only when session is active)
   const isSessionActive = gameSession?.state === 'active';
@@ -138,32 +146,22 @@ export function BottleSpinGame({
     return 'idle';
   })();
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // DEBUG LOGGING - Comprehensive state trace for both devices
-  // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
-    if (visible) {
+    if (__DEV__ && visible) {
       console.log('[BOTTLE_SPIN_V4_DEBUG]', {
-        // Session info
         sessionState: gameSession?.state,
         isSessionActive,
-        // IDs
         userId,
         inviterId,
         inviteeId,
-        // Role determination
         amIInviter,
         amIInvitee,
         myRole,
-        // Backend turn state
         backendTurnRole,
         backendTurnPhase,
-        // Local state
         isSpinningLocally,
         chosenOption,
-        // DERIVED UI MODE
         uiMode,
-        // Render branch that will be active
         renderBranch: uiMode === 'choosing_for_me' ? 'CHOOSER_BUTTONS' :
                       uiMode === 'choosing_for_other' ? 'OBSERVER_UI' :
                       uiMode === 'spinning_local' ? 'SPINNING' :
@@ -171,6 +169,30 @@ export function BottleSpinGame({
       });
     }
   }, [visible, gameSession, isSessionActive, userId, inviterId, inviteeId, amIInviter, amIInvitee, myRole, backendTurnRole, backendTurnPhase, isSpinningLocally, chosenOption, uiMode]);
+
+  useEffect(() => {
+    if (!visible) {
+      setShowEndConfirmation(false);
+      setIsEndingGame(false);
+      if (spinAgainTimeoutRef.current) {
+        clearTimeout(spinAgainTimeoutRef.current);
+        spinAgainTimeoutRef.current = null;
+      }
+
+      if (!isSpinningLocally) {
+        setChosenOption(null);
+        spinAnim.stopAnimation();
+        spinAnim.setValue(0);
+        currentRotation.current = 0;
+      }
+    }
+  }, [visible, isSpinningLocally, spinAnim]);
+
+  useEffect(() => () => {
+    if (spinAgainTimeoutRef.current) {
+      clearTimeout(spinAgainTimeoutRef.current);
+    }
+  }, []);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SKIP TRACKING
@@ -198,50 +220,43 @@ export function BottleSpinGame({
   // ═══════════════════════════════════════════════════════════════════════════
   // GAME ACTIONS
   // ═══════════════════════════════════════════════════════════════════════════
-  const resetGame = useCallback(async () => {
-    spinSessionRef.current += 1;
-    setIsSpinningLocally(false);
-    setChosenOption(null);
-    setShowEndConfirmation(false);
-    spinAnim.stopAnimation();
-    spinAnim.setValue(0);
-    currentRotation.current = 0;
-
-    if (userId && conversationId) {
-      try {
-        await setTurnMutation({
-          authUserId: userId,
-          conversationId,
-          currentTurnRole: undefined,
-          turnPhase: 'idle',
-        });
-      } catch (error) {
-        // Ignore errors during reset
-      }
-    }
-  }, [spinAnim, userId, conversationId, setTurnMutation]);
-
   const handleClose = useCallback(() => {
-    resetGame();
+    setShowEndConfirmation(false);
     onClose();
-  }, [resetGame, onClose]);
+  }, [onClose]);
 
   const handleEndGamePress = useCallback(() => {
     setShowEndConfirmation(true);
   }, []);
 
-  const handleEndGameConfirm = useCallback(() => {
-    setShowEndConfirmation(false);
-    if (onSendResultMessage) {
-      onSendResultMessage(`${currentUserName} ended the game`);
+  const handleEndGameConfirm = useCallback(async () => {
+    if (isEndingGame) return;
+
+    setIsEndingGame(true);
+    try {
+      await onEndGame?.();
+    } catch (error: any) {
+      Alert.alert('Unable to end game', error?.message || 'Please try again.');
+      setIsEndingGame(false);
+      return;
     }
-    resetGame();
+
+    try {
+      await onSendResultMessage?.(`${currentUserName} ended the game`);
+    } catch {
+      // The session has already been ended; close the modal even if the chat marker fails.
+    }
+
+    setShowEndConfirmation(false);
+    setChosenOption(null);
+    setIsEndingGame(false);
     onClose();
-  }, [currentUserName, onSendResultMessage, resetGame, onClose]);
+  }, [currentUserName, isEndingGame, onClose, onEndGame, onSendResultMessage]);
 
   const handleEndGameCancel = useCallback(() => {
+    if (isEndingGame) return;
     setShowEndConfirmation(false);
-  }, []);
+  }, [isEndingGame]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SPIN BOTTLE
@@ -251,13 +266,17 @@ export function BottleSpinGame({
 
     // Guard: Only spin if session is active
     if (!isSessionActive) {
-      console.warn('[BOTTLE_SPIN] Cannot spin - no active session');
+      if (__DEV__) {
+        console.warn('[BOTTLE_SPIN] Cannot spin - no active session');
+      }
       return;
     }
 
     // Guard: Must have a role
     if (!myRole) {
-      console.warn('[BOTTLE_SPIN] Cannot spin - role not determined', { userId, inviterId, inviteeId });
+      if (__DEV__) {
+        console.warn('[BOTTLE_SPIN] Cannot spin - role not determined', { userId, inviterId, inviteeId });
+      }
       return;
     }
 
@@ -278,7 +297,8 @@ export function BottleSpinGame({
       }
     }
 
-    const spinSession = spinSessionRef.current;
+    const spinSession = spinSessionRef.current + 1;
+    spinSessionRef.current = spinSession;
 
     // Random spin
     const fullRotations = 3 + Math.floor(Math.random() * 4);
@@ -291,7 +311,9 @@ export function BottleSpinGame({
       ? myRole // Landed on me = my role
       : (myRole === 'inviter' ? 'invitee' : 'inviter'); // Landed on other = opposite role
 
-    console.log('[BOTTLE_SPIN] Spin result:', { landsOnMe, myRole, selectedRole });
+    if (__DEV__) {
+      console.log('[BOTTLE_SPIN] Spin result:', { landsOnMe, myRole, selectedRole });
+    }
 
     Animated.timing(spinAnim, {
       toValue: totalRotation,
@@ -316,7 +338,9 @@ export function BottleSpinGame({
             currentTurnRole: selectedRole,
             turnPhase: 'choosing',
           });
-          console.log('[BOTTLE_SPIN] Set turn state:', { selectedRole, turnPhase: 'choosing' });
+          if (__DEV__) {
+            console.log('[BOTTLE_SPIN] Set turn state:', { selectedRole, turnPhase: 'choosing' });
+          }
         } catch (error) {
           console.error('[BOTTLE_SPIN] Failed to set turn state:', error);
         }
@@ -343,7 +367,9 @@ export function BottleSpinGame({
   const handleChoice = useCallback(async (choice: 'truth' | 'dare' | 'skip') => {
     // Guard: Only allow choice if it's my turn
     if (uiMode !== 'choosing_for_me') {
-      console.warn('[BOTTLE_SPIN] Cannot choose - not my turn', { uiMode });
+      if (__DEV__) {
+        console.warn('[BOTTLE_SPIN] Cannot choose - not my turn', { uiMode });
+      }
       return;
     }
 
@@ -410,8 +436,13 @@ export function BottleSpinGame({
       }
     }
 
+    if (spinAgainTimeoutRef.current) {
+      clearTimeout(spinAgainTimeoutRef.current);
+    }
+
     // Small delay to let state update, then spin
-    setTimeout(() => {
+    spinAgainTimeoutRef.current = setTimeout(() => {
+      spinAgainTimeoutRef.current = null;
       spinBottle();
     }, 100);
   }, [spinAnim, spinBottle, userId, conversationId, setTurnMutation]);
@@ -594,10 +625,21 @@ export function BottleSpinGame({
           {/* IDLE: Show spin button */}
           {uiMode === 'idle' && (
             <View style={styles.actions}>
-              <TouchableOpacity style={styles.spinButton} onPress={spinBottle}>
-                <Ionicons name="refresh" size={18} color={COLORS.white} />
-                <Text style={styles.spinButtonText}>Spin the Bottle</Text>
-              </TouchableOpacity>
+              {isSessionLoading ? (
+                <View style={styles.sessionLoading}>
+                  <ActivityIndicator size="small" color={COLORS.primary} />
+                  <Text style={styles.sessionLoadingText}>Loading game...</Text>
+                </View>
+              ) : isSessionActive ? (
+                <TouchableOpacity style={styles.spinButton} onPress={spinBottle}>
+                  <Ionicons name="refresh" size={18} color={COLORS.white} />
+                  <Text style={styles.spinButtonText}>Spin the Bottle</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.sessionLoading}>
+                  <Text style={styles.sessionLoadingText}>Waiting for the game to start...</Text>
+                </View>
+              )}
             </View>
           )}
 
@@ -658,14 +700,20 @@ export function BottleSpinGame({
                 <TouchableOpacity
                   style={[styles.confirmButton, styles.confirmButtonNo]}
                   onPress={handleEndGameCancel}
+                  disabled={isEndingGame}
                 >
                   <Text style={styles.confirmButtonNoText}>No</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.confirmButton, styles.confirmButtonYes]}
                   onPress={handleEndGameConfirm}
+                  disabled={isEndingGame}
                 >
-                  <Text style={styles.confirmButtonYesText}>Yes</Text>
+                  {isEndingGame ? (
+                    <ActivityIndicator size="small" color={COLORS.white} />
+                  ) : (
+                    <Text style={styles.confirmButtonYesText}>Yes</Text>
+                  )}
                 </TouchableOpacity>
               </View>
             </View>
@@ -811,6 +859,16 @@ const styles = StyleSheet.create({
     height: CONTENT_AREA_HEIGHT,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  sessionLoading: {
+    alignItems: 'center',
+    gap: 8,
+  },
+  sessionLoadingText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.textLight,
+    textAlign: 'center',
   },
   spinButton: {
     flexDirection: 'row',

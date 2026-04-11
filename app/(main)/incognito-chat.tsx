@@ -20,13 +20,16 @@ import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useMutation, useQuery } from 'convex/react';
 import { popHandoff } from '@/lib/memoryHandoff';
 import * as ImagePicker from 'expo-image-picker';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { maskExplicitWords, MASKED_CONTENT_NOTICE } from '@/lib/contentFilter';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
-import { BottleSpinGame } from '@/components/chat/BottleSpinGame';
+import { useAuthStore } from '@/stores/authStore';
+import { BottleSpinGame, TruthDareInviteCard } from '@/components/chat';
 import { CameraPhotoSheet, type CameraPhotoOptions } from '@/components/chat/CameraPhotoSheet';
 import { ReportModal } from '@/components/private/ReportModal';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
@@ -37,6 +40,7 @@ import { trackEvent } from '@/lib/analytics';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import type { IncognitoMessage } from '@/types';
+import { formatBottleSpinCooldown } from '@/lib/bottleSpin';
 
 /** Look up Phase-2 intent label for a participant (checks both demoStore and DEMO_INCOGNITO_PROFILES) */
 const getIntentLabel = (participantId: string): string | null => {
@@ -93,6 +97,15 @@ export default function PrivateChatScreen() {
 
   const conversation = conversations.find((c) => c.id === id);
   const messages = id ? storeMessages[id] || [] : [];
+  const currentUserId = useAuthStore((s) => s.userId);
+
+  const gameSession = useQuery(
+    api.games.getBottleSpinSession,
+    currentUserId && id ? { conversationId: id } : 'skip'
+  );
+  const sendInviteMutation = useMutation(api.games.sendBottleSpinInvite);
+  const respondToInviteMutation = useMutation(api.games.respondToBottleSpinInvite);
+  const endGameMutation = useMutation(api.games.endBottleSpinGame);
 
   // GOAL A: Live countdown state - updates every 250ms for smooth countdown display
   const [now, setNow] = useState(Date.now());
@@ -185,6 +198,18 @@ export default function PrivateChatScreen() {
 
   // ─── Truth-or-Dare game (same as Phase-1: BottleSpinGame) ───
   const [showTruthDareGame, setShowTruthDareGame] = useState(false);
+  const [showTruthDareInvite, setShowTruthDareInvite] = useState(false);
+  const [showCooldownMessage, setShowCooldownMessage] = useState(false);
+  const [cooldownRemainingLabel, setCooldownRemainingLabel] = useState('');
+  const cooldownHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (cooldownHideTimeoutRef.current) {
+        clearTimeout(cooldownHideTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // C10 FIX: Disable profile navigation in incognito mode to prevent identity leak
   // In incognito chat, tapping the header should NOT reveal the other user's profile
@@ -208,6 +233,122 @@ export default function PrivateChatScreen() {
       console.log('[Phase2Chat] ToD result:', message);
     }
   }, [id, addMessage]);
+
+  useEffect(() => {
+    if (!gameSession) return;
+
+    if (gameSession.state === 'cooldown' || gameSession.state === 'none') {
+      if (showTruthDareGame) {
+        setShowTruthDareGame(false);
+      }
+      if (showTruthDareInvite) {
+        setShowTruthDareInvite(false);
+      }
+    }
+
+    if (gameSession.state === 'active' && showTruthDareInvite) {
+      setShowTruthDareInvite(false);
+      setShowTruthDareGame(true);
+    }
+
+    if (gameSession.state !== 'cooldown') {
+      setShowCooldownMessage(false);
+    }
+  }, [gameSession?.state, showTruthDareGame, showTruthDareInvite]);
+
+  useEffect(() => {
+    if (!gameSession || !currentUserId) return;
+    if (gameSession.state !== 'active') return;
+    if (gameSession.turnPhase !== 'choosing') return;
+    if (!gameSession.currentTurnRole) return;
+
+    const amIInviter = gameSession.inviterId === currentUserId;
+    const amIInvitee = gameSession.inviteeId === currentUserId;
+    const myRole = amIInviter ? 'inviter' : (amIInvitee ? 'invitee' : null);
+    if (!myRole) return;
+
+    if (gameSession.currentTurnRole === myRole && !showTruthDareGame) {
+      setShowTruthDareGame(true);
+    }
+  }, [
+    currentUserId,
+    gameSession?.state,
+    gameSession?.turnPhase,
+    gameSession?.currentTurnRole,
+    gameSession?.inviterId,
+    gameSession?.inviteeId,
+    showTruthDareGame,
+  ]);
+
+  const handleTruthDarePress = useCallback(() => {
+    if (!currentUserId || !gameSession) return;
+
+    if (gameSession.state === 'cooldown') {
+      setCooldownRemainingLabel(formatBottleSpinCooldown(gameSession.remainingMs || 0));
+      setShowCooldownMessage(true);
+      if (cooldownHideTimeoutRef.current) {
+        clearTimeout(cooldownHideTimeoutRef.current);
+      }
+      cooldownHideTimeoutRef.current = setTimeout(() => {
+        setShowCooldownMessage(false);
+        cooldownHideTimeoutRef.current = null;
+      }, 3000);
+      return;
+    }
+
+    if (gameSession.state === 'active') {
+      setShowTruthDareGame(true);
+      return;
+    }
+
+    if (gameSession.state === 'pending') {
+      return;
+    }
+
+    setShowTruthDareInvite(true);
+  }, [currentUserId, gameSession]);
+
+  const handleSendInvite = useCallback(async () => {
+    if (!currentUserId || !id || !conversation?.participantId) return;
+
+    try {
+      await sendInviteMutation({
+        authUserId: currentUserId,
+        conversationId: id,
+        otherUserId: conversation.participantId,
+      });
+      setShowTruthDareInvite(false);
+    } catch (error: any) {
+      Alert.alert('Error', error?.message || 'Failed to send invite');
+    }
+  }, [conversation?.participantId, currentUserId, id, sendInviteMutation]);
+
+  const handleRespondToInvite = useCallback(async (accept: boolean) => {
+    if (!currentUserId || !id) return;
+
+    try {
+      await respondToInviteMutation({
+        authUserId: currentUserId,
+        conversationId: id,
+        accept,
+      });
+
+      if (accept) {
+        setShowTruthDareGame(true);
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error?.message || 'Failed to respond to invite');
+    }
+  }, [currentUserId, id, respondToInviteMutation]);
+
+  const handleEndGame = useCallback(async () => {
+    if (!currentUserId || !id) return;
+
+    await endGameMutation({
+      authUserId: currentUserId,
+      conversationId: id,
+    });
+  }, [currentUserId, endGameMutation, id]);
 
   // Check for captured media from camera-composer when screen regains focus
   useFocusEffect(
@@ -589,19 +730,52 @@ export default function PrivateChatScreen() {
         </TouchableOpacity>
         {/* Truth-or-Dare button — same as Phase-1: opens BottleSpinGame */}
         <TouchableOpacity
-          onPress={() => setShowTruthDareGame(true)}
+          onPress={handleTruthDarePress}
           hitSlop={8}
           style={styles.gameButton}
+          disabled={!currentUserId || (gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId)}
         >
-          <View style={styles.truthDareButton}>
+          <View style={[
+            styles.truthDareButton,
+            gameSession?.state === 'pending' && gameSession?.inviteeId === currentUserId && styles.truthDareButtonWithBadge,
+            gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId && styles.truthDareButtonWaiting,
+            gameSession?.state === 'cooldown' && styles.truthDareButtonCooldown,
+          ]}>
             <Ionicons name="wine" size={18} color="#FFFFFF" />
-            <Text style={styles.truthDareLabel}>T/D</Text>
+            <Text style={styles.truthDareLabel}>
+              {gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId
+                ? 'Wait'
+                : 'T/D'}
+            </Text>
+            {gameSession?.state === 'pending' && gameSession?.inviteeId === currentUserId && (
+              <View style={styles.truthDareBadge} />
+            )}
           </View>
         </TouchableOpacity>
         <TouchableOpacity onPress={() => setReportVisible(true)} style={styles.moreButton}>
           <Ionicons name="ellipsis-vertical" size={20} color={C.textLight} />
         </TouchableOpacity>
       </View>
+
+      {showCooldownMessage && (
+        <View style={styles.cooldownBanner}>
+          <Ionicons name="timer-outline" size={16} color={C.primary} />
+          <Text style={styles.cooldownBannerText}>
+            Cooldown: wait {cooldownRemainingLabel} before playing again
+          </Text>
+        </View>
+      )}
+
+      {gameSession?.state === 'pending' && gameSession?.inviteeId === currentUserId && conversation && (
+        <View style={styles.tdPendingInviteWrapper}>
+          <TruthDareInviteCard
+            inviterName={conversation.participantName}
+            isInvitee={true}
+            onAccept={() => handleRespondToInvite(true)}
+            onReject={() => handleRespondToInvite(false)}
+          />
+        </View>
+      )}
 
       {/* ─── KEYBOARD AVOIDING VIEW (matches locked chat-rooms pattern) ─── */}
       <KeyboardAvoidingView
@@ -742,6 +916,41 @@ export default function PrivateChatScreen() {
         onBlock={handleBlock}
       />
 
+      <Modal
+        visible={showTruthDareInvite}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowTruthDareInvite(false)}
+      >
+        <View style={styles.tdInviteOverlay}>
+          <View style={styles.tdInviteContainer}>
+            <View style={styles.tdInviteHeader}>
+              <View style={styles.tdInviteIconContainer}>
+                <Ionicons name="wine" size={28} color="#FFFFFF" />
+              </View>
+              <Text style={styles.tdInviteTitle}>Truth or Dare</Text>
+            </View>
+            <Text style={styles.tdInviteMessage}>
+              Invite {conversation.participantName} to play Truth or Dare?
+            </Text>
+            <View style={styles.tdInviteActions}>
+              <TouchableOpacity
+                style={[styles.tdInviteButton, styles.tdInviteCancelButton]}
+                onPress={() => setShowTruthDareInvite(false)}
+              >
+                <Text style={styles.tdInviteCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.tdInviteButton, styles.tdInviteSendButton]}
+                onPress={handleSendInvite}
+              >
+                <Text style={styles.tdInviteSendText}>Invite</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* Truth-or-Dare Game — same component as Phase-1 */}
       <BottleSpinGame
         visible={showTruthDareGame}
@@ -749,8 +958,9 @@ export default function PrivateChatScreen() {
         currentUserName="You"
         otherUserName={conversation.participantName}
         conversationId={id}
-        userId="me"
+        userId={currentUserId || ''}
         onSendResultMessage={handleSendTodResult}
+        onEndGame={handleEndGame}
       />
 
       {/* Camera Photo Sheet (gallery/camera picker -> secure options) */}
@@ -837,8 +1047,116 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     gap: 4,
   },
+  truthDareButtonWithBadge: {
+    paddingRight: 12,
+  },
+  truthDareButtonWaiting: {
+    opacity: 0.75,
+  },
+  truthDareButtonCooldown: {
+    opacity: 0.7,
+  },
+  truthDareBadge: {
+    position: 'absolute' as const,
+    top: 2,
+    right: 2,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#FFFFFF',
+  },
   truthDareLabel: {
     fontSize: 11,
+    fontWeight: '700' as const,
+    color: '#FFFFFF',
+  },
+  cooldownBanner: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 8,
+    marginHorizontal: 12,
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.primary + '33',
+  },
+  cooldownBannerText: {
+    flex: 1,
+    fontSize: 13,
+    color: C.text,
+    fontWeight: '500' as const,
+  },
+  tdPendingInviteWrapper: {
+    marginTop: 8,
+  },
+  tdInviteOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center' as const,
+    alignItems: 'center' as const,
+    padding: 24,
+  },
+  tdInviteContainer: {
+    width: '100%',
+    maxWidth: 320,
+    borderRadius: 20,
+    backgroundColor: C.background,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: C.surface,
+  },
+  tdInviteHeader: {
+    alignItems: 'center' as const,
+    marginBottom: 14,
+  },
+  tdInviteIconContainer: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: C.primary,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    marginBottom: 10,
+  },
+  tdInviteTitle: {
+    fontSize: 18,
+    fontWeight: '700' as const,
+    color: C.text,
+  },
+  tdInviteMessage: {
+    fontSize: 15,
+    lineHeight: 21,
+    color: C.textLight,
+    textAlign: 'center' as const,
+    marginBottom: 18,
+  },
+  tdInviteActions: {
+    flexDirection: 'row' as const,
+    gap: 12,
+  },
+  tdInviteButton: {
+    flex: 1,
+    minHeight: 46,
+    borderRadius: 16,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  },
+  tdInviteCancelButton: {
+    backgroundColor: C.surface,
+  },
+  tdInviteSendButton: {
+    backgroundColor: C.primary,
+  },
+  tdInviteCancelText: {
+    fontSize: 14,
+    fontWeight: '600' as const,
+    color: C.text,
+  },
+  tdInviteSendText: {
+    fontSize: 14,
     fontWeight: '700' as const,
     color: '#FFFFFF',
   },

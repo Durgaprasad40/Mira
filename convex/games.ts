@@ -1,8 +1,12 @@
-import { mutation, query } from './_generated/server';
+import { mutation, query, type MutationCtx } from './_generated/server';
 import { v } from 'convex/values';
-import { Id } from './_generated/dataModel';
+import { type Doc, Id } from './_generated/dataModel';
 import { asUserId } from './id';
 import { resolveUserIdByAuthId } from './helpers';
+import {
+  BOTTLE_SPIN_COOLDOWN_MS,
+  BOTTLE_SPIN_PENDING_INVITE_TIMEOUT_MS,
+} from '../lib/bottleSpin';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GAME LIMITS: Bottle Spin Skip Tracking (Convex-backed persistence)
@@ -209,9 +213,27 @@ export const incrementGlobalBottleSpinSkip = mutation({
 // BOTTLE SPIN GAME SESSIONS: Invite, Accept, Reject, End flow
 // ═══════════════════════════════════════════════════════════════════════════
 
-const TEN_MINUTES_MS = 10 * 60 * 1000;
-// WAIT-FIX: Pending invites expire after 5 minutes if not responded
-const PENDING_INVITE_TIMEOUT_MS = 5 * 60 * 1000;
+type BottleSpinSessionDoc = Doc<'bottleSpinSessions'>;
+
+const isPendingInviteExpired = (session: BottleSpinSessionDoc, now: number) =>
+  session.status === 'pending' && now - session.createdAt >= BOTTLE_SPIN_PENDING_INVITE_TIMEOUT_MS;
+
+async function expireStalePendingSessions(
+  ctx: MutationCtx,
+  sessions: BottleSpinSessionDoc[],
+  now: number
+) {
+  const stalePendingSessions = sessions.filter((session) => isPendingInviteExpired(session, now));
+
+  await Promise.all(
+    stalePendingSessions.map((session) =>
+      ctx.db.patch(session._id, {
+        status: 'expired',
+        respondedAt: session.respondedAt ?? now,
+      })
+    )
+  );
+}
 
 // Get current game session status for a conversation
 // CRITICAL FIX: Query ALL sessions and find the active/pending one, not just the latest
@@ -252,25 +274,19 @@ export const getBottleSpinSession = query({
 
     // Priority 2: Find PENDING session (invite waiting for response)
     // WAIT-FIX: Pending invites expire after 5 minutes - treat expired ones as 'none'
-    const pendingSessions = allSessions.filter((s) => s.status === 'pending');
-    if (pendingSessions.length > 0) {
-      pendingSessions.sort((a, b) => b.createdAt - a.createdAt);
-      const session = pendingSessions[0];
-
-      // WAIT-FIX: Check if pending invite has expired
-      const pendingAge = now - session.createdAt;
-      if (pendingAge < PENDING_INVITE_TIMEOUT_MS) {
-        // Still valid pending invite
-        return {
-          state: 'pending' as const,
-          sessionId: session._id,
-          inviterId: session.inviterId,
-          inviteeId: session.inviteeId,
-          createdAt: session.createdAt,
-        };
-      }
-      // WAIT-FIX: Expired pending invite - fall through to cooldown/none check
-      // The pending session is stale, don't return it as pending
+    const freshPendingSessions = allSessions.filter(
+      (session) => session.status === 'pending' && !isPendingInviteExpired(session, now)
+    );
+    if (freshPendingSessions.length > 0) {
+      freshPendingSessions.sort((a, b) => b.createdAt - a.createdAt);
+      const session = freshPendingSessions[0];
+      return {
+        state: 'pending' as const,
+        sessionId: session._id,
+        inviterId: session.inviterId,
+        inviteeId: session.inviteeId,
+        createdAt: session.createdAt,
+      };
     }
 
     // Priority 3: Check for cooldown from most recent ended/rejected session
@@ -303,15 +319,17 @@ export const sendBottleSpinInvite = mutation({
     otherUserId: v.string(),
   },
   handler: async (ctx, { authUserId, conversationId, otherUserId }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+    if (authUserId === otherUserId) {
+      throw new Error('You cannot invite yourself');
+    }
+
+    if (!await resolveUserIdByAuthId(ctx, authUserId)) {
       throw new Error('Unauthorized: user not found');
     }
 
-    // P0-T&D-FIX: Use Convex IDs directly for both inviter and invitee
-    // Frontend passes Convex document IDs (user._id) as "authUserId" parameter
-    // DO NOT convert to user.authUserId field - that causes ID format mismatch
-    // because frontend's useAuthStore().userId is the Convex ID, not the authUserId field
+    if (!await resolveUserIdByAuthId(ctx, otherUserId)) {
+      throw new Error('Invited user not found');
+    }
 
     const now = Date.now();
 
@@ -321,9 +339,12 @@ export const sendBottleSpinInvite = mutation({
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
       .collect();
 
-    // Block if ANY session is pending
-    const pendingSession = allSessions.find((s) => s.status === 'pending');
-    if (pendingSession) {
+    await expireStalePendingSessions(ctx, allSessions, now);
+
+    const freshPendingSession = allSessions.find(
+      (session) => session.status === 'pending' && !isPendingInviteExpired(session, now)
+    );
+    if (freshPendingSession) {
       throw new Error('Invite already pending');
     }
 
@@ -341,7 +362,7 @@ export const sendBottleSpinInvite = mutation({
       throw new Error('Cooldown active');
     }
 
-    // Create new invite session - use Convex IDs directly (passed from frontend)
+    // Create new invite session using the auth IDs passed by the Messages UI.
     await ctx.db.insert('bottleSpinSessions', {
       conversationId,
       inviterId: authUserId,
@@ -363,8 +384,7 @@ export const respondToBottleSpinInvite = mutation({
     accept: v.boolean(),
   },
   handler: async (ctx, { authUserId, conversationId, accept }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+    if (!await resolveUserIdByAuthId(ctx, authUserId)) {
       throw new Error('Unauthorized: user not found');
     }
 
@@ -376,9 +396,14 @@ export const respondToBottleSpinInvite = mutation({
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
       .collect();
 
-    const pendingSessions = allSessions.filter((s) => s.status === 'pending');
+    const hadAnyPendingSession = allSessions.some((session) => session.status === 'pending');
+    await expireStalePendingSessions(ctx, allSessions, now);
+
+    const pendingSessions = allSessions.filter(
+      (session) => session.status === 'pending' && !isPendingInviteExpired(session, now)
+    );
     if (pendingSessions.length === 0) {
-      throw new Error('No pending invite found');
+      throw new Error(hadAnyPendingSession ? 'Invite expired' : 'No pending invite found');
     }
 
     // Get most recent pending session
@@ -406,7 +431,7 @@ export const respondToBottleSpinInvite = mutation({
       await ctx.db.patch(session._id, {
         status: 'rejected',
         respondedAt: now,
-        cooldownUntil: now + TEN_MINUTES_MS,
+        cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS,
       });
       return { success: true, status: 'rejected' as const };
     }
@@ -421,8 +446,7 @@ export const endBottleSpinGame = mutation({
     conversationId: v.string(),
   },
   handler: async (ctx, { authUserId, conversationId }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+    if (!await resolveUserIdByAuthId(ctx, authUserId)) {
       throw new Error('Unauthorized: user not found');
     }
 
@@ -452,7 +476,7 @@ export const endBottleSpinGame = mutation({
     await ctx.db.patch(session._id, {
       status: 'ended',
       endedAt: now,
-      cooldownUntil: now + TEN_MINUTES_MS,
+      cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS,
     });
 
     return { success: true };
@@ -498,13 +522,6 @@ export const setBottleSpinTurn = mutation({
     const activeSessions = allSessions.filter((s) => s.status === 'active');
 
     if (activeSessions.length === 0) {
-      // Debug: Log what sessions exist for this conversation
-      console.log('[BOTTLE_SPIN_DEBUG] setBottleSpinTurn - No active session found', {
-        conversationId,
-        authUserId,
-        totalSessions: allSessions.length,
-        sessionStatuses: allSessions.map((s) => ({ id: s._id, status: s.status, createdAt: s.createdAt })),
-      });
       throw new Error('No active game found');
     }
 
