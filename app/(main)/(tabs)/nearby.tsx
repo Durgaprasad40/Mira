@@ -280,12 +280,8 @@ const PUBLISH_REFRESH_INTERVAL_MS = 30000; // Refresh publishedAt at least every
 // P3-NEARBY-002: Query timeout constant (extracted from inline 30000ms)
 const QUERY_TIMEOUT_MS = 30000; // 30 seconds before showing error
 const LOCATION_ACQUIRE_TIMEOUT_MS = 15000; // 15 seconds before fallback error
-
-// Privacy fuzzing constants
-const FUZZ_MIN_METERS = 50;  // Minimum offset
-const FUZZ_MAX_METERS = 150; // Maximum offset
-const STRONG_PRIVACY_FUZZ_MIN = 200; // Larger offset for users with strongPrivacyMode
-const STRONG_PRIVACY_FUZZ_MAX = 400;
+const LOADING_OVERLAY_DELAY_MS = 180;
+const MAP_FADE_IN_DURATION_MS = 220;
 
 // Demo fallback location (Mumbai)
 const DEMO_LOCATION = {
@@ -296,34 +292,6 @@ const DEMO_LOCATION = {
 // Supercluster configuration (matches previous react-native-map-clustering behavior)
 const CLUSTER_RADIUS = 45;
 const CLUSTER_MAX_ZOOM = 20;
-
-// ---------------------------------------------------------------------------
-// STABILITY FIX P1: Cryptographically secure session salt
-// ---------------------------------------------------------------------------
-// Module-level session salt for stable privacy fuzzing across Nearby remounts.
-// Generated once per app session (module load), not per component mount.
-// Combined with viewerId + otherId for deterministic per-user fuzzing.
-//
-// FIX: Use crypto API for unpredictable salt instead of Date.now()
-// This prevents reverse-engineering of fuzz offsets.
-// ---------------------------------------------------------------------------
-function generateSecureSessionSalt(): number {
-  try {
-    // Use Web Crypto API (available in Hermes/React Native)
-    const array = new Uint32Array(2);
-    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-      crypto.getRandomValues(array);
-      // Combine two 32-bit values into a larger number
-      return array[0] * 0x100000000 + array[1];
-    }
-  } catch {
-    // Fallback silently
-  }
-  // Fallback: combine Math.random with high-resolution time for entropy
-  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER) ^ Date.now();
-}
-
-const MODULE_SESSION_SALT = generateSecureSessionSalt();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -367,69 +335,7 @@ function isValidMapCoordinate(
   return true;
 }
 
-/**
- * Simple deterministic hash for stable fuzzing.
- * Same input always produces same output within a session.
- */
-function simpleHash(str: string): number {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-
-/**
- * Apply client-side privacy fuzzing to coordinates.
- * Deterministic per user+viewer+session so markers stay stable.
- * Never reveals exact location.
- */
-function applyPrivacyFuzz(
-  lat: number,
-  lng: number,
-  otherId: string,
-  viewerId: string,
-  sessionSalt: number,
-  strongPrivacyMode: boolean,
-): { lat: number; lng: number } {
-  // Deterministic seed
-  const seed = simpleHash(`${viewerId}:${otherId}:${sessionSalt}`);
-
-  // Random angle (0-360 degrees)
-  const angle = ((seed % 36000) / 100) * (Math.PI / 180);
-
-  // Random radius based on strongPrivacyMode preference
-  const minMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MIN : FUZZ_MIN_METERS;
-  const maxMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MAX : FUZZ_MAX_METERS;
-  const radiusMeters = minMeters + (seed % (maxMeters - minMeters + 1));
-
-  // Earth radius in meters
-  const R = 6371000;
-  const latRad = lat * (Math.PI / 180);
-  const lngRad = lng * (Math.PI / 180);
-  const d = radiusMeters / R;
-
-  const newLat = Math.asin(
-    Math.sin(latRad) * Math.cos(d) +
-    Math.cos(latRad) * Math.sin(d) * Math.cos(angle),
-  );
-  const newLng = lngRad + Math.atan2(
-    Math.sin(angle) * Math.sin(d) * Math.cos(latRad),
-    Math.cos(d) - Math.sin(latRad) * Math.sin(newLat),
-  );
-
-  return {
-    lat: newLat * (180 / Math.PI),
-    lng: newLng * (180 / Math.PI),
-  };
-}
-
-/**
- * Convert map region to zoom level for supercluster.
- * Formula based on how map tiles work at different zoom levels.
- */
+/** Convert map region to zoom level for supercluster. */
 function getZoomFromRegion(region: Region): number {
   const angle = region.longitudeDelta;
   // Clamp zoom to reasonable range
@@ -489,6 +395,9 @@ export default function NearbyScreen() {
   const [queryError, setQueryError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
   const [showEmptyState, setShowEmptyState] = useState(false);
+  const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
+  const [isMapReady, setIsMapReady] = useState(false);
+  const [retainedNearbyUsersResult, setRetainedNearbyUsersResult] = useState<NearbyUsersQueryResult | null>(null);
   const [nearbyRefreshKey, setNearbyRefreshKey] = useState(0);
 
   // Mount guard for async operations
@@ -498,6 +407,7 @@ export default function NearbyScreen() {
   const queryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locationAcquireTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const publishRefreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const loadingOverlayDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // P1-003 FIX: Ref to track query completion for timeout callback
   // This provides fresh state check inside setTimeout, avoiding stale closure values
@@ -518,6 +428,7 @@ export default function NearbyScreen() {
   const recenterScale = useRef(new Animated.Value(1)).current;
   // P3-003: Loading overlay fade animation
   const loadingOpacity = useRef(new Animated.Value(0)).current;
+  const mapOpacity = useRef(new Animated.Value(0)).current;
   const lastNearbyRefreshAtRef = useRef(0);
   const [nearbySyncIssue, setNearbySyncIssue] = useState<NearbySyncIssue | null>(null);
   const requestNearbyRefresh = useCallback(
@@ -555,6 +466,10 @@ export default function NearbyScreen() {
       if (publishRefreshIntervalRef.current) {
         clearInterval(publishRefreshIntervalRef.current);
         publishRefreshIntervalRef.current = null;
+      }
+      if (loadingOverlayDelayRef.current) {
+        clearTimeout(loadingOverlayDelayRef.current);
+        loadingOverlayDelayRef.current = null;
       }
       if (autoRetryTimeoutRef.current) {
         clearTimeout(autoRetryTimeoutRef.current);
@@ -644,6 +559,13 @@ export default function NearbyScreen() {
   // Track query loading state for error detection
   const isQueryActive = shouldRunNearbyUsersQuery;
   const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
+  const shouldShowLoadingState = (isQueryLoading || isRetrying) && !isDemo;
+
+  useEffect(() => {
+    if (userId) {
+      setRetainedNearbyUsersResult(null);
+    }
+  }, [userId]);
 
   // Clear timeout when query succeeds or on unmount
   useEffect(() => {
@@ -696,7 +618,7 @@ export default function NearbyScreen() {
       }
       // Only set error if query is still pending
       if (isQueryActive) {
-        setQueryError('Unable to load nearby users. Please check your connection.');
+        setQueryError('Nearby is taking longer than usual to refresh.');
         setIsRetrying(false);
         log.warn('[NEARBY]', 'query timeout - no data after 30s');
       }
@@ -711,22 +633,47 @@ export default function NearbyScreen() {
     };
   }, [isQueryLoading, isQueryActive]);
 
-  // P3-003: Animate loading overlay opacity on show
+  // P3-003: Delay + fade the loading overlay so quick refreshes do not flash
   useEffect(() => {
-    const isShowingLoading = (isQueryLoading || isRetrying) && !isDemo;
-    if (isShowingLoading) {
-      // Fade in
-      loadingOpacity.setValue(0);
-      Animated.timing(loadingOpacity, {
-        toValue: 1,
-        duration: 150,
-        useNativeDriver: true,
-      }).start();
-    } else {
-      // Reset for next show
-      loadingOpacity.setValue(0);
+    if (loadingOverlayDelayRef.current) {
+      clearTimeout(loadingOverlayDelayRef.current);
+      loadingOverlayDelayRef.current = null;
     }
-  }, [isQueryLoading, isRetrying, isDemo, loadingOpacity]);
+
+    if (shouldShowLoadingState) {
+      if (showLoadingOverlay) {
+        return;
+      }
+
+      loadingOverlayDelayRef.current = setTimeout(() => {
+        if (!isMountedRef.current) return;
+        setShowLoadingOverlay(true);
+        loadingOpacity.setValue(0);
+        Animated.timing(loadingOpacity, {
+          toValue: 1,
+          duration: 180,
+          useNativeDriver: true,
+        }).start();
+      }, LOADING_OVERLAY_DELAY_MS);
+    } else {
+      Animated.timing(loadingOpacity, {
+        toValue: 0,
+        duration: 140,
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (finished && isMountedRef.current) {
+          setShowLoadingOverlay(false);
+        }
+      });
+    }
+
+    return () => {
+      if (loadingOverlayDelayRef.current) {
+        clearTimeout(loadingOverlayDelayRef.current);
+        loadingOverlayDelayRef.current = null;
+      }
+    };
+  }, [loadingOpacity, shouldShowLoadingState, showLoadingOverlay]);
 
   // ---------------------------------------------------------------------------
   // Auto-retry on query error (conservative: max 2 attempts, 5s delay)
@@ -998,8 +945,8 @@ export default function NearbyScreen() {
           }
           setNearbySyncIssue({
             kind: 'record',
-            message: 'Crossed Paths may be delayed until location sync catches up.',
-            actionLabel: 'Retry sync',
+            message: 'Crossed Paths will catch up as soon as your location refresh finishes.',
+            actionLabel: 'Retry now',
           });
         }
       } catch (err) {
@@ -1011,8 +958,8 @@ export default function NearbyScreen() {
         }
         setNearbySyncIssue({
           kind: 'publish',
-          message: 'Nearby could not refresh your location just now.',
-          actionLabel: 'Retry sync',
+          message: 'Using your last good location while Nearby refreshes.',
+          actionLabel: 'Retry now',
         });
       } finally {
         // Always reset publishing flag to allow future calls
@@ -1096,10 +1043,19 @@ export default function NearbyScreen() {
     return nearbyUsersQuery as NearbyUsersQueryResult;
   }, [demoNearbyUsers, isDemo, nearbyUsersQuery]);
 
-  const nearbyQueryStatus = nearbyUsersResult?.status ?? null;
+  useEffect(() => {
+    if (nearbyUsersResult?.status === 'ok') {
+      setRetainedNearbyUsersResult(nearbyUsersResult);
+    }
+  }, [nearbyUsersResult]);
+
+  const displayNearbyUsersResult = nearbyUsersResult ?? retainedNearbyUsersResult;
+  const hasRetainedNearbyResult =
+    nearbyUsersResult == null && retainedNearbyUsersResult?.status === 'ok';
+  const nearbyQueryStatus = displayNearbyUsersResult?.status ?? null;
 
   const processedNearbyUsers = useMemo(() => {
-    const rawUsers: NearbyUser[] = nearbyUsersResult?.users ?? [];
+    const rawUsers: NearbyUser[] = displayNearbyUsersResult?.users ?? [];
     let validCount = 0;
     let skippedCount = 0;
 
@@ -1134,7 +1090,7 @@ export default function NearbyScreen() {
     }
 
     return processed;
-  }, [nearbyUsersResult, userId]);
+  }, [displayNearbyUsersResult, userId]);
 
   // ---------------------------------------------------------------------------
   // Sort visible markers fairly before clustering
@@ -1219,6 +1175,7 @@ export default function NearbyScreen() {
     if (!mapRef.current || !superclusterRef.current) return;
 
     try {
+      Haptics.selectionAsync().catch(() => {});
       const clusterId = cluster.properties.cluster_id;
       const expansionZoom = superclusterRef.current.getClusterExpansionZoom(clusterId);
       const [lng, lat] = cluster.geometry.coordinates;
@@ -1246,28 +1203,36 @@ export default function NearbyScreen() {
     nearbyQueryStatus === 'ok' &&
     mapUsers.length === 0 &&
     !isDemo &&
-    !isQueryLoading &&
-    !isRetrying;
-
-  useEffect(() => {
-    setShowEmptyState(isEmptyStateCondition);
-  }, [isEmptyStateCondition]);
+    (!shouldShowLoadingState || hasRetainedNearbyResult);
 
   // P3-001: Animate empty state opacity on show/hide
   useEffect(() => {
     if (showEmptyState) {
-      // Fade in
-      emptyStateOpacity.setValue(0);
+      if (!isEmptyStateCondition) {
+        Animated.timing(emptyStateOpacity, {
+          toValue: 0,
+          duration: 160,
+          useNativeDriver: true,
+        }).start(({ finished }) => {
+          if (finished && isMountedRef.current) {
+            setShowEmptyState(false);
+          }
+        });
+        return;
+      }
       Animated.timing(emptyStateOpacity, {
         toValue: 1,
         duration: 200,
         useNativeDriver: true,
       }).start();
-    } else {
-      // Fade out (instant since component will unmount)
-      emptyStateOpacity.setValue(0);
+      return;
     }
-  }, [showEmptyState, emptyStateOpacity]);
+
+    if (isEmptyStateCondition) {
+      emptyStateOpacity.setValue(0);
+      setShowEmptyState(true);
+    }
+  }, [emptyStateOpacity, isEmptyStateCondition, showEmptyState]);
 
   // ---------------------------------------------------------------------------
   // Navigation handlers for header buttons
@@ -1281,6 +1246,10 @@ export default function NearbyScreen() {
 
   const handleOpenNearbySettings = useCallback(() => {
     safePush(router, '/(main)/nearby-settings' as any, 'nearby->nearby-settings');
+  }, [router]);
+
+  const handleOpenVerification = useCallback(() => {
+    safePush(router, '/(main)/verification' as any, 'nearby->verification');
   }, [router]);
 
   // ---------------------------------------------------------------------------
@@ -1493,6 +1462,13 @@ export default function NearbyScreen() {
     return null;
   }, [isDemo, bestLocation]);
 
+  useEffect(() => {
+    if (locationUIState !== 'ready' || !mapRegion) {
+      setIsMapReady(false);
+      mapOpacity.setValue(0);
+    }
+  }, [locationUIState, mapOpacity, mapRegion]);
+
   // ---------------------------------------------------------------------------
   // Open device settings
   // ---------------------------------------------------------------------------
@@ -1551,9 +1527,17 @@ export default function NearbyScreen() {
       };
     }
 
+    if (queryError && hasRetainedNearbyResult) {
+      return {
+        message: 'Showing your last Nearby view while we reconnect.',
+        actionLabel: 'Retry',
+        onPress: handleRetryQuery,
+      };
+    }
+
     if (passiveLocationErrorMessage) {
       return {
-        message: 'Showing your last known location while GPS refreshes.',
+        message: 'Using your last good location while we refresh your position.',
         actionLabel: 'Retry',
         onPress: handleRetryLocation,
       };
@@ -1561,7 +1545,7 @@ export default function NearbyScreen() {
 
     if (nearbyQueryStatus === 'location_required' && hasValidBestLocation) {
       return {
-        message: 'Syncing your location with Nearby...',
+        message: 'Finishing your Nearby refresh...',
         actionLabel: 'Retry',
         onPress: handleRetryNearbySync,
       };
@@ -1572,10 +1556,15 @@ export default function NearbyScreen() {
     hasValidBestLocation,
     handleRetryLocation,
     handleRetryNearbySync,
+    handleRetryQuery,
     nearbyQueryStatus,
     nearbySyncIssue,
     passiveLocationErrorMessage,
+    queryError,
+    hasRetainedNearbyResult,
   ]);
+
+  const shouldShowBlockingQueryError = Boolean(queryError && !hasRetainedNearbyResult);
 
   // ---------------------------------------------------------------------------
   // SHELL UI PATTERN: Header renders immediately, content area handles states
@@ -1592,7 +1581,10 @@ export default function NearbyScreen() {
       return (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.statusText}>Getting your location...</Text>
+          <Text style={styles.title}>Finding your location</Text>
+          <Text style={styles.subtitle}>
+            Nearby works best with a fresh location. This usually takes a few seconds.
+          </Text>
         </View>
       );
     }
@@ -1602,12 +1594,12 @@ export default function NearbyScreen() {
       return (
         <View style={styles.centered}>
           <Ionicons name="navigate-circle-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Location Access Denied</Text>
+          <Text style={styles.title}>Turn on location for Nearby</Text>
           <Text style={styles.subtitle}>
-            Please enable location access in your device settings to see people nearby.
+            Nearby needs location access to place your map and show people around you.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
-            <Text style={styles.primaryButtonText}>Open Settings</Text>
+            <Text style={styles.primaryButtonText}>Turn On Location</Text>
           </TouchableOpacity>
         </View>
       );
@@ -1618,9 +1610,9 @@ export default function NearbyScreen() {
       return (
         <View style={styles.centered}>
           <Ionicons name="lock-closed-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Location Restricted</Text>
+          <Text style={styles.title}>Location isn't available here</Text>
           <Text style={styles.subtitle}>
-            Location access is restricted on this device, possibly due to parental controls or device management. Contact your device administrator for help.
+            This device is preventing location access, possibly because of parental controls or device management.
           </Text>
         </View>
       );
@@ -1631,9 +1623,9 @@ export default function NearbyScreen() {
       return (
         <View style={styles.centered}>
           <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Location Services Off</Text>
+          <Text style={styles.title}>Enable Location Services</Text>
           <Text style={styles.subtitle}>
-            Please enable Location Services in your device settings to see people nearby.
+            Turn on Location Services to keep Nearby live and up to date.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
             <Text style={styles.primaryButtonText}>Open Settings</Text>
@@ -1647,12 +1639,12 @@ export default function NearbyScreen() {
       return (
         <View style={styles.centered}>
           <Ionicons name="warning-outline" size={64} color={COLORS.warning} />
-          <Text style={styles.title}>Location Error</Text>
+          <Text style={styles.title}>We couldn't update your location yet</Text>
           <Text style={styles.subtitle}>
-            {blockingLocationErrorMessage || 'Unable to get your location. Please try again.'}
+            {blockingLocationErrorMessage || 'Try again in a moment or move somewhere with a clearer GPS signal.'}
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={handleRetryLocation}>
-            <Text style={styles.primaryButtonText}>Retry</Text>
+            <Text style={styles.primaryButtonText}>Try Again</Text>
           </TouchableOpacity>
         </View>
       );
@@ -1664,23 +1656,26 @@ export default function NearbyScreen() {
           <Ionicons name="shield-checkmark-outline" size={64} color={COLORS.textLight} />
           <Text style={styles.title}>Verify to use Nearby</Text>
           <Text style={styles.subtitle}>
-            Nearby is available after profile verification, so everyone you see here meets the same trust rules.
+            Finish verification to unlock Nearby and browse people who meet the same trust rules.
           </Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={handleOpenVerification}>
+            <Text style={styles.primaryButtonText}>Verify Now</Text>
+          </TouchableOpacity>
         </View>
       );
     }
 
     // Query error state
-    if (queryError) {
+    if (shouldShowBlockingQueryError) {
       return (
         <View style={styles.centered}>
           <Ionicons name="cloud-offline-outline" size={64} color={COLORS.warning} />
-          <Text style={styles.title}>Connection Issue</Text>
+          <Text style={styles.title}>Nearby needs a moment</Text>
           <Text style={styles.subtitle}>
             {queryError}
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={handleRetryQuery}>
-            <Text style={styles.primaryButtonText}>Try Again</Text>
+            <Text style={styles.primaryButtonText}>Refresh Nearby</Text>
           </TouchableOpacity>
         </View>
       );
@@ -1694,7 +1689,10 @@ export default function NearbyScreen() {
       return (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.statusText}>Preparing map...</Text>
+          <Text style={styles.title}>Preparing your map</Text>
+          <Text style={styles.subtitle}>
+            We&apos;re getting Nearby ready for you.
+          </Text>
         </View>
       );
     }
@@ -1705,23 +1703,31 @@ export default function NearbyScreen() {
     return (
       <MapErrorBoundary>
       <View style={styles.mapContainer}>
-        <MapView
-          ref={mapRef}
-          style={styles.map}
-          initialRegion={mapRegion}
-          onRegionChangeComplete={handleRegionChangeComplete}
-          onMapReady={() => {
-            // Set initial region for cluster computation
-            if (mapRegion) {
-              setCurrentRegion(mapRegion);
-            }
-          }}
-          showsUserLocation={permissionStatus === 'granted'}
-          showsMyLocationButton={false}
-          showsCompass={false}
-          rotateEnabled={true}
-          pitchEnabled={false}
-        >
+        <Animated.View style={[styles.mapStage, { opacity: mapOpacity }]}>
+          <MapView
+            ref={mapRef}
+            style={styles.map}
+            initialRegion={mapRegion}
+            onRegionChangeComplete={handleRegionChangeComplete}
+            onMapReady={() => {
+              if (mapRegion) {
+                setCurrentRegion(mapRegion);
+              }
+              setIsMapReady(true);
+              mapOpacity.setValue(0);
+              Animated.timing(mapOpacity, {
+                toValue: 1,
+                duration: MAP_FADE_IN_DURATION_MS,
+                useNativeDriver: true,
+              }).start();
+            }}
+            showsUserLocation={permissionStatus === 'granted'}
+            showsMyLocationButton={false}
+            showsCompass={false}
+            rotateEnabled={true}
+            pitchEnabled={false}
+            moveOnMarkerPress={false}
+          >
           {/* ================================================================
            * CLUSTERING: Manual implementation with supercluster
            * ================================================================
@@ -1761,6 +1767,7 @@ export default function NearbyScreen() {
                   anchor={{ x: 0.5, y: 1 }}
                   onPress={() => handleClusterPress(clusterFeature)}
                   image={clusterImage}
+                  tracksViewChanges={false}
                 />
               );
             } else {
@@ -1775,11 +1782,22 @@ export default function NearbyScreen() {
                   anchor={{ x: 0.5, y: 1 }}
                   onPress={() => handleMarkerPress(user)}
                   image={pinPink}
+                  tracksViewChanges={false}
                 />
               );
             }
           })}
-        </MapView>
+          </MapView>
+        </Animated.View>
+
+        {!isMapReady && (
+          <View style={styles.mapBootOverlay} pointerEvents="none">
+            <View style={styles.mapBootCard}>
+              <ActivityIndicator size="small" color={COLORS.primary} />
+              <Text style={styles.mapBootText}>Loading your map…</Text>
+            </View>
+          </View>
+        )}
 
         {mapNotice && (
           <View style={styles.mapNoticeContainer} pointerEvents="box-none">
@@ -1796,12 +1814,14 @@ export default function NearbyScreen() {
 
         {/* Query loading indicator - shown while fetching nearby users */}
         {/* P3-003: Animated fade-in for premium feel */}
-        {(isQueryLoading || isRetrying) && !isDemo && (
+        {showLoadingOverlay && !isDemo && (
           <Animated.View style={[styles.loadingOverlay, { opacity: loadingOpacity }]}>
             <View style={styles.loadingCard}>
               <ActivityIndicator size="small" color={COLORS.primary} />
               <Text style={styles.loadingText}>
-                {isRetrying ? 'Retrying...' : 'Finding people nearby...'}
+                {isRetrying || hasRetainedNearbyResult
+                  ? 'Refreshing Nearby…'
+                  : 'Looking around you…'}
               </Text>
             </View>
           </Animated.View>
@@ -1815,7 +1835,7 @@ export default function NearbyScreen() {
               <Ionicons name="people-outline" size={32} color={COLORS.textLight} />
               <Text style={styles.emptyTitle}>No one nearby right now</Text>
               <Text style={styles.emptySubtitle}>
-                Check back later or see who crossed your path
+                Your map is live. We&apos;ll show people here as soon as someone nearby appears.
               </Text>
               <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenCrossedPaths}>
                 <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
@@ -1956,11 +1976,6 @@ const styles = StyleSheet.create({
     marginTop: 8,
     lineHeight: 22,
   },
-  statusText: {
-    fontSize: 15,
-    color: COLORS.textLight,
-    marginTop: 12,
-  },
   primaryButton: {
     marginTop: 24,
     backgroundColor: COLORS.primary,
@@ -1976,8 +1991,35 @@ const styles = StyleSheet.create({
   mapContainer: {
     flex: 1,
   },
+  mapStage: {
+    flex: 1,
+  },
   map: {
     flex: 1,
+  },
+  mapBootOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  mapBootCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.96)',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  mapBootText: {
+    fontSize: 13,
+    color: COLORS.textLight,
   },
   // NOTE: Cluster markers use image={pinPink} for Android reliability.
   // Custom View-based cluster styles removed - they were unreliable on Android.
