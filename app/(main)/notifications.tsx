@@ -201,6 +201,9 @@ export default function NotificationsScreen() {
       case 'subscription':
         router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);
         break;
+      case 'comment_connect':
+        router.push(`/(main)/comment-connect-requests?${notifParams}${dedupeParam}` as any);
+        break;
       case 'confession_reaction':
       case 'confession_reply':
         if (notification.data?.confessionId) {
@@ -269,6 +272,8 @@ export default function NotificationsScreen() {
         return 'information-circle';
       case 'subscription':
         return 'card';
+      case 'comment_connect':
+        return 'chatbubble-ellipses';
       case 'weekly_refresh':
         return 'refresh';
       case 'confession_reaction':
@@ -302,6 +307,8 @@ export default function NotificationsScreen() {
         return '#607D8B';
       case 'system':
         return '#2196F3';
+      case 'comment_connect':
+        return COLORS.primary;
       case 'confession_reaction':
       case 'confession_reply':
         return '#9C27B0';
