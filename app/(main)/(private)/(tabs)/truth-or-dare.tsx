@@ -7,7 +7,7 @@ import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery } from 'convex/react';
+import { useConvex, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
@@ -69,23 +69,12 @@ function getUrlPrefix(url?: string): string {
 }
 
 /** Check if URL is valid for display:
- * - Accept https/http always
- * - Accept file:// if NOT from unstable cache (ImagePicker cache)
- * - Reject content:// (not directly displayable)
+ * Shared T&D surfaces must only render remote URLs.
+ * Local file paths are device-specific and break cross-device consistency.
  */
 function isValidPhotoUrl(url?: string): boolean {
   if (!url) return false;
-  // Accept remote URLs always
-  if (url.startsWith('http://') || url.startsWith('https://')) return true;
-  // Accept file:// if not from unstable cache
-  if (url.startsWith('file://')) {
-    // Reject unstable ImagePicker cache paths
-    if (url.includes('/cache/ImagePicker/') || url.includes('/Cache/ImagePicker/')) {
-      return false;
-    }
-    return true;
-  }
-  return false;
+  return url.startsWith('http://') || url.startsWith('https://');
 }
 
 const C = INCOGNITO_COLORS;
@@ -357,8 +346,8 @@ const PromptCard = React.memo(function PromptCard({
 export default function TruthOrDareScreen() {
   useScreenTrace("P2_TRUTH_OR_DARE");
   const router = useRouter();
+  const convex = useConvex();
   const insets = useSafeAreaInsets();
-  const [refreshKey, setRefreshKey] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const firstRenderRef = useRef(true);
   const dataReceivedRef = useRef(false);
@@ -397,7 +386,7 @@ export default function TruthOrDareScreen() {
   const userId = useAuthStore((s) => s.userId);
 
   // Get trending prompts (1 Dare + 1 Truth)
-  const trendingDataQuery = useQuery(api.truthDare.getTrendingTruthAndDare);
+  const trendingDataQuery = useQuery(api.truthDare.getTrendingTruthAndDare, { viewerUserId: userId ?? undefined });
 
   // Get all prompts (sorted by engagement)
   const promptsDataQuery = useQuery(
@@ -462,9 +451,8 @@ export default function TruthOrDareScreen() {
     return prompts.filter((p) => !trendingIds.has(p._id as unknown as string));
   }, [prompts, trendingIds]);
 
-  const onRefresh = useCallback(() => {
+  const onRefresh = useCallback(async () => {
     setIsRefreshing(true);
-    setRefreshKey((k: number) => k + 1);
 
     // B2-HIGH FIX: Timeout fallback to prevent stuck spinner (10s)
     if (refreshTimeoutRef.current) {
@@ -475,7 +463,26 @@ export default function TruthOrDareScreen() {
         setIsRefreshing(false);
       }
     }, 10000);
-  }, []);
+
+    try {
+      const [nextPrompts, nextTrending] = await Promise.all([
+        convex.query(api.truthDare.listActivePromptsWithTop2Answers, { viewerUserId: userId ?? undefined }),
+        convex.query(api.truthDare.getTrendingTruthAndDare, { viewerUserId: userId ?? undefined }),
+      ]);
+
+      _cachedPromptsData = nextPrompts;
+      _cachedTrendingData = nextTrending;
+      _hasEverLoaded = true;
+    } finally {
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+        refreshTimeoutRef.current = null;
+      }
+      if (mountedRef.current) {
+        setIsRefreshing(false);
+      }
+    }
+  }, [convex, userId]);
 
   const openThread = useCallback((promptId: string) => {
     router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId } });

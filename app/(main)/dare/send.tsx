@@ -1,3 +1,8 @@
+/**
+ * LEGACY DARE V1 SEND SCREEN
+ * Not used by the active Phase-2 Truth or Dare tab.
+ * Kept because an older chat flow still routes here.
+ */
 import React, { useState } from 'react';
 import {
   View,

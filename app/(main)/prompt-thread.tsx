@@ -4,7 +4,6 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
-import * as ImagePicker from 'expo-image-picker';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -13,7 +12,6 @@ import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { UnifiedAnswerComposer, IdentityMode, Attachment } from '@/components/truthdare/UnifiedAnswerComposer';
 import { TodVoicePlayer } from '@/components/truthdare/TodVoicePlayer';
-import { CameraPhotoSheet, CameraPhotoOptions } from '@/components/chat/CameraPhotoSheet';
 import { uploadMediaToConvex } from '@/lib/uploadUtils';
 import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
@@ -47,6 +45,10 @@ function formatTimeLeft(expiresAt: number): string {
   return `${minutes}m left`;
 }
 
+function isRemoteDisplayUrl(url?: string | null): boolean {
+  return !!url && (url.startsWith('http://') || url.startsWith('https://'));
+}
+
 export default function PromptThreadScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -58,8 +60,6 @@ export default function PromptThreadScreen() {
   const userId = useAuthStore((s) => s.userId);
   const demoUserId = useDemoStore((s) => s.currentDemoUserId);
 
-  // C-002 FIX: Stable fallback ID constant (outside useMemo to avoid re-creation)
-  // Resolve currentUserId: authStore userId → demoStore currentDemoUserId
   const currentUserId = useMemo(() => {
     if (userId) {
       console.log(`[T/D] resolvedUserId source=auth valuePrefix=${userId.substring(0, 12)}...`);
@@ -69,10 +69,8 @@ export default function PromptThreadScreen() {
       console.log(`[T/D] resolvedUserId source=demoStore valuePrefix=${demoUserId.substring(0, 12)}...`);
       return demoUserId;
     }
-    // C-002 FIX: Use stable constant fallback instead of Date.now()
-    // This prevents render loops when auth state is missing
-    console.warn(`[T/D] resolvedUserId source=fallback (no auth or demoStore userId)`);
-    return 'demo_fallback_user';
+    console.warn(`[T/D] resolvedUserId source=missing`);
+    return null;
   }, [userId, demoUserId]);
 
   // Get profile data for author identity snapshot
@@ -99,7 +97,7 @@ export default function PromptThreadScreen() {
   // Fetch thread data from Convex
   const threadData = useQuery(
     api.truthDare.getPromptThread,
-    promptId ? { promptId, viewerUserId: currentUserId } : 'skip'
+    promptId ? { promptId, viewerUserId: currentUserId ?? undefined } : 'skip'
   );
 
   // Mutations
@@ -113,6 +111,13 @@ export default function PromptThreadScreen() {
   const finalizeAnswerMediaView = useMutation(api.truthDare.finalizeAnswerMediaView);
   // T&D Connect
   const sendConnectRequest = useMutation(api.truthDare.sendTodConnectRequest);
+
+  const generateTodUploadUrl = useCallback(() => {
+    if (!currentUserId) {
+      throw new Error('Session expired');
+    }
+    return generateUploadUrl({ authUserId: currentUserId });
+  }, [generateUploadUrl, currentUserId]);
 
   const isLoading = threadData === undefined;
   const prompt = threadData?.prompt;
@@ -154,21 +159,12 @@ export default function PromptThreadScreen() {
     }
   }, [isExpired, showUnifiedComposer]);
 
-  // Gallery media state for privacy sheet (camera flow)
-  const [galleryMedia, setGalleryMedia] = useState<{
-    uri: string;
-    type: 'photo' | 'video';
-    durationMs?: number;
-  } | null>(null);
-  const [isSubmittingMedia, setIsSubmittingMedia] = useState(false);
-
   // Emoji picker state (per answer)
   const [emojiPickerAnswerId, setEmojiPickerAnswerId] = useState<string | null>(null);
 
   // Report modal state
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [reportingAnswerId, setReportingAnswerId] = useState<string | null>(null);
-  const [reportingAuthorId, setReportingAuthorId] = useState<string | null>(null);
   const [selectedReportReason, setSelectedReportReason] = useState<TodReportReason | null>(null);
   const [reportReasonText, setReportReasonText] = useState('');
   const [isSubmittingReport, setIsSubmittingReport] = useState(false);
@@ -181,14 +177,17 @@ export default function PromptThreadScreen() {
     isOwnAnswer: boolean;
     hasViewed?: boolean;
     isFrontCamera?: boolean;
+    durationSec?: number;
+    viewMode?: 'tap' | 'hold';
   } | null>(null);
+  const mediaAutoCloseRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // T&D Connect state - tracks which answers have pending/sent connect requests
   const [connectSentFor, setConnectSentFor] = useState<Set<string>>(new Set());
   const [connectSending, setConnectSending] = useState<string | null>(null);
 
   // Check if current user is the prompt owner
-  const isPromptOwner = prompt?.ownerUserId === currentUserId;
+  const isPromptOwner = !!prompt?.isPromptOwner;
 
   const listRef = useRef<FlatList>(null);
 
@@ -201,6 +200,10 @@ export default function PromptThreadScreen() {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
+      if (mediaAutoCloseRef.current) {
+        clearTimeout(mediaAutoCloseRef.current);
+        mediaAutoCloseRef.current = null;
+      }
       if (scrollTimeoutRef.current) {
         clearTimeout(scrollTimeoutRef.current);
         scrollTimeoutRef.current = null;
@@ -242,7 +245,7 @@ export default function PromptThreadScreen() {
 
   // Handle emoji reaction
   const handleReact = useCallback(async (answerId: string, emoji: string) => {
-    if (!userId) {
+    if (!currentUserId) {
       console.log('[T/D REACTION] skip - no userId');
       return;
     }
@@ -265,11 +268,11 @@ export default function PromptThreadScreen() {
       emoji: emoji || '(remove)',
       currentCount: answer?.totalReactionCount ?? 0,
       isOwnAnswer: answer?.isOwnAnswer ?? false,
-      hasAuth: !!userId,
+      hasAuth: !!currentUserId,
     });
 
     try {
-      const result = await setReaction({ answerId, userId, emoji });
+      const result = await setReaction({ answerId, userId: currentUserId, emoji });
       // Handle server returning ok: false (no throw, graceful fail)
       if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
         console.warn('[T/D REACTION] failed', { reason: (result as any).reason });
@@ -285,27 +288,26 @@ export default function PromptThreadScreen() {
     } finally {
       pendingReactionsRef.current.delete(answerId);
     }
-  }, [userId, setReaction]);
+  }, [currentUserId, setReaction]);
 
   // Open report modal
-  const handleReport = useCallback((answerId: string, authorId: string) => {
-    if (!userId || userId === authorId) return;
+  const handleReport = useCallback((answerId: string) => {
+    if (!currentUserId) return;
     setReportingAnswerId(answerId);
-    setReportingAuthorId(authorId);
     setSelectedReportReason(null);
     setReportReasonText('');
     setReportModalVisible(true);
-  }, [userId]);
+  }, [currentUserId]);
 
   // Submit report with selected reason
   const submitReport = useCallback(async () => {
-    if (!userId || !reportingAnswerId || !selectedReportReason) return;
+    if (!currentUserId || !reportingAnswerId || !selectedReportReason) return;
 
     setIsSubmittingReport(true);
     try {
       const result = await reportAnswer({
         answerId: reportingAnswerId,
-        reporterId: userId,
+        reporterId: currentUserId,
         reasonCode: selectedReportReason,
         reasonText: reportReasonText.trim() || undefined,
       });
@@ -326,20 +328,19 @@ export default function PromptThreadScreen() {
     } finally {
       setIsSubmittingReport(false);
     }
-  }, [userId, reportingAnswerId, selectedReportReason, reportReasonText, reportAnswer]);
+  }, [currentUserId, reportingAnswerId, selectedReportReason, reportReasonText, reportAnswer]);
 
   // Close report modal
   const closeReportModal = useCallback(() => {
     setReportModalVisible(false);
     setReportingAnswerId(null);
-    setReportingAuthorId(null);
     setSelectedReportReason(null);
     setReportReasonText('');
   }, []);
 
   // Handle delete own comment
   const handleDeleteAnswer = useCallback(async (answerId: string) => {
-    if (!userId) return;
+    if (!currentUserId) return;
 
     Alert.alert(
       'Delete Comment',
@@ -351,7 +352,7 @@ export default function PromptThreadScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await deleteAnswer({ answerId, userId });
+              await deleteAnswer({ answerId, userId: currentUserId });
             } catch (error) {
               Alert.alert('Error', 'Failed to delete comment. Please try again.');
             }
@@ -359,18 +360,18 @@ export default function PromptThreadScreen() {
         },
       ]
     );
-  }, [userId, deleteAnswer]);
+  }, [currentUserId, deleteAnswer]);
 
   // Handle send T&D connect request (prompt owner → answer author)
   const handleSendConnect = useCallback(async (answerId: string) => {
-    if (!userId || !promptId) return;
+    if (!currentUserId || !promptId) return;
 
     setConnectSending(answerId);
     try {
       const result = await sendConnectRequest({
         promptId,
         answerId,
-        authUserId: userId,
+        authUserId: currentUserId,
       });
 
       if (result.success) {
@@ -384,62 +385,65 @@ export default function PromptThreadScreen() {
     } finally {
       setConnectSending(null);
     }
-  }, [userId, promptId, sendConnectRequest]);
+  }, [currentUserId, promptId, sendConnectRequest]);
 
   // Handle tap-to-view for media content
   const handleViewMedia = useCallback(async (answer: typeof answers[0]) => {
-    if (!answer.mediaUrl || (answer.type !== 'photo' && answer.type !== 'video')) return;
-
-    const isOwner = answer.isOwnAnswer;
-    const hasAlreadyViewed = answer.hasViewedMedia;
-
-    // Owner can always view their own media
-    if (isOwner) {
-      setViewingMedia({
-        answerId: answer._id,
-        mediaUrl: answer.mediaUrl,
-        mediaType: answer.type as 'photo' | 'video',
-        isOwnAnswer: true,
-        isFrontCamera: answer.isFrontCamera,
-      });
+    if ((answer.type !== 'photo' && answer.type !== 'video') || !answer.hasMedia || !currentUserId) {
       return;
     }
 
-    // Non-owner: check if already viewed (one-time view)
-    if (hasAlreadyViewed) {
+    if (!answer.isOwnAnswer && answer.hasViewedMedia) {
       Alert.alert('Already Viewed', 'This media can only be viewed once.');
       return;
     }
 
     try {
-      // Claim the view before showing
-      await claimAnswerMediaView({
+      const result = await claimAnswerMediaView({
         answerId: answer._id,
         viewerId: currentUserId,
       });
 
-      // Show the media
+      if (result.status === 'already_viewed') {
+        Alert.alert('Already Viewed', 'This media can only be viewed once.');
+        return;
+      }
+      if (result.status === 'already_deleted') {
+        Alert.alert('Expired', 'This media is no longer available.');
+        return;
+      }
+      if (result.status === 'not_authorized') {
+        Alert.alert('Unavailable', 'You are not allowed to view this media.');
+        return;
+      }
+      if (result.status !== 'ok') {
+        Alert.alert('Error', 'Failed to view media. Please try again.');
+        return;
+      }
+
       setViewingMedia({
         answerId: answer._id,
-        mediaUrl: answer.mediaUrl,
-        mediaType: answer.type as 'photo' | 'video',
-        isOwnAnswer: false,
+        mediaUrl: result.url,
+        mediaType: result.mediaType,
+        isOwnAnswer: result.role === 'sender',
         hasViewed: false,
-        isFrontCamera: answer.isFrontCamera,
+        isFrontCamera: result.isFrontCamera,
+        durationSec: result.durationSec,
+        viewMode: result.viewMode,
       });
     } catch (error: any) {
       console.error('[T/D] Claim media view failed:', error);
-      if (error.message?.includes('already viewed')) {
-        Alert.alert('Already Viewed', 'This media can only be viewed once.');
-      } else {
-        Alert.alert('Error', 'Failed to view media. Please try again.');
-      }
+      Alert.alert('Error', 'Failed to view media. Please try again.');
     }
   }, [currentUserId, claimAnswerMediaView]);
 
   // Handle closing the media viewer
   const handleCloseMediaViewer = useCallback(async () => {
-    if (viewingMedia && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed) {
+    if (mediaAutoCloseRef.current) {
+      clearTimeout(mediaAutoCloseRef.current);
+      mediaAutoCloseRef.current = null;
+    }
+    if (viewingMedia && currentUserId && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed) {
       // Finalize the view for non-owners
       try {
         await finalizeAnswerMediaView({
@@ -460,6 +464,28 @@ export default function PromptThreadScreen() {
     }
     setViewingMedia(null);
   }, [viewingMedia, currentUserId, finalizeAnswerMediaView]);
+
+  useEffect(() => {
+    if (mediaAutoCloseRef.current) {
+      clearTimeout(mediaAutoCloseRef.current);
+      mediaAutoCloseRef.current = null;
+    }
+
+    if (!viewingMedia || viewingMedia.isOwnAnswer || !viewingMedia.durationSec) {
+      return;
+    }
+
+    mediaAutoCloseRef.current = setTimeout(() => {
+      handleCloseMediaViewer();
+    }, viewingMedia.durationSec * 1000);
+
+    return () => {
+      if (mediaAutoCloseRef.current) {
+        clearTimeout(mediaAutoCloseRef.current);
+        mediaAutoCloseRef.current = null;
+      }
+    };
+  }, [viewingMedia, handleCloseMediaViewer]);
 
   // Unified submit handler - handles text + optional media attachment
   // Uses MERGE behavior: only sends fields that changed
@@ -513,7 +539,7 @@ export default function PromptThreadScreen() {
           console.log('[T/D UPLOAD] start', { type: mediaType, isFrontCamera });
 
           try {
-            mediaStorageId = await uploadMediaToConvex(attachment.uri, generateUploadUrl, mediaType);
+            mediaStorageId = await uploadMediaToConvex(attachment.uri, generateTodUploadUrl, mediaType);
             const storageIdPrefix = mediaStorageId?.substring(0, 8) ?? 'none';
             console.log('[T/D UPLOAD] success', { storageIdPrefix });
           } catch (uploadError: any) {
@@ -525,6 +551,13 @@ export default function PromptThreadScreen() {
             durationSec = Math.ceil(attachment.durationMs / 1000);
           }
         }
+      }
+
+      let authorPhotoUrl = isAnon || isNoPhoto ? undefined : authorProfile.photoUrl;
+      let authorPhotoStorageId: string | undefined;
+      if (authorPhotoUrl && !isRemoteDisplayUrl(authorPhotoUrl)) {
+        authorPhotoStorageId = await uploadMediaToConvex(authorPhotoUrl, generateTodUploadUrl, 'photo');
+        authorPhotoUrl = undefined;
       }
 
       // Create or edit the answer with MERGE behavior
@@ -547,7 +580,8 @@ export default function PromptThreadScreen() {
         viewMode: attachment ? 'tap' : undefined, // One-time tap to view for media
         // Author identity based on choice
         authorName: isAnon ? undefined : authorProfile.name,
-        authorPhotoUrl: isAnon || isNoPhoto ? undefined : authorProfile.photoUrl,
+        authorPhotoUrl,
+        authorPhotoStorageId: authorPhotoStorageId as any,
         authorAge: isAnon ? undefined : authorProfile.age,
         authorGender: isAnon ? undefined : authorProfile.gender,
         photoBlurMode: photoBlurMode as 'none' | 'blur',
@@ -563,92 +597,7 @@ export default function PromptThreadScreen() {
     } finally {
       setIsSubmitting(false);
     }
-  }, [promptId, currentUserId, generateUploadUrl, createOrEditAnswer, authorProfile]);
-
-  // These functions are kept for camera-composer route compatibility
-  const openCamera = () => {
-    if (!promptId) return;
-    router.push({
-      pathname: '/(main)/camera-composer' as any,
-      params: { promptId, promptType: prompt?.type },
-    });
-  };
-
-  // Gallery picker - pick photo/video from library, then show privacy sheet
-  const openGallery = useCallback(async () => {
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images', 'videos'],
-        allowsEditing: false,
-        quality: 0.8,
-        videoMaxDuration: 60,
-      });
-
-      if (result.canceled || !result.assets || result.assets.length === 0) {
-        return;
-      }
-
-      const asset = result.assets[0];
-      const mediaType = asset.type === 'video' ? 'video' : 'photo';
-      // asset.duration is in milliseconds - store as durationMs for consistency
-      const durationMs = asset.duration ? Math.round(asset.duration) : undefined;
-
-      // Set gallery media state to show privacy sheet
-      setGalleryMedia({
-        uri: asset.uri,
-        type: mediaType,
-        durationMs,
-      });
-    } catch (error) {
-      Alert.alert('Error', 'Failed to open gallery. Please try again.');
-    }
-  }, []);
-
-  // Handle gallery media privacy settings confirmation
-  const handleGalleryMediaConfirm = useCallback(async (
-    imageUri: string,
-    options: CameraPhotoOptions
-  ) => {
-    if (!promptId || !currentUserId || !galleryMedia) return;
-
-    setIsSubmittingMedia(true);
-
-    try {
-      // Upload media to Convex storage
-      const storageId = await uploadMediaToConvex(imageUri, generateUploadUrl, galleryMedia.type);
-
-      // Default to anonymous for this legacy flow
-      const identityMode: IdentityMode = 'anonymous';
-      const isAnon = true;
-
-      await createOrEditAnswer({
-        promptId,
-        userId: currentUserId,
-        mediaStorageId: storageId,
-        mediaMime: galleryMedia.type === 'video' ? 'video/mp4' : 'image/jpeg',
-        // Convert durationMs to durationSec for API (backend expects seconds)
-        durationSec: galleryMedia.durationMs ? Math.ceil(galleryMedia.durationMs / 1000) : undefined,
-        identityMode,
-        isAnonymous: isAnon,
-        visibility: 'public',
-        viewMode: options.viewingMode,
-        viewDurationSec: options.timer > 0 ? options.timer : undefined,
-      });
-
-      // Clear gallery media state and close sheet
-      setGalleryMedia(null);
-      scrollToEnd();
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to post media comment. Please try again.');
-    } finally {
-      setIsSubmittingMedia(false);
-    }
-  }, [promptId, currentUserId, galleryMedia, generateUploadUrl, createOrEditAnswer]);
-
-  // Handle gallery media cancel
-  const handleGalleryMediaCancel = useCallback(() => {
-    setGalleryMedia(null);
-  }, []);
+  }, [promptId, currentUserId, generateTodUploadUrl, createOrEditAnswer, authorProfile]);
 
   // Helper for gender icon
   const getCommentGenderIcon = (gender: string | undefined): string => {
@@ -688,6 +637,9 @@ export default function PromptThreadScreen() {
       authorPhotoUrl = authorProfile.photoUrl;
       authorAge = authorProfile.age;
       authorGender = authorProfile.gender;
+    }
+    if (!isRemoteDisplayUrl(authorPhotoUrl)) {
+      authorPhotoUrl = undefined;
     }
 
     const genderIcon = getCommentGenderIcon(authorGender);
@@ -756,7 +708,7 @@ export default function PromptThreadScreen() {
         )}
 
         {/* Photo/Video media */}
-        {(item.type === 'photo' || item.type === 'video') && item.mediaUrl && (
+        {(item.type === 'photo' || item.type === 'video') && item.hasMedia && (
           <TouchableOpacity
             style={styles.mediaContainer}
             onPress={() => handleViewMedia(item)}
@@ -873,7 +825,7 @@ export default function PromptThreadScreen() {
               {!hasReported ? (
                 <TouchableOpacity
                   style={styles.reportBtn}
-                  onPress={() => handleReport(item._id, item.userId)}
+                  onPress={() => handleReport(item._id)}
                 >
                   <Ionicons name="flag-outline" size={16} color={C.textLight} />
                 </TouchableOpacity>
@@ -963,7 +915,7 @@ export default function PromptThreadScreen() {
   const ownerAge = prompt.ownerAge;
   const ownerGender = prompt.ownerGender;
   const ownerName = prompt.ownerName;
-  const ownerPhotoUrl = prompt.ownerPhotoUrl;
+  const ownerPhotoUrl = isRemoteDisplayUrl(prompt.ownerPhotoUrl) ? prompt.ownerPhotoUrl : undefined;
   const genderIcon = getGenderIcon(ownerGender);
 
   return (
@@ -1073,7 +1025,7 @@ export default function PromptThreadScreen() {
           type: prompt.type,
           text: prompt.text,
           isTrending: prompt.isTrending,
-          ownerUserId: prompt.ownerUserId,
+          ownerUserId: currentUserId ?? '',
           answerCount: prompt.answerCount,
           activeCount: 0,
           createdAt: prompt.createdAt,
@@ -1091,23 +1043,6 @@ export default function PromptThreadScreen() {
         onSubmit={handleUnifiedSubmit}
         isSubmitting={isSubmitting}
       />
-
-      {/* Gallery Media Privacy Sheet - same as camera flow */}
-      <CameraPhotoSheet
-        visible={!!galleryMedia}
-        imageUri={galleryMedia?.uri ?? null}
-        mediaType={galleryMedia?.type}
-        onConfirm={handleGalleryMediaConfirm}
-        onCancel={handleGalleryMediaCancel}
-      />
-
-      {/* Loading overlay for media upload */}
-      {isSubmittingMedia && (
-        <View style={styles.uploadingOverlay}>
-          <ActivityIndicator size="large" color={C.primary} />
-          <Text style={styles.uploadingText}>Posting media...</Text>
-        </View>
-      )}
 
       {/* Media Viewer Modal - Tap to view */}
       <Modal
@@ -1519,21 +1454,6 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     elevation: 3, shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.2, shadowRadius: 3,
-  },
-
-  // Uploading overlay
-  uploadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 100,
-  },
-  uploadingText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: '#FFF',
-    fontWeight: '600',
   },
 
   // Media badge viewed state

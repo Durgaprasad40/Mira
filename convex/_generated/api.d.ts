@@ -71,7 +71,6 @@ import type * as trustScore from "../trustScore.js";
 import type * as truthDare from "../truthDare.js";
 import type * as users from "../users.js";
 import type * as verification from "../verification.js";
-import type * as verificationProviders from "../verificationProviders.js";
 import type * as verifyFaceMatch from "../verifyFaceMatch.js";
 
 import type {
@@ -144,7 +143,6 @@ declare const fullApi: ApiFromModules<{
   truthDare: typeof truthDare;
   users: typeof users;
   verification: typeof verification;
-  verificationProviders: typeof verificationProviders;
   verifyFaceMatch: typeof verifyFaceMatch;
 }>;
 

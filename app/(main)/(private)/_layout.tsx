@@ -330,7 +330,10 @@ export default function PrivateLayout() {
     api.truthDare.listActivePromptsWithTop2Answers,
     { viewerUserId: userId ?? undefined }
   );
-  const prewarmTrendingData = useQuery(api.truthDare.getTrendingTruthAndDare);
+  const prewarmTrendingData = useQuery(
+    api.truthDare.getTrendingTruthAndDare,
+    { viewerUserId: userId ?? undefined }
+  );
 
   // Push data into module-level cache as soon as it arrives
   useEffect(() => {

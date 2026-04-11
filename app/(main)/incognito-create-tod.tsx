@@ -6,6 +6,7 @@ import {
   TextInput,
   TouchableOpacity,
   KeyboardAvoidingView,
+  ScrollView,
   Platform,
   Alert,
   ActivityIndicator,
@@ -20,6 +21,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import * as FileSystem from 'expo-file-system/legacy';
+import { uploadMediaToConvex } from '@/lib/uploadUtils';
 
 /** Check if URL is a valid remote URL (http/https) */
 function isRemoteUrl(url: string | undefined | null): boolean {
@@ -67,14 +69,10 @@ export default function CreateTodScreen() {
   // Get user data from canonical sources
   const userId = useAuthStore((s) => s.userId);
 
-  // M-010 FIX: Generate stable session-scoped fallback ID once
-  // This ensures all anonymous operations use the same ID within a session
-  const stableAnonId = useMemo(() => `anon_session_${Date.now()}`, []);
-  const effectiveUserId = userId || stableAnonId;
-
   // Source 1: demoStore - select STABLE primitives
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
+  const effectiveUserId = userId || currentDemoUserId || null;
 
   // Source 2: privateProfileStore - Phase-2 data
   const p2DisplayName = usePrivateProfileStore((s) => s.displayName);
@@ -135,9 +133,10 @@ export default function CreateTodScreen() {
 
   // Convex mutation
   const createPrompt = useMutation(api.truthDare.createPrompt);
+  const generateUploadUrl = useMutation(api.truthDare.generateUploadUrl);
 
   const maxLength = 280;
-  const canSubmit = content.trim().length >= 10 && !isSubmitting;
+  const canSubmit = content.trim().length >= 10 && !isSubmitting && !!effectiveUserId;
 
   // Synchronous lock to prevent double-tap race condition
   const isSubmittingRef = useRef(false);
@@ -207,6 +206,10 @@ export default function CreateTodScreen() {
   const handleSubmit = async () => {
     // Synchronous guard: prevent double-tap race condition
     if (!canSubmit || isSubmittingRef.current) return;
+    if (!effectiveUserId) {
+      Alert.alert('Session Required', 'Please wait for your session to finish loading and try again.');
+      return;
+    }
     isSubmittingRef.current = true;
 
     setIsSubmitting(true);
@@ -240,6 +243,21 @@ export default function CreateTodScreen() {
       } else {
         // Everyone (public): identity + photo
         const photoResult = await resolveBestPhoto(ownerIdentity.photoCandidates || []);
+        if (!photoResult.url) {
+          throw new Error('Profile photo unavailable for public posting.');
+        }
+
+        let ownerPhotoUrl: string | undefined;
+        let ownerPhotoStorageId: any;
+        if (photoResult.type === 'file') {
+          ownerPhotoStorageId = await uploadMediaToConvex(
+            photoResult.url,
+            () => generateUploadUrl({ authUserId: effectiveUserId }),
+            'photo'
+          );
+        } else {
+          ownerPhotoUrl = photoResult.url;
+        }
 
         await createPrompt({
           type: postType,
@@ -250,17 +268,18 @@ export default function CreateTodScreen() {
           ownerName: ownerIdentity.name,
           ownerAge: ownerIdentity.age,
           ownerGender: ownerIdentity.gender,
-          ownerPhotoUrl: photoResult.url,
+          ownerPhotoUrl,
+          ownerPhotoStorageId,
         });
         console.log(`[T/D REPORT] created visibility=public photoType=${photoResult.type}`);
       }
 
       router.back();
-    } catch (error) {
+    } catch (error: any) {
       console.error('[T/D UI] Post failed:', error);
       isSubmittingRef.current = false;
       setIsSubmitting(false);
-      Alert.alert('Error', 'Failed to create your post. Please try again.');
+      Alert.alert('Error', error?.message || 'Failed to create your post. Please try again.');
     }
   };
 
@@ -271,128 +290,134 @@ export default function CreateTodScreen() {
       style={[styles.container, { paddingTop: insets.top }]}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      {/* Header - close button only, no Post button here */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
-          <Ionicons name="close" size={24} color={C.text} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>New Post</Text>
-        {/* Spacer for alignment */}
-        <View style={{ width: 24 }} />
-      </View>
-
-      {/* Type Selector */}
-      <View style={styles.typeSelector}>
-        <TouchableOpacity
-          style={[styles.typeOption, postType === 'truth' && styles.typeOptionActive]}
-          onPress={() => setPostType('truth')}
-        >
-          <Ionicons name="help-circle" size={20} color={postType === 'truth' ? '#FFFFFF' : C.textLight} />
-          <Text style={[styles.typeLabel, postType === 'truth' && styles.typeLabelActive]}>Truth</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.typeOption, postType === 'dare' && styles.typeOptionDareActive]}
-          onPress={() => setPostType('dare')}
-        >
-          <Ionicons name="flash" size={20} color={postType === 'dare' ? '#FFFFFF' : C.textLight} />
-          <Text style={[styles.typeLabel, postType === 'dare' && styles.typeLabelActive]}>Dare</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Input */}
-      <View style={styles.inputContainer}>
-        <TextInput
-          style={styles.textInput}
-          placeholder={
-            postType === 'truth'
-              ? 'Ask a truth question...'
-              : 'Write a dare challenge...'
-          }
-          placeholderTextColor={C.textLight}
-          multiline
-          maxLength={maxLength}
-          value={content}
-          onChangeText={setContent}
-          autoFocus
-        />
-        <Text style={styles.charCount}>
-          {content.length}/{maxLength}
-        </Text>
-      </View>
-
-      {/* 3-Option Visibility Selector */}
-      <View style={styles.visibilityContainer}>
-        <Text style={styles.visibilityLabel}>Who can see your identity?</Text>
-        <View style={styles.visibilityOptions}>
-          {/* Anonymous */}
-          <TouchableOpacity
-            style={[styles.visibilityOption, visibility === 'anonymous' && styles.visibilityOptionActive]}
-            onPress={() => setVisibility('anonymous')}
-          >
-            <Ionicons
-              name="eye-off"
-              size={18}
-              color={visibility === 'anonymous' ? '#FFFFFF' : C.textLight}
-            />
-            <Text style={[styles.visibilityText, visibility === 'anonymous' && styles.visibilityTextActive]}>
-              Anonymous
-            </Text>
+      <ScrollView
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: Math.max(insets.bottom, 16) + 24 }]}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Header - close button only, no Post button here */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="close" size={24} color={C.text} />
           </TouchableOpacity>
+          <Text style={styles.headerTitle}>New Post</Text>
+          {/* Spacer for alignment */}
+          <View style={{ width: 24 }} />
+        </View>
 
-          {/* Public */}
+        {/* Type Selector */}
+        <View style={styles.typeSelector}>
           <TouchableOpacity
-            style={[styles.visibilityOption, visibility === 'public' && styles.visibilityOptionActive]}
-            onPress={() => setVisibility('public')}
+            style={[styles.typeOption, postType === 'truth' && styles.typeOptionActive]}
+            onPress={() => setPostType('truth')}
           >
-            <Ionicons
-              name="person"
-              size={18}
-              color={visibility === 'public' ? '#FFFFFF' : C.textLight}
-            />
-            <Text style={[styles.visibilityText, visibility === 'public' && styles.visibilityTextActive]}>
-              Everyone
-            </Text>
+            <Ionicons name="help-circle" size={20} color={postType === 'truth' ? '#FFFFFF' : C.textLight} />
+            <Text style={[styles.typeLabel, postType === 'truth' && styles.typeLabelActive]}>Truth</Text>
           </TouchableOpacity>
-
-          {/* Without photo */}
           <TouchableOpacity
-            style={[styles.visibilityOption, visibility === 'no_photo' && styles.visibilityOptionActive]}
-            onPress={() => setVisibility('no_photo')}
+            style={[styles.typeOption, postType === 'dare' && styles.typeOptionDareActive]}
+            onPress={() => setPostType('dare')}
           >
-            <Ionicons
-              name="person-outline"
-              size={18}
-              color={visibility === 'no_photo' ? '#FFFFFF' : C.textLight}
-            />
-            <Text style={[styles.visibilityText, visibility === 'no_photo' && styles.visibilityTextActive]}>
-              No photo
-            </Text>
+            <Ionicons name="flash" size={20} color={postType === 'dare' ? '#FFFFFF' : C.textLight} />
+            <Text style={[styles.typeLabel, postType === 'dare' && styles.typeLabelActive]}>Dare</Text>
           </TouchableOpacity>
         </View>
-        <Text style={styles.visibilityHint}>
-          {visibility === 'anonymous'
-            ? 'Your identity is completely hidden'
-            : visibility === 'public'
-            ? 'Your profile photo is visible'
-            : 'Your name is visible, no photo'}
-        </Text>
 
-        {/* POST button - directly under visibility options */}
-        <TouchableOpacity
-          style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
-          onPress={handleSubmit}
-          disabled={!canSubmit}
-          activeOpacity={0.8}
-        >
-          {isSubmitting ? (
-            <ActivityIndicator size="small" color="#FFFFFF" />
-          ) : (
-            <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
-              POST
-            </Text>
-          )}
-        </TouchableOpacity>
-      </View>
+        {/* Input */}
+        <View style={styles.inputContainer}>
+          <TextInput
+            style={styles.textInput}
+            placeholder={
+              postType === 'truth'
+                ? 'Ask a truth question...'
+                : 'Write a dare challenge...'
+            }
+            placeholderTextColor={C.textLight}
+            multiline
+            maxLength={maxLength}
+            value={content}
+            onChangeText={setContent}
+            autoFocus
+          />
+          <Text style={styles.charCount}>
+            {content.length}/{maxLength}
+          </Text>
+        </View>
+
+        {/* 3-Option Visibility Selector */}
+        <View style={styles.visibilityContainer}>
+          <Text style={styles.visibilityLabel}>Who can see your identity?</Text>
+          <View style={styles.visibilityOptions}>
+            {/* Anonymous */}
+            <TouchableOpacity
+              style={[styles.visibilityOption, visibility === 'anonymous' && styles.visibilityOptionActive]}
+              onPress={() => setVisibility('anonymous')}
+            >
+              <Ionicons
+                name="eye-off"
+                size={18}
+                color={visibility === 'anonymous' ? '#FFFFFF' : C.textLight}
+              />
+              <Text style={[styles.visibilityText, visibility === 'anonymous' && styles.visibilityTextActive]}>
+                Anonymous
+              </Text>
+            </TouchableOpacity>
+
+            {/* Public */}
+            <TouchableOpacity
+              style={[styles.visibilityOption, visibility === 'public' && styles.visibilityOptionActive]}
+              onPress={() => setVisibility('public')}
+            >
+              <Ionicons
+                name="person"
+                size={18}
+                color={visibility === 'public' ? '#FFFFFF' : C.textLight}
+              />
+              <Text style={[styles.visibilityText, visibility === 'public' && styles.visibilityTextActive]}>
+                Everyone
+              </Text>
+            </TouchableOpacity>
+
+            {/* Without photo */}
+            <TouchableOpacity
+              style={[styles.visibilityOption, visibility === 'no_photo' && styles.visibilityOptionActive]}
+              onPress={() => setVisibility('no_photo')}
+            >
+              <Ionicons
+                name="person-outline"
+                size={18}
+                color={visibility === 'no_photo' ? '#FFFFFF' : C.textLight}
+              />
+              <Text style={[styles.visibilityText, visibility === 'no_photo' && styles.visibilityTextActive]}>
+                No photo
+              </Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.visibilityHint}>
+            {visibility === 'anonymous'
+              ? 'Your identity is completely hidden'
+              : visibility === 'public'
+              ? 'Your profile photo is visible'
+              : 'Your name is visible, no photo'}
+          </Text>
+
+          {/* POST button - directly under visibility options */}
+          <TouchableOpacity
+            style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
+            onPress={handleSubmit}
+            disabled={!canSubmit}
+            activeOpacity={0.8}
+          >
+            {isSubmitting ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
+                POST
+              </Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }
@@ -401,6 +426,7 @@ const C = INCOGNITO_COLORS;
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  scrollContent: { flexGrow: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingVertical: 12,
