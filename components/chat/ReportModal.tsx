@@ -18,6 +18,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
 import { Toast } from '@/components/ui/Toast';
 import { trackEvent } from '@/lib/analytics';
+import { useAuthStore } from '@/stores/authStore';
 
 type ReportReason =
   | 'inappropriate_content'
@@ -36,7 +37,7 @@ const REPORT_REASONS: { key: ReportReason; label: string; icon: string }[] = [
 
 interface ReportModalProps {
   visible: boolean;
-  authToken?: string;
+  reporterId: string;
   reportedUserId: string;
   chatId: string;
   mediaId?: string;
@@ -45,13 +46,14 @@ interface ReportModalProps {
 
 export function ReportModal({
   visible,
-  authToken,
+  reporterId,
   reportedUserId,
   chatId,
   mediaId,
   onClose,
 }: ReportModalProps) {
   const insets = useSafeAreaInsets();
+  const token = useAuthStore((s) => s.token);
   const [selectedReason, setSelectedReason] = useState<ReportReason | null>(null);
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -75,11 +77,9 @@ export function ReportModal({
 
     setSubmitting(true);
     try {
-      if (!authToken) {
-        throw new Error('Session expired. Please log in again.');
-      }
       await reportMedia({
-        token: authToken,
+        token: token ?? undefined,
+        authUserId: reporterId,
         reportedUserId: reportedUserId as any,
         chatId: chatId as any,
         mediaId: mediaId ? (mediaId as any) : undefined,
@@ -111,8 +111,8 @@ export function ReportModal({
           onPress={(e) => e.stopPropagation()}
         >
           <View style={styles.handle} />
-          <Text style={styles.title}>Report protected media</Text>
-          <Text style={styles.subtitle}>Tell us what felt unsafe or inappropriate.</Text>
+          <Text style={styles.title}>Report</Text>
+          <Text style={styles.subtitle}>Why are you reporting this?</Text>
 
           {REPORT_REASONS.map((reason) => (
             <TouchableOpacity
@@ -163,7 +163,7 @@ export function ReportModal({
             disabled={!selectedReason || submitting}
           >
             <Text style={styles.submitButtonText}>
-              {submitting ? 'Sending...' : 'Send report'}
+              {submitting ? 'Submitting...' : 'Submit Report'}
             </Text>
           </TouchableOpacity>
 

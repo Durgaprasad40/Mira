@@ -65,7 +65,7 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
 
   const messageQuota = useQuery(
     api.messages.getUnreadCount,
-    token ? { token } : 'skip'
+    userId && token ? { token, authUserId: userId } : 'skip'
   );
 
   const menuItems = [

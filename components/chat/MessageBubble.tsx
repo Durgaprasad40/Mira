@@ -42,6 +42,7 @@ interface MessageBubbleProps {
     senderId: string;
     createdAt: number;
     readAt?: number;
+    readReceiptVisible?: boolean;
     imageUrl?: string;
     mediaUrl?: string;
     // Video message fields (demo mode)
@@ -109,9 +110,9 @@ const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
 // MESSAGE-TICKS-FIX: Helper to determine message status and tick appearance
 type TickStatus = 'sent' | 'delivered' | 'read';
 
-function getTickStatus(message: { readAt?: number; deliveredAt?: number }): TickStatus {
-  if (message.readAt) return 'read';
-  if (message.deliveredAt) return 'delivered';
+function getTickStatus(message: { readAt?: number; deliveredAt?: number; readReceiptVisible?: boolean }): TickStatus {
+  if (message.readReceiptVisible !== false && message.readAt) return 'read';
+  if (message.deliveredAt || message.readAt) return 'delivered';
   return 'sent';
 }
 

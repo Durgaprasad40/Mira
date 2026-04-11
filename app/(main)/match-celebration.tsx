@@ -11,7 +11,7 @@ import {
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { COLORS, INCOGNITO_COLORS } from "@/lib/constants";
+import { COLORS } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -25,65 +25,36 @@ import { useDemoDmStore } from "@/stores/demoDmStore";
 import { useDemoStore } from "@/stores/demoStore";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
-import { getPrimaryPhotoUrl } from "@/lib/photoUtils";
 
 export default function MatchCelebrationScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  // P1-001 FIX: Read mode and conversationId for Phase-2 support
-  // CONFESS-NAV-FIX: Added source param for proper "Keep Discovering" navigation
-  const { matchId, userId: otherUserId, mode, conversationId, source } = useLocalSearchParams<{
+  const { matchId, userId: otherUserId } = useLocalSearchParams<{
     matchId: string;
     userId: string;
-    mode?: string;
-    conversationId?: string;
-    source?: string; // 'confessions' = return to Confessions tab, undefined = router.back()
   }>();
   const { userId, token } = useAuthStore();
 
-  // P1-001 FIX: Detect Phase-2 mode
-  const isPhase2 = mode === 'phase2';
-
-  // P0-003 FIX: Log Phase-2 match celebration for debugging
-  if (__DEV__ && isPhase2) {
-    console.log('[P2_MATCH_CELEBRATION] Phase-2 match celebration opened', {
-      matchId: matchId?.slice?.(-8),
-      otherUserId: otherUserId?.slice?.(-8),
-      conversationId: conversationId?.slice?.(-8),
-    });
-  }
-
-  const isDemo = isDemoMode || matchId?.startsWith("demo_") || matchId?.startsWith("match_") || userId?.startsWith("demo_");
+  const isDemo = isDemoMode || matchId?.startsWith("demo_") || userId?.startsWith("demo_");
   const viewerId = userId ? (userId as Id<"users">) : null;
   const matchIdValue = matchId ? (matchId as unknown as Id<"matches">) : null;
   const otherUserIdValue = otherUserId
     ? (otherUserId as unknown as Id<"users">)
     : null;
 
-  // P1-001 FIX: Phase-1 match query - SKIP for Phase-2 (uses privateMatches table)
+  // Fetch match and other user data (skip in demo mode)
   const matchQuery = useQuery(
     api.matches.getMatch,
-    !isDemo && !isPhase2 && matchIdValue && viewerId
+    !isDemo && matchIdValue && viewerId
       ? { matchId: matchIdValue, userId: viewerId }
       : "skip",
   );
-
-  // P1-001 FIX: Phase-1 other user query - SKIP for Phase-2
   const otherUserQuery = useQuery(
     api.users.getUserById,
-    !isDemo && !isPhase2 && otherUserIdValue && viewerId
-      ? { userId: otherUserIdValue }
+    !isDemo && otherUserIdValue && viewerId
+      ? { userId: otherUserIdValue, viewerId }
       : "skip",
   );
-
-  // P1-001 FIX: Phase-2 profile query - only for Phase-2
-  const phase2ProfileQuery = useQuery(
-    api.privateDiscover.getProfileByUserId,
-    !isDemo && isPhase2 && otherUserIdValue && viewerId
-      ? { userId: otherUserIdValue }
-      : "skip",
-  );
-
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
     !isDemo && viewerId ? { userId: viewerId } : "skip",
@@ -98,14 +69,8 @@ export default function MatchCelebrationScreen() {
       : { name: "Someone", photos: [{ url: "https://via.placeholder.com/400" }] };
   }, [isDemo, otherUserId]);
 
-  const match = isDemo ? { _id: matchId } : (isPhase2 ? { _id: matchId } : matchQuery);
-  // P1-001 FIX: Use Phase-2 profile query for Phase-2 matches
-  // P0-002 FIX: Phase-2 uses displayName only (no name/nickname)
-  const otherUser = isDemo
-    ? demoOtherUser
-    : isPhase2
-      ? (phase2ProfileQuery ? { name: phase2ProfileQuery.displayName, photos: phase2ProfileQuery.photos } : null)
-      : otherUserQuery;
+  const match = isDemo ? { _id: matchId } : matchQuery;
+  const otherUser = isDemo ? demoOtherUser : otherUserQuery;
   const demoCurrentUser = isDemo ? getDemoCurrentUser() : null;
   const currentUser = isDemo
     ? demoCurrentUser
@@ -150,9 +115,6 @@ export default function MatchCelebrationScreen() {
   const rotation = useRef(new Animated.Value(0)).current;
   const confettiOpacity = useRef(new Animated.Value(0)).current;
   const heartScale = useRef(new Animated.Value(0)).current;
-  // Entry animation for entire content container
-  const contentScale = useRef(new Animated.Value(0.9)).current;
-  const contentOpacity = useRef(new Animated.Value(0)).current;
 
   const confettiPieces = useMemo(() => {
     type ConfettiPiece = {
@@ -180,21 +142,6 @@ export default function MatchCelebrationScreen() {
   useEffect(() => {
     // Celebration animation sequence
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-
-    // Content container entry animation (scale 0.9 → 1, opacity 0 → 1)
-    Animated.parallel([
-      Animated.spring(contentScale, {
-        toValue: 1,
-        tension: 50,
-        friction: 7,
-        useNativeDriver: true,
-      }),
-      Animated.timing(contentOpacity, {
-        toValue: 1,
-        duration: 200,
-        useNativeDriver: true,
-      }),
-    ]).start();
 
     const t1 = Animated.spring(scale1, {
       toValue: 1,
@@ -277,7 +224,10 @@ export default function MatchCelebrationScreen() {
     // handler. Just pre-fill a draft "Hi" and navigate to the chat.
     if (isDemo) {
       const demoConversationId = `demo_convo_${otherUserId}`;
-      if (__DEV__) console.log("[SayHi] demo mode — convoId=", demoConversationId, "isPhase2=", isPhase2);
+      if (__DEV__) console.log("[SayHi] demo mode — convoId=", demoConversationId);
+
+      // Pre-fill draft so the chat input shows "Hi" ready to send.
+      useDemoDmStore.getState().setDraft(demoConversationId, "Hi");
 
       // Clear the match celebration event.
       useDemoStore.getState().setNewMatchUserId(null);
@@ -288,26 +238,6 @@ export default function MatchCelebrationScreen() {
         return;
       }
       hasNavigatedRef.current = true;
-
-      // P1-001 FIX: Phase-2 demo mode navigates to incognito-chat
-      if (isPhase2) {
-        router.dismiss();
-        InteractionManager.runAfterInteractions(() => {
-          if (!mountedRef.current) return;
-          router.push("/(main)/(private)/(tabs)/chats" as any);
-          const t = setTimeout(() => {
-            if (!mountedRef.current) return;
-            router.push(`/(main)/incognito-chat?id=${demoConversationId}` as any);
-          }, 50);
-          navTimeoutRefs.current.push(t);
-        });
-        sendingRef.current = false;
-        return;
-      }
-
-      // Phase-1 demo mode
-      // Pre-fill draft so the chat input shows "Hi" ready to send.
-      useDemoDmStore.getState().setDraft(demoConversationId, "Hi");
 
       // NAV-RACE-FIX: Use InteractionManager for safer navigation sequencing
       // Stack becomes: Messages list → Chat, so router.back() from chat
@@ -327,48 +257,7 @@ export default function MatchCelebrationScreen() {
       return;
     }
 
-    // P1-001 FIX: Phase-2 flow - navigate directly to incognito-chat
-    // Conversation already created by privateSwipes.swipe mutation
-    if (isPhase2 && conversationId) {
-      if (__DEV__) console.log("[SayHi] Phase-2 mode — conversationId=", conversationId);
-
-      // E1: Single-fire navigation guard
-      if (hasNavigatedRef.current) {
-        sendingRef.current = false;
-        return;
-      }
-      hasNavigatedRef.current = true;
-
-      // Navigate to Phase-2 incognito chat (via Private tab)
-      router.dismiss();
-      InteractionManager.runAfterInteractions(() => {
-        if (!mountedRef.current) return;
-        // Go to Private chats tab first
-        router.push("/(main)/(private)/(tabs)/chats" as any);
-        const t = setTimeout(() => {
-          if (!mountedRef.current) return;
-          // Then open the specific conversation
-          router.push(`/(main)/incognito-chat?id=${conversationId}` as any);
-        }, 50);
-        navTimeoutRefs.current.push(t);
-      });
-      sendingRef.current = false;
-      return;
-    }
-
-    // P2-ISOLATION-FIX: Guard against Phase 2 without conversationId
-    // This prevents falling through to Phase 1 API (which would fail with wrong table ID)
-    if (isPhase2 && !conversationId) {
-      if (__DEV__) {
-        console.error('[SayHi] Phase-2 mode but no conversationId provided - cannot proceed');
-      }
-      Toast.show("Couldn't start chat. Please go back and try again.");
-      sendingRef.current = false;
-      return;
-    }
-
-    // Phase-1 flow continues below
-    if (!matchIdValue || !viewerId || !token) {
+    if (!matchIdValue || !viewerId) {
       Toast.show("Something went wrong. Please go back and try again.");
       sendingRef.current = false;
       return;
@@ -379,21 +268,23 @@ export default function MatchCelebrationScreen() {
       // STEP A: Ensure a conversation row exists for this match.
       // Idempotent — safe to retry if the previous attempt crashed mid-flow.
       // Returns the conversationId needed for Step B.
+      // MSG-005 FIX: Use authUserId for server-side verification
       const { conversationId: conversationIdFinal } = await ensureConversation({
         matchId: matchIdValue,
-        token: token!,
+        authUserId: viewerId,
       });
       if (__DEV__) console.log("[SayHi] conversationId(after)", conversationIdFinal);
 
       // STEP B: Send the mandatory first message ("Hi 👋").
       // Must happen BEFORE navigation — otherwise the chat screen opens empty
       // and the message appears with a visible delay.
+      // MSG-001 FIX: Use authUserId for server-side verification
       await sendMessageMut({
         conversationId: conversationIdFinal,
-        token: token!,
+        token: token ?? undefined,
+        authUserId: viewerId,
         type: "text",
         content: "Hi 👋",
-        clientMessageId: `first_hi_${matchIdValue}_${Date.now()}`,
       });
       trackEvent({ name: 'first_message_sent', conversationId: conversationIdFinal as string });
       if (__DEV__) console.log("[SayHi] messageSent ok");
@@ -434,20 +325,7 @@ export default function MatchCelebrationScreen() {
     if (isDemo) {
       useDemoStore.getState().setNewMatchUserId(null);
     }
-
-    // CONFESS-NAV-FIX: Navigate based on source param
-    // - source=confessions: go to Confessions tab (avoids empty connect-requests page)
-    // - undefined: use router.back() for Discover flow
-    if (__DEV__) {
-      console.log('[MatchCelebration] handleKeepSwiping source=', source);
-    }
-
-    if (source === 'confessions') {
-      // Replace current screen with Confessions tab to avoid stale back stack
-      router.replace('/(main)/(tabs)/confessions' as any);
-    } else {
-      router.back();
-    }
+    router.back();
   };
 
   if (!match || !otherUser || !currentUser) {
@@ -473,22 +351,9 @@ export default function MatchCelebrationScreen() {
     );
   }
 
-  // P0-003 FIX: Explicit Phase-2 vs Phase-1 branching
-  // Phase-2 (Deep Connect) uses incognito colors and different labels
-  const gradientColors: [string, string] = isPhase2
-    ? [INCOGNITO_COLORS.primary, INCOGNITO_COLORS.accent]
-    : [COLORS.primary, COLORS.secondary];
-
-  const titleText = isPhase2 ? '🔥 It\'s a Connection! 🔥' : '🎉 It\'s a Match! 🎉';
-  const subtitleText = isPhase2
-    ? `You and ${otherUser.name} connected in Deep Connect!`
-    : `You and ${otherUser.name} liked each other!`;
-  const buttonText = isPhase2 ? 'Start Chatting' : 'Say Hi 👋';
-  const keepSwipingText = isPhase2 ? 'Keep Exploring' : 'Keep Discovering';
-
   return (
     <LinearGradient
-      colors={gradientColors}
+      colors={[COLORS.primary, COLORS.secondary]}
       style={[styles.container, { paddingTop: insets.top }]}
     >
       {/* Confetti Effect */}
@@ -503,25 +368,25 @@ export default function MatchCelebrationScreen() {
               {
                 left: piece.left,
                 top: piece.top,
-                backgroundColor: isPhase2
-                  ? [INCOGNITO_COLORS.text, INCOGNITO_COLORS.primary, INCOGNITO_COLORS.accent, '#FFD700', '#FF69B4'][Math.floor(Math.random() * 5)]
-                  : piece.backgroundColor,
+                backgroundColor: piece.backgroundColor,
               },
             ]}
           />
         ))}
       </Animated.View>
 
-      <Animated.View style={[styles.content, { transform: [{ scale: contentScale }], opacity: contentOpacity }]}>
-        <Text style={styles.title}>{titleText}</Text>
-        <Text style={styles.subtitle}>{subtitleText}</Text>
+      <View style={styles.content}>
+        <Text style={styles.title}>🎉 It's a Match! 🎉</Text>
+        <Text style={styles.subtitle}>
+          You and {otherUser.name} liked each other!
+        </Text>
 
         <View style={styles.photosContainer}>
           <Animated.View
             style={[styles.photoWrapper, { transform: [{ scale: scale1 }] }]}
           >
             <Image
-              source={{ uri: getPrimaryPhotoUrl(currentUser.photos) || "https://via.placeholder.com/400" }}
+              source={{ uri: currentUser.photos?.[0]?.url }}
               style={styles.photo}
             />
             <View style={styles.photoBadge}>
@@ -544,7 +409,7 @@ export default function MatchCelebrationScreen() {
             style={[styles.photoWrapper, { transform: [{ scale: scale2 }] }]}
           >
             <Image
-              source={{ uri: getPrimaryPhotoUrl(otherUser.photos) || "https://via.placeholder.com/400" }}
+              source={{ uri: otherUser.photos?.[0]?.url }}
               style={styles.photo}
             />
             <View style={styles.photoBadge}>
@@ -553,26 +418,25 @@ export default function MatchCelebrationScreen() {
           </Animated.View>
         </View>
 
-        {/* P0-003 FIX: Use phase-specific button text */}
         <View style={styles.actions}>
           <Button
-            title={sending ? "Sending…" : buttonText}
+            title={sending ? "Sending…" : "Say Hi 👋"}
             variant="primary"
             onPress={handleSendMessage}
             loading={sending}
             disabled={sending}
             fullWidth
-            style={isPhase2 ? styles.phase2MessageButton : styles.messageButton}
-            textStyle={isPhase2 ? styles.phase2MessageButtonText : styles.messageButtonText}
+            style={styles.messageButton}
+            textStyle={styles.messageButtonText}
           />
           <TouchableOpacity
             style={styles.keepSwipingButton}
             onPress={handleKeepSwiping}
           >
-            <Text style={styles.keepSwipingText}>{keepSwipingText}</Text>
+            <Text style={styles.keepSwipingText}>Keep Discovering</Text>
           </TouchableOpacity>
         </View>
-      </Animated.View>
+      </View>
     </LinearGradient>
   );
 }
@@ -660,13 +524,6 @@ const styles = StyleSheet.create({
   },
   messageButtonText: {
     color: COLORS.primary,
-  },
-  // P0-003 FIX: Phase-2 specific button styles
-  phase2MessageButton: {
-    backgroundColor: INCOGNITO_COLORS.text,
-  },
-  phase2MessageButtonText: {
-    color: INCOGNITO_COLORS.background,
   },
   keepSwipingButton: {
     padding: 16,

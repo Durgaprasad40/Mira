@@ -1,13 +1,14 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { requireLiveMessageSessionUser, resolveUserIdByAuthId } from './helpers';
+import { resolveTrustedUserId } from './helpers';
+import { shouldCreateNotification } from './notificationPreferences';
 
 // Create a protected media message with per-recipient permissions
 export const createMediaMessage = mutation({
   args: {
     chatId: v.id('conversations'),
-    token: v.optional(v.string()),
     authUserId: v.optional(v.string()),
+    token: v.optional(v.string()),
     objectKey: v.id('_storage'),
     mediaType: v.union(v.literal('image'), v.literal('video')),
     timerSeconds: v.optional(v.number()),
@@ -15,23 +16,12 @@ export const createMediaMessage = mutation({
     watermarkEnabled: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const {
-      chatId,
-      token,
-      authUserId,
-      objectKey,
-      mediaType,
-      timerSeconds,
-      viewOnce = false,
-      watermarkEnabled = true,
-    } = args;
+    const { chatId, objectKey, mediaType, timerSeconds, viewOnce = false, watermarkEnabled = true } = args;
     const now = Date.now();
 
-    const senderId = token
-      ? await requireLiveMessageSessionUser(ctx, token)
-      : (authUserId ? await resolveUserIdByAuthId(ctx, authUserId) : null);
+    const senderId = await resolveTrustedUserId(ctx, args);
     if (!senderId) {
-      throw new Error('Unauthorized: user not found');
+      throw new Error('Unauthorized: authentication required');
     }
 
     const conversation = await ctx.db.get(chatId);
@@ -66,7 +56,7 @@ export const createMediaMessage = mutation({
       conversationId: chatId,
       senderId,
       type: mediaType,
-      content: mediaType === 'video' ? 'Protected Video' : 'Protected Photo',
+      content: 'Protected Photo',
       mediaId,
       createdAt: now,
     });
@@ -90,12 +80,12 @@ export const createMediaMessage = mutation({
 
     // 5. Notify recipients
     const recipientId = conversation.participants.find((id) => id !== senderId);
-    if (recipientId) {
+    if (recipientId && await shouldCreateNotification(ctx, recipientId, 'message')) {
       await ctx.db.insert('notifications', {
         userId: recipientId,
         type: 'message',
         title: 'New Message',
-        body: `${sender.name} sent you a protected ${mediaType === 'video' ? 'video' : 'photo'}`,
+        body: `${sender.name} sent you a protected photo`,
         data: { conversationId: chatId },
         createdAt: now,
       });
@@ -109,11 +99,17 @@ export const createMediaMessage = mutation({
 export const openMedia = query({
   args: {
     mediaId: v.id('media'),
-    userId: v.id('users'),
+    authUserId: v.optional(v.string()),
+    token: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { mediaId, userId } = args;
+    const { mediaId } = args;
     const now = Date.now();
+
+    const userId = await resolveTrustedUserId(ctx, args);
+    if (!userId) {
+      return { error: 'not_authorized' };
+    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) return { error: 'not_found' };
@@ -208,11 +204,17 @@ export const openMedia = query({
 export const recordMediaOpened = mutation({
   args: {
     mediaId: v.id('media'),
-    userId: v.id('users'),
+    authUserId: v.optional(v.string()),
+    token: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { mediaId, userId } = args;
+    const { mediaId } = args;
     const now = Date.now();
+
+    const userId = await resolveTrustedUserId(ctx, args);
+    if (!userId) {
+      throw new Error('Unauthorized: authentication required');
+    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');
@@ -262,11 +264,17 @@ export const recordMediaOpened = mutation({
 export const expireMedia = mutation({
   args: {
     mediaId: v.id('media'),
-    userId: v.id('users'),
+    authUserId: v.optional(v.string()),
+    token: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { mediaId, userId } = args;
+    const { mediaId } = args;
     const now = Date.now();
+
+    const userId = await resolveTrustedUserId(ctx, args);
+    if (!userId) {
+      throw new Error('Unauthorized: authentication required');
+    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');
@@ -308,14 +316,24 @@ export const expireMedia = mutation({
 export const getMediaInfo = query({
   args: {
     mediaId: v.id('media'),
-    token: v.string(),
+    authUserId: v.optional(v.string()),
+    token: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { mediaId, token } = args;
-    const userId = await requireLiveMessageSessionUser(ctx, token);
+    const { mediaId } = args;
+
+    const userId = await resolveTrustedUserId(ctx, args);
+    if (!userId) {
+      return null;
+    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) return null;
+
+    const conversation = await ctx.db.get(media.chatId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return null;
+    }
 
     const permission = await ctx.db
       .query('mediaPermissions')
@@ -333,7 +351,8 @@ export const getMediaInfo = query({
     // Recipient-specific expiry checks (only apply if not owner)
     const recipientExpired = !isOwner && (
       permission?.revoked ||
-      (permission?.expiresAt != null && Date.now() >= permission.expiresAt)
+      (permission?.expiresAt != null && Date.now() >= permission.expiresAt) ||
+      (media.viewOnce && (permission?.viewCount ?? 0) >= 1)
     );
 
     // Final expiry: either globally expired OR recipient-specifically expired
@@ -348,7 +367,8 @@ export const getMediaInfo = query({
       canScreenshot: isOwner ? true : (permission?.canScreenshot ?? false),
       isExpired, // EXPIRY-SYNC-FIX: Now includes owner expiry
       isOwner,
-      viewMode: 'tap',
+      // HOLD-TAP-FIX: Return viewMode so bubble renders correct interaction label
+      viewMode: media.viewMode ?? 'tap',
     };
   },
 });

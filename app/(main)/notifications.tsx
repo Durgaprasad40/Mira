@@ -111,14 +111,18 @@ export default function NotificationsScreen() {
     // 4-4: Build common query params for context
     const notifParams = `source=notification&notificationId=${notification._id}`;
     const dedupeParam = notification.dedupeKey ? `&dedupeKey=${encodeURIComponent(notification.dedupeKey)}` : '';
+    const actorUserId =
+      notification.data?.actorUserId ??
+      notification.data?.otherUserId ??
+      notification.data?.userId;
 
     switch (notification.type) {
       case 'match':
       case 'new_match':
       case 'match_created':
-        if (notification.data?.otherUserId) {
-          const mId = notification.data.matchId ?? `match_${notification.data.otherUserId}`;
-          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${notification.data.otherUserId}&${notifParams}${dedupeParam}` as any);
+        if (actorUserId) {
+          const mId = notification.data?.matchId ?? `match_${actorUserId}`;
+          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${actorUserId}&${notifParams}${dedupeParam}` as any);
         }
         break;
       case 'like':
@@ -128,11 +132,11 @@ export default function NotificationsScreen() {
       case 'super_like_received': {
         // INVARIANT: A like_received notification may exist IF AND ONLY IF a pending Like exists
         // Validate the like still exists before navigating to Likes screen
-        const likeUserId = notification.data?.otherUserId;
+        const likeUserId = actorUserId;
 
         // Guard: Prevent crash if likeUserId is missing
         if (!likeUserId) {
-          console.warn('[Notifications] like notification missing otherUserId, skipping navigation');
+          console.warn('[Notifications] like notification missing actorUserId, skipping navigation');
           break;
         }
 

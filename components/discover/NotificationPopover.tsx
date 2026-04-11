@@ -24,9 +24,6 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const POPOVER_WIDTH = Math.min(SCREEN_WIDTH - 32, 360);
 const POPOVER_MAX_HEIGHT = SCREEN_HEIGHT * 0.6;
 
-// DEFENSIVE: Types that must NEVER render in bell popover (safety net if upstream filtering fails)
-const BELL_RENDER_EXCLUDED = new Set(['message', 'new_message']);
-
 interface NotificationPopoverProps {
   visible: boolean;
   onClose: () => void;
@@ -42,33 +39,10 @@ export function NotificationPopover({
   anchorRight = 16,
   anchorTop = 56,
 }: NotificationPopoverProps) {
-  if (!visible) {
-    return null;
-  }
-
-  return (
-    <NotificationPopoverContent
-      visible={visible}
-      onClose={onClose}
-      anchorRight={anchorRight}
-      anchorTop={anchorTop}
-    />
-  );
-}
-
-function NotificationPopoverContent({
-  visible,
-  onClose,
-  anchorRight = 16,
-  anchorTop = 56,
-}: NotificationPopoverProps) {
   const { notifications, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
 
-  // BUGFIX: Do NOT mark all as read when popover opens.
-  // Notifications should only be marked read when user explicitly:
-  // 1) Taps a specific notification (handled in handleNotificationPress)
-  // 2) Presses "Mark Read" button in header
-  // Only cleanup expired notifications on open.
+  // Keep expiry cleanup on open, but don't clear unread state until the user
+  // opens an item or explicitly taps "Mark all read".
   useEffect(() => {
     if (visible) {
       cleanupExpiredNotifications();
@@ -86,14 +60,18 @@ function NotificationPopoverContent({
     // Build common query params for context
     const notifParams = `source=notification&notificationId=${notification._id}`;
     const dedupeParam = notification.dedupeKey ? `&dedupeKey=${encodeURIComponent(notification.dedupeKey)}` : '';
+    const actorUserId =
+      notification.data?.actorUserId ??
+      notification.data?.otherUserId ??
+      notification.data?.userId;
 
     switch (notification.type) {
       case 'match':
       case 'new_match':
       case 'match_created':
-        if (notification.data?.otherUserId) {
-          const mId = notification.data.matchId ?? `match_${notification.data.otherUserId}`;
-          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${notification.data.otherUserId}&${notifParams}${dedupeParam}` as any);
+        if (actorUserId) {
+          const mId = notification.data?.matchId ?? `match_${actorUserId}`;
+          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${actorUserId}&${notifParams}${dedupeParam}` as any);
         }
         break;
       case 'like':
@@ -101,11 +79,14 @@ function NotificationPopoverContent({
       case 'super_like':
       case 'superlike':
       case 'super_like_received':
+        if (!actorUserId) {
+          break;
+        }
         router.push({
           pathname: '/(main)/(tabs)/messages',
           params: {
             focus: 'likes',
-            profileId: notification.data?.otherUserId,
+            profileId: actorUserId,
             source: 'notification',
             notificationId: notification._id,
             dedupeKey: notification.dedupeKey,
@@ -134,39 +115,6 @@ function NotificationPopoverContent({
         break;
       case 'subscription':
         router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);
-        break;
-      case 'tod_connect':
-        // Phase-2 T/D and Comment Connect: Navigate to the Phase-2 chat
-        if (notification.data?.conversationId) {
-          router.push(`/(main)/incognito-chat?id=${notification.data.conversationId}&${notifParams}${dedupeParam}` as any);
-        }
-        break;
-      case 'comment_connect':
-        router.push(`/(main)/comment-connect-requests?${notifParams}${dedupeParam}` as any);
-        break;
-      case 'confession_reaction':
-      case 'confession_reply':
-        if (notification.data?.confessionId) {
-          router.push(`/(main)/confession-thread?confessionId=${notification.data.confessionId}&${notifParams}${dedupeParam}` as any);
-        }
-        break;
-      // P1-001 FIX: Phase-2 match notification - navigate to Phase-2 chat
-      case 'phase2_match':
-        if (notification.data?.conversationId) {
-          router.push(`/(main)/incognito-chat?id=${notification.data.conversationId}&${notifParams}${dedupeParam}` as any);
-        }
-        break;
-      // P1-001 FIX: Phase-2 like notification - navigate to Phase-2 likes screen
-      case 'phase2_like':
-        router.push({
-          pathname: '/(main)/(private)/phase2-likes',
-          params: {
-            profileId: notification.data?.otherUserId,
-            source: 'notification',
-            notificationId: notification._id,
-            dedupeKey: notification.dedupeKey,
-          },
-        } as any);
         break;
       default:
         break;
@@ -197,19 +145,6 @@ function NotificationPopoverContent({
         return 'information-circle';
       case 'subscription':
         return 'card';
-      case 'tod_connect':
-        return 'flame';
-      case 'comment_connect':
-        return 'chatbubble-ellipses';
-      case 'confession_reaction':
-        return 'heart';
-      case 'confession_reply':
-        return 'chatbubble-ellipses';
-      // P1-001 FIX: Phase-2 notification icons
-      case 'phase2_match':
-        return 'heart';
-      case 'phase2_like':
-        return 'heart-outline';
       default:
         return 'notifications';
     }
@@ -236,18 +171,6 @@ function NotificationPopoverContent({
         return '#607D8B';
       case 'system':
         return '#2196F3';
-      case 'tod_connect':
-        return '#FF7849'; // T/D orange flame color
-      case 'comment_connect':
-        return '#7C6AEF'; // Phase-2 purple accent
-      case 'confession_reaction':
-      case 'confession_reply':
-        return COLORS.primary;
-      // P1-001 FIX: Phase-2 notification colors
-      case 'phase2_match':
-        return '#7C6AEF'; // Phase-2 purple accent for match
-      case 'phase2_like':
-        return '#9B7EF0'; // Phase-2 lighter purple for like
       default:
         return COLORS.textLight;
     }
@@ -298,10 +221,8 @@ function NotificationPopoverContent({
     </TouchableOpacity>
   );
 
-  // DEFENSIVE: Filter out message types at render level (safety net), then limit to 5
-  const displayNotifications = notifications
-    .filter((n) => !BELL_RENDER_EXCLUDED.has(n.type))
-    .slice(0, 5);
+  // Limit to most recent 5 notifications for popover
+  const displayNotifications = notifications.slice(0, 5);
 
   return (
     <Modal
@@ -328,7 +249,7 @@ function NotificationPopoverContent({
             <Text style={styles.headerTitle}>Notifications</Text>
             {notifications.length > 0 && (
               <TouchableOpacity onPress={markAllSeen}>
-                <Text style={styles.markAllText}>Mark Read</Text>
+                <Text style={styles.markAllText}>Mark all read</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -346,7 +267,7 @@ function NotificationPopoverContent({
             <View style={styles.emptyContainer}>
               <Ionicons name="notifications-outline" size={40} color={COLORS.textLight} />
               <Text style={styles.emptyTitle}>No notifications</Text>
-              <Text style={styles.emptySubtitle}>You're all caught up!</Text>
+              <Text style={styles.emptySubtitle}>New activity will show up here.</Text>
             </View>
           )}
 

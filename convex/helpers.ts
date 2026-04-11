@@ -93,79 +93,6 @@ export async function resolveUserIdByAuthId(
   return null;
 }
 
-export async function requireAuthenticatedUserId(
-  ctx: QueryCtx | MutationCtx
-): Promise<Id<"users">> {
-  const identity = await ctx.auth.getUserIdentity();
-  if (!identity?.subject) {
-    throw new Error("Authentication required");
-  }
-
-  const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-  if (!userId) {
-    throw new Error("Authenticated user not found");
-  }
-
-  return userId;
-}
-
-/**
- * APP USER RESOLUTION - Supports both real Convex auth AND demo session tokens.
- *
- * This is the preferred helper for app queries that need the current user.
- * It tries both authentication paths in order:
- *
- * 1. Real Convex auth identity (production path via ctx.auth.getUserIdentity())
- * 2. Session token resolution (supports demo tokens in dev mode via validateSessionToken)
- *
- * SECURITY:
- * - Production remains strict: real Convex auth works normally
- * - Demo token resolution only works when IS_DEV_MODE=true (backend env var)
- * - Demo tokens must exist in sessions table with valid user reference
- *
- * Usage:
- * - Queries that need current user context should use this helper
- * - Pass optional token arg from frontend for demo auth mode support
- *
- * @param ctx - Convex query or mutation context
- * @param token - Optional session token (for demo auth mode fallback)
- * @returns Id<"users"> - The resolved user ID
- * @throws Error if neither auth path succeeds
- */
-export async function requireAppUserId(
-  ctx: QueryCtx | MutationCtx,
-  token?: string
-): Promise<Id<"users">> {
-  // PATH 1: Try real Convex auth identity (production path)
-  const identity = await ctx.auth.getUserIdentity();
-  if (identity?.subject) {
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (userId) {
-      return userId;
-    }
-  }
-
-  // PATH 2: Try session token resolution (supports demo tokens in dev mode)
-  if (token && token.trim().length > 0) {
-    const userId = await validateSessionToken(ctx, token);
-    if (userId) {
-      return userId;
-    }
-  }
-
-  // Both paths failed
-  throw new Error("Authentication required");
-}
-
-export async function getPhase2DisplayName(
-  ctx: QueryCtx | MutationCtx,
-  userId: Id<"users">
-): Promise<string> {
-  const user = await ctx.db.get(userId);
-  const handle = user?.handle?.trim();
-  return handle && handle.length > 0 ? handle : "Anonymous";
-}
-
 /**
  * IDENTITY MAPPING (WRITE): Ensure Convex user record exists for authUserId.
  *
@@ -345,32 +272,11 @@ export async function ensureUserByAuthId(
   return newUserId;
 }
 
-// =============================================================================
-// DEMO AUTH MODE - Backend support
-// =============================================================================
-// IMPORTANT: In Convex, NODE_ENV is NOT reliable for dev/prod detection.
-// Use IS_DEV_DEPLOYMENT env var set via `npx convex env set IS_DEV_DEPLOYMENT true`
-// =============================================================================
-const IS_DEV_MODE = process.env.IS_DEV_DEPLOYMENT === "true";
-
-/**
- * Check if a token is a demo token.
- * Demo tokens start with "demo_" prefix.
- */
-function isDemoToken(token: string): boolean {
-  return token.startsWith("demo_");
-}
-
 /**
  * Validate session token and return the authenticated user ID.
  * Uses session table to verify token is valid, not expired, and not revoked.
  *
- * DEMO MODE: Demo tokens (starting with "demo_") are handled specially:
- * - Still requires session to exist in database
- * - Session is never considered expired
- * - User is always considered active
- *
- * @param ctx - Convex mutation context
+ * @param ctx - Convex query or mutation context
  * @param token - Session token to validate
  * @returns userId if valid, null if invalid/expired/revoked
  */
@@ -386,297 +292,68 @@ export async function validateSessionToken(
     .first();
 
   if (!session) return null;
-
-  // DEMO MODE: Demo sessions are never expired
-  const isDemo = IS_DEV_MODE && isDemoToken(token);
-  if (!isDemo) {
-    if (session.expiresAt < now) return null;
-    if (session.revokedAt) return null;
-  }
+  if (session.expiresAt < now) return null;
+  if (session.revokedAt) return null;
 
   const user = await ctx.db.get(session.userId);
   if (!user) return null;
+  if (!user.isActive) return null;
+  if (user.deletedAt) return null;
+  // APP-P1-004 FIX: Deny session for banned users
+  if (user.isBanned) return null;
 
-  // DEMO MODE: Demo users are always considered active
-  if (!isDemo) {
-    if (!user.isActive) return null;
-    if (user.deletedAt) return null;
-    // APP-P1-004 FIX: Deny session for banned users
-    if (user.isBanned) return null;
-
-    // Check mass session revocation
-    if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
-      return null;
-    }
+  // Check mass session revocation
+  if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
+    return null;
   }
 
   return session.userId;
 }
 
 /**
- * Strict current-user resolution from a validated session token.
+ * Resolve the currently authenticated user from a trusted server-side identity.
+ * Accepts either:
+ * - a validated session token (primary path for this app), or
+ * - Convex auth identity subject (fallback for future auth integrations)
  *
- * IMPORTANT:
- * - Uses ONLY the session token as the source of truth
- * - Intended for security-sensitive self-service flows (Profile, Support, Verification)
- * - Does NOT accept raw user IDs, auth IDs, demo IDs, or prefix matches
+ * If authUserId is also provided, it must resolve to the same user or the
+ * request is rejected.
  */
-export async function requireAuthenticatedSessionUser(
+export async function resolveTrustedUserId(
   ctx: QueryCtx | MutationCtx,
-  token: string
-): Promise<Doc<"users">> {
-  if (!token || token.trim().length === 0) {
-    throw new Error("Unauthorized: authentication required");
+  {
+    token,
+    authUserId,
+  }: {
+    token?: string | null;
+    authUserId?: string | null;
   }
+): Promise<Id<"users"> | null> {
+  let trustedUserId: Id<"users"> | null = null;
 
-  const userId = await validateSessionToken(ctx, token);
-  if (!userId) {
-    throw new Error("Unauthorized: invalid or expired session");
-  }
-
-  const user = await ctx.db.get(userId);
-  if (!user || !user.isActive || user.deletedAt || user.isBanned) {
-    throw new Error("Unauthorized: invalid user");
-  }
-
-  return user;
-}
-
-/**
- * Strict admin resolution from a validated session token.
- */
-export async function requireAdminSessionUser(
-  ctx: QueryCtx | MutationCtx,
-  token: string
-): Promise<Doc<"users">> {
-  const user = await requireAuthenticatedSessionUser(ctx, token);
-  if (!user.isAdmin) {
-    throw new Error("Unauthorized: admin access required");
-  }
-  return user;
-}
-
-/**
- * Strict session-based user resolution for live Phase-1 Messages paths.
- *
- * IMPORTANT:
- * - Uses ONLY the validated session token as the source of truth
- * - Does NOT accept Convex user IDs, authUserIds, demoUserIds, or prefix matches
- * - Intended for security-sensitive message and protected-media access
- */
-export async function requireLiveMessageSessionUser(
-  ctx: QueryCtx | MutationCtx,
-  token: string
-): Promise<Id<"users">> {
-  const user = await requireAuthenticatedSessionUser(ctx, token);
-  return user._id;
-}
-
-// =============================================================================
-// PAIR ELIGIBILITY CHECK - ONE PAIR, ONE CONNECTION PER PHASE
-// =============================================================================
-// This is a CORE backend rule enforced globally.
-// If two users have EVER had a relationship in a phase, they are PERMANENTLY
-// INELIGIBLE for ANY new connection in that same phase.
-//
-// "Pair history" includes: matches, conversations, messages, likes, blocks,
-// confession connects, or any other prior interaction.
-// =============================================================================
-
-export type Phase = 'phase1' | 'phase2';
-
-/**
- * Normalize a user pair to a consistent order for lookups.
- * Returns [smaller, larger] based on string comparison.
- */
-export function normalizePair(
-  userA: Id<"users">,
-  userB: Id<"users">
-): [Id<"users">, Id<"users">] {
-  const a = userA as string;
-  const b = userB as string;
-  return a < b ? [userA, userB] : [userB, userA];
-}
-
-/**
- * Check if a pair of users is eligible for a new connection in a given phase.
- *
- * CORRECTED LOGIC:
- * - Likes/swipes do NOT block eligibility (only matches do)
- * - Blocks are phase-specific (Phase-1 blocks only affect Phase-1)
- * - Backend is the source of truth
- *
- * Returns FALSE if ANY of the following exists for the pair:
- * - Previous match (active or inactive)
- * - Conversation created
- * - Block records (Phase-1 only - no Phase-2 blocks table exists)
- * - Confession connect records (Phase-1 only)
- *
- * Phase 1 tables: blocks, matches, conversations, confessionCommentConnects
- * Phase 2 tables: privateMatches, privateConversations
- *
- * @param ctx - Convex query or mutation context
- * @param userA - First user ID
- * @param userB - Second user ID
- * @param phase - 'phase1' or 'phase2'
- * @returns true if eligible, false if pair has prior history
- */
-export async function isPairEligibleForPhase(
-  ctx: QueryCtx | MutationCtx,
-  userA: Id<"users">,
-  userB: Id<"users">,
-  phase: Phase
-): Promise<boolean> {
-  // Same user check
-  if (userA === userB) return false;
-
-  if (phase === 'phase1') {
-    return isPairEligibleForPhase1(ctx, userA, userB);
+  const trimmedToken = token?.trim();
+  if (trimmedToken) {
+    trustedUserId = await validateSessionToken(ctx, trimmedToken);
   } else {
-    return isPairEligibleForPhase2(ctx, userA, userB);
-  }
-}
-
-/**
- * Phase-1 specific eligibility check.
- * Checks: blocks, matches, conversations, confessionCommentConnects
- * NOTE: Likes/swipes do NOT block eligibility - only completed connections do
- */
-async function isPairEligibleForPhase1(
-  ctx: QueryCtx | MutationCtx,
-  userA: Id<"users">,
-  userB: Id<"users">
-): Promise<boolean> {
-  const db = ctx.db as any;
-  // Check Phase-1 blocks (bidirectional)
-  const blockCheck1 = await ctx.db
-    .query('blocks')
-    .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userA).eq('blockedUserId', userB))
-    .first();
-  if (blockCheck1) return false;
-
-  const blockCheck2 = await ctx.db
-    .query('blocks')
-    .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userB).eq('blockedUserId', userA))
-    .first();
-  if (blockCheck2) return false;
-
-  // Check matches (either direction, any status - active or inactive)
-  const match1 = await ctx.db
-    .query('matches')
-    .withIndex('by_users', (q) => q.eq('user1Id', userA).eq('user2Id', userB))
-    .first();
-  if (match1) return false;
-
-  const match2 = await ctx.db
-    .query('matches')
-    .withIndex('by_users', (q) => q.eq('user1Id', userB).eq('user2Id', userA))
-    .first();
-  if (match2) return false;
-
-  // NOTE: Likes are intentionally NOT checked here
-  // A single-sided like should not prevent future connection attempts
-
-  // Check confession comment connects (either direction)
-  const confessionConnect1 = await db
-    .query('confessionCommentConnects')
-    .withIndex('by_from_user', (q: any) => q.eq('fromUserId', userA))
-    .filter((q: any) => q.eq(q.field('toUserId'), userB))
-    .first();
-  if (confessionConnect1) return false;
-
-  const confessionConnect2 = await db
-    .query('confessionCommentConnects')
-    .withIndex('by_from_user', (q: any) => q.eq('fromUserId', userB))
-    .filter((q: any) => q.eq(q.field('toUserId'), userA))
-    .first();
-  if (confessionConnect2) return false;
-
-  // Check conversations (check if both users are participants)
-  const conversationsWithUserA = await ctx.db
-    .query('conversationParticipants')
-    .withIndex('by_user', (q) => q.eq('userId', userA))
-    .take(100);
-
-  for (const cp of conversationsWithUserA) {
-    const otherParticipant = await ctx.db
-      .query('conversationParticipants')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', cp.conversationId))
-      .filter((q) => q.eq(q.field('userId'), userB))
-      .first();
-    if (otherParticipant) return false;
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      trustedUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+    }
   }
 
-  // Pair is eligible
-  return true;
-}
-
-/**
- * Phase-2 specific eligibility check.
- * Checks: privateMatches, privateConversations
- * NOTE: No Phase-2 blocks table exists - blocks are Phase-1 only
- * NOTE: privateLikes do NOT block eligibility - only completed connections do
- */
-async function isPairEligibleForPhase2(
-  ctx: QueryCtx | MutationCtx,
-  userA: Id<"users">,
-  userB: Id<"users">
-): Promise<boolean> {
-  const db = ctx.db as any;
-  // NOTE: No blocks check for Phase-2 - blocks table is Phase-1 only
-
-  // Check private matches (either direction, any status)
-  const privateMatch1 = await db
-    .query('privateMatches')
-    .withIndex('by_users', (q: any) => q.eq('user1Id', userA).eq('user2Id', userB))
-    .first();
-  if (privateMatch1) return false;
-
-  const privateMatch2 = await db
-    .query('privateMatches')
-    .withIndex('by_users', (q: any) => q.eq('user1Id', userB).eq('user2Id', userA))
-    .first();
-  if (privateMatch2) return false;
-
-  // NOTE: privateLikes are intentionally NOT checked here
-  // A single-sided like should not prevent future connection attempts
-
-  // Check private conversations (through participants)
-  const privateConvsWithUserA = await db
-    .query('privateConversationParticipants')
-    .withIndex('by_user', (q: any) => q.eq('userId', userA))
-    .take(100);
-
-  for (const cp of privateConvsWithUserA) {
-    const otherParticipant = await db
-      .query('privateConversationParticipants')
-      .withIndex('by_conversation', (q: any) => q.eq('conversationId', cp.conversationId))
-      .filter((q: any) => q.eq(q.field('userId'), userB))
-      .first();
-    if (otherParticipant) return false;
+  if (!trustedUserId) {
+    return null;
   }
 
-  // P1-004 FIX: Check TOD (Truth or Dare) connections
-  // TOD creates Phase-1 conversations, but a connected TOD request means users
-  // have already interacted - should not reconnect in Phase-2 either
-  // Note: todConnectRequests uses string IDs, not Id<"users">
-  const userAStr = userA as string;
-  const userBStr = userB as string;
+  const trimmedAuthUserId = authUserId?.trim();
+  if (!trimmedAuthUserId) {
+    return trustedUserId;
+  }
 
-  const todConnectAToB = await ctx.db
-    .query('todConnectRequests')
-    .withIndex('by_from_to', (q) => q.eq('fromUserId', userAStr).eq('toUserId', userBStr))
-    .filter((q) => q.eq(q.field('status'), 'connected'))
-    .first();
-  if (todConnectAToB) return false;
+  const claimedUserId = await resolveUserIdByAuthId(ctx, trimmedAuthUserId);
+  if (!claimedUserId || claimedUserId !== trustedUserId) {
+    return null;
+  }
 
-  const todConnectBToA = await ctx.db
-    .query('todConnectRequests')
-    .withIndex('by_from_to', (q) => q.eq('fromUserId', userBStr).eq('toUserId', userAStr))
-    .filter((q) => q.eq(q.field('status'), 'connected'))
-    .first();
-  if (todConnectBToA) return false;
-
-  // Pair is eligible
-  return true;
+  return trustedUserId;
 }

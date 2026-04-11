@@ -1,7 +1,8 @@
 import { v } from 'convex/values';
 import { mutation, query, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { requireAuthenticatedUserId, resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { shouldCreateNotification } from './notificationPreferences';
 
 // D1-REPAIR: Helper to check if either user has blocked the other
 // Returns true if blocked (should prevent messaging)
@@ -125,16 +126,10 @@ export const swipe = mutation({
     const { token, toUserId, action, message } = args;
     const now = Date.now();
 
-    // P1-008 FIX: Token format validation - reject obviously invalid tokens early
-    // Valid tokens are non-empty strings within reasonable length bounds
-    if (!token || typeof token !== 'string' || token.length < 10 || token.length > 2000) {
-      throw new Error('Unauthorized: invalid session');
-    }
-
     // P1-028 FIX: Validate session and derive user from trusted server context
     const fromUserId = await validateSessionToken(ctx, token);
     if (!fromUserId) {
-      throw new Error('Unauthorized: invalid session');
+      throw new Error('Unauthorized: invalid or expired session');
     }
 
     // P2-003 FIX: Prevent self-swiping
@@ -165,16 +160,19 @@ export const swipe = mutation({
     }
 
     // 8A: Check target user is also verified (shouldn't appear in deck but double-check)
-    // P1-009 FIX: Use generic error message to prevent user enumeration
     const toUser = await ctx.db.get(toUserId);
-    if (!toUser) {
-      throw new Error('This user is not available');
-    }
-    const toStatus = toUser.verificationStatus || 'unverified';
-    if (toStatus !== 'verified') {
-      throw new Error('This user is not available');
+    if (toUser) {
+      const toStatus = toUser.verificationStatus || 'unverified';
+      if (toStatus !== 'verified') {
+        throw new Error('This user is no longer available.');
+      }
     }
 
+    // TODO: Subscription restrictions disabled for testing mode.
+    // Re-enable usage limits once testing is complete.
+    // if (fromUser.gender === 'male') { ... }
+
+    // Check if already swiped
     const existingLike = await ctx.db
       .query('likes')
       .withIndex('by_from_to', (q) =>
@@ -182,62 +180,35 @@ export const swipe = mutation({
       )
       .first();
 
-    const existingMatchId = (() => {
-      const user1Id = fromUserId < toUserId ? fromUserId : toUserId;
-      const user2Id = fromUserId < toUserId ? toUserId : fromUserId;
-      return ctx.db
-        .query('matches')
-        .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
-        .first();
-    })();
-
     if (existingLike) {
-      const sameAction = existingLike.action === action;
-      const sameMessage = (existingLike.message ?? '') === (message ?? '');
-
-      if (sameAction && sameMessage) {
-        const existingMatch = await existingMatchId;
-        return existingMatch
-          ? { success: true, isMatch: true, matchId: existingMatch._id }
-          : { success: true, isMatch: false };
-      }
-
       throw new Error('Already swiped on this user');
     }
 
     // P1 SECURITY: Block check for like/super_like actions (not just text)
     // Prevents blocked users from liking each other and creating matches
-    // P1-009 FIX: Use generic error message to prevent user enumeration
-    if (action === 'like' || action === 'super_like' || action === 'text') {
+    if (action === 'like' || action === 'super_like') {
       if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
-        throw new Error('This user is not available');
+        throw new Error('Cannot like this user');
       }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // P0-004 FIX: Rate limiting BEFORE insert (not after)
-    // P0-005 FIX: Re-enable server-side daily limit enforcement
-    // P1-005 FIX: Add short-term burst rate limiting (15/min) alongside 5-min window
-    // ═══════════════════════════════════════════════════════════════════════════
+    // Record the like
+    await ctx.db.insert('likes', {
+      fromUserId,
+      toUserId,
+      action,
+      message,
+      createdAt: now,
+    });
 
-    // 1. Check rapid-swiping abuse BEFORE insert (P0-004)
-    const oneMinAgo = now - 60 * 1000;
+    // Inline rapid-swiping check
     const fiveMinAgo = now - 5 * 60 * 1000;
     const recentSwipes = await ctx.db
       .query('likes')
       .withIndex('by_from_user', (q) => q.eq('fromUserId', fromUserId))
       .collect();
-    const oneMinCount = recentSwipes.filter(s => s.createdAt > oneMinAgo).length;
     const recentCount = recentSwipes.filter(s => s.createdAt > fiveMinAgo).length;
-
-    // P1-005 FIX: Short-term burst limit - 15 swipes per minute (prevents fast bot-like swiping)
-    if (oneMinCount >= 15) {
-      throw new Error('Too many swipes. Please slow down.');
-    }
-
-    // Hard block at 100 swipes in 5 minutes (bot-like behavior)
-    if (recentCount >= 100) {
-      // Still log the flag for monitoring
+    if (recentCount > 100) {
       const existingFlag = await ctx.db
         .query('behaviorFlags')
         .withIndex('by_user_type', (q) =>
@@ -249,120 +220,25 @@ export const swipe = mutation({
         await ctx.db.insert('behaviorFlags', {
           userId: fromUserId,
           flagType: 'rapid_swiping',
-          severity: 'high', // Upgraded to high since they hit the hard limit
-          description: `Blocked: ${recentCount} swipes in 5 minutes`,
+          severity: 'medium',
+          description: `${recentCount} swipes in 5 minutes`,
           createdAt: now,
         });
       }
-      throw new Error('Too many swipes. Please slow down.');
     }
 
-    // 2. Check and enforce daily limits BEFORE insert (P0-005)
-    // Daily limits only apply to like/super_like actions (pass is always allowed)
-    let pendingDailyUsagePatch:
-      | {
-          likesRemaining: number;
-          superLikesRemaining: number;
-          likesResetAt: number;
-          superLikesResetAt: number;
-        }
-      | null = null;
-    if (action === 'like' || action === 'super_like') {
-      const oneDayMs = 24 * 60 * 60 * 1000;
-
-      // Check if daily counters need reset
-      const likesResetAt = fromUser.likesResetAt ?? 0;
-      const superLikesResetAt = fromUser.superLikesResetAt ?? 0;
-      const shouldResetLikes = now - likesResetAt > oneDayMs;
-      const shouldResetSuperLikes = now - superLikesResetAt > oneDayMs;
-
-      // Get current remaining counts
-      let likesRemaining = fromUser.likesRemaining ?? 0;
-      let superLikesRemaining = fromUser.superLikesRemaining ?? 0;
-
-      // Reset counters if needed (daily refresh)
-      if (shouldResetLikes) {
-        // Reset to tier-based daily limits
-        const dailyLikeLimit =
-          fromUser.subscriptionTier === 'premium' ? 999 :
-          fromUser.subscriptionTier === 'basic' ? 50 : 25; // free tier = 25
-        likesRemaining = dailyLikeLimit;
-      }
-      if (shouldResetSuperLikes) {
-        const dailySuperLikeLimit =
-          fromUser.subscriptionTier === 'premium' ? 10 :
-          fromUser.subscriptionTier === 'basic' ? 3 : 1; // free tier = 1
-        superLikesRemaining = dailySuperLikeLimit;
-      }
-
-      // Check if user has remaining swipes for this action
-      if (action === 'like' && likesRemaining <= 0) {
-        throw new Error('Daily like limit reached. Upgrade for more likes or try again tomorrow.');
-      }
-      if (action === 'super_like' && superLikesRemaining <= 0) {
-        throw new Error('Daily super like limit reached. Upgrade for more or try again tomorrow.');
-      }
-
-      // Prepare counter decrements (will be applied after successful insert)
-      // Store in closure for later use
-      const newLikesRemaining = action === 'like' ? likesRemaining - 1 : likesRemaining;
-      const newSuperLikesRemaining = action === 'super_like' ? superLikesRemaining - 1 : superLikesRemaining;
-      const newLikesResetAt = shouldResetLikes ? now : likesResetAt;
-      const newSuperLikesResetAt = shouldResetSuperLikes ? now : superLikesResetAt;
-
-      pendingDailyUsagePatch = {
-        likesRemaining: newLikesRemaining,
-        superLikesRemaining: newSuperLikesRemaining,
-        likesResetAt: newLikesResetAt,
-        superLikesResetAt: newSuperLikesResetAt,
-      };
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // END P0-004/P0-005 FIXES
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    // Record the like (P0-004/P0-005: Rate limiting and daily limits already checked above)
-    const insertedLikeId = await ctx.db.insert('likes', {
-      fromUserId,
-      toUserId,
-      action,
-      message,
-      createdAt: now,
-    });
-
-    const duplicateLikes = await ctx.db
-      .query('likes')
-      .withIndex('by_from_to', (q) =>
-        q.eq('fromUserId', fromUserId).eq('toUserId', toUserId)
-      )
-      .collect();
-
-    if (duplicateLikes.length > 1) {
-      duplicateLikes.sort((a, b) => a._id.localeCompare(b._id));
-      const winningLike = duplicateLikes[0];
-
-      if (winningLike._id !== insertedLikeId) {
-        await ctx.db.delete(insertedLikeId);
-        const existingMatch = await existingMatchId;
-        return existingMatch
-          ? { success: true, isMatch: true, matchId: existingMatch._id }
-          : { success: true, isMatch: false };
-      }
-
-      for (let i = 1; i < duplicateLikes.length; i++) {
-        await ctx.db.delete(duplicateLikes[i]._id);
-      }
-    }
-
-    if (pendingDailyUsagePatch) {
-      await ctx.db.patch(fromUserId, pendingDailyUsagePatch);
-    }
+    // TODO: Usage count updates disabled for testing mode.
+    // Re-enable once testing is complete.
 
     // Handle text action: send a direct message via message token (pre-match conversation)
     if (action === 'text') {
       if (!message) {
         throw new Error('Message is required for text action');
+      }
+
+      // D1-REPAIR: Check if either user has blocked the other
+      if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
+        throw new Error('Cannot send message');
       }
 
       // Create a pre-match conversation for the direct message
@@ -384,19 +260,24 @@ export const swipe = mutation({
 
       // Notify the receiver
       // D3: Add dedupeKey and expiresAt for consistency with messages.ts notifications
-      await ctx.db.insert('notifications', {
-        userId: toUserId,
-        type: 'message',
-        title: 'New Direct Message!',
-        body: `${fromUser.name} sent you a message`,
-        data: { conversationId: conversationId, userId: fromUserId },
-        dedupeKey: `message:${conversationId}:unread`,
-        createdAt: now,
-        expiresAt: now + 24 * 60 * 60 * 1000,
-      });
+      if (await shouldCreateNotification(ctx, toUserId, 'message')) {
+        await ctx.db.insert('notifications', {
+          userId: toUserId,
+          type: 'message',
+          title: 'New Direct Message!',
+          body: `${fromUser.name} sent you a message`,
+          data: {
+            actorUserId: fromUserId as string,
+            targetUserId: toUserId as string,
+            conversationId: conversationId as string,
+          } as any,
+          dedupeKey: `message:${conversationId}:unread`,
+          createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
+      }
 
-      // P1-006 FIX: Return conversationId so client can navigate to chat
-      return { success: true, isMatch: false, conversationId };
+      return { success: true, isMatch: false };
     }
 
     // Check for match (only on like or super_like)
@@ -408,10 +289,10 @@ export const swipe = mutation({
         )
         .first();
 
-      // P1-002 FIX: Only 'like' and 'super_like' trigger matches - 'text' is separate intent
       const hasReciprocalLike = reciprocalLike && (
         reciprocalLike.action === 'like' ||
-        reciprocalLike.action === 'super_like'
+        reciprocalLike.action === 'super_like' ||
+        reciprocalLike.action === 'text'
       );
 
       // SMART MATCHING: Check for T&D connected status
@@ -585,27 +466,39 @@ export const swipe = mutation({
         // Create notifications for both users
         // D5: Add dedupeKey and expiresAt for match notifications
         const toUser = await ctx.db.get(toUserId);
-        await ctx.db.insert('notifications', {
-          userId: fromUserId,
-          type: 'match',
-          title: 'New Match!',
-          body: `You matched with ${toUser?.name || 'someone'}!`,
-          data: { matchId: matchId },
-          dedupeKey: `match:${matchId}`,
-          createdAt: now,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
+        if (await shouldCreateNotification(ctx, fromUserId, 'match')) {
+          await ctx.db.insert('notifications', {
+            userId: fromUserId,
+            type: 'match',
+            title: 'New Match!',
+            body: `You matched with ${toUser?.name || 'someone'}!`,
+            data: {
+              actorUserId: toUserId as string,
+              targetUserId: fromUserId as string,
+              matchId: matchId as string,
+            } as any,
+            dedupeKey: `match:${matchId}`,
+            createdAt: now,
+            expiresAt: now + 24 * 60 * 60 * 1000,
+          });
+        }
 
-        await ctx.db.insert('notifications', {
-          userId: toUserId,
-          type: 'match',
-          title: 'New Match!',
-          body: `You matched with ${fromUser.name}!`,
-          data: { matchId: matchId },
-          dedupeKey: `match:${matchId}`,
-          createdAt: now,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
+        if (await shouldCreateNotification(ctx, toUserId, 'match')) {
+          await ctx.db.insert('notifications', {
+            userId: toUserId,
+            type: 'match',
+            title: 'New Match!',
+            body: `You matched with ${fromUser.name}!`,
+            data: {
+              actorUserId: fromUserId as string,
+              targetUserId: toUserId as string,
+              matchId: matchId as string,
+            } as any,
+            dedupeKey: `match:${matchId}`,
+            createdAt: now,
+            expiresAt: now + 24 * 60 * 60 * 1000,
+          });
+        }
 
         return { success: true, isMatch: true, matchId };
       }
@@ -617,27 +510,39 @@ export const swipe = mutation({
     const senderName = fromUser.name || 'Someone';
 
     if (action === 'like') {
-      await ctx.db.insert('notifications', {
-        userId: toUserId,
-        type: 'like',
-        title: `${senderName} liked you`,
-        body: 'Check your likes to see their profile',
-        data: { userId: fromUserId, likeType: 'like' },
-        dedupeKey: `like:${fromUserId}`,
-        createdAt: now,
-        // No expiresAt - notification stays until acted on
-      });
+      if (await shouldCreateNotification(ctx, toUserId, 'like')) {
+        await ctx.db.insert('notifications', {
+          userId: toUserId,
+          type: 'like',
+          title: `${senderName} liked you`,
+          body: 'Check your likes to see their profile',
+          data: {
+            actorUserId: fromUserId as string,
+            targetUserId: toUserId as string,
+            likeType: 'like',
+          } as any,
+          dedupeKey: `like:${fromUserId}`,
+          createdAt: now,
+          // No expiresAt - notification stays until acted on
+        });
+      }
     } else if (action === 'super_like') {
-      await ctx.db.insert('notifications', {
-        userId: toUserId,
-        type: 'super_like',
-        title: `${senderName} super liked you`,
-        body: 'Open your likes to view their profile',
-        data: { userId: fromUserId, likeType: 'super_like' },
-        dedupeKey: `super_like:${fromUserId}`,
-        createdAt: now,
-        // No expiresAt - notification stays until acted on
-      });
+      if (await shouldCreateNotification(ctx, toUserId, 'super_like')) {
+        await ctx.db.insert('notifications', {
+          userId: toUserId,
+          type: 'super_like',
+          title: `${senderName} super liked you`,
+          body: 'Open your likes to view their profile',
+          data: {
+            actorUserId: fromUserId as string,
+            targetUserId: toUserId as string,
+            likeType: 'super_like',
+          } as any,
+          dedupeKey: `super_like:${fromUserId}`,
+          createdAt: now,
+          // No expiresAt - notification stays until acted on
+        });
+      }
     }
 
     return { success: true, isMatch: false };
@@ -652,19 +557,11 @@ export const rewind = mutation({
   handler: async (ctx, args) => {
     const { authUserId } = args;
 
-    // P2-010 FIX: Strengthened authUserId validation
-    // - Must be non-null and non-empty string
-    // - Must have reasonable length bounds (10-500 chars for auth IDs)
-    // - Must not contain potentially malicious characters
-    if (!authUserId || typeof authUserId !== 'string') {
+    // AUTH FIX: Resolve acting user from server-side auth
+    if (!authUserId || authUserId.trim().length === 0) {
       throw new Error('Unauthorized: authentication required');
     }
-    const trimmedAuthId = authUserId.trim();
-    if (trimmedAuthId.length === 0 || trimmedAuthId.length < 10 || trimmedAuthId.length > 500) {
-      throw new Error('Unauthorized: invalid authentication');
-    }
-
-    const userId = await resolveUserIdByAuthId(ctx, trimmedAuthId);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -911,9 +808,11 @@ export const getSwipeHistory = query({
 
 // Get users that the current user has liked (for confession tagging)
 export const getLikedUsers = query({
-  args: {},
-  handler: async (ctx) => {
-    const userId = await requireAuthenticatedUserId(ctx);
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { userId } = args;
 
     // Get all likes from this user (like or super_like, not pass)
     const likes = await ctx.db
@@ -1044,68 +943,6 @@ export const resetSwipeBetweenUsers = mutation({
       success: true,
       deletedCount,
       message: `Deleted ${deletedCount} swipe record(s) between users`,
-    };
-  },
-});
-
-// =============================================================================
-// UNCRUSH: Remove your like/crush on another user
-// =============================================================================
-// Allows user to take back their like before or after matching.
-// Only removes the current user's like, not the other user's.
-// =============================================================================
-export const uncrush = mutation({
-  args: {
-    token: v.string(),
-    targetUserId: v.id('users'),
-  },
-  handler: async (ctx, args) => {
-    const { token, targetUserId } = args;
-
-    // Validate session and derive current user
-    const fromUserId = await validateSessionToken(ctx, token);
-    if (!fromUserId) {
-      throw new Error('Unauthorized: invalid or expired session');
-    }
-
-    // Prevent self-targeting
-    if (fromUserId === targetUserId) {
-      throw new Error('Cannot uncrush yourself');
-    }
-
-    // Find the like from current user to target user
-    const existingLike = await ctx.db
-      .query('likes')
-      .withIndex('by_from_to', (q) =>
-        q.eq('fromUserId', fromUserId).eq('toUserId', targetUserId)
-      )
-      .first();
-
-    if (!existingLike) {
-      // No like found - nothing to remove
-      return {
-        success: true,
-        removed: false,
-        message: 'No crush found to remove',
-      };
-    }
-
-    // Delete the like
-    await ctx.db.delete(existingLike._id);
-
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('[Uncrush] Removed like', {
-        fromUserId,
-        targetUserId,
-        likeId: existingLike._id,
-        action: existingLike.action,
-      });
-    }
-
-    return {
-      success: true,
-      removed: true,
-      message: 'Crush removed successfully',
     };
   },
 });

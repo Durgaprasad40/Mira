@@ -83,6 +83,27 @@ export interface AddNotificationInput {
   data?: Record<string, string | undefined>;
 }
 
+function getActorUserId(data?: Record<string, string | undefined>): string | undefined {
+  return data?.actorUserId ?? data?.otherUserId ?? data?.userId;
+}
+
+function normalizeNotificationData(
+  data?: Record<string, string | undefined>,
+  targetUserId?: string
+): Record<string, string | undefined> | undefined {
+  if (!data && !targetUserId) {
+    return undefined;
+  }
+
+  const actorUserId = getActorUserId(data);
+  return {
+    ...data,
+    actorUserId,
+    targetUserId: data?.targetUserId ?? targetUserId,
+    otherUserId: data?.otherUserId ?? actorUserId,
+  };
+}
+
 // ── Dedupe key computation ─────────────────────────────────────
 // Deterministic key per logical event so the same event doesn't create
 // duplicate rows.  Key schema:
@@ -96,7 +117,7 @@ export interface AddNotificationInput {
 //   confession_*      → "confession_<sub>:<confessionId>"
 //   fallback          → "<type>:<timestamp>"  (no dedupe — always unique)
 function computeDedupeKey(type: string, data?: Record<string, string | undefined>): string {
-  const userId = data?.otherUserId ?? data?.userId;
+  const userId = getActorUserId(data);
   switch (type) {
     case 'match':
     case 'new_match':
@@ -112,7 +133,7 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
       return `super_like:${userId ?? 'unknown'}`;
     case 'message':
     case 'new_message':
-      return `message:${data?.conversationId ?? userId ?? 'unknown'}`;
+      return `message:${data?.conversationId ?? userId ?? 'unknown'}:unread`;
     case 'crossed_paths':
       return `crossed_paths:${userId ?? 'unknown'}`;
     case 'profile_viewed':
@@ -310,7 +331,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
     })),
   markReadForConversation: (conversationId: string) =>
     set((state) => {
-      const key = `message:${conversationId}`;
+      const key = `message:${conversationId}:unread`;
       return {
         notifications: state.notifications.map((n) =>
           n.dedupeKey === key && !n.isRead
@@ -403,7 +424,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       const likeTypes = new Set(['like', 'like_received', 'super_like', 'superlike', 'super_like_received']);
       const filtered = state.notifications.filter((n) => {
         if (!likeTypes.has(n.type)) return true;
-        return n.data?.otherUserId !== userId;
+        return getActorUserId(n.data) !== userId;
       });
       return { notifications: filtered };
     }),
@@ -415,7 +436,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       const cleanupStartTime = Date.now() - 100; // 100ms grace period
       const filtered = state.notifications.filter((n) => {
         if (!likeTypes.has(n.type)) return true;
-        const userId = n.data?.otherUserId;
+        const userId = getActorUserId(n.data);
         if (!userId) return true;
         // BUGFIX #35: Don't delete notifications created after cleanup started
         if (n.createdAt && n.createdAt > cleanupStartTime) return true;
@@ -445,7 +466,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
     set((state) => {
       const filtered = state.notifications.filter((n) => {
         if (n.type !== 'crossed_paths') return true;
-        return n.data?.otherUserId !== userId;
+        return getActorUserId(n.data) !== userId;
       });
       return { notifications: filtered };
     }),
@@ -456,7 +477,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       const cleanupStartTime = Date.now() - 100; // 100ms grace period
       const filtered = state.notifications.filter((n) => {
         if (n.type !== 'crossed_paths') return true;
-        const userId = n.data?.otherUserId;
+        const userId = getActorUserId(n.data);
         // Keep notifications without otherUserId (legacy/generic crossed paths)
         if (!userId) return true;
         // BUGFIX #35: Don't delete notifications created after cleanup started
@@ -619,12 +640,13 @@ export function useNotifications() {
         type: n.type,
         title: n.title,
         body: n.body,
-        data: n.data,
+        data: normalizeNotificationData(n.data, n.userId),
         createdAt: n.createdAt,
         readAt: n.readAt,
         // BUGFIX #19: Include expiresAt for proper expiry filtering
         expiresAt: n.expiresAt,
         isRead: !!n.readAt,
+        dedupeKey: n.dedupeKey,
       })),
     [convexSafe],
   );

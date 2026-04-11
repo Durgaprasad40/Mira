@@ -1,7 +1,8 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { resolveUserIdByAuthId } from './helpers';
+import { getUnreadCount as getConversationUnreadCount } from './unreadCounts';
 
 // Get all matches for a user
 // FIX: Excludes blocked users (bidirectional)
@@ -106,20 +107,7 @@ export const getMatches = query({
         )
       ),
       Promise.all(
-        validConversations.map((c) =>
-          ctx.db
-            .query('messages')
-            .withIndex('by_conversation', (q) =>
-              q.eq('conversationId', c._id)
-            )
-            .filter((q) =>
-              q.and(
-                q.neq(q.field('senderId'), userId),
-                q.eq(q.field('readAt'), undefined)
-              )
-            )
-            .collect()
-        )
+        validConversations.map((c) => getConversationUnreadCount(ctx, c._id, userId))
       ),
     ]);
 
@@ -128,7 +116,7 @@ export const getMatches = query({
       validConversations.map((c, i) => [c._id as string, lastMessages[i]])
     );
     const unreadCountMap = new Map(
-      validConversations.map((c, i) => [c._id as string, unreadCounts[i]?.length || 0])
+      validConversations.map((c, i) => [c._id as string, unreadCounts[i] || 0])
     );
 
     // Build result
@@ -263,18 +251,17 @@ export const getMatch = query({
 });
 
 // Unmatch
-// Live callers must provide a validated session token.
+// AUTH FIX: Use authUserId + server-side resolution to prevent client spoofing
 export const unmatch = mutation({
   args: {
     matchId: v.id('matches'),
-    token: v.optional(v.string()),
-    authUserId: v.optional(v.string()),
+    authUserId: v.string(), // Auth ID from client, resolved server-side
   },
   handler: async (ctx, args) => {
-    const { matchId, token, authUserId } = args;
-    const userId = token
-      ? await validateSessionToken(ctx, token)
-      : (authUserId ? await resolveUserIdByAuthId(ctx, authUserId) : null);
+    const { matchId, authUserId } = args;
+
+    // Resolve auth ID to actual user ID server-side (prevents spoofing)
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       throw new Error('User not found');
     }
@@ -293,28 +280,6 @@ export const unmatch = mutation({
       [updateField]: Date.now(),
       isActive: false,
     });
-
-    // POST-UNMATCH REAPPEARANCE FIX: Delete bidirectional like records
-    // This allows unmatched users to reappear in Explore/Discover
-    const otherId = match.user1Id === userId ? match.user2Id : match.user1Id;
-
-    // Delete: userId -> otherId
-    const like1 = await ctx.db
-      .query('likes')
-      .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', otherId))
-      .first();
-    if (like1) {
-      await ctx.db.delete(like1._id);
-    }
-
-    // Delete: otherId -> userId
-    const like2 = await ctx.db
-      .query('likes')
-      .withIndex('by_from_to', (q) => q.eq('fromUserId', otherId).eq('toUserId', userId))
-      .first();
-    if (like2) {
-      await ctx.db.delete(like2._id);
-    }
 
     return { success: true };
   },

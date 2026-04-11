@@ -1,15 +1,5 @@
 /**
- * LOCKED (PHASE-1 CHAT SCREEN INNER)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- *
- * STATUS:
- * - Feature is stable and production-locked
- * - P0 audit passed: backend connectivity verified, demo mode disabled
- * - All messages via Convex messages backend
- * - Delivery/read ticks from backend truth
- * - Voice messages use storage URLs (not local paths)
- *
- * Used by both:
+ * Shared chat UI used by both:
  *   - app/(main)/chat/[id].tsx            (standalone stack screen)
  *   - app/(main)/(tabs)/messages/chat/[conversationId].tsx  (inside Messages tab)
  *
@@ -32,13 +22,11 @@ import {
   InteractionManager,
   Image,
   Modal,
-  Animated,
-  Dimensions,
 } from 'react-native';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useConvex, useQuery, useMutation } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
@@ -61,126 +49,12 @@ import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import { popHandoff } from '@/lib/memoryHandoff';
 import { useIsFocused } from '@react-navigation/native';
-import { formatDayLabel, shouldShowDayDivider, shouldShowTimestamp } from '@/utils/chatTime';
 import {
   isUserBlocked,
   isExpiredConfessionThread,
   getOtherUserIdFromMeta,
 } from '@/lib/threadsIntegrity';
 import { preloadVideos } from '@/lib/videoCache';
-import { useUserPresence } from '@/hooks/usePresence';
-import type { Id } from '@/convex/_generated/dataModel';
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SKELETON LOADING - Chat loading placeholder
-// ═══════════════════════════════════════════════════════════════════════════
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
-const SkeletonBubble = ({ isOwn, width }: { isOwn: boolean; width: number }) => {
-  const pulseAnim = React.useRef(new Animated.Value(0.4)).current;
-
-  React.useEffect(() => {
-    const pulse = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 0.7, duration: 700, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 0.4, duration: 700, useNativeDriver: true }),
-      ])
-    );
-    pulse.start();
-    return () => pulse.stop();
-  }, [pulseAnim]);
-
-  return (
-    <Animated.View
-      style={[
-        skeletonStyles.bubble,
-        isOwn ? skeletonStyles.ownBubble : skeletonStyles.otherBubble,
-        { width, opacity: pulseAnim },
-      ]}
-    />
-  );
-};
-
-const ChatLoadingSkeleton = () => (
-  <View style={skeletonStyles.container}>
-    <SkeletonBubble isOwn={false} width={SCREEN_WIDTH * 0.55} />
-    <SkeletonBubble isOwn={true} width={SCREEN_WIDTH * 0.45} />
-    <SkeletonBubble isOwn={false} width={SCREEN_WIDTH * 0.65} />
-    <SkeletonBubble isOwn={true} width={SCREEN_WIDTH * 0.5} />
-    <SkeletonBubble isOwn={false} width={SCREEN_WIDTH * 0.4} />
-  </View>
-);
-
-const MESSAGE_PAGE_SIZE = 40;
-
-// P0 UNIFIED PRESENCE: Old constant removed - now using unified presence hook
-// @deprecated const PRESENCE_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
-
-function mergeMessagesById(messages: any[]): any[] {
-  const seen = new Set<string>();
-  return messages
-    .sort((a, b) => {
-      const createdDiff = (a.createdAt ?? 0) - (b.createdAt ?? 0);
-      if (createdDiff !== 0) return createdDiff;
-      return String(a._id).localeCompare(String(b._id));
-    })
-    .filter((message) => {
-      const id = String(message._id);
-      if (seen.has(id)) return false;
-      seen.add(id);
-      return true;
-    });
-}
-
-/**
- * @deprecated P0 UNIFIED PRESENCE: Use useUserPresence hook instead.
- * This function is kept only for backwards compatibility with demo mode.
- */
-function getPresenceStatusLegacy(lastActive?: number) {
-  if (!lastActive || lastActive <= 0) {
-    return {
-      label: 'Recently active',
-      isActiveNow: false,
-    };
-  }
-
-  const diff = Date.now() - lastActive;
-  // Legacy 5-minute threshold (kept for demo mode fallback)
-  const LEGACY_PRESENCE_MS = 5 * 60 * 1000;
-  if (diff < LEGACY_PRESENCE_MS) {
-    return {
-      label: 'Active now',
-      isActiveNow: true,
-    };
-  }
-
-  return {
-    label: 'Recently active',
-    isActiveNow: false,
-  };
-}
-
-const skeletonStyles = StyleSheet.create({
-  container: {
-    flex: 1,
-    paddingHorizontal: 14,
-    paddingTop: 20,
-    gap: 12,
-    backgroundColor: COLORS.background,
-  },
-  bubble: {
-    height: 42,
-    borderRadius: 20,
-  },
-  ownBubble: {
-    alignSelf: 'flex-end',
-    backgroundColor: COLORS.primarySubtle,
-  },
-  otherBubble: {
-    alignSelf: 'flex-start',
-    backgroundColor: COLORS.backgroundDark,
-  },
-});
 
 /** Resolve the current demo user ID at call-time from authStore.
  *  Falls back to 'demo_user_1' for legacy data compatibility. */
@@ -206,7 +80,6 @@ export interface ChatScreenInnerProps {
 
 export default function ChatScreenInner({ conversationId, source }: ChatScreenInnerProps) {
   const router = useRouter();
-  const convex = useConvex();
   const insets = useSafeAreaInsets();
 
   // Back handler — routes based on source to ensure consistent navigation
@@ -221,17 +94,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [source, router]);
 
   // Open other user's profile when tapping avatar or name (with fromChat flag to hide action buttons)
-  // FIX 8: Pass mode='confession_comment' for mini profile when matchSource is 'confession_comment'
-  const handleOpenProfile = useCallback((otherUserId: string | undefined, matchSource?: string) => {
+  const handleOpenProfile = useCallback((otherUserId: string | undefined) => {
     if (otherUserId) {
-      const params: any = { id: otherUserId, fromChat: '1' };
-      // FIX 8: Mini profile for confession_comment matches
-      if (matchSource === 'confession_comment') {
-        params.mode = 'confession_comment';
-      }
       router.push({
         pathname: '/(main)/profile/[id]',
-        params,
+        params: { id: otherUserId, fromChat: '1' },
       });
     } else if (__DEV__) {
       console.warn('[P1ChatHeader] missing otherUserId', { convoId: conversationId });
@@ -240,11 +107,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const { userId, token } = useAuthStore();
   const flatListRef = useRef<FlashListRef<any>>(null);
-  const scrollOffsetRef = useRef(0);
-  const pendingPrependScrollRef = useRef<{ previousHeight: number; previousOffset: number } | null>(null);
-  const isPrependingOlderRef = useRef(false);
-  const lastDeliveredMessageIdRef = useRef<string | null>(null);
-  const lastReadMessageIdRef = useRef<string | null>(null);
 
   // Track screen focus to check for camera-composer handoff data
   const isFocused = useIsFocused();
@@ -274,7 +136,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
     const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
     isNearBottomRef.current = distanceFromBottom < 80;
-    scrollOffsetRef.current = contentOffset.y;
   }, []);
 
   // Detect demo mode by global flag OR by convention: demo conversation IDs
@@ -316,9 +177,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // ── "Just unblocked" one-time banner state ──
   const [showJustUnblockedBanner, setShowJustUnblockedBanner] = useState(false);
 
-  // P1-FIX: Track if blocked alert has been shown this mount (prevents alert loop)
-  const hasShownBlockedAlertRef = useRef(false);
-
   // Check if this chat is with the just-unblocked user and show banner once
   useEffect(() => {
     if (justUnblockedUserId && otherUserIdFromMeta === justUnblockedUserId) {
@@ -330,16 +188,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // 5-3: Live re-check of blocked user status (not one-time)
   // Re-runs whenever blockedUserIds changes, even if chat is already open
-  // P1-FIX: Guard prevents alert loop from repeated navigation/deep links
   useEffect(() => {
     if (!isDemo) return;
 
     // Guard 1: Blocked user — re-check live when blockedUserIds changes
     if (otherUserIdFromMeta && isUserBlocked(otherUserIdFromMeta, blockedUserIds)) {
-      // P1-FIX: Only show alert once per mount to prevent stacking
-      if (hasShownBlockedAlertRef.current) return;
-      hasShownBlockedAlertRef.current = true;
-
       logDebugEvent('BLOCK_OR_REPORT', 'Blocked user chat navigation prevented');
       Alert.alert(
         'User Blocked',
@@ -380,23 +233,20 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const demoMessageList = conversationId ? demoConversations[conversationId] ?? [] : [];
 
-  // Live Phase-1 chat reads use the validated session token as the source of truth.
+  // SYNC-FIX: Use authUserId for consistent identity resolution across devices
   const conversation = useQuery(
     api.messages.getConversation,
-    !isDemo && conversationId && token ? { conversationId: conversationId as any, token } : 'skip'
-  );
-
-  // Live Phase-1 chat reads use the validated session token as the source of truth.
-  const liveMessagePage = useQuery(
-    api.messages.getMessagesPage,
-    !isDemo && conversationId && token
-      ? { conversationId: conversationId as any, token, limit: MESSAGE_PAGE_SIZE }
+    !isDemo && conversationId && userId && token
+      ? { conversationId: conversationId as any, token, authUserId: userId }
       : 'skip'
   );
 
-  const otherUserTyping = useQuery(
-    api.messages.getTypingStatus,
-    !isDemo && conversationId && token ? { conversationId: conversationId as any, token } : 'skip'
+  // SYNC-FIX: Use authUserId for consistent identity resolution across devices
+  const convexMessages = useQuery(
+    api.messages.getMessages,
+    !isDemo && conversationId && userId && token
+      ? { conversationId: conversationId as any, token, authUserId: userId }
+      : 'skip'
   );
 
   const currentUser = useQuery(
@@ -404,17 +254,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     !isDemo && userId ? { userId: userId as any } : 'skip'
   );
 
-  const [olderMessages, setOlderMessages] = useState<any[]>([]);
-  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
-  const [hasOlderMessages, setHasOlderMessages] = useState(false);
-  const [oldestLoadedCreatedAt, setOldestLoadedCreatedAt] = useState<number | null>(null);
-  const [loadOlderError, setLoadOlderError] = useState<string | null>(null);
-
-  const liveMessages = useMemo(
-    () => mergeMessagesById([...(olderMessages || []), ...((liveMessagePage?.messages as any[]) || [])]),
-    [liveMessagePage?.messages, olderMessages]
-  );
-  const messages = isDemo ? demoMessageList : liveMessages;
+  const messages = isDemo ? demoMessageList : convexMessages;
 
   // Demo conversation metadata comes from demoDmStore.meta, seeded by
   // simulateMatch() or match-celebration's "Say Hi" flow.
@@ -443,32 +283,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const activeConversation = isDemo ? demoConversation : conversation;
 
-  // P0 UNIFIED PRESENCE: Query presence for the other user (skip in demo mode)
-  const otherUserIdForPresence = !isDemo && activeConversation?.otherUser?.id
-    ? (activeConversation.otherUser.id as Id<'users'>)
-    : null;
-  const otherUserPresence = useUserPresence(otherUserIdForPresence);
-
-  useEffect(() => {
-    setOlderMessages([]);
-    setIsLoadingOlder(false);
-    setHasOlderMessages(false);
-    setOldestLoadedCreatedAt(null);
-    setLoadOlderError(null);
-    pendingPrependScrollRef.current = null;
-    isPrependingOlderRef.current = false;
-    lastDeliveredMessageIdRef.current = null;
-    lastReadMessageIdRef.current = null;
-  }, [conversationId]);
-
-  useEffect(() => {
-    if (isDemo || !liveMessagePage) return;
-    if (olderMessages.length === 0) {
-      setHasOlderMessages(liveMessagePage.hasOlder);
-      setOldestLoadedCreatedAt(liveMessagePage.oldestMessageCreatedAt ?? null);
-    }
-  }, [isDemo, liveMessagePage, olderMessages.length]);
-
   // Check if this is an expired confession-based chat
   const now = Date.now();
   const isExpiredChat = activeConversation
@@ -477,39 +291,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         : ((activeConversation as any).isExpired === true)
       )
     : false;
-
-  const terminalState = !isDemo ? ((activeConversation as any)?.terminalState ?? null) : null;
-  const isTerminalConversation = terminalState === 'blocked_by_you'
-    || terminalState === 'blocked_by_other'
-    || terminalState === 'unmatched'
-    || terminalState === 'user_removed';
-
-  const terminalStateCopy = useMemo(() => {
-    switch (terminalState) {
-      case 'blocked_by_you':
-        return {
-          title: 'You blocked this user',
-          detail: 'Messaging is turned off here. You can unblock them later if you want to chat again.',
-        };
-      case 'blocked_by_other':
-        return {
-          title: 'Conversation unavailable',
-          detail: 'This conversation can no longer receive new messages.',
-        };
-      case 'unmatched':
-        return {
-          title: 'You are no longer matched',
-          detail: 'Your previous messages stay visible, but new messages are turned off.',
-        };
-      case 'user_removed':
-        return {
-          title: 'User unavailable',
-          detail: 'This account is no longer available. Existing messages may remain visible here.',
-        };
-      default:
-        return null;
-    }
-  }, [terminalState]);
 
 
   // Log when chat is detected as expired
@@ -522,9 +303,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [isExpiredChat]);
 
   const sendMessage = useMutation(api.messages.sendMessage);
-  const deleteMessageMutation = useMutation(api.messages.deleteMessage); // FEAT-2
   const markAsRead = useMutation(api.messages.markAsRead);
   const markAsDelivered = useMutation(api.messages.markAsDelivered); // MESSAGE-TICKS-FIX
+  const markNotificationReadForConversation = useMutation(api.notifications.markReadForConversation);
   const updatePresence = useMutation(api.messages.updatePresence); // ONLINE-STATUS-FIX
   const sendPreMatchMessage = useMutation(api.messages.sendPreMatchMessage);
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
@@ -535,14 +316,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const [isSending, setIsSending] = useState(false);
   const isSendingRef = useRef(false);
-  const isSendingVoiceRef = useRef(false);
-  const [failedTextSend, setFailedTextSend] = useState<{
-    id: string;
-    text: string;
-    reason: string;
-    createdAt: number;
-  } | null>(null);
-  const [retryingFailedSend, setRetryingFailedSend] = useState(false);
 
   // Protected media state
   const [pendingImageUri, setPendingImageUri] = useState<string | null>(null);
@@ -591,52 +364,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     return [...(messages || []), ...pendingSecureMessages];
   }, [messages, pendingSecureMessages]);
 
-  const handleLoadOlderMessages = useCallback(async () => {
-    if (isDemo || !conversationId || !token) return;
-    if (isLoadingOlder || !hasOlderMessages || oldestLoadedCreatedAt == null) return;
-
-    setIsLoadingOlder(true);
-    setLoadOlderError(null);
-    isPrependingOlderRef.current = true;
-    pendingPrependScrollRef.current = {
-      previousHeight: contentHeightRef.current,
-      previousOffset: scrollOffsetRef.current,
-    };
-
-    try {
-      const olderPage = await convex.query(api.messages.getMessagesPage, {
-        conversationId: conversationId as any,
-        token,
-        limit: MESSAGE_PAGE_SIZE,
-        before: oldestLoadedCreatedAt,
-      });
-
-      setOlderMessages((prev) => mergeMessagesById([
-        ...(olderPage.messages as any[]),
-        ...prev,
-      ]));
-      setHasOlderMessages(olderPage.hasOlder);
-      setOldestLoadedCreatedAt(olderPage.oldestMessageCreatedAt ?? null);
-    } catch (error) {
-      console.warn('[ChatScreenInner] Failed to load older messages:', error);
-      setLoadOlderError("Couldn't load older messages.");
-      isPrependingOlderRef.current = false;
-      pendingPrependScrollRef.current = null;
-    } finally {
-      if (mountedRef.current) {
-        setIsLoadingOlder(false);
-      }
-    }
-  }, [
-    conversationId,
-    convex,
-    hasOlderMessages,
-    isDemo,
-    isLoadingOlder,
-    oldestLoadedCreatedAt,
-    token,
-  ]);
-
   // LIVE-TICK-FIX: Compute a hash of message read/delivered states to force FlashList re-renders
   // When any message's deliveredAt or readAt changes, this hash changes, triggering a re-render
   // This ensures the sender sees tick updates (1 -> 2 -> blue) in real-time without reopening the chat
@@ -650,7 +377,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // LIVE-TICK-DEBUG: Log when hash changes (tracks sender seeing tick updates)
     if (__DEV__) {
-      const lastMsg = recentMessages[recentMessages.length - 1] as any;
+      const lastMsg = recentMessages[recentMessages.length - 1];
       console.log('[LIVE-TICK-HASH] Hash computed:', {
         msgCount: recentMessages.length,
         lastMsgId: lastMsg?._id?.slice(-6),
@@ -717,9 +444,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const sendInviteMutation = useMutation(api.games.sendBottleSpinInvite);
   const respondToInviteMutation = useMutation(api.games.respondToBottleSpinInvite);
   const endGameMutation = useMutation(api.games.endBottleSpinGame);
-  // TD-LIFECYCLE: New mutations for proper session lifecycle
-  const startGameMutation = useMutation(api.games.startBottleSpinGame);
-  const cleanupExpiredMutation = useMutation(api.games.cleanupExpiredSession);
 
   // Get other user's ID for invite
   const otherUserId = activeConversation?.otherUser?.id;
@@ -727,71 +451,26 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Track cooldown state for inline UI feedback (instead of Alert spam)
   const [showCooldownMessage, setShowCooldownMessage] = useState(false);
   const [cooldownRemainingMin, setCooldownRemainingMin] = useState(0);
-  // TD-UX: Lightweight waiting toast for invitee (instead of full modal)
-  const [showWaitingForStartToast, setShowWaitingForStartToast] = useState(false);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // TD-LIFECYCLE: Watch game session state changes for cross-device sync
+  // AUTO-CLOSE: Watch game session state changes for cross-device sync
   // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (isDemo || !gameSession) return;
 
-    // TD-LIFECYCLE: Debug logging for session state
-    console.log('[TD_UI_STATE] Phase 1 session update:', {
-      phase: 'P1',
-      conversationId,
-      sessionId: gameSession.sessionId,
-      state: gameSession.state,
-      turnPhase: gameSession.turnPhase,
-      gameStartedAt: gameSession.gameStartedAt,
-      hasGameStarted: !!gameSession.gameStartedAt,
-    });
-
-    // Auto-close game modal when game is ended/rejected/expired on either device
-    if (gameSession.state === 'cooldown' || gameSession.state === 'none' || gameSession.state === 'expired') {
+    // Auto-close game modal when game is ended/rejected on either device
+    if (gameSession.state === 'cooldown' || gameSession.state === 'none') {
       if (showTruthDareGame) {
-        console.log('[TD_MODAL_GUARD] Phase 1: Closing modal - session ended/expired');
         setShowTruthDareGame(false);
       }
-      if (showTruthDareInvite) {
-        setShowTruthDareInvite(false);
-      }
     }
 
-    // TD-LIFECYCLE: Handle expired session - cleanup and show message
-    if (gameSession.state === 'expired' && gameSession.endedReason && userId && token && conversationId) {
-      // Cleanup the expired session in backend
-      cleanupExpiredMutation({
-        authUserId: userId,
-        conversationId,
-        endedReason: gameSession.endedReason as 'invite_expired' | 'not_started' | 'timeout',
-      }).catch((err) => console.warn('[TD_CLEANUP] Failed:', err));
-
-      // Show appropriate system message (using sendMessage directly)
-      const messages: Record<string, string> = {
-        invite_expired: 'Truth or Dare invite expired',
-        not_started: 'Truth or Dare was not started in time',
-        timeout: 'Truth or Dare ended due to inactivity',
-      };
-      const msg = messages[gameSession.endedReason];
-      if (msg && !isDemo) {
-        // Send system message with marker
-        sendMessage({
-          conversationId: conversationId as any,
-          token: token!,
-          content: `[SYSTEM:truthdare]${msg}`,
-          type: 'text',
-        }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
-      }
-    }
-
-    // TD-LIFECYCLE: Close invite modal when game becomes active
-    // Do NOT auto-open game modal - inviter must manually start
+    // Auto-open game modal when invite is accepted (for inviter)
     if (gameSession.state === 'active') {
+      // Only auto-open if we have a pending invite modal open (inviter waiting)
       if (showTruthDareInvite) {
-        console.log('[TD_MODAL_GUARD] Phase 1: Closing invite modal - game accepted, waiting for manual start');
         setShowTruthDareInvite(false);
-        // DO NOT open game modal - inviter must click T/D button to start
+        setShowTruthDareGame(true);
       }
     }
 
@@ -799,23 +478,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (gameSession.state !== 'cooldown') {
       setShowCooldownMessage(false);
     }
-  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.gameStartedAt, gameSession?.endedReason, showTruthDareGame, showTruthDareInvite, userId, token, conversationId, cleanupExpiredMutation, sendMessage]);
+  }, [isDemo, gameSession?.state, showTruthDareGame, showTruthDareInvite]);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // TD-LIFECYCLE: Auto-open modal ONLY when game has started and it's my turn
+  // AUTO-OPEN MODAL WHEN IT'S MY TURN TO CHOOSE
+  // This is the critical fix: when backend says it's my turn (choosing phase),
+  // automatically open the game modal so I can see Truth/Dare/Skip buttons.
   // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (isDemo || !gameSession || !userId) return;
 
-    // Only care about active games that have been manually started
+    // Only care about active games in choosing phase
     if (gameSession.state !== 'active') return;
-    if (!gameSession.gameStartedAt) {
-      console.log('[TD_MODAL_GUARD] Phase 1: Blocked auto-open - game not started yet', {
-        state: gameSession.state,
-        gameStartedAt: gameSession.gameStartedAt,
-      });
-      return; // Game not started yet - do NOT auto-open
-    }
     if (gameSession.turnPhase !== 'choosing') return;
     if (!gameSession.currentTurnRole) return;
 
@@ -829,135 +503,61 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // Check if it's MY turn
     const isMyTurn = gameSession.currentTurnRole === myRole;
 
+    console.log('[BOTTLE_SPIN_AUTO_OPEN]', {
+      turnPhase: gameSession.turnPhase,
+      currentTurnRole: gameSession.currentTurnRole,
+      myRole,
+      isMyTurn,
+      modalCurrentlyOpen: showTruthDareGame,
+    });
+
     // If it's my turn and modal is closed, open it automatically
     if (isMyTurn && !showTruthDareGame) {
-      console.log('[TD_MODAL_GUARD] Phase 1: Auto-opening modal - my turn to choose');
+      console.log('[BOTTLE_SPIN_AUTO_OPEN] Opening modal - it is my turn to choose!');
       setShowTruthDareGame(true);
     }
-  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, gameSession?.gameStartedAt, userId, showTruthDareGame]);
+  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, userId, showTruthDareGame]);
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // AUTO-CLOSE MODAL AFTER TRUTH/DARE/SKIP SELECTION
-  // When turnPhase becomes 'complete', show result briefly then close modal.
-  // Both devices see this since they watch the same backend state.
-  // ═══════════════════════════════════════════════════════════════════════════
-  useEffect(() => {
-    if (isDemo || !gameSession) return;
-
-    // Only auto-close when active game reaches 'complete' phase
-    if (gameSession.state !== 'active') return;
-    if (gameSession.turnPhase !== 'complete') return;
-
-    // Wait briefly to show result, then auto-close (fast, near-instant)
-    const timer = setTimeout(() => {
-      if (showTruthDareGame) {
-        console.log('[BOTTLE_SPIN_AUTO_CLOSE] Closing modal after T/D selection complete');
-        setShowTruthDareGame(false);
-      }
-    }, 400);
-
-    return () => clearTimeout(timer);
-  }, [isDemo, gameSession?.state, gameSession?.turnPhase, showTruthDareGame]);
-
-  // TD-LIFECYCLE: Handle T/D button press with manual start support
-  const handleTruthDarePress = useCallback(async () => {
+  // Handle T/D button press based on current state
+  const handleTruthDarePress = useCallback(() => {
     if (isDemo) {
       // Demo mode: skip invite flow, go directly to game
       setShowTruthDareGame(true);
       return;
     }
 
-    if (!gameSession || !userId || !token || !conversationId) return;
-
-    // Debug logging
-    console.log('[TD_MODAL_GUARD] Phase 1: T/D button pressed', {
-      state: gameSession.state,
-      turnPhase: gameSession.turnPhase,
-      gameStartedAt: gameSession.gameStartedAt,
-      hasGameStarted: !!gameSession.gameStartedAt,
-      amIInviter: gameSession.inviterId === userId,
-    });
+    if (!gameSession) return;
 
     // Priority 1: Cooldown active - show inline message instead of Alert
     if (gameSession.state === 'cooldown') {
       const remainingMin = Math.ceil((gameSession.remainingMs || 0) / 60000);
       setCooldownRemainingMin(remainingMin);
       setShowCooldownMessage(true);
+      // Auto-hide after 3 seconds
       setTimeout(() => setShowCooldownMessage(false), 3000);
       return;
     }
 
-    // Priority 2: Expired session - handled by useEffect, just return
-    if (gameSession.state === 'expired') {
-      return;
-    }
-
-    // Priority 3: Active game exists
+    // Priority 2: Active game exists
     if (gameSession.state === 'active') {
-      const amIInviter = gameSession.inviterId === userId;
-      const hasGameStarted = !!gameSession.gameStartedAt;
-
-      // TD-LIFECYCLE: If game not started yet, handle based on role
-      if (!hasGameStarted) {
-        if (amIInviter) {
-          // Inviter: Start the game manually
-          console.log('[TD_MANUAL_START] Phase 1: Inviter starting game');
-          try {
-            const result = await startGameMutation({
-              authUserId: userId,
-              conversationId,
-            });
-            if (result.success) {
-              console.log('[TD_MANUAL_START] Phase 1: Game started successfully');
-              // Send system message using sendMessage directly
-              if (!isDemo) {
-                sendMessage({
-                  conversationId: conversationId as any,
-                  token: token!,
-                  content: '[SYSTEM:truthdare]Game started!',
-                  type: 'text',
-                }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
-              }
-              setShowTruthDareGame(true);
-            } else {
-              console.warn('[TD_MANUAL_START] Phase 1: Failed to start game:', result);
-            }
-          } catch (err) {
-            console.error('[TD_MANUAL_START] Phase 1: Error starting game:', err);
-          }
-        } else {
-          // TD-UX: Invitee sees lightweight toast instead of full modal
-          console.log('[TD_UX] Phase 1: Invitee - showing waiting toast (not modal)');
-          setShowWaitingForStartToast(true);
-          setTimeout(() => setShowWaitingForStartToast(false), 3000);
-        }
-        return;
-      }
-
-      // Game is started - open the game modal normally
       setShowTruthDareGame(true);
       return;
     }
 
-    // Priority 4: Pending invite exists - no action (button is disabled or visual feedback)
+    // Priority 3: Pending invite exists - no action (button is disabled or visual feedback)
     if (gameSession.state === 'pending') {
+      // Invitee sees the invite card below chat
+      // Inviter sees "Waiting..." indicator - no action needed
       return;
     }
 
-    // Priority 5: No game - show invite modal
+    // Priority 4: No game - show invite modal
     setShowTruthDareInvite(true);
-  }, [isDemo, gameSession, userId, conversationId, token, startGameMutation, sendMessage]);
+  }, [isDemo, gameSession, userId]);
 
   // Send game invite
-  // INVITE-FIX: Handle "Invite already pending" error gracefully
   const handleSendInvite = useCallback(async () => {
-    if (!userId || !token || !conversationId || !otherUserId) return;
-
-    // INVITE-FIX: Don't send if invite is already pending
-    if (gameSession?.state === 'pending') {
-      setShowTruthDareInvite(false);
-      return;
-    }
+    if (!userId || !conversationId || !otherUserId) return;
 
     try {
       await sendInviteMutation({
@@ -973,29 +573,19 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       const markedMessage = `[SYSTEM:truthdare]${inviterName} wants to play Truth or Dare!`;
       await sendMessage({
         conversationId: conversationId as any,
-        token: token!,
+        token: token ?? undefined,
+        authUserId: userId,
         content: markedMessage,
         type: 'text',
       });
     } catch (error: any) {
-      // INVITE-FIX: Handle "Invite already pending" error gracefully
-      const errorMsg = error?.message || '';
-      if (errorMsg.toLowerCase().includes('already pending') || errorMsg.toLowerCase().includes('invite already')) {
-        // Show friendly message instead of error
-        Alert.alert(
-          'Invite Already Sent',
-          'A game invite is already pending. Wait for your match to respond.',
-          [{ text: 'OK', onPress: () => setShowTruthDareInvite(false) }]
-        );
-      } else {
-        Alert.alert('Error', errorMsg || 'Failed to send invite');
-      }
+      Alert.alert('Error', error.message || 'Failed to send invite');
     }
-  }, [userId, conversationId, otherUserId, gameSession?.state, token, sendInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, otherUserId, token, sendInviteMutation, currentUser, sendMessage]);
 
-  // TD-UX: Respond to game invite with clean acceptance flow
+  // Respond to game invite
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
-    if (!userId || !token || !conversationId) return;
+    if (!userId || !conversationId) return;
 
     try {
       await respondToInviteMutation({
@@ -1004,24 +594,28 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         accept,
       });
 
-      // TD-UX: Clear acceptance message (NO "Game starting..." - inviter must start)
+      // Send system message about response (neutral phrasing)
+      const responderName = currentUser?.name || 'Someone';
       const responseText = accept
-        ? 'Invite accepted! Tap T/D to start'
-        : 'Invite declined';
+        ? `${responderName} is ready to play! Game starting...`
+        : `${responderName} declined the game invite`;
       const markedMessage = `[SYSTEM:truthdare]${responseText}`;
       await sendMessage({
         conversationId: conversationId as any,
-        token: token!,
+        token: token ?? undefined,
+        authUserId: userId,
         content: markedMessage,
         type: 'text',
       });
 
-      // TD-UX: Do NOT open modal on accept - inviter must tap T/D to start
-      // Modal will open only after startGame mutation succeeds
+      // If accepted, open the game
+      if (accept) {
+        setShowTruthDareGame(true);
+      }
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to respond to invite');
     }
-  }, [userId, conversationId, token, respondToInviteMutation, sendMessage]);
+  }, [userId, conversationId, token, respondToInviteMutation, currentUser, sendMessage]);
 
   // End game (called from BottleSpinGame)
   const handleEndGame = useCallback(async () => {
@@ -1061,12 +655,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           systemSubtype: 'truthdare',
           createdAt: Date.now(),
         } as any); // Cast needed since DemoDmMessage doesn't have systemSubtype
-      } else if (userId && token) {
+      } else if (userId) {
         // Convex mode: prefix with hidden marker (stripped by MessageBubble)
         const markedMessage = `[SYSTEM:truthdare]${message}`;
+        // MSG-001 FIX: Use authUserId for server-side verification
         await sendMessage({
           conversationId: conversationId as any,
-          token: token!,
+          token: token ?? undefined,
+          authUserId: userId,
           content: markedMessage,
           type: 'text',
         });
@@ -1078,89 +674,155 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
   const markNotifReadForConvo = useDemoNotifStore((s) => s.markReadForConversation);
-  const currentViewerId = isDemo ? getDemoUserId() : userId;
 
+  // LIVE-TICK-FIX-V2: These refs are no longer needed (replaced by simpler approach)
+  // Kept for compatibility with reset effect, will be removed in future cleanup
+
+  // TASK-3: Mark as read on initial open AND when screen regains focus
+  // This ensures unread badges are properly cleared when user views a conversation
   useEffect(() => {
-    if (!conversationId) return;
-
-    if (isDemo) {
+    if (isDemo && conversationId) {
       markDemoRead(conversationId, getDemoUserId());
       markNotifReadForConvo(conversationId);
+    } else if (!isDemo && conversationId && userId) {
+      // MSG-004 FIX: Use authUserId for server-side verification
+      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+        .catch((err) => {
+          if (__DEV__) console.warn('[ChatScreen] markAsRead failed:', err);
+        });
+      markNotificationReadForConversation({ authUserId: userId, conversationId })
+        .catch((err) => {
+          if (__DEV__) console.warn('[ChatScreen] markReadForConversation failed:', err);
+        });
+      // MESSAGE-TICKS-FIX: Mark messages as delivered when conversation is opened
+      markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+        .catch((err) => {
+          if (__DEV__) console.warn('[ChatScreen] markAsDelivered failed:', err);
+        });
     }
-  }, [conversationId, isDemo, markDemoRead, markNotifReadForConvo]);
+  }, [conversationId, userId, token, isDemo, markDemoRead, markNotifReadForConvo, markAsRead, markAsDelivered, markNotificationReadForConversation]);
 
-  const latestInboundUndeliveredId = useMemo(() => {
-    if (!messages || messages.length === 0 || !currentViewerId) return null;
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const message = messages[i] as any;
-      if (message.senderId !== currentViewerId && !message.deliveredAt) {
-        return String(message._id);
-      }
-    }
-    return null;
-  }, [currentViewerId, messages]);
-
-  const latestInboundUnreadId = useMemo(() => {
-    if (!messages || messages.length === 0 || !currentViewerId) return null;
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const message = messages[i] as any;
-      if (message.senderId !== currentViewerId && !message.readAt) {
-        return String(message._id);
-      }
-    }
-    return null;
-  }, [currentViewerId, messages]);
-
+  // TASK-3: Also mark as read when screen regains focus (handles navigation back scenarios)
+  // This ensures badges are cleared even if user navigated away and back
   useEffect(() => {
-    if (isDemo || !conversationId || !token || !isFocused || !latestInboundUndeliveredId) {
-      return;
-    }
-    if (lastDeliveredMessageIdRef.current === latestInboundUndeliveredId) {
-      return;
-    }
+    if (!isFocused) return;
 
-    lastDeliveredMessageIdRef.current = latestInboundUndeliveredId;
-    markAsDelivered({ conversationId: conversationId as any, token }).catch((err) => {
-      lastDeliveredMessageIdRef.current = null;
-      if (__DEV__) console.warn('[ChatScreen] markAsDelivered failed:', err);
-    });
-  }, [conversationId, isDemo, isFocused, latestInboundUndeliveredId, markAsDelivered, token]);
-
-  useEffect(() => {
-    if (!conversationId || !isFocused) return;
-
-    if (isDemo) {
+    if (isDemo && conversationId) {
       markDemoRead(conversationId, getDemoUserId());
-      return;
+    } else if (!isDemo && conversationId && userId) {
+      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+        .catch((err) => {
+          if (__DEV__) console.warn('[ChatScreen] markAsRead on focus failed:', err);
+        });
+      markNotificationReadForConversation({ authUserId: userId, conversationId })
+        .catch((err) => {
+          if (__DEV__) console.warn('[ChatScreen] markReadForConversation on focus failed:', err);
+        });
     }
+  }, [isFocused, conversationId, userId, token, isDemo, markDemoRead, markAsRead, markNotificationReadForConversation]);
 
-    if (!token || !latestInboundUnreadId) return;
-    if (lastReadMessageIdRef.current === latestInboundUnreadId) {
-      return;
-    }
-
-    lastReadMessageIdRef.current = latestInboundUnreadId;
-    markAsRead({ conversationId: conversationId as any, token }).catch((err) => {
-      lastReadMessageIdRef.current = null;
-      if (__DEV__) console.warn('[ChatScreen] markAsRead failed:', err);
-    });
-  }, [conversationId, isDemo, isFocused, latestInboundUnreadId, markAsRead, markDemoRead, token]);
-
+  // ONLINE-STATUS-FIX: Update presence periodically while chat is open
+  // This allows the other user to see "Online" status
   useEffect(() => {
-    if (isDemo || !token || !isFocused) return;
+    if (isDemo || !userId) return;
 
-    updatePresence({ token }).catch(() => {
+    // Update presence immediately on mount
+    updatePresence({ token: token ?? undefined, authUserId: userId }).catch(() => {
       // Silent fail - presence is best-effort
     });
 
+    // Update every 30 seconds while chat is open
     const interval = setInterval(() => {
-      updatePresence({ token }).catch(() => {
+      updatePresence({ token: token ?? undefined, authUserId: userId }).catch(() => {
         // Silent fail
       });
     }, 30_000);
 
     return () => clearInterval(interval);
-  }, [token, isDemo, isFocused, updatePresence]);
+  }, [userId, token, isDemo, updatePresence]);
+
+  // LIVE-TICK-FIX-V2: Track the last message ID we processed to detect truly new messages
+  const lastProcessedMsgIdRef = useRef<string | null>(null);
+
+  // LIVE-TICK-FIX-V2: Mark as delivered AND read when messages change while viewing
+  // This uses the messages array itself (not just length) to detect any changes
+  // and checks for ANY unread messages from the other user, not just the latest
+  useEffect(() => {
+    // Log every time this effect runs for debugging
+    if (__DEV__) {
+      console.log('[LIVE-TICK-V2] Effect triggered, messages:', messages?.length ?? 0);
+    }
+
+    // Skip if no messages or required data
+    if (!messages || messages.length === 0) {
+      if (__DEV__) console.log('[LIVE-TICK-V2] No messages, skipping');
+      return;
+    }
+    if (!conversationId) {
+      if (__DEV__) console.log('[LIVE-TICK-V2] No conversationId, skipping');
+      return;
+    }
+
+    const currentUserId = isDemo ? getDemoUserId() : userId;
+    if (!currentUserId) {
+      if (__DEV__) console.log('[LIVE-TICK-V2] No currentUserId, skipping');
+      return;
+    }
+
+    // Get the latest message
+    const latestMsg = messages[messages.length - 1];
+    const latestMsgId = latestMsg?._id;
+
+    // Check if we have any unread messages from the other user
+    const hasUnreadFromOther = messages.some((m: any) =>
+      m.senderId !== currentUserId && !m.readAt
+    );
+
+    if (__DEV__) {
+      console.log('[LIVE-TICK-V2] State check:', {
+        latestMsgId,
+        lastProcessedMsgIdRef: lastProcessedMsgIdRef.current,
+        latestSenderId: latestMsg?.senderId,
+        currentUserId,
+        hasUnreadFromOther,
+        isFromOther: latestMsg?.senderId !== currentUserId,
+        latestReadAt: latestMsg?.readAt,
+        latestDeliveredAt: latestMsg?.deliveredAt,
+      });
+    }
+
+    // If the latest message is from the other user and not yet read, mark as read
+    // This handles BOTH new incoming messages AND existing unread messages
+    if (hasUnreadFromOther) {
+      if (isDemo && conversationId) {
+        if (__DEV__) console.log('[LIVE-TICK-V2] Demo mode: marking as read');
+        markDemoRead(conversationId, getDemoUserId());
+      } else if (!isDemo && userId) {
+        if (__DEV__) console.log('[LIVE-TICK-V2] Convex mode: calling markAsDelivered and markAsRead');
+
+        // Mark as delivered (sets deliveredAt on all undelivered messages from other user)
+        markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+          .then((result) => {
+            if (__DEV__) console.log('[LIVE-TICK-V2] markAsDelivered result:', result);
+          })
+          .catch((err) => {
+            console.warn('[LIVE-TICK-V2] markAsDelivered error:', err);
+          });
+
+        // Mark as read (sets readAt on all unread messages from other user)
+        markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+          .then((result) => {
+            if (__DEV__) console.log('[LIVE-TICK-V2] markAsRead result:', result);
+          })
+          .catch((err) => {
+            console.warn('[LIVE-TICK-V2] markAsRead error:', err);
+          });
+      }
+    }
+
+    // Update last processed message ID
+    lastProcessedMsgIdRef.current = latestMsgId;
+  }, [messages, conversationId, userId, token, isDemo, markDemoRead, markAsRead, markAsDelivered]);
 
   // Helper: scroll to bottom with reliable Android timing
   const scrollToBottom = useCallback((animated = true) => {
@@ -1179,26 +841,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     hasInitiallyScrolledRef.current = false;
     contentHeightRef.current = 0;
     prevMessageCountRef.current = 0;
+    lastProcessedMsgIdRef.current = null; // LIVE-TICK-FIX-V2: Reset for new conversation
   }, [conversationId]);
 
   // Phase-2 Fix A: Handle content size changes for initial scroll
   const onContentSizeChange = useCallback((w: number, h: number) => {
     const prevHeight = contentHeightRef.current;
     contentHeightRef.current = h;
-
-    if (pendingPrependScrollRef.current) {
-      const { previousHeight, previousOffset } = pendingPrependScrollRef.current;
-      pendingPrependScrollRef.current = null;
-      isPrependingOlderRef.current = false;
-      const heightDelta = h - previousHeight;
-      requestAnimationFrame(() => {
-        flatListRef.current?.scrollToOffset({
-          offset: Math.max(0, previousOffset + heightDelta),
-          animated: false,
-        });
-      });
-      return;
-    }
 
     // Initial scroll: scroll to bottom when content first renders with messages
     if (!hasInitiallyScrolledRef.current && h > 0 && (messages?.length ?? 0) > 0) {
@@ -1226,10 +875,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // we only act when count increases. Access to `messages` for content is via closure.
   useEffect(() => {
     const count = messages?.length ?? 0;
-    if (isPrependingOlderRef.current) {
-      prevMessageCountRef.current = count;
-      return;
-    }
     if (count > prevMessageCountRef.current) {
       // Check if latest message is from current user
       const latestMsg = messages?.[messages.length - 1];
@@ -1268,29 +913,31 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // Typing indicator handler - notify backend when user starts/stops typing
   const handleTypingChange = useCallback((isTyping: boolean) => {
-    if (isDemo || !conversationId || !token) return;
+    if (isDemo || !conversationId || !userId) return;
     // Fire and forget - don't block UI for typing status updates
     setTypingStatus({
       conversationId: conversationId as any,
-      token,
+      token: token ?? undefined,
+      authUserId: userId,
       isTyping,
     }).catch(() => {
       // Silently ignore typing status errors
     });
-  }, [isDemo, conversationId, token, setTypingStatus]);
+  }, [isDemo, conversationId, userId, token, setTypingStatus]);
 
   // Clear typing status when leaving the chat
   useEffect(() => {
     return () => {
-      if (!isDemo && conversationId && token) {
+      if (!isDemo && conversationId && userId) {
         setTypingStatus({
           conversationId: conversationId as any,
-          token,
+          token: token ?? undefined,
+          authUserId: userId,
           isTyping: false,
         }).catch(() => {});
       }
     };
-  }, [isDemo, conversationId, token, setTypingStatus]);
+  }, [isDemo, conversationId, userId, token, setTypingStatus]);
 
   // Check for camera-composer handoff data when screen regains focus
   // This handles returning from camera-composer with captured photo/video
@@ -1306,27 +953,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }>(handoffKey);
 
     if (capturedMedia) {
+      // Set pending media to trigger secure photo sheet
       setPendingImageUri(capturedMedia.uri);
       setPendingMediaType(capturedMedia.type);
-      setPendingIsMirrored(capturedMedia.isMirrored === true);
+      setPendingIsMirrored(capturedMedia.isMirrored === true); // Track front-camera video mirroring
     }
   }, [isFocused, conversationId]);
-
-  const getSendFailureReason = useCallback((error: any) => {
-    const message = typeof error?.message === 'string' ? error.message : '';
-    const normalized = message.toLowerCase();
-
-    if (
-      normalized.includes('network') ||
-      normalized.includes('fetch') ||
-      normalized.includes('timeout') ||
-      normalized.includes('offline')
-    ) {
-      return 'Message not sent. Check your connection and try again.';
-    }
-
-    return message || 'Message not sent. Try again.';
-  }, []);
 
   const handleSend = async (text: string, type: 'text' | 'template' = 'text') => {
     if (!activeConversation) return;
@@ -1335,14 +967,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // Block sending if chat is expired
     if (isExpiredChat) {
       Alert.alert('Chat Expired', 'This confession chat has expired and can no longer receive messages.');
-      return;
-    }
-
-    if (isTerminalConversation) {
-      Alert.alert(
-        terminalStateCopy?.title || 'Conversation unavailable',
-        terminalStateCopy?.detail || 'Messaging is disabled for this conversation.',
-      );
       return;
     }
 
@@ -1361,7 +985,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       return;
     }
 
-    if (!userId || !token) return;
+    if (!userId) return;
     isSendingRef.current = true;
     if (mountedRef.current) setIsSending(true);
     // Clear typing status when sending a message
@@ -1374,17 +998,21 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     try {
       if (activeConversation.isPreMatch) {
+        // MSG-002 FIX: Use authUserId for server-side verification
         await sendPreMatchMessage({
-          token,
+          token: token ?? undefined,
+          authUserId: userId,
           toUserId: (activeConversation as any).otherUser.id as any,
           content: text,
           templateId: type === 'template' ? 'custom' : undefined,
           clientMessageId,
         });
       } else {
+        // MSG-001 FIX: Use authUserId for server-side verification
         await sendMessage({
           conversationId: conversationId as any,
-          token,
+          token: token ?? undefined,
+          authUserId: userId,
           type: 'text',
           content: text,
           clientMessageId,
@@ -1392,14 +1020,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       }
       // B5 fix: clear draft after successful send in Convex mode
       if (conversationId) clearDemoDraft(conversationId);
-      setFailedTextSend((prev) => (prev?.text === text ? null : prev));
     } catch (error: any) {
-      setFailedTextSend({
-        id: `failed_text_${Date.now()}`,
-        text,
-        reason: getSendFailureReason(error),
-        createdAt: Date.now(),
-      });
       // Use Alert.alert instead of Toast for guaranteed visibility (Toast requires ToastHost to be mounted)
       if (mountedRef.current) {
         Alert.alert('Send Failed', error.message || 'Message could not be sent. Your text has been restored — tap send to retry.');
@@ -1411,25 +1032,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   };
 
-  const handleRetryFailedText = useCallback(async () => {
-    if (!failedTextSend || retryingFailedSend) return;
-
-    setRetryingFailedSend(true);
-    try {
-      await handleSend(failedTextSend.text);
-    } catch {
-      // handleSend already preserves the failed state and restored input.
-    } finally {
-      if (mountedRef.current) {
-        setRetryingFailedSend(false);
-      }
-    }
-  }, [failedTextSend, retryingFailedSend, handleSend]);
-
   // Voice message sending - supports both demo and production
   const handleSendVoice = useCallback(async (audioUri: string, durationMs: number) => {
     if (!activeConversation || !conversationId) return;
-    if (isSendingVoiceRef.current) return;
 
     if (isDemo) {
       const uniqueId = `dm_voice_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
@@ -1444,8 +1049,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       });
     } else {
       // Production mode: upload audio and send via Convex
-      if (!userId || !token) return;
-      isSendingVoiceRef.current = true;
+      if (!userId) return;
       try {
         // Get upload URL
         const uploadUrl = await generateUploadUrl();
@@ -1459,57 +1063,39 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           body: blob,
         });
         const { storageId } = await uploadResult.json();
-        const clientMessageId = `voice_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
         // Send voice message
         await sendMessage({
           conversationId: conversationId as any,
-          token,
+          token: token ?? undefined,
+          authUserId: userId,
           type: 'voice',
           content: 'Voice message',
           audioStorageId: storageId,
           audioDurationMs: durationMs,
-          clientMessageId,
         });
       } catch (e) {
         console.error('[ChatScreenInner] Failed to send voice message:', e);
         Alert.alert('Error', 'Failed to send voice message. Please try again.');
-      } finally {
-        isSendingVoiceRef.current = false;
       }
     }
   }, [isDemo, activeConversation, conversationId, userId, token, addDemoMessage, generateUploadUrl, sendMessage]);
 
-  // FEAT-2: Delete voice message (supports both demo and live modes)
-  const handleVoiceDelete = useCallback(async (messageId: string) => {
+  // Delete voice message (demo mode only)
+  const handleVoiceDelete = useCallback((messageId: string) => {
     if (!conversationId) return;
-
     if (isDemo) {
       deleteDemoMessage(conversationId, messageId);
-      return;
     }
-
-    // Live mode: call Convex mutation
-    if (!token) {
-      console.warn('[ChatScreenInner] Cannot delete message: no session token');
-      return;
-    }
-
-    try {
-      await deleteMessageMutation({
-        messageId: messageId as any, // Cast to Id<'messages'>
-        token,
-      });
-    } catch (e) {
-      console.error('[ChatScreenInner] Failed to delete message:', e);
-      Alert.alert('Error', 'Failed to delete message. Please try again.');
-    }
-  }, [isDemo, conversationId, token, deleteDemoMessage, deleteMessageMutation]);
+    // TODO: Add Convex delete support when backend is ready
+  }, [isDemo, conversationId, deleteDemoMessage]);
 
   // Camera handler: navigate to camera-composer for photo/video capture
+  // This enables: photo/video toggle, 30s video limit, proper front camera handling
   const handleSendCamera = useCallback(() => {
     if (!activeConversation || !conversationId) return;
 
+    // Navigate to camera-composer in secure capture mode
     router.push({
       pathname: '/(main)/camera-composer',
       params: {
@@ -1552,11 +1138,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [activeConversation]);
 
   const handleSecurePhotoConfirm = async (imageUri: string, options: CameraPhotoOptions) => {
-    if ((!isDemo && (!userId || !token)) || !conversationId) return;
+    if (!userId || !conversationId) return;
 
     const isVideo = pendingMediaType === 'video';
-    const isMirrored = pendingIsMirrored;
-
+    const isMirrored = pendingIsMirrored; // Capture before clearing
     setPendingImageUri(null);
     setPendingMediaType('photo'); // Reset for next time
     setPendingIsMirrored(false); // Reset mirrored flag
@@ -1575,28 +1160,23 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         const uniqueId = `secure_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
         const now = Date.now();
         // Calculate expiry duration in ms (for continuous video resume)
-        // timer=-1 means "Normal" (no timer, not view-once)
-        // timer=0 means "View once" (view once)
-        // timer>0 means timed (seconds)
-        const effectiveTimer = options.timer === -1 ? 0 : options.timer;
-        const isViewOnce = options.timer === 0; // Only 0 = View once
-        const expiresDurationMs = effectiveTimer > 0 ? effectiveTimer * 1000 : 0;
+        // timer=0 means "Once" (view once), otherwise timer is in seconds
+        const expiresDurationMs = options.timer > 0 ? options.timer * 1000 : 0;
 
         const protectedMedia = {
           localUri: imageUri,
           mediaType: isVideo ? 'video' as const : 'photo' as const,
-          timer: effectiveTimer,
+          timer: options.timer,
           expiresDurationMs, // Store for wall-clock based video resume
           viewingMode: options.viewingMode,
           screenshotAllowed: false,
-          viewOnce: isViewOnce,
+          viewOnce: options.timer === 0,
           watermark: false,
           isMirrored: isVideo && isMirrored, // Only videos need render-time flip
         };
 
         // Add to demoDmStore for chat list (bubble uses isProtected + protectedMedia for display)
         // For videos: use type 'video' and videoUri; for photos: use type 'image'
-        // BUGFIX: Pass the FULL protectedMedia object including localUri and mediaType
         addDemoMessage(conversationId, {
           _id: uniqueId,
           content: isVideo ? 'Secure Video' : 'Secure Photo',
@@ -1606,7 +1186,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           isProtected: true,
           // For videos, store in videoUri; for photos, the protectedMedia.localUri is used
           ...(isVideo ? { videoUri: imageUri } : {}),
-          protectedMedia, // Use full object with localUri and mediaType
+          protectedMedia: {
+            timer: options.timer,
+            viewingMode: options.viewingMode,
+            screenshotAllowed: false,
+            viewOnce: options.timer === 0,
+            watermark: false,
+            isMirrored: isVideo && isMirrored, // For bubble thumbnail flip
+          },
         });
 
         // Add to privateChatStore for viewer (has full schema with localUri)
@@ -1631,7 +1218,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       pendingId = `pending_secure_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       addPendingSecureMessage({
         _id: pendingId,
-        senderId: userId || getDemoUserId(),
+        senderId: userId,
         type: isVideo ? 'video' : 'image',
         content: isVideo ? 'Sending secure video...' : 'Sending secure photo...',
         createdAt: Date.now(),
@@ -1663,31 +1250,31 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         throw new Error('Upload succeeded but no storageId returned');
       }
       const { storageId } = uploadResult;
-      const clientMessageId = `secure_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
-      // 3. Send protected media message with the canonical Phase-1 contract:
-      // secure photo/video only, tap to view, Normal/View once/30s/60s.
-      const effectiveTimerConvex = options.timer === -1 ? 0 : options.timer;
-      const isViewOnceConvex = options.timer === 0; // Only 0 = View once
+      // 3. Send protected media message with Phase-1 options mapped to Convex format
+      // MSG-003 FIX: Use authUserId for server-side verification
+      // HOLD-TAP-FIX: Pass viewMode to backend for consistent rendering
+      // VIDEO-FIX: Pass mediaType to distinguish photo vs video
+      // VIDEO-MIRROR-FIX: Pass isMirrored for front-camera video correction
       await sendProtectedImage({
         conversationId: conversationId as any,
-        token: token as string,
+        token: token ?? undefined,
+        authUserId: userId,
         imageStorageId: storageId,
-        timer: effectiveTimerConvex,
+        timer: options.timer,
         screenshotAllowed: false, // Phase-1 default: no screenshots
-        viewOnce: isViewOnceConvex,
+        viewOnce: options.timer === 0, // "Once" timer = view once
         watermark: false, // Phase-1 default: no watermark
-        viewMode: options.viewingMode,
+        viewMode: options.viewingMode, // HOLD-TAP-FIX: Store the actual viewing mode
         mediaType: isVideo ? 'video' : 'image', // VIDEO-FIX: Pass correct media type
         isMirrored: isVideo && isMirrored, // VIDEO-MIRROR-FIX: Pass mirrored flag for front-camera videos
-        clientMessageId,
       });
       // PARALLEL-SEND-FIX: Remove specific pending message on success
       removePendingSecureMessage(pendingId);
     } catch (error: any) {
       // PARALLEL-SEND-FIX: Remove pending message on error too (only if set)
       if (pendingId) removePendingSecureMessage(pendingId);
-      if (mountedRef.current) Alert.alert('Error', error.message || 'Failed to send secure media.');
+      if (mountedRef.current) Alert.alert('Error', error.message || 'Failed to send secure photo');
     } finally {
       // PARALLEL-SEND-FIX: No isSending state management for media sends
       // The pending messages array handles UI feedback
@@ -1764,11 +1351,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       }
     } else {
       // Convex mode: call backend to mark expired
-      if (token) {
+      if (userId) {
         if (__DEV__) console.log('[EXPIRY] Marking media expired from bubble:', messageId);
         markMediaExpired({
           messageId: messageId as any,
-          token,
+          token: token ?? undefined,
+          authUserId: userId,
         }).catch((err) => {
           if (__DEV__) console.error('[EXPIRY] Failed to mark expired:', err);
         });
@@ -1799,23 +1387,23 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   if (!activeConversation) {
     const isLoading = !isDemo && conversation === undefined;
     return (
-      <View style={styles.container}>
+      <View style={styles.loadingContainer}>
         {isLoading ? (
-          <ChatLoadingSkeleton />
+          <>
+            <ActivityIndicator size="large" color={COLORS.primary} />
+            <Text style={styles.loadingText}>Opening your conversation...</Text>
+          </>
         ) : (
-          <View style={styles.loadingContainer}>
-            <Text style={styles.notFoundEmoji}>💬</Text>
-            <Text style={styles.loadingText}>Conversation unavailable</Text>
-            <Text style={styles.loadingSubtext}>
-              This conversation may have been removed, unmatched, blocked, or is no longer accessible.
-            </Text>
+          <>
+            <Ionicons name="chatbubble-ellipses-outline" size={48} color={COLORS.textLight} />
+            <Text style={styles.loadingText}>This chat is no longer available.</Text>
             <TouchableOpacity
               style={styles.errorBackButton}
               onPress={handleBack}
             >
-              <Text style={styles.errorBackText}>Go Back</Text>
+              <Text style={styles.errorBackText}>Go back</Text>
             </TouchableOpacity>
-          </View>
+          </>
         )}
       </View>
     );
@@ -1826,11 +1414,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const otherUser = activeConversation.otherUser;
   if (!otherUser || !otherUser.name) {
     return (
-      <View style={styles.container}>
-        <ChatLoadingSkeleton />
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color={COLORS.primary} />
+        <Text style={styles.loadingText}>Syncing your conversation...</Text>
       </View>
     );
   }
+
+  const composerBottomPadding = source === 'messages'
+    ? (Platform.OS === 'android' ? 8 : 6)
+    : Math.max(insets.bottom, Platform.OS === 'android' ? 10 : 8);
 
   const canSendCustom = isDemo
     ? true
@@ -1842,313 +1435,70 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const messagesRemaining = isDemo ? 999999 : (currentUser?.messagesRemaining || 0);
 
-  // P0 UNIFIED PRESENCE: Use unified presence for live mode, legacy for demo
-  const presenceStatus = isDemo
-    ? getPresenceStatusLegacy(activeConversation.otherUser.lastActive)
-    : {
-        label: otherUserPresence?.label || 'Recently active',
-        isActiveNow: otherUserPresence?.status === 'online',
-      };
-  const showTypingIndicator = !isDemo
-    && !isExpiredChat
-    && !isTerminalConversation
-    && otherUserTyping?.isTyping === true;
-  const composerDisabledPlaceholder = isTerminalConversation
-    ? (terminalStateCopy?.title || 'Messaging unavailable')
-    : isExpiredChat
-      ? 'This chat has expired'
-      : undefined;
-
-  // CONFESSION CHAT PRIVACY: Check if other user is anonymous (from confession chat)
-  const isOtherUserAnonymous = !isDemo && (activeConversation.otherUser as any).isAnonymous === true;
-  const isConfessionChat = !isDemo && (activeConversation as any).isConfessionChat === true;
-  const otherUserName = activeConversation.otherUser.name;
-  const otherUserPhotoUrl = isOtherUserAnonymous ? undefined : activeConversation.otherUser.photoUrl ?? undefined;
-  const activeMatchSource = (activeConversation as any).matchSource;
-
-  const messageKeyExtractor = useCallback((item: any) => String(item._id), []);
-
-  const renderMessageItem = useCallback(({ item, index }: { item: any; index: number }) => {
-    const msgSenderId = item.senderId;
-    const isMessageOwn = !!(
-      msgSenderId &&
-      currentViewerId &&
-      typeof msgSenderId === 'string' &&
-      typeof currentViewerId === 'string' &&
-      msgSenderId === currentViewerId
-    );
-
-    const prevMessage = displayMessages[index - 1];
-    const showDayDivider = shouldShowDayDivider(item.createdAt, prevMessage?.createdAt);
-    const isFirstInGroup = !prevMessage || prevMessage.senderId !== item.senderId;
-    const showTimestamp = isFirstInGroup || shouldShowTimestamp(item.createdAt, prevMessage?.createdAt);
-    const showAvatar = !isMessageOwn && isFirstInGroup;
-
-    const mergedProtectedMedia = item.protectedMedia
-      ? {
-          ...item.protectedMedia,
-          mediaType: item.protectedMedia.mediaType ?? (item.mediaType === 'video' ? 'video' : 'photo'),
-          isMirrored: item.protectedMedia.isMirrored ?? item.isMirrored,
-          viewingMode: item.protectedMedia.viewingMode ?? item.viewMode,
-        }
-      : item.viewMode
-        ? {
-            mediaType: item.mediaType === 'video' ? 'video' : 'photo',
-            isMirrored: item.isMirrored === true,
-            viewingMode: item.viewMode,
-            timer: 0,
-            screenshotAllowed: false,
-            viewOnce: false,
-            watermark: false,
-          }
-        : undefined;
-
-    return (
-      <View>
-        {showDayDivider && (
-          <View style={styles.dayDivider}>
-            <Text style={styles.dayDividerText}>{formatDayLabel(item.createdAt)}</Text>
-          </View>
-        )}
-        <MessageBubble
-          message={{
-            id: item._id,
-            content: item.content,
-            type: item.type as any,
-            senderId: item.senderId,
-            createdAt: item.createdAt,
-            readAt: item.readAt,
-            deliveredAt: item.deliveredAt,
-            isProtected: item.isProtected ?? false,
-            protectedMedia: mergedProtectedMedia,
-            isExpired: item.isExpired,
-            timerEndsAt: item.timerEndsAt,
-            expiredAt: item.expiredAt,
-            viewedAt: item.viewedAt,
-            systemSubtype: item.systemSubtype,
-            mediaId: item.mediaId,
-            viewOnce: item.viewOnce,
-            recipientOpened: item.recipientOpened,
-            audioUri: item.audioUri,
-            durationMs: item.durationMs,
-            audioUrl: item.audioUrl,
-            audioDurationMs: item.audioDurationMs,
-          }}
-          isOwn={isMessageOwn}
-          otherUserName={otherUserName}
-          currentUserId={currentViewerId || undefined}
-          currentUserToken={!isDemo ? (token || undefined) : undefined}
-          onProtectedMediaPress={handleProtectedMediaPress}
-          onProtectedMediaHoldStart={handleProtectedMediaHoldStart}
-          onProtectedMediaHoldEnd={handleProtectedMediaHoldEnd}
-          onProtectedMediaExpire={handleProtectedMediaExpire}
-          onVoiceDelete={isDemo ? handleVoiceDelete : undefined}
-          showTimestamp={showTimestamp}
-          showAvatar={showAvatar}
-          avatarUrl={otherUserPhotoUrl}
-          isLastInGroup={isFirstInGroup}
-          onAvatarPress={isOtherUserAnonymous ? undefined : () => handleOpenProfile(activeConversation.otherUser.id, activeMatchSource)}
-        />
-      </View>
-    );
-  }, [
-    activeConversation.otherUser.id,
-    activeMatchSource,
-    currentViewerId,
-    displayMessages,
-    handleOpenProfile,
-    handleProtectedMediaExpire,
-    handleProtectedMediaHoldEnd,
-    handleProtectedMediaHoldStart,
-    handleProtectedMediaPress,
-    handleVoiceDelete,
-    isDemo,
-    isOtherUserAnonymous,
-    otherUserName,
-    otherUserPhotoUrl,
-    token,
-  ]);
-
-  const listHeaderComponent = useMemo(() => {
-    if (isDemo || displayMessages.length === 0) {
-      return null;
-    }
-
-    return (
-      <View style={styles.loadOlderContainer}>
-        {hasOlderMessages ? (
-          <TouchableOpacity
-            style={styles.loadOlderButton}
-            onPress={handleLoadOlderMessages}
-            disabled={isLoadingOlder}
-            activeOpacity={0.8}
-          >
-            {isLoadingOlder ? (
-              <ActivityIndicator size="small" color={COLORS.primary} />
-            ) : (
-              <Text style={styles.loadOlderButtonText}>Load older messages</Text>
-            )}
-          </TouchableOpacity>
-        ) : (
-          <Text style={styles.loadOlderDoneText}>Start of conversation</Text>
-        )}
-        {loadOlderError ? (
-          <Text style={styles.loadOlderErrorText}>{loadOlderError}</Text>
-        ) : null}
-      </View>
-    );
-  }, [displayMessages.length, handleLoadOlderMessages, hasOlderMessages, isDemo, isLoadingOlder, loadOlderError]);
-
-  const listEmptyComponent = useMemo(() => (
-    <View style={styles.emptyChat}>
-      <View style={styles.emptyChatIconContainer}>
-        <Text style={styles.emptyChatEmoji}>💬</Text>
-      </View>
-      <Text style={styles.emptyChatText}>
-        {activeConversation.isPreMatch ? 'Make the first move' : 'Start the conversation'}
-      </Text>
-      <Text style={styles.emptyChatHint}>
-        {activeConversation.isPreMatch
-          ? 'A simple hello or one of the prompts below is enough to get things started.'
-          : `You matched with ${otherUserName}. Say hi when you're ready.`}
-      </Text>
-      {!activeConversation.isPreMatch && !isOtherUserAnonymous && (
-        <View style={styles.matchContextBadge}>
-          <Ionicons name="heart" size={12} color={COLORS.primary} />
-          <Text style={styles.matchContextText}>
-            You matched with {otherUserName}
-          </Text>
-        </View>
-      )}
-    </View>
-  ), [activeConversation.isPreMatch, isOtherUserAnonymous, otherUserName]);
-
-  const listFooterComponent = useMemo(() => {
-    if (!failedTextSend) {
-      return null;
-    }
-
-    return (
-      <View style={styles.failedSendNotice}>
-        <View style={styles.failedSendTextWrap}>
-          <Text style={styles.failedSendTitle}>Message failed to send</Text>
-          <Text style={styles.failedSendText} numberOfLines={2}>
-            {failedTextSend.reason}
-          </Text>
-        </View>
-        <TouchableOpacity
-          style={styles.failedSendAction}
-          onPress={handleRetryFailedText}
-          disabled={retryingFailedSend}
-          activeOpacity={0.8}
-        >
-          {retryingFailedSend ? (
-            <ActivityIndicator size="small" color={COLORS.primary} />
-          ) : (
-            <Text style={styles.failedSendActionText}>Retry</Text>
-          )}
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.failedSendDismiss}
-          onPress={() => setFailedTextSend(null)}
-          disabled={retryingFailedSend}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.failedSendDismissText}>Dismiss</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }, [failedTextSend, handleRetryFailedText, retryingFailedSend]);
-
-  const listContentContainerStyle = useMemo(() => ({
-    flexGrow: 1,
-    justifyContent: displayMessages.length > 0 ? 'flex-end' as const : 'center' as const,
-    paddingTop: 8,
-    paddingHorizontal: 12,
-    paddingBottom: composerHeight,
-  }), [composerHeight, displayMessages.length]);
-
   return (
     <View style={styles.container}>
-      {/* CONFESSION CHAT BANNER: Show safety notice for anonymous confession chats */}
-      {isConfessionChat && (
-        <View style={[styles.confessionBanner, { paddingTop: insets.top + 8 }]}>
-          <View style={styles.confessionBannerInner}>
-            <Ionicons name="eye-off" size={14} color={COLORS.primary} />
-            <Text style={styles.confessionBannerText}>Anonymous Chat from Confess</Text>
-          </View>
-          <Text style={styles.confessionBannerHint}>Be kind. Do not share personal info.</Text>
-        </View>
-      )}
+      {/* LOCKED: P1 chat header avatar + open profile. Do not modify without explicit approval. */}
       {/* Header — sits above KAV (does not move when keyboard opens) */}
-      <View style={[styles.header, !isConfessionChat && { paddingTop: insets.top }]}>
+      <View style={[styles.header, { paddingTop: insets.top }]}>
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
-        {/* Avatar with presence dot - tappable to open profile (disabled for anonymous users) */}
-        {isOtherUserAnonymous ? (
-          // PRIVACY: Non-tappable anonymous avatar
-          <View style={styles.avatarButton}>
-            <View style={styles.avatarContainer}>
-              <View style={[styles.headerAvatarPlaceholder, styles.headerAvatarAnonymous]}>
-                <Ionicons name="eye-off" size={18} color={COLORS.textMuted} />
+        {/* Avatar with presence dot - tappable to open profile */}
+        <TouchableOpacity
+          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+          style={styles.avatarButton}
+          activeOpacity={0.7}
+        >
+          <View style={styles.avatarContainer}>
+            {activeConversation.otherUser.photoUrl ? (
+              <Image
+                source={{ uri: activeConversation.otherUser.photoUrl }}
+                style={styles.headerAvatar}
+              />
+            ) : (
+              <View style={styles.headerAvatarPlaceholder}>
+                <Text style={styles.headerAvatarInitials}>{avatarInitials}</Text>
               </View>
-            </View>
+            )}
+            {/* PRESENCE-DOT: Online indicator on avatar */}
+            {(() => {
+              const lastActive = activeConversation.otherUser.lastActive ?? 0;
+              const isOnline = Date.now() - lastActive < 60_000;
+              return (
+                <View style={[
+                  styles.presenceDot,
+                  isOnline ? styles.presenceDotOnline : styles.presenceDotOffline,
+                ]} />
+              );
+            })()}
           </View>
-        ) : (
-          <TouchableOpacity
-            onPress={() => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}
-            style={styles.avatarButton}
-            activeOpacity={0.7}
-          >
-            <View style={styles.avatarContainer}>
-              {activeConversation.otherUser.photoUrl ? (
-                <Image
-                  source={{ uri: activeConversation.otherUser.photoUrl }}
-                  style={styles.headerAvatar}
-                />
-              ) : (
-                <View style={styles.headerAvatarPlaceholder}>
-                  <Text style={styles.headerAvatarInitials}>{avatarInitials}</Text>
-                </View>
-              )}
-              {/* PRESENCE-DOT: Online indicator on avatar */}
-              <View style={[
-                styles.presenceDot,
-                presenceStatus.isActiveNow ? styles.presenceDotOnline : styles.presenceDotOffline,
-              ]} />
-            </View>
-          </TouchableOpacity>
-        )}
-        {/* Name + status - tappable to open profile (disabled for anonymous users) */}
-        {isOtherUserAnonymous ? (
-          // PRIVACY: Non-tappable anonymous name display
-          <View style={styles.headerInfo}>
-            <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
-              Anonymous
-            </Text>
-            <Text style={styles.headerStatus}>From a confession</Text>
-          </View>
-        ) : (
-          <TouchableOpacity
-            onPress={() => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}
-            style={styles.headerInfo}
-            activeOpacity={0.7}
-          >
-            <View style={styles.headerNameRow}>
-              {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
-              <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
-                {activeConversation.otherUser.name}
-              </Text>
-              {activeConversation.otherUser.isVerified && (
-                <View style={styles.headerVerifiedBadge}>
-                  <Ionicons name="checkmark" size={10} color={COLORS.white} />
-                </View>
-              )}
-            </View>
-            <Text style={styles.headerStatus}>{presenceStatus.label}</Text>
-          </TouchableOpacity>
-        )}
+        </TouchableOpacity>
+        {/* Name + status - tappable to open profile */}
+        <TouchableOpacity
+          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+          style={styles.headerInfo}
+          activeOpacity={0.7}
+        >
+          {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
+          <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
+            {activeConversation.otherUser.name}
+          </Text>
+          {/* ONLINE-STATUS-FIX: Show "Online" for very recent activity */}
+          <Text style={styles.headerStatus}>
+            {(() => {
+              const lastActive = activeConversation.otherUser.lastActive ?? 0;
+              const now = Date.now();
+              const diff = now - lastActive;
+              // Online: within 1 minute (likely still in app)
+              if (diff < 60_000) return 'Online';
+              // Active now: within 5 minutes
+              if (diff < 5 * 60_000) return 'Active now';
+              // Recently active: anything else with valid timestamp
+              if (lastActive > 0) return 'Recently active';
+              return 'Offline';
+            })()}
+          </Text>
+        </TouchableOpacity>
         {/* Right section: T/D button + menu with stable spacing */}
         <View style={styles.headerRightSection}>
         {/* Truth/Dare game button - only for matched users (non-pre-match) */}
@@ -2167,30 +1517,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               !isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId && styles.truthDareButtonWaiting,
               // Dim button during cooldown
               !isDemo && gameSession?.state === 'cooldown' && styles.truthDareButtonCooldown,
-              // TD-UX: Special "ready to start" style for inviter when accepted but not started
-              !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId && styles.truthDareButtonReadyToStart,
-              // Green for active game that's already started
-              !isDemo && gameSession?.state === 'active' && !!gameSession?.gameStartedAt && styles.truthDareButtonActive,
             ]}>
               <Ionicons name="wine" size={18} color={COLORS.white} />
-              <Text style={[
-                styles.truthDareLabel,
-                !isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId && styles.truthDareLabelWaiting,
-              ]} numberOfLines={1}>
-                {/* TD-UX: Show contextual status on button */}
+              <Text style={styles.truthDareLabel}>
+                {/* Show status on button */}
                 {!isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId
-                  ? 'Sent'
-                  : !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId
-                    ? 'Start!'
-                    : 'T/D'}
+                  ? 'Wait'
+                  : 'T/D'}
               </Text>
               {/* Pending invite indicator (for invitee) */}
               {gameSession?.state === 'pending' && gameSession?.inviteeId === userId && (
                 <View style={styles.truthDareBadge} />
-              )}
-              {/* TD-UX: Badge dot for inviter when ready to start */}
-              {!isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId && (
-                <View style={styles.truthDareStartBadge} />
               )}
             </View>
           </TouchableOpacity>
@@ -2215,31 +1552,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         </View>
       )}
 
-      {/* TD-UX: Waiting for inviter to start banner (for invitee) */}
-      {showWaitingForStartToast && (
-        <View style={styles.waitingStartBanner}>
-          <Ionicons name="hourglass-outline" size={16} color="#2E7D32" />
-          <Text style={styles.waitingStartBannerText}>
-            Waiting for {activeConversation?.otherUser?.name || 'them'} to start the game
-          </Text>
-        </View>
-      )}
-
       {/* Expired chat banner */}
       {isExpiredChat && (
         <View style={styles.expiredBanner}>
           <Ionicons name="time-outline" size={16} color={COLORS.textMuted} />
           <Text style={styles.expiredBannerText}>This chat has expired.</Text>
-        </View>
-      )}
-
-      {terminalStateCopy && (
-        <View style={styles.terminalBanner}>
-          <Ionicons name="alert-circle-outline" size={16} color={COLORS.warning} />
-          <View style={styles.terminalBannerTextWrap}>
-            <Text style={styles.terminalBannerTitle}>{terminalStateCopy.title}</Text>
-            <Text style={styles.terminalBannerText}>{terminalStateCopy.detail}</Text>
-          </View>
         </View>
       )}
 
@@ -2261,15 +1578,101 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           <FlashList
           ref={flatListRef}
           data={displayMessages}
-          keyExtractor={messageKeyExtractor}
+          keyExtractor={(item) => item._id}
           // LIVE-TICK-FIX: Force re-render when message read/delivered states change
           // This ensures sender sees tick updates in real-time without reopening chat
           extraData={messageStatusHash}
-          renderItem={renderMessageItem}
-          ListHeaderComponent={listHeaderComponent}
-          ListEmptyComponent={listEmptyComponent}
-          ListFooterComponent={listFooterComponent}
-          contentContainerStyle={listContentContainerStyle}
+          renderItem={({ item, index }: { item: any; index: number }) => {
+            // SECURE-REWRITE: Single source of truth for message ownership
+            // Both IDs must be valid non-empty strings for comparison
+            const msgSenderId = item.senderId;
+            const currentUserId = isDemo ? getDemoUserId() : userId;
+            const isMessageOwn = !!(
+              msgSenderId &&
+              currentUserId &&
+              typeof msgSenderId === 'string' &&
+              typeof currentUserId === 'string' &&
+              msgSenderId === currentUserId
+            );
+
+            // AVATAR GROUPING: Determine if this is the last message in a sender group
+            // Show avatar only on the LAST message of consecutive messages from the same sender
+            const nextMessage = displayMessages[index + 1];
+            const isLastInGroup = !nextMessage || nextMessage.senderId !== item.senderId;
+            // Show avatar only for received messages (not own) and only on last in group
+            const showAvatar = !isMessageOwn && isLastInGroup;
+
+            // SECURE-MEDIA-FIX: Merge backend viewMode into protectedMedia for consistent mode
+            // This ensures both sender and receiver use the same viewMode from the single source of truth
+            const mergedProtectedMedia = item.protectedMedia
+              ? { ...item.protectedMedia, viewingMode: item.protectedMedia.viewingMode ?? item.viewMode }
+              : item.viewMode
+                ? { viewingMode: item.viewMode, timer: 0, screenshotAllowed: false, viewOnce: false, watermark: false }
+                : undefined;
+
+            return (
+            <MessageBubble
+              message={{
+                id: item._id,
+                content: item.content,
+                type: item.type as any,
+                senderId: item.senderId,
+                createdAt: item.createdAt,
+                readAt: item.readAt,
+                readReceiptVisible: item.readReceiptVisible,
+                deliveredAt: item.deliveredAt, // MESSAGE-TICKS-FIX: Pass deliveredAt for tick rendering
+                isProtected: item.isProtected ?? false,
+                // SECURE-MEDIA-FIX: Use merged protectedMedia with backend viewMode
+                protectedMedia: mergedProtectedMedia,
+                isExpired: item.isExpired,
+                timerEndsAt: item.timerEndsAt,
+                expiredAt: item.expiredAt,
+                viewedAt: item.viewedAt,
+                systemSubtype: item.systemSubtype,
+                mediaId: item.mediaId,
+                // SENDER-TIMER-FIX: Pass viewOnce and recipientOpened for sender status
+                viewOnce: item.viewOnce,
+                recipientOpened: item.recipientOpened,
+                // VOICE-FIX: Pass both demo and production audio fields
+                audioUri: item.audioUri,
+                durationMs: item.durationMs,
+                audioUrl: item.audioUrl,
+                audioDurationMs: item.audioDurationMs,
+              }}
+              isOwn={isMessageOwn}
+              otherUserName={activeConversation.otherUser.name}
+              currentUserId={currentUserId || undefined}
+              onProtectedMediaPress={handleProtectedMediaPress}
+              // HOLD-MODE-FIX: Enable hold handlers for both demo and Convex mode
+              onProtectedMediaHoldStart={handleProtectedMediaHoldStart}
+              onProtectedMediaHoldEnd={handleProtectedMediaHoldEnd}
+              onProtectedMediaExpire={handleProtectedMediaExpire}
+              // L2 FIX: Voice delete only works in demo mode
+              onVoiceDelete={isDemo ? handleVoiceDelete : undefined}
+              // AVATAR GROUPING: Pass grouping info for Instagram/Tinder style layout
+              showAvatar={showAvatar}
+              avatarUrl={activeConversation.otherUser.photoUrl}
+              isLastInGroup={isLastInGroup}
+              // PROFILE-TAP: Avatar tap opens profile
+              onAvatarPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+            />
+          );
+          }}
+          ListEmptyComponent={
+            <View style={styles.emptyChat}>
+              <Ionicons name="chatbubble-outline" size={40} color={COLORS.border} />
+              <Text style={styles.emptyChatText}>
+                Start the conversation with {activeConversation.otherUser.name}.
+              </Text>
+            </View>
+          }
+          contentContainerStyle={{
+            flexGrow: 1,
+            justifyContent: (messages?.length ?? 0) > 0 ? 'flex-end' as const : 'center' as const,
+            paddingTop: 8,
+            paddingHorizontal: 12,
+            paddingBottom: composerHeight + composerBottomPadding,
+          }}
           onScroll={onScroll}
           scrollEventThrottle={16}
           keyboardShouldPersistTaps="handled"
@@ -2281,18 +1684,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             onLayout={onComposerLayout}
             style={styles.composerWrapper}
           >
-            {showTypingIndicator && (
-              <View style={styles.typingIndicatorBar}>
-                <View style={styles.typingIndicatorDot} />
-                <Text style={styles.typingIndicatorText}>
-                  {activeConversation.otherUser.name} is typing…
-                </Text>
-              </View>
-            )}
-            {/* COMPOSER-SPACING-FIX: Conditional bottom spacing based on context
-                - Inside tabs (source='messages'): Tab bar handles safe area, use minimal padding
-                - Standalone screen: Apply full insets.bottom for safe area protection */}
-            <View style={{ paddingBottom: source === 'messages' ? 4 : insets.bottom }}>
+            <View style={{ paddingBottom: composerBottomPadding }}>
               {/* L2 FIX: Voice messages only work in demo mode - hide from production UI */}
               <MessageInput
                 onSend={handleSend}
@@ -2300,7 +1692,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 onSendGallery={handleSendGallery}
                 onSendVoice={handleSendVoice}
                 onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
-                disabled={isSending || isExpiredChat || isTerminalConversation}
+                disabled={isSending || isExpiredChat}
                 isPreMatch={activeConversation.isPreMatch}
                 messagesRemaining={messagesRemaining}
                 subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
@@ -2309,7 +1701,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 initialText={demoDraft ?? ''}
                 onTextChange={handleDraftChange}
                 onTypingChange={handleTypingChange}
-                disabledPlaceholder={composerDisabledPlaceholder}
               />
             </View>
           </View>
@@ -2326,11 +1717,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       />
 
       {/* Protected Media Viewer (Convex mode) */}
-      {viewerMessageId && token && !isDemo && (
+      {viewerMessageId && userId && !isDemo && (
         <ProtectedMediaViewer
           visible={!!viewerMessageId}
           messageId={viewerMessageId}
-          authToken={token}
+          userId={userId}
           viewerName={currentUser?.name || activeConversation.otherUser.name}
           onClose={() => { setViewerMessageId(null); setViewerIsMirrored(false); setViewerIsHoldMode(false); }}
           onReport={() => {
@@ -2367,10 +1758,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       )}
 
       {/* Report Modal (for protected media) */}
-      {token && (
+      {userId && (
         <ReportModal
           visible={reportModalVisible}
-          authToken={token}
+          reporterId={userId}
           reportedUserId={(activeConversation as any).otherUser?.id || ''}
           chatId={conversationId || ''}
           onClose={() => setReportModalVisible(false)}
@@ -2383,7 +1774,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         onClose={() => setShowReportBlock(false)}
         reportedUserId={(activeConversation as any).otherUser?.id || ''}
         reportedUserName={activeConversation.otherUser?.name || ''}
-        authToken={token || undefined}
+        currentUserId={userId || getDemoUserId()}
         conversationId={conversationId}
         // matchId: For Convex mode, use conversation.matchId. For demo mode, derive from conversation if it's a match.
         matchId={
@@ -2393,8 +1784,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 : undefined)
             : (conversation as any)?.matchId
         }
-        onBlockSuccess={() => router.back()}
-        onUnmatchSuccess={() => router.back()}
+        onBlockSuccess={handleBack}
+        onUnmatchSuccess={handleBack}
       />
 
       {/* Truth/Dare Invite Modal (first-tap flow) */}
@@ -2473,50 +1864,16 @@ const styles = StyleSheet.create({
   composerWrapper: {
     backgroundColor: COLORS.background,
   },
-  typingIndicatorBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingTop: 10,
-    paddingBottom: 6,
-    backgroundColor: COLORS.background,
-  },
-  typingIndicatorDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: COLORS.primary,
-  },
-  typingIndicatorText: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: COLORS.textMuted,
-  },
   loadingContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.background,
-    padding: 24,
-  },
-  notFoundEmoji: {
-    fontSize: 56,
-    marginBottom: 8,
   },
   loadingText: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginTop: 8,
-  },
-  loadingSubtext: {
-    marginTop: 8,
-    fontSize: 13,
-    lineHeight: 18,
-    color: COLORS.textMuted,
-    textAlign: 'center',
-    maxWidth: 280,
+    fontSize: 16,
+    color: COLORS.textLight,
+    marginTop: 12,
   },
   errorBackButton: {
     marginTop: 20,
@@ -2596,27 +1953,11 @@ const styles = StyleSheet.create({
     minWidth: 0, // Required for text truncation in flexbox
     marginRight: 8,
   },
-  headerNameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    minWidth: 0,
-  },
   headerName: {
     fontSize: 16,
     fontWeight: '600' as const,
     color: COLORS.text,
     lineHeight: 20,
-    flexShrink: 1,
-  },
-  headerVerifiedBadge: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    flexShrink: 0,
   },
   headerStatus: {
     fontSize: 11,
@@ -2641,20 +1982,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
     backgroundColor: COLORS.secondary,
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
     paddingVertical: 6,
     borderRadius: 14,
     gap: 4,
-    minWidth: 52, // Prevent shrinking
   },
   truthDareLabel: {
     fontSize: 11,
     fontWeight: '700' as const,
     color: COLORS.white,
-    flexShrink: 0,
-  },
-  truthDareLabelWaiting: {
-    fontSize: 10,
   },
   truthDareButtonWithBadge: {
     position: 'relative' as const,
@@ -2678,26 +2014,6 @@ const styles = StyleSheet.create({
     opacity: 0.5,
     backgroundColor: COLORS.textMuted,
   },
-  // TD-UX: Special style for inviter when accepted but not started
-  truthDareButtonReadyToStart: {
-    backgroundColor: '#E67E22', // Orange - attention-grabbing
-    borderWidth: 2,
-    borderColor: '#F39C12',
-  },
-  truthDareButtonActive: {
-    backgroundColor: '#27AE60', // Green for active game
-  },
-  truthDareStartBadge: {
-    position: 'absolute' as const,
-    top: -2,
-    right: -2,
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#F39C12', // Orange badge
-    borderWidth: 1,
-    borderColor: '#FFFFFF',
-  },
   cooldownBanner: {
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
@@ -2711,23 +2027,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500' as const,
     color: COLORS.warning || '#FF9800',
-  },
-  // TD-UX: Waiting for inviter to start banner
-  waitingStartBanner: {
-    flexDirection: 'row' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    gap: 8,
-    backgroundColor: '#E8F5E9', // Light green tint
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#81C784',
-  },
-  waitingStartBannerText: {
-    fontSize: 13,
-    fontWeight: '500' as const,
-    color: '#2E7D32', // Dark green
   },
   // Truth/Dare Invite Modal styles
   tdInviteOverlay: {
@@ -2813,96 +2112,15 @@ const styles = StyleSheet.create({
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
-  // ═══════════════════════════════════════════════════════════════════════════
-  // EMPTY STATE - Friendly, engaging, clear CTA
-  // ═══════════════════════════════════════════════════════════════════════════
   emptyChat: {
     alignItems: 'center',
-    padding: 32,
-    paddingTop: 48,
-  },
-  emptyChatIconContainer: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: COLORS.primary + '12',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 16,
-  },
-  emptyChatEmoji: {
-    fontSize: 32,
+    padding: 24,
   },
   emptyChatText: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: COLORS.text,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  emptyChatHint: {
     fontSize: 15,
     color: COLORS.textMuted,
+    marginTop: 12,
     textAlign: 'center',
-    lineHeight: 22,
-  },
-  dayDivider: {
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  dayDividerText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: COLORS.textMuted,
-    backgroundColor: COLORS.backgroundDark,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 12,
-  },
-  matchContextBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 20,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    backgroundColor: COLORS.primary + '10',
-    borderRadius: 16,
-  },
-  matchContextText: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: COLORS.primary,
-  },
-  loadOlderContainer: {
-    alignItems: 'center',
-    paddingTop: 4,
-    paddingBottom: 12,
-  },
-  loadOlderButton: {
-    minWidth: 152,
-    minHeight: 36,
-    borderRadius: 18,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.backgroundDark,
-  },
-  loadOlderButtonText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-  loadOlderDoneText: {
-    fontSize: 11,
-    fontWeight: '500',
-    color: COLORS.textLight,
-  },
-  loadOlderErrorText: {
-    marginTop: 6,
-    fontSize: 11,
-    color: COLORS.error,
   },
   expiredBanner: {
     flexDirection: 'row',
@@ -2918,28 +2136,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: COLORS.textMuted,
   },
-  terminalBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    backgroundColor: 'rgba(255, 179, 0, 0.10)',
-  },
-  terminalBannerTextWrap: {
-    flex: 1,
-  },
-  terminalBannerTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.warning,
-  },
-  terminalBannerText: {
-    marginTop: 2,
-    fontSize: 12,
-    lineHeight: 17,
-    color: COLORS.textMuted,
-  },
   justUnblockedBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2953,79 +2149,5 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     color: COLORS.success,
-  },
-  failedSendNotice: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginTop: 12,
-    marginBottom: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 14,
-    backgroundColor: 'rgba(244, 67, 54, 0.08)',
-  },
-  failedSendTextWrap: {
-    flex: 1,
-  },
-  failedSendTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.error,
-  },
-  failedSendText: {
-    marginTop: 2,
-    fontSize: 12,
-    lineHeight: 17,
-    color: COLORS.textMuted,
-  },
-  failedSendAction: {
-    minWidth: 52,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  failedSendActionText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-  failedSendDismiss: {
-    paddingHorizontal: 4,
-    paddingVertical: 8,
-  },
-  failedSendDismissText: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: COLORS.textMuted,
-  },
-  // CONFESSION CHAT: Anonymous privacy styles
-  confessionBanner: {
-    backgroundColor: 'rgba(233, 30, 99, 0.08)',
-    paddingBottom: 8,
-    paddingHorizontal: 16,
-  },
-  confessionBannerInner: {
-    flexDirection: 'row' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    gap: 6,
-  },
-  confessionBannerText: {
-    fontSize: 13,
-    fontWeight: '600' as const,
-    color: COLORS.primary,
-  },
-  confessionBannerHint: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-    textAlign: 'center' as const,
-    marginTop: 2,
-  },
-  headerAvatarAnonymous: {
-    backgroundColor: COLORS.backgroundDark,
   },
 });

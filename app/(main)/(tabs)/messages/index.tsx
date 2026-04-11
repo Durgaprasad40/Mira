@@ -1,10 +1,7 @@
 /*
- * LOCKED (MESSAGES TAB)
+ * LOCKED (PHASE-1 TAB)
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- *
- * STATUS:
- * - Feature is stable and production-locked
- * - No logic/UI changes allowed
+ * Nearby tab is the only Phase-1 tab currently unlocked.
  */
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
@@ -12,7 +9,6 @@ import {
   Text,
   StyleSheet,
   FlatList,
-  TextInput,
   TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
@@ -26,7 +22,7 @@ import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { safePush } from '@/lib/safeRouter';
 import { LoadingGuard } from '@/components/safety';
 import { Image } from 'expo-image';
-import { useConvex, useQuery, useMutation } from 'convex/react';
+import { useQuery, useMutation, useConvex } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
@@ -35,8 +31,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { Badge } from '@/components/ui';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
-import type { Id } from '@/convex/_generated/dataModel';
-import { useBatchPresence } from '@/hooks/usePresence';
 import { getDemoCurrentUser, DEMO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
@@ -58,86 +52,6 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - 48) / 2;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SKELETON CHAT ROW - Loading placeholder for conversations
-// ═══════════════════════════════════════════════════════════════════════════
-const SkeletonChatRow = ({ index }: { index: number }) => {
-  const pulseAnim = React.useRef(new Animated.Value(0.4)).current;
-
-  React.useEffect(() => {
-    const pulse = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, {
-          toValue: 0.8,
-          duration: 800,
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulseAnim, {
-          toValue: 0.4,
-          duration: 800,
-          useNativeDriver: true,
-        }),
-      ])
-    );
-    pulse.start();
-    return () => pulse.stop();
-  }, [pulseAnim]);
-
-  // Vary widths for natural look
-  const nameWidth = 100 + (index % 3) * 30;
-  const messageWidth = 140 + (index % 4) * 25;
-
-  return (
-    <Animated.View style={[skeletonStyles.row, { opacity: pulseAnim }]}>
-      <View style={skeletonStyles.avatar} />
-      <View style={skeletonStyles.content}>
-        <View style={[skeletonStyles.name, { width: nameWidth }]} />
-        <View style={[skeletonStyles.message, { width: messageWidth }]} />
-      </View>
-      <View style={skeletonStyles.time} />
-    </Animated.View>
-  );
-};
-
-const skeletonStyles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
-  },
-  avatar: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: COLORS.backgroundDark,
-    marginRight: 14,
-  },
-  content: {
-    flex: 1,
-    gap: 8,
-  },
-  name: {
-    height: 16,
-    borderRadius: 4,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  message: {
-    height: 14,
-    borderRadius: 4,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  time: {
-    width: 32,
-    height: 12,
-    borderRadius: 4,
-    backgroundColor: COLORS.backgroundDark,
-    marginLeft: 8,
-  },
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
 // RESPONSIVE SPACING SYSTEM - Consistent across devices
 // ═══════════════════════════════════════════════════════════════════════════
 // Base scale factor: smaller phones get slightly tighter spacing
@@ -146,11 +60,11 @@ const SCALE_FACTOR = Math.min(SCREEN_WIDTH / 375, 1.1); // Cap at 1.1x for large
 // Section spacing (compact top sections, more room for messages)
 const SPACING = {
   sectionTop: Math.round(8 * SCALE_FACTOR),        // Top padding of sections
-  titleToRow: Math.round(5 * SCALE_FACTOR),        // Title to avatar row
-  sectionGap: Math.round(6 * SCALE_FACTOR),        // Between Super Likes and New Matches
+  titleToRow: Math.round(6 * SCALE_FACTOR),        // Title to avatar row
+  sectionGap: Math.round(8 * SCALE_FACTOR),        // Between Super Likes and New Matches
   beforeMessages: Math.round(12 * SCALE_FACTOR),   // Before Messages list
-  avatarSize: Math.round(52 * SCALE_FACTOR),       // Avatar circle size
-  avatarGap: Math.round(10 * SCALE_FACTOR),        // Gap between avatars
+  avatarSize: Math.round(56 * SCALE_FACTOR),       // Avatar circle size
+  avatarGap: Math.round(12 * SCALE_FACTOR),        // Gap between avatars
 };
 
 // Recency threshold: 24 hours
@@ -177,43 +91,9 @@ function isRecentLike(createdAt: number): boolean {
   return Date.now() - createdAt < RECENCY_THRESHOLD_MS;
 }
 
-const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
-
-function getConversationSearchPreview(
-  lastMessage: {
-    content: string;
-    type: string;
-    senderId: string;
-    isProtected?: boolean;
-  } | null | undefined,
-  currentUserId?: string
-): string {
-  if (!lastMessage) return 'say hi';
-
-  const previewPrefix = currentUserId && lastMessage.senderId === currentUserId ? 'you ' : '';
-  if (lastMessage.isProtected) {
-    return `${previewPrefix}${lastMessage.type === 'video' ? 'secure video' : 'secure photo'}`;
-  }
-  if (lastMessage.type === 'image') return `${previewPrefix}photo`;
-  if (lastMessage.type === 'video') return `${previewPrefix}video`;
-  if (lastMessage.type === 'voice') return `${previewPrefix}voice message`;
-  if (lastMessage.type === 'dare') return `${previewPrefix}dare sent`;
-
-  if (typeof lastMessage.content === 'string' && lastMessage.content.trim()) {
-    const markerMatch = lastMessage.content.match(SYSTEM_MARKER_RE);
-    if (markerMatch) {
-      return lastMessage.content.slice(markerMatch[0].length).trim() || 'new message';
-    }
-    return `${previewPrefix}${lastMessage.content}`;
-  }
-
-  return 'new message';
-}
-
 export default function MessagesScreen() {
   useScreenTrace("MESSAGES");
   const router = useRouter();
-  const convex = useConvex();
   const { focus, profileId, source } = useLocalSearchParams<{
     focus?: string;
     profileId?: string;
@@ -223,23 +103,13 @@ export default function MessagesScreen() {
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
   const convexUserId = asUserId(userId);
+  const convex = useConvex();
   const [refreshing, setRefreshing] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
 
   // Swipe mutation for Convex mode like/pass actions
   const swipe = useMutation(api.likes.swipe);
-  // Mutation to ensure conversation exists for a match (used when conversationId is missing)
-  const ensureConversation = useMutation(api.conversations.getOrCreateForMatch);
   const [retryKey, setRetryKey] = useState(0);
-  // P2-PARITY: Error state + retry (matches Phase 2 inline error UX)
-  const [hasQueryError, setHasQueryError] = useState(false);
   const { safeTimeout } = useScreenSafety();
-  // Track ongoing conversation creation to prevent double-taps
-  const [creatingConversation, setCreatingConversation] = useState<string | null>(null);
-  const [chatEntryStatus, setChatEntryStatus] = useState<string | null>(null);
-  const refreshInFlightRef = useRef<Promise<void> | null>(null);
-  const chatEntryLockRef = useRef<string | null>(null);
-  const chatEntryStatusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // View state: 'messages' | 'likes' — IN-PLACE toggle, not a route change
   const [activeView, setActiveView] = useState<'messages' | 'likes'>('messages');
@@ -253,21 +123,15 @@ export default function MessagesScreen() {
   const matchAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
 
   // BUGFIX #25: Stop animations on unmount
-  // P1-FIX: Reset values BEFORE stopping to prevent partial animation state
   useEffect(() => {
     return () => {
-      if (chatEntryStatusTimeoutRef.current) {
-        clearTimeout(chatEntryStatusTimeoutRef.current);
-        chatEntryStatusTimeoutRef.current = null;
-      }
-      // P1-FIX: Reset animated values FIRST (before stop) to ensure clean state
-      modalScale.setValue(0);
-      heartScale.setValue(0);
-      // Then stop any running animation
       if (matchAnimationRef.current) {
         matchAnimationRef.current.stop();
         matchAnimationRef.current = null;
       }
+      // Reset animated values to prevent memory leaks
+      modalScale.setValue(0);
+      heartScale.setValue(0);
     };
   }, [modalScale, heartScale]);
 
@@ -303,7 +167,6 @@ export default function MessagesScreen() {
   }, [isDemoMode, hasHydrated, demoSeed]);
 
   // Handle focus param from notification deep link
-  // FIX: Always reset to correct view based on focus param to prevent stale state
   useFocusEffect(
     useCallback(() => {
       if (focus === 'likes') {
@@ -361,10 +224,6 @@ export default function MessagesScreen() {
             likesListRef.current?.scrollToIndex({ index: rowIndex, animated: true });
           }, 150); // Slightly longer delay to allow layout
         }
-      } else {
-        // FIX: Reset to messages view when not explicitly requesting likes
-        // This prevents stale 'likes' view state when navigating from Discover
-        setActiveView('messages');
       }
 
       // Cleanup: clear pending scroll timeout on blur/unmount
@@ -394,19 +253,19 @@ export default function MessagesScreen() {
   );
 
   // HIGH #1 FIX: Memoize Convex query args to prevent re-subscriptions
-  // Live message queries are keyed by validated session token instead of client user IDs.
-  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  // Creating new object references on every render causes Convex to re-subscribe
+  // APP-P0-004: Split args - getConversations uses authUserId, others use userId
   const convexConversationsArgs = useMemo(
-    () => (!isDemoMode && token ? { token } : 'skip' as const),
-    [token]
+    () => (!isDemoMode && userId && token ? { token, authUserId: userId } : 'skip' as const),
+    [userId, token, retryKey]
+  );
+  const convexUnreadArgs = useMemo(
+    () => (!isDemoMode && userId && token ? { token, authUserId: userId } : 'skip' as const),
+    [userId, token, retryKey]
   );
   const convexQueryArgs = useMemo(
     () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
-    [convexUserId]
-  );
-  const convexUnreadArgs = useMemo(
-    () => (!isDemoMode && token ? { token } : 'skip' as const),
-    [token]
+    [convexUserId, retryKey]
   );
 
   // Convex queries (skipped in demo mode)
@@ -421,34 +280,6 @@ export default function MessagesScreen() {
 
   // DELIVERED-TICK-FIX: Mark all incoming messages as delivered when messages list loads
   const markAllAsDelivered = useMutation(api.messages.markAllAsDelivered);
-
-  // P2-PARITY: Error detection - timeout after 10s of loading (faster feedback than 15s)
-  const isQueryLoading = !isDemoMode && convexConversations === undefined && !hasQueryError;
-
-  // FIX: Use functional update to clear error without needing hasQueryError in deps
-  // This prevents potential re-render cycles from deps including state we're updating
-  useEffect(() => {
-    if (isDemoMode) return; // Demo mode doesn't need error detection
-
-    if (convexConversations !== undefined) {
-      // Clear error state using functional update (only changes if currently true)
-      setHasQueryError((prev) => (prev ? false : prev));
-      return;
-    }
-
-    const timeout = setTimeout(() => {
-      setHasQueryError(true);
-      log.warn('[MESSAGES]', 'Query timeout - showing error state');
-    }, 10000); // 10s timeout (faster feedback)
-
-    return () => clearTimeout(timeout);
-  }, [convexConversations, retryKey]);
-
-  // P2-PARITY: Retry handler
-  const handleRetryQuery = useCallback(() => {
-    setHasQueryError(false);
-    setRetryKey((k) => k + 1);
-  }, []);
 
   // Demo DM store for thread model
   const demoMeta = useDemoDmStore((s) => s.meta);
@@ -495,25 +326,12 @@ export default function MessagesScreen() {
   // Note: This is separate from "read" (blue ticks) which only happens when user opens the chat.
   useEffect(() => {
     // Only run when we have conversation data (meaning messages have arrived)
-    if (!isDemoMode && token && convexConversations && convexConversations.length > 0) {
-      markAllAsDelivered({ token }).catch(() => {
+    if (!isDemoMode && userId && convexConversations && convexConversations.length > 0) {
+      markAllAsDelivered({ token: token ?? undefined, authUserId: userId }).catch(() => {
         // Silent fail - delivery marking is best-effort
       });
     }
-  }, [isDemoMode, token, convexConversations, markAllAsDelivered]);
-
-  // P0-009 FIX: Mark messages as delivered when app resumes from background
-  // useFocusEffect runs when screen is focused (including when app resumes)
-  // This complements the above useEffect which only runs when data changes
-  useFocusEffect(
-    useCallback(() => {
-      if (!isDemoMode && token) {
-        markAllAsDelivered({ token }).catch(() => {
-          // Silent fail - delivery marking is best-effort
-        });
-      }
-    }, [token, markAllAsDelivered])
-  );
+  }, [isDemoMode, userId, token, convexConversations, markAllAsDelivered]);
 
   // Combine message threads
   const demoThreads = useMemo(() => {
@@ -603,49 +421,55 @@ export default function MessagesScreen() {
   const showMessagesNudge =
     messagesNudgeStatus === 'needs_both' && !dismissedNudges.includes('messages');
 
-  const onRefresh = useCallback(async () => {
-    if (refreshInFlightRef.current) {
-      return refreshInFlightRef.current;
+  const refetchLiveMessagesData = useCallback(async () => {
+    if (isDemoMode || !userId || !token || !convexUserId) {
+      return;
     }
 
+    setRetryKey((k) => k + 1);
+
+    await Promise.all([
+      convex.query(api.messages.getConversations, { token, authUserId: userId }),
+      convex.query(api.messages.getUnreadCount, { token, authUserId: userId }),
+      convex.query(api.users.getCurrentUser, { userId: convexUserId }),
+      convex.query(api.likes.getLikesReceived, { userId: convexUserId }),
+      convex.query(api.matches.getMatches, { userId: convexUserId }),
+    ]);
+  }, [convex, convexUserId, isDemoMode, token, userId]);
+
+  const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    const refreshPromise = (async () => {
-      try {
-        if (isDemoMode) {
-          demoSeed();
-          return;
-        }
 
-        if (!token) {
-          setHasQueryError(true);
-          return;
-        }
-
-        const refreshCalls: Promise<unknown>[] = [
-          convex.query(api.messages.getConversations, { token }),
-          convex.query(api.messages.getUnreadCount, { token }),
-        ];
-
-        if (convexUserId) {
-          refreshCalls.push(convex.query(api.users.getCurrentUser, { userId: convexUserId }));
-          refreshCalls.push(convex.query(api.likes.getLikesReceived, { userId: convexUserId }));
-          refreshCalls.push(convex.query(api.matches.getMatches, { userId: convexUserId }));
-        }
-
-        await Promise.all(refreshCalls);
-        setHasQueryError(false);
-      } catch (error) {
-        log.warn('[MESSAGES]', 'refresh failed', { error });
-        setHasQueryError(true);
-      } finally {
-        refreshInFlightRef.current = null;
-        safeTimeout(() => setRefreshing(false), 300);
+    try {
+      if (isDemoMode) {
+        demoSeed();
+        return;
       }
-    })();
 
-    refreshInFlightRef.current = refreshPromise;
-    return refreshPromise;
-  }, [convex, convexUserId, demoSeed, isDemoMode, safeTimeout, token]);
+      await refetchLiveMessagesData();
+    } catch (error) {
+      log.warn('[MESSAGES]', 'refresh failed', { error });
+      Toast.show('Couldn’t refresh messages. Please try again.');
+    } finally {
+      if (isDemoMode) {
+        safeTimeout(() => setRefreshing(false), 300);
+      } else {
+        setRefreshing(false);
+      }
+    }
+  }, [demoSeed, isDemoMode, refetchLiveMessagesData, safeTimeout]);
+
+  const handleRetry = useCallback(() => {
+    if (isDemoMode) {
+      demoSeed();
+      return;
+    }
+
+    void refetchLiveMessagesData().catch((error) => {
+      log.warn('[MESSAGES]', 'retry failed', { error });
+      Toast.show('Couldn’t reload messages. Please try again.');
+    });
+  }, [demoSeed, isDemoMode, refetchLiveMessagesData]);
 
   // Process matches: separate Super Likes (above) from New Matches
   // A match is "new" if it has no messages yet (lastMessage is null)
@@ -823,94 +647,11 @@ export default function MessagesScreen() {
     safePush(router, `/(main)/profile/${like.userId}` as any, 'messages->likeProfile');
   }, [router]);
 
-  // ── Open match chat with fallback conversation creation ──
-  // This ensures tapping a match card always navigates to chat, even if conversationId is missing
-  const handleOpenMatchChat = useCallback(async (
-    matchId: string,
-    conversationId: string | undefined,
-    sourceLabel: string
-  ) => {
-    // Guard: log matchId presence
-    log.info('[MESSAGES]', `${sourceLabel}: handleOpenMatchChat`, {
-      matchId,
-      hasConversationId: !!conversationId,
-    });
-
-    const lockKey = conversationId || matchId;
-
-    // Prevent repeated open/create attempts while a chat entry flow is already active.
-    if (chatEntryLockRef.current) {
-      log.warn('[MESSAGES]', `${sourceLabel}: chat entry already in progress`, {
-        activeLock: chatEntryLockRef.current,
-      });
-      return;
-    }
-    chatEntryLockRef.current = lockKey;
-
-    if (conversationId) {
-      // Direct navigation - conversation exists
-      log.info('[MESSAGES]', `${sourceLabel}: navigating directly`, { conversationId });
-      setChatEntryStatus('Opening chat…');
-      safePush(router, `/(main)/(tabs)/messages/chat/${conversationId}` as any, sourceLabel);
-      if (chatEntryStatusTimeoutRef.current) {
-        clearTimeout(chatEntryStatusTimeoutRef.current);
-      }
-      chatEntryStatusTimeoutRef.current = setTimeout(() => {
-        chatEntryLockRef.current = null;
-        setChatEntryStatus(null);
-      }, 1500);
-    } else {
-      // Fallback: create conversation for this match, then navigate
-      if (!token) {
-        log.error('[MESSAGES]', `${sourceLabel}: session token missing, cannot create conversation`);
-        chatEntryLockRef.current = null;
-        Toast.show('Unable to open chat. Please try again.');
-        return;
-      }
-      log.info('[MESSAGES]', `${sourceLabel}: conversationId missing, creating...`, { matchId });
-      setCreatingConversation(matchId);
-      setChatEntryStatus('Creating chat…');
-      try {
-        const result = await ensureConversation({ matchId: matchId as any, token });
-        if (result?.conversationId) {
-          log.info('[MESSAGES]', `${sourceLabel}: conversation created, navigating`, {
-            conversationId: result.conversationId,
-          });
-          setChatEntryStatus('Opening chat…');
-          safePush(router, `/(main)/(tabs)/messages/chat/${result.conversationId}` as any, sourceLabel);
-          if (chatEntryStatusTimeoutRef.current) {
-            clearTimeout(chatEntryStatusTimeoutRef.current);
-          }
-          chatEntryStatusTimeoutRef.current = setTimeout(() => {
-            chatEntryLockRef.current = null;
-            setChatEntryStatus(null);
-          }, 1500);
-        } else {
-          log.error('[MESSAGES]', `${sourceLabel}: ensureConversation returned no conversationId`, { result });
-          chatEntryLockRef.current = null;
-          setChatEntryStatus(null);
-          Toast.show('Unable to open chat. Please try again.');
-        }
-      } catch (error) {
-        log.error('[MESSAGES]', `${sourceLabel}: ensureConversation failed`, { error, matchId });
-        chatEntryLockRef.current = null;
-        setChatEntryStatus(null);
-        Toast.show('Unable to open chat. Please try again.');
-      } finally {
-        setCreatingConversation(null);
-      }
-    }
-  }, [ensureConversation, router, token]);
-
   // Back to messages (for in-place header button)
   const handleBackToMessages = useCallback(() => {
     // BUGFIX #5: Reset layout ready flag since FlatList will be destroyed
     likesListLayoutReady.current = false;
     setActiveView('messages');
-  }, []);
-
-  const clearSearch = useCallback(() => {
-    setSearchQuery('');
   }, []);
 
   // ── Render functions ──
@@ -1015,7 +756,13 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.compactMatchItem}
               activeOpacity={0.7}
-              onPress={() => handleOpenMatchChat(item.id, item.conversationId, 'messages->superLikeChat')}
+              onPress={() => {
+                if (item.conversationId) {
+                  safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->superLikeChat');
+                } else {
+                  log.warn('[MESSAGES]', 'Super Like card missing conversationId', { matchId: item.id });
+                }
+              }}
             >
               <View style={styles.compactAvatarContainer}>
                 <View style={[styles.compactMatchRing, { borderColor: COLORS.superLike }]}>
@@ -1036,9 +783,6 @@ export default function MessagesScreen() {
                   <Ionicons name="star" size={8} color={COLORS.white} />
                 </View>
               </View>
-              <Text style={styles.compactMatchName} numberOfLines={1}>
-                {item.otherUser?.name?.split(' ')[0] || 'Someone'}
-              </Text>
             </TouchableOpacity>
           )}
           showsHorizontalScrollIndicator={false}
@@ -1072,7 +816,13 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.compactMatchItem}
               activeOpacity={0.7}
-              onPress={() => handleOpenMatchChat(item.id, item.conversationId, 'messages->newMatchChat')}
+              onPress={() => {
+                if (item.conversationId) {
+                  safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat');
+                } else {
+                  log.warn('[MESSAGES]', 'New Match card missing conversationId', { matchId: item.id });
+                }
+              }}
             >
               <View style={styles.compactAvatarContainer}>
                 <View style={[styles.compactMatchRing, { borderColor: COLORS.primary }]}>
@@ -1089,9 +839,6 @@ export default function MessagesScreen() {
                   )}
                 </View>
               </View>
-              <Text style={styles.compactMatchName} numberOfLines={1}>
-                {item.otherUser?.name?.split(' ')[0] || 'Someone'}
-              </Text>
             </TouchableOpacity>
           )}
           showsHorizontalScrollIndicator={false}
@@ -1106,112 +853,31 @@ export default function MessagesScreen() {
     return null;
   };
 
-  // Loading state - P2-PARITY: Use isQueryLoading (excludes error state)
-  const isLoading = isQueryLoading;
-
-  // ── Main render state derived before any early return ──
-  const demoCurrentUser = isDemoMode ? (getDemoCurrentUser() as any) : null;
-  const currentConversationUserId = isDemoMode
-    ? String(demoCurrentUser?._id || demoCurrentUser?.id || userId || 'demo_user_1')
-    : (userId || undefined);
-  const hasConversationRows = (conversations?.length ?? 0) > 0;
-  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
-  const isSearching = normalizedSearchQuery.length > 0;
-  const filteredConversations = useMemo(() => {
-    if (!normalizedSearchQuery) return conversations;
-
-    return (conversations || []).filter((conversation: any) => {
-      const haystack = [
-        conversation.otherUser?.name || '',
-        getConversationSearchPreview(conversation.lastMessage, currentConversationUserId),
-      ]
-        .join(' ')
-        .toLowerCase();
-      return haystack.includes(normalizedSearchQuery);
-    });
-  }, [conversations, currentConversationUserId, normalizedSearchQuery]);
-
-  // P0 UNIFIED PRESENCE: Extract user IDs for batch presence query
-  const conversationUserIds = useMemo(() => {
-    if (isDemoMode) return null; // Demo mode doesn't use presence API
-    const ids: Id<'users'>[] = [];
-    for (const convo of (filteredConversations || []) as any[]) {
-      const otherId = convo.otherUser?.id;
-      if (otherId) {
-        ids.push(otherId as Id<'users'>);
-      }
-    }
-    return ids.length > 0 ? ids : null;
-  }, [filteredConversations]);
-
-  // P0 UNIFIED PRESENCE: Batch presence query for all conversation users
-  const batchPresence = useBatchPresence(conversationUserIds);
-
-  const showsSecondaryModules = !isSearching && (showMessagesNudge || superLikeMatches.length > 0 || newMatches.length > 0);
-  const renderConversationRow = useCallback(({ item }: { item: any }) => {
-    // P0 UNIFIED PRESENCE: Look up presence status from batch query
-    const otherId = item.otherUser?.id;
-    const presenceStatus = otherId && batchPresence ? batchPresence[otherId]?.status : undefined;
-
-    return (
-      <ConversationItem
-        id={item.id}
-        otherUser={{
-          ...item.otherUser,
-          presenceStatus, // P0 UNIFIED PRESENCE: Add presence status to otherUser
-        }}
-        lastMessage={item.lastMessage}
-        unreadCount={item.unreadCount}
-        isPreMatch={item.isPreMatch}
-        currentUserId={currentConversationUserId}
-        onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
-        onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
-      />
-    );
-  }, [currentConversationUserId, router, batchPresence]);
-  const conversationKeyExtractor = useCallback((item: any) => item.id, []);
-
-  // Render skeleton loading rows
-  const renderSkeletonLoading = () => (
-    <View style={styles.skeletonContainer}>
-      {[0, 1, 2, 3, 4, 5].map((i) => (
-        <SkeletonChatRow key={i} index={i} />
-      ))}
-    </View>
-  );
-
-  // P2-PARITY: Render inline error state (matches Phase 2 UX)
-  const renderErrorState = () => (
-    <View style={styles.errorContainer}>
-      <Ionicons name="cloud-offline-outline" size={64} color={COLORS.textLight} />
-      <Text style={styles.errorTitle}>Couldn't load messages</Text>
-      <Text style={styles.errorSubtitle}>
-        Please check your connection and try again
-      </Text>
-      <TouchableOpacity style={styles.retryButton} onPress={handleRetryQuery}>
-        <Ionicons name="refresh" size={18} color={COLORS.white} />
-        <Text style={styles.retryButtonText}>Retry</Text>
-      </TouchableOpacity>
-    </View>
-  );
+  // Loading state
+  const isLoading = !isDemoMode && convexConversations === undefined;
 
   if (isLoading) {
     return (
       <LoadingGuard
         isLoading={true}
-        onRetry={() => setRetryKey((k) => k + 1)}
-        title="Loading conversations…"
-        subtitle="This is taking longer than expected. Check your connection and try again."
+        onRetry={handleRetry}
+        title="Loading your inbox..."
+        subtitle="We are syncing your latest conversations. Please try again if this takes too long."
       >
         <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
           <View style={styles.header}>
             <Text style={styles.title}>Messages</Text>
           </View>
-          {renderSkeletonLoading()}
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="small" color={COLORS.primary} />
+            <Text style={styles.helperText}>Bringing your conversations up to date...</Text>
+          </View>
         </SafeAreaView>
       </LoadingGuard>
     );
   }
+
+  // ── Main render ──
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
@@ -1274,13 +940,6 @@ export default function MessagesScreen() {
         )}
       </View>
 
-      {chatEntryStatus && (
-        <View style={styles.chatEntryBanner}>
-          <ActivityIndicator size="small" color={COLORS.primary} />
-          <Text style={styles.chatEntryBannerText}>{chatEntryStatus}</Text>
-        </View>
-      )}
-
       {/* Content — switches based on activeView */}
       {activeView === 'likes' ? (
         // Likes view (IN-PLACE, not a separate route)
@@ -1325,16 +984,10 @@ export default function MessagesScreen() {
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Ionicons name="heart-outline" size={64} color={COLORS.textLight} />
-              <Text style={styles.emptyTitle}>No pending likes</Text>
+              <Text style={styles.emptyTitle}>No likes waiting right now</Text>
               <Text style={styles.emptySubtitle}>
-                When someone likes you, they'll appear here
+                New likes and super likes will show up here.
               </Text>
-              <TouchableOpacity
-                style={styles.emptySecondaryButton}
-                onPress={() => safePush(router, '/(main)/(tabs)/explore' as any, 'messagesLikes->explore')}
-              >
-                <Text style={styles.emptySecondaryButtonText}>Keep exploring</Text>
-              </TouchableOpacity>
             </View>
           }
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
@@ -1352,125 +1005,49 @@ export default function MessagesScreen() {
         // Instead, optional sections are rendered as direct siblings ABOVE the FlatList.
         // ════════════════════════════════════════════════════════════════════════
         <View style={styles.messagesContent}>
-          {!hasQueryError && (
-            <View style={styles.searchSection}>
-              <View style={styles.searchInputWrap}>
-                <Ionicons name="search" size={18} color={COLORS.textMuted} />
-                <TextInput
-                  value={searchQuery}
-                  onChangeText={setSearchQuery}
-                  placeholder="Search conversations"
-                  placeholderTextColor={COLORS.textMuted}
-                  style={styles.searchInput}
-                  returnKeyType="search"
-                  autoCorrect={false}
-                  autoCapitalize="none"
-                  clearButtonMode="never"
-                />
-                {searchQuery.length > 0 && (
-                  <TouchableOpacity
-                    onPress={clearSearch}
-                    style={styles.searchClearButton}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  >
-                    <Ionicons name="close-circle" size={18} color={COLORS.textLight} />
-                  </TouchableOpacity>
-                )}
-              </View>
-            </View>
+          {/* Optional top sections - rendered ONLY when they have data */}
+          {showMessagesNudge && (
+            <ProfileNudge
+              message={NUDGE_MESSAGES.needs_both.messages}
+              onDismiss={() => dismissNudge('messages')}
+            />
           )}
-
-          {/* P2-PARITY: Error state with retry */}
-          {hasQueryError && renderErrorState()}
-
-          {/* Content - only show when not in error state */}
-          {!hasQueryError && (
-            <>
-              {/* Optional top sections - rendered ONLY when they have data */}
-              {showMessagesNudge && !hasConversationRows && !isSearching && (
-                <ProfileNudge
-                  message={NUDGE_MESSAGES.needs_both.messages}
-                  onDismiss={() => dismissNudge('messages')}
-                />
-              )}
-              {!isSearching && superLikeMatches.length > 0 && renderSuperLikesRow()}
-              {!isSearching && newMatches.length > 0 && renderNewMatchesRow()}
-              {hasConversationRows && showsSecondaryModules && (
-                <View style={styles.threadsSectionHeader}>
-                  <Text style={styles.threadsSectionEyebrow}>Inbox</Text>
-                  <Text style={styles.threadsSectionTitle}>Conversations</Text>
-                </View>
-              )}
-            </>
-          )}
+          {superLikeMatches.length > 0 && renderSuperLikesRow()}
+          {newMatches.length > 0 && renderNewMatchesRow()}
 
           {/* Conversation list - starts immediately after header when no top sections */}
-          {!hasQueryError && (
           <FlatList
             key="messages-list"
             style={styles.conversationList}
-            data={filteredConversations as any[]}
-            keyExtractor={conversationKeyExtractor}
-            renderItem={renderConversationRow}
-            keyboardShouldPersistTaps="handled"
-            initialNumToRender={12}
-            maxToRenderPerBatch={10}
-            windowSize={8}
+            data={(conversations || []) as any[]}
+            keyExtractor={(item: any) => item.id}
+            renderItem={({ item }: { item: any }) => (
+              <ConversationItem
+                id={item.id}
+                otherUser={item.otherUser}
+                lastMessage={item.lastMessage}
+                unreadCount={item.unreadCount}
+                isPreMatch={item.isPreMatch}
+                onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
+                onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
+              />
+            )}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
-                <View style={styles.emptyIconContainer}>
-                  <Ionicons
-                    name={isSearching ? 'search-outline' : 'chatbubbles-outline'}
-                    size={40}
-                    color={COLORS.primary}
-                  />
-                </View>
-                <Text style={styles.emptyTitle}>
-                  {isSearching ? 'No matching conversations' : 'No conversations yet'}
-                </Text>
+                <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
+                <Text style={styles.emptyTitle}>Your inbox is quiet for now</Text>
                 <Text style={styles.emptySubtitle}>
-                  {isSearching
-                    ? 'Try a different name or phrase from the last message.'
-                    : 'Matches and replies will appear here once someone chats back'}
+                  When you match with someone or accept a confession, your conversations will appear here.
                 </Text>
-                {!isSearching ? (
-                  <>
-                    <Text style={styles.emptyHint}>
-                      Explore profiles, make a match, and your inbox will feel alive here.
-                    </Text>
-                    <TouchableOpacity
-                      style={styles.emptyPrimaryButton}
-                      onPress={() => safePush(router, '/(main)/(tabs)/explore' as any, 'messages->explore')}
-                    >
-                      <Ionicons name="compass-outline" size={16} color={COLORS.white} />
-                      <Text style={styles.emptyPrimaryButtonText}>Go to Explore</Text>
-                    </TouchableOpacity>
-                  </>
-                ) : (
-                  <TouchableOpacity style={styles.emptySecondaryButton} onPress={clearSearch}>
-                    <Text style={styles.emptySecondaryButtonText}>Clear search</Text>
-                  </TouchableOpacity>
-                )}
               </View>
-            }
-            ListFooterComponent={
-              showMessagesNudge && hasConversationRows && !isSearching ? (
-                <View style={styles.nudgeFooter}>
-                  <ProfileNudge
-                    message={NUDGE_MESSAGES.needs_both.messages}
-                    onDismiss={() => dismissNudge('messages')}
-                  />
-                </View>
-              ) : null
             }
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
             contentContainerStyle={
-              (!filteredConversations || filteredConversations.length === 0)
+              (!conversations || conversations.length === 0)
                 ? styles.emptyListContainer
                 : styles.conversationListContent
             }
           />
-          )}
         </View>
       )}
 
@@ -1541,33 +1118,6 @@ const styles = StyleSheet.create({
     marginTop: 0,
     paddingTop: 0,
   },
-  searchSection: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 4,
-    backgroundColor: COLORS.background,
-  },
-  searchInputWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    minHeight: 44,
-    paddingHorizontal: 14,
-    borderRadius: 16,
-    backgroundColor: COLORS.backgroundDark,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 15,
-    color: COLORS.text,
-    paddingVertical: 11,
-  },
-  searchClearButton: {
-    paddingVertical: 4,
-    paddingLeft: 4,
-  },
   // HARD FIX: FlatList style - negative margin to pull content up and eliminate gap
   conversationList: {
     flex: 1,
@@ -1603,22 +1153,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-  },
-  chatEntryBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    backgroundColor: COLORS.primary + '10',
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.primary + '20',
-  },
-  chatEntryBannerText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.primary,
   },
   likesButton: {
     padding: 8,
@@ -1847,14 +1381,6 @@ const styles = StyleSheet.create({
     borderRadius: SPACING.avatarSize / 2,
     backgroundColor: COLORS.backgroundDark,
   },
-  compactMatchName: {
-    marginTop: 6,
-    maxWidth: SPACING.avatarSize + 16,
-    fontSize: 11,
-    fontWeight: '500',
-    color: COLORS.textLight,
-    textAlign: 'center',
-  },
   compactAvatarInitial: {
     fontSize: 18,
     fontWeight: '600',
@@ -1958,19 +1484,6 @@ const styles = StyleSheet.create({
     borderTopColor: COLORS.border,
     marginTop: SPACING.sectionGap,
   },
-  threadsSectionEyebrow: {
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-    color: COLORS.textMuted,
-    marginBottom: 2,
-  },
-  threadsSectionTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
 
   // Quota banner
   quotaBanner: {
@@ -2041,126 +1554,33 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textLight,
     textAlign: 'center',
-  },
-  skeletonContainer: {
-    flex: 1,
-  },
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // P2-PARITY: ERROR STATE - Matches Phase 2 inline error UI
-  // ═══════════════════════════════════════════════════════════════════════════
-  errorContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 40,
-    marginTop: 60,
-  },
-  errorTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  errorSubtitle: {
-    fontSize: 14,
-    color: COLORS.textLight,
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  retryButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 12,
-    gap: 8,
-  },
-  retryButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.white,
+    lineHeight: 20,
+    maxWidth: 280,
   },
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // EMPTY STATE - Friendly, engaging, clear guidance
-  // ═══════════════════════════════════════════════════════════════════════════
+  // Empty states
   emptyContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 40,
-    paddingTop: 80,
   },
   emptyListContainer: {
     flexGrow: 1,
   },
-  emptyIconContainer: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: COLORS.primary + '12',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 20,
-  },
-  emptyEmoji: {
-    fontSize: 56,
-    marginBottom: 16,
-  },
   emptyTitle: {
     fontSize: 20,
-    fontWeight: '700',
+    fontWeight: '600',
     color: COLORS.text,
-    marginBottom: 10,
-    letterSpacing: -0.3,
+    marginTop: 16,
+    marginBottom: 8,
   },
   emptySubtitle: {
-    fontSize: 15,
-    fontWeight: '500',
+    fontSize: 14,
     color: COLORS.textLight,
     textAlign: 'center',
-    marginBottom: 14,
-  },
-  emptyHint: {
-    fontSize: 14,
-    color: COLORS.textMuted,
-    textAlign: 'center',
-    lineHeight: 22,
-  },
-  emptyPrimaryButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 20,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    borderRadius: 22,
-    backgroundColor: COLORS.primary,
-  },
-  emptyPrimaryButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.white,
-  },
-  emptySecondaryButton: {
-    marginTop: 18,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.background,
-  },
-  emptySecondaryButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  nudgeFooter: {
-    paddingTop: 12,
-    paddingBottom: 24,
+    lineHeight: 20,
+    maxWidth: 300,
   },
 
   // Match Modal

@@ -1,55 +1,55 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { requireAuthenticatedUserId, requireAppUserId, resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId } from './helpers';
 
 // 4-2: Notification TTL (24 hours in milliseconds)
 const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
-const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
-const PHASE2_ONLY_TYPES = new Set([
-  'phase2_match',
-  'phase2_like',
-  'tod_connect',
-]);
-const BELL_EXCLUDED_TYPES = new Set(['message', 'new_message']);
 
-function shouldIncludeBellNotification(
-  type: string,
-  phase: 'phase1' | 'phase2',
-): boolean {
-  if (BELL_EXCLUDED_TYPES.has(type)) {
-    return false;
+type NotificationData = {
+  actorUserId?: string;
+  targetUserId?: string;
+  matchId?: string;
+  conversationId?: string;
+  userId?: string;
+  pairKey?: string;
+  likeType?: 'like' | 'super_like';
+};
+
+function normalizeNotificationData(
+  data: NotificationData | undefined,
+  targetUserId?: string
+): NotificationData | undefined {
+  if (!data && !targetUserId) {
+    return undefined;
   }
 
-  if (phase === 'phase2') {
-    return !PHASE1_ONLY_TYPES.has(type);
-  }
+  const actorUserId = data?.actorUserId ?? data?.userId;
+  const normalizedTargetUserId = data?.targetUserId ?? targetUserId;
 
-  return !PHASE2_ONLY_TYPES.has(type);
+  return {
+    ...data,
+    actorUserId,
+    targetUserId: normalizedTargetUserId,
+  };
 }
 
 // Get notifications for a user
 // 4-3: Filters out expired notifications server-side to prevent render race
-// SAFE DEGRADATION: Returns empty array if auth session not yet established
-// This prevents Discover crash when client fires query before Convex auth is ready
 export const getNotifications = query({
   args: {
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
     limit: v.optional(v.number()),
     unreadOnly: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const { limit = 50, unreadOnly = false } = args;
 
-    // SAFE AUTH CHECK: Return empty array if not authenticated (prevents crash)
-    // Client may fire query before Convex auth session is fully established
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      return []; // Safe degradation - no notifications for unauthenticated users
-    }
-
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!userId) {
-      return []; // User record not found - return empty instead of throwing
+      console.log('[getNotifications] User not found for authUserId:', args.userId);
+      return [];
     }
 
     const now = Date.now();
@@ -70,16 +70,27 @@ export const getNotifications = query({
       )
     );
 
-    return await queryBuilder.order('desc').take(limit);
+    const notifications = await queryBuilder.order('desc').take(limit);
+    return notifications.map((notification) => ({
+      ...notification,
+      data: normalizeNotificationData(notification.data as NotificationData | undefined, notification.userId as string),
+    }));
   },
 });
 
 // Get unread notification count
 // 4-3: Filters out expired notifications server-side
 export const getUnreadCount = query({
-  args: {},
-  handler: async (ctx) => {
-    const userId = await requireAuthenticatedUserId(ctx);
+  args: {
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getUnreadCount] User not found for authUserId:', args.userId);
+      return 0;
+    }
 
     const now = Date.now();
     const notifications = await ctx.db
@@ -101,52 +112,21 @@ export const getUnreadCount = query({
   },
 });
 
-// Get unread bell badge count with phase-aware filtering.
-// Used on hot surfaces so the client does not need the full notification list.
-// DEMO AUTH FIX: Accepts optional token for demo auth mode support.
-export const getBellUnreadCount = query({
-  args: {
-    phase: v.union(v.literal('phase1'), v.literal('phase2')),
-    token: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    // Use requireAppUserId which supports both real Convex auth AND demo session tokens
-    const userId = await requireAppUserId(ctx, args.token);
-    const now = Date.now();
-
-    const unreadNotifications = await ctx.db
-      .query('notifications')
-      .withIndex('by_user_unread', (q) =>
-        q.eq('userId', userId).eq('readAt', undefined),
-      )
-      .filter((q) =>
-        q.or(
-          q.eq(q.field('expiresAt'), undefined),
-          q.gt(q.field('expiresAt'), now),
-        ),
-      )
-      .collect();
-
-    let count = 0;
-    for (const notification of unreadNotifications) {
-      if (shouldIncludeBellNotification(notification.type, args.phase)) {
-        count++;
-      }
-    }
-
-    return count;
-  },
-});
-
 // Mark notification as read
 // P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markAsRead = mutation({
   args: {
     notificationId: v.id('notifications'),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { notificationId } = args;
-    const userId = await requireAuthenticatedUserId(ctx);
+    const { notificationId, authUserId } = args;
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const notification = await ctx.db.get(notificationId);
     if (!notification || notification.userId !== userId) {
@@ -163,10 +143,21 @@ export const markAsRead = mutation({
 
 // Mark all notifications as read
 export const markAllAsRead = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
+  },
+  handler: async (ctx, args) => {
+    const { authUserId } = args;
     const now = Date.now();
-    const userId = await requireAuthenticatedUserId(ctx);
+
+    // AUTH FIX: Resolve acting user from server-side auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const unreadNotifications = await ctx.db
       .query('notifications')
@@ -191,12 +182,9 @@ export const createNotification = mutation({
     type: v.union(
       v.literal('match'),
       v.literal('message'),
+      v.literal('like'),
       v.literal('super_like'),
-      v.literal('comment_connect'),
-      v.literal('confession_reaction'),
-      v.literal('confession_reply'),
       v.literal('crossed_paths'),
-      v.literal('tod_connect'),
       v.literal('subscription'),
       v.literal('weekly_refresh'),
       v.literal('profile_nudge')
@@ -204,16 +192,20 @@ export const createNotification = mutation({
     title: v.string(),
     body: v.string(),
     data: v.optional(v.object({
+      actorUserId: v.optional(v.string()),
+      targetUserId: v.optional(v.string()),
       matchId: v.optional(v.string()),
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
-      confessionId: v.optional(v.string()),
+      pairKey: v.optional(v.string()),
+      likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
     })),
     // 4-1: Optional dedupeKey for upsert behavior
     dedupeKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { userId, type, title, body, data, dedupeKey } = args;
+    const { userId, type, title, body, dedupeKey } = args;
+    const data = normalizeNotificationData(args.data as NotificationData | undefined, userId as string);
     const now = Date.now();
     const expiresAt = now + NOTIFICATION_TTL_MS; // 4-2: Set expiry
 
@@ -260,22 +252,20 @@ export const createNotification = mutation({
 });
 
 // Compute dedupeKey from notification type and data (matches client-side logic)
-function computeDedupeKey(type: string, data?: { matchId?: string; conversationId?: string; userId?: string; pairKey?: string; confessionId?: string }): string {
-  const userId = data?.userId;
+function computeDedupeKey(type: string, data?: NotificationData): string {
+  const actorUserId = data?.actorUserId ?? data?.userId;
   switch (type) {
     case 'match':
-      return `match:${data?.matchId ?? userId ?? 'unknown'}`;
+      return `match:${data?.matchId ?? actorUserId ?? 'unknown'}`;
     case 'message':
-      return `message:${data?.conversationId ?? userId ?? 'unknown'}`;
+      return `message:${data?.conversationId ?? actorUserId ?? 'unknown'}:unread`;
+    case 'like':
+      return `like:${actorUserId ?? 'unknown'}`;
     case 'super_like':
-      return `super_like:${userId ?? 'unknown'}`;
+      return `super_like:${actorUserId ?? 'unknown'}`;
     case 'crossed_paths':
       // Use pairKey if available (deterministic sorted pair format), fallback to userId
-      return data?.pairKey ?? `crossed_paths:${userId ?? 'unknown'}`;
-    case 'confession_reaction':
-      return `confession_reaction:${data?.confessionId ?? userId ?? 'unknown'}`;
-    case 'confession_reply':
-      return `confession_reply:${data?.confessionId ?? userId ?? 'unknown'}`;
+      return data?.pairKey ?? `crossed_paths:${actorUserId ?? 'unknown'}`;
     default:
       return `${type}:unknown`;
   }
@@ -285,12 +275,18 @@ function computeDedupeKey(type: string, data?: { matchId?: string; conversationI
 // P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markReadByDedupeKey = mutation({
   args: {
+    authUserId: v.string(),
     dedupeKey: v.string(),
   },
   handler: async (ctx, args) => {
-    const { dedupeKey } = args;
+    const { authUserId, dedupeKey } = args;
     const now = Date.now();
-    const userId = await requireAuthenticatedUserId(ctx);
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     // Find unread notifications matching the dedupeKey
     const notifications = await ctx.db
@@ -301,8 +297,12 @@ export const markReadByDedupeKey = mutation({
 
     let count = 0;
     for (const notification of notifications) {
-      // Compute dedupeKey from type+data
-      const notifDedupeKey = computeDedupeKey(notification.type, notification.data);
+      const notifDedupeKey =
+        notification.dedupeKey ??
+        computeDedupeKey(
+          notification.type,
+          normalizeNotificationData(notification.data as NotificationData | undefined, notification.userId as string)
+        );
       if (notifDedupeKey === dedupeKey) {
         await ctx.db.patch(notification._id, { readAt: now });
         count++;
@@ -318,12 +318,18 @@ export const markReadByDedupeKey = mutation({
 // P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markReadForConversation = mutation({
   args: {
+    authUserId: v.string(),
     conversationId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId } = args;
+    const { authUserId, conversationId } = args;
     const now = Date.now();
-    const userId = await requireAuthenticatedUserId(ctx);
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     // D2/D4: Use dedupeKey format matching messages.ts: `message:${conversationId}:unread`
     const dedupeKey = `message:${conversationId}:unread`;
@@ -350,10 +356,16 @@ export const markReadForConversation = mutation({
 export const deleteNotification = mutation({
   args: {
     notificationId: v.id('notifications'),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { notificationId } = args;
-    const userId = await requireAuthenticatedUserId(ctx);
+    const { notificationId, authUserId } = args;
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const notification = await ctx.db.get(notificationId);
     if (!notification || notification.userId !== userId) {
@@ -368,9 +380,17 @@ export const deleteNotification = mutation({
 // Delete all notifications
 // P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const deleteAllNotifications = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const userId = await requireAuthenticatedUserId(ctx);
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { authUserId } = args;
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const notifications = await ctx.db
       .query('notifications')

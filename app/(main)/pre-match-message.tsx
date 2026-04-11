@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -17,7 +17,6 @@ import { useAuthStore, useSubscriptionStore } from '@/stores';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
-import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 
 export default function PreMatchMessageScreen() {
   const router = useRouter();
@@ -31,7 +30,6 @@ export default function PreMatchMessageScreen() {
   const [customMessage, setCustomMessage] = useState('');
   const [sending, setSending] = useState(false);
   const [timedOut, setTimedOut] = useState(false);
-  const sendingRef = useRef(false);
 
   useEffect(() => {
     const t = setTimeout(() => setTimedOut(true), 8000);
@@ -40,7 +38,7 @@ export default function PreMatchMessageScreen() {
 
   const targetUser = useQuery(
     api.users.getUserById,
-    !isDemoMode && targetUserId && userId ? { userId: targetUserId as any } : 'skip'
+    !isDemoMode && targetUserId && userId ? { userId: targetUserId as any, viewerId: userId as any } : 'skip'
   );
 
   const templates = useQuery(
@@ -50,16 +48,10 @@ export default function PreMatchMessageScreen() {
       : 'skip'
   );
 
-  const canSend = useQuery(
-    api.messages.canSendMessage,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
-  );
-
   const sendPreMatchMessage = useMutation(api.messages.sendPreMatchMessage);
 
   const handleSend = async () => {
-    if (sendingRef.current) return;
-    if (!userId || !targetUserId || !token) return;
+    if (!userId || !targetUserId) return;
 
     const message = selectedTemplate
       ? templates?.find((t) => t.id === selectedTemplate)?.text || customMessage
@@ -79,22 +71,15 @@ export default function PreMatchMessageScreen() {
       }
     }
 
-    if (!isDemoMode && !canSend?.canSend) {
-      Alert.alert('No Messages Remaining', 'You have used all your weekly messages. They reset on Monday.');
-      router.push('/(main)/subscription');
-      return;
-    }
-
     setSending(true);
-    sendingRef.current = true;
     try {
-      // Live pre-match sends use the validated session token as the source of truth.
+      // MSG-002 FIX: Use authUserId for server-side verification
       await sendPreMatchMessage({
-        token,
+        token: token ?? undefined,
+        authUserId: userId!,
         toUserId: targetUserId as any,
         content: message,
         templateId: selectedTemplate || undefined,
-        clientMessageId: `pre_match_${targetUserId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       });
       Alert.alert('Success', 'Message sent! They\'ll see it at the top of their screen.', [
         { text: 'OK', onPress: () => router.back() },
@@ -103,7 +88,6 @@ export default function PreMatchMessageScreen() {
       Alert.alert('Error', error.message || 'Failed to send message');
     } finally {
       setSending(false);
-      sendingRef.current = false;
     }
   };
 
@@ -135,10 +119,10 @@ export default function PreMatchMessageScreen() {
 
       <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer}>
         <View style={styles.targetUserCard}>
-          <Avatar uri={getPrimaryPhotoUrl(targetUser.photos)} size={64} />
+          <Avatar uri={targetUser.photos?.[0]?.url} size={64} />
           <Text style={styles.targetUserName}>{targetUser.name}</Text>
           <Text style={styles.targetUserSubtext}>
-            Send a message to stand out!{isDemoMode ? '' : ` (Uses 1 of your ${canSend?.remaining || 0} weekly messages)`}
+            Send a message to stand out before you match.
           </Text>
         </View>
 
@@ -199,14 +183,6 @@ export default function PreMatchMessageScreen() {
           disabled={sending || (!selectedTemplate && !customMessage.trim())}
           fullWidth
         />
-        {!isDemoMode && (
-          <>
-            <Text style={styles.footerText}>
-              Messages remaining: {canSend?.remaining || 0} of {canSend?.total || 0}
-            </Text>
-            <Text style={styles.footerSubtext}>Resets Monday</Text>
-          </>
-        )}
       </View>
     </View>
   );
