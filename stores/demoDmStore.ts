@@ -22,6 +22,7 @@ export interface DemoDmMessage {
   senderId: string;
   createdAt: number;
   readAt?: number;
+  deliveredAt?: number;
   // Voice message fields
   audioUri?: string;
   durationMs?: number;

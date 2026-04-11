@@ -19,6 +19,7 @@ export interface ProfileData {
   lastActive?: number;
   createdAt?: number;
   profilePrompts?: { question: string; answer: string }[];
+  photoBlurred?: boolean;
   /** @deprecated Use privateIntentKeys[] instead */
   privateIntentKey?: string;
   /** Phase-2 only: Private intent category keys (multi-select, 1-5) */
@@ -65,6 +66,7 @@ export function toProfileData(p: any): ProfileData {
     lastActive: p.lastActive ?? p.lastActiveAt,
     createdAt: p.createdAt,
     profilePrompts: p.profilePrompts,
+    photoBlurred: p.photoBlurred === true,
     // Phase-2 only: preserve intent keys (array preferred, single for backward compat)
     privateIntentKeys: p.privateIntentKeys ?? p.intentKeys ?? (p.privateIntentKey ? [p.privateIntentKey] : undefined),
     privateIntentKey: p.privateIntentKey ?? (p.privateIntentKeys?.[0] || p.intentKeys?.[0]),

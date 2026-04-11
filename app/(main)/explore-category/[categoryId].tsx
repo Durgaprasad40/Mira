@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -7,6 +7,7 @@ import { useExploreProfiles } from '@/hooks/useExploreProfiles';
 import { EXPLORE_CATEGORIES } from '@/components/explore/exploreCategories';
 import { DiscoverCardStack } from '@/components/screens/DiscoverCardStack';
 import { COLORS } from '@/lib/constants';
+import { LoadingGuard } from '@/components/safety/LoadingGuard';
 
 const HEADER_H = 48;
 
@@ -14,16 +15,15 @@ export default function ExploreCategoryScreen() {
   const { categoryId } = useLocalSearchParams<{ categoryId: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const profiles = useExploreProfiles();
+  const [refreshKey, setRefreshKey] = useState(0);
+  const {
+    profiles,
+    isLoading,
+  } = useExploreProfiles({ categoryId, refreshKey });
 
   const cat = useMemo(
     () => EXPLORE_CATEGORIES.find((c) => c.id === categoryId),
     [categoryId],
-  );
-
-  const items = useMemo(
-    () => profiles.filter(cat?.predicate ?? (() => false)),
-    [profiles, cat],
   );
 
   return (
@@ -39,24 +39,39 @@ export default function ExploreCategoryScreen() {
         <View style={styles.headerBtn} />
       </View>
 
-      {items.length > 0 ? (
-        <DiscoverCardStack externalProfiles={items} hideHeader />
-      ) : (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyEmoji}>🔍</Text>
-          <Text style={styles.emptyTitle}>No profiles yet</Text>
-          <Text style={styles.emptySubtitle}>
-            No one matches this category right now. Check back later or explore other categories.
-          </Text>
-          <TouchableOpacity
-            style={styles.emptyBackButton}
-            onPress={() => router.back()}
-          >
-            <Ionicons name="arrow-back" size={18} color={COLORS.white} />
-            <Text style={styles.emptyBackText}>Back to Explore</Text>
-          </TouchableOpacity>
-        </View>
-      )}
+      <LoadingGuard
+        isLoading={isLoading}
+        onRetry={() => setRefreshKey((key) => key + 1)}
+        title="Category is still loading"
+        subtitle="We’re still fetching profiles for this Explore category. Retry to request a fresh feed."
+      >
+        {isLoading ? (
+          <View style={styles.loadingState}>
+            <ActivityIndicator size="large" color={COLORS.primary} />
+          </View>
+        ) : profiles.length > 0 ? (
+          <DiscoverCardStack externalProfiles={profiles} hideHeader />
+        ) : (
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyEmoji}>🔍</Text>
+            <Text style={styles.emptyTitle}>
+              {cat ? 'No profiles yet' : 'Category unavailable'}
+            </Text>
+            <Text style={styles.emptySubtitle}>
+              {cat
+                ? 'No one matches this category right now. Check back later or explore other categories.'
+                : 'This Explore category is no longer available.'}
+            </Text>
+            <TouchableOpacity
+              style={styles.emptyBackButton}
+              onPress={() => router.back()}
+            >
+              <Ionicons name="arrow-back" size={18} color={COLORS.white} />
+              <Text style={styles.emptyBackText}>Back to Explore</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </LoadingGuard>
     </View>
   );
 }
@@ -79,6 +94,11 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.text,
     textAlign: 'center',
+  },
+  loadingState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   emptyState: {
     flex: 1,

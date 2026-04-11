@@ -53,6 +53,7 @@ export default function ViewProfileScreen() {
   const { userId: currentUserId, token } = useAuthStore();
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [showReportBlock, setShowReportBlock] = useState(false);
+  const [brokenPhotoIndexes, setBrokenPhotoIndexes] = useState<number[]>([]);
 
   // Confess preview: mark as used on successful screen mount (one-time only)
   const markPreviewUsed = useConfessPreviewStore((s) => s.markPreviewUsed);
@@ -66,11 +67,16 @@ export default function ViewProfileScreen() {
     }
   }, [isConfessPreview, confessionId, receiverId, markPreviewUsed]);
 
+  useEffect(() => {
+    setCurrentPhotoIndex(0);
+    setBrokenPhotoIndexes([]);
+  }, [userId]);
+
   // Phase-1: Use users.getUserById
   const convexPhase1Profile = useQuery(
     api.users.getUserById,
     !isDemoMode && !isPhase2 && userId && currentUserId
-      ? { userId: userId as any, viewerId: currentUserId as any }
+      ? { userId: userId as any, authUserId: currentUserId }
       : 'skip'
   );
 
@@ -78,7 +84,14 @@ export default function ViewProfileScreen() {
   const sharedPlaces = useQuery(
     api.crossedPaths.getSharedPlaces,
     !isDemoMode && !isPhase2 && userId && currentUserId
-      ? { viewerId: currentUserId as any, profileUserId: userId as any }
+      ? { authUserId: currentUserId, profileUserId: userId as any }
+      : 'skip'
+  );
+
+  const convexCurrentUser = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && currentUserId
+      ? { userId: currentUserId }
       : 'skip'
   );
 
@@ -317,16 +330,30 @@ export default function ViewProfileScreen() {
             const index = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
             setCurrentPhotoIndex(index);
           }}
-          renderItem={({ item }) => (
-            <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
-              <Image
-                source={{ uri: item.url }}
-                style={{ width: '100%', height: 500 }}
-                contentFit="cover"
-                blurRadius={isPhase2 ? 20 : 0}
-              />
-            </View>
-          )}
+          renderItem={({ item, index }) => {
+            const hasBrokenImage = brokenPhotoIndexes.includes(index);
+            return (
+              <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
+                {item?.url && !hasBrokenImage ? (
+                  <Image
+                    source={{ uri: item.url }}
+                    style={{ width: '100%', height: 500 }}
+                    contentFit="cover"
+                    blurRadius={isPhase2 ? 20 : profile.photoBlurred ? 25 : 0}
+                    onError={() => {
+                      setBrokenPhotoIndexes((current) => (
+                        current.includes(index) ? current : [...current, index]
+                      ));
+                    }}
+                  />
+                ) : (
+                  <View style={styles.heroPhotoFallback}>
+                    <Ionicons name="image-outline" size={56} color={COLORS.textLight} />
+                  </View>
+                )}
+              </View>
+            );
+          }}
           style={styles.photoCarousel}
         />
       ) : (
@@ -355,7 +382,7 @@ export default function ViewProfileScreen() {
             {profile.name}, {age}
           </Text>
           {profile.distance !== undefined && (
-            <Text style={styles.distance}>{profile.distance} mi away</Text>
+            <Text style={styles.distance}>{profile.distance} km away</Text>
           )}
         </View>
 
@@ -545,7 +572,9 @@ export default function ViewProfileScreen() {
 
         {/* Shared Interests - Both phases */}
         {(() => {
-          const myActivities: string[] = isDemoMode ? getDemoCurrentUser().activities : [];
+          const myActivities: string[] = isDemoMode
+            ? getDemoCurrentUser().activities
+            : convexCurrentUser?.activities ?? [];
           const shared = (profile.activities || []).filter((a: string) => myActivities.includes(a));
           if (shared.length === 0) return null;
           return (
@@ -720,6 +749,13 @@ const styles = StyleSheet.create({
   photoPlaceholder: {
     width: '100%',
     // Height is now dynamic: 500 + insets.top (applied inline)
+    backgroundColor: COLORS.backgroundDark,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroPhotoFallback: {
+    width: '100%',
+    height: 500,
     backgroundColor: COLORS.backgroundDark,
     alignItems: 'center',
     justifyContent: 'center',

@@ -1,7 +1,12 @@
 import { v } from 'convex/values';
-import { query } from './_generated/server';
-import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+import { query, QueryCtx } from './_generated/server';
+import { Id, Doc } from './_generated/dataModel';
+import {
+  resolveUserIdByAuthId,
+  requireAuthenticatedUser,
+  sanitizePublicPhotos,
+  getPublicLastActive,
+} from './helpers';
 import {
   CandidateProfile,
   CurrentUser,
@@ -67,6 +72,388 @@ function toRad(deg: number): number {
 function isDistanceAllowed(distance: number | undefined, maxDistanceKm: number): boolean {
   if (distance == null) return true;
   return distance <= maxDistanceKm;
+}
+
+const EXPLORE_NEAR_ME_DISTANCE_KM = 5;
+const ONLINE_NOW_WINDOW_MS = 10 * 60 * 1000;
+const ACTIVE_TODAY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+const EXPLORE_CATEGORY_IDS = [
+  'long_term',
+  'short_term',
+  'figuring_out',
+  'short_to_long',
+  'long_to_short',
+  'new_friends',
+  'open_to_anything',
+  'near_me',
+  'online_now',
+  'active_today',
+  'free_tonight',
+  'coffee_date',
+  'nature_lovers',
+  'binge_watchers',
+  'travel',
+  'gaming',
+  'fitness',
+  'music',
+] as const;
+
+type ExploreCategoryId = (typeof EXPLORE_CATEGORY_IDS)[number];
+
+type ExploreCandidate = {
+  id: Id<'users'>;
+  name: string;
+  age: number;
+  gender: Doc<'users'>['gender'];
+  bio: string;
+  isVerified: boolean;
+  verificationStatus: string;
+  city?: string;
+  distance?: number;
+  lastActive?: number;
+  lookingFor: string[];
+  relationshipIntent: string[];
+  activities: string[];
+  profilePrompts: { question: string; answer: string }[];
+  photos: ReturnType<typeof sanitizePublicPhotos>;
+  photoBlurred: boolean;
+  photoCount: number;
+  createdAt: number;
+  isIncognito: boolean;
+};
+
+type ExploreViewerContext = {
+  currentUser: Doc<'users'>;
+  swipedUserIds: Set<string>;
+  matchedUserIds: Set<string>;
+  blockedUserIds: Set<string>;
+  viewerReportedIds: Set<string>;
+  conversationPartnerIds: Set<string>;
+};
+
+function isExploreCategoryId(value: string | undefined): value is ExploreCategoryId {
+  return !!value && (EXPLORE_CATEGORY_IDS as readonly string[]).includes(value);
+}
+
+function canSeeIncognitoProfiles(viewer: Doc<'users'>): boolean {
+  return viewer.gender === 'female' || viewer.subscriptionTier === 'premium';
+}
+
+function shouldShowReducedReach(viewerId: string, candidateId: string): boolean {
+  const seeded = rotationScore(viewerId, candidateId);
+  return seeded <= 50;
+}
+
+async function loadExploreViewerContext(
+  ctx: QueryCtx,
+  viewerId: Id<'users'>,
+): Promise<ExploreViewerContext | null> {
+  const currentUser = await ctx.db.get(viewerId);
+  if (!currentUser) return null;
+
+  const now = Date.now();
+  const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
+
+  const [
+    mySwipes,
+    matchesAsUser1,
+    matchesAsUser2,
+    blocksICreated,
+    blocksAgainstMe,
+    myReports,
+    myConversationParticipations,
+  ] = await Promise.all([
+    ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', viewerId))
+      .collect(),
+    ctx.db
+      .query('matches')
+      .withIndex('by_user1', (q) => q.eq('user1Id', viewerId))
+      .filter((q) => q.eq(q.field('isActive'), true))
+      .collect(),
+    ctx.db
+      .query('matches')
+      .withIndex('by_user2', (q) => q.eq('user2Id', viewerId))
+      .filter((q) => q.eq(q.field('isActive'), true))
+      .collect(),
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocker', (q) => q.eq('blockerId', viewerId))
+      .collect(),
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerId))
+      .collect(),
+    ctx.db
+      .query('reports')
+      .withIndex('by_reporter', (q) => q.eq('reporterId', viewerId))
+      .collect(),
+    ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', viewerId))
+      .collect(),
+  ]);
+
+  const swipedUserIds = new Set<string>();
+  for (const swipe of mySwipes) {
+    if (swipe.action === 'pass' && swipe.createdAt < passExpiry) continue;
+    swipedUserIds.add(swipe.toUserId as string);
+  }
+
+  const matchedUserIds = new Set<string>();
+  for (const match of matchesAsUser1) matchedUserIds.add(match.user2Id as string);
+  for (const match of matchesAsUser2) matchedUserIds.add(match.user1Id as string);
+
+  const blockedUserIds = new Set<string>();
+  for (const block of blocksICreated) blockedUserIds.add(block.blockedUserId as string);
+  for (const block of blocksAgainstMe) blockedUserIds.add(block.blockerId as string);
+
+  const viewerReportedIds = new Set<string>();
+  for (const report of myReports) viewerReportedIds.add(report.reportedUserId as string);
+
+  const conversationPartnerIds = new Set<string>();
+  if (myConversationParticipations.length > 0) {
+    const conversations = await Promise.all(
+      myConversationParticipations.map((participation) => ctx.db.get(participation.conversationId)),
+    );
+    for (const conversation of conversations) {
+      if (!conversation) continue;
+      for (const participantId of conversation.participants) {
+        if (participantId !== viewerId) {
+          conversationPartnerIds.add(participantId as string);
+        }
+      }
+    }
+  }
+
+  return {
+    currentUser,
+    swipedUserIds,
+    matchedUserIds,
+    blockedUserIds,
+    viewerReportedIds,
+    conversationPartnerIds,
+  };
+}
+
+async function collectExploreUserBuckets(
+  ctx: QueryCtx,
+  genders: string[],
+): Promise<Doc<'users'>[]> {
+  const uniqueGenders = Array.from(new Set(genders));
+  const buckets = await Promise.all(
+    uniqueGenders.map((gender) =>
+      ctx.db
+        .query('users')
+        .withIndex('by_gender', (q) => q.eq('gender', gender as Doc<'users'>['gender']))
+        .collect()
+    ),
+  );
+
+  const deduped = new Map<string, Doc<'users'>>();
+  for (const bucket of buckets) {
+    for (const user of bucket) {
+      deduped.set(user._id as string, user);
+    }
+  }
+  return Array.from(deduped.values());
+}
+
+function matchesExploreCategory(candidate: ExploreCandidate, categoryId: ExploreCategoryId): boolean {
+  switch (categoryId) {
+    case 'long_term':
+      return candidate.relationshipIntent.includes('long_term');
+    case 'short_term':
+      return candidate.relationshipIntent.includes('short_term') || candidate.relationshipIntent.includes('fwb');
+    case 'figuring_out':
+      return candidate.relationshipIntent.includes('figuring_out');
+    case 'short_to_long':
+      return candidate.relationshipIntent.includes('short_to_long');
+    case 'long_to_short':
+      return candidate.relationshipIntent.includes('long_to_short');
+    case 'new_friends':
+      return candidate.relationshipIntent.includes('new_friends');
+    case 'open_to_anything':
+      return candidate.relationshipIntent.includes('open_to_anything');
+    case 'near_me':
+      return typeof candidate.distance === 'number' && candidate.distance <= EXPLORE_NEAR_ME_DISTANCE_KM;
+    case 'online_now':
+      return typeof candidate.lastActive === 'number' && Date.now() - candidate.lastActive <= ONLINE_NOW_WINDOW_MS;
+    case 'active_today':
+      return typeof candidate.lastActive === 'number' && Date.now() - candidate.lastActive <= ACTIVE_TODAY_WINDOW_MS;
+    case 'free_tonight':
+      return candidate.activities.includes('free_tonight');
+    case 'coffee_date':
+      return candidate.activities.includes('coffee');
+    case 'nature_lovers':
+      return candidate.activities.includes('outdoors');
+    case 'binge_watchers':
+      return candidate.activities.includes('movies');
+    case 'travel':
+      return candidate.activities.includes('travel');
+    case 'gaming':
+      return candidate.activities.includes('gaming');
+    case 'fitness':
+      return candidate.activities.includes('gym_partner') || candidate.activities.includes('gym');
+    case 'music':
+      return candidate.activities.includes('concerts') || candidate.activities.includes('music_lover');
+    default:
+      return false;
+  }
+}
+
+function scoreExploreCandidate(candidate: ExploreCandidate, currentUser: Doc<'users'>): number {
+  const activity = candidate.lastActive ? activityScore(candidate.lastActive) : 5;
+  const completeness = completenessScore(candidate, candidate.photoCount);
+  const preference = preferenceMatchScore(candidate, currentUser);
+  const rotation = rotationScore(currentUser._id as string, candidate.id as string);
+  return 0.45 * activity + 0.35 * completeness + 0.15 * preference + 0.05 * rotation;
+}
+
+function sortExploreCandidates(
+  candidates: ExploreCandidate[],
+  currentUser: Doc<'users'>,
+  categoryId?: ExploreCategoryId,
+): ExploreCandidate[] {
+  const next = [...candidates];
+
+  if (categoryId === 'near_me') {
+    next.sort((a, b) => (a.distance ?? Number.POSITIVE_INFINITY) - (b.distance ?? Number.POSITIVE_INFINITY));
+    return next;
+  }
+
+  if (categoryId === 'online_now' || categoryId === 'active_today') {
+    next.sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0));
+    return next;
+  }
+
+  if (categoryId && ['coffee_date', 'nature_lovers', 'binge_watchers', 'travel', 'gaming', 'fitness', 'music'].includes(categoryId)) {
+    const viewerActivities = new Set<string>((currentUser.activities ?? []) as string[]);
+    next.sort((a, b) => {
+      const sharedA = a.activities.filter((activity) => viewerActivities.has(activity)).length;
+      const sharedB = b.activities.filter((activity) => viewerActivities.has(activity)).length;
+      if (sharedA !== sharedB) return sharedB - sharedA;
+      return scoreExploreCandidate(b, currentUser) - scoreExploreCandidate(a, currentUser);
+    });
+    return next;
+  }
+
+  next.sort((a, b) => scoreExploreCandidate(b, currentUser) - scoreExploreCandidate(a, currentUser));
+  return next;
+}
+
+async function buildEligibleExploreCandidates(
+  ctx: QueryCtx,
+  viewerId: Id<'users'>,
+  categoryId?: ExploreCategoryId,
+): Promise<{ currentUser: Doc<'users'>; candidates: ExploreCandidate[] } | null> {
+  const viewerContext = await loadExploreViewerContext(ctx, viewerId);
+  if (!viewerContext) return null;
+
+  const { currentUser } = viewerContext;
+  const genders: string[] = Array.from(
+    new Set((currentUser.lookingFor ?? []) as string[]),
+  );
+  if (genders.length === 0) {
+    return { currentUser, candidates: [] };
+  }
+
+  const allUsers = await collectExploreUserBuckets(ctx, genders);
+  const myAge = calculateAge(currentUser.dateOfBirth);
+  const filteredUsers: Array<{ user: Doc<'users'>; age: number; distance?: number }> = [];
+
+  for (const user of allUsers) {
+    if (user._id === viewerId) continue;
+    if (!user.isActive || user.isBanned) continue;
+    if (isUserPaused(user)) continue;
+
+    if (user.incognitoMode && !canSeeIncognitoProfiles(currentUser)) continue;
+
+    if (!currentUser.lookingFor.includes(user.gender)) continue;
+    if (!user.lookingFor.includes(currentUser.gender)) continue;
+
+    const userAge = calculateAge(user.dateOfBirth);
+    if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;
+    if (myAge < user.minAge || myAge > user.maxAge) continue;
+
+    let distance: number | undefined;
+    if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
+      distance = calculateDistance(
+        currentUser.latitude,
+        currentUser.longitude,
+        user.latitude,
+        user.longitude,
+      );
+      if (!isDistanceAllowed(distance, currentUser.maxDistance)) continue;
+    }
+
+    if (viewerContext.swipedUserIds.has(user._id as string)) continue;
+    if (viewerContext.matchedUserIds.has(user._id as string)) continue;
+    if (viewerContext.blockedUserIds.has(user._id as string)) continue;
+    if (viewerContext.viewerReportedIds.has(user._id as string)) continue;
+    if (viewerContext.conversationPartnerIds.has(user._id as string)) continue;
+
+    if (user.verificationEnforcementLevel === 'security_only') continue;
+    if (
+      user.verificationEnforcementLevel === 'reduced_reach' &&
+      !shouldShowReducedReach(viewerId as string, user._id as string)
+    ) {
+      continue;
+    }
+
+    filteredUsers.push({ user, age: userAge, distance });
+  }
+
+  const photoResults = await Promise.all(
+    filteredUsers.map(({ user }) =>
+      ctx.db
+        .query('photos')
+        .withIndex('by_user_order', (q) => q.eq('userId', user._id))
+        .collect()
+    ),
+  );
+
+  const candidates: ExploreCandidate[] = [];
+  for (let i = 0; i < filteredUsers.length; i++) {
+    const { user, age, distance } = filteredUsers[i];
+    const publicPhotos = sanitizePublicPhotos(photoResults[i]);
+    if (publicPhotos.length === 0) continue;
+
+    const candidate: ExploreCandidate = {
+      id: user._id,
+      name: user.name,
+      age,
+      gender: user.gender,
+      bio: user.bio,
+      isVerified: user.isVerified,
+      verificationStatus: user.verificationStatus || 'unverified',
+      city: user.city,
+      distance,
+      lastActive: getPublicLastActive(user),
+      lookingFor: user.lookingFor,
+      relationshipIntent: user.relationshipIntent,
+      activities: user.activities,
+      profilePrompts: user.profilePrompts ?? [],
+      photos: publicPhotos,
+      photoBlurred: user.photoBlurred === true,
+      photoCount: publicPhotos.length,
+      createdAt: user.createdAt,
+      isIncognito: user.incognitoMode === true,
+    };
+
+    if (categoryId && !matchesExploreCategory(candidate, categoryId)) {
+      continue;
+    }
+
+    candidates.push(candidate);
+  }
+
+  return {
+    currentUser,
+    candidates: sortExploreCandidates(candidates, currentUser, categoryId),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -678,294 +1065,90 @@ export const getDiscoverProfiles = query({
 
 export const getExploreProfiles = query({
   args: {
-    userId: v.id('users'),
-    genderFilter: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other')))),
-    minAge: v.optional(v.number()),
-    maxAge: v.optional(v.number()),
-    maxDistance: v.optional(v.number()),
-    relationshipIntent: v.optional(v.array(v.union(
-      v.literal('long_term'), v.literal('short_term'), v.literal('fwb'),
-      v.literal('figuring_out'), v.literal('short_to_long'), v.literal('long_to_short'),
-      v.literal('new_friends'), v.literal('open_to_anything'),
-    ))),
-    activities: v.optional(v.array(v.union(
-      v.literal('coffee'), v.literal('date_night'), v.literal('sports'),
-      v.literal('movies'), v.literal('free_tonight'), v.literal('foodie'),
-      v.literal('gym_partner'), v.literal('concerts'), v.literal('travel'),
-      v.literal('outdoors'), v.literal('art_culture'), v.literal('gaming'),
-      v.literal('nightlife'), v.literal('brunch'), v.literal('study_date'),
-      v.literal('this_weekend'), v.literal('beach_pool'), v.literal('road_trip'),
-      v.literal('photography'), v.literal('volunteering'),
-    ))),
-    sortByInterests: v.optional(v.boolean()),
+    authUserId: v.string(),
+    categoryId: v.optional(v.string()),
     limit: v.optional(v.number()),
     offset: v.optional(v.number()),
+    refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const {
-      userId, genderFilter, minAge, maxAge, maxDistance,
-      relationshipIntent, activities, sortByInterests,
-      limit = 20, offset = 0,
-    } = args;
+    const viewerId = await requireAuthenticatedUser(ctx, args.authUserId);
+    const categoryId = isExploreCategoryId(args.categoryId) ? args.categoryId : undefined;
+    const { limit, offset = 0 } = args;
 
-    const currentUser = await ctx.db.get(userId);
-    if (!currentUser) return { profiles: [], totalCount: 0 };
-    if (isUserPaused(currentUser)) return { profiles: [], totalCount: 0 };
-
-    const effectiveGender = genderFilter || currentUser.lookingFor;
-    const effectiveMinAge = minAge ?? currentUser.minAge;
-    const effectiveMaxAge = maxAge ?? currentUser.maxAge;
-    const effectiveMaxDistance = maxDistance ?? currentUser.maxDistance;
-
-    // PERF FIX: Pre-fetch all swipes, matches, blocks upfront (converts O(4*N) queries to O(4))
-    // Same efficient pattern as getDiscoverProfiles
-    const now = Date.now();
-    const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
-
-    // P1/R3 FIX: Adaptive buffer sizing instead of full table scan
-    // Base multiplier with adjustment for filter strictness
-    const hasStrictFilters = (relationshipIntent && relationshipIntent.length > 0) ||
-                              (activities && activities.length > 0);
-    const bufferMultiplier = hasStrictFilters ? 20 : 10; // Higher buffer for stricter filters
-    const fetchLimit = Math.max((offset + limit) * bufferMultiplier, 200); // Min 200 candidates
-
-    const [
-      allUsers,
-      mySwipes,
-      matchesAsUser1,
-      matchesAsUser2,
-      blocksICreated,
-      blocksAgainstMe,
-    ] = await Promise.all([
-      // P0 FIX: Remove verification hard-filter - verification is a ranking boost, not exclusion
-      // Use take() with buffer for efficiency without filtering by verification status
-      ctx.db.query('users')
-        .take(fetchLimit),
-      // All my swipes (likes/passes)
-      ctx.db
-        .query('likes')
-        .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
-        .collect(),
-      // Matches where I'm user1
-      ctx.db
-        .query('matches')
-        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .collect(),
-      // Matches where I'm user2
-      ctx.db
-        .query('matches')
-        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .collect(),
-      // Blocks I created
-      ctx.db
-        .query('blocks')
-        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
-        .collect(),
-      // Blocks against me
-      ctx.db
-        .query('blocks')
-        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
-        .collect(),
-    ]);
-
-    // Build Maps/Sets for O(1) lookups
-    // Swiped users: exclude likes/superlikes, and recent passes (within 7 days)
-    const swipedUserIds = new Set<string>();
-    for (const swipe of mySwipes) {
-      // Skip expired passes (can re-show after 7 days)
-      if (swipe.action === 'pass' && swipe.createdAt < passExpiry) continue;
-      swipedUserIds.add(swipe.toUserId as string);
+    const result = await buildEligibleExploreCandidates(ctx, viewerId, categoryId);
+    if (!result) {
+      return { profiles: [], totalCount: 0 };
     }
 
-    const matchedUserIds = new Set<string>();
-    for (const m of matchesAsUser1) matchedUserIds.add(m.user2Id as string);
-    for (const m of matchesAsUser2) matchedUserIds.add(m.user1Id as string);
-
-    const blockedUserIds = new Set<string>();
-    for (const b of blocksICreated) blockedUserIds.add(b.blockedUserId as string);
-    for (const b of blocksAgainstMe) blockedUserIds.add(b.blockerId as string);
-
-    // STABILITY FIX: C-9 - Two-pass approach to eliminate N+1 photo queries
-    // First pass: filter candidates, collect user objects with computed values
-    type FilteredUser = { user: typeof allUsers[0]; userAge: number; distance: number | undefined };
-    const filteredUsers: FilteredUser[] = [];
-
-    for (const user of allUsers) {
-      if (user._id === userId) continue;
-      if (!user.isActive || user.isBanned) continue;
-      if (isUserPaused(user)) continue;
-      // P0 FIX: Verification is a ranking boost, not a hard filter - no verification check here
-
-      if (!effectiveGender.includes(user.gender)) continue;
-
-      const userAge = calculateAge(user.dateOfBirth);
-      if (userAge < effectiveMinAge || userAge > effectiveMaxAge) continue;
-
-      let distance: number | undefined;
-      if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
-        const dist = calculateDistance(
-          currentUser.latitude, currentUser.longitude,
-          user.latitude, user.longitude,
-        );
-        if (!isDistanceAllowed(dist, effectiveMaxDistance)) continue;
-        distance = dist;
-      }
-
-      if (relationshipIntent && relationshipIntent.length > 0) {
-        if (!relationshipIntent.some((i) => user.relationshipIntent.includes(i))) continue;
-      }
-
-      if (activities && activities.length > 0) {
-        if (!activities.some((a) => user.activities.includes(a))) continue;
-      }
-
-      // PERF FIX: O(1) Set lookups instead of per-user database queries
-      if (swipedUserIds.has(user._id as string)) continue;
-      if (matchedUserIds.has(user._id as string)) continue;
-      if (blockedUserIds.has(user._id as string)) continue;
-
-      filteredUsers.push({ user, userAge, distance });
-    }
-
-    // STABILITY FIX: C-9 - Batch fetch photos with chunked concurrency (avoids N+1)
-    const CHUNK_SIZE = 20;
-    const photosByUser = new Map<string, any[]>();
-    for (let i = 0; i < filteredUsers.length; i += CHUNK_SIZE) {
-      const chunk = filteredUsers.slice(i, i + CHUNK_SIZE);
-      const chunkPhotos = await Promise.all(
-        chunk.map((f) =>
-          ctx.db
-            .query('photos')
-            .withIndex('by_user_order', (q) => q.eq('userId', f.user._id))
-            .collect()
-        )
-      );
-      for (let j = 0; j < chunk.length; j++) {
-        photosByUser.set(chunk[j].user._id as string, chunkPhotos[j]);
-      }
-    }
-
-    // Second pass: build candidates with photos from the map
-    const candidates = filteredUsers.map(({ user, userAge, distance }) => {
-      const photos = photosByUser.get(user._id as string) ?? [];
-      return {
-        id: user._id,
-        name: user.name,
-        age: userAge,
-        gender: user.gender,
-        bio: user.bio,
-        isVerified: user.isVerified,
-        city: user.city,
-        distance,
-        lastActive: user.lastActive,
-        lookingFor: user.lookingFor,
-        relationshipIntent: user.relationshipIntent,
-        activities: user.activities,
-        profilePrompts: user.profilePrompts,
-        photos, // Already sorted by order via by_user_order index
-        photoBlurred: user.photoBlurred === true,
-        photoCount: photos.filter((p: any) => !p.isNsfw).length,
-        isIncognito: user.incognitoMode === true,
-      };
-    });
-
-    // Sort: interests sort uses shared activities, filtered categories use relevance,
-    // default falls back to the simple 4-signal score.
-    if (sortByInterests && currentUser.activities.length > 0) {
-      candidates.sort((a, b) => {
-        const shA = a.activities.filter((act) => currentUser.activities.includes(act)).length;
-        const shB = b.activities.filter((act) => currentUser.activities.includes(act)).length;
-        return shB - shA;
-      });
-    } else if ((relationshipIntent && relationshipIntent.length > 0) || (activities && activities.length > 0)) {
-      candidates.sort((a, b) => {
-        let sA = 0, sB = 0;
-        if (relationshipIntent) {
-          sA += relationshipIntent.filter((i) => a.relationshipIntent.includes(i)).length;
-          sB += relationshipIntent.filter((i) => b.relationshipIntent.includes(i)).length;
-        }
-        if (activities) {
-          sA += activities.filter((act) => a.activities.includes(act)).length;
-          sB += activities.filter((act) => b.activities.includes(act)).length;
-        }
-        return sB - sA;
-      });
-    } else {
-      // Default: rank by the same 4-signal formula
-      candidates.sort((a, b) => {
-        const scoreA = 0.45 * activityScore(a.lastActive) +
-          0.35 * completenessScore(a, a.photoCount) +
-          0.15 * preferenceMatchScore(a, currentUser) +
-          0.05 * rotationScore(currentUser._id as string, a.id as string);
-        const scoreB = 0.45 * activityScore(b.lastActive) +
-          0.35 * completenessScore(b, b.photoCount) +
-          0.15 * preferenceMatchScore(b, currentUser) +
-          0.05 * rotationScore(currentUser._id as string, b.id as string);
-        return scoreB - scoreA;
-      });
-    }
-
+    const start = Math.max(0, offset);
+    const end = typeof limit === 'number' ? start + limit : undefined;
     return {
-      profiles: candidates.slice(offset, offset + limit),
-      totalCount: candidates.length,
+      profiles: result.candidates.slice(start, end),
+      totalCount: result.candidates.length,
     };
   },
 });
 
 // ---------------------------------------------------------------------------
-// getFilterCounts — badge numbers for explore grid
+// getExploreCategoryCounts — accurate badge numbers for the explore grid
 // ---------------------------------------------------------------------------
 
-export const getFilterCounts = query({
-  args: { userId: v.id('users') },
+export const getExploreCategoryCounts = query({
+  args: {
+    authUserId: v.string(),
+    refreshKey: v.optional(v.number()),
+  },
   handler: async (ctx, args) => {
-    const { userId } = args;
-    const currentUser = await ctx.db.get(userId);
-    if (!currentUser) return {};
+    const viewerId = await requireAuthenticatedUser(ctx, args.authUserId);
+    const result = await buildEligibleExploreCandidates(ctx, viewerId);
+    if (!result) {
+      return { counts: {}, totalEligibleCount: 0 };
+    }
 
+    const counts: Record<string, number> = {};
+    for (const categoryId of EXPLORE_CATEGORY_IDS) {
+      counts[categoryId] = result.candidates.filter((candidate) => matchesExploreCategory(candidate, categoryId)).length;
+    }
+
+    return {
+      counts,
+      totalEligibleCount: result.candidates.length,
+    };
+  },
+});
+
+// Backward-compatible legacy helper for any older Explore callers.
+export const getFilterCounts = query({
+  args: { authUserId: v.string() },
+  handler: async (ctx, args) => {
     const intentCounts: Record<string, number> = {};
     const activityCounts: Record<string, number> = {};
 
-    // P1-001 FIX: Use by_gender index with bounded reads instead of .collect()
-    // Dedupe genders to avoid querying same bucket twice
-    const genders = Array.from(new Set(currentUser.lookingFor ?? []));
-    if (genders.length === 0) return { intentCounts, activityCounts };
+    const viewerId = await requireAuthenticatedUser(ctx, args.authUserId);
+    const result = await buildEligibleExploreCandidates(ctx, viewerId);
+    if (!result) {
+      return { intentCounts, activityCounts, categoryCounts: {} };
+    }
 
-    // Track seen users to avoid double-counting if user appears in multiple queries
-    const seenUserIds = new Set<string>();
-    const MAX_PER_GENDER = 2500;
+    const categoryCounts: Record<string, number> = {};
+    for (const categoryId of EXPLORE_CATEGORY_IDS) {
+      categoryCounts[categoryId] = result.candidates.filter((candidate) => matchesExploreCategory(candidate, categoryId)).length;
+    }
 
-    for (const gender of genders) {
-      const users = await ctx.db
-        .query('users')
-        .withIndex('by_gender', (q) => q.eq('gender', gender))
-        .take(MAX_PER_GENDER);
-
-      for (const user of users) {
-        if (String(user._id) === String(userId)) continue;
-        if (seenUserIds.has(String(user._id))) continue;
-        seenUserIds.add(String(user._id));
-
-        if (!user.isActive || user.isBanned) continue;
-        if (isUserPaused(user)) continue;
-
-        // P0 FIX: Verification is a ranking boost, not a hard filter
-        // Removed verification check - unverified users are included in counts
-
-        const userAge = calculateAge(user.dateOfBirth);
-        if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;
-
-        for (const intent of user.relationshipIntent) {
-          intentCounts[intent] = (intentCounts[intent] || 0) + 1;
-        }
-        for (const activity of user.activities) {
-          activityCounts[activity] = (activityCounts[activity] || 0) + 1;
-        }
+    for (const candidate of result.candidates) {
+      for (const intent of candidate.relationshipIntent) {
+        intentCounts[intent] = (intentCounts[intent] || 0) + 1;
+      }
+      for (const activity of candidate.activities) {
+        activityCounts[activity] = (activityCounts[activity] || 0) + 1;
       }
     }
 
-    return { intentCounts, activityCounts };
+    return {
+      intentCounts,
+      activityCounts,
+      categoryCounts,
+    };
   },
 });

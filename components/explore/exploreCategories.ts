@@ -18,7 +18,7 @@ const KNOWN_INTENTS = new Set([
   "long_term", "long_term_partner", "long_term_open_to_short",
   "short_term_open_to_long", "short_term_fun", "short_term",
   "new_friends", "figuring_out", "non_monogamy", "leading_to_marriage",
-  "fwb", "short_to_long", "open_to_anything", "single_parent", "just_18",
+  "fwb", "short_to_long", "open_to_anything",
 ]);
 
 const getIntents = (p: any): string[] => {
@@ -152,24 +152,6 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     color: TILE_COLORS.gold,
     kind: "relationship",
     predicate: (p) => hasIntent(p, "open_to_anything"),
-  },
-  {
-    id: "single_parent",
-    label: "Single Parent",
-    title: "Single Parent",
-    icon: "👨‍👧",
-    color: TILE_COLORS.rose,
-    kind: "relationship",
-    predicate: (p) => hasIntent(p, "single_parent"),
-  },
-  {
-    id: "just_18",
-    label: "New to Dating",
-    title: "New to Dating",
-    icon: "🌱",
-    color: TILE_COLORS.lime,
-    kind: "relationship",
-    predicate: (p) => hasIntent(p, "just_18"),
   },
 ];
 

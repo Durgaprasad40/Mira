@@ -1,4 +1,4 @@
-import React, { useMemo, memo } from "react";
+import React, { memo } from "react";
 import {
   View,
   Text,
@@ -15,7 +15,6 @@ import {
   RELATIONSHIP_CATEGORIES,
   RIGHT_NOW_CATEGORIES,
   INTEREST_CATEGORIES,
-  countProfilesPerCategory,
   ExploreCategory,
 } from "./exploreCategories";
 
@@ -25,8 +24,9 @@ const HORIZONTAL_PADDING = 16;
 const TILE_WIDTH = (SCREEN_WIDTH - HORIZONTAL_PADDING * 2 - TILE_GAP) / 2;
 
 type Props = {
-  profiles: any[];
-  selectedCategory?: ExploreCategory | null;
+  categoryCounts: Record<string, number>;
+  totalEligibleCount?: number;
+  isEmpty?: boolean;
   onCategoryPress?: (category: ExploreCategory) => void;
   refreshing?: boolean;
   onRefresh?: () => void;
@@ -104,8 +104,9 @@ const BASE_BOTTOM_PADDING = 20;
 const TAB_BAR_HEIGHT = 60;
 
 export default function ExploreTileGrid({
-  profiles,
-  selectedCategory,
+  categoryCounts,
+  totalEligibleCount = 0,
+  isEmpty = false,
   onCategoryPress,
   refreshing = false,
   onRefresh,
@@ -114,25 +115,15 @@ export default function ExploreTileGrid({
   // Dynamic bottom spacing: safe area inset + tab bar + base padding
   const bottomSpacing = insets.bottom + TAB_BAR_HEIGHT + BASE_BOTTOM_PADDING;
 
-  // Compute counts for all categories
-  const categoryCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const cat of [...RELATIONSHIP_CATEGORIES, ...RIGHT_NOW_CATEGORIES, ...INTEREST_CATEGORIES]) {
-      counts[cat.id] = countProfilesPerCategory(cat, profiles);
-    }
-    return counts;
-  }, [profiles]);
-
   const renderTile = (category: ExploreCategory) => {
     const count = categoryCounts[category.id] ?? 0;
-    const isSelected = selectedCategory?.id === category.id;
 
     return (
       <ExploreTile
         key={category.id}
         category={category}
         count={count}
-        isSelected={isSelected}
+        isSelected={false}
         onPress={() => {
           // Always navigate - category detail handles empty state
           if (onCategoryPress) {
@@ -159,6 +150,15 @@ export default function ExploreTileGrid({
         ) : undefined
       }
     >
+      {isEmpty && (
+        <View style={styles.emptyCard}>
+          <Text style={styles.emptyTitle}>No Explore profiles right now</Text>
+          <Text style={styles.emptySubtitle}>
+            There are currently {totalEligibleCount} eligible profiles in Explore. Pull to refresh after more people come online or update your preferences.
+          </Text>
+        </View>
+      )}
+
       {/* RELATIONSHIP Section */}
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionEmoji}>💕</Text>
@@ -200,6 +200,23 @@ const styles = StyleSheet.create({
   content: {
     paddingHorizontal: HORIZONTAL_PADDING,
     paddingTop: 8,
+  },
+  emptyCard: {
+    backgroundColor: "#F7F7F7",
+    borderRadius: 20,
+    padding: 18,
+    marginTop: 12,
+  },
+  emptyTitle: {
+    color: "#1a1a1a",
+    fontSize: 18,
+    fontWeight: "700",
+    marginBottom: 6,
+  },
+  emptySubtitle: {
+    color: "#666666",
+    fontSize: 14,
+    lineHeight: 20,
   },
   sectionHeader: {
     flexDirection: "row",

@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, requireAuthenticatedUser } from './helpers';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
@@ -1574,14 +1574,41 @@ export const getCrossedPathsCount = query({
  */
 export const getSharedPlaces = query({
   args: {
-    viewerId: v.id('users'),    // Current user viewing the profile
+    authUserId: v.string(),    // Current user viewing the profile
     profileUserId: v.id('users'), // User whose profile is being viewed
   },
   handler: async (ctx, args) => {
-    const { viewerId, profileUserId } = args;
+    const viewerId = await requireAuthenticatedUser(ctx, args.authUserId);
+    const { profileUserId } = args;
 
     // Don't show shared places for self
     if (viewerId === profileUserId) {
+      return [];
+    }
+
+    const [viewer, profileUser] = await Promise.all([
+      ctx.db.get(viewerId),
+      ctx.db.get(profileUserId),
+    ]);
+    if (!viewer || !profileUser || !profileUser.isActive || profileUser.isBanned) {
+      return [];
+    }
+
+    const [blocked, reverseBlocked] = await Promise.all([
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', profileUserId).eq('blockedUserId', viewerId),
+        )
+        .first(),
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', viewerId).eq('blockedUserId', profileUserId),
+        )
+        .first(),
+    ]);
+    if (blocked || reverseBlocked) {
       return [];
     }
 

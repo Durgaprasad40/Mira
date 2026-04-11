@@ -7,27 +7,19 @@ import { DEMO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { useShallow } from 'zustand/react/shallow';
-import { EXPLORE_CATEGORIES } from '@/components/explore/exploreCategories';
+import { EXPLORE_CATEGORIES, countProfilesPerCategory } from '@/components/explore/exploreCategories';
 
-export type ExploreProfilesOptions = {
-  categoryId?: string | null;
-  refreshKey?: number;
-};
-
-export type ExploreProfilesState = {
-  profiles: any[];
-  totalCount: number;
+export type ExploreCategoryCountsState = {
+  counts: Record<string, number>;
+  totalEligibleCount: number;
   isLoading: boolean;
   isReady: boolean;
   isEmpty: boolean;
 };
 
-const EMPTY_PROFILES: any[] = [];
-
-export function useExploreProfiles(
-  options: ExploreProfilesOptions = {},
-): ExploreProfilesState {
-  const { categoryId = null, refreshKey = 0 } = options;
+export function useExploreCategoryCounts(
+  refreshKey = 0,
+): ExploreCategoryCountsState {
   const userId = useAuthStore((s) => s.userId);
   const demo = useDemoStore(useShallow((s) => ({
     matchCount: s.matches.length,
@@ -42,21 +34,15 @@ export function useExploreProfiles(
     return new Set(demo.getExcludedUserIds());
   }, [blockedUserIds, demo.matchCount, demo.likesCount, demo.getExcludedUserIds]);
 
-  const demoCategory = useMemo(
-    () => (categoryId ? EXPLORE_CATEGORIES.find((category) => category.id === categoryId) ?? null : null),
-    [categoryId],
-  );
-
   const queryArgs = useMemo(() => {
     if (isDemoMode || !userId) return 'skip' as const;
     return {
       authUserId: userId,
-      categoryId: categoryId ?? undefined,
       refreshKey,
     };
-  }, [userId, categoryId, refreshKey]);
+  }, [userId, refreshKey]);
 
-  const result = useQuery(api.discover.getExploreProfiles, queryArgs);
+  const result = useQuery(api.discover.getExploreCategoryCounts, queryArgs);
 
   return useMemo(() => {
     if (isDemoMode) {
@@ -64,23 +50,27 @@ export function useExploreProfiles(
       const filteredProfiles = (sourceProfiles as any[]).filter(
         (profile) => !excludedSet.has(profile._id),
       );
-      const categoryProfiles = demoCategory
-        ? filteredProfiles.filter(demoCategory.predicate)
-        : filteredProfiles;
+
+      const counts = Object.fromEntries(
+        EXPLORE_CATEGORIES.map((category) => [
+          category.id,
+          countProfilesPerCategory(category, filteredProfiles),
+        ]),
+      );
 
       return {
-        profiles: categoryProfiles,
-        totalCount: categoryProfiles.length,
+        counts,
+        totalEligibleCount: filteredProfiles.length,
         isLoading: false,
         isReady: true,
-        isEmpty: categoryProfiles.length === 0,
+        isEmpty: filteredProfiles.length === 0,
       };
     }
 
     if (!userId) {
       return {
-        profiles: EMPTY_PROFILES,
-        totalCount: 0,
+        counts: {},
+        totalEligibleCount: 0,
         isLoading: false,
         isReady: true,
         isEmpty: true,
@@ -88,15 +78,15 @@ export function useExploreProfiles(
     }
 
     const isLoading = result === undefined;
-    const profiles = result?.profiles ?? EMPTY_PROFILES;
-    const totalCount = result?.totalCount ?? 0;
+    const counts = result?.counts ?? {};
+    const totalEligibleCount = result?.totalEligibleCount ?? 0;
 
     return {
-      profiles,
-      totalCount,
+      counts,
+      totalEligibleCount,
       isLoading,
       isReady: !isLoading,
-      isEmpty: !isLoading && totalCount === 0,
+      isEmpty: !isLoading && totalEligibleCount === 0,
     };
-  }, [result, excludedSet, demo.profiles, demoCategory, userId]);
+  }, [result, excludedSet, demo.profiles, userId]);
 }

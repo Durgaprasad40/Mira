@@ -94,6 +94,27 @@ export async function resolveUserIdByAuthId(
 }
 
 /**
+ * Resolve the caller from the app's auth-safe query pattern.
+ * The frontend passes its authenticated user id string and the server resolves
+ * that to the canonical Convex user id before any viewer-specific logic runs.
+ */
+export async function requireAuthenticatedUser(
+  ctx: QueryCtx | MutationCtx,
+  authUserId: string | undefined
+): Promise<Id<"users">> {
+  if (!authUserId || authUserId.trim().length === 0) {
+    throw new Error("Unauthorized: authentication required");
+  }
+
+  const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  if (!userId) {
+    throw new Error("Unauthorized: user not found");
+  }
+
+  return userId;
+}
+
+/**
  * IDENTITY MAPPING (WRITE): Ensure Convex user record exists for authUserId.
  *
  * USE THIS IN MUTATIONS ONLY - creates user if not found.
@@ -308,4 +329,43 @@ export async function validateSessionToken(
   }
 
   return session.userId;
+}
+
+export type PublicPhoto = {
+  _id: Id<"photos">;
+  url: string;
+  order: number;
+};
+
+/**
+ * Public profile surfaces must never leak verification reference photos.
+ * We also strip all non-display metadata from the payload.
+ */
+export function sanitizePublicPhotos(
+  photos: Doc<"photos">[]
+): PublicPhoto[] {
+  return photos
+    .filter(
+      (photo) =>
+        photo.photoType !== "verification_reference" &&
+        photo.isNsfw !== true &&
+        typeof photo.url === "string" &&
+        photo.url.length > 0
+    )
+    .sort((a, b) => a.order - b.order)
+    .map((photo) => ({
+      _id: photo._id,
+      url: photo.url,
+      order: photo.order,
+    }));
+}
+
+export function getPublicLastActive(user: {
+  showLastSeen?: boolean;
+  lastActive?: number;
+}): number | undefined {
+  if (user.showLastSeen === false) {
+    return undefined;
+  }
+  return typeof user.lastActive === "number" ? user.lastActive : undefined;
 }

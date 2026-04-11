@@ -1,47 +1,27 @@
-/*
- * LOCKED (PHASE-1 TAB)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- * Nearby tab is the only Phase-1 tab currently unlocked.
- */
-import { useCallback, useMemo, useState, useRef } from "react";
-import { StyleSheet } from "react-native";
+import { useCallback, useEffect, useState } from "react";
+import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect, useRouter, useLocalSearchParams } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { safePush } from "@/lib/safeRouter";
 import { useScreenTrace } from "@/lib/devTrace";
 
 import ExploreTileGrid from "@/components/explore/ExploreTileGrid";
-import { useExploreProfiles } from "@/components/explore/useExploreProfiles";
-import {
-  ExploreCategory,
-  EXPLORE_CATEGORIES,
-} from "@/components/explore/exploreCategories";
+import { ExploreCategory } from "@/components/explore/exploreCategories";
+import { LoadingGuard } from "@/components/safety/LoadingGuard";
+import { useExploreCategoryCounts } from "@/hooks/useExploreCategoryCounts";
+import { COLORS } from "@/lib/constants";
 
 export default function ExploreScreen() {
   useScreenTrace("EXPLORE");
   const router = useRouter();
-  const params = useLocalSearchParams();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-
-  // profiles source (demo or real) — refreshKey forces re-evaluation
-  const profiles = useExploreProfiles();
-
-  // Track profiles ref to detect stale state
-  const profilesRef = useRef(profiles);
-  profilesRef.current = profiles;
-
-  // restore selected category from route params
-  const selectedCategoryId = typeof params.categoryId === "string"
-    ? params.categoryId
-    : null;
-
-  const selectedCategory: ExploreCategory | null = useMemo(() => {
-    if (!selectedCategoryId) return null;
-    return (
-      EXPLORE_CATEGORIES.find(c => c.id === selectedCategoryId) ?? null
-    );
-  }, [selectedCategoryId]);
+  const {
+    counts,
+    totalEligibleCount,
+    isLoading,
+    isEmpty,
+  } = useExploreCategoryCounts(refreshKey);
 
   // when user taps a category
   const handleCategoryPress = useCallback(
@@ -54,33 +34,48 @@ export default function ExploreScreen() {
     [router]
   );
 
-  // Refresh on focus — forces profile list to re-evaluate
+  useEffect(() => {
+    if (refreshing && !isLoading) {
+      setRefreshing(false);
+    }
+  }, [refreshing, isLoading]);
+
+  // Refresh on focus so category counts stay in sync with swipes/blocks.
   useFocusEffect(
     useCallback(() => {
-      // Trigger a refresh key update to force re-render with latest profiles
       setRefreshKey((k) => k + 1);
       return () => {};
     }, [])
   );
 
-  // Pull-to-refresh handler
   const handleRefresh = useCallback(() => {
     setRefreshing(true);
-    // Bump refresh key to force profiles re-evaluation
     setRefreshKey((k) => k + 1);
-    // Short delay to show refresh indicator
-    setTimeout(() => setRefreshing(false), 500);
   }, []);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-      <ExploreTileGrid
-        profiles={profiles}
-        selectedCategory={selectedCategory}
-        onCategoryPress={handleCategoryPress}
-        refreshing={refreshing}
-        onRefresh={handleRefresh}
-      />
+      <LoadingGuard
+        isLoading={isLoading}
+        onRetry={handleRefresh}
+        title="Explore is still loading"
+        subtitle="We’re still fetching your Explore categories. Retry to reload the feed."
+      >
+        {isLoading ? (
+          <View style={styles.loadingState}>
+            <ActivityIndicator size="large" color={COLORS.primary} />
+          </View>
+        ) : (
+          <ExploreTileGrid
+            categoryCounts={counts}
+            totalEligibleCount={totalEligibleCount}
+            isEmpty={isEmpty}
+            onCategoryPress={handleCategoryPress}
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+          />
+        )}
+      </LoadingGuard>
     </SafeAreaView>
   );
 }
@@ -89,5 +84,10 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#FFFFFF",
+  },
+  loadingState: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
   },
 });

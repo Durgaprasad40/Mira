@@ -332,6 +332,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     type: 'image' | 'video';
     content: string;
     createdAt: number;
+    readAt?: number;
+    deliveredAt?: number;
     isPending: true;
   }>>([]);
 
@@ -342,6 +344,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     type: 'image' | 'video';
     content: string;
     createdAt: number;
+    readAt?: number;
+    deliveredAt?: number;
     isPending: true;
   }) => {
     setPendingSecureMessages((prev) => [...prev, msg]);

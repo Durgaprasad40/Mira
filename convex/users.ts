@@ -3,7 +3,14 @@ import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
-import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
+import {
+  resolveUserIdByAuthId,
+  ensureUserByAuthId,
+  validateSessionToken,
+  requireAuthenticatedUser,
+  sanitizePublicPhotos,
+  getPublicLastActive,
+} from "./helpers";
 
 // ALLOWED_RELATIONSHIP_INTENTS: Schema-safe values (excludes UI-only values like single_parent, just_18)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
@@ -68,9 +75,10 @@ export const ensureCurrentUser = mutation({
 export const getUserById = query({
   args: {
     userId: v.id("users"),
-    viewerId: v.id("users"),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
+    const viewerId = await requireAuthenticatedUser(ctx, args.authUserId);
     const user = await ctx.db.get(args.userId);
     if (!user || !user.isActive || user.isBanned) return null;
 
@@ -78,7 +86,7 @@ export const getUserById = query({
     const blocked = await ctx.db
       .query("blocks")
       .withIndex("by_blocker_blocked", (q) =>
-        q.eq("blockerId", args.userId).eq("blockedUserId", args.viewerId),
+        q.eq("blockerId", args.userId).eq("blockedUserId", viewerId),
       )
       .first();
 
@@ -87,7 +95,7 @@ export const getUserById = query({
     const reverseBlocked = await ctx.db
       .query("blocks")
       .withIndex("by_blocker_blocked", (q) =>
-        q.eq("blockerId", args.viewerId).eq("blockedUserId", args.userId),
+        q.eq("blockerId", viewerId).eq("blockedUserId", args.userId),
       )
       .first();
 
@@ -98,9 +106,11 @@ export const getUserById = query({
       .query("photos")
       .withIndex("by_user_order", (q) => q.eq("userId", args.userId))
       .collect();
+    const publicPhotos = sanitizePublicPhotos(photos);
+    if (publicPhotos.length === 0) return null;
 
     // Calculate distance if both have location
-    const viewer = await ctx.db.get(args.viewerId);
+    const viewer = await ctx.db.get(viewerId);
     let distance: number | undefined;
     if (
       user.latitude &&
@@ -136,12 +146,12 @@ export const getUserById = query({
       verificationStatus: user.verificationStatus || "unverified",
       city: user.city,
       distance,
-      lastActive: user.lastActive,
+      lastActive: getPublicLastActive(user),
       lookingFor: user.lookingFor,
       relationshipIntent: user.relationshipIntent,
       activities: user.activities,
       profilePrompts: user.profilePrompts ?? [],
-      photos: photos.sort((a, b) => a.order - b.order),
+      photos: publicPhotos,
       photoBlurred: user.photoBlurred === true,
     };
   },

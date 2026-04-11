@@ -1554,6 +1554,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               isVerified={next.isVerified}
               distance={next.distance}
               photos={next.photos}
+              photoBlurred={next.photoBlurred}
               trustBadges={nextBadges}
               profilePrompt={next.profilePrompts?.[0]}
               theme={isPhase2 ? "dark" : "light"}
@@ -1573,6 +1574,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               isVerified={current.isVerified}
               distance={current.distance}
               photos={current.photos}
+              photoBlurred={current.photoBlurred}
               trustBadges={currentBadges}
               profilePrompt={current.profilePrompts?.[0]}
               showCarousel
