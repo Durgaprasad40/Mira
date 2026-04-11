@@ -961,34 +961,24 @@ export default function AdditionalPhotosScreen() {
       });
     }
 
-    // Gate: minimum 2 photos required
-    // BUG FIX: Account for reference photo in effective count (matches backend logic)
-    // effectivePhotoCount = normal photos + reference photo (if exists)
-    const effectivePhotoCount = photoCount + (hasReferencePhoto ? 1 : 0);
+    // Gate: minimum photos required
+    // PRODUCT RULE FIX: Reference photo is for verification, NOT for profile display
+    // Users need at least 1 NORMAL/additional photo for their profile
+    // The reference photo does NOT count toward the minimum profile photo requirement
+    const MIN_NORMAL_PHOTOS_REQUIRED = 1; // At least 1 additional profile photo
 
-    if (effectivePhotoCount < MIN_PHOTOS_REQUIRED) {
-      console.warn(`[PHOTO_GATE] Blocked: effectivePhotoCount=${effectivePhotoCount} < MIN_PHOTOS_REQUIRED=${MIN_PHOTOS_REQUIRED}`);
-      console.warn('[PHOTO_GATE] Photo breakdown:', { normalPhotoCount: photoCount, hasReferencePhoto, effectivePhotoCount });
+    if (photoCount < MIN_NORMAL_PHOTOS_REQUIRED) {
+      console.warn(`[PHOTO_GATE] Blocked: normalPhotoCount=${photoCount} < MIN_NORMAL_PHOTOS_REQUIRED=${MIN_NORMAL_PHOTOS_REQUIRED}`);
+      console.warn('[PHOTO_GATE] Reference photo does NOT count toward profile minimum');
       setShowPhotoWarning(true);
       return;
     }
 
-    // BUG FIX: Log when reference photo allows bypass of "Photo Required" warning
-    if (hasReferencePhoto && photoCount < MIN_PHOTOS_REQUIRED) {
-      if (__DEV__) {
-        console.log('[PHOTO_REQUIRED_BLOCKED] referenceExists=true, bypassing normal photo requirement', {
-          normalPhotoCount: photoCount,
-          hasReferencePhoto,
-          effectivePhotoCount,
-          note: 'Reference photo counts toward MIN_PHOTOS_REQUIRED',
-        });
-      }
-    }
-
     if (__DEV__) {
-      console.log(`[PHOTO_GATE] Passed: effectivePhotoCount=${effectivePhotoCount} >= MIN_PHOTOS_REQUIRED=${MIN_PHOTOS_REQUIRED}`, {
+      console.log(`[PHOTO_GATE] Passed: normalPhotoCount=${photoCount} >= MIN_NORMAL_PHOTOS_REQUIRED=${MIN_NORMAL_PHOTOS_REQUIRED}`, {
         normalPhotos: photoCount,
-        referencePhoto: hasReferencePhoto ? 1 : 0,
+        hasReferencePhoto,
+        note: 'Reference photo is separate from profile photos',
       });
     }
 
@@ -1271,7 +1261,7 @@ export default function AdditionalPhotosScreen() {
                 source={{ uri: primaryPhoto ?? undefined }}
                 style={styles.primaryImage}
                 contentFit="cover"
-                blurRadius={displayPhotoVariant === 'blurred' ? 15 : 0}
+                // REMOVED: blurRadius - display options removed from onboarding
               />
             ) : (
               <View style={styles.primaryPlaceholder}>
@@ -1345,50 +1335,11 @@ export default function AdditionalPhotosScreen() {
           </View>
         </View>
 
-        {/* Privacy Options */}
-        <View style={styles.privacySection}>
-          <Text style={styles.sectionTitle}>Display Options</Text>
-          {privacyOptions.map((option) => {
-            const isSelected = displayPhotoVariant === option.id;
-            const isDisabled = option.disabled;
-            return (
-              <TouchableOpacity
-                key={option.id}
-                style={[
-                  styles.privacyOption,
-                  isSelected && styles.privacyOptionSelected,
-                  isDisabled && styles.privacyOptionDisabled,
-                ]}
-                onPress={() => !isDisabled && handleSetDisplayPhotoVariant(option.id)}
-                disabled={isDisabled}
-              >
-                <View style={[styles.privacyIcon, isSelected && styles.privacyIconSelected]}>
-                  <Ionicons
-                    name={option.icon}
-                    size={20}
-                    color={isSelected ? COLORS.white : COLORS.primary}
-                  />
-                </View>
-                <View style={styles.privacyContent}>
-                  <View style={styles.privacyHeader}>
-                    <Text style={[styles.privacyTitle, isDisabled && styles.privacyTitleDisabled]}>
-                      {option.title}
-                    </Text>
-                    {isDisabled && (
-                      <View style={styles.comingSoonBadge}>
-                        <Text style={styles.comingSoonText}>Soon</Text>
-                      </View>
-                    )}
-                  </View>
-                  <Text style={styles.privacyDescription}>{option.description}</Text>
-                </View>
-                {isSelected && (
-                  <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} />
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+        {/* Display Options REMOVED from onboarding per user request
+         * Privacy options (blur/cartoon/original) are not shown during onboarding
+         * Onboarding uses normal/original photo flow only
+         * These options may be re-enabled in Edit Profile later if needed
+         */}
 
         {/* Unified Photo Grid (All 9 slots including primary) */}
         <View style={styles.gridSection}>
@@ -1407,11 +1358,11 @@ export default function AdditionalPhotosScreen() {
 
         {/* Footer */}
         <View style={styles.footer}>
-          {/* Inline warning when trying to proceed with < 2 photos */}
+          {/* Inline warning when trying to proceed with < 1 additional photos */}
           {showPhotoWarning && (
             <View style={styles.warningBanner}>
               <Ionicons name="warning" size={16} color={COLORS.error} />
-              <Text style={styles.warningText}>Add at least {MIN_PHOTOS_REQUIRED} photos to continue.</Text>
+              <Text style={styles.warningText}>Add at least 1 profile photo to continue.</Text>
             </View>
           )}
           <Button
@@ -1420,8 +1371,8 @@ export default function AdditionalPhotosScreen() {
             onPress={handleNext}
             fullWidth
           />
-          {photoCount < MIN_PHOTOS_REQUIRED && !showPhotoWarning && (
-            <Text style={styles.hint}>Add at least {MIN_PHOTOS_REQUIRED} photos to continue</Text>
+          {photoCount < 1 && !showPhotoWarning && (
+            <Text style={styles.hint}>Add at least 1 profile photo to continue</Text>
           )}
         </View>
       </ScrollView>

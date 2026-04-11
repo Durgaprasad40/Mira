@@ -25,6 +25,8 @@ import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { isDemoMode, convex } from '@/hooks/useConvex';
+import { isDemoAuthMode } from '@/config/demo';
+import { ensureDemoUserConsent } from '@/lib/demoAuth';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
 import { decideNextOnboardingRoute, logOnboardingStatus } from '@/lib/onboardingRouting';
@@ -394,8 +396,77 @@ export default function PhotoUploadScreen() {
       return;
     }
 
-    // Demo mode: skip Convex upload, use local storage only
+    // =========================================================================
+    // DEMO AUTH MODE: Upload to Convex (same as live mode) for proper backend state
+    // This ensures referencePhotoExists is properly set in Convex
+    // =========================================================================
+    if (isDemoAuthMode) {
+      console.log('[DEMO_AUTH] PHOTO: Uploading to Convex in demo auth mode');
+      setIsUploading(true);
+
+      try {
+        // Step 0: CRITICAL - Ensure consent is set before upload
+        // ROOT CAUSE FIX: On app resume, consent may not be set (user from before fix)
+        if (token) {
+          console.log('[DEMO_AUTH] PHOTO: Ensuring consent is set...');
+          const consentOk = await ensureDemoUserConsent(token);
+          if (!consentOk) {
+            console.warn('[DEMO_AUTH] PHOTO: Could not verify consent, proceeding anyway');
+          } else {
+            console.log('[DEMO_AUTH] PHOTO: Consent confirmed');
+          }
+        }
+
+        // Step 1: Upload photo to Convex storage (same as live mode)
+        const uploadUrl = await generateUploadUrl();
+        const response = await fetch(currentPhoto);
+        const blob = await response.blob();
+
+        const uploadResponse = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'image/jpeg' },
+          body: blob,
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error(`Upload failed with status ${uploadResponse.status}`);
+        }
+
+        const uploadResult = await uploadResponse.json();
+        const storageId = uploadResult.storageId as Id<'_storage'>;
+        console.log(`[DEMO_AUTH] PHOTO: Uploaded to storage, storageId=${storageId}`);
+
+        // Step 2: Set verification reference photo in Convex
+        const result = await uploadVerificationReferencePhoto({
+          userId: userId as Id<'users'>,
+          storageId,
+          hasFace: true,
+          faceCount: 1,
+        });
+
+        if (!result.success) {
+          throw new Error(result.message || 'Failed to set reference photo');
+        }
+
+        console.log('[DEMO_AUTH] PHOTO: Reference photo set in Convex');
+        setVerificationPhoto(currentPhoto);
+
+        setStep('face_verification');
+        router.push('/(onboarding)/face-verification' as any);
+      } catch (error: any) {
+        console.error('[DEMO_AUTH] PHOTO: Upload error:', error);
+        Alert.alert('Upload Failed', error.message || 'Please try again.');
+      } finally {
+        setIsUploading(false);
+        uploadInProgressRef.current = false;
+      }
+      return;
+    }
+
+    // =========================================================================
+    // LEGACY DEMO MODE: skip Convex upload, use local storage only
     // Face verification in demo mode uses mockVerify which doesn't check reference photo
+    // =========================================================================
     if (isDemoMode) {
       console.log('[PHOTO_GATE] DEMO MODE: Skipping Convex upload, using local storage');
       setVerificationPhoto(currentPhoto);

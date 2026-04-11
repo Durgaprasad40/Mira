@@ -53,6 +53,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
 import { Id } from "@/convex/_generated/dataModel";
 import { isDemoMode } from "@/hooks/useConvex";
+import { isDemoAuthMode } from "@/config/demo";
 import { useDemoStore } from "@/stores/demoStore";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { saveAuthBootCache } from "@/stores/authBootCache";
@@ -175,10 +176,19 @@ export default function ReviewScreen() {
   }, []);
 
   // BUG FIX: Always query backend status as authoritative source + fallback
-  const onboardingStatus = useQuery(
+  const onboardingStatusLive = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && token ? { token } : 'skip'
+    !isDemoMode && !isDemoAuthMode && token ? { token } : 'skip'
   );
+
+  // Demo auth mode: Use demo onboarding status query
+  const onboardingStatusDemo = useQuery(
+    api.demoAuth.getDemoOnboardingStatus,
+    isDemoAuthMode && token ? { token } : 'skip'
+  );
+
+  // Use appropriate status based on mode
+  const onboardingStatus = isDemoAuthMode ? onboardingStatusDemo : onboardingStatusLive;
 
   // BUG FIX (2026-03-06): Use getCurrentUser which includes ALL photos
   // (including verification_reference primary photo), not getUserPhotos
@@ -202,7 +212,12 @@ export default function ReviewScreen() {
     return '';
   };
   const displayName = getDisplayName() || "Not set";
-  const displayNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "—";
+  // Format nickname for display: capitalize first letter
+  // Handles are stored lowercase for uniqueness, but display should look natural
+  const rawNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "";
+  const displayNickname = rawNickname
+    ? rawNickname.charAt(0).toUpperCase() + rawNickname.slice(1)
+    : "—";
   const displayDateOfBirth = dateOfBirth || onboardingStatus?.basicInfo?.dateOfBirth || demoProfile?.dateOfBirth || "";
   const displayGender = gender || onboardingStatus?.basicInfo?.gender || demoProfile?.gender || "";
 
@@ -533,21 +548,30 @@ export default function ReviewScreen() {
   };
 
   // PERFORMANCE FIX: Use backend photos directly (instant display, no download wait)
+  // BUG FIX: Include verification reference photo in review (getCurrentUser excludes it)
   // In demo mode, fall back to local photos from store
   const validPhotos = React.useMemo(() => {
     if (isDemoMode) {
       // Demo mode: use local photos from store
       return photos.filter((uri): uri is string => uri !== null && uri !== '');
     }
-    // Live mode: use backend photos (sorted by order)
-    if (!backendPhotos || backendPhotos.length === 0) {
-      return [];
-    }
-    return [...backendPhotos]
+
+    // Live mode: Start with reference photo if exists (from onboardingStatus)
+    const referencePhotoUrl = onboardingStatus?.verificationReferencePhotoUrl;
+    const referencePhotoList: string[] = referencePhotoUrl ? [referencePhotoUrl] : [];
+
+    // Add normal photos from backend (excludes verification_reference)
+    const normalPhotoUrls = [...(backendPhotos || [])]
       .sort((a, b) => a.order - b.order)
       .map(photo => photo.url)
       .filter((url): url is string => !!url);
-  }, [backendPhotos, photos]);
+
+    // Merge: reference photo first, then additional normal photos
+    // Deduplicate in case reference photo somehow appears in both
+    const allPhotos = [...new Set([...referencePhotoList, ...normalPhotoUrls])];
+
+    return allPhotos;
+  }, [backendPhotos, photos, onboardingStatus?.verificationReferencePhotoUrl]);
 
   // Helper to get label from options array
   const getLabel = (options: { value: string; label: string }[], value: string | null) => {

@@ -33,7 +33,8 @@ import { useAuthStore } from '@/stores/authStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { Ionicons } from '@expo/vector-icons';
 import { verifyFace, type CapturedFrame, type FaceMatchReasonCode } from '@/services/faceVerification';
-import { isDemoMode } from '@/hooks/useConvex';
+import { isDemoMode, convex } from '@/hooks/useConvex';
+import { isDemoAuthMode } from '@/config/demo';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -74,10 +75,19 @@ export default function FaceVerificationScreen() {
 
   // Query backend onboarding status for reference photo check (source of truth)
   // M6 FIX: Include queryEnabled in skip condition to allow forced re-subscription
-  const onboardingStatus = useQuery(
+  const onboardingStatusLive = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && token && queryEnabled ? { token } : 'skip'
+    !isDemoMode && !isDemoAuthMode && token && queryEnabled ? { token } : 'skip'
   );
+
+  // Demo auth mode: Use demo onboarding status query
+  const onboardingStatusDemo = useQuery(
+    api.demoAuth.getDemoOnboardingStatus,
+    isDemoAuthMode && token && queryEnabled ? { token } : 'skip'
+  );
+
+  // Use appropriate status based on mode
+  const onboardingStatus = isDemoAuthMode ? onboardingStatusDemo : onboardingStatusLive;
 
   // M6 FIX: Track loading timeout to prevent infinite loading state
   const [backendLoadTimedOut, setBackendLoadTimedOut] = useState(false);
@@ -126,11 +136,11 @@ export default function FaceVerificationScreen() {
   const isFocused = useIsFocused();
   const [appState, setAppState] = useState(AppState.currentState);
 
-  // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
-  // Also check faceVerificationPending - if pending, user has already completed verification step
-  const isAlreadyVerified = isDemoMode
-    ? !!(demoProfile?.faceVerificationPassed || demoProfile?.faceVerificationPending || faceVerificationPassed || faceVerificationPending)
-    : (faceVerificationPassed || faceVerificationPending);
+  // Get backend verification status (source of truth)
+  // Used to show appropriate UI state on mount/resume
+  const backendFaceStatus = onboardingStatus?.faceVerificationStatus;
+  const backendVerificationPassed = backendFaceStatus === 'verified';
+  const backendVerificationPending = backendFaceStatus === 'pending';
 
   // Camera
   const device = useCameraDevice('front');
@@ -140,38 +150,44 @@ export default function FaceVerificationScreen() {
   // Camera active state - controlled by multiple conditions
   const [cameraActive, setCameraActive] = useState(false);
 
-  // State - initialize to 'success' if already verified (prevents re-verification on back)
-  const [verificationState, setVerificationState] = useState<VerificationState>(
-    isAlreadyVerified ? 'success' : 'waiting'
-  );
+  // State - start as 'waiting', will update based on backend status when loaded
+  const [verificationState, setVerificationState] = useState<VerificationState>('waiting');
 
-  // CRITICAL: Skip verification entirely if already verified or pending - redirect immediately
-  const didSkipRef = useRef(false);
   // ONB-012 FIX: Component-wide mounted ref to guard async setState calls
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
-  // STABILITY FIX (2026-03-04): Add cleanup to prevent setState on unmounted component
+
+  // CRITICAL FIX: NO AUTO-SKIP - Show confirmation UI instead
+  // When backend status is already verified/pending, show the appropriate result UI
+  // User MUST press Continue button manually to proceed to next step
+  const didSetInitialStateRef = useRef(false);
   useEffect(() => {
-    let isMounted = true;
-
-    if (isAlreadyVerified && !didSkipRef.current) {
-      didSkipRef.current = true;
-      console.log('[FaceDebug] face verification completed (passed or pending) -> skip capture -> additional-photos');
-
-      // Only call setState/navigate if still mounted
-      if (isMounted) {
-        setStep('additional_photos');
-        router.replace('/(onboarding)/additional-photos' as any);
-      }
+    // Wait for backend data to load
+    const backendLoaded = onboardingStatus !== undefined;
+    if (!backendLoaded || didSetInitialStateRef.current) {
+      return;
     }
 
-    return () => {
-      isMounted = false; // Cleanup: prevent state updates if unmounted
-    };
-  }, [isAlreadyVerified, setStep, router]);
+    // If already verified or pending, show the result UI (NOT auto-navigate)
+    if (backendVerificationPassed) {
+      didSetInitialStateRef.current = true;
+      console.log('[FaceDebug] Backend status is VERIFIED -> showing success UI (user must press Continue)');
+      setVerificationState('success');
+      // Also update authStore flags for consistency
+      setFaceVerificationPassed(true);
+      setFaceVerificationPending(false);
+    } else if (backendVerificationPending) {
+      didSetInitialStateRef.current = true;
+      console.log('[FaceDebug] Backend status is PENDING -> showing pending UI (user must press Continue)');
+      setVerificationState('pending');
+      // Also update authStore flags for consistency
+      setFaceVerificationPending(true);
+    }
+    // If unverified/failed, stay in 'waiting' state to show camera UI
+  }, [onboardingStatus, backendVerificationPassed, backendVerificationPending, setFaceVerificationPassed, setFaceVerificationPending]);
   const [capturedFrames, setCapturedFrames] = useState<CapturedFrame[]>([]);
   const [framesCaptured, setFramesCaptured] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -578,10 +594,51 @@ export default function FaceVerificationScreen() {
   }, [setStep, router]);
 
   // =============================================================================
+  // DEMO AUTH MODE: Auto-approve verification without real face comparison
+  // Shows the UI but approves immediately when user taps the demo button
+  // =============================================================================
+
+  const [isDemoApproving, setIsDemoApproving] = useState(false);
+
+  const handleDemoApprove = useCallback(async () => {
+    if (!isDemoAuthMode) return;
+
+    console.log('[DEMO_AUTH] Demo approve face verification');
+    setIsDemoApproving(true);
+
+    try {
+      // Call backend to set verification as passed
+      if (token) {
+        await convex.mutation(api.demoAuth.skipDemoFaceVerification, {
+          token,
+        });
+        console.log('[DEMO_AUTH] Face verification approved in Convex');
+      }
+
+      // Update local state
+      setFaceVerificationPassed(true);
+      setFaceVerificationPending(false);
+      setVerificationState('success');
+      setMatchScore(100);
+
+      console.log('[DEMO_AUTH] Face verification demo-approved successfully');
+    } catch (error: any) {
+      console.error('[DEMO_AUTH] Demo approve error:', error);
+      Alert.alert('Demo Error', error.message || 'Failed to demo-approve verification');
+    } finally {
+      setIsDemoApproving(false);
+    }
+  }, [token, setFaceVerificationPassed, setFaceVerificationPending]);
+
+  // =============================================================================
   // Render: M6 FIX - Backend loading with timeout fallback
   // =============================================================================
 
-  if (!isDemoMode && onboardingStatus === undefined) {
+  // Wait for backend status in both demo auth mode and live mode
+  const waitingForBackend = !isDemoMode && !isDemoAuthMode && onboardingStatus === undefined;
+  const waitingForDemoBackend = isDemoAuthMode && onboardingStatus === undefined;
+
+  if (waitingForBackend || waitingForDemoBackend) {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <OnboardingProgressHeader />
@@ -804,6 +861,27 @@ export default function FaceVerificationScreen() {
                 fullWidth
                 style={{ marginTop: 16 }}
               />
+              {/* DEMO AUTH MODE: Show demo approve button */}
+              {isDemoAuthMode && (
+                <View style={{ marginTop: 12 }}>
+                  <Button
+                    title={isDemoApproving ? "Approving..." : "Demo Approve (Dev Only)"}
+                    variant="outline"
+                    onPress={handleDemoApprove}
+                    loading={isDemoApproving}
+                    disabled={isDemoApproving}
+                    fullWidth
+                  />
+                  <Text style={{
+                    textAlign: 'center',
+                    marginTop: 8,
+                    fontSize: 12,
+                    color: COLORS.textLight,
+                  }}>
+                    Demo mode: Approve verification without selfie
+                  </Text>
+                </View>
+              )}
             </>
           )}
 
