@@ -256,9 +256,11 @@ const DEFAULT_LONGITUDE_DELTA = 0.004;
 // Rate limiting constants for crossed paths detection
 const DETECTION_MIN_MOVEMENT_METERS = 60; // Only scan if moved 60m+
 const DETECTION_MIN_INTERVAL_MS = 30000; // Only scan every 30s+
+const PUBLISH_REFRESH_INTERVAL_MS = 30000; // Refresh publishedAt at least every 30s while Nearby is active
 
 // P3-NEARBY-002: Query timeout constant (extracted from inline 30000ms)
 const QUERY_TIMEOUT_MS = 30000; // 30 seconds before showing error
+const LOCATION_ACQUIRE_TIMEOUT_MS = 15000; // 15 seconds before fallback error
 
 // Privacy fuzzing constants
 const FUZZ_MIN_METERS = 50;  // Minimum offset
@@ -456,6 +458,8 @@ export default function NearbyScreen() {
 
   // Current map region for cluster computation
   const [currentRegion, setCurrentRegion] = useState<Region | null>(null);
+  const [isNearbyFocused, setIsNearbyFocused] = useState(false);
+  const [publishRefreshTick, setPublishRefreshTick] = useState(0);
 
   // Computed clusters/points to render
   const [clusters, setClusters] = useState<ClusterFeature[]>([]);
@@ -473,6 +477,7 @@ export default function NearbyScreen() {
 
   // UI state
   const [locationUIState, setLocationUIState] = useState<LocationUIState>('checking');
+  const [locationTimeoutMessage, setLocationTimeoutMessage] = useState<string | null>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
   const [showEmptyState, setShowEmptyState] = useState(false);
@@ -483,6 +488,8 @@ export default function NearbyScreen() {
 
   // Ref to track query timeout (prevents race condition)
   const queryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const locationAcquireTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const publishRefreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // P1-003 FIX: Ref to track query completion for timeout callback
   // This provides fresh state check inside setTimeout, avoiding stale closure values
@@ -521,6 +528,14 @@ export default function NearbyScreen() {
       if (queryTimeoutRef.current) {
         clearTimeout(queryTimeoutRef.current);
         queryTimeoutRef.current = null;
+      }
+      if (locationAcquireTimeoutRef.current) {
+        clearTimeout(locationAcquireTimeoutRef.current);
+        locationAcquireTimeoutRef.current = null;
+      }
+      if (publishRefreshIntervalRef.current) {
+        clearInterval(publishRefreshIntervalRef.current);
+        publishRefreshIntervalRef.current = null;
       }
       if (autoRetryTimeoutRef.current) {
         clearTimeout(autoRetryTimeoutRef.current);
@@ -586,6 +601,11 @@ export default function NearbyScreen() {
   // Track query loading state for error detection
   const isQueryActive = !isDemo && typeof token === 'string' && token.trim().length > 0;
   const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
+  const hasValidBestLocation = !!(
+    bestLocation &&
+    isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)
+  );
+  const locationErrorMessage = locationTimeoutMessage ?? error;
 
   // Clear timeout when query succeeds or on unmount
   useEffect(() => {
@@ -729,7 +749,7 @@ export default function NearbyScreen() {
   const publishLocationMutation = useMutation(api.crossedPaths.publishLocation);
 
   // Track last published coords to avoid spam
-  const lastPublishedRef = useRef<{ lat: number; lng: number } | null>(null);
+  const lastPublishedRef = useRef<{ lat: number; lng: number; publishedAt: number } | null>(null);
   // Guard to prevent concurrent publish calls during initial mount/focus
   const isPublishingRef = useRef(false);
 
@@ -746,11 +766,38 @@ export default function NearbyScreen() {
   const TOAST_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
   const lastToastTimeRef = useRef<number>(0);
 
+  useEffect(() => {
+    if (publishRefreshIntervalRef.current) {
+      clearInterval(publishRefreshIntervalRef.current);
+      publishRefreshIntervalRef.current = null;
+    }
+
+    if (!isNearbyFocused || isDemo || !token || locationUIState !== 'ready') {
+      return;
+    }
+
+    publishRefreshIntervalRef.current = setInterval(() => {
+      if (!isMountedRef.current) return;
+      setPublishRefreshTick((current) => current + 1);
+    }, PUBLISH_REFRESH_INTERVAL_MS);
+
+    return () => {
+      if (publishRefreshIntervalRef.current) {
+        clearInterval(publishRefreshIntervalRef.current);
+        publishRefreshIntervalRef.current = null;
+      }
+    };
+  }, [isNearbyFocused, isDemo, token, locationUIState]);
+
   // Publish location when screen is ready and location is valid
   useEffect(() => {
     // Skip in demo mode
     if (isDemo) {
       if (__DEV__) console.log('[NEARBY] publishLocation skipped: demo mode');
+      return;
+    }
+
+    if (!isNearbyFocused) {
       return;
     }
 
@@ -779,14 +826,20 @@ export default function NearbyScreen() {
 
     const lat = bestLocation.latitude;
     const lng = bestLocation.longitude;
+    const now = Date.now();
 
-    // Skip if same coordinates already published (within ~10m threshold)
+    // Skip if same coordinates were published recently (within ~10m threshold + refresh window)
     const last = lastPublishedRef.current;
     if (last) {
       const latDiff = Math.abs(lat - last.lat);
       const lngDiff = Math.abs(lng - last.lng);
+      const timeSinceLastPublish = now - last.publishedAt;
       // ~10m threshold (0.0001 degrees ≈ 11m)
-      if (latDiff < 0.0001 && lngDiff < 0.0001) {
+      if (
+        latDiff < 0.0001 &&
+        lngDiff < 0.0001 &&
+        timeSinceLastPublish < PUBLISH_REFRESH_INTERVAL_MS
+      ) {
         if (__DEV__) console.log('[NEARBY] publishLocation skipped: same location');
         return;
       }
@@ -809,7 +862,11 @@ export default function NearbyScreen() {
 
         // Only treat the current coordinates as published if the backend actually refreshed them
         if (result?.published) {
-          lastPublishedRef.current = { lat, lng };
+          lastPublishedRef.current = {
+            lat,
+            lng,
+            publishedAt: result.publishedAt ?? Date.now(),
+          };
         }
 
         if (__DEV__) {
@@ -909,7 +966,17 @@ export default function NearbyScreen() {
         isPublishingRef.current = false;
       }
     })();
-  }, [isDemo, token, locationUIState, bestLocation, publishLocationMutation, recordLocationMutation, router]);
+  }, [
+    isDemo,
+    isNearbyFocused,
+    token,
+    locationUIState,
+    bestLocation,
+    publishRefreshTick,
+    publishLocationMutation,
+    recordLocationMutation,
+    router,
+  ]);
 
   // ---------------------------------------------------------------------------
   // Demo mode nearby users - placed around current location
@@ -1250,11 +1317,13 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   useFocusEffect(
     useCallback(() => {
+      setIsNearbyFocused(true);
       log.info('[NEARBY]', 'screen focused, starting location tracking');
       startLocationTracking();
 
       // Cleanup: stop tracking when leaving Nearby tab (battery optimization)
       return () => {
+        setIsNearbyFocused(false);
         log.info('[NEARBY]', 'screen unfocused, stopping location tracking');
         stopLocationTracking();
       };
@@ -1264,6 +1333,51 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   // Derive UI state from location store
   // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (
+      isDemo ||
+      permissionStatus !== 'granted' ||
+      hasValidBestLocation ||
+      error ||
+      locationTimeoutMessage
+    ) {
+      if ((isDemo || permissionStatus !== 'granted' || hasValidBestLocation || error) && locationTimeoutMessage) {
+        setLocationTimeoutMessage(null);
+      }
+      if (locationAcquireTimeoutRef.current) {
+        clearTimeout(locationAcquireTimeoutRef.current);
+        locationAcquireTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    if (locationAcquireTimeoutRef.current) {
+      return;
+    }
+
+    locationAcquireTimeoutRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
+      const latestBestLocation = useLocationStore.getState().getBestLocation();
+      if (
+        latestBestLocation &&
+        isValidMapCoordinate(latestBestLocation.latitude, latestBestLocation.longitude)
+      ) {
+        locationAcquireTimeoutRef.current = null;
+        return;
+      }
+
+      setLocationTimeoutMessage('Unable to get your location. Please try again.');
+      locationAcquireTimeoutRef.current = null;
+    }, LOCATION_ACQUIRE_TIMEOUT_MS);
+
+    return () => {
+      if (locationAcquireTimeoutRef.current) {
+        clearTimeout(locationAcquireTimeoutRef.current);
+        locationAcquireTimeoutRef.current = null;
+      }
+    };
+  }, [isDemo, permissionStatus, hasValidBestLocation, error, locationTimeoutMessage]);
+
   useEffect(() => {
     // Demo mode: always ready with fallback location
     if (isDemo) {
@@ -1294,19 +1408,19 @@ export default function NearbyScreen() {
 
     // Permission granted - check if we have valid coordinates
     if (permissionStatus === 'granted') {
-      if (error) {
+      if (locationErrorMessage) {
         setLocationUIState('error');
         return;
       }
 
-      if (bestLocation && isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)) {
+      if (hasValidBestLocation) {
         setLocationUIState('ready');
       } else {
         // Still waiting for GPS fix
         setLocationUIState('checking');
       }
     }
-  }, [isDemo, permissionStatus, error, bestLocation]);
+  }, [isDemo, permissionStatus, locationErrorMessage, hasValidBestLocation]);
 
   // ---------------------------------------------------------------------------
   // Compute map region
@@ -1369,6 +1483,12 @@ export default function NearbyScreen() {
     // Re-trigger location tracking and force query identity change so retry is real
     startLocationTracking();
   }, [startLocationTracking]);
+
+  const handleRetryLocation = useCallback(() => {
+    setLocationTimeoutMessage(null);
+    stopLocationTracking();
+    startLocationTracking();
+  }, [startLocationTracking, stopLocationTracking]);
 
   // ---------------------------------------------------------------------------
   // SHELL UI PATTERN: Header renders immediately, content area handles states
@@ -1442,9 +1562,9 @@ export default function NearbyScreen() {
           <Ionicons name="warning-outline" size={64} color={COLORS.warning} />
           <Text style={styles.title}>Location Error</Text>
           <Text style={styles.subtitle}>
-            {error || 'Unable to get your location. Please try again.'}
+            {locationErrorMessage || 'Unable to get your location. Please try again.'}
           </Text>
-          <TouchableOpacity style={styles.primaryButton} onPress={startLocationTracking}>
+          <TouchableOpacity style={styles.primaryButton} onPress={handleRetryLocation}>
             <Text style={styles.primaryButtonText}>Retry</Text>
           </TouchableOpacity>
         </View>

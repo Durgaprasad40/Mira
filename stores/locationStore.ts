@@ -229,6 +229,7 @@ interface LocationState {
 
 let watchSubscription: Location.LocationSubscription | null = null;
 let appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
+let trackingSessionGeneration = 0;
 
 // ---------------------------------------------------------------------------
 // Store
@@ -254,7 +255,6 @@ export const useLocationStore = create<LocationState>((set, get) => ({
       // Check permission first (don't request, just check)
       const { status } = await Location.getForegroundPermissionsAsync();
       if (status !== 'granted') {
-        set({ permissionStatus: 'denied' });
         return;
       }
       set({ permissionStatus: 'granted' });
@@ -282,6 +282,21 @@ export const useLocationStore = create<LocationState>((set, get) => ({
 
   startLocationTracking: async () => {
     const state = get();
+    const sessionGeneration = ++trackingSessionGeneration;
+    const isCurrentSession = () => sessionGeneration === trackingSessionGeneration;
+    let pendingWatchSubscription: Location.LocationSubscription | null = null;
+    let pendingAppStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
+
+    const cleanupPendingSubscriptions = () => {
+      if (pendingWatchSubscription) {
+        pendingWatchSubscription.remove();
+        pendingWatchSubscription = null;
+      }
+      if (pendingAppStateSubscription) {
+        pendingAppStateSubscription.remove();
+        pendingAppStateSubscription = null;
+      }
+    };
 
     // Prevent double-start
     if (state.isTracking) {
@@ -310,6 +325,10 @@ export const useLocationStore = create<LocationState>((set, get) => ({
     try {
       // 0. Check if location services are enabled system-wide
       const servicesEnabled = await Location.hasServicesEnabledAsync();
+      if (!isCurrentSession()) {
+        cleanupPendingSubscriptions();
+        return;
+      }
       if (!servicesEnabled) {
         set({
           permissionStatus: 'services_disabled',
@@ -322,9 +341,17 @@ export const useLocationStore = create<LocationState>((set, get) => ({
 
       // 1. Check/request permission
       let { status } = await Location.getForegroundPermissionsAsync();
+      if (!isCurrentSession()) {
+        cleanupPendingSubscriptions();
+        return;
+      }
 
       if (status !== 'granted') {
         const result = await Location.requestForegroundPermissionsAsync();
+        if (!isCurrentSession()) {
+          cleanupPendingSubscriptions();
+          return;
+        }
         status = result.status;
       }
 
@@ -332,6 +359,10 @@ export const useLocationStore = create<LocationState>((set, get) => ({
       if (status === 'denied') {
         // Check if it's actually restricted (iOS-specific)
         const { ios } = await Location.getForegroundPermissionsAsync();
+        if (!isCurrentSession()) {
+          cleanupPendingSubscriptions();
+          return;
+        }
         const isRestricted = ios?.scope === 'none';
 
         set({
@@ -380,13 +411,17 @@ export const useLocationStore = create<LocationState>((set, get) => ({
 
       // 3. Start watching position for live updates
       // Battery-optimized: 100m distance, 30s time interval
-      watchSubscription = await Location.watchPositionAsync(
+      pendingWatchSubscription = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.Balanced,
           distanceInterval: 100, // Update every 100 meters (was 50)
           timeInterval: 30000, // Or every 30 seconds (was 10)
         },
         (position) => {
+          if (!isCurrentSession()) {
+            return;
+          }
+
           const coords: LocationCoords = {
             latitude: position.coords.latitude,
             longitude: position.coords.longitude,
@@ -422,12 +457,22 @@ export const useLocationStore = create<LocationState>((set, get) => ({
           set({ lastKnownLocation: coords });
         }
       );
+      if (!isCurrentSession()) {
+        cleanupPendingSubscriptions();
+        return;
+      }
+      watchSubscription = pendingWatchSubscription;
+      pendingWatchSubscription = null;
 
       // 4. Also fetch current position once for faster initial display
       try {
         const current = await Location.getCurrentPositionAsync({
           accuracy: Location.Accuracy.Balanced,
         });
+        if (!isCurrentSession()) {
+          cleanupPendingSubscriptions();
+          return;
+        }
 
         const coords: LocationCoords = {
           latitude: current.coords.latitude,
@@ -459,25 +504,46 @@ export const useLocationStore = create<LocationState>((set, get) => ({
           }
         }
       } catch (e) {
+        if (!isCurrentSession()) {
+          cleanupPendingSubscriptions();
+          return;
+        }
         // Current position failed but watch is still running
         log.warn('[LOCATION]', 'getCurrentPosition failed', { error: String(e) });
       }
 
       // 5. Setup AppState listener for foreground resume
       if (!appStateSubscription) {
-        appStateSubscription = AppState.addEventListener(
+        pendingAppStateSubscription = AppState.addEventListener(
           'change',
           (nextAppState: AppStateStatus) => {
+            if (!isCurrentSession()) {
+              return;
+            }
             if (nextAppState === 'active') {
               // App came to foreground — refresh location
               get().refreshLocation();
             }
           }
         );
+        if (!isCurrentSession()) {
+          cleanupPendingSubscriptions();
+          return;
+        }
+        appStateSubscription = pendingAppStateSubscription;
+        pendingAppStateSubscription = null;
       }
 
+      if (!isCurrentSession()) {
+        cleanupPendingSubscriptions();
+        return;
+      }
       log.info('[LOCATION]', 'tracking started successfully');
     } catch (e) {
+      cleanupPendingSubscriptions();
+      if (!isCurrentSession()) {
+        return;
+      }
       const errorMsg = e instanceof Error ? e.message : 'Failed to start location tracking';
       set({ error: errorMsg, isTracking: false });
       log.error('[LOCATION]', 'startTracking failed', { error: errorMsg });
@@ -485,6 +551,8 @@ export const useLocationStore = create<LocationState>((set, get) => ({
   },
 
   stopLocationTracking: () => {
+    trackingSessionGeneration += 1;
+
     if (watchSubscription) {
       watchSubscription.remove();
       watchSubscription = null;

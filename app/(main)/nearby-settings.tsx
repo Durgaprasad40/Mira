@@ -32,8 +32,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { Toast } from '@/components/ui/Toast';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import {
-  startBackgroundLocation,
-  stopBackgroundLocation,
+  applyBackgroundLocationModeChange,
   getLocationModeStatus,
   setPreferredLocationMode,
   type NearbyLocationMode,
@@ -137,7 +136,9 @@ export default function NearbySettingsScreen() {
       setLocationMode(status.preferredMode);
       setLocationStatusText(status.statusText);
       setBackgroundDenied(
-        status.preferredMode === 'background' && !status.backgroundPermissionGranted
+        status.preferredMode === 'background' &&
+        status.foregroundPermissionGranted &&
+        !status.backgroundPermissionGranted
       );
     } catch {
       // Fallback to foreground mode
@@ -169,7 +170,13 @@ export default function NearbySettingsScreen() {
       setLocationMode(newMode);
 
       // Apply the change (request permissions, start/stop background task)
-      const result = await startBackgroundLocation();
+      const result = await applyBackgroundLocationModeChange();
+
+      if (!result.success) {
+        await loadLocationModeStatus();
+        Toast.show('Location permission not granted');
+        return;
+      }
 
       if (result.backgroundDenied) {
         // Background was denied - show fallback message

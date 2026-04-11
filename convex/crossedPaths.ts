@@ -150,10 +150,10 @@ const CROSSED_MIN_METERS = 100;  // Minimum distance to trigger crossing
 const CROSSED_MAX_METERS = 750;  // Maximum distance for crossed paths
 
 // Location update gate
-const LOCATION_UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+const LOCATION_UPDATE_INTERVAL_MS = 30 * 1000; // 30 seconds
 
 // Published location window (how often user can refresh their published location)
-const PUBLISH_WINDOW_MS = 45 * 60 * 1000; // 45 minutes
+const PUBLISH_WINDOW_MS = 30 * 1000; // 30 seconds
 const PUBLISH_MOVEMENT_OVERRIDE_METERS = 100; // allow refresh within window after meaningful movement
 
 // Marker visibility tiers (for map)
@@ -253,8 +253,8 @@ const DEV_TEST_CONFIG = {
   // Visibility: 60 minutes instead of 10 minutes
   MAP_VISIBILITY_WINDOW_MS: 60 * 60 * 1000, // 60 minutes
 
-  // Publish throttle: 2 minutes instead of 6 hours
-  PUBLISH_WINDOW_MS: 2 * 60 * 1000, // 2 minutes
+  // Publish throttle: 15 seconds for faster real-device testing
+  PUBLISH_WINDOW_MS: 15 * 1000, // 15 seconds
 
   // Distance: Allow 0m minimum (same room testing)
   NEARBY_MIN_METERS: 0,
@@ -264,8 +264,8 @@ const DEV_TEST_CONFIG = {
   CROSSED_MIN_METERS: 0,
   CROSSED_MAX_METERS: 2000, // 2km for testing
 
-  // Location update gate: 1 minute instead of 30 minutes
-  LOCATION_UPDATE_INTERVAL_MS: 1 * 60 * 1000, // 1 minute
+  // Location update gate: 15 seconds for faster real-device testing
+  LOCATION_UPDATE_INTERVAL_MS: 15 * 1000, // 15 seconds
 
   // Profile requirements relaxation
   SKIP_VERIFICATION_CHECK: true,
@@ -346,7 +346,7 @@ function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>, now: 
 }
 
 // ---------------------------------------------------------------------------
-// publishLocation — updates published location (max once per 6 hours)
+// publishLocation — updates published location (short throttle for Nearby freshness)
 // Called when Nearby screen is opened. Others see publishedLat/Lng, not live GPS.
 // P1 AUTH HARDENING: Uses validated session token for current-user resolution
 // ---------------------------------------------------------------------------
@@ -368,7 +368,7 @@ export const publishLocation = mutation({
     const userId = user._id;
 
     // Check if published location is still within the publish window
-    // DEV MODE: Uses shorter window (2 min) instead of production (45 min)
+    // DEV MODE: Uses shorter window than production for faster testing
     const effectivePublishWindow = config.PUBLISH_WINDOW_MS;
     if (user.publishedAt && now - user.publishedAt < effectivePublishWindow) {
       const hasPublishedCoords =
