@@ -475,13 +475,12 @@ export async function getEligibleNearbyCandidatesForViewer(
       .collect();
   }
 
-  const [blockedIds, swipedUsersMap, presenceByUserId] = await Promise.all([
+  const [blockedIds, swipedUsersMap] = await Promise.all([
     prefetchBlockedUserIds(ctx, userId),
     prefetchSwipes(ctx, userId),
-    prefetchPresenceRecords(ctx, allUsers.map((user: Doc<'users'>) => user._id)),
   ]);
 
-  const candidateUsers: Array<{
+  const preVisibilityCandidates: Array<{
     user: Doc<'users'>;
     distance: number;
     locationAgeMs: number;
@@ -563,16 +562,6 @@ export async function getEligibleNearbyCandidatesForViewer(
         userId: user._id,
         name: user.name,
         pausedUntil: new Date(user.nearbyPausedUntil).toISOString(),
-      });
-      continue;
-    }
-
-    if (!passesNearbyVisibilityMode(user, now, presenceByUserId.get(user._id as string) ?? null)) {
-      filterStats.filtered_visibilityMode++;
-      devLog('FILTERED: visibilityMode', {
-        userId: user._id,
-        name: user.name,
-        visibilityMode: user.nearbyVisibilityMode,
       });
       continue;
     }
@@ -718,19 +707,56 @@ export async function getEligibleNearbyCandidatesForViewer(
       }
     }
 
-    filterStats.passed++;
-    devLog('PASSED: User passed all filters', {
-      userId: user._id,
-      name: user.name,
-      distanceMeters: Math.round(distance),
-      locationAgeMinutes: Math.round(locationAgeMs / 60000),
-    });
-
-    candidateUsers.push({
+    preVisibilityCandidates.push({
       user,
       distance,
       locationAgeMs,
     });
+  }
+
+  const presenceCheckUserIds = preVisibilityCandidates
+    .filter(({ user }) => user.nearbyVisibilityMode && user.nearbyVisibilityMode !== 'always')
+    .map(({ user }) => user._id);
+
+  const presenceByUserId = presenceCheckUserIds.length > 0
+    ? await prefetchPresenceRecords(ctx, presenceCheckUserIds)
+    : new Map<
+        string,
+        { lastSeenAt: number; appState: 'foreground' | 'background' | 'inactive' } | null
+      >();
+
+  const candidateUsers: Array<{
+    user: Doc<'users'>;
+    distance: number;
+    locationAgeMs: number;
+  }> = [];
+
+  for (const candidate of preVisibilityCandidates) {
+    if (
+      !passesNearbyVisibilityMode(
+        candidate.user,
+        now,
+        presenceByUserId.get(candidate.user._id as string) ?? null,
+      )
+    ) {
+      filterStats.filtered_visibilityMode++;
+      devLog('FILTERED: visibilityMode', {
+        userId: candidate.user._id,
+        name: candidate.user.name,
+        visibilityMode: candidate.user.nearbyVisibilityMode,
+      });
+      continue;
+    }
+
+    filterStats.passed++;
+    devLog('PASSED: User passed all filters', {
+      userId: candidate.user._id,
+      name: candidate.user.name,
+      distanceMeters: Math.round(candidate.distance),
+      locationAgeMinutes: Math.round(candidate.locationAgeMs / 60000),
+    });
+
+    candidateUsers.push(candidate);
   }
 
   devLog('getNearbyUsers: FILTER SUMMARY', filterStats);
@@ -970,24 +996,21 @@ export const detectCrossedUsers = mutation({
     }
 
     // 4) Dedupe — filter out people we've already alerted about recently
-    // Batch fetch existing events for all candidates to avoid N+1
+    // Fetch current user's recent events once instead of querying per candidate
     const validCandidates: Id<'users'>[] = [];
-
-    // Pre-fetch existing events for candidates
-    const eventPromises = candidates.map((otherUserId) =>
-      ctx.db
-        .query('crossedEvents')
-        .withIndex('by_user_other', (q) =>
-          q.eq('userId', userId).eq('otherUserId', otherUserId),
-        )
-        .first()
+    const recentEventUserIds = new Set(
+      (
+        await ctx.db
+          .query('crossedEvents')
+          .withIndex('by_user_createdAt', (q) => q.eq('userId', userId))
+          .collect()
+      )
+        .filter((event) => now - event.createdAt < CROSS_DEDUPE_WINDOW_MS)
+        .map((event) => event.otherUserId as string)
     );
-    const existingEvents = await Promise.all(eventPromises);
 
     for (let i = 0; i < candidates.length; i++) {
-      const existingEvent = existingEvents[i];
-      // If no existing event, or existing event is older than dedupe window, allow
-      if (!existingEvent || now - existingEvent.createdAt >= CROSS_DEDUPE_WINDOW_MS) {
+      if (!recentEventUserIds.has(candidates[i] as string)) {
         validCandidates.push(candidates[i]);
       }
     }
@@ -1216,6 +1239,44 @@ export const recordLocation = mutation({
       nearbyUsers.push(user);
     }
 
+    const [existingCrossedPathsAsUser1, existingCrossedPathsAsUser2, existingHistoryAsUser1, existingHistoryAsUser2] = await Promise.all([
+      ctx.db
+        .query('crossedPaths')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .collect(),
+      ctx.db
+        .query('crossedPaths')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .collect(),
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .collect(),
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .collect(),
+    ]);
+
+    const crossedPathsByOtherUserId = new Map<string, Doc<'crossedPaths'>>();
+    for (const crossedPath of [...existingCrossedPathsAsUser1, ...existingCrossedPathsAsUser2]) {
+      const otherUserId =
+        crossedPath.user1Id === userId ? crossedPath.user2Id : crossedPath.user1Id;
+      crossedPathsByOtherUserId.set(otherUserId as string, crossedPath);
+    }
+
+    const recentHistoryByOtherUserId = new Map<string, number>();
+    for (const historyEntry of [...existingHistoryAsUser1, ...existingHistoryAsUser2]) {
+      const otherUserId =
+        historyEntry.user1Id === userId ? historyEntry.user2Id : historyEntry.user1Id;
+      const latestForPair = recentHistoryByOtherUserId.get(otherUserId as string) ?? 0;
+      if (historyEntry.createdAt > latestForPair) {
+        recentHistoryByOtherUserId.set(otherUserId as string, historyEntry.createdAt);
+      }
+    }
+
+    let insertedHistoryEntry = false;
+
     // Record crossed paths + history
     for (const nearbyUser of nearbyUsers) {
       // Age filtering (both directions)
@@ -1253,12 +1314,7 @@ export const recordLocation = mutation({
 
       // --- Crossed paths record (for unlock logic) ---
       // BUGFIX #28: Use idempotent upsert pattern to prevent duplicate records
-      let crossedPath = await ctx.db
-        .query('crossedPaths')
-        .withIndex('by_users', (q) =>
-          q.eq('user1Id', user1Id).eq('user2Id', user2Id),
-        )
-        .first();
+      let crossedPath = crossedPathsByOtherUserId.get(nearbyUser._id as string) ?? null;
 
       if (crossedPath) {
         // 1-hour cooldown per pair (faster notification for better UX)
@@ -1274,9 +1330,14 @@ export const recordLocation = mutation({
         };
 
         await ctx.db.patch(crossedPath._id, updates);
+        crossedPath = {
+          ...crossedPath,
+          ...updates,
+          count: newCount,
+        };
+        crossedPathsByOtherUserId.set(nearbyUser._id as string, crossedPath);
       } else {
-        // BUGFIX #28: Insert new record, then check for race condition duplicate
-        const newId = await ctx.db.insert('crossedPaths', {
+        const insertedCrossedPathId = await ctx.db.insert('crossedPaths', {
           user1Id,
           user2Id,
           count: 1,
@@ -1301,20 +1362,28 @@ export const recordLocation = mutation({
           }
           // Update crossedPath reference to the kept record
           crossedPath = allForPair[0];
+        } else {
+          crossedPath = {
+            _id: insertedCrossedPathId,
+            _creationTime: now,
+            user1Id,
+            user2Id,
+            count: 1,
+            lastCrossedAt: now,
+          } as Doc<'crossedPaths'>;
+        }
+
+        if (crossedPath) {
+          crossedPathsByOtherUserId.set(nearbyUser._id as string, crossedPath);
         }
       }
 
       // --- Cross-path history entry (MUTUAL — both users see this) ---
-      // BUGFIX #28: Check 24h duplicate control for same pair
-      const existingHistory = await ctx.db
-        .query('crossPathHistory')
-        .withIndex('by_users', (q) =>
-          q.eq('user1Id', user1Id).eq('user2Id', user2Id),
-        )
-        .order('desc')
-        .first();
+      const existingHistoryCreatedAt = recentHistoryByOtherUserId.get(
+        nearbyUser._id as string,
+      ) ?? 0;
 
-      if (existingHistory && now - existingHistory.createdAt < NOTIFICATION_COOLDOWN_MS) {
+      if (existingHistoryCreatedAt && now - existingHistoryCreatedAt < NOTIFICATION_COOLDOWN_MS) {
         // Already have a recent history entry for this pair — skip
         continue;
       }
@@ -1338,6 +1407,8 @@ export const recordLocation = mutation({
         createdAt: now,
         expiresAt: now + HISTORY_EXPIRY_MS,
       });
+      insertedHistoryEntry = true;
+      recentHistoryByOtherUserId.set(nearbyUser._id as string, now);
 
       // BUGFIX #28: Re-query to detect concurrent insert race condition for history
       const recentHistories = await ctx.db
@@ -1360,21 +1431,13 @@ export const recordLocation = mutation({
         }
       }
 
-      // Re-fetch crossedPath to get latest state (may have been created/updated above)
-      const currentCrossedPath = await ctx.db
-        .query('crossedPaths')
-        .withIndex('by_users', (q) =>
-          q.eq('user1Id', user1Id).eq('user2Id', user2Id),
-        )
-        .first();
-
       // Check notification cooldown on the canonical crossedPaths record
-      const canNotify = currentCrossedPath && (
-        !currentCrossedPath.lastNotifiedAt ||
-        now - currentCrossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS
+      const canNotify = crossedPath && (
+        !crossedPath.lastNotifiedAt ||
+        now - crossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS
       );
 
-      if (canNotify && currentCrossedPath) {
+      if (canNotify && crossedPath) {
         // Rate limiting: Check if user has received too many notifications in the last 24 hours
         const recentNotificationsUser1 = await ctx.db
           .query('notifications')
@@ -1399,10 +1462,12 @@ export const recordLocation = mutation({
           .collect();
 
         // Update lastNotifiedAt to prevent race condition duplicates
-        await ctx.db.patch(currentCrossedPath._id, { lastNotifiedAt: now });
+        await ctx.db.patch(crossedPath._id, { lastNotifiedAt: now });
+        crossedPath = { ...crossedPath, lastNotifiedAt: now };
+        crossedPathsByOtherUserId.set(nearbyUser._id as string, crossedPath);
 
         // Generate dynamic notification text based on crossing count
-        const crossingCount = currentCrossedPath.count;
+        const crossingCount = crossedPath.count;
         const reasonText = formatReasonForNotification(compatibility.reasonTags[0] ?? 'common');
 
         // Dynamic title and body based on state
@@ -1502,13 +1567,71 @@ export const recordLocation = mutation({
         }
       }
 
-      // Enforce max entries per user — trim oldest
+    }
+
+    if (insertedHistoryEntry) {
       await trimHistoryForUser(ctx, userId);
     }
 
     return { success: true, nearbyCount: nearbyUsers.length };
   },
 });
+
+async function getVisibleCrossPathHistoryEntriesForUser(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  currentUser: Doc<'users'>,
+): Promise<{ entries: Doc<'crossPathHistory'>[]; now: number }> {
+  const userId = currentUser._id;
+  const now = Date.now();
+
+  const [mySwipes, blockedIds, asUser1, asUser2] = await Promise.all([
+    ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q: any) => q.eq('fromUserId', userId))
+      .collect(),
+    prefetchBlockedUserIds(ctx, userId),
+    ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user1', (q: any) => q.eq('user1Id', userId))
+      .collect(),
+    ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user2', (q: any) => q.eq('user2Id', userId))
+      .collect(),
+  ]);
+
+  const swipedUsersMap = new Map<string, { action: string; createdAt: number }>();
+  for (const swipe of mySwipes) {
+    swipedUsersMap.set(swipe.toUserId as string, {
+      action: swipe.action,
+      createdAt: swipe.createdAt,
+    });
+  }
+
+  const entries = [...asUser1, ...asUser2]
+    .filter((entry) => {
+      if (entry.expiresAt <= now) return false;
+
+      const isUser1 = entry.user1Id === userId;
+      if (isUser1 && entry.hiddenByUser1) return false;
+      if (!isUser1 && entry.hiddenByUser2) return false;
+
+      const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
+      if (blockedIds.has(otherUserId as string)) return false;
+
+      const existingSwipe = swipedUsersMap.get(otherUserId as string);
+      if (existingSwipe) {
+        if (existingSwipe.action !== 'pass') return false;
+        if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) return false;
+      }
+
+      return true;
+    })
+    .sort((a, b) => b.createdAt - a.createdAt);
+
+  return { entries, now };
+}
 
 // ---------------------------------------------------------------------------
 // getNearbyUsers — map markers with jittered coords & freshness
@@ -1603,78 +1726,34 @@ export const getCrossPathHistory = query({
   handler: async (ctx, { token }) => {
     const currentUser = await requireAuthenticatedSessionUser(ctx, token);
     const userId = currentUser._id;
-    const now = Date.now();
+    const { entries, now } = await getVisibleCrossPathHistoryEntriesForUser(ctx, currentUser);
 
     const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
     const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
-
-    const [mySwipes, blockedIds] = await Promise.all([
-      ctx.db
-        .query('likes')
-        .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
-        .collect(),
-      prefetchBlockedUserIds(ctx, userId),
-    ]);
-    const swipedUsersMap = new Map<string, { action: string; createdAt: number }>();
-    for (const swipe of mySwipes) {
-      swipedUsersMap.set(swipe.toUserId as string, {
-        action: swipe.action,
-        createdAt: swipe.createdAt,
-      });
-    }
-
-    const asUser1 = await ctx.db
-      .query('crossPathHistory')
-      .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-      .collect();
-
-    const asUser2 = await ctx.db
-      .query('crossPathHistory')
-      .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-      .collect();
-
-    const all = [...asUser1, ...asUser2]
-      .filter((entry) => {
-        // Filter expired entries (4 weeks)
-        if (entry.expiresAt <= now) return false;
-
-        // Filter hidden entries for this user
-        const isUser1 = entry.user1Id === userId;
-        if (isUser1 && entry.hiddenByUser1) return false;
-        if (!isUser1 && entry.hiddenByUser2) return false;
-
-        const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
-        if (blockedIds.has(otherUserId as string)) return false;
-
-        // Skip filter: Same as Discover behavior (Rule 9)
-        const existingSwipe = swipedUsersMap.get(otherUserId as string);
-        if (existingSwipe) {
-          if (existingSwipe.action !== 'pass') return false; // Skip likes/super_likes
-          if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) return false; // Skip recent passes
-        }
-
-        return true;
-      })
-      .sort((a, b) => b.createdAt - a.createdAt) // newest first
-      .slice(0, MAX_HISTORY_ENTRIES);
+    const all = entries.slice(0, MAX_HISTORY_ENTRIES);
 
     // Collect unique other user IDs
     const otherUserIds = [...new Set(
       all.map((entry) => entry.user1Id === userId ? entry.user2Id : entry.user1Id)
     )];
 
-    // Batch fetch crossing counts from crossedPaths table
-    const crossingCountsMap = new Map<string, number>();
-    for (const otherUserId of otherUserIds) {
-      const orderedUser1 = userId < otherUserId ? userId : otherUserId;
-      const orderedUser2 = userId < otherUserId ? otherUserId : userId;
-      const crossedPath = await ctx.db
+    const [crossedPathsAsUser1, crossedPathsAsUser2] = await Promise.all([
+      ctx.db
         .query('crossedPaths')
-        .withIndex('by_users', (q) =>
-          q.eq('user1Id', orderedUser1).eq('user2Id', orderedUser2),
-        )
-        .first();
-      crossingCountsMap.set(otherUserId as string, crossedPath?.count ?? 1);
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .collect(),
+      ctx.db
+        .query('crossedPaths')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .collect(),
+    ]);
+
+    // Batch fetch crossing counts from crossedPaths table without per-user lookups
+    const crossingCountsMap = new Map<string, number>();
+    for (const crossedPath of [...crossedPathsAsUser1, ...crossedPathsAsUser2]) {
+      const otherUserId =
+        crossedPath.user1Id === userId ? crossedPath.user2Id : crossedPath.user1Id;
+      crossingCountsMap.set(otherUserId as string, crossedPath.count);
     }
 
     // Parallel fetch all users
@@ -1787,6 +1866,21 @@ export const getCrossPathHistory = query({
     });
 
     return results;
+  },
+});
+
+export const getCrossedPathSummary = query({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, { token }) => {
+    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
+    const { entries } = await getVisibleCrossPathHistoryEntriesForUser(ctx, currentUser);
+
+    return {
+      count: entries.length,
+      latestCreatedAt: entries.length > 0 ? entries[0].createdAt : null,
+    };
   },
 });
 

@@ -520,6 +520,22 @@ export default function NearbyScreen() {
   const loadingOpacity = useRef(new Animated.Value(0)).current;
   const lastNearbyRefreshAtRef = useRef(0);
   const [nearbySyncIssue, setNearbySyncIssue] = useState<NearbySyncIssue | null>(null);
+  const requestNearbyRefresh = useCallback(
+    (options?: { force?: boolean; minIntervalMs?: number }) => {
+      const force = options?.force ?? false;
+      const minIntervalMs = options?.minIntervalMs ?? 1500;
+      const now = Date.now();
+
+      if (!force && now - lastNearbyRefreshAtRef.current < minIntervalMs) {
+        return false;
+      }
+
+      lastNearbyRefreshAtRef.current = now;
+      setNearbyRefreshKey((current) => current + 1);
+      return true;
+    },
+    [],
+  );
 
   // P2-NEARBY-002: Centralized unmount cleanup for all timer refs
   // This ensures all timers are cleared on unmount, regardless of effect state
@@ -557,49 +573,6 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   // Query nearby users (live mode only)
   // ---------------------------------------------------------------------------
-  const nearbyUsersQuery = useQuery(
-    api.crossedPaths.getNearbyUsers,
-    !isDemo && token
-      ? { token, refreshKey: nearbyRefreshKey }
-      : 'skip'
-  );
-
-  // ---------------------------------------------------------------------------
-  // Crossed Paths Badge - show dot when there are new entries
-  // ---------------------------------------------------------------------------
-  const crossedPathsQuery = useQuery(
-    api.crossedPaths.getCrossPathHistory,
-    !isDemo && token ? { token } : 'skip'
-  );
-
-  const [hasNewCrossedPaths, setHasNewCrossedPaths] = useState(false);
-
-  // Check if there are new crossed paths since last viewed
-  useEffect(() => {
-    if (!crossedPathsQuery || crossedPathsQuery.length === 0) {
-      setHasNewCrossedPaths(false);
-      return;
-    }
-
-    // Get the latest crossed path timestamp
-    const latestTimestamp = Math.max(...crossedPathsQuery.map((cp: any) => cp.createdAt || 0));
-
-    // Get last seen timestamp from storage
-    // P1-005 FIX: Add mount guard to prevent state update after unmount
-    AsyncStorage.getItem(CROSSED_PATHS_LAST_SEEN_KEY).then((lastSeenStr) => {
-      if (!isMountedRef.current) return;
-      const lastSeen = lastSeenStr ? parseInt(lastSeenStr, 10) : 0;
-      setHasNewCrossedPaths(latestTimestamp > lastSeen);
-    }).catch(() => {
-      if (!isMountedRef.current) return;
-      // On error, assume there are new paths if we have any
-      setHasNewCrossedPaths(crossedPathsQuery.length > 0);
-    });
-  }, [crossedPathsQuery]);
-
-  // Track query loading state for error detection
-  const isQueryActive = !isDemo && typeof token === 'string' && token.trim().length > 0;
-  const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
   const hasValidBestLocation = !!(
     bestLocation &&
     isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)
@@ -610,6 +583,67 @@ export default function NearbyScreen() {
   const passiveLocationErrorMessage = hasValidBestLocation
     ? (locationTimeoutMessage ?? error)
     : null;
+  const authToken =
+    typeof token === 'string' && token.trim().length > 0 ? token : null;
+  const shouldRunNearbyUsersQuery = Boolean(
+    !isDemo &&
+    authToken &&
+    isNearbyFocused &&
+    permissionStatus === 'granted' &&
+    !blockingLocationErrorMessage
+  );
+  const shouldRunCrossedPathSummaryQuery = Boolean(
+    !isDemo &&
+    authToken &&
+    isNearbyFocused
+  );
+
+  const nearbyUsersQuery = useQuery(
+    api.crossedPaths.getNearbyUsers,
+    shouldRunNearbyUsersQuery
+      ? { token: authToken!, refreshKey: nearbyRefreshKey }
+      : 'skip'
+  );
+
+  // ---------------------------------------------------------------------------
+  // Crossed Paths Badge - show dot when there are new entries
+  // ---------------------------------------------------------------------------
+  const crossedPathSummaryQuery = useQuery(
+    api.crossedPaths.getCrossedPathSummary,
+    shouldRunCrossedPathSummaryQuery ? { token: authToken! } : 'skip'
+  );
+
+  const [hasNewCrossedPaths, setHasNewCrossedPaths] = useState(false);
+
+  // Check if there are new crossed paths since last viewed
+  useEffect(() => {
+    if (!crossedPathSummaryQuery || crossedPathSummaryQuery.count === 0) {
+      setHasNewCrossedPaths(false);
+      return;
+    }
+
+    const latestTimestamp = crossedPathSummaryQuery.latestCreatedAt ?? 0;
+    if (!latestTimestamp) {
+      setHasNewCrossedPaths(false);
+      return;
+    }
+
+    // Get last seen timestamp from storage
+    // P1-005 FIX: Add mount guard to prevent state update after unmount
+    AsyncStorage.getItem(CROSSED_PATHS_LAST_SEEN_KEY).then((lastSeenStr) => {
+      if (!isMountedRef.current) return;
+      const lastSeen = lastSeenStr ? parseInt(lastSeenStr, 10) : 0;
+      setHasNewCrossedPaths(latestTimestamp > lastSeen);
+    }).catch(() => {
+      if (!isMountedRef.current) return;
+      // On error, assume there are new paths if we have any
+      setHasNewCrossedPaths(crossedPathSummaryQuery.count > 0);
+    });
+  }, [crossedPathSummaryQuery]);
+
+  // Track query loading state for error detection
+  const isQueryActive = shouldRunNearbyUsersQuery;
+  const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
 
   // Clear timeout when query succeeds or on unmount
   useEffect(() => {
@@ -731,7 +765,7 @@ export default function NearbyScreen() {
         // Clear error and trigger retry (same as manual retry)
         setQueryError(null);
         setIsRetrying(true);
-        setNearbyRefreshKey((current) => current + 1);
+        requestNearbyRefresh({ force: true });
         startLocationTracking();
       }
 
@@ -745,7 +779,7 @@ export default function NearbyScreen() {
         autoRetryTimeoutRef.current = null;
       }
     };
-  }, [queryError, startLocationTracking]);
+  }, [queryError, requestNearbyRefresh, startLocationTracking]);
 
   // ---------------------------------------------------------------------------
   // Publish location mutation (live mode only)
@@ -871,7 +905,7 @@ export default function NearbyScreen() {
             lng,
             publishedAt: result.publishedAt ?? Date.now(),
           };
-          setNearbyRefreshKey((current) => current + 1);
+          requestNearbyRefresh();
           setNearbySyncIssue((currentIssue) =>
             currentIssue?.kind === 'publish' ? null : currentIssue
           );
@@ -993,6 +1027,7 @@ export default function NearbyScreen() {
     bestLocation,
     publishRefreshTick,
     publishLocationMutation,
+    requestNearbyRefresh,
     recordLocationMutation,
     router,
   ]);
@@ -1123,6 +1158,39 @@ export default function NearbyScreen() {
     return sorted;
   }, [processedNearbyUsers]);
 
+  const clusterPoints = useMemo<Supercluster.PointFeature<UserPointProperties>[]>(() => {
+    return mapUsers
+      .filter((user) => isValidMapCoordinate(user.fuzzedLat, user.fuzzedLng))
+      .map((user) => ({
+        type: 'Feature' as const,
+        properties: {
+          id: user.id,
+          user,
+        },
+        geometry: {
+          type: 'Point' as const,
+          coordinates: [user.fuzzedLng, user.fuzzedLat],
+        },
+      }));
+  }, [mapUsers]);
+
+  const recomputeClusters = useCallback((region: Region | null) => {
+    if (!region || !superclusterRef.current) {
+      setClusters([]);
+      return;
+    }
+
+    try {
+      const zoom = getZoomFromRegion(region);
+      const bbox = getBoundingBox(region);
+      const newClusters = superclusterRef.current.getClusters(bbox, zoom);
+      setClusters(newClusters);
+    } catch (e) {
+      log.warn('[NEARBY]', 'Error computing clusters', { error: String(e) });
+      setClusters([]);
+    }
+  }, []);
+
   // ---------------------------------------------------------------------------
   // Supercluster: Initialize and compute clusters
   // ---------------------------------------------------------------------------
@@ -1132,54 +1200,17 @@ export default function NearbyScreen() {
       radius: CLUSTER_RADIUS,
       maxZoom: CLUSTER_MAX_ZOOM,
     });
-
-    // Convert users to GeoJSON points
-    const points: Supercluster.PointFeature<UserPointProperties>[] = mapUsers
-      .filter(user => isValidMapCoordinate(user.fuzzedLat, user.fuzzedLng))
-      .map(user => ({
-        type: 'Feature' as const,
-        properties: {
-          id: user.id,
-          user,
-        },
-        geometry: {
-          type: 'Point' as const,
-          coordinates: [user.fuzzedLng, user.fuzzedLat], // GeoJSON is [lng, lat]
-        },
-      }));
-
-    // Load points into supercluster
-    cluster.load(points);
+    cluster.load(clusterPoints);
     superclusterRef.current = cluster;
+  }, [clusterPoints]);
 
-    // Compute initial clusters if we have a region
-    if (currentRegion) {
-      try {
-        const zoom = getZoomFromRegion(currentRegion);
-        const bbox = getBoundingBox(currentRegion);
-        const newClusters = cluster.getClusters(bbox, zoom);
-        setClusters(newClusters);
-      } catch (e) {
-        log.warn('[NEARBY]', 'Error computing clusters', { error: String(e) });
-        setClusters([]);
-      }
-    }
-  }, [mapUsers, currentRegion]);
+  useEffect(() => {
+    recomputeClusters(currentRegion);
+  }, [clusterPoints, currentRegion, recomputeClusters]);
 
   // Handler for map region changes - recompute clusters
   const handleRegionChangeComplete = useCallback((region: Region) => {
     setCurrentRegion(region);
-
-    if (!superclusterRef.current) return;
-
-    try {
-      const zoom = getZoomFromRegion(region);
-      const bbox = getBoundingBox(region);
-      const newClusters = superclusterRef.current.getClusters(bbox, zoom);
-      setClusters(newClusters);
-    } catch (e) {
-      log.warn('[NEARBY]', 'Error computing clusters on region change', { error: String(e) });
-    }
   }, []);
 
   // Handler for cluster press - zoom into cluster
@@ -1329,7 +1360,7 @@ export default function NearbyScreen() {
   useFocusEffect(
     useCallback(() => {
       setIsNearbyFocused(true);
-      setNearbyRefreshKey((current) => current + 1);
+      requestNearbyRefresh({ force: true });
       log.info('[NEARBY]', 'screen focused, starting location tracking');
       startLocationTracking();
 
@@ -1339,28 +1370,8 @@ export default function NearbyScreen() {
         log.info('[NEARBY]', 'screen unfocused, stopping location tracking');
         stopLocationTracking();
       };
-    }, [startLocationTracking, stopLocationTracking])
+    }, [requestNearbyRefresh, startLocationTracking, stopLocationTracking])
   );
-
-  useEffect(() => {
-    if (
-      !isNearbyFocused ||
-      isDemo ||
-      locationUIState !== 'ready' ||
-      !bestLocation ||
-      !isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)
-    ) {
-      return;
-    }
-
-    const now = Date.now();
-    if (now - lastNearbyRefreshAtRef.current < 5000) {
-      return;
-    }
-
-    lastNearbyRefreshAtRef.current = now;
-    setNearbyRefreshKey((current) => current + 1);
-  }, [bestLocation?.timestamp, isDemo, isNearbyFocused, locationUIState, bestLocation]);
 
   // ---------------------------------------------------------------------------
   // Derive UI state from location store
@@ -1511,11 +1522,11 @@ export default function NearbyScreen() {
     // Clear error and show loading feedback
     setQueryError(null);
     setIsRetrying(true);
-    setNearbyRefreshKey((current) => current + 1);
+    requestNearbyRefresh({ force: true });
 
     // Re-trigger location tracking and force query identity change so retry is real
     startLocationTracking();
-  }, [startLocationTracking]);
+  }, [requestNearbyRefresh, startLocationTracking]);
 
   const handleRetryLocation = useCallback(() => {
     setLocationTimeoutMessage(null);
@@ -1529,8 +1540,8 @@ export default function NearbyScreen() {
     lastDetectionTimeRef.current = 0;
     lastDetectionLatLngRef.current = null;
     setPublishRefreshTick((current) => current + 1);
-    setNearbyRefreshKey((current) => current + 1);
-  }, []);
+    requestNearbyRefresh({ force: true });
+  }, [requestNearbyRefresh]);
 
   const mapNotice = useMemo<NearbyMapNotice | null>(() => {
     if (nearbySyncIssue) {

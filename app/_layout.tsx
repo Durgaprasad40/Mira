@@ -800,15 +800,15 @@ function CrossedPathToastManager() {
   }, []);
 
   // Query crossed-path history (live mode only)
-  const crossedPathsQuery = useQuery(
-    api.crossedPaths.getCrossPathHistory,
+  const crossedPathsSummary = useQuery(
+    api.crossedPaths.getCrossedPathSummary,
     !isDemoMode && token ? { token } : 'skip'
   );
 
   // Check for new crossed paths and show toast
   const checkAndShowToast = useCallback(async () => {
     // Guard: must be authenticated and have data
-    if (!crossedPathsQuery || crossedPathsQuery.length === 0) return;
+    if (!crossedPathsSummary || crossedPathsSummary.count === 0) return;
     if (!mountedRef.current) return;
 
     // Guard: don't show if already on crossed-paths screen
@@ -816,9 +816,7 @@ function CrossedPathToastManager() {
     if (currentPath.includes('crossed-paths')) return;
 
     // Find the latest createdAt timestamp
-    const latestCreatedAt = Math.max(
-      ...crossedPathsQuery.map((item: any) => item.createdAt || 0)
-    );
+    const latestCreatedAt = crossedPathsSummary.latestCreatedAt ?? 0;
     if (!latestCreatedAt) return;
 
     try {
@@ -854,17 +852,17 @@ function CrossedPathToastManager() {
         console.warn('[CROSSED_TOAST] Failed to check lastSeen:', error);
       }
     }
-  }, [crossedPathsQuery, segments, router]);
+  }, [crossedPathsSummary, segments, router]);
 
   // Check on initial data load (after mount)
   useEffect(() => {
     if (!authHydrated || !token) return;
     if (hasCheckedOnMountRef.current) return;
-    if (!crossedPathsQuery || crossedPathsQuery.length === 0) return;
+    if (!crossedPathsSummary || crossedPathsSummary.count === 0) return;
 
     hasCheckedOnMountRef.current = true;
     checkAndShowToast();
-  }, [authHydrated, token, crossedPathsQuery, checkAndShowToast]);
+  }, [authHydrated, token, crossedPathsSummary, checkAndShowToast]);
 
   // Check on app resume (foreground)
   useEffect(() => {
