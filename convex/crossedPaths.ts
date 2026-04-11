@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { requireAuthenticatedSessionUser } from './helpers';
+import { computePresenceStatus } from './presence';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
@@ -310,6 +311,472 @@ function getEffectiveNearbyConfig() {
     SKIP_PRIMARY_PHOTO_CHECK: false,
     MIN_PHOTO_COUNT: 2,
     IS_DEV_MODE: false,
+  };
+}
+
+type NearbyEligibilityStatus = 'ok' | 'viewer_unverified' | 'location_required';
+
+type NearbyEligibleCandidate = {
+  user: Doc<'users'>;
+  distance: number;
+  locationAgeMs: number;
+  photoSummary: {
+    count: number;
+    safeDisplayUrl: string | null;
+  };
+};
+
+function hasNearbyCoordinatePair(
+  lat: number | null | undefined,
+  lng: number | null | undefined,
+): boolean {
+  return typeof lat === 'number' && typeof lng === 'number';
+}
+
+async function prefetchPresenceRecords(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userIds: Id<'users'>[],
+): Promise<Map<string, { lastSeenAt: number; appState: 'foreground' | 'background' | 'inactive' } | null>> {
+  const records = await Promise.all(
+    userIds.map((userId) =>
+      ctx.db
+        .query('presence')
+        .withIndex('by_user', (q: any) => q.eq('userId', userId))
+        .first()
+    )
+  );
+
+  const presenceMap = new Map<string, { lastSeenAt: number; appState: 'foreground' | 'background' | 'inactive' } | null>();
+  userIds.forEach((userId, index) => {
+    const record = records[index];
+    presenceMap.set(
+      userId as string,
+      record
+        ? {
+            lastSeenAt: record.lastSeenAt,
+            appState: record.appState,
+          }
+        : null
+    );
+  });
+
+  return presenceMap;
+}
+
+function passesNearbyVisibilityMode(
+  user: Doc<'users'>,
+  now: number,
+  presenceRecord: { lastSeenAt: number; appState: 'foreground' | 'background' | 'inactive' } | null,
+): boolean {
+  if (user.nearbyVisibilityMode === 'always' || !user.nearbyVisibilityMode) {
+    return true;
+  }
+
+  const fallbackLastSeenAt = typeof user.lastActive === 'number' ? user.lastActive : 0;
+  const lastSeenAt = presenceRecord?.lastSeenAt ?? fallbackLastSeenAt;
+  const appState = presenceRecord?.appState ?? 'inactive';
+
+  if (!lastSeenAt) {
+    return false;
+  }
+
+  if (user.nearbyVisibilityMode === 'app_open') {
+    return computePresenceStatus(lastSeenAt, appState, now).status === 'online';
+  }
+
+  if (user.nearbyVisibilityMode === 'recent') {
+    const recentThreshold = 30 * 60 * 1000;
+    return now - lastSeenAt <= recentThreshold;
+  }
+
+  return true;
+}
+
+export async function getEligibleNearbyCandidatesForViewer(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  currentUser: Doc<'users'>,
+): Promise<{
+  status: NearbyEligibilityStatus;
+  candidates: NearbyEligibleCandidate[];
+  now: number;
+}> {
+  const now = Date.now();
+
+  const config = getEffectiveNearbyConfig();
+
+  devLog('getNearbyUsers: STARTING QUERY', {
+    isDevMode: config.IS_DEV_MODE,
+    effectiveVisibilityWindowMs: config.MAP_VISIBILITY_WINDOW_MS,
+    effectiveMinMeters: config.NEARBY_MIN_METERS,
+    effectiveMaxMeters: config.NEARBY_MAX_METERS,
+    skipVerificationCheck: config.SKIP_VERIFICATION_CHECK,
+    skipPhotoCountCheck: config.SKIP_PHOTO_COUNT_CHECK,
+  });
+
+  const userId = currentUser._id;
+
+  devLog('getNearbyUsers: currentUser', {
+    userId,
+    name: currentUser.name,
+    verificationStatus: currentUser.verificationStatus,
+    publishedAt: currentUser.publishedAt ? new Date(currentUser.publishedAt).toISOString() : null,
+  });
+
+  if (!config.SKIP_VERIFICATION_CHECK && currentUser.verificationStatus !== 'verified') {
+    devLog('getNearbyUsers: BLOCKED - currentUser not verified', {
+      verificationStatus: currentUser.verificationStatus,
+    });
+    return {
+      status: 'viewer_unverified',
+      candidates: [],
+      now,
+    };
+  }
+
+  const myLat = hasNearbyCoordinatePair(currentUser.publishedLat, currentUser.publishedLng)
+    ? currentUser.publishedLat
+    : currentUser.latitude;
+  const myLng = hasNearbyCoordinatePair(currentUser.publishedLat, currentUser.publishedLng)
+    ? currentUser.publishedLng
+    : currentUser.longitude;
+
+  if (!hasNearbyCoordinatePair(myLat, myLng)) {
+    devLog('getNearbyUsers: BLOCKED - currentUser has no location', {
+      publishedLat: currentUser.publishedLat,
+      publishedLng: currentUser.publishedLng,
+      latitude: currentUser.latitude,
+      longitude: currentUser.longitude,
+    });
+    return {
+      status: 'location_required',
+      candidates: [],
+      now,
+    };
+  }
+
+  const viewerLat = myLat as number;
+  const viewerLng = myLng as number;
+
+  const myAge = calculateAge(currentUser.dateOfBirth);
+
+  let allUsers;
+  if (config.SKIP_VERIFICATION_CHECK) {
+    allUsers = await ctx.db
+      .query('users')
+      .filter((q: any) => q.eq(q.field('isActive'), true))
+      .collect();
+    devLog('getNearbyUsers: DEV MODE - querying ALL active users', { count: allUsers.length });
+  } else {
+    allUsers = await ctx.db
+      .query('users')
+      .withIndex('by_verification_status', (q: any) => q.eq('verificationStatus', 'verified'))
+      .collect();
+  }
+
+  const [blockedIds, swipedUsersMap, presenceByUserId] = await Promise.all([
+    prefetchBlockedUserIds(ctx, userId),
+    prefetchSwipes(ctx, userId),
+    prefetchPresenceRecords(ctx, allUsers.map((user: Doc<'users'>) => user._id)),
+  ]);
+
+  const candidateUsers: Array<{
+    user: Doc<'users'>;
+    distance: number;
+    locationAgeMs: number;
+  }> = [];
+
+  const filterStats = {
+    total: 0,
+    passed: 0,
+    filtered_self: 0,
+    filtered_inactive: 0,
+    filtered_banned: 0,
+    filtered_incognito: 0,
+    filtered_nearbyDisabled: 0,
+    filtered_paused: 0,
+    filtered_visibilityMode: 0,
+    filtered_incompleteProfile: 0,
+    filtered_verificationEnforcement: 0,
+    filtered_noPublishedLocation: 0,
+    filtered_staleLocation: 0,
+    filtered_tooClose: 0,
+    filtered_tooFar: 0,
+    filtered_ageMismatch: 0,
+    filtered_genderMismatch: 0,
+    filtered_blocked: 0,
+    filtered_swiped: 0,
+    filtered_noSafePhoto: 0,
+  };
+
+  for (const user of allUsers) {
+    filterStats.total++;
+
+    if (user._id === userId) {
+      filterStats.filtered_self++;
+      continue;
+    }
+
+    if (!user.isActive) {
+      filterStats.filtered_inactive++;
+      devLog('FILTERED: inactive', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    if (user.isBanned) {
+      filterStats.filtered_banned++;
+      devLog('FILTERED: banned', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    if (user.verificationEnforcementLevel === 'security_only') {
+      filterStats.filtered_verificationEnforcement++;
+      devLog('FILTERED: security_only', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    if (
+      user.verificationEnforcementLevel === 'reduced_reach' &&
+      !shouldIncludeReducedReachCandidate(String(userId), String(user._id))
+    ) {
+      filterStats.filtered_verificationEnforcement++;
+      devLog('FILTERED: reduced_reach', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    if (user.incognitoMode === true) {
+      filterStats.filtered_incognito++;
+      devLog('FILTERED: incognito', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    if (user.nearbyEnabled === false) {
+      filterStats.filtered_nearbyDisabled++;
+      devLog('FILTERED: nearbyDisabled', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
+      filterStats.filtered_paused++;
+      devLog('FILTERED: paused', {
+        userId: user._id,
+        name: user.name,
+        pausedUntil: new Date(user.nearbyPausedUntil).toISOString(),
+      });
+      continue;
+    }
+
+    if (!passesNearbyVisibilityMode(user, now, presenceByUserId.get(user._id as string) ?? null)) {
+      filterStats.filtered_visibilityMode++;
+      devLog('FILTERED: visibilityMode', {
+        userId: user._id,
+        name: user.name,
+        visibilityMode: user.nearbyVisibilityMode,
+      });
+      continue;
+    }
+
+    if (!user.name || !user.bio || !user.dateOfBirth) {
+      filterStats.filtered_incompleteProfile++;
+      devLog('FILTERED: incompleteProfile', {
+        userId: user._id,
+        name: user.name,
+        hasBio: !!user.bio,
+        hasDateOfBirth: !!user.dateOfBirth,
+      });
+      continue;
+    }
+
+    if (
+      !hasNearbyCoordinatePair(user.publishedLat, user.publishedLng) ||
+      typeof user.publishedAt !== 'number'
+    ) {
+      filterStats.filtered_noPublishedLocation++;
+      devLog('FILTERED: noPublishedLocation', {
+        userId: user._id,
+        name: user.name,
+        publishedLat: user.publishedLat,
+        publishedLng: user.publishedLng,
+        publishedAt: user.publishedAt,
+      });
+      continue;
+    }
+
+    const locationAgeMs = now - user.publishedAt;
+    if (locationAgeMs > config.MAP_VISIBILITY_WINDOW_MS) {
+      filterStats.filtered_staleLocation++;
+      devLog('FILTERED: staleLocation', {
+        userId: user._id,
+        name: user.name,
+        publishedAt: new Date(user.publishedAt).toISOString(),
+        locationAgeMinutes: Math.round(locationAgeMs / 60000),
+        windowMinutes: Math.round(config.MAP_VISIBILITY_WINDOW_MS / 60000),
+      });
+      continue;
+    }
+
+    const distance = calculateDistanceMeters(
+      viewerLat,
+      viewerLng,
+      user.publishedLat as number,
+      user.publishedLng as number,
+    );
+
+    if (distance < config.NEARBY_MIN_METERS) {
+      filterStats.filtered_tooClose++;
+      devLog('FILTERED: tooClose', {
+        userId: user._id,
+        name: user.name,
+        distanceMeters: Math.round(distance),
+        minMeters: config.NEARBY_MIN_METERS,
+      });
+      continue;
+    }
+
+    if (distance > config.NEARBY_MAX_METERS) {
+      filterStats.filtered_tooFar++;
+      devLog('FILTERED: tooFar', {
+        userId: user._id,
+        name: user.name,
+        distanceMeters: Math.round(distance),
+        maxMeters: config.NEARBY_MAX_METERS,
+      });
+      continue;
+    }
+
+    const otherAge = calculateAge(user.dateOfBirth);
+    if (myAge < user.minAge || myAge > user.maxAge) {
+      filterStats.filtered_ageMismatch++;
+      devLog('FILTERED: ageMismatch (viewer not in target range)', {
+        userId: user._id,
+        name: user.name,
+        myAge,
+        targetMinAge: user.minAge,
+        targetMaxAge: user.maxAge,
+      });
+      continue;
+    }
+    if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) {
+      filterStats.filtered_ageMismatch++;
+      devLog('FILTERED: ageMismatch (target not in viewer range)', {
+        userId: user._id,
+        name: user.name,
+        otherAge,
+        viewerMinAge: currentUser.minAge,
+        viewerMaxAge: currentUser.maxAge,
+      });
+      continue;
+    }
+
+    if (!currentUser.lookingFor.includes(user.gender)) {
+      filterStats.filtered_genderMismatch++;
+      devLog('FILTERED: genderMismatch (viewer not looking for target gender)', {
+        userId: user._id,
+        name: user.name,
+        targetGender: user.gender,
+        viewerLookingFor: currentUser.lookingFor,
+      });
+      continue;
+    }
+    if (!user.lookingFor.includes(currentUser.gender)) {
+      filterStats.filtered_genderMismatch++;
+      devLog('FILTERED: genderMismatch (target not looking for viewer gender)', {
+        userId: user._id,
+        name: user.name,
+        viewerGender: currentUser.gender,
+        targetLookingFor: user.lookingFor,
+      });
+      continue;
+    }
+
+    if (blockedIds.has(user._id as string)) {
+      filterStats.filtered_blocked++;
+      devLog('FILTERED: blocked', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    const existingSwipe = swipedUsersMap.get(user._id as string);
+    if (existingSwipe) {
+      if (existingSwipe.action !== 'pass') {
+        filterStats.filtered_swiped++;
+        devLog('FILTERED: swiped (liked/super_liked)', {
+          userId: user._id,
+          name: user.name,
+          action: existingSwipe.action,
+        });
+        continue;
+      }
+      if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) {
+        filterStats.filtered_swiped++;
+        devLog('FILTERED: swiped (recent pass)', {
+          userId: user._id,
+          name: user.name,
+          passedAt: new Date(existingSwipe.createdAt).toISOString(),
+        });
+        continue;
+      }
+    }
+
+    filterStats.passed++;
+    devLog('PASSED: User passed all filters', {
+      userId: user._id,
+      name: user.name,
+      distanceMeters: Math.round(distance),
+      locationAgeMinutes: Math.round(locationAgeMs / 60000),
+    });
+
+    candidateUsers.push({
+      user,
+      distance,
+      locationAgeMs,
+    });
+  }
+
+  devLog('getNearbyUsers: FILTER SUMMARY', filterStats);
+
+  const photoSummariesMap = await prefetchPhotoSummaries(
+    ctx,
+    candidateUsers.map(({ user }) => user._id as string)
+  );
+
+  const results: NearbyEligibleCandidate[] = [];
+  for (const candidate of candidateUsers) {
+    const photoSummary = photoSummariesMap.get(candidate.user._id as string);
+    const photoCount = photoSummary?.count ?? 0;
+
+    if (!config.SKIP_PHOTO_COUNT_CHECK && photoCount < config.MIN_PHOTO_COUNT) {
+      devLog('FILTERED (2nd pass): photoCount too low', {
+        userId: candidate.user._id,
+        name: candidate.user.name,
+        photoCount,
+        requiredMin: config.MIN_PHOTO_COUNT,
+      });
+      continue;
+    }
+
+    if (!config.SKIP_PRIMARY_PHOTO_CHECK && !photoSummary?.safeDisplayUrl) {
+      filterStats.filtered_noSafePhoto++;
+      devLog('FILTERED (2nd pass): no safe display photo', {
+        userId: candidate.user._id,
+        name: candidate.user.name,
+      });
+      continue;
+    }
+
+    results.push({
+      ...candidate,
+      photoSummary: photoSummary ?? {
+        count: photoCount,
+        safeDisplayUrl: null,
+      },
+    });
+  }
+
+  return {
+    status: 'ok',
+    candidates: results,
+    now,
   };
 }
 
@@ -1057,418 +1524,44 @@ export const getNearbyUsers = query({
     refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, { token }) => {
-    const now = Date.now();
-
-    // Get effective config (DEV vs production)
+    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
+    const nearbyEligibility = await getEligibleNearbyCandidatesForViewer(ctx, currentUser);
     const config = getEffectiveNearbyConfig();
 
-    devLog('getNearbyUsers: STARTING QUERY', {
-      isDevMode: config.IS_DEV_MODE,
-      effectiveVisibilityWindowMs: config.MAP_VISIBILITY_WINDOW_MS,
-      effectiveMinMeters: config.NEARBY_MIN_METERS,
-      effectiveMaxMeters: config.NEARBY_MAX_METERS,
-      skipVerificationCheck: config.SKIP_VERIFICATION_CHECK,
-      skipPhotoCountCheck: config.SKIP_PHOTO_COUNT_CHECK,
-    });
+    if (nearbyEligibility.status !== 'ok') {
+      return {
+        status: nearbyEligibility.status,
+        users: [],
+      };
+    }
 
-    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
     const userId = currentUser._id;
+    const results = nearbyEligibility.candidates.map(({ user, distance, locationAgeMs, photoSummary }) => {
+      const freshness: 'solid' | 'faded' = locationAgeMs <= SOLID_WINDOW_MS ? 'solid' : 'faded';
 
-    devLog('getNearbyUsers: currentUser', {
-      userId,
-      name: currentUser.name,
-      verificationStatus: currentUser.verificationStatus,
-      publishedAt: currentUser.publishedAt ? new Date(currentUser.publishedAt).toISOString() : null,
-    });
-
-    // Current user must be verified to see nearby users
-    // DEV MODE: Can skip this check
-    if (!config.SKIP_VERIFICATION_CHECK && currentUser.verificationStatus !== 'verified') {
-      devLog('getNearbyUsers: BLOCKED - currentUser not verified', {
-        verificationStatus: currentUser.verificationStatus,
-      });
-      return [];
-    }
-
-    // Use current user's published location for distance checks
-    // (they should have published when opening Nearby screen)
-    const myLat = currentUser.publishedLat ?? currentUser.latitude;
-    const myLng = currentUser.publishedLng ?? currentUser.longitude;
-    if (!myLat || !myLng) {
-      devLog('getNearbyUsers: BLOCKED - currentUser has no location', {
-        publishedLat: currentUser.publishedLat,
-        publishedLng: currentUser.publishedLng,
-        latitude: currentUser.latitude,
-        longitude: currentUser.longitude,
-      });
-      return [];
-    }
-
-    // Get current user's age for filtering
-    const myAge = calculateAge(currentUser.dateOfBirth);
-
-    // STABILITY FIX S1: Use indexed query for verified users only
-    // DEV MODE: Query all users if skipping verification check
-    let allUsers;
-    if (config.SKIP_VERIFICATION_CHECK) {
-      // In DEV mode, query all active users (not just verified)
-      allUsers = await ctx.db
-        .query('users')
-        .filter((q) => q.eq(q.field('isActive'), true))
-        .collect();
-      devLog('getNearbyUsers: DEV MODE - querying ALL active users', { count: allUsers.length });
-    } else {
-      // Production: query only verified users
-      allUsers = await ctx.db
-        .query('users')
-        .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
-        .collect();
-    }
-
-    // STABILITY FIX S6/C2: Pre-fetch blocks and swipes before loop
-    const [blockedIds, swipedUsersMap] = await Promise.all([
-      prefetchBlockedUserIds(ctx, userId),
-      prefetchSwipes(ctx, userId),
-    ]);
-
-    // First pass: collect candidate user IDs that pass basic filters
-    const candidateUserIds: string[] = [];
-    const candidateUsers: typeof allUsers = [];
-
-    // DEV MODE: Track filter statistics
-    const filterStats = {
-      total: 0,
-      passed: 0,
-      filtered_self: 0,
-      filtered_inactive: 0,
-      filtered_banned: 0,
-      filtered_incognito: 0,
-      filtered_nearbyDisabled: 0,
-      filtered_paused: 0,
-      filtered_visibilityMode: 0,
-      filtered_incompleteProfile: 0,
-      filtered_verificationEnforcement: 0,
-      filtered_noPublishedLocation: 0,
-      filtered_staleLocation: 0,
-      filtered_tooClose: 0,
-      filtered_tooFar: 0,
-      filtered_ageMismatch: 0,
-      filtered_genderMismatch: 0,
-      filtered_blocked: 0,
-      filtered_swiped: 0,
-      filtered_noSafePhoto: 0,
-    };
-
-    for (const user of allUsers) {
-      filterStats.total++;
-
-      if (user._id === userId) {
-        filterStats.filtered_self++;
-        continue;
-      }
-
-      if (!user.isActive) {
-        filterStats.filtered_inactive++;
-        devLog('FILTERED: inactive', { userId: user._id, name: user.name });
-        continue;
-      }
-
-      if (user.isBanned) {
-        filterStats.filtered_banned++;
-        devLog('FILTERED: banned', { userId: user._id, name: user.name });
-        continue;
-      }
-
-      if (user.verificationEnforcementLevel === 'security_only') {
-        filterStats.filtered_verificationEnforcement++;
-        devLog('FILTERED: security_only', { userId: user._id, name: user.name });
-        continue;
-      }
-
-      if (
-        user.verificationEnforcementLevel === 'reduced_reach' &&
-        !shouldIncludeReducedReachCandidate(String(userId), String(user._id))
-      ) {
-        filterStats.filtered_verificationEnforcement++;
-        devLog('FILTERED: reduced_reach', { userId: user._id, name: user.name });
-        continue;
-      }
-
-      // Incognito mode: Hidden users don't appear on map
-      if (user.incognitoMode === true) {
-        filterStats.filtered_incognito++;
-        devLog('FILTERED: incognito', { userId: user._id, name: user.name });
-        continue;
-      }
-
-      // Nearby visibility opt-out: Respect user preference
-      if (user.nearbyEnabled === false) {
-        filterStats.filtered_nearbyDisabled++;
-        devLog('FILTERED: nearbyDisabled', { userId: user._id, name: user.name });
-        continue;
-      }
-
-      // Nearby pause: User has temporarily hidden from Nearby
-      if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
-        filterStats.filtered_paused++;
-        devLog('FILTERED: paused', { userId: user._id, name: user.name, pausedUntil: new Date(user.nearbyPausedUntil).toISOString() });
-        continue;
-      }
-
-      // Time-based visibility mode
-      if (user.nearbyVisibilityMode === 'app_open') {
-        const inactiveThreshold = 5 * 60 * 1000;
-        if (now - user.lastActive > inactiveThreshold) {
-          filterStats.filtered_visibilityMode++;
-          devLog('FILTERED: visibilityMode=app_open (inactive)', {
-            userId: user._id,
-            name: user.name,
-            lastActive: new Date(user.lastActive).toISOString(),
-            inactiveForMs: now - user.lastActive,
-          });
-          continue;
-        }
-      } else if (user.nearbyVisibilityMode === 'recent') {
-        const recentThreshold = 30 * 60 * 1000;
-        if (now - user.lastActive > recentThreshold) {
-          filterStats.filtered_visibilityMode++;
-          devLog('FILTERED: visibilityMode=recent (inactive)', {
-            userId: user._id,
-            name: user.name,
-            lastActive: new Date(user.lastActive).toISOString(),
-          });
-          continue;
-        }
-      }
-
-      // Basic info completeness
-      if (!user.name || !user.bio || !user.dateOfBirth) {
-        filterStats.filtered_incompleteProfile++;
-        devLog('FILTERED: incompleteProfile', {
-          userId: user._id,
-          name: user.name,
-          hasBio: !!user.bio,
-          hasDateOfBirth: !!user.dateOfBirth,
-        });
-        continue;
-      }
-
-      // Must have published location
-      if (!user.publishedLat || !user.publishedLng || !user.publishedAt) {
-        filterStats.filtered_noPublishedLocation++;
-        devLog('FILTERED: noPublishedLocation', {
-          userId: user._id,
-          name: user.name,
-          publishedLat: user.publishedLat,
-          publishedLng: user.publishedLng,
-          publishedAt: user.publishedAt,
-        });
-        continue;
-      }
-
-      // Freshness: published location must be within visibility window
-      // DEV MODE: Uses 60 min instead of 10 min
-      const locationAgeMs = now - user.publishedAt;
-      if (locationAgeMs > config.MAP_VISIBILITY_WINDOW_MS) {
-        filterStats.filtered_staleLocation++;
-        devLog('FILTERED: staleLocation', {
-          userId: user._id,
-          name: user.name,
-          publishedAt: new Date(user.publishedAt).toISOString(),
-          locationAgeMinutes: Math.round(locationAgeMs / 60000),
-          windowMinutes: Math.round(config.MAP_VISIBILITY_WINDOW_MS / 60000),
-        });
-        continue;
-      }
-
-      // Distance check — uses effective config
-      const distance = calculateDistanceMeters(
-        myLat,
-        myLng,
-        user.publishedLat,
-        user.publishedLng,
-      );
-
-      if (distance < config.NEARBY_MIN_METERS) {
-        filterStats.filtered_tooClose++;
-        devLog('FILTERED: tooClose', {
-          userId: user._id,
-          name: user.name,
-          distanceMeters: Math.round(distance),
-          minMeters: config.NEARBY_MIN_METERS,
-        });
-        continue;
-      }
-
-      if (distance > config.NEARBY_MAX_METERS) {
-        filterStats.filtered_tooFar++;
-        devLog('FILTERED: tooFar', {
-          userId: user._id,
-          name: user.name,
-          distanceMeters: Math.round(distance),
-          maxMeters: config.NEARBY_MAX_METERS,
-        });
-        continue;
-      }
-
-      // Age filtering (both directions)
-      const otherAge = calculateAge(user.dateOfBirth);
-      if (myAge < user.minAge || myAge > user.maxAge) {
-        filterStats.filtered_ageMismatch++;
-        devLog('FILTERED: ageMismatch (viewer not in target range)', {
-          userId: user._id,
-          name: user.name,
-          myAge,
-          targetMinAge: user.minAge,
-          targetMaxAge: user.maxAge,
-        });
-        continue;
-      }
-      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) {
-        filterStats.filtered_ageMismatch++;
-        devLog('FILTERED: ageMismatch (target not in viewer range)', {
-          userId: user._id,
-          name: user.name,
-          otherAge,
-          viewerMinAge: currentUser.minAge,
-          viewerMaxAge: currentUser.maxAge,
-        });
-        continue;
-      }
-
-      // Gender/orientation preference match (both directions)
-      if (!currentUser.lookingFor.includes(user.gender)) {
-        filterStats.filtered_genderMismatch++;
-        devLog('FILTERED: genderMismatch (viewer not looking for target gender)', {
-          userId: user._id,
-          name: user.name,
-          targetGender: user.gender,
-          viewerLookingFor: currentUser.lookingFor,
-        });
-        continue;
-      }
-      if (!user.lookingFor.includes(currentUser.gender)) {
-        filterStats.filtered_genderMismatch++;
-        devLog('FILTERED: genderMismatch (target not looking for viewer gender)', {
-          userId: user._id,
-          name: user.name,
-          viewerGender: currentUser.gender,
-          targetLookingFor: user.lookingFor,
-        });
-        continue;
-      }
-
-      // Block check (using pre-fetched set)
-      if (blockedIds.has(user._id as string)) {
-        filterStats.filtered_blocked++;
-        devLog('FILTERED: blocked', { userId: user._id, name: user.name });
-        continue;
-      }
-
-      // Skip filter (using pre-fetched map)
-      const existingSwipe = swipedUsersMap.get(user._id as string);
-      if (existingSwipe) {
-        if (existingSwipe.action !== 'pass') {
-          filterStats.filtered_swiped++;
-          devLog('FILTERED: swiped (liked/super_liked)', {
-            userId: user._id,
-            name: user.name,
-            action: existingSwipe.action,
-          });
-          continue;
-        }
-        if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) {
-          filterStats.filtered_swiped++;
-          devLog('FILTERED: swiped (recent pass)', {
-            userId: user._id,
-            name: user.name,
-            passedAt: new Date(existingSwipe.createdAt).toISOString(),
-          });
-          continue;
-        }
-      }
-
-      // PASSED ALL FILTERS!
-      filterStats.passed++;
-      devLog('PASSED: User passed all filters', {
-        userId: user._id,
-        name: user.name,
-        distanceMeters: Math.round(distance),
-        locationAgeMinutes: Math.round(locationAgeMs / 60000),
-      });
-
-      candidateUserIds.push(user._id as string);
-      candidateUsers.push(user);
-    }
-
-    // Log filter statistics summary
-    devLog('getNearbyUsers: FILTER SUMMARY', filterStats);
-
-    // STABILITY FIX: Fetch photo counts only for candidates (not all users)
-    const photoSummariesMap = await prefetchPhotoSummaries(ctx, candidateUserIds);
-
-    // Second pass: filter by photo count and build results
-    const results = [];
-    for (let i = 0; i < candidateUsers.length; i++) {
-      const user = candidateUsers[i];
-      const photoSummary = photoSummariesMap.get(user._id as string);
-      const photoCount = photoSummary?.count ?? 0;
-
-      // DEV MODE: Can skip photo count check
-      if (!config.SKIP_PHOTO_COUNT_CHECK && photoCount < config.MIN_PHOTO_COUNT) {
-        devLog('FILTERED (2nd pass): photoCount too low', {
-          userId: user._id,
-          name: user.name,
-          photoCount,
-          requiredMin: config.MIN_PHOTO_COUNT,
-        });
-        continue;
-      }
-
-      if (!config.SKIP_PRIMARY_PHOTO_CHECK && !photoSummary?.safeDisplayUrl) {
-        filterStats.filtered_noSafePhoto++;
-        devLog('FILTERED (2nd pass): no safe display photo', {
-          userId: user._id,
-          name: user.name,
-        });
-        continue;
-      }
-
-      const locationAge = now - user.publishedAt!;
-      const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
-      const distance = calculateDistanceMeters(
-        myLat,
-        myLng,
-        user.publishedLat!,
-        user.publishedLng!,
-      );
-
-      // SEC-1 FIX: Apply server-side privacy fuzzing BEFORE returning coordinates
-      // This prevents exact location reconstruction from API responses
       const fuzzed = applyPrivacyFuzz(
         user.publishedLat!,
         user.publishedLng!,
-        user._id, // userId of the person being viewed
-        userId,   // viewerId (current user)
+        user._id,
+        userId,
         user.strongPrivacyMode ?? false,
       );
 
-      results.push({
+      return {
         id: user._id,
-        // PHASE-2 PRIVACY: Use handle (anonymous username) ONLY, never real name
         name: user.handle || 'Anonymous',
         age: calculateAge(user.dateOfBirth),
-        publishedLat: fuzzed.lat,  // SEC-1 FIX: Return fuzzed coordinates
-        publishedLng: fuzzed.lng,  // SEC-1 FIX: Return fuzzed coordinates
+        publishedLat: fuzzed.lat,
+        publishedLng: fuzzed.lng,
         publishedAt: user.publishedAt,
         distance: user.hideDistance === true ? undefined : distance,
         freshness,
-        photoUrl: photoSummary?.safeDisplayUrl ?? null,
+        photoUrl: photoSummary.safeDisplayUrl,
         isVerified: user.isVerified,
         strongPrivacyMode: user.strongPrivacyMode ?? false,
         hideDistance: user.hideDistance ?? false,
-      });
-    }
+      };
+    });
 
     // Sort by recency first, then by distance
     results.sort((a, b) => {
@@ -1489,7 +1582,10 @@ export const getNearbyUsers = query({
       })),
     });
 
-    return results;
+    return {
+      status: 'ok' as const,
+      users: results,
+    };
   },
 });
 

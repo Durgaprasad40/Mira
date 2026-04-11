@@ -18,8 +18,6 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useQuery } from "convex/react";
-import { api } from "@/convex/_generated/api";
 import { safePush } from "@/lib/safeRouter";
 import { useScreenTrace } from "@/lib/devTrace";
 import { Ionicons } from "@expo/vector-icons";
@@ -34,7 +32,6 @@ import {
   RIGHT_NOW_CATEGORIES,
   INTEREST_CATEGORIES,
 } from "@/components/explore/exploreCategories";
-import { useAuthStore } from "@/stores/authStore";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { COLORS } from "@/lib/constants";
 
@@ -224,8 +221,6 @@ function adjustColorBrightness(hex: string, percent: number): string {
 export default function ExploreScreen() {
   useScreenTrace("EXPLORE");
   const router = useRouter();
-  const userId = useAuthStore((s) => s.userId);
-  const authReady = useAuthStore((s) => s.authReady);
   const [refreshKey, setRefreshKey] = useState(0);
   const hasFocusedOnceRef = useRef(false);
 
@@ -246,15 +241,13 @@ export default function ExploreScreen() {
   const {
     data: backendCounts,
     status: countsStatus,
+    nearbyStatus,
     isLoading,
     isError,
     error,
   } = useExploreCategoryCounts(refreshKey);
-  const viewerDiscoverContext = useQuery(
-    api.users.getCurrentUserDiscoverContext,
-    authReady && userId ? {} : "skip"
-  );
-  const nearbyUnavailable = viewerDiscoverContext?.hasDiscoverLocation === false;
+  const nearbyUnavailable = nearbyStatus !== "ok";
+  const nearbyStatusLabel = nearbyStatus === "verification_required" ? "Verify first" : "Enable location";
 
   // ═══════════════════════════════════════════════════════════════════════════
   // INSTANT RENDER FIX: Mark data as loaded once we have it
@@ -383,10 +376,10 @@ export default function ExploreScreen() {
         onPress={() => handleCategoryPress(item)}
         index={index}
         disabled={item.id === "nearby" && nearbyUnavailable}
-        statusLabel={item.id === "nearby" && nearbyUnavailable ? "Enable location" : undefined}
+        statusLabel={item.id === "nearby" && nearbyUnavailable ? nearbyStatusLabel : undefined}
       />
     ),
-    [categoryCounts, handleCategoryPress, nearbyUnavailable]
+    [categoryCounts, handleCategoryPress, nearbyStatusLabel, nearbyUnavailable]
   );
 
   // Render a 2-column grid for a section
@@ -525,7 +518,9 @@ export default function ExploreScreen() {
               </View>
               {nearbyUnavailable && (
                 <Text style={styles.sectionHelperText}>
-                  Enable location access for Mira to use Nearby.
+                  {nearbyStatus === "verification_required"
+                    ? "Verify your profile to use Nearby."
+                    : "Enable location access for Mira to use Nearby."}
                 </Text>
               )}
               <View style={styles.sectionGrid}>

@@ -230,10 +230,29 @@ interface NearbyUser {
   hideDistance: boolean;
 }
 
+type NearbyQueryStatus = 'ok' | 'viewer_unverified' | 'location_required';
+
+interface NearbyUsersQueryResult {
+  status: NearbyQueryStatus;
+  users: NearbyUser[];
+}
+
 /** Processed nearby user with backend-fuzzed map coordinates */
 interface ProcessedNearbyUser extends NearbyUser {
   fuzzedLat: number;
   fuzzedLng: number;
+}
+
+interface NearbyMapNotice {
+  message: string;
+  actionLabel?: string;
+  onPress?: () => void;
+}
+
+interface NearbySyncIssue {
+  kind: 'publish' | 'record';
+  message: string;
+  actionLabel: string;
 }
 
 /** GeoJSON Point properties for supercluster */
@@ -305,17 +324,6 @@ function generateSecureSessionSalt(): number {
 }
 
 const MODULE_SESSION_SALT = generateSecureSessionSalt();
-
-// ---------------------------------------------------------------------------
-// P2-NEARBY-003: Module-level empty state flag
-// ---------------------------------------------------------------------------
-// DESIGN: Show "no nearby users" empty state only ONCE per app session.
-// This prevents repeated display on every navigation back to Nearby tab.
-// The flag persists across component remounts within the same JS bundle session.
-// It resets only on full app restart (JS context reload / hot reload).
-// This is intentional UX behavior - not a bug.
-// ---------------------------------------------------------------------------
-let hasShownEmptyStateThisSession = false;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -501,13 +509,6 @@ export default function NearbyScreen() {
   const AUTO_RETRY_MAX = 2;
   const AUTO_RETRY_DELAY_MS = 5000;
 
-  // Empty state auto-dismiss timer ref
-  const emptyStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const EMPTY_STATE_DISMISS_MS = 5000;
-
-  // P2-005: Maximum markers to render on map (performance limit)
-  const MAX_VISIBLE_MARKERS = 30;
-
   // ---------------------------------------------------------------------------
   // P3 POLISH: Animation refs for premium feel
   // ---------------------------------------------------------------------------
@@ -517,6 +518,8 @@ export default function NearbyScreen() {
   const recenterScale = useRef(new Animated.Value(1)).current;
   // P3-003: Loading overlay fade animation
   const loadingOpacity = useRef(new Animated.Value(0)).current;
+  const lastNearbyRefreshAtRef = useRef(0);
+  const [nearbySyncIssue, setNearbySyncIssue] = useState<NearbySyncIssue | null>(null);
 
   // P2-NEARBY-002: Centralized unmount cleanup for all timer refs
   // This ensures all timers are cleared on unmount, regardless of effect state
@@ -540,10 +543,6 @@ export default function NearbyScreen() {
       if (autoRetryTimeoutRef.current) {
         clearTimeout(autoRetryTimeoutRef.current);
         autoRetryTimeoutRef.current = null;
-      }
-      if (emptyStateTimerRef.current) {
-        clearTimeout(emptyStateTimerRef.current);
-        emptyStateTimerRef.current = null;
       }
     };
   }, []);
@@ -605,7 +604,12 @@ export default function NearbyScreen() {
     bestLocation &&
     isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)
   );
-  const locationErrorMessage = locationTimeoutMessage ?? error;
+  const blockingLocationErrorMessage = !hasValidBestLocation
+    ? (locationTimeoutMessage ?? error)
+    : null;
+  const passiveLocationErrorMessage = hasValidBestLocation
+    ? (locationTimeoutMessage ?? error)
+    : null;
 
   // Clear timeout when query succeeds or on unmount
   useEffect(() => {
@@ -867,6 +871,10 @@ export default function NearbyScreen() {
             lng,
             publishedAt: result.publishedAt ?? Date.now(),
           };
+          setNearbyRefreshKey((current) => current + 1);
+          setNearbySyncIssue((currentIssue) =>
+            currentIssue?.kind === 'publish' ? null : currentIssue
+          );
         }
 
         if (__DEV__) {
@@ -947,11 +955,18 @@ export default function NearbyScreen() {
               });
             }
           }
+          setNearbySyncIssue((currentIssue) =>
+            currentIssue?.kind === 'record' ? null : currentIssue
+          );
         } catch (recordErr) {
-          // recordLocation failure should not affect publishLocation flow
           if (__DEV__) {
-            console.warn('[NEARBY] recordLocation failed (non-critical):', recordErr);
+            console.warn('[NEARBY] recordLocation failed:', recordErr);
           }
+          setNearbySyncIssue({
+            kind: 'record',
+            message: 'Crossed Paths may be delayed until location sync catches up.',
+            actionLabel: 'Retry sync',
+          });
         }
       } catch (err) {
         // Guard: skip logging if unmounted
@@ -960,7 +975,11 @@ export default function NearbyScreen() {
         if (__DEV__) {
           console.error('[NEARBY] publishLocation failed:', err);
         }
-        // Silently fail - don't crash the app
+        setNearbySyncIssue({
+          kind: 'publish',
+          message: 'Nearby could not refresh your location just now.',
+          actionLabel: 'Retry sync',
+        });
       } finally {
         // Always reset publishing flag to allow future calls
         isPublishingRef.current = false;
@@ -1020,10 +1039,32 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   // Combine and process nearby users using backend-fuzzed coordinates
   // ---------------------------------------------------------------------------
+  const nearbyUsersResult = useMemo<NearbyUsersQueryResult | null>(() => {
+    if (isDemo) {
+      return {
+        status: 'ok',
+        users: demoNearbyUsers,
+      };
+    }
+
+    if (!nearbyUsersQuery) {
+      return null;
+    }
+
+    if (Array.isArray(nearbyUsersQuery)) {
+      return {
+        status: 'ok',
+        users: nearbyUsersQuery as NearbyUser[],
+      };
+    }
+
+    return nearbyUsersQuery as NearbyUsersQueryResult;
+  }, [demoNearbyUsers, isDemo, nearbyUsersQuery]);
+
+  const nearbyQueryStatus = nearbyUsersResult?.status ?? null;
+
   const processedNearbyUsers = useMemo(() => {
-    const rawUsers: NearbyUser[] = isDemo
-      ? demoNearbyUsers
-      : (nearbyUsersQuery ?? []);
+    const rawUsers: NearbyUser[] = nearbyUsersResult?.users ?? [];
     let validCount = 0;
     let skippedCount = 0;
 
@@ -1058,13 +1099,13 @@ export default function NearbyScreen() {
     }
 
     return processed;
-  }, [isDemo, demoNearbyUsers, nearbyUsersQuery, userId]);
+  }, [nearbyUsersResult, userId]);
 
   // ---------------------------------------------------------------------------
-  // Sort and limit visible markers for performance (max 30)
-  // Filtering is handled by Discovery preferences at the backend level
+  // Sort visible markers fairly before clustering
+  // Filtering is handled by the backend so every eligible user is represented
   // ---------------------------------------------------------------------------
-  const visibleUsers = useMemo(() => {
+  const mapUsers = useMemo(() => {
     const sorted = [...processedNearbyUsers];
 
     // Sort: verified users first, then by freshness, then by distance
@@ -1079,11 +1120,8 @@ export default function NearbyScreen() {
       return (a.distance ?? 1000) - (b.distance ?? 1000);
     });
 
-    return sorted.slice(0, MAX_VISIBLE_MARKERS);
+    return sorted;
   }, [processedNearbyUsers]);
-
-  // Alias for rendering (visibleUsers are the processed, sorted, limited markers)
-  const mapUsers = visibleUsers;
 
   // ---------------------------------------------------------------------------
   // Supercluster: Initialize and compute clusters
@@ -1170,45 +1208,18 @@ export default function NearbyScreen() {
   }, []);
 
   // ---------------------------------------------------------------------------
-  // Empty state: show once per app session, auto-dismiss after 5 seconds
+  // Empty state: stay visible whenever Nearby is truthfully empty
   // ---------------------------------------------------------------------------
-  const isEmptyStateCondition = locationUIState === 'ready' && mapUsers.length === 0 && !isDemo && !isQueryLoading && !isRetrying;
+  const isEmptyStateCondition =
+    locationUIState === 'ready' &&
+    nearbyQueryStatus === 'ok' &&
+    mapUsers.length === 0 &&
+    !isDemo &&
+    !isQueryLoading &&
+    !isRetrying;
 
   useEffect(() => {
-    // If conditions for empty state are not met, hide and clear timer
-    if (!isEmptyStateCondition) {
-      setShowEmptyState(false);
-      if (emptyStateTimerRef.current) {
-        clearTimeout(emptyStateTimerRef.current);
-        emptyStateTimerRef.current = null;
-      }
-      return;
-    }
-
-    // If already shown this session, don't show again
-    if (hasShownEmptyStateThisSession) {
-      return;
-    }
-
-    // Show empty state and mark as shown this session
-    hasShownEmptyStateThisSession = true;
-    setShowEmptyState(true);
-
-    // P2-006 FIX: Auto-dismiss after 5 seconds (matches EMPTY_STATE_DISMISS_MS)
-    emptyStateTimerRef.current = setTimeout(() => {
-      if (isMountedRef.current) {
-        setShowEmptyState(false);
-      }
-      emptyStateTimerRef.current = null;
-    }, EMPTY_STATE_DISMISS_MS);
-
-    // Cleanup on unmount
-    return () => {
-      if (emptyStateTimerRef.current) {
-        clearTimeout(emptyStateTimerRef.current);
-        emptyStateTimerRef.current = null;
-      }
-    };
+    setShowEmptyState(isEmptyStateCondition);
   }, [isEmptyStateCondition]);
 
   // P3-001: Animate empty state opacity on show/hide
@@ -1318,6 +1329,7 @@ export default function NearbyScreen() {
   useFocusEffect(
     useCallback(() => {
       setIsNearbyFocused(true);
+      setNearbyRefreshKey((current) => current + 1);
       log.info('[NEARBY]', 'screen focused, starting location tracking');
       startLocationTracking();
 
@@ -1329,6 +1341,26 @@ export default function NearbyScreen() {
       };
     }, [startLocationTracking, stopLocationTracking])
   );
+
+  useEffect(() => {
+    if (
+      !isNearbyFocused ||
+      isDemo ||
+      locationUIState !== 'ready' ||
+      !bestLocation ||
+      !isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)
+    ) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastNearbyRefreshAtRef.current < 5000) {
+      return;
+    }
+
+    lastNearbyRefreshAtRef.current = now;
+    setNearbyRefreshKey((current) => current + 1);
+  }, [bestLocation?.timestamp, isDemo, isNearbyFocused, locationUIState, bestLocation]);
 
   // ---------------------------------------------------------------------------
   // Derive UI state from location store
@@ -1408,19 +1440,20 @@ export default function NearbyScreen() {
 
     // Permission granted - check if we have valid coordinates
     if (permissionStatus === 'granted') {
-      if (locationErrorMessage) {
+      if (hasValidBestLocation) {
+        setLocationUIState('ready');
+        return;
+      }
+
+      if (blockingLocationErrorMessage) {
         setLocationUIState('error');
         return;
       }
 
-      if (hasValidBestLocation) {
-        setLocationUIState('ready');
-      } else {
-        // Still waiting for GPS fix
-        setLocationUIState('checking');
-      }
+      // Still waiting for GPS fix
+      setLocationUIState('checking');
     }
-  }, [isDemo, permissionStatus, locationErrorMessage, hasValidBestLocation]);
+  }, [blockingLocationErrorMessage, hasValidBestLocation, isDemo, permissionStatus]);
 
   // ---------------------------------------------------------------------------
   // Compute map region
@@ -1489,6 +1522,49 @@ export default function NearbyScreen() {
     stopLocationTracking();
     startLocationTracking();
   }, [startLocationTracking, stopLocationTracking]);
+
+  const handleRetryNearbySync = useCallback(() => {
+    setNearbySyncIssue(null);
+    lastPublishedRef.current = null;
+    lastDetectionTimeRef.current = 0;
+    lastDetectionLatLngRef.current = null;
+    setPublishRefreshTick((current) => current + 1);
+    setNearbyRefreshKey((current) => current + 1);
+  }, []);
+
+  const mapNotice = useMemo<NearbyMapNotice | null>(() => {
+    if (nearbySyncIssue) {
+      return {
+        ...nearbySyncIssue,
+        onPress: handleRetryNearbySync,
+      };
+    }
+
+    if (passiveLocationErrorMessage) {
+      return {
+        message: 'Showing your last known location while GPS refreshes.',
+        actionLabel: 'Retry',
+        onPress: handleRetryLocation,
+      };
+    }
+
+    if (nearbyQueryStatus === 'location_required' && hasValidBestLocation) {
+      return {
+        message: 'Syncing your location with Nearby...',
+        actionLabel: 'Retry',
+        onPress: handleRetryNearbySync,
+      };
+    }
+
+    return null;
+  }, [
+    hasValidBestLocation,
+    handleRetryLocation,
+    handleRetryNearbySync,
+    nearbyQueryStatus,
+    nearbySyncIssue,
+    passiveLocationErrorMessage,
+  ]);
 
   // ---------------------------------------------------------------------------
   // SHELL UI PATTERN: Header renders immediately, content area handles states
@@ -1562,11 +1638,23 @@ export default function NearbyScreen() {
           <Ionicons name="warning-outline" size={64} color={COLORS.warning} />
           <Text style={styles.title}>Location Error</Text>
           <Text style={styles.subtitle}>
-            {locationErrorMessage || 'Unable to get your location. Please try again.'}
+            {blockingLocationErrorMessage || 'Unable to get your location. Please try again.'}
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={handleRetryLocation}>
             <Text style={styles.primaryButtonText}>Retry</Text>
           </TouchableOpacity>
+        </View>
+      );
+    }
+
+    if (nearbyQueryStatus === 'viewer_unverified') {
+      return (
+        <View style={styles.centered}>
+          <Ionicons name="shield-checkmark-outline" size={64} color={COLORS.textLight} />
+          <Text style={styles.title}>Verify to use Nearby</Text>
+          <Text style={styles.subtitle}>
+            Nearby is available after profile verification, so everyone you see here meets the same trust rules.
+          </Text>
         </View>
       );
     }
@@ -1682,6 +1770,19 @@ export default function NearbyScreen() {
           })}
         </MapView>
 
+        {mapNotice && (
+          <View style={styles.mapNoticeContainer} pointerEvents="box-none">
+            <View style={styles.mapNoticeCard}>
+              <Text style={styles.mapNoticeText}>{mapNotice.message}</Text>
+              {mapNotice.actionLabel && mapNotice.onPress ? (
+                <TouchableOpacity onPress={mapNotice.onPress} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={styles.mapNoticeAction}>{mapNotice.actionLabel}</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          </View>
+        )}
+
         {/* Query loading indicator - shown while fetching nearby users */}
         {/* P3-003: Animated fade-in for premium feel */}
         {(isQueryLoading || isRetrying) && !isDemo && (
@@ -1695,7 +1796,7 @@ export default function NearbyScreen() {
           </Animated.View>
         )}
 
-        {/* Empty state overlay - shown once per app session, auto-dismisses after 5s */}
+        {/* Empty state overlay - stays visible whenever Nearby is currently empty */}
         {/* P3-001: Animated fade in/out for premium feel */}
         {showEmptyState && (
           <Animated.View style={[styles.emptyOverlay, { opacity: emptyStateOpacity }]}>
@@ -1894,6 +1995,38 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 13,
     color: COLORS.textLight,
+  },
+  mapNoticeContainer: {
+    position: 'absolute',
+    top: 64,
+    left: 16,
+    right: 16,
+    alignItems: 'center',
+  },
+  mapNoticeCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.97)',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  mapNoticeText: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.text,
+  },
+  mapNoticeAction: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   emptyOverlay: {
     position: 'absolute',

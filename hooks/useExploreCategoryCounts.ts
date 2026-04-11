@@ -18,10 +18,12 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 
 export type ExploreCategoryCountsStatus = 'ok' | 'viewer_missing' | 'discovery_paused';
+export type ExploreNearbyAvailabilityStatus = 'ok' | 'location_required' | 'verification_required';
 
 type ExploreCategoryCountsResult = {
   data: Record<string, number> | null;
   status: ExploreCategoryCountsStatus | null;
+  nearbyStatus: ExploreNearbyAvailabilityStatus;
   isLoading: boolean;
   isError: boolean;
   error: string | null;
@@ -56,6 +58,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   const userId = useAuthStore((s) => s.userId);
   const authReady = useAuthStore((s) => s.authReady);
   const lastGoodCountsRef = useRef<Record<string, number> | null>(null);
+  const lastNearbyStatusRef = useRef<ExploreNearbyAvailabilityStatus>('ok');
 
   // Determine if we should skip the query
   // Skip if: demo mode OR auth not ready OR userId missing
@@ -73,17 +76,25 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   useEffect(() => {
     if (queryResult && queryResult.status === 'ok' && queryResult.counts) {
       lastGoodCountsRef.current = queryResult.counts;
+      lastNearbyStatusRef.current = queryResult.nearbyStatus ?? 'ok';
     }
   }, [queryResult]);
 
   // Demo mode: return mock counts (query was skipped above)
   if (isDemoMode) {
-    return { data: DEMO_CATEGORY_COUNTS, status: 'ok', isLoading: false, isError: false, error: null };
+    return {
+      data: DEMO_CATEGORY_COUNTS,
+      status: 'ok',
+      nearbyStatus: 'ok',
+      isLoading: false,
+      isError: false,
+      error: null,
+    };
   }
 
   // Auth not ready yet - show loading
   if (!authReady) {
-    return { data: null, status: null, isLoading: true, isError: false, error: null };
+    return { data: null, status: null, nearbyStatus: 'ok', isLoading: true, isError: false, error: null };
   }
 
   // Auth ready but no userId - viewer state is unavailable, not a healthy empty result
@@ -91,6 +102,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     return {
       data: lastGoodCountsRef.current,
       status: 'viewer_missing',
+      nearbyStatus: lastNearbyStatusRef.current,
       isLoading: false,
       isError: false,
       error: null,
@@ -102,6 +114,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     return {
       data: lastGoodCountsRef.current,
       status: lastGoodCountsRef.current ? 'ok' : null,
+      nearbyStatus: lastNearbyStatusRef.current,
       isLoading: true,
       isError: false,
       error: null,
@@ -114,6 +127,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     return {
       data: lastGoodCountsRef.current,
       status: lastGoodCountsRef.current ? 'ok' : null,
+      nearbyStatus: lastNearbyStatusRef.current,
       isLoading: false,
       isError: lastGoodCountsRef.current == null,
       error: lastGoodCountsRef.current == null ? EXPLORE_COUNTS_ERROR : null,
@@ -123,6 +137,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   return {
     data: queryResult.counts ?? null,
     status: queryResult.status ?? null,
+    nearbyStatus: queryResult.nearbyStatus ?? 'ok',
     isLoading: false,
     isError: false,
     error: null,

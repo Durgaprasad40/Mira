@@ -26,6 +26,7 @@ export type ExploreCategoryStatus =
   | 'discovery_paused'
   | 'invalid_category'
   | 'location_required'
+  | 'verification_required'
   | 'empty_category';
 
 type UseExploreCategoryProfilesOptions = {

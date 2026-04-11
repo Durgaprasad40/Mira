@@ -11,6 +11,7 @@ import {
   calculateRankScore, // P2-018 FIX: Import for fallback ranking
   DISCOVER_RANKING_CONFIG,
 } from './discoverRanking';
+import { getEligibleNearbyCandidatesForViewer } from './crossedPaths';
 
 // Phase 3: Shadow mode imports
 import { shouldRunShadowComparison } from './ranking/rankingConfig';
@@ -537,15 +538,17 @@ type ExploreEligibleCandidate = {
   distance?: number;
 };
 
-type ExploreUnavailableReason = 'unsupported_category' | 'location_required';
+type ExploreUnavailableReason = 'unsupported_category' | 'location_required' | 'verification_required';
 type ExploreCategoryStatus =
   | 'ok'
   | 'viewer_missing'
   | 'discovery_paused'
   | 'invalid_category'
   | 'location_required'
+  | 'verification_required'
   | 'empty_category';
 type ExploreCategoryCountsStatus = 'ok' | 'viewer_missing' | 'discovery_paused';
+type ExploreNearbyAvailabilityStatus = 'ok' | 'location_required' | 'verification_required';
 
 function createEmptyExploreCounts(): Record<string, number> {
   const counts: Record<string, number> = {};
@@ -560,6 +563,9 @@ function mapExploreUnavailableReasonToStatus(
 ): Exclude<ExploreCategoryStatus, 'ok'> {
   if (unavailableReason === 'location_required') {
     return 'location_required';
+  }
+  if (unavailableReason === 'verification_required') {
+    return 'verification_required';
   }
   return 'invalid_category';
 }
@@ -778,33 +784,19 @@ async function getEligibleExploreCategoryUsers(
   const filteredCandidates: ExploreEligibleCandidate[] = [];
 
   if (categoryId === 'nearby') {
-    const viewerCoords = getDiscoverSafeCoordinates(viewer);
-    if (!viewerCoords) {
+    const nearbyEligibility = await getEligibleNearbyCandidatesForViewer(ctx, viewer);
+    if (nearbyEligibility.status === 'location_required') {
       return { candidates: [], unavailableReason: 'location_required', sourceHitFetchLimit: false };
     }
-
-    const allActiveUsers = await ctx.db
-      .query('users')
-      .withIndex('by_last_active')
-      .order('desc')
-      .filter((q) => q.eq(q.field('isActive'), true))
-      .take(rawFetchLimit);
-    const sourceHitFetchLimit = allActiveUsers.length === rawFetchLimit;
-
-    for (const user of allActiveUsers) {
-      if (!hasDiscoverablePrimaryPhoto(user)) continue;
-
-      const distance = calculateDiscoverSafeDistance(viewer, user);
-      if (distance == null || distance > EXPLORE_NEARBY_DISTANCE_KM) continue;
-
-      if (!isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)) {
-        continue;
-      }
-
-      filteredCandidates.push({ user, distance });
+    if (nearbyEligibility.status === 'viewer_unverified') {
+      return { candidates: [], unavailableReason: 'verification_required', sourceHitFetchLimit: false };
     }
 
-    return { candidates: filteredCandidates, unavailableReason: null, sourceHitFetchLimit };
+    return {
+      candidates: nearbyEligibility.candidates.map(({ user, distance }) => ({ user, distance })),
+      unavailableReason: null,
+      sourceHitFetchLimit: false,
+    };
   }
 
   const categoryUsers = await ctx.db
@@ -1921,6 +1913,7 @@ export const getExploreCategoryCounts = query({
       return {
         status: 'viewer_missing' as ExploreCategoryCountsStatus,
         counts: emptyCounts,
+        nearbyStatus: 'ok' as ExploreNearbyAvailabilityStatus,
       };
     }
 
@@ -1928,6 +1921,7 @@ export const getExploreCategoryCounts = query({
       return {
         status: 'discovery_paused' as ExploreCategoryCountsStatus,
         counts: emptyCounts,
+        nearbyStatus: 'ok' as ExploreNearbyAvailabilityStatus,
       };
     }
 
@@ -1935,6 +1929,7 @@ export const getExploreCategoryCounts = query({
     const exclusions = await buildExclusionSets(ctx, viewerId);
 
     const counts = createEmptyExploreCounts();
+    let nearbyStatus: ExploreNearbyAvailabilityStatus = 'ok';
 
     for (const categoryId of LIVE_EXPLORE_CATEGORY_IDS) {
       const { candidates, unavailableReason } = await getEligibleExploreCategoryUsers(
@@ -1947,12 +1942,22 @@ export const getExploreCategoryCounts = query({
         cooldownThreshold,
       );
 
+      if (categoryId === 'nearby') {
+        nearbyStatus =
+          unavailableReason === 'verification_required'
+            ? 'verification_required'
+            : unavailableReason === 'location_required'
+              ? 'location_required'
+              : 'ok';
+      }
+
       counts[categoryId] = unavailableReason ? 0 : candidates.length;
     }
 
     return {
       status: 'ok' as ExploreCategoryCountsStatus,
       counts,
+      nearbyStatus,
     };
   },
 });

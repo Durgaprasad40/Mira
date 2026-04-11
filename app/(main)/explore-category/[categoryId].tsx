@@ -154,6 +154,9 @@ export default function ExploreCategoryScreen() {
     if (status === 'location_required') {
       return 'Nearby needs location';
     }
+    if (status === 'verification_required') {
+      return 'Verify to use Nearby';
+    }
     if (status === 'invalid_category' || !cat) {
       return 'This vibe is unavailable';
     }
@@ -178,6 +181,9 @@ export default function ExploreCategoryScreen() {
   const unavailableSubtitle = useMemo(() => {
     if (status === 'location_required') {
       return 'Enable location access for Mira, then come back to see people close to you.';
+    }
+    if (status === 'verification_required') {
+      return 'Finish profile verification to browse people nearby.';
     }
     if (status === 'invalid_category' || !cat) {
       return 'This Explore vibe is not live right now.';
@@ -205,6 +211,7 @@ export default function ExploreCategoryScreen() {
 
   const emptyIconName = useMemo(() => {
     if (status === 'location_required') return 'location-outline';
+    if (status === 'verification_required') return 'shield-checkmark-outline';
     if (status === 'discovery_paused') return 'pause-circle-outline';
     if (status === 'viewer_missing' || status === 'invalid_category') return 'alert-circle-outline';
     if (status === 'empty_category') return 'people-outline';
