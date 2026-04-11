@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { query, mutation, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { requireAuthenticatedUserId, resolveUserIdByAuthId } from './helpers';
+import { requireAuthenticatedUserId, requireAppUserId, resolveUserIdByAuthId } from './helpers';
 import {
   CandidateProfile,
   CurrentUser,
@@ -1653,16 +1653,19 @@ const SHOWN_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
  * Uses the single-category assignment system to ensure mutual exclusivity
  * FIXED: Now uses shared isUserEligibleForViewer for consistency with getExploreCategoryCounts
  */
+// DEMO AUTH FIX: Accepts optional token for demo auth mode support.
 export const getExploreCategoryProfiles = query({
   args: {
     categoryId: v.string(), // Category key from exploreCategories.ts
     limit: v.optional(v.number()),
     offset: v.optional(v.number()),
     refreshKey: v.optional(v.number()), // Client-only cache busting / refetch trigger
+    token: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const { categoryId, limit = EXPLORE_CATEGORY_PAGE_SIZE, offset = 0 } = args;
-    const viewerId = await requireAuthenticatedUserId(ctx);
+    // Use requireAppUserId which supports both real Convex auth AND demo session tokens
+    const viewerId = await requireAppUserId(ctx, args.token);
     const emptyResponse = (
       status: Exclude<ExploreCategoryStatus, 'ok'>,
     ) => ({
@@ -1901,12 +1904,15 @@ export const assignUserCategory = mutation({
  * Uses the single-category assignment system
  * FIXED: Now uses shared isUserEligibleForViewer for consistency with getExploreCategoryProfiles
  */
+// DEMO AUTH FIX: Accepts optional token for demo auth mode support.
 export const getExploreCategoryCounts = query({
   args: {
     refreshKey: v.optional(v.number()), // Client-only cache busting / refetch trigger
+    token: v.optional(v.string()),
   },
-  handler: async (ctx) => {
-    const viewerId = await requireAuthenticatedUserId(ctx);
+  handler: async (ctx, args) => {
+    // Use requireAppUserId which supports both real Convex auth AND demo session tokens
+    const viewerId = await requireAppUserId(ctx, args.token);
     const emptyCounts = createEmptyExploreCounts();
     const viewer = await ctx.db.get(viewerId);
     if (!viewer) {

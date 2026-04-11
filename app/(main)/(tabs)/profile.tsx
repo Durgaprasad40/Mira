@@ -87,6 +87,7 @@ export default function ProfileScreen() {
   // FIX D: Subscribe to hydration status to re-render when hydration completes
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
 
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const convexUser = useQuery(
     api.users.getCurrentUserFromToken,
     !isDemoMode && token ? { token } : 'skip'
@@ -549,24 +550,6 @@ export default function ProfileScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* PROFILE COMPLETION CARD - Non-blocking nudge system */}
-      <ProfileCompletionCard
-        userData={{
-          name: currentUser.name,
-          dateOfBirth: currentUser.dateOfBirth,
-          gender: currentUser.gender,
-          isVerified: currentUser.isVerified,
-          photos: isDemoMode ? currentUser.photos : effectivePhotos,
-          lookingFor: (currentUser as any).lookingFor,
-          relationshipIntent: (currentUser as any).relationshipIntent,
-          bio: currentUser.bio,
-          profilePrompts: (currentUser as any).profilePrompts,
-          education: (currentUser as any).education,
-          jobTitle: (currentUser as any).jobTitle,
-          company: (currentUser as any).company,
-        }}
-      />
-
       <View style={styles.profileSection}>
         {/* Main photo - large with shadow, tappable for full-screen view */}
         {/* BLUR FIX: Apply soft blur (radius 8) when photoBlurred is true */}
@@ -724,6 +707,25 @@ export default function ProfileScreen() {
       <View style={styles.sectionDivider} />
 
 {/* HIDDEN: Subscription UI temporarily removed per product rules */}
+
+      {/* PROFILE COMPLETION - Compact card below photos, above menu */}
+      <ProfileCompletionCard
+        userData={{
+          name: currentUser.name,
+          dateOfBirth: currentUser.dateOfBirth,
+          gender: currentUser.gender,
+          isVerified: currentUser.isVerified,
+          photos: isDemoMode ? currentUser.photos : effectivePhotos,
+          lookingFor: (currentUser as any).lookingFor,
+          relationshipIntent: (currentUser as any).relationshipIntent,
+          bio: currentUser.bio,
+          profilePrompts: (currentUser as any).profilePrompts,
+          education: (currentUser as any).education,
+          jobTitle: (currentUser as any).jobTitle,
+          company: (currentUser as any).company,
+        }}
+        compact={true}
+      />
 
       <View style={styles.menuSection}>
         {/* 1. Edit Profile */}

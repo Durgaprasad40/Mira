@@ -100,6 +100,7 @@ if (__DEV__) {
 })()
 import { ConvexProvider, useMutation, useQuery } from "convex/react";
 import { convex, isDemoMode } from "@/hooks/useConvex";
+import { isDemoAuthMode } from "@/config/demo";
 
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -314,6 +315,7 @@ function SessionValidator() {
   // validateSessionFull checks: expiry, revocation, user status, deletedAt
   // M2 FIX: Use hasValidToken to skip query for empty/whitespace tokens
   // M1 FIX: sessionRefreshTrigger gates query to force re-subscription on app resume
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const sessionStatus = useQuery(
     api.auth.validateSessionFull,
     sessionRefreshTrigger ? 'skip' : (!isDemoMode && hasValidToken ? { token } : 'skip')
@@ -321,6 +323,11 @@ function SessionValidator() {
 
   // Handle session validation result
   useEffect(() => {
+    // Demo auth mode: skip Convex session validation, trust local auth state
+    if (isDemoAuthMode) {
+      setSessionValidated(true);
+      return;
+    }
     // M2 FIX: Use hasValidToken for early return; only mark validated if token is truly null
     if (isDemoMode || !hasValidToken) {
       // Only mark as validated if token is truly absent (null), not empty/whitespace
@@ -575,6 +582,7 @@ function OnboardingDraftHydrator() {
   }, []);
 
   // BUG FIX: Use getOnboardingStatus to get comprehensive data including basicInfo from user document
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
     !isDemoMode && token && authHydrated && onboardingHydrated
@@ -583,9 +591,9 @@ function OnboardingDraftHydrator() {
   );
 
   useEffect(() => {
-    // Only in production mode (not demo)
-    if (isDemoMode) {
-      // Demo mode doesn't use Convex for onboarding draft, mark as hydrated immediately
+    // Only in production mode (not demo/demo auth)
+    if (isDemoMode || isDemoAuthMode) {
+      // Demo/demo auth mode doesn't use Convex for onboarding draft, mark as hydrated immediately
       useOnboardingStore.getState().setConvexHydrated();
       return;
     }
@@ -800,6 +808,7 @@ function CrossedPathToastManager() {
   }, []);
 
   // Query crossed-path history (live mode only)
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const crossedPathsSummary = useQuery(
     api.crossedPaths.getCrossedPathSummary,
     !isDemoMode && token ? { token } : 'skip'

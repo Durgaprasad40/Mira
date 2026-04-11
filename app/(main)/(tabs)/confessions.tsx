@@ -29,7 +29,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { safePush } from '@/lib/safeRouter';
 import { LoadingGuard } from '@/components/safety';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery, useMutation } from 'convex/react';
+import { usePaginatedQuery, useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import EmojiPicker from 'rn-emoji-keyboard';
@@ -70,6 +70,7 @@ import {
 import { useScreenTrace } from '@/lib/devTrace';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+const FEED_PAGE_SIZE = 20;
 
 // TaggedConfessionItem is now imported from confessionsIntegrity.ts
 
@@ -117,6 +118,7 @@ export default function ConfessionsScreen() {
   const demoCurrentUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
   const demoMyProfile = demoCurrentUserId ? demoProfiles[demoCurrentUserId] : null;
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const convexUserQueryArgs = !isDemoMode && currentUserId ? { userId: asUserId(currentUserId) ?? currentUserId } : 'skip';
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexUserQueryArgs);
 
@@ -173,9 +175,12 @@ export default function ConfessionsScreen() {
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [hiddenConfessionIds, setHiddenConfessionIds] = useState<string[]>([]);
   const [showToast, setShowToast] = useState(false);
-  const [toastMessage, setToastMessage] = useState('Posted anonymously');
+  const [toastMessage, setToastMessage] = useState('Confession posted');
   const [toastIcon, setToastIcon] = useState<'checkmark-circle' | 'chatbubbles' | 'alert-circle'>('checkmark-circle');
   const toastOpacity = useRef(new Animated.Value(0)).current;
+  const toastAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
+  const reactionTimeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const composerFocusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingBlockAuthorsRef = useRef<Set<string>>(new Set());
 
   // Emoji picker state
@@ -202,11 +207,11 @@ export default function ConfessionsScreen() {
   const [showDuplicatePicker, setShowDuplicatePicker] = useState(false);
   const [duplicateCandidates, setDuplicateCandidates] = useState<{ id: string; name: string; avatarUrl: string | null; age?: number; disambiguator: string }[]>([]);
 
-  // Query liked users for tagging candidates
-  const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
-  const likedUsersQuery = useQuery(
-    api.likes.getLikedUsers,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+  // Query auth-safe eligible tag targets for tagging candidates
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  const eligibleTagTargetsQuery = useQuery(
+    api.confessions.getEligibleTagTargets,
+    !isDemoMode && currentUserId ? {} : 'skip'
   );
 
   // Demo liked users (for demo mode) - IDs must match DEMO_PROFILES for profile lookup
@@ -224,8 +229,14 @@ export default function ConfessionsScreen() {
 
   const likedUsers = useMemo(() => {
     if (isDemoMode) return demoLikedUsers;
-    return likedUsersQuery || [];
-  }, [isDemoMode, demoLikedUsers, likedUsersQuery]);
+    return (eligibleTagTargetsQuery || []).map((user: any) => ({
+      id: user.id,
+      name: user.name,
+      avatarUrl: user.photoUrl || null,
+      age: user.age,
+      disambiguator: user.disambiguator,
+    }));
+  }, [isDemoMode, demoLikedUsers, eligibleTagTargetsQuery]);
 
   // Tagging suggestions logic
   // Rule: Short names (<=7) require full typing, long names (>7) show suggestions after 3+ chars
@@ -294,10 +305,16 @@ export default function ConfessionsScreen() {
     setTagInput('');
   }, []);
 
-  // Convex queries (only when not in demo mode)
-  const convexConfessions = useQuery(
-    api.confessions.listConfessions,
-    !isDemoMode ? { sortBy: 'latest' as const, refreshKey: retryKey, limit: 50 } : 'skip'
+  // Convex queries (only when not in legacy demo mode)
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  const {
+    results: convexConfessions,
+    status: convexConfessionsStatus,
+    loadMore: loadMoreConfessions,
+  } = usePaginatedQuery(
+    api.confessions.listConfessionsPage,
+    !isDemoMode ? { refreshKey: retryKey } : 'skip',
+    { initialNumItems: FEED_PAGE_SIZE }
   );
   const convexTrending = useQuery(
     api.confessions.getTrendingConfessions,
@@ -512,8 +529,15 @@ export default function ConfessionsScreen() {
     setRetryKey((k) => k + 1);
   }, []);
 
+  const handleLoadMoreConfessions = useCallback(() => {
+    if (isDemoMode || convexConfessionsStatus !== 'CanLoadMore') {
+      return;
+    }
+    loadMoreConfessions(FEED_PAGE_SIZE);
+  }, [isDemoMode, convexConfessionsStatus, loadMoreConfessions]);
+
   const isRefreshReady = !isDemoMode
-    ? convexConfessions !== undefined &&
+    ? convexConfessionsStatus !== 'LoadingFirstPage' &&
       convexTrending !== undefined &&
       (!currentUserId || (convexTaggedConfessions !== undefined && convexTaggedBadgeCount !== undefined))
     : true;
@@ -564,11 +588,19 @@ export default function ConfessionsScreen() {
     setToastMessage(message);
     setToastIcon(icon);
     setShowToast(true);
-    Animated.sequence([
+    toastAnimationRef.current?.stop();
+    toastOpacity.setValue(0);
+    const animation = Animated.sequence([
       Animated.timing(toastOpacity, { toValue: 1, duration: 200, useNativeDriver: true }),
       Animated.delay(2000),
       Animated.timing(toastOpacity, { toValue: 0, duration: 200, useNativeDriver: true }),
-    ]).start(() => setShowToast(false));
+    ]);
+    toastAnimationRef.current = animation;
+    animation.start(({ finished }) => {
+      if (finished) {
+        setShowToast(false);
+      }
+    });
   }, [toastOpacity]);
 
   // BUGFIX #24: Track pending reactions to prevent double toast on rapid taps
@@ -582,7 +614,15 @@ export default function ConfessionsScreen() {
       pendingReactionsRef.current.add(reactionKey);
 
       // Clear pending after animation completes
-      setTimeout(() => pendingReactionsRef.current.delete(reactionKey), 500);
+      const existingTimeout = reactionTimeoutsRef.current.get(reactionKey);
+      if (existingTimeout) {
+        clearTimeout(existingTimeout);
+      }
+      const timeoutId = setTimeout(() => {
+        pendingReactionsRef.current.delete(reactionKey);
+        reactionTimeoutsRef.current.delete(reactionKey);
+      }, 500);
+      reactionTimeoutsRef.current.set(reactionKey, timeoutId);
 
       if (isDemoMode) {
         const result = demoToggleReaction(confessionId, emoji, currentUserId);
@@ -630,11 +670,18 @@ export default function ConfessionsScreen() {
     setDuplicateCandidates([]);
     setShowComposer(true);
     // Focus input after modal opens
-    setTimeout(() => composerInputRef.current?.focus(), 100);
+    if (composerFocusTimeoutRef.current) {
+      clearTimeout(composerFocusTimeoutRef.current);
+    }
+    composerFocusTimeoutRef.current = setTimeout(() => composerInputRef.current?.focus(), 100);
   }, []);
 
   const handleCloseComposer = useCallback(() => {
     Keyboard.dismiss();
+    if (composerFocusTimeoutRef.current) {
+      clearTimeout(composerFocusTimeoutRef.current);
+      composerFocusTimeoutRef.current = null;
+    }
     setShowComposer(false);
   }, []);
 
@@ -747,13 +794,25 @@ export default function ConfessionsScreen() {
       setComposerText('');
       setTagInput('');
       setTaggedUser(null);
-      showToastMessage('Posted anonymously', 'checkmark-circle');
+      const successMessage = composerAnonymous ? 'Posted anonymously' : 'Posted with your profile';
+      showToastMessage(successMessage, 'checkmark-circle');
     } catch (error: any) {
       setComposerSubmitting(false);
       Alert.alert('Error', error?.message || 'Failed to post confession');
       return;
     }
   }, [canSubmitComposer, composerText, composerAnonymous, currentUserId, createConfessionMutation, taggedUser, canPostConfession, tagInput, recordConfessionTimestamp, getAuthorInfo, isDemoMode, showToastMessage, triggerRefetch]);
+
+  useEffect(() => {
+    return () => {
+      toastAnimationRef.current?.stop();
+      if (composerFocusTimeoutRef.current) {
+        clearTimeout(composerFocusTimeoutRef.current);
+      }
+      reactionTimeoutsRef.current.forEach((timeoutId) => clearTimeout(timeoutId));
+      reactionTimeoutsRef.current.clear();
+    };
+  }, []);
 
   const handleBlockAuthor = useCallback(
     async (authorId: string) => {
@@ -1224,7 +1283,7 @@ export default function ConfessionsScreen() {
   );
 
   const isLoading = !isDemoMode
-    ? convexConfessions === undefined ||
+    ? convexConfessionsStatus === 'LoadingFirstPage' ||
       convexTrending === undefined ||
       (!!currentUserId && (convexTaggedConfessions === undefined || convexTaggedBadgeCount === undefined))
     : false;
@@ -1310,8 +1369,8 @@ export default function ConfessionsScreen() {
     <LoadingGuard
       isLoading={isLoading}
       onRetry={triggerRefetch}
-      title="Couldn't load confessions"
-      subtitle="Check your connection and try again."
+      title="We couldn't refresh Confess"
+      subtitle="Pull to try again once your connection feels steady."
     >
       <SafeAreaView style={styles.container} edges={['top']}>
         {/* Compact header */}
@@ -1329,7 +1388,7 @@ export default function ConfessionsScreen() {
         </View>
 
         {/* Top hint */}
-        <Text style={styles.topHint}>Anonymous by default • Be respectful</Text>
+        <Text style={styles.topHint}>Anonymous by default • Kind words only</Text>
 
         {/* Feed */}
         <FlatList
@@ -1379,17 +1438,30 @@ export default function ConfessionsScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />
         }
         showsVerticalScrollIndicator={false}
+        ListFooterComponent={
+          !isDemoMode && convexConfessions.length > 0 ? (
+            <View style={styles.paginationFooter}>
+              {convexConfessionsStatus === 'LoadingMore' ? (
+                <ActivityIndicator size="small" color={COLORS.primary} />
+              ) : convexConfessionsStatus === 'CanLoadMore' ? (
+                <TouchableOpacity style={styles.loadMoreButton} onPress={handleLoadMoreConfessions}>
+                  <Text style={styles.loadMoreText}>Load more confessions</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null
+        }
         ListEmptyComponent={
           isLoading ? (
             <View style={styles.loadingContainer}>
               <ActivityIndicator size="large" color={COLORS.primary} />
-              <Text style={styles.loadingText}>Finding confessions...</Text>
+              <Text style={styles.loadingText}>Loading today's confessions...</Text>
             </View>
           ) : (
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyEmoji}>💬</Text>
-              <Text style={styles.emptyTitle}>No confessions yet</Text>
-              <Text style={styles.emptySubtitle}>Be the first to share something — it's anonymous by default.</Text>
+              <Text style={styles.emptyTitle}>It&apos;s quiet right now</Text>
+              <Text style={styles.emptySubtitle}>When someone shares a confession, it will show up here. Yours can start the conversation.</Text>
               <TouchableOpacity style={styles.emptyButton} onPress={handleOpenCompose}>
                 <Text style={styles.emptyButtonText}>Post a Confession</Text>
               </TouchableOpacity>
@@ -1910,6 +1982,25 @@ const styles = StyleSheet.create({
   listContent: {
     paddingTop: 4,
     paddingBottom: 96,
+  },
+  paginationFooter: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 4,
+    paddingBottom: 20,
+  },
+  loadMoreButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 18,
+    backgroundColor: COLORS.white,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+  },
+  loadMoreText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   emptyContainer: {
     alignItems: 'center',

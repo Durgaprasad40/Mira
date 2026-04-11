@@ -81,6 +81,7 @@ export default function MainTabsLayout() {
   }, [demoMatches, demoConversations, demoMeta, blockedUserIds, currentUserId]);
 
   // Convex mode: query unread count from server
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const convexUnreadCount = useQuery(
     api.messages.getUnreadCount,
     !isDemoMode && token ? { token } : 'skip'
@@ -89,16 +90,16 @@ export default function MainTabsLayout() {
   const unreadChats = isDemoMode ? demoUnreadCount : (convexUnreadCount ?? 0);
 
   // Tagged confession badge count (convexUserId already defined above)
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const convexTaggedCount = useQuery(
     api.confessions.getTaggedConfessionBadgeCount,
     !isDemoMode && userId ? {} : 'skip'
   );
 
-  // PRELOAD: Prefetch confessions data so Confessions tab feels instant
-  // Convex caches query results - when tab opens, data is already available
+  // PRELOAD: Prefetch the lightweight Confessions trending strip so the tab header feels instant
   useQuery(
-    api.confessions.listConfessions,
-    !isDemoMode ? { sortBy: 'trending' as const } : 'skip'
+    api.confessions.getTrendingConfessions,
+    !isDemoMode ? { limit: 5 } : 'skip'
   );
 
   // PRELOAD: Prefetch Nearby users so Nearby tab opens faster
@@ -142,6 +143,7 @@ export default function MainTabsLayout() {
   }
 
   // Query deletion state for Private tab entry gating (non-demo mode)
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const privateDeletionState = useQuery(
     api.privateDeletion.getPrivateDeletionState,
     !isDemoMode && userId ? {} : 'skip'

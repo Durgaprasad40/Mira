@@ -395,6 +395,7 @@ export default function MessagesScreen() {
 
   // HIGH #1 FIX: Memoize Convex query args to prevent re-subscriptions
   // Live message queries are keyed by validated session token instead of client user IDs.
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const convexConversationsArgs = useMemo(
     () => (!isDemoMode && token ? { token } : 'skip' as const),
     [token]

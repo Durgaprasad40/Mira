@@ -17,12 +17,11 @@ const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
 // only appear in the Phase 2 notification bell, not in the Phase 1 bell.
 // - phase2_match: Matches created in Deep Connect
 // - phase2_like: Likes received in Deep Connect
-// - comment_connect: TOD confession reactions and connects
+// - comment_connect: Confession comment connects
 // - tod_connect: Truth or Dare connections
 const PHASE2_ONLY_TYPES = new Set([
   'phase2_match',
   'phase2_like',
-  'comment_connect',
   'tod_connect',
 ]);
 
@@ -507,8 +506,10 @@ let __notifLogged = false;
  */
 export function useNotifications() {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const convexUserId = asUserId(userId);
+  const hasValidToken = typeof token === 'string' && token.trim().length > 0;
 
   // ══════════════════════════════════════════════════════════════════════════════
   // PHASE DETECTION: Derive notification phase directly from route
@@ -588,10 +589,11 @@ export function useNotifications() {
     return () => clearInterval(interval);
   }, []);
 
-  // ── Convex queries (skipped in demo mode) ──
+  // ── Convex queries (skipped in legacy demo mode only) ──
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const convexNotifications = useQuery(
     api.notifications.getNotifications,
-    !isDemoMode && convexUserId && authReady ? {} : 'skip',
+    !isDemoMode && convexUserId && authReady && hasValidToken ? {} : 'skip',
   );
   const markAsReadMutation = useMutation(api.notifications.markAsRead);
   const markAllAsReadMutation = useMutation(api.notifications.markAllAsRead);
@@ -789,15 +791,19 @@ export function useNotifications() {
 
 export function useNotificationBellBadge() {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const convexUserId = asUserId(userId);
+  const hasValidToken = typeof token === 'string' && token.trim().length > 0;
   const phaseMode = usePhaseMode();
   const isInPhase2 = phaseMode === 'phase2' || phaseMode === 'shared';
   const phase = isInPhase2 ? 'phase2' : 'phase1';
 
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  // Pass token for demo auth mode support (backend uses requireAppUserId)
   const convexUnseenCount = useQuery(
     api.notifications.getBellUnreadCount,
-    !isDemoMode && convexUserId && authReady ? { phase } : 'skip',
+    !isDemoMode && convexUserId && authReady && hasValidToken ? { phase, token } : 'skip',
   );
 
   const demoNotifications = useDemoNotifStore((s) => s.notifications);

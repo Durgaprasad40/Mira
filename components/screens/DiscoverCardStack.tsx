@@ -379,6 +379,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
+  const hasValidToken = typeof token === "string" && token.trim().length > 0;
 
   // LIVE_LOCATION: Get cached location refresh for screen focus events
   const refreshLocationCached = useLocationStore((s) => s.refreshLocationCached);
@@ -711,7 +712,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     prefetchedProfiles === null &&
     !prefetchWaitExpired;
 
-  // Phase-1 discover query args (skip if Phase-2 mode)
+  // Phase-1 discover query args (skip if Phase-2 mode or legacy demo mode)
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const discoverArgs = useMemo(
     () =>
       !isDemoMode && convexUserId && !skipInternalQuery && !isPhase2 && !shouldHoldPhase1Query
@@ -764,6 +766,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
 
   // P1-002 FIX: Only pass authUserId and limit - userId was removed from validator
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const privateDiscoverArgs = useMemo(
     () =>
       !isDemoMode && convexUserId && !skipInternalQuery && isPhase2 && isAuthReadyForQuery
@@ -778,9 +781,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // ═══════════════════════════════════════════════════════════════════════════
   // VIEWER PROFILE QUERY - For computing common points with candidates
   // ═══════════════════════════════════════════════════════════════════════════
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  // Pass token for demo auth mode support (backend uses requireAppUserId)
   const viewerProfileArgs = useMemo(
-    () => userId && !isPhase2 ? {} : "skip" as const,
-    [userId, isPhase2]
+    () => !isDemoMode && userId && authReady && hasValidToken && !isPhase2 ? { token } : "skip" as const,
+    [authReady, hasValidToken, userId, isPhase2, token]
   );
   const viewerProfile = useQuery(api.users.getCurrentUserDiscoverContext, viewerProfileArgs);
 

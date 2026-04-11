@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { requireAuthenticatedUserId, resolveUserIdByAuthId } from './helpers';
+import { requireAuthenticatedUserId, requireAppUserId, resolveUserIdByAuthId } from './helpers';
 
 // 4-2: Notification TTL (24 hours in milliseconds)
 const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -9,7 +9,6 @@ const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
 const PHASE2_ONLY_TYPES = new Set([
   'phase2_match',
   'phase2_like',
-  'comment_connect',
   'tod_connect',
 ]);
 const BELL_EXCLUDED_TYPES = new Set(['message', 'new_message']);
@@ -104,12 +103,15 @@ export const getUnreadCount = query({
 
 // Get unread bell badge count with phase-aware filtering.
 // Used on hot surfaces so the client does not need the full notification list.
+// DEMO AUTH FIX: Accepts optional token for demo auth mode support.
 export const getBellUnreadCount = query({
   args: {
     phase: v.union(v.literal('phase1'), v.literal('phase2')),
+    token: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const userId = await requireAuthenticatedUserId(ctx);
+    // Use requireAppUserId which supports both real Convex auth AND demo session tokens
+    const userId = await requireAppUserId(ctx, args.token);
     const now = Date.now();
 
     const unreadNotifications = await ctx.db
@@ -190,6 +192,9 @@ export const createNotification = mutation({
       v.literal('match'),
       v.literal('message'),
       v.literal('super_like'),
+      v.literal('comment_connect'),
+      v.literal('confession_reaction'),
+      v.literal('confession_reply'),
       v.literal('crossed_paths'),
       v.literal('tod_connect'),
       v.literal('subscription'),
@@ -202,6 +207,7 @@ export const createNotification = mutation({
       matchId: v.optional(v.string()),
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
+      confessionId: v.optional(v.string()),
     })),
     // 4-1: Optional dedupeKey for upsert behavior
     dedupeKey: v.optional(v.string()),
@@ -254,7 +260,7 @@ export const createNotification = mutation({
 });
 
 // Compute dedupeKey from notification type and data (matches client-side logic)
-function computeDedupeKey(type: string, data?: { matchId?: string; conversationId?: string; userId?: string; pairKey?: string }): string {
+function computeDedupeKey(type: string, data?: { matchId?: string; conversationId?: string; userId?: string; pairKey?: string; confessionId?: string }): string {
   const userId = data?.userId;
   switch (type) {
     case 'match':
@@ -266,6 +272,10 @@ function computeDedupeKey(type: string, data?: { matchId?: string; conversationI
     case 'crossed_paths':
       // Use pairKey if available (deterministic sorted pair format), fallback to userId
       return data?.pairKey ?? `crossed_paths:${userId ?? 'unknown'}`;
+    case 'confession_reaction':
+      return `confession_reaction:${data?.confessionId ?? userId ?? 'unknown'}`;
+    case 'confession_reply':
+      return `confession_reply:${data?.confessionId ?? userId ?? 'unknown'}`;
     default:
       return `${type}:unknown`;
   }

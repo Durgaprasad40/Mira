@@ -56,21 +56,24 @@ const DEMO_CATEGORY_COUNTS: Record<string, number> = {
  */
 export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsResult {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const lastGoodCountsRef = useRef<Record<string, number> | null>(null);
   const lastNearbyStatusRef = useRef<ExploreNearbyAvailabilityStatus>('ok');
 
   // Determine if we should skip the query
-  // Skip if: demo mode OR auth not ready OR userId missing
+  // Skip if: demo mode (legacy store mode) OR auth not ready OR userId missing
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const shouldSkip = isDemoMode || !authReady || !userId;
 
   // P1-001 FIX: Use useQuery() for reactive caching
   // This shares cache with the preload in _layout.tsx, so first Explore open is faster
   // refreshKey in args triggers re-fetch when changed (for manual refresh)
   // IMPORTANT: Always call useQuery unconditionally (React hooks rule)
+  // Pass token for demo auth mode support (backend uses requireAppUserId)
   const queryResult = useQuery(
     api.discover.getExploreCategoryCounts,
-    shouldSkip ? 'skip' : { refreshKey }
+    shouldSkip ? 'skip' : { refreshKey, token: token ?? undefined }
   );
 
   useEffect(() => {
@@ -80,7 +83,8 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     }
   }, [queryResult]);
 
-  // Demo mode: return mock counts (query was skipped above)
+  // Legacy demo mode only: return mock counts (query was skipped above)
+  // NOTE: isDemoAuthMode uses real Convex backend - NOT handled here
   if (isDemoMode) {
     return {
       data: DEMO_CATEGORY_COUNTS,

@@ -66,6 +66,7 @@ export function useExploreCategoryProfiles({
   refreshKey = 0,
 }: UseExploreCategoryProfilesOptions): UseExploreCategoryProfilesResult {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const allProfiles = useExploreProfiles({ enabled: isDemoMode });
   const category = EXPLORE_CATEGORIES.find((c) => c.id === categoryId);
@@ -88,6 +89,7 @@ export function useExploreCategoryProfiles({
       status: cached?.status ?? 'ok',
       partialBatchExhausted: cached?.partialBatchExhausted ?? false,
       isLoading: cached == null,
+      // NOTE: isDemoAuthMode uses real Convex backend with token-based auth
       isUsingBackend: !isDemoMode,
       isError: false,
       error: null,
@@ -98,6 +100,8 @@ export function useExploreCategoryProfiles({
     let cancelled = false;
 
     const run = async () => {
+      // Legacy demo mode only: use local demo profiles
+      // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - NOT handled here
       if (isDemoMode) {
         if (!cancelled) {
           setState({
@@ -155,11 +159,13 @@ export function useExploreCategoryProfiles({
       }
 
       try {
+        // Pass token for demo auth mode support (backend uses requireAppUserId)
         const result = await convex.query(api.discover.getExploreCategoryProfiles as any, {
           categoryId,
           limit,
           offset,
           refreshKey,
+          token: token ?? undefined,
         });
 
         if (cancelled) return;
@@ -221,7 +227,7 @@ export function useExploreCategoryProfiles({
     return () => {
       cancelled = true;
     };
-  }, [authReady, cacheKey, category, userId, categoryId, limit, offset, refreshKey, demoProfiles]);
+  }, [authReady, cacheKey, category, userId, categoryId, limit, offset, refreshKey, demoProfiles, token]);
 
   return state;
 }

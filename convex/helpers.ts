@@ -109,6 +109,54 @@ export async function requireAuthenticatedUserId(
   return userId;
 }
 
+/**
+ * APP USER RESOLUTION - Supports both real Convex auth AND demo session tokens.
+ *
+ * This is the preferred helper for app queries that need the current user.
+ * It tries both authentication paths in order:
+ *
+ * 1. Real Convex auth identity (production path via ctx.auth.getUserIdentity())
+ * 2. Session token resolution (supports demo tokens in dev mode via validateSessionToken)
+ *
+ * SECURITY:
+ * - Production remains strict: real Convex auth works normally
+ * - Demo token resolution only works when IS_DEV_MODE=true (backend env var)
+ * - Demo tokens must exist in sessions table with valid user reference
+ *
+ * Usage:
+ * - Queries that need current user context should use this helper
+ * - Pass optional token arg from frontend for demo auth mode support
+ *
+ * @param ctx - Convex query or mutation context
+ * @param token - Optional session token (for demo auth mode fallback)
+ * @returns Id<"users"> - The resolved user ID
+ * @throws Error if neither auth path succeeds
+ */
+export async function requireAppUserId(
+  ctx: QueryCtx | MutationCtx,
+  token?: string
+): Promise<Id<"users">> {
+  // PATH 1: Try real Convex auth identity (production path)
+  const identity = await ctx.auth.getUserIdentity();
+  if (identity?.subject) {
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (userId) {
+      return userId;
+    }
+  }
+
+  // PATH 2: Try session token resolution (supports demo tokens in dev mode)
+  if (token && token.trim().length > 0) {
+    const userId = await validateSessionToken(ctx, token);
+    if (userId) {
+      return userId;
+    }
+  }
+
+  // Both paths failed
+  throw new Error("Authentication required");
+}
+
 export async function getPhase2DisplayName(
   ctx: QueryCtx | MutationCtx,
   userId: Id<"users">
@@ -297,9 +345,30 @@ export async function ensureUserByAuthId(
   return newUserId;
 }
 
+// =============================================================================
+// DEMO AUTH MODE - Backend support
+// =============================================================================
+// IMPORTANT: In Convex, NODE_ENV is NOT reliable for dev/prod detection.
+// Use IS_DEV_DEPLOYMENT env var set via `npx convex env set IS_DEV_DEPLOYMENT true`
+// =============================================================================
+const IS_DEV_MODE = process.env.IS_DEV_DEPLOYMENT === "true";
+
+/**
+ * Check if a token is a demo token.
+ * Demo tokens start with "demo_" prefix.
+ */
+function isDemoToken(token: string): boolean {
+  return token.startsWith("demo_");
+}
+
 /**
  * Validate session token and return the authenticated user ID.
  * Uses session table to verify token is valid, not expired, and not revoked.
+ *
+ * DEMO MODE: Demo tokens (starting with "demo_") are handled specially:
+ * - Still requires session to exist in database
+ * - Session is never considered expired
+ * - User is always considered active
  *
  * @param ctx - Convex mutation context
  * @param token - Session token to validate
@@ -317,19 +386,28 @@ export async function validateSessionToken(
     .first();
 
   if (!session) return null;
-  if (session.expiresAt < now) return null;
-  if (session.revokedAt) return null;
+
+  // DEMO MODE: Demo sessions are never expired
+  const isDemo = IS_DEV_MODE && isDemoToken(token);
+  if (!isDemo) {
+    if (session.expiresAt < now) return null;
+    if (session.revokedAt) return null;
+  }
 
   const user = await ctx.db.get(session.userId);
   if (!user) return null;
-  if (!user.isActive) return null;
-  if (user.deletedAt) return null;
-  // APP-P1-004 FIX: Deny session for banned users
-  if (user.isBanned) return null;
 
-  // Check mass session revocation
-  if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
-    return null;
+  // DEMO MODE: Demo users are always considered active
+  if (!isDemo) {
+    if (!user.isActive) return null;
+    if (user.deletedAt) return null;
+    // APP-P1-004 FIX: Deny session for banned users
+    if (user.isBanned) return null;
+
+    // Check mass session revocation
+    if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
+      return null;
+    }
   }
 
   return session.userId;

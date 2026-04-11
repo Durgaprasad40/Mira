@@ -86,27 +86,36 @@ export function ProfileCompletionCard({
     return null;
   }
 
-  // Compact version for Discover banner
+  // Compact version for Profile tab - navigates to Edit Profile to complete profile
   if (compact) {
+    // Get top action for inline hint
+    const topAction = completion.nextBestActions[0];
+    const actionHint = topAction ? ACTION_DESCRIPTIONS[topAction.key] : 'Complete your profile';
+
     return (
       <TouchableOpacity
         style={styles.compactContainer}
-        onPress={() => router.push('/(main)/(tabs)/profile')}
+        onPress={() => router.push('/(main)/edit-profile')}
         activeOpacity={0.8}
       >
         <View style={styles.compactContent}>
           <View style={[styles.compactIcon, { backgroundColor: tierColor + '20' }]}>
-            <Ionicons name="person-circle-outline" size={20} color={tierColor} />
+            <Ionicons name="sparkles" size={18} color={tierColor} />
           </View>
           <View style={styles.compactTextContainer}>
             <Text style={styles.compactTitle}>
-              Profile {completion.percentage}% complete
+              {completion.percentage}% complete
             </Text>
             <Text style={styles.compactSubtitle} numberOfLines={1}>
-              Complete your profile to get more matches
+              {actionHint}
             </Text>
           </View>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+          <View style={styles.compactBadge}>
+            <Text style={[styles.compactBadgeText, { color: tierColor }]}>
+              +{topAction?.points || 10}%
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
         </View>
         <View style={styles.compactProgressContainer}>
           <View style={[styles.compactProgressBar, { width: `${completion.percentage}%`, backgroundColor: tierColor }]} />
@@ -328,15 +337,25 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   compactProgressContainer: {
-    height: 4,
+    height: 3,
     backgroundColor: COLORS.border,
     borderRadius: 2,
-    marginTop: 10,
+    marginTop: 8,
     overflow: 'hidden',
   },
   compactProgressBar: {
     height: '100%',
     borderRadius: 2,
+  },
+  compactBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: COLORS.border,
+  },
+  compactBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
   },
 });
 

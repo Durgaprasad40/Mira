@@ -9,6 +9,7 @@ import {
   validateSessionToken,
   requireAuthenticatedSessionUser,
   requireAuthenticatedUserId,
+  requireAppUserId,
 } from "./helpers";
 
 // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
@@ -124,10 +125,14 @@ export const getCurrentUser = query({
   },
 });
 
+// DEMO AUTH FIX: Accepts optional token for demo auth mode support.
 export const getCurrentUserDiscoverContext = query({
-  args: {},
-  handler: async (ctx) => {
-    const convexUserId = await requireAuthenticatedUserId(ctx);
+  args: {
+    token: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Use requireAppUserId which supports both real Convex auth AND demo session tokens
+    const convexUserId = await requireAppUserId(ctx, args.token);
     const user = await ctx.db.get(convexUserId);
     if (!user) {
       return null;
@@ -1724,8 +1729,11 @@ export const completeOnboarding = mutation({
     }
 
     // ONB-P0-002 FIX: Enforce face verification before onboarding completion
-    // Only verified users can complete onboarding - PENDING status is not allowed
-    if (user.faceVerificationStatus !== 'verified') {
+    // PRODUCT RULE: Allow both "verified" AND "pending" to complete onboarding
+    // Only block "unverified" (user hasn't attempted verification at all)
+    const faceStatus = user.faceVerificationStatus || 'unverified';
+    const faceVerificationAllowed = faceStatus === 'verified' || faceStatus === 'pending';
+    if (!faceVerificationAllowed) {
       throw new Error("Face verification required: please complete face verification before continuing");
     }
 
