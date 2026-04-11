@@ -32,6 +32,8 @@ import DateTimePicker from "@react-native-community/datetimepicker";
 import { Gender } from "@/types";
 import { isDemoMode, convex } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
+import { isDemoAuthMode, DEMO_USER_STABLE_ID } from "@/config/demo";
+import { loginDemoUser } from "@/lib/demoAuth";
 import { useAuthSubmit } from "@/hooks/useAuthSubmit";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -573,6 +575,70 @@ export default function BasicInfoScreen() {
     // Create user account
     setIsSubmitting(true);
     try {
+      // =========================================================================
+      // DEMO AUTH MODE: Use centralized demo auth with Convex backend
+      // Creates/reuses stable demo user, stores all data in Convex
+      // =========================================================================
+      if (isDemoAuthMode) {
+        if (__DEV__) {
+          console.log('[DEMO_AUTH] ════════════════════════════════════════');
+          console.log('[DEMO_AUTH] Registration in demo auth mode');
+          console.log(`[DEMO_AUTH]   email=${email}`);
+          console.log(`[DEMO_AUTH]   name=${name.trim()}`);
+          console.log('[DEMO_AUTH] ════════════════════════════════════════');
+        }
+
+        try {
+          // Step 1: Login/create demo user in Convex backend
+          const demoResult = await loginDemoUser(email, password);
+
+          if (!demoResult.success) {
+            throw new Error('Demo auth failed');
+          }
+
+          // Step 2: Update basic info in Convex backend
+          await convex.mutation(api.demoAuth.updateDemoUserBasicInfo, {
+            token: demoResult.token,
+            name: name.trim(),
+            dateOfBirth,
+            gender: gender as any,
+            handle: nickname,
+          });
+
+          // Step 3: Save onboarding draft to Convex
+          await upsertDraft({
+            userId: demoResult.userId,
+            patch: {
+              basicInfo: {
+                name: name.trim(),
+                handle: nickname,
+                dateOfBirth,
+                gender,
+              },
+              progress: {
+                lastStepKey: 'basic_info',
+              },
+            },
+          });
+
+          if (__DEV__) {
+            console.log('[DEMO_AUTH] Basic info saved to Convex');
+          }
+
+          setStep("preferences");
+          router.push("/(onboarding)/preferences" as any);
+          return;
+        } catch (demoError: any) {
+          console.error('[DEMO_AUTH] Registration error:', demoError);
+          Alert.alert("Error", demoError.message || "Demo registration failed");
+          setIsSubmitting(false);
+          return;
+        }
+      }
+
+      // =========================================================================
+      // LEGACY DEMO MODE: local account creation via demoStore
+      // =========================================================================
       if (isDemoMode) {
         // Demo mode: local account creation via demoStore
         const demoStore = useDemoStore.getState();

@@ -19,6 +19,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
+import { isDemoAuthMode } from '@/config/demo';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { useScreenTrace } from '@/lib/devTrace';
 
@@ -48,7 +49,17 @@ export default function PasswordScreen() {
   useEffect(() => {
     if (!emailToCheck) return;
 
-    // Demo mode: check local demoStore
+    // DEMO AUTH MODE: Accept any email without checking existence
+    // In demo auth mode, we create/reuse a stable demo user on the backend
+    if (isDemoAuthMode) {
+      if (__DEV__) console.log('[DEMO_AUTH] Accepting email without check:', emailToCheck);
+      setIsChecking(false);
+      setEmailVerified(true);
+      setEmailToCheck(null);
+      return;
+    }
+
+    // Demo mode (legacy): check local demoStore
     if (isDemoMode) {
       const demoAccounts = useDemoStore.getState().demoAccounts;
       const exists = demoAccounts.some(a => a.email.toLowerCase() === emailToCheck.toLowerCase());

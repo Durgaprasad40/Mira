@@ -9,13 +9,15 @@ import { useOnboardingStore } from "@/stores/onboardingStore";
 import { getBootCache } from "@/stores/bootCache";
 import { getAuthBootCache, clearAuthBootCache, type AuthBootCacheData } from "@/stores/authBootCache";
 import { isDemoMode, convex } from "@/hooks/useConvex";
-import { skipDemoOnboarding } from "@/config/demo";
+import { skipDemoOnboarding, isDemoAuthMode } from "@/config/demo";
+import { isDemoToken, validateDemoSession, getDemoOnboardingStatus } from "@/lib/demoAuth";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { COLORS } from "@/lib/constants";
 import { markTiming, markDuration } from "@/utils/startupTiming";
 import { startDiscoverPrefetch, clearDiscoverPrefetch } from "@/lib/discoverPrefetch";
 import { DEBUG_AUTH_BOOT } from "@/lib/debugFlags";
+import { getOnboardingResumeRoute } from "@/lib/onboardingRouting";
 
 // =============================================================================
 // BOOT STATE MACHINE
@@ -51,47 +53,6 @@ type BootState =
   | "TIMEOUT_RETRY";  // TIMEOUT-FIX: New state for validation timeout with retry
 
 const H = (p: string) => p as unknown as Href;
-
-/**
- * Map onboarding lastStepKey to resume route.
- * Returns the route to resume onboarding from based on saved progress.
- */
-function getOnboardingResumeRoute(lastStepKey: string | undefined | null): string {
-  // Default: start from basic-info (first profile step after auth)
-  if (!lastStepKey) {
-    return "/(onboarding)/basic-info";
-  }
-
-  // Map lastStepKey to route
-  const stepToRoute: Record<string, string> = {
-    // Auth steps (should not happen for VALID_ONBOARD, but handle gracefully)
-    'email_phone': '/(onboarding)/basic-info',
-    'otp': '/(onboarding)/basic-info',
-    'password': '/(onboarding)/basic-info',
-    // Profile building steps
-    'basic_info': '/(onboarding)/basic-info',
-    'consent': '/(onboarding)/consent',
-    'prompts_part1': '/(onboarding)/prompts-part1',
-    'prompts_part2': '/(onboarding)/prompts-part2',
-    'profile_details': '/(onboarding)/profile-details',
-    'profile-details/basic': '/(onboarding)/profile-details',
-    'lifestyle': '/(onboarding)/profile-details/lifestyle',
-    'profile-details/lifestyle': '/(onboarding)/profile-details/lifestyle',
-    'life_rhythm': '/(onboarding)/profile-details/life-rhythm',
-    'profile-details/life-rhythm': '/(onboarding)/profile-details/life-rhythm',
-    'education_religion': '/(onboarding)/profile-details/education-religion',
-    'preferences': '/(onboarding)/preferences',
-    'bio': '/(onboarding)/bio',
-    'display_privacy': '/(onboarding)/display-privacy',
-    'photo_upload': '/(onboarding)/photo-upload',
-    'face_verification': '/(onboarding)/face-verification',
-    'additional_photos': '/(onboarding)/additional-photos',
-    'permissions': '/(onboarding)/permissions',
-    'review': '/(onboarding)/review',
-  };
-
-  return stepToRoute[lastStepKey] || '/(onboarding)/basic-info';
-}
 
 export default function Index() {
   const router = useRouter();
@@ -171,8 +132,26 @@ export default function Index() {
       if (demoData) setDemoCache(demoData);
 
       // Determine next state based on cached auth
-      if (isDemoMode) {
-        // Demo mode decision
+      // =========================================================================
+      // DEMO AUTH MODE: Validate demo token via Convex backend
+      // =========================================================================
+      if (isDemoAuthMode) {
+        const hasValidToken = authData.token && authData.token.trim().length > 0;
+        if (hasValidToken && authData.userId && isDemoToken(authData.token)) {
+          if (__DEV__ && DEBUG_AUTH_BOOT) {
+            console.log('[BOOT] Demo auth mode: validating demo token');
+          }
+          setBootState("VALIDATING");
+        } else {
+          if (__DEV__ && DEBUG_AUTH_BOOT) {
+            console.log('[BOOT] Demo auth mode: no valid demo token, route to welcome');
+          }
+          setBootState("NO_AUTH");
+        }
+      } else if (isDemoMode) {
+        // =========================================================================
+        // LEGACY DEMO MODE: Local demoStore decision
+        // =========================================================================
         if (skipDemoOnboarding) {
           setBootState("DEMO_HOME");
         } else if (demoData?.currentDemoUserId) {
@@ -182,7 +161,9 @@ export default function Index() {
           setBootState("DEMO_WELCOME");
         }
       } else {
-        // Live mode decision
+        // =========================================================================
+        // LIVE MODE: Validate with backend
+        // =========================================================================
         const hasValidToken = authData.token && authData.token.trim().length > 0;
         if (hasValidToken && authData.userId) {
           // PERF: Start prefetching Discover profiles in parallel with validation
@@ -247,9 +228,20 @@ export default function Index() {
           setTimeout(() => reject(new Error("Validation timeout")), TIMEOUT)
         );
 
-        const statusPromise = convex.query(api.users.getOnboardingStatus, {
-          token,
-        });
+        // =========================================================================
+        // DEMO AUTH MODE: Use demo auth APIs for validation
+        // =========================================================================
+        let statusPromise: Promise<any>;
+        if (isDemoAuthMode && isDemoToken(token)) {
+          if (__DEV__ && DEBUG_AUTH_BOOT) {
+            console.log('[BOOT] Using demo auth API for validation');
+          }
+          statusPromise = getDemoOnboardingStatus(token);
+        } else {
+          statusPromise = convex.query(api.users.getOnboardingStatus, {
+            token,
+          });
+        }
 
         const status = (await Promise.race([statusPromise, timeoutPromise])) as any;
 
@@ -306,7 +298,7 @@ export default function Index() {
         } else {
           // FIX: Compute resume route from lastStepKey before setting state
           const lastStepKey = status.onboardingDraft?.progress?.lastStepKey;
-          const resumeRoute = getOnboardingResumeRoute(lastStepKey);
+          const resumeRoute = getOnboardingResumeRoute(lastStepKey, status);
           if (__DEV__ && DEBUG_AUTH_BOOT) {
             console.log(`[BOOT] onboard: step=${lastStepKey}, route=${resumeRoute}`);
           }

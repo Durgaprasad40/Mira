@@ -25,3 +25,50 @@ export const isDemoMode = __DEV__ ? false : false;
  * Only has effect when isDemoMode = true.
  */
 export const skipDemoOnboarding = false;
+
+// =============================================================================
+// DEMO AUTH MODE - Centralized flag for testing with simulated auth
+// =============================================================================
+//
+// When enabled (EXPO_PUBLIC_DEMO_AUTH_MODE=true in .env.local):
+// - Any email + any password accepted for login/signup
+// - Stable demo user identity created/reused in backend
+// - Email verification bypassed (demo user is pre-verified)
+// - Face verification bypassed (demo user is pre-verified)
+// - Onboarding progress saved against stable demo user
+// - Force-quit/reopen restores same demo user
+//
+// SAFE: Only works in __DEV__ builds. Production ignores this flag.
+// CLEAN: All demo auth logic centralized in lib/demoAuth.ts + convex/demoAuth.ts
+// REMOVABLE: Delete demoAuth.ts files + revert this file to disable
+// =============================================================================
+
+/**
+ * Demo Auth Mode - enables testing without real auth providers.
+ *
+ * Controlled by EXPO_PUBLIC_DEMO_AUTH_MODE env variable.
+ * Only active in __DEV__ builds for safety.
+ */
+export const isDemoAuthMode = __DEV__
+  ? process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true'
+  : false;
+
+/**
+ * Stable demo user identifier - same user across all demo sessions.
+ * This ensures onboarding progress is preserved between app restarts.
+ */
+export const DEMO_USER_STABLE_ID = 'demo_user_stable_001';
+
+/**
+ * Stable demo session token - recognized by backend as valid demo session.
+ * Prefix 'demo_' allows backend to identify and handle demo sessions specially.
+ */
+export const DEMO_TOKEN_STABLE = 'demo_token_stable_001';
+
+/**
+ * Log demo auth mode status on startup (dev only)
+ */
+if (__DEV__ && isDemoAuthMode) {
+  console.log('[DEMO_AUTH] Demo Auth Mode ENABLED - any email/password will work');
+  console.log('[DEMO_AUTH] Stable user ID:', DEMO_USER_STABLE_ID);
+}

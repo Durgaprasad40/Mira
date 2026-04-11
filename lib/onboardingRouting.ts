@@ -24,6 +24,38 @@ export interface OnboardingStatus {
 }
 
 /**
+ * Maps saved onboarding draft progress back to a concrete route.
+ * Uses backend status as a fallback when draft progress is missing.
+ */
+export function getOnboardingResumeRoute(
+  lastStepKey: string | undefined | null,
+  status?: OnboardingStatus | null
+): string {
+  const basicInfoRoute = status?.basicInfoComplete
+    ? '/(onboarding)/basic-info?confirm=true'
+    : '/(onboarding)/basic-info';
+
+  if (!lastStepKey) {
+    return status ? decideNextOnboardingRoute(status) : '/(onboarding)/basic-info';
+  }
+
+  const stepToRoute: Record<string, string> = {
+    email_phone: '/(onboarding)/basic-info',
+    otp: '/(onboarding)/basic-info',
+    password: '/(onboarding)/basic-info',
+    basic_info: basicInfoRoute,
+    preferences: '/(onboarding)/preferences',
+    photo_upload: '/(onboarding)/photo-upload',
+    face_verification: '/(onboarding)/face-verification',
+    additional_photos: '/(onboarding)/additional-photos',
+    review: '/(onboarding)/review',
+    tutorial: '/(onboarding)/tutorial',
+  };
+
+  return stepToRoute[lastStepKey] || (status ? decideNextOnboardingRoute(status) : '/(onboarding)/basic-info');
+}
+
+/**
  * Decides the next onboarding route based on current status.
  * Used for resume routing and mid-flow navigation decisions.
  *
