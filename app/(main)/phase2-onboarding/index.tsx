@@ -3,7 +3,7 @@
  *
  * - User must agree to Private Mode rules
  * - Imports Phase-1 profile data from Convex (or demoStore in demo mode)
- * - Proceeds to profile setup (Step 2)
+ * - Proceeds to photo selection (Step 2)
  *
  * 18+ check already done by PrivateConsentGate in _layout.tsx
  */
@@ -445,9 +445,9 @@ export default function Phase2OnboardingTerms() {
       // NOTE: This imports profile info (name, age, gender, etc.) - photos are selected in next step
       importPhase1Data(phase1Data);
 
-      // P2-PHOTO-001 FIX: Navigate to photo selection screen instead of auto-importing all photos
-      // User will explicitly select which Phase-1 photos to import into Phase-2
-      router.push("/(main)/(private-setup)/select-photos" as any);
+      // P2-PHOTO-001 FIX: Navigate to dedicated Phase-2 photo selection screen
+      // User explicitly selects which Phase-1 photos to import into Phase-2.
+      router.push("/(main)/phase2-onboarding/photo-select" as any);
     } catch (err) {
       if (__DEV__) console.error("[Phase2Onboarding] Error:", err);
     } finally {
@@ -468,7 +468,7 @@ export default function Phase2OnboardingTerms() {
         >
           <Ionicons name="close" size={22} color={C.textLight} />
         </TouchableOpacity>
-        <Text style={styles.stepIndicator}>Step 1 of 4</Text>
+        <Text style={styles.stepIndicator}>Step 1 of 5</Text>
       </View>
 
       <ScrollView
@@ -561,7 +561,7 @@ export default function Phase2OnboardingTerms() {
           <Ionicons name="information-circle-outline" size={18} color={C.textLight} />
           <Text style={styles.infoNoteText}>
             Your Private profile is separate from your main profile.
-            You'll create new photos and preferences specifically for Private Mode.
+            You'll choose which photos to import, then finish your Phase-2 details on the next screens.
           </Text>
         </View>
       </ScrollView>

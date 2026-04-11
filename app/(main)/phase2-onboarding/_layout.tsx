@@ -56,6 +56,7 @@ export default function Phase2OnboardingLayout() {
     <Phase2ErrorBoundary>
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="index" />
+      <Stack.Screen name="photo-select" />
       <Stack.Screen name="profile-edit" />
       <Stack.Screen name="prompts" />
       <Stack.Screen name="profile-setup" />
