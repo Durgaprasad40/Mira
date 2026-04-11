@@ -92,9 +92,15 @@ export const DEBUG_TRUTH_DARE = false;
  * - Breadcrumbs filtered to remove verbose debug tags
  * - Error capture still fully functional
  *
- * USAGE: Set to TRUE for deep Sentry diagnosis, FALSE for normal operation
+ * CONTROL:
+ * - Set EXPO_PUBLIC_SENTRY_DEBUG=true in .env.local to enable in development
+ * - Production always uses false regardless of env variable
+ *
+ * USAGE: Set env var to TRUE for deep Sentry diagnosis, omit/FALSE for normal operation
  */
-export const DEBUG_SENTRY_VERBOSE = false;
+export const DEBUG_SENTRY_VERBOSE = __DEV__
+  ? process.env.EXPO_PUBLIC_SENTRY_DEBUG === 'true'
+  : false;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS

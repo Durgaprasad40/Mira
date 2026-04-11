@@ -25,16 +25,14 @@ export interface OnboardingStatus {
 
 /**
  * Decides the next onboarding route based on current status.
- * This is the single source of truth for routing decisions.
+ * Used for resume routing and mid-flow navigation decisions.
  *
- * PHASE-1 RESTRUCTURE: New simplified 7-step flow:
- * 1. Basic Info (name, nickname, DOB, gender, LGBTQ self optional)
- * 2. Preferences (lookingFor, relationshipIntent, LGBTQ preference optional)
- * 3. Reference Photo Upload
- * 4. Face Verification (NON-BLOCKING - can continue unverified)
- * 5. Additional Photos + Bio (bio MANDATORY)
- * 6. Review (simplified)
- * 7. Tutorial → Phase-1/Discover
+ * NOTE: This function only checks backend status flags (basicInfoComplete, referencePhotoExists, etc.)
+ * It does NOT check for preferences completion since that's handled by forward navigation.
+ *
+ * ACTUAL FLOW (full navigation handled by each screen):
+ * 1. Basic Info → 2. Preferences → 3. Photo Upload → 4. Face Verification →
+ * 5. Additional Photos → 6. Review → 7. Tutorial → Home
  *
  * @param status - Current onboarding status from backend
  * @returns The route path to navigate to
