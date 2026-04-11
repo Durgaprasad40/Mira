@@ -86,7 +86,7 @@ const TILE_COLORS = {
 
 // ============================================
 // RELATIONSHIP CATEGORIES (9 canonical goals)
-// IDs match backend CATEGORY_IDS exactly
+// IDs match the backend live Explore category set exactly
 // ============================================
 // RELATIONSHIP TILES - predicates use CURRENT 9 RELATIONSHIP CATEGORIES
 // Category ID === relationshipIntent value (unified naming)

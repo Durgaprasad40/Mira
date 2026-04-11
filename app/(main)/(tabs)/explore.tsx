@@ -12,9 +12,9 @@ import {
   Text,
   TouchableOpacity,
   ScrollView,
-  Dimensions,
   Animated,
   ActivityIndicator,
+  useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -35,17 +35,23 @@ import {
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { COLORS } from "@/lib/constants";
 
-const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const GRID_PADDING = 16;
 const GRID_GAP = 14; // Slightly more breathing room
-const TILE_WIDTH = (SCREEN_WIDTH - GRID_PADDING * 2 - GRID_GAP) / 2;
-const TILE_HEIGHT = Math.round(TILE_WIDTH * 1.1); // Responsive height based on width
 const TILE_BORDER_RADIUS = 20; // Consistent rounded corners
+const TILE_MAX_WIDTH = 280;
 
 // ══════════════════════════════════════════════════════════════════════════
 // SKELETON LOADING CARD
 // ══════════════════════════════════════════════════════════════════════════
-const SkeletonTile = ({ index }: { index: number }) => {
+const SkeletonTile = ({
+  tileWidth,
+  tileHeight,
+  isLastInRow,
+}: {
+  tileWidth: number;
+  tileHeight: number;
+  isLastInRow: boolean;
+}) => {
   const pulseAnim = useRef(new Animated.Value(0.4)).current;
 
   useEffect(() => {
@@ -71,8 +77,12 @@ const SkeletonTile = ({ index }: { index: number }) => {
     <Animated.View
       style={[
         styles.skeletonTile,
-        { opacity: pulseAnim },
-        index % 2 === 0 ? { marginRight: GRID_GAP / 2 } : { marginLeft: GRID_GAP / 2 },
+        {
+          opacity: pulseAnim,
+          width: tileWidth,
+          height: tileHeight,
+          marginRight: isLastInRow ? 0 : GRID_GAP,
+        },
       ]}
     >
       <View style={styles.skeletonIcon} />
@@ -90,14 +100,18 @@ const ExploreTile = React.memo(function ExploreTile({
   category,
   count,
   onPress,
-  index,
+  tileWidth,
+  tileHeight,
+  isLastInRow,
   disabled = false,
   statusLabel,
 }: {
   category: ExploreCategory;
   count: number;
   onPress: () => void;
-  index: number;
+  tileWidth: number;
+  tileHeight: number;
+  isLastInRow: boolean;
   disabled?: boolean;
   statusLabel?: string;
 }) {
@@ -139,7 +153,10 @@ const ExploreTile = React.memo(function ExploreTile({
       disabled={disabled}
       style={[
         styles.tileContainer,
-        index % 2 === 0 ? { marginRight: GRID_GAP / 2 } : { marginLeft: GRID_GAP / 2 },
+        {
+          width: tileWidth,
+          marginRight: isLastInRow ? 0 : GRID_GAP,
+        },
       ]}
     >
       <Animated.View
@@ -155,7 +172,7 @@ const ExploreTile = React.memo(function ExploreTile({
           locations={[0, 0.4, 1]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={styles.tile}
+          style={[styles.tile, { height: tileHeight }]}
         >
           {/* Refined bottom overlay for text readability (not too dark) */}
           <LinearGradient
@@ -202,8 +219,10 @@ const ExploreTile = React.memo(function ExploreTile({
   return (
     prev.category === next.category &&
     prev.count === next.count &&
-    prev.index === next.index &&
     prev.disabled === next.disabled &&
+    prev.tileWidth === next.tileWidth &&
+    prev.tileHeight === next.tileHeight &&
+    prev.isLastInRow === next.isLastInRow &&
     prev.statusLabel === next.statusLabel
   );
 });
@@ -221,6 +240,7 @@ function adjustColorBrightness(hex: string, percent: number): string {
 export default function ExploreScreen() {
   useScreenTrace("EXPLORE");
   const router = useRouter();
+  const { width: windowWidth } = useWindowDimensions();
   const [refreshKey, setRefreshKey] = useState(0);
   const hasFocusedOnceRef = useRef(false);
 
@@ -269,6 +289,7 @@ export default function ExploreScreen() {
   const shouldShowReturnHook = useExplorePrefsStore((s) => s.shouldShowReturnHook);
   const getReturnCategory = useExplorePrefsStore((s) => s.getReturnCategory);
   const markTriggerShown = useExplorePrefsStore((s) => s.markTriggerShown);
+  const lastExploreExitTimestamp = useExplorePrefsStore((s) => s.lastExploreExitTimestamp);
 
   // Return hook state
   const [showReturnHook, setShowReturnHook] = useState(false);
@@ -282,6 +303,27 @@ export default function ExploreScreen() {
   const relationshipItems = RELATIONSHIP_CATEGORIES;
   const rightNowItems = RIGHT_NOW_CATEGORIES;
   const interestItems = INTEREST_CATEGORIES;
+  const columnCount = windowWidth >= 1080 ? 4 : windowWidth >= 760 ? 3 : windowWidth >= 320 ? 2 : 1;
+  const tileWidth = useMemo(() => {
+    const availableWidth = Math.max(windowWidth - GRID_PADDING * 2 - GRID_GAP * (columnCount - 1), 0);
+    const computedWidth = Math.floor(availableWidth / columnCount);
+    if (windowWidth >= 760) {
+      return Math.min(computedWidth, TILE_MAX_WIDTH);
+    }
+    return computedWidth;
+  }, [columnCount, windowWidth]);
+  const tileHeight = useMemo(
+    () => Math.max(168, Math.round(tileWidth * (columnCount >= 3 ? 1.02 : 1.1))),
+    [columnCount, tileWidth]
+  );
+  const sectionGridWidth = useMemo(
+    () => tileWidth * columnCount + GRID_GAP * (columnCount - 1),
+    [columnCount, tileWidth]
+  );
+  const sectionGridStyle = useMemo(
+    () => ({ width: sectionGridWidth, alignSelf: "center" as const }),
+    [sectionGridWidth]
+  );
 
   // Check if any items exist (for empty state)
   const hasAnyItems = relationshipItems.length > 0 || rightNowItems.length > 0 || interestItems.length > 0;
@@ -301,6 +343,13 @@ export default function ExploreScreen() {
 
     return counts;
   }, [backendCounts]);
+  const allCountsZero = useMemo(
+    () =>
+      countsStatus === "ok" &&
+      EXPLORE_CATEGORIES.length > 0 &&
+      EXPLORE_CATEGORIES.every((category) => (categoryCounts[category.id] ?? 0) === 0),
+    [categoryCounts, countsStatus]
+  );
 
   // Navigate to category detail
   const handleCategoryPress = useCallback(
@@ -336,6 +385,16 @@ export default function ExploreScreen() {
     }
   }, [returnCategoryId, router]);
 
+  const handleRefresh = useCallback(() => {
+    try {
+      Haptics.selectionAsync();
+    } catch {}
+
+    scrollViewRef.current?.scrollTo({ x: 0, y: 0, animated: true });
+    lastFetchTimestampRef.current = 0;
+    setRefreshKey((k) => k + 1);
+  }, []);
+
   // Refresh on focus (with staleness check to prevent unnecessary refetch)
   useFocusEffect(
     useCallback(() => {
@@ -354,77 +413,111 @@ export default function ExploreScreen() {
       }
 
       // Check for return hook
-      if (shouldShowReturnHook() && returnCategory) {
+      if (shouldShowReturnHook() && returnCategory && lastExploreExitTimestamp) {
         setShowReturnHook(true);
-        markTriggerShown(`return-hook-${Date.now()}`);
+        markTriggerShown(`return-hook-${lastExploreExitTimestamp}`);
       }
 
       return () => {
         trackExploreExit();
         setShowReturnHook(false);
       };
-    }, [shouldShowReturnHook, returnCategory, markTriggerShown, trackExploreExit])
+    }, [lastExploreExitTimestamp, shouldShowReturnHook, returnCategory, markTriggerShown, trackExploreExit])
   );
 
   // Render a single tile
   const renderTile = useCallback(
-    (item: ExploreCategory, index: number) => (
+    (item: ExploreCategory, isLastInRow: boolean) => (
       <ExploreTile
         key={item.id}
         category={item}
         count={categoryCounts[item.id] ?? 0}
         onPress={() => handleCategoryPress(item)}
-        index={index}
+        tileWidth={tileWidth}
+        tileHeight={tileHeight}
+        isLastInRow={isLastInRow}
         disabled={item.id === "nearby" && nearbyUnavailable}
         statusLabel={item.id === "nearby" && nearbyUnavailable ? nearbyStatusLabel : undefined}
       />
     ),
-    [categoryCounts, handleCategoryPress, nearbyStatusLabel, nearbyUnavailable]
+    [categoryCounts, handleCategoryPress, nearbyStatusLabel, nearbyUnavailable, tileHeight, tileWidth]
   );
 
   // Render a 2-column grid for a section
   const renderSectionGrid = useCallback(
     (items: ExploreCategory[]) => {
       const rows: React.ReactNode[] = [];
-      for (let i = 0; i < items.length; i += 2) {
+      for (let i = 0; i < items.length; i += columnCount) {
+        const rowItems = items.slice(i, i + columnCount);
         const row = (
           <View key={`row-${i}`} style={styles.gridRow}>
-            {renderTile(items[i], i)}
-            {items[i + 1] && renderTile(items[i + 1], i + 1)}
+            {rowItems.map((item, rowIndex) => renderTile(item, rowIndex === rowItems.length - 1))}
           </View>
         );
         rows.push(row);
       }
       return rows;
     },
-    [renderTile]
+    [columnCount, renderTile]
   );
 
   // Empty state
   const renderEmptyState = () => (
     <View style={styles.emptyContainer}>
-      <Text style={styles.emptyEmoji}>👀</Text>
-      <Text style={styles.emptyTitle}>Nothing here yet...</Text>
-      <Text style={styles.emptySubtitle}>Explore something new</Text>
+      <Ionicons name="sparkles-outline" size={52} color={COLORS.textLight} />
+      <Text style={styles.emptyTitle}>Explore is getting ready</Text>
+      <Text style={styles.emptySubtitle}>
+        We&apos;re preparing the next set of Explore categories. Check back in a bit.
+      </Text>
+    </View>
+  );
+
+  const renderZeroProfilesState = () => (
+    <View style={styles.emptyContainer}>
+      <Ionicons name="people-outline" size={52} color={COLORS.textLight} />
+      <Text style={styles.emptyTitle}>No new people right now</Text>
+      <Text style={styles.emptySubtitle}>
+        {nearbyUnavailable
+          ? "Fresh Explore profiles are quiet right now. Enable location for Nearby and check back soon."
+          : "Fresh Explore profiles are quiet right now. Check back soon for new people."}
+      </Text>
+      <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+        <Text style={styles.retryButtonText}>Refresh Explore</Text>
+      </TouchableOpacity>
     </View>
   );
 
   // Loading skeletons
   const renderLoadingState = () => (
-    <View style={styles.skeletonGrid}>
-      {[0, 1, 2, 3, 4, 5].map((i) => (
-        <SkeletonTile key={i} index={i} />
-      ))}
+    <View style={styles.loadingContainer}>
+      <View style={styles.loadingCopyContainer}>
+        <Text style={styles.emptyTitle}>Refreshing Explore</Text>
+        <Text style={styles.emptySubtitle}>
+          Pulling in fresh people, nearby energy, and the latest category counts.
+        </Text>
+      </View>
+      <View style={[styles.skeletonGrid, sectionGridStyle]}>
+        {Array.from({ length: columnCount * 2 }).map((_, i) => (
+          <SkeletonTile
+            key={i}
+            tileWidth={tileWidth}
+            tileHeight={tileHeight}
+            isLastInRow={(i + 1) % columnCount === 0}
+          />
+        ))}
+      </View>
     </View>
   );
 
   const renderErrorState = () => (
     <View style={styles.emptyContainer}>
       <Ionicons name="alert-circle-outline" size={52} color={COLORS.textLight} />
-      <Text style={styles.emptyTitle}>Explore is unavailable</Text>
-      <Text style={styles.emptySubtitle}>{error ?? 'Unable to load Explore right now.'}</Text>
-      <TouchableOpacity style={styles.retryButton} onPress={() => setRefreshKey((k) => k + 1)}>
-        <Text style={styles.retryButtonText}>Try again</Text>
+      <Text style={styles.emptyTitle}>Couldn&apos;t refresh Explore</Text>
+      <Text style={styles.emptySubtitle}>
+        {error ?? 'We hit a snag while refreshing Explore. Try again in a moment.'}
+      </Text>
+      <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+        <Text style={styles.retryButtonText}>Refresh Explore</Text>
       </TouchableOpacity>
     </View>
   );
@@ -434,6 +527,11 @@ export default function ExploreScreen() {
       <Ionicons name={iconName} size={52} color={COLORS.textLight} />
       <Text style={styles.emptyTitle}>{title}</Text>
       <Text style={styles.emptySubtitle}>{subtitle}</Text>
+      {countsStatus === "viewer_missing" && (
+        <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+          <Text style={styles.retryButtonText}>Try again</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 
@@ -442,14 +540,19 @@ export default function ExploreScreen() {
       {/* Header - Always renders immediately (shell UI pattern) */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Explore</Text>
-        {/* Subtle refresh indicator during background refresh (not first load) */}
-        {isLoading && hasLoadedDataOnceRef.current && (
-          <ActivityIndicator
-            size="small"
-            color={COLORS.primary}
-            style={styles.headerRefreshIndicator}
-          />
-        )}
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Refresh Explore"
+          onPress={handleRefresh}
+          hitSlop={8}
+          style={styles.headerActionButton}
+        >
+          {isLoading && hasLoadedDataOnceRef.current ? (
+            <ActivityIndicator size="small" color={COLORS.primary} />
+          ) : (
+            <Ionicons name="refresh" size={20} color={COLORS.text} />
+          )}
+        </TouchableOpacity>
       </View>
 
       {/* Return Hook */}
@@ -487,6 +590,8 @@ export default function ExploreScreen() {
         // Only show error state if we've never loaded data
         // If we have stale data, keep showing it
         renderErrorState()
+      ) : allCountsZero ? (
+        renderZeroProfilesState()
       ) : !hasAnyItems ? (
         renderEmptyState()
       ) : (
@@ -503,7 +608,7 @@ export default function ExploreScreen() {
                 <Text style={styles.sectionIcon}>❤️</Text>
                 <Text style={styles.sectionTitle}>Relationship</Text>
               </View>
-              <View style={styles.sectionGrid}>
+              <View style={[styles.sectionGrid, sectionGridStyle]}>
                 {renderSectionGrid(relationshipItems)}
               </View>
             </View>
@@ -523,7 +628,7 @@ export default function ExploreScreen() {
                     : "Enable location access for Mira to use Nearby."}
                 </Text>
               )}
-              <View style={styles.sectionGrid}>
+              <View style={[styles.sectionGrid, sectionGridStyle]}>
                 {renderSectionGrid(rightNowItems)}
               </View>
             </View>
@@ -536,7 +641,7 @@ export default function ExploreScreen() {
                 <Text style={styles.sectionIcon}>🎯</Text>
                 <Text style={styles.sectionTitle}>Interests</Text>
               </View>
-              <View style={styles.sectionGrid}>
+              <View style={[styles.sectionGrid, sectionGridStyle]}>
                 {renderSectionGrid(interestItems)}
               </View>
             </View>
@@ -568,9 +673,13 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     letterSpacing: -0.5,
   },
-  // Subtle refresh indicator (shell UI pattern - non-blocking background refresh)
-  headerRefreshIndicator: {
-    marginLeft: 12,
+  headerActionButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.backgroundSecondary,
   },
 
   // Return Hook
@@ -638,7 +747,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   sectionGrid: {
-    // Container for the grid rows
+    alignSelf: "center",
   },
 
   // Grid Layout
@@ -651,7 +760,6 @@ const styles = StyleSheet.create({
   // TILE STYLES - Premium grid item design
   // ══════════════════════════════════════════════════════════════════════════
   tileContainer: {
-    width: TILE_WIDTH,
   },
   tileWrapper: {
     borderRadius: TILE_BORDER_RADIUS,
@@ -670,7 +778,6 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   tile: {
-    height: TILE_HEIGHT,
     borderRadius: TILE_BORDER_RADIUS,
   },
   tileOverlay: {
@@ -740,6 +847,15 @@ const styles = StyleSheet.create({
     textShadowRadius: 4,
   },
 
+  loadingContainer: {
+    flex: 1,
+    paddingTop: 8,
+  },
+  loadingCopyContainer: {
+    paddingHorizontal: GRID_PADDING,
+    paddingBottom: 18,
+  },
+
   // Empty State
   emptyContainer: {
     flex: 1,
@@ -763,6 +879,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textMuted,
     textAlign: "center",
+    lineHeight: 21,
   },
   retryButton: {
     marginTop: 16,
@@ -783,12 +900,9 @@ const styles = StyleSheet.create({
   skeletonGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    paddingHorizontal: GRID_PADDING,
-    paddingTop: 8,
+    alignSelf: "center",
   },
   skeletonTile: {
-    width: TILE_WIDTH,
-    height: TILE_HEIGHT,
     backgroundColor: COLORS.backgroundDark,
     borderRadius: TILE_BORDER_RADIUS,
     padding: 16,

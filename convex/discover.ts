@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { query, mutation, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { requireAuthenticatedUserId, requireAppUserId, resolveUserIdByAuthId } from './helpers';
+import { getTrustedUserId, resolveUserIdByAuthId } from './helpers';
 import {
   CandidateProfile,
   CurrentUser,
@@ -11,6 +11,7 @@ import {
   calculateRankScore, // P2-018 FIX: Import for fallback ranking
   DISCOVER_RANKING_CONFIG,
 } from './discoverRanking';
+import { LIVE_EXPLORE_CATEGORY_IDS } from './discoverCategories';
 import { getEligibleNearbyCandidatesForViewer } from './crossedPaths';
 
 // Phase 3: Shadow mode imports
@@ -168,18 +169,6 @@ const EXPLORE_CATEGORY_PAGE_SIZE = 50;
 const EXPLORE_CATEGORY_FETCH_MULTIPLIER = 5;
 const EXPLORE_CATEGORY_MAX_FETCH = 250;
 const EXPLORE_NEARBY_DISTANCE_KM = 5;
-const LIVE_EXPLORE_CATEGORY_IDS = [
-  'serious_vibes',
-  'keep_it_casual',
-  'exploring_vibes',
-  'see_where_it_goes',
-  'open_to_vibes',
-  'just_friends',
-  'open_to_anything',
-  'single_parent',
-  'new_to_dating',
-  'nearby',
-] as const;
 const LIVE_EXPLORE_CATEGORY_ID_SET = new Set<string>(LIVE_EXPLORE_CATEGORY_IDS);
 
 type DiscoverSort =
@@ -784,7 +773,12 @@ async function getEligibleExploreCategoryUsers(
   const filteredCandidates: ExploreEligibleCandidate[] = [];
 
   if (categoryId === 'nearby') {
-    const nearbyEligibility = await getEligibleNearbyCandidatesForViewer(ctx, viewer);
+    const nearbyEligibility = await getEligibleNearbyCandidatesForViewer(ctx, viewer, {
+      blockedUserIds: exclusions.blockedUserIds,
+      matchedUserIds: exclusions.matchedUserIds,
+      viewerReportedIds: exclusions.viewerReportedIds,
+      conversationPartnerIds: exclusions.conversationPartnerIds,
+    });
     if (nearbyEligibility.status === 'location_required') {
       return { candidates: [], unavailableReason: 'location_required', sourceHitFetchLimit: false };
     }
@@ -1409,7 +1403,8 @@ export const getDiscoverProfiles = query({
 
 export const getExploreProfiles = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.optional(v.string()),
+    authUserId: v.optional(v.string()),
     genderFilter: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other')))),
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
@@ -1440,8 +1435,11 @@ export const getExploreProfiles = query({
       limit = 20, offset = 0,
     } = args;
 
-    const viewerId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!viewerId) return { profiles: [], totalCount: 0 };
+    const viewerId = await getTrustedUserId(
+      ctx,
+      args,
+      'Unauthorized: Explore access requires a valid session'
+    );
 
     const currentUser = await ctx.db.get(viewerId);
     if (!currentUser) return { profiles: [], totalCount: 0 };
@@ -1661,11 +1659,15 @@ export const getExploreCategoryProfiles = query({
     offset: v.optional(v.number()),
     refreshKey: v.optional(v.number()), // Client-only cache busting / refetch trigger
     token: v.optional(v.string()),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const { categoryId, limit = EXPLORE_CATEGORY_PAGE_SIZE, offset = 0 } = args;
-    // Use requireAppUserId which supports both real Convex auth AND demo session tokens
-    const viewerId = await requireAppUserId(ctx, args.token);
+    const viewerId = await getTrustedUserId(
+      ctx,
+      args,
+      'Unauthorized: Explore access requires a valid session'
+    );
     const emptyResponse = (
       status: Exclude<ExploreCategoryStatus, 'ok'>,
     ) => ({
@@ -1691,7 +1693,12 @@ export const getExploreCategoryProfiles = query({
     const likesToMe = await ctx.db
       .query('likes')
       .withIndex('by_to_user', (q) => q.eq('toUserId', viewerId))
-      .filter((q) => q.eq(q.field('action'), 'like'))
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('action'), 'like'),
+          q.eq(q.field('action'), 'super_like')
+        )
+      )
       .collect();
     const usersWhoLikedMe = new Set<string>();
     for (const like of likesToMe) usersWhoLikedMe.add(like.fromUserId as string);
@@ -1909,10 +1916,14 @@ export const getExploreCategoryCounts = query({
   args: {
     refreshKey: v.optional(v.number()), // Client-only cache busting / refetch trigger
     token: v.optional(v.string()),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Use requireAppUserId which supports both real Convex auth AND demo session tokens
-    const viewerId = await requireAppUserId(ctx, args.token);
+    const viewerId = await getTrustedUserId(
+      ctx,
+      args,
+      'Unauthorized: Explore access requires a valid session'
+    );
     const emptyCounts = createEmptyExploreCounts();
     const viewer = await ctx.db.get(viewerId);
     if (!viewer) {
@@ -1935,19 +1946,24 @@ export const getExploreCategoryCounts = query({
     const exclusions = await buildExclusionSets(ctx, viewerId);
 
     const counts = createEmptyExploreCounts();
+    const categoryResults = await Promise.all(
+      LIVE_EXPLORE_CATEGORY_IDS.map(async (categoryId) => ({
+        categoryId,
+        ...(await getEligibleExploreCategoryUsers(
+          ctx,
+          viewer,
+          viewerId,
+          categoryId,
+          EXPLORE_CATEGORY_MAX_FETCH,
+          exclusions,
+          cooldownThreshold,
+        )),
+      }))
+    );
+
     let nearbyStatus: ExploreNearbyAvailabilityStatus = 'ok';
 
-    for (const categoryId of LIVE_EXPLORE_CATEGORY_IDS) {
-      const { candidates, unavailableReason } = await getEligibleExploreCategoryUsers(
-        ctx,
-        viewer,
-        viewerId,
-        categoryId,
-        EXPLORE_CATEGORY_MAX_FETCH,
-        exclusions,
-        cooldownThreshold,
-      );
-
+    for (const { categoryId, candidates, unavailableReason } of categoryResults) {
       if (categoryId === 'nearby') {
         nearbyStatus =
           unavailableReason === 'verification_required'

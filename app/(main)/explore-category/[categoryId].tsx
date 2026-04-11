@@ -32,6 +32,7 @@ export default function ExploreCategoryScreen() {
     status,
     partialBatchExhausted,
     isLoading,
+    isStale,
     isError,
     error,
   } = useExploreCategoryProfiles({
@@ -244,12 +245,21 @@ export default function ExploreCategoryScreen() {
       </View>
 
       {/* Engagement triggers - subtle hints */}
-      {!isLoading && !isError && items.length > 0 && (showScarcityHint || showRevisitNudge) && (
+      {!isLoading && !isError && !isStale && items.length > 0 && (showScarcityHint || showRevisitNudge) && (
         <View style={styles.engagementHint}>
           <Text style={styles.engagementHintText}>
             {showScarcityHint
               ? 'Only a few people in this vibe right now'
               : 'New people might be joining soon'}
+          </Text>
+        </View>
+      )}
+
+      {!isLoading && isStale && (
+        <View style={styles.staleState}>
+          <Ionicons name="cloud-offline-outline" size={16} color={COLORS.textLight} />
+          <Text style={styles.staleStateText}>
+            {error ?? 'Showing saved results while we reconnect.'}
           </Text>
         </View>
       )}
@@ -346,6 +356,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: COLORS.textLight,
     fontStyle: 'italic',
+  },
+  staleState: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(20, 24, 35, 0.04)',
+  },
+  staleStateText: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.textLight,
   },
   emptyState: {
     flex: 1,

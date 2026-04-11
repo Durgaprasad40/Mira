@@ -5,8 +5,8 @@
  * per category. This prevents duplicate profiles appearing in multiple
  * categories.
  *
- * P1-001 FIX: Now uses useQuery() (reactive) to share cache with the preload
- * in _layout.tsx. First Explore open benefits from preloaded data.
+ * P1-001 FIX: Uses useQuery() so count reads stay reactive and cached within
+ * the active Explore session.
  *
  * P2-003 FIX: Empty result {} is treated as valid data, not an error.
  * Only actual query failures result in error state.
@@ -51,7 +51,7 @@ const DEMO_CATEGORY_COUNTS: Record<string, number> = {
  * Fetch category counts from the backend using the single-category system.
  * Returns explicit loading and error state so the homepage can stay truthful.
  *
- * P1-001: Uses useQuery() for reactive caching - shares cache with preload in _layout.tsx
+ * P1-001: Uses useQuery() for reactive caching inside the current Explore session
  * P2-003: Empty {} is valid data (new user with no matches), not an error
  */
 export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsResult {
@@ -64,13 +64,12 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   // Determine if we should skip the query
   // Skip if: demo mode (legacy store mode) OR auth not ready OR userId missing
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  const shouldSkip = isDemoMode || !authReady || !userId;
+  const shouldSkip = isDemoMode || !authReady || !userId || !token;
 
-  // P1-001 FIX: Use useQuery() for reactive caching
-  // This shares cache with the preload in _layout.tsx, so first Explore open is faster
+  // P1-001 FIX: Use useQuery() for reactive caching during the current Explore session.
   // refreshKey in args triggers re-fetch when changed (for manual refresh)
   // IMPORTANT: Always call useQuery unconditionally (React hooks rule)
-  // Pass token for demo auth mode support (backend uses requireAppUserId)
+  // Pass token so the backend can resolve the trusted session user.
   const queryResult = useQuery(
     api.discover.getExploreCategoryCounts,
     shouldSkip ? 'skip' : { refreshKey, token: token ?? undefined }

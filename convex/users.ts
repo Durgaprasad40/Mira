@@ -8,8 +8,7 @@ import {
   ensureUserByAuthId,
   validateSessionToken,
   requireAuthenticatedSessionUser,
-  requireAuthenticatedUserId,
-  requireAppUserId,
+  getTrustedUserId,
 } from "./helpers";
 
 // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
@@ -131,8 +130,11 @@ export const getCurrentUserDiscoverContext = query({
     token: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Use requireAppUserId which supports both real Convex auth AND demo session tokens
-    const convexUserId = await requireAppUserId(ctx, args.token);
+    const convexUserId = await getTrustedUserId(
+      ctx,
+      { token: args.token },
+      "Unauthorized: Explore context requires a valid session"
+    );
     const user = await ctx.db.get(convexUserId);
     if (!user) {
       return null;
@@ -184,9 +186,15 @@ export const ensureCurrentUser = mutation({
 export const getUserById = query({
   args: {
     userId: v.id("users"),
+    token: v.optional(v.string()),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const viewerId = await requireAuthenticatedUserId(ctx);
+    const viewerId = await getTrustedUserId(
+      ctx,
+      args,
+      "Unauthorized: profile access requires a valid session"
+    );
     const user = await ctx.db.get(args.userId);
     if (!user || !user.isActive || user.isBanned) return null;
 

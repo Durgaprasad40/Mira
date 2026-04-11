@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { getTrustedUserId, resolveUserIdByAuthId } from './helpers';
 import { getUnreadCount as getConversationUnreadCount } from './unreadCounts';
 
 // Get all matches for a user
@@ -176,10 +176,16 @@ export const getMatches = query({
 export const getMatch = query({
   args: {
     matchId: v.id('matches'),
-    userId: v.id('users'),
+    token: v.optional(v.string()),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { matchId, userId } = args;
+    const { matchId } = args;
+    const userId = await getTrustedUserId(
+      ctx,
+      args,
+      'Unauthorized: match access requires a valid session'
+    );
 
     const match = await ctx.db.get(matchId);
     if (!match || !match.isActive) return null;

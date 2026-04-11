@@ -19,6 +19,7 @@ import { EXPLORE_CATEGORIES } from '@/components/explore/exploreCategories';
 
 const EMPTY_PROFILES: any[] = [];
 const EXPLORE_CATEGORY_ERROR = 'Unable to load this vibe right now.';
+const EXPLORE_CATEGORY_STALE_ERROR = 'Showing saved results while we reconnect.';
 
 export type ExploreCategoryStatus =
   | 'ok'
@@ -45,16 +46,27 @@ type UseExploreCategoryProfilesResult = {
   partialBatchExhausted: boolean;
   isLoading: boolean;
   isUsingBackend: boolean;
+  isStale: boolean;
   isError: boolean;
   error: string | null;
 };
+
+type ExploreCategoryCacheEntry = Pick<
+  UseExploreCategoryProfilesResult,
+  'profiles' | 'totalCount' | 'hasMore' | 'status' | 'partialBatchExhausted'
+>;
 
 const exploreCategoryResultCache = new Map<string, Pick<
   UseExploreCategoryProfilesResult,
   'profiles' | 'totalCount' | 'hasMore' | 'status' | 'partialBatchExhausted'
 >>();
+const exploreCategoryLatestResultCache = new Map<string, ExploreCategoryCacheEntry>();
 
-function getExploreCategoryCacheKey(categoryId: string, limit: number, offset: number) {
+function getExploreCategoryCacheKey(categoryId: string, limit: number, offset: number, refreshKey: number) {
+  return `${categoryId}:${limit}:${offset}:${refreshKey}`;
+}
+
+function getExploreCategoryLatestCacheKey(categoryId: string, limit: number, offset: number) {
   return `${categoryId}:${limit}:${offset}`;
 }
 
@@ -71,7 +83,11 @@ export function useExploreCategoryProfiles({
   const allProfiles = useExploreProfiles({ enabled: isDemoMode });
   const category = EXPLORE_CATEGORIES.find((c) => c.id === categoryId);
   const cacheKey = useMemo(
-    () => getExploreCategoryCacheKey(categoryId, limit, offset),
+    () => getExploreCategoryCacheKey(categoryId, limit, offset, refreshKey),
+    [categoryId, limit, offset, refreshKey],
+  );
+  const latestCacheKey = useMemo(
+    () => getExploreCategoryLatestCacheKey(categoryId, limit, offset),
     [categoryId, limit, offset],
   );
 
@@ -81,7 +97,7 @@ export function useExploreCategoryProfiles({
   );
 
   const [state, setState] = useState<UseExploreCategoryProfilesResult>(() => {
-    const cached = exploreCategoryResultCache.get(cacheKey);
+    const cached = exploreCategoryResultCache.get(cacheKey) ?? exploreCategoryLatestResultCache.get(latestCacheKey);
     return {
       profiles: cached?.profiles ?? EMPTY_PROFILES,
       totalCount: cached?.totalCount ?? 0,
@@ -91,6 +107,7 @@ export function useExploreCategoryProfiles({
       isLoading: cached == null,
       // NOTE: isDemoAuthMode uses real Convex backend with token-based auth
       isUsingBackend: !isDemoMode,
+      isStale: false,
       isError: false,
       error: null,
     };
@@ -112,6 +129,7 @@ export function useExploreCategoryProfiles({
             partialBatchExhausted: false,
             isLoading: false,
             isUsingBackend: false,
+            isStale: false,
             isError: false,
             error: null,
           });
@@ -121,21 +139,29 @@ export function useExploreCategoryProfiles({
 
       if (!authReady) {
         if (!cancelled) {
-          setState((prev) => ({ ...prev, isLoading: true, isError: false, error: null, isUsingBackend: true }));
+          setState((prev) => ({
+            ...prev,
+            isLoading: true,
+            isUsingBackend: true,
+            isStale: false,
+            isError: false,
+            error: null,
+          }));
         }
         return;
       }
 
-      if (!userId || !categoryId || !category) {
+      if (!userId || !token || !categoryId || !category) {
         if (!cancelled) {
           setState({
             profiles: EMPTY_PROFILES,
             totalCount: 0,
             hasMore: false,
-            status: !userId ? 'viewer_missing' : 'invalid_category',
+            status: !userId || !token ? 'viewer_missing' : 'invalid_category',
             partialBatchExhausted: false,
             isLoading: false,
             isUsingBackend: true,
+            isStale: false,
             isError: false,
             error: null,
           });
@@ -144,7 +170,7 @@ export function useExploreCategoryProfiles({
       }
 
       if (!cancelled) {
-        const cached = exploreCategoryResultCache.get(cacheKey);
+        const cached = exploreCategoryLatestResultCache.get(latestCacheKey);
         setState({
           profiles: cached?.profiles ?? EMPTY_PROFILES,
           totalCount: cached?.totalCount ?? 0,
@@ -153,19 +179,21 @@ export function useExploreCategoryProfiles({
           partialBatchExhausted: cached?.partialBatchExhausted ?? false,
           isLoading: true,
           isUsingBackend: true,
+          isStale: false,
           isError: false,
           error: null,
         });
       }
 
       try {
-        // Pass token for demo auth mode support (backend uses requireAppUserId)
+        // Pass token so the backend can resolve the trusted session user.
         const result = await convex.query(api.discover.getExploreCategoryProfiles as any, {
           categoryId,
           limit,
           offset,
           refreshKey,
           token: token ?? undefined,
+          authUserId: userId,
         });
 
         if (cancelled) return;
@@ -178,23 +206,27 @@ export function useExploreCategoryProfiles({
           partialBatchExhausted: result?.partialBatchExhausted === true,
           isLoading: false,
           isUsingBackend: true,
+          isStale: false,
           isError: false,
           error: null,
         } satisfies UseExploreCategoryProfilesResult;
 
-        exploreCategoryResultCache.set(cacheKey, {
+        const cacheEntry = {
           profiles: nextState.profiles,
           totalCount: nextState.totalCount,
           hasMore: nextState.hasMore,
           status: nextState.status,
           partialBatchExhausted: nextState.partialBatchExhausted,
-        });
+        } satisfies ExploreCategoryCacheEntry;
+
+        exploreCategoryResultCache.set(cacheKey, cacheEntry);
+        exploreCategoryLatestResultCache.set(latestCacheKey, cacheEntry);
 
         setState(nextState);
       } catch (error) {
         if (cancelled) return;
         console.warn('[useExploreCategoryProfiles] Failed to load category profiles:', error);
-        const cached = exploreCategoryResultCache.get(cacheKey);
+        const cached = exploreCategoryLatestResultCache.get(latestCacheKey);
         if (cached) {
           setState({
             profiles: cached.profiles,
@@ -204,8 +236,9 @@ export function useExploreCategoryProfiles({
             partialBatchExhausted: cached.partialBatchExhausted,
             isLoading: false,
             isUsingBackend: true,
+            isStale: true,
             isError: false,
-            error: null,
+            error: EXPLORE_CATEGORY_STALE_ERROR,
           });
         } else {
           setState({
@@ -216,6 +249,7 @@ export function useExploreCategoryProfiles({
             partialBatchExhausted: false,
             isLoading: false,
             isUsingBackend: true,
+            isStale: false,
             isError: true,
             error: EXPLORE_CATEGORY_ERROR,
           });
@@ -227,7 +261,7 @@ export function useExploreCategoryProfiles({
     return () => {
       cancelled = true;
     };
-  }, [authReady, cacheKey, category, userId, categoryId, limit, offset, refreshKey, demoProfiles, token]);
+  }, [authReady, cacheKey, category, userId, categoryId, latestCacheKey, limit, offset, refreshKey, demoProfiles, token]);
 
   return state;
 }

@@ -357,3 +357,74 @@ export async function resolveTrustedUserId(
 
   return trustedUserId;
 }
+
+/**
+ * Resolve the current user from trusted auth and fail closed when missing.
+ * Explore and other client-callable reads should use this instead of
+ * trusting caller-supplied IDs.
+ */
+export async function getTrustedUserId(
+  ctx: QueryCtx | MutationCtx,
+  auth: {
+    token?: string | null;
+    authUserId?: string | null;
+  },
+  errorMessage = 'Unauthorized: authentication required'
+): Promise<Id<'users'>> {
+  const userId = await resolveTrustedUserId(ctx, auth);
+  if (!userId) {
+    throw new Error(errorMessage);
+  }
+
+  return userId;
+}
+
+/**
+ * Backward-compatible Convex-auth helper for callers that rely on
+ * authenticated identity rather than app session tokens.
+ */
+export async function requireAuthenticatedUserId(
+  ctx: QueryCtx | MutationCtx,
+  errorMessage = 'Unauthorized: authentication required'
+): Promise<Id<'users'>> {
+  const identity = await ctx.auth.getUserIdentity();
+  const authUserId = identity?.subject?.trim();
+
+  if (!authUserId) {
+    throw new Error(errorMessage);
+  }
+
+  const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  if (!userId) {
+    throw new Error(errorMessage);
+  }
+
+  const user = await ctx.db.get(userId);
+  if (!user || !user.isActive || !!user.deletedAt || !!user.isBanned) {
+    throw new Error(errorMessage);
+  }
+
+  return userId;
+}
+
+/**
+ * Resolve the authenticated session user from a validated session token.
+ * Shared by endpoints that need the full user document after auth.
+ */
+export async function requireAuthenticatedSessionUser(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+  errorMessage = 'Unauthorized: invalid or expired session'
+): Promise<Doc<'users'>> {
+  const userId = await validateSessionToken(ctx, token);
+  if (!userId) {
+    throw new Error(errorMessage);
+  }
+
+  const user = await ctx.db.get(userId);
+  if (!user || !user.isActive || !!user.deletedAt || !!user.isBanned) {
+    throw new Error(errorMessage);
+  }
+
+  return user;
+}

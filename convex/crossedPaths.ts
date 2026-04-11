@@ -326,6 +326,13 @@ type NearbyEligibleCandidate = {
   };
 };
 
+type NearbyExploreExclusions = {
+  blockedUserIds?: Set<string>;
+  matchedUserIds?: Set<string>;
+  viewerReportedIds?: Set<string>;
+  conversationPartnerIds?: Set<string>;
+};
+
 function hasNearbyCoordinatePair(
   lat: number | null | undefined,
   lng: number | null | undefined,
@@ -397,6 +404,7 @@ export async function getEligibleNearbyCandidatesForViewer(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ctx: any,
   currentUser: Doc<'users'>,
+  exploreExclusions?: NearbyExploreExclusions,
 ): Promise<{
   status: NearbyEligibilityStatus;
   candidates: NearbyEligibleCandidate[];
@@ -479,6 +487,13 @@ export async function getEligibleNearbyCandidatesForViewer(
     prefetchBlockedUserIds(ctx, userId),
     prefetchSwipes(ctx, userId),
   ]);
+  const effectiveBlockedIds = new Set<string>([
+    ...blockedIds,
+    ...(exploreExclusions?.blockedUserIds ?? []),
+  ]);
+  const matchedUserIds = exploreExclusions?.matchedUserIds ?? new Set<string>();
+  const viewerReportedIds = exploreExclusions?.viewerReportedIds ?? new Set<string>();
+  const conversationPartnerIds = exploreExclusions?.conversationPartnerIds ?? new Set<string>();
 
   const preVisibilityCandidates: Array<{
     user: Doc<'users'>;
@@ -505,6 +520,9 @@ export async function getEligibleNearbyCandidatesForViewer(
     filtered_ageMismatch: 0,
     filtered_genderMismatch: 0,
     filtered_blocked: 0,
+    filtered_reported: 0,
+    filtered_matched: 0,
+    filtered_conversationPartner: 0,
     filtered_swiped: 0,
     filtered_noSafePhoto: 0,
   };
@@ -679,9 +697,27 @@ export async function getEligibleNearbyCandidatesForViewer(
       continue;
     }
 
-    if (blockedIds.has(user._id as string)) {
+    if (effectiveBlockedIds.has(user._id as string)) {
       filterStats.filtered_blocked++;
       devLog('FILTERED: blocked', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    if (viewerReportedIds.has(user._id as string)) {
+      filterStats.filtered_reported++;
+      devLog('FILTERED: reported', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    if (matchedUserIds.has(user._id as string)) {
+      filterStats.filtered_matched++;
+      devLog('FILTERED: matched', { userId: user._id, name: user.name });
+      continue;
+    }
+
+    if (conversationPartnerIds.has(user._id as string)) {
+      filterStats.filtered_conversationPartner++;
+      devLog('FILTERED: conversationPartner', { userId: user._id, name: user.name });
       continue;
     }
 

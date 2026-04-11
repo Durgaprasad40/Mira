@@ -44,20 +44,20 @@ export default function MatchCelebrationScreen() {
 
   // Fetch match and other user data (skip in demo mode)
   const matchQuery = useQuery(
-    api.matches.getMatch,
-    !isDemo && matchIdValue && viewerId
-      ? { matchId: matchIdValue, userId: viewerId }
+    api.matches.getMatch as any,
+    !isDemo && matchIdValue && userId && token
+      ? { matchId: matchIdValue, token, authUserId: userId }
       : "skip",
   );
   const otherUserQuery = useQuery(
-    api.users.getUserById,
-    !isDemo && otherUserIdValue && viewerId
-      ? { userId: otherUserIdValue, viewerId }
+    api.users.getUserById as any,
+    !isDemo && otherUserIdValue && viewerId && token
+      ? { userId: otherUserIdValue, token, authUserId: userId }
       : "skip",
   );
   const currentUserQuery = useQuery(
-    api.users.getCurrentUser,
-    !isDemo && viewerId ? { userId: viewerId } : "skip",
+    api.users.getCurrentUserFromToken,
+    !isDemo && token ? { token } : "skip",
   );
 
   // In demo mode, use demo data directly; in live mode, use Convex queries

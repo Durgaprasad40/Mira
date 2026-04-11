@@ -145,6 +145,34 @@ export const CATEGORY_IDS = {
 
 export type CategoryId = typeof CATEGORY_IDS[keyof typeof CATEGORY_IDS];
 
+// Live Phase-1 Explore intentionally ships only the backend-backed categories below.
+// Additional legacy taxonomy entries remain defined above for compatibility, but are
+// excluded from active Explore loops until they have truthful live population.
+export const LIVE_EXPLORE_CATEGORY_IDS = [
+  CATEGORY_IDS.serious_vibes,
+  CATEGORY_IDS.keep_it_casual,
+  CATEGORY_IDS.exploring_vibes,
+  CATEGORY_IDS.see_where_it_goes,
+  CATEGORY_IDS.open_to_vibes,
+  CATEGORY_IDS.just_friends,
+  CATEGORY_IDS.open_to_anything,
+  CATEGORY_IDS.single_parent,
+  CATEGORY_IDS.new_to_dating,
+  CATEGORY_IDS.nearby,
+] as const;
+
+const LIVE_ASSIGNABLE_CATEGORY_IDS = [
+  CATEGORY_IDS.serious_vibes,
+  CATEGORY_IDS.keep_it_casual,
+  CATEGORY_IDS.exploring_vibes,
+  CATEGORY_IDS.see_where_it_goes,
+  CATEGORY_IDS.open_to_vibes,
+  CATEGORY_IDS.just_friends,
+  CATEGORY_IDS.open_to_anything,
+  CATEGORY_IDS.single_parent,
+  CATEGORY_IDS.new_to_dating,
+] as const;
+
 // Intent compatibility map - maps CATEGORY IDs to user relationshipIntent values
 // CURRENT 9 RELATIONSHIP CATEGORIES are BOTH the category IDs AND the intent values
 // They are now unified - category ID === relationshipIntent value
@@ -631,7 +659,7 @@ async function fetchCategoryLoads(ctx: any): Promise<Record<string, number>> {
   const loads: Record<string, number> = {};
 
   // Fetch counts for all categories in parallel (Task 5: Keep it light)
-  const allCategories = Object.values(CATEGORY_IDS).filter(c => c !== 'nearby');
+  const allCategories = LIVE_ASSIGNABLE_CATEGORY_IDS;
 
   await Promise.all(
     allCategories.map(async (categoryId) => {
@@ -856,8 +884,7 @@ export const getCategoryCounts = query({
     const cooldownThreshold = Date.now() - SHOWN_COOLDOWN_MS;
 
     // Count users per category
-    for (const categoryId of Object.values(CATEGORY_IDS)) {
-      if (categoryId === 'nearby') continue; // nearby requires location context
+    for (const categoryId of LIVE_ASSIGNABLE_CATEGORY_IDS) {
 
       const users = await ctx.db
         .query('users')
