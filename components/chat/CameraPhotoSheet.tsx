@@ -1,14 +1,11 @@
 /**
- * CameraPhotoSheet - Bottom sheet for secure photo options.
+ * CameraPhotoSheet - Bottom sheet for secure photo/video options.
  *
- * LOCKED UI:
- * - NO camera view (gallery picker handled externally)
- * - NO photo preview shown
- * - NO blur
- * - NO crop/edit
- * - Static placeholder with lock icon
- * - Timer: Once / 3s / 10s / 30s / 60s
- * - Viewing mode: Timed / Hold
+ * Phase-1 canonical contract:
+ * - Secure photo/video only
+ * - Tap to view only
+ * - Timer options: Normal / View once / 30s / 60s
+ * - Timer starts when the recipient opens the media
  * - Cancel / Send buttons
  */
 import React, { useState, useEffect } from 'react';
@@ -30,7 +27,7 @@ const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 const SHEET_HEIGHT = SCREEN_HEIGHT * 0.48; // ~48% of screen for options only
 
 export interface CameraPhotoOptions {
-  timer: number; // 0 = once, 3, 10, 30, 60
+  timer: number; // -1 = normal, 0 = view once, 30/60 = timed secure media
   viewingMode: 'tap' | 'hold';
 }
 
@@ -45,9 +42,8 @@ interface CameraPhotoSheetProps {
 }
 
 const TIMER_OPTIONS = [
-  { label: 'Once', value: 0 },
-  { label: '3s', value: 3 },
-  { label: '10s', value: 10 },
+  { label: 'Normal', value: -1 },
+  { label: 'View once', value: 0 },
   { label: '30s', value: 30 },
   { label: '60s', value: 60 },
 ];
@@ -63,14 +59,13 @@ export function CameraPhotoSheet({
   const insets = useSafeAreaInsets();
 
   // State
-  const [timer, setTimer] = useState(0); // Default: Once
-  const [viewingMode, setViewingMode] = useState<'tap' | 'hold'>('tap');
+  const [timer, setTimer] = useState(-1); // Default: Normal
+  const viewingMode = 'tap' as const; // Fixed: tap-to-view only
 
   // Reset state when modal closes
   useEffect(() => {
     if (!visible) {
-      setTimer(0);
-      setViewingMode('tap');
+      setTimer(-1); // Reset to Normal
     }
   }, [visible]);
 
@@ -78,13 +73,11 @@ export function CameraPhotoSheet({
     if (!imageUri) return;
     onConfirm(imageUri, { timer, viewingMode });
     // Reset for next use
-    setTimer(0);
-    setViewingMode('tap');
+    setTimer(-1); // Reset to Normal
   };
 
   const handleCancel = () => {
-    setTimer(0);
-    setViewingMode('tap');
+    setTimer(-1); // Reset to Normal
     onCancel();
   };
 
@@ -123,9 +116,11 @@ export function CameraPhotoSheet({
                   </Text>
                 </View>
                 <Text style={styles.secureSubtitle}>
-                  {isVideo
-                    ? 'Video disappears after viewing once'
-                    : 'Photo disappears after viewing once'}
+                  {timer === -1
+                    ? `${isVideo ? 'Video' : 'Photo'} stays protected and opens on tap`
+                    : timer === 0
+                      ? `${isVideo ? 'Video' : 'Photo'} closes after the first successful view`
+                      : `${isVideo ? 'Video' : 'Photo'} expires ${timer}s after it is opened`}
                 </Text>
               </View>
             </View>
@@ -154,43 +149,9 @@ export function CameraPhotoSheet({
                   </TouchableOpacity>
                 ))}
               </View>
-            </View>
-
-            {/* Viewing mode: Timed / Hold */}
-            <View style={styles.viewingModeContainer}>
-              <TouchableOpacity
-                style={[
-                  styles.viewingModeButton,
-                  viewingMode === 'tap' && styles.viewingModeButtonActive,
-                ]}
-                onPress={() => setViewingMode('tap')}
-              >
-                <Text
-                  style={[
-                    styles.viewingModeText,
-                    viewingMode === 'tap' && styles.viewingModeTextActive,
-                  ]}
-                >
-                  Timed
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.viewingModeButton,
-                  viewingMode === 'hold' && styles.viewingModeButtonActive,
-                ]}
-                onPress={() => setViewingMode('hold')}
-              >
-                <Text
-                  style={[
-                    styles.viewingModeText,
-                    viewingMode === 'hold' && styles.viewingModeTextActive,
-                  ]}
-                >
-                  Hold
-                </Text>
-              </TouchableOpacity>
+              <Text style={styles.timerHint}>
+                The timer starts only after the recipient opens it.
+              </Text>
             </View>
 
             {/* Cancel / Send buttons */}
@@ -297,6 +258,12 @@ const styles = StyleSheet.create({
   timerButtons: {
     flexDirection: 'row',
     gap: 8,
+  },
+  timerHint: {
+    marginTop: 10,
+    fontSize: 12,
+    lineHeight: 17,
+    color: COLORS.textMuted,
   },
   timerButton: {
     flex: 1,

@@ -5,16 +5,20 @@ export const COLORS = {
   primary: '#FF6B6B',
   primaryDark: '#E55A5A',
   primaryLight: '#FF8A8A',
+  primarySubtle: 'rgba(255, 107, 107, 0.06)',
   secondary: '#4ECDC4',
   secondaryDark: '#3DBDB5',
   background: '#FFFFFF',
   backgroundDark: '#F5F5F5',
+  card: '#F0F0F0',
   text: '#333333',
   textLight: '#666666',
   textMuted: '#999999',
   border: '#E0E0E0',
   success: '#4CAF50',
+  successSubtle: 'rgba(76, 175, 80, 0.08)',
   warning: '#FFC107',
+  warningSubtle: 'rgba(255, 193, 7, 0.1)',
   error: '#F44336',
   superLike: '#2196F3',
   like: '#FF6B6B',
@@ -22,19 +26,29 @@ export const COLORS = {
   gold: '#FFD700',
   platinum: '#E5E4E2',
   overlay: 'rgba(0, 0, 0, 0.5)',
+  overlayLight: 'rgba(255, 255, 255, 0.18)',
+  overlayMedium: 'rgba(255, 255, 255, 0.22)',
+  overlaySubtle: 'rgba(255, 255, 255, 0.1)',
+  overlayDark: 'rgba(0, 0, 0, 0.45)',
   white: '#FFFFFF',
   black: '#000000',
 };
 
 // Swipe Configuration
 export const SWIPE_CONFIG = {
-  SWIPE_THRESHOLD_X: 0.3, // 30% of screen width
-  SWIPE_THRESHOLD_Y: 0.2, // 20% of screen height
-  SWIPE_VELOCITY_X: 0.7, // horizontal velocity threshold
-  SWIPE_VELOCITY_Y: 0.7, // vertical velocity threshold
-  ROTATION_ANGLE: 15, // degrees
-  ANIMATION_DURATION: 300, // ms
+  SWIPE_THRESHOLD_X: 0.25, // 25% of screen width (slightly easier to trigger)
+  SWIPE_THRESHOLD_Y: 0.18, // 18% of screen height
+  SWIPE_VELOCITY_X: 0.6, // horizontal velocity threshold (more responsive)
+  SWIPE_VELOCITY_Y: 0.6, // vertical velocity threshold
+  ROTATION_ANGLE: 8, // degrees (subtle, premium feel)
+  ANIMATION_DURATION: 280, // ms (slightly faster exit)
   HAPTIC_ENABLED: true,
+  // Stack depth settings
+  NEXT_CARD_SCALE: 0.94, // Scale of card behind
+  NEXT_CARD_OFFSET_Y: 8, // Vertical offset (pixels)
+  // Spring animation config
+  SPRING_DAMPING: 18, // Bounciness control (lower = more bounce)
+  SPRING_STIFFNESS: 280, // Speed of spring (higher = snappier)
 };
 
 // Validation Rules
@@ -49,6 +63,16 @@ export const VALIDATION = {
   BIO_MAX_LENGTH: 500,
   MIN_AGE: 18,
   MAX_AGE: 100,
+  // P2-005 FIX: Centralized age range for discovery preferences
+  // Note: Discovery/matching uses 18-70 range, profile validation uses 18-100
+  DISCOVERY_MIN_AGE: 18,
+  DISCOVERY_MAX_AGE: 70,
+  // P2-005 FIX: Height validation (in cm)
+  MIN_HEIGHT: 120,
+  MAX_HEIGHT: 250,
+  // P2-005 FIX: Weight validation (in kg)
+  MIN_WEIGHT: 30,
+  MAX_WEIGHT: 300,
   MIN_PHOTO_SIZE: 400, // px
   MAX_PHOTOS: 6,
   MIN_PHOTOS: 1,
@@ -157,18 +181,18 @@ export const IAP_PRODUCTS: IAPProduct[] = [
   { id: 'messages_50', type: 'messages', quantity: 50, price: 350 },
 ];
 
-// Relationship Intent Options (Phase-1 ONLY — store-safe labels, no overlap with Phase-2)
-// CANONICAL LIST: 9 Relationship Goals used across Explore, Sort By, Filters
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
+// These are the ONLY valid values for relationshipIntent across the entire app
 export const RELATIONSHIP_INTENTS: { value: RelationshipIntent; label: string; emoji: string }[] = [
-  { value: 'long_term', label: 'Serious Vibes', emoji: '💑' },
-  { value: 'short_term', label: 'Keep It Casual', emoji: '🎉' },
-  { value: 'figuring_out', label: 'Exploring Vibes', emoji: '🤔' },
-  { value: 'short_to_long', label: 'See Where It Goes', emoji: '📈' },
-  { value: 'long_to_short', label: 'Open to Vibes', emoji: '📉' },
-  { value: 'new_friends', label: 'Just Friends', emoji: '👋' },
+  { value: 'serious_vibes', label: 'Serious Vibes', emoji: '💑' },
+  { value: 'keep_it_casual', label: 'Keep It Casual', emoji: '🎉' },
+  { value: 'exploring_vibes', label: 'Exploring Vibes', emoji: '🤔' },
+  { value: 'see_where_it_goes', label: 'See Where It Goes', emoji: '📈' },
+  { value: 'open_to_vibes', label: 'Open to Vibes', emoji: '📉' },
+  { value: 'just_friends', label: 'Just Friends', emoji: '👋' },
   { value: 'open_to_anything', label: 'Open to Anything', emoji: '✨' },
   { value: 'single_parent', label: 'Single Parent', emoji: '👨‍👧' },
-  { value: 'just_18', label: 'New to Dating', emoji: '🌱' },
+  { value: 'new_to_dating', label: 'New to Dating', emoji: '🌱' },
 ];
 
 // Activity Filter Options (70 interests for onboarding)
@@ -655,6 +679,8 @@ export interface LifeRhythm {
 // Incognito Mode Colors
 export const INCOGNITO_COLORS = {
   background: '#1A1A2E',
+  // DM-VISUAL-FIX: Subtle purple-tinted background for 1-on-1 DM to distinguish from group chat
+  dmBackground: '#1F1A30',
   surface: '#16213E',
   accent: '#0F3460',
   text: '#E0E0E0',
@@ -662,3 +688,45 @@ export const INCOGNITO_COLORS = {
   primary: '#E94560',
   border: '#2D3748',
 };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RESPONSIVE DESIGN SYSTEM RE-EXPORTS
+// ═══════════════════════════════════════════════════════════════════════════════
+// These re-exports allow importing from '@/lib/constants' for convenience.
+// For full API, import directly from '@/lib/responsive' or '@/lib/typography'.
+
+export {
+  // Scale utilities
+  normalize,
+  moderateScale,
+  verticalScale,
+  cappedScale,
+  SCALE,
+  CAPPED_SCALE,
+  // Spacing and sizing
+  SPACING,
+  SIZES,
+  // Border utilities
+  HAIRLINE,
+  normalizeBorder,
+  // Screen info
+  SCREEN,
+  // Flex utilities
+  FLEX,
+  // Platform utilities
+  platformSelect,
+} from './responsive';
+
+export {
+  // Font sizes
+  FONT_SIZE,
+  FONT_WEIGHT,
+  // Line height
+  LINE_HEIGHT_MULTIPLIER,
+  lineHeight,
+  // Text styles
+  TEXT_STYLE,
+  // Accessibility
+  hasLargeFontScale,
+  accessibleFontSize,
+} from './typography';

@@ -16,20 +16,21 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
-import { useQuery, useMutation } from 'convex/react';
+import { usePaginatedQuery, useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import EmojiPicker from 'rn-emoji-keyboard';
 import * as Clipboard from 'expo-clipboard';
 import { COLORS } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
 import { Toast } from '@/components/ui/Toast';
+import { LoadingGuard } from '@/components/safety';
 import { ConfessionMood, ConfessionReply, ConfessionChat } from '@/types';
 import ReactionBar from '@/components/confessions/ReactionBar';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { asUserId } from '@/convex/id';
+import { asConfessionId, asReplyId, asUserId } from '@/convex/id';
 import { safePush } from '@/lib/safeRouter';
 import { shouldBlockConfessionOpen } from '@/lib/confessionsIntegrity';
 import { logDebugEvent } from '@/lib/debugEventLogger';
@@ -52,6 +53,7 @@ const GENDER_LABELS: Record<string, string> = {
   lesbian: 'F',
   other: '',
 };
+const REPLY_PAGE_SIZE = 40;
 
 // ============================================================================
 // HELPERS
@@ -77,6 +79,7 @@ export default function ConfessionThreadScreen() {
   const insets = useSafeAreaInsets();
   const { confessionId } = useLocalSearchParams<{ confessionId: string }>();
   const { userId } = useAuthStore();
+  const [retryKey, setRetryKey] = useState(0);
 
   // In live mode, never use demo fallback for Convex mutations
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
@@ -102,7 +105,7 @@ export default function ConfessionThreadScreen() {
   // ──────────────────────────────────────────────────────────────────────────
   const convexConfession = useQuery(
     api.confessions.getConfession,
-    !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+    !isDemoMode && confessionId ? { confessionId: confessionId as any, refreshKey: retryKey } : 'skip'
   );
 
   const convexUserQueryArgs = !isDemoMode && currentUserId
@@ -110,9 +113,22 @@ export default function ConfessionThreadScreen() {
     : 'skip';
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexUserQueryArgs);
 
-  const convexReplies = useQuery(
-    api.confessions.getReplies,
+  const {
+    results: convexReplyPage,
+    status: convexRepliesStatus,
+    loadMore: loadMoreReplies,
+  } = usePaginatedQuery(
+    api.confessions.getRepliesPage,
+    !isDemoMode && confessionId ? { confessionId: confessionId as any, refreshKey: retryKey } : 'skip',
+    { initialNumItems: REPLY_PAGE_SIZE }
+  );
+  const convexReactionCounts = useQuery(
+    api.confessions.getReactionCounts,
     !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+  );
+  const convexUserReaction = useQuery(
+    api.confessions.getUserReaction,
+    !isDemoMode && confessionId && currentUserId ? { confessionId: confessionId as any } : 'skip'
   );
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -156,16 +172,18 @@ export default function ConfessionThreadScreen() {
   }, [storeConfession, convexConfession]);
 
   const isLoadingConfession = !isDemoMode && convexConfession === undefined && !!confessionId;
+  const isUnavailableConfession = !isDemoMode && convexConfession === null;
 
   // ──────────────────────────────────────────────────────────────────────────
   // DERIVED STATE: Replies
   // ──────────────────────────────────────────────────────────────────────────
   const demoReplies = confessionId ? (storeReplies[confessionId] || []) : [];
+  const [hiddenReplyIds, setHiddenReplyIds] = useState<string[]>([]);
 
   const replies: ConfessionReply[] = useMemo(() => {
     let items: ConfessionReply[];
-    if (!isDemoMode && convexReplies) {
-      items = convexReplies.map((r: any) => ({
+    if (!isDemoMode) {
+      items = [...convexReplyPage].reverse().map((r: any) => ({
         id: r._id,
         confessionId: r.confessionId,
         userId: r.userId,
@@ -174,6 +192,8 @@ export default function ConfessionThreadScreen() {
         type: r.type || 'text',
         voiceUrl: r.voiceUrl,
         voiceDurationSec: r.voiceDurationSec,
+        parentReplyId: r.parentReplyId,
+        hasActiveConnectRequest: r.hasActiveConnectRequest,
         createdAt: r.createdAt,
       }));
     } else {
@@ -183,8 +203,28 @@ export default function ConfessionThreadScreen() {
     if (globalBlockedIds.length > 0) {
       items = items.filter((r) => !globalBlockedIds.includes(r.userId));
     }
+    if (hiddenReplyIds.length > 0) {
+      const hiddenReplyIdSet = new Set(hiddenReplyIds);
+      items = items.filter((r) => !hiddenReplyIdSet.has(r.id));
+    }
     return items;
-  }, [convexReplies, demoReplies, globalBlockedIds]);
+  }, [convexReplyPage, demoReplies, globalBlockedIds, hiddenReplyIds, isDemoMode]);
+
+  const topLevelReplies = useMemo(
+    () => replies.filter((reply) => !reply.parentReplyId),
+    [replies]
+  );
+
+  const childRepliesByParent = useMemo(() => {
+    const map = new Map<string, ConfessionReply[]>();
+    for (const reply of replies) {
+      if (!reply.parentReplyId) continue;
+      const existing = map.get(reply.parentReplyId) || [];
+      existing.push(reply);
+      map.set(reply.parentReplyId, existing);
+    }
+    return map;
+  }, [replies]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // CENTRALIZED OWNERSHIP CHECKS
@@ -221,30 +261,25 @@ export default function ConfessionThreadScreen() {
   const [showReactionPicker, setShowReactionPicker] = useState(false);
   const [replyingToReplyId, setReplyingToReplyId] = useState<string | null>(null);
   const [replyToReplyText, setReplyToReplyText] = useState('');
-  const [guardTriggered, setGuardTriggered] = useState(false);
+  const [creatingConnectReplyId, setCreatingConnectReplyId] = useState<string | null>(null);
+  const [composerHeight, setComposerHeight] = useState(72);
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // NAVIGATION GUARD: Block expired/reported confessions
-  // ──────────────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (guardTriggered || !confessionId || isLoadingConfession) return;
+  const confessionBlockReason = useMemo(() => {
+    if (!confessionId || isLoadingConfession) return null;
 
-    const blockReason = shouldBlockConfessionOpen(
+    return shouldBlockConfessionOpen(
       confessionId,
       confession ? [confession as any] : [],
       globalBlockedIds,
       reportedIds,
     );
+  }, [confessionId, confession, globalBlockedIds, reportedIds, isLoadingConfession]);
 
-    if (blockReason && blockReason !== 'not_found') {
-      setGuardTriggered(true);
-      logDebugEvent('CHAT_EXPIRED', `Confession thread blocked: ${blockReason}`);
-      if (blockReason === 'expired') {
-        cleanupExpiredConfessions([confessionId]);
-      }
-      router.back();
-    }
-  }, [confessionId, confession, globalBlockedIds, reportedIds, guardTriggered, router, cleanupExpiredConfessions, isLoadingConfession]);
+  useEffect(() => {
+    if (!isDemoMode || confessionBlockReason !== 'expired' || !confessionId) return;
+    logDebugEvent('CHAT_EXPIRED', `Confession thread blocked: ${confessionBlockReason}`);
+    cleanupExpiredConfessions([confessionId]);
+  }, [cleanupExpiredConfessions, confessionBlockReason, confessionId]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // CONVEX MUTATIONS
@@ -252,8 +287,10 @@ export default function ConfessionThreadScreen() {
   const createReplyMutation = useMutation(api.confessions.createReply);
   const deleteReplyMutation = useMutation(api.confessions.deleteReply);
   const reportMutation = useMutation(api.confessions.reportConfession);
+  const reportReplyMutation = useMutation((api as any).confessions.reportReply);
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
   const getOrCreateForConfessionMutation = useMutation(api.confessions.getOrCreateForConfession);
+  const createCommentConnectRequestMutation = useMutation(api.confessions.createCommentConnectRequest);
 
   // ──────────────────────────────────────────────────────────────────────────
   // HANDLERS
@@ -280,7 +317,6 @@ export default function ConfessionThreadScreen() {
       try {
         await createReplyMutation({
           confessionId: confessionId as any,
-          userId: currentUserId as any,
           text: submittedText,
           isAnonymous: true,
           type: 'text',
@@ -317,7 +353,6 @@ export default function ConfessionThreadScreen() {
       try {
         await createReplyMutation({
           confessionId: confessionId as any,
-          userId: currentUserId as any,
           text: submittedText,
           isAnonymous: false,
           type: 'text',
@@ -331,6 +366,34 @@ export default function ConfessionThreadScreen() {
     }
     setSending(false);
   }, [replyToReplyText, confessionId, currentUserId, createReplyMutation, sending, addReplyToStore, deleteReplyFromStore]);
+
+  const handleCreateCommentConnect = useCallback(async (reply: ConfessionReply) => {
+    if (!confessionId || !isConfessionAuthor || isOwnReply(reply) || creatingConnectReplyId) {
+      return;
+    }
+
+    const confessionRowId = asConfessionId(confessionId);
+    const replyRowId = asReplyId(reply.id);
+
+    if (!confessionRowId || !replyRowId) {
+      Toast.show('Unable to send request right now.');
+      return;
+    }
+
+    try {
+      setCreatingConnectReplyId(reply.id);
+      await createCommentConnectRequestMutation({
+        confessionId: confessionRowId,
+        replyId: replyRowId,
+      });
+      Toast.show('Connect request sent.');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unable to send request right now.';
+      Toast.show(message);
+    } finally {
+      setCreatingConnectReplyId((current) => (current === reply.id ? null : current));
+    }
+  }, [confessionId, createCommentConnectRequestMutation, creatingConnectReplyId, isConfessionAuthor, isOwnReply]);
 
   const handleDeleteReply = useCallback(async (reply: ConfessionReply) => {
     if (reply.userId !== currentUserId || !confessionId) return;
@@ -346,7 +409,6 @@ export default function ConfessionThreadScreen() {
             try {
               await deleteReplyMutation({
                 replyId: reply.id as any,
-                userId: currentUserId as any,
               });
             } catch {
               addReplyToStore(confessionId, reply);
@@ -361,27 +423,35 @@ export default function ConfessionThreadScreen() {
   const handleReactEmoji = useCallback((emojiObj: any) => {
     if (!confession) return;
     const emoji = emojiObj.emoji;
-    toggleReaction(confession.id, emoji);
-    if (!isDemoMode && currentUserId) {
+    if (isDemoMode) {
+      toggleReaction(confession.id, emoji);
+      return;
+    }
+    if (currentUserId) {
       toggleReactionMutation({
         confessionId: confession.id as any,
-        userId: currentUserId as any,
         type: emoji,
-      }).catch(() => toggleReaction(confession.id, emoji));
+      }).catch(() => {
+        Toast.show("Couldn't save your reaction. Please try again.");
+      });
     }
-  }, [confession, toggleReaction, toggleReactionMutation, currentUserId]);
+  }, [confession, isDemoMode, toggleReaction, toggleReactionMutation, currentUserId]);
 
   const handleToggleEmoji = useCallback((emoji: string) => {
     if (!confession) return;
-    toggleReaction(confession.id, emoji);
-    if (!isDemoMode && currentUserId) {
+    if (isDemoMode) {
+      toggleReaction(confession.id, emoji);
+      return;
+    }
+    if (currentUserId) {
       toggleReactionMutation({
         confessionId: confession.id as any,
-        userId: currentUserId as any,
         type: emoji,
-      }).catch(() => toggleReaction(confession.id, emoji));
+      }).catch(() => {
+        Toast.show("Couldn't save your reaction. Please try again.");
+      });
     }
-  }, [confession, toggleReaction, toggleReactionMutation, currentUserId]);
+  }, [confession, isDemoMode, toggleReaction, toggleReactionMutation, currentUserId]);
 
   const handleReplyAnonymously = useCallback(async () => {
     if (!confession || !confessionId || !currentUserId) return;
@@ -389,11 +459,8 @@ export default function ConfessionThreadScreen() {
 
     if (!isDemoMode) {
       try {
-        const convexId = asUserId(currentUserId);
-        if (!convexId) return;
         const result = await getOrCreateForConfessionMutation({
           confessionId: confessionId as any,
-          userId: convexId,
         });
         safePush(
           router,
@@ -441,16 +508,27 @@ export default function ConfessionThreadScreen() {
       { key: 'other', label: 'Other' },
     ] as const;
 
-    const submitReport = (reason: typeof reportReasons[number]['key']) => {
-      reportConfession(confessionId);
-      if (!isDemoMode && currentUserId) {
-        reportMutation({
-          confessionId: confessionId as any,
-          reporterId: currentUserId as any,
-          reason,
-        }).catch((e) => console.warn('[Report] Silent fail:', e));
+    const submitReport = async (reason: typeof reportReasons[number]['key']) => {
+      if (isDemoMode) {
+        reportConfession(confessionId);
+        router.back();
+        return;
       }
-      router.back();
+
+      if (!currentUserId) {
+        Alert.alert('Unable to report right now');
+        return;
+      }
+
+      try {
+        await reportMutation({
+          confessionId: confessionId as any,
+          reason,
+        });
+        router.back();
+      } catch {
+        Alert.alert('Unable to report right now');
+      }
     };
 
     if (Platform.OS === 'ios') {
@@ -462,17 +540,90 @@ export default function ConfessionThreadScreen() {
         },
         (buttonIndex) => {
           if (buttonIndex < reportReasons.length) {
-            submitReport(reportReasons[buttonIndex].key);
+            void submitReport(reportReasons[buttonIndex].key);
           }
         }
       );
     } else {
       Alert.alert('Report Confession', 'Why are you reporting this?', [
-        ...reportReasons.map((r) => ({ text: r.label, onPress: () => submitReport(r.key) })),
+        ...reportReasons.map((r) => ({ text: r.label, onPress: () => void submitReport(r.key) })),
         { text: 'Cancel', style: 'cancel' as const },
       ]);
     }
   }, [confessionId, reportConfession, reportMutation, currentUserId, router]);
+
+  const handleReportReply = useCallback(
+    async (reply: ConfessionReply, reason: 'spam' | 'abuse' | 'harassment' | 'other') => {
+      if (isDemoMode) {
+        setHiddenReplyIds((current) => (current.includes(reply.id) ? current : [...current, reply.id]));
+        Toast.show('Reply reported.');
+        return;
+      }
+
+      if (!currentUserId) {
+        Alert.alert('Unable to report right now');
+        return;
+      }
+
+      try {
+        await reportReplyMutation({
+          replyId: reply.id as any,
+          reason,
+        });
+        setHiddenReplyIds((current) => (current.includes(reply.id) ? current : [...current, reply.id]));
+        Toast.show('Reply reported.');
+      } catch {
+        Alert.alert('Unable to report right now');
+      }
+    },
+    [currentUserId, isDemoMode, reportReplyMutation]
+  );
+
+  const showReplyReportReasonPicker = useCallback(
+    (reply: ConfessionReply) => {
+      const reportReasons = [
+        { key: 'spam', label: 'Spam' },
+        { key: 'abuse', label: 'Abuse' },
+        { key: 'harassment', label: 'Harassment' },
+        { key: 'other', label: 'Other' },
+      ] as const;
+
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            title: 'Report reply',
+            options: [...reportReasons.map((r) => r.label), 'Cancel'],
+            cancelButtonIndex: reportReasons.length,
+          },
+          (buttonIndex) => {
+            if (buttonIndex < reportReasons.length) {
+              void handleReportReply(reply, reportReasons[buttonIndex].key);
+            }
+          }
+        );
+      } else {
+        Alert.alert('Report Reply', 'Why are you reporting this reply?', [
+          ...reportReasons.map((r) => ({
+            text: r.label,
+            onPress: () => void handleReportReply(reply, r.key),
+          })),
+          { text: 'Cancel', style: 'cancel' as const },
+        ]);
+      }
+    },
+    [handleReportReply]
+  );
+
+  const handleReplyActions = useCallback(
+    (reply: ConfessionReply) => {
+      if (isOwnReply(reply)) {
+        void handleDeleteReply(reply);
+        return;
+      }
+      showReplyReportReasonPicker(reply);
+    },
+    [handleDeleteReply, isOwnReply, showReplyReportReasonPicker]
+  );
 
   const handleCopyText = useCallback(() => {
     if (!confession) return;
@@ -491,34 +642,87 @@ export default function ConfessionThreadScreen() {
     setReplyText((prev) => prev + emoji.emoji);
   }, []);
 
+  const handleRetry = useCallback(() => {
+    setRetryKey((current) => current + 1);
+  }, []);
+
+  const handleLoadMoreReplies = useCallback(() => {
+    if (isDemoMode || convexRepliesStatus !== 'CanLoadMore') {
+      return;
+    }
+    loadMoreReplies(REPLY_PAGE_SIZE);
+  }, [convexRepliesStatus, isDemoMode, loadMoreReplies]);
+
+  const handleComposerLayout = useCallback((event: any) => {
+    const nextHeight = event?.nativeEvent?.layout?.height;
+    if (typeof nextHeight === 'number' && nextHeight > 0) {
+      setComposerHeight(nextHeight);
+    }
+  }, []);
+
+  const unavailableReason = isUnavailableConfession ? 'unavailable' : confessionBlockReason;
+
+  const unavailableCopy = useMemo(() => {
+    switch (unavailableReason) {
+      case 'blocked_user':
+        return {
+          title: 'This confession is no longer available',
+          subtitle: 'It was hidden because the author is blocked.',
+        };
+      case 'reported':
+        return {
+          title: 'This confession is no longer available',
+          subtitle: 'It has already been removed from your view.',
+        };
+      case 'expired':
+      case 'unavailable':
+        return {
+          title: 'This confession is no longer available',
+          subtitle: 'It may have expired, been deleted, or been removed.',
+        };
+      default:
+        return {
+          title: 'Confession not found',
+          subtitle: 'It may have been removed or is no longer available.',
+        };
+    }
+  }, [unavailableReason]);
+
   // ──────────────────────────────────────────────────────────────────────────
   // LOADING/EMPTY STATE
   // ──────────────────────────────────────────────────────────────────────────
-  if (!confession) {
+  if (!confession || unavailableReason) {
     return (
-      <SafeAreaView style={styles.container} edges={['top']}>
-        <View style={styles.navBar}>
-          <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.navTitle}>Thread</Text>
-          <View style={{ width: 24 }} />
-        </View>
-        <View style={styles.loadingContainer}>
-          {isLoadingConfession ? (
-            <>
-              <ActivityIndicator size="large" color={COLORS.primary} />
-              <Text style={styles.loadingText}>Loading...</Text>
-            </>
-          ) : (
-            <>
-              <Text style={styles.emptyEmoji}>💬</Text>
-              <Text style={styles.emptyTitle}>Confession not found</Text>
-              <Text style={styles.emptySubtitle}>It may have been removed or is no longer available.</Text>
-            </>
-          )}
-        </View>
-      </SafeAreaView>
+      <LoadingGuard
+        isLoading={isLoadingConfession}
+        onRetry={handleRetry}
+        title="We couldn't open this thread"
+        subtitle="Try again once the connection settles."
+      >
+        <SafeAreaView style={styles.container} edges={['top']}>
+          <View style={styles.navBar}>
+            <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+            </TouchableOpacity>
+            <Text style={styles.navTitle}>Thread</Text>
+            <View style={{ width: 24 }} />
+          </View>
+          <View style={styles.loadingContainer}>
+            {isLoadingConfession ? (
+              <>
+                <ActivityIndicator size="large" color={COLORS.primary} />
+                <Text style={styles.loadingText}>Opening the thread...</Text>
+              </>
+            ) : (
+              <>
+                <Text style={styles.emptyEmoji}>💬</Text>
+                <Text style={styles.emptyTitle}>{unavailableCopy.title}</Text>
+                <Text style={styles.emptySubtitle}>{unavailableCopy.subtitle}</Text>
+              </>
+            )}
+          </View>
+        </SafeAreaView>
+      </LoadingGuard>
     );
   }
 
@@ -526,9 +730,9 @@ export default function ConfessionThreadScreen() {
   // DERIVED DISPLAY VALUES
   // ──────────────────────────────────────────────────────────────────────────
   const badgeInfo = MOOD_CONFIG[confession.mood];
-  const rawReaction = userReactions[confession.id] || null;
+  const rawReaction = isDemoMode ? (userReactions[confession.id] || null) : (convexUserReaction || null);
   const myReaction = rawReaction && isProbablyEmoji(rawReaction) ? rawReaction : null;
-  const topEmojis = confession.topEmojis || [];
+  const topEmojis = isDemoMode ? (confession.topEmojis || []) : (convexReactionCounts || []);
 
   const getDisplayName = (): string => {
     if (confession.isAnonymous) return 'Anonymous';
@@ -547,6 +751,7 @@ export default function ConfessionThreadScreen() {
 
   // Whether to show bottom composer (hidden for OP viewing own confession)
   const showBottomComposer = !isOwnConfession;
+  const totalReplyCount = isDemoMode ? topLevelReplies.length : (confession.replyCount || 0);
 
   // ──────────────────────────────────────────────────────────────────────────
   // RENDER: Reply Item
@@ -555,13 +760,17 @@ export default function ConfessionThreadScreen() {
     const replyIsOwn = isOwnReply(item);
     const replyIsFromOP = isReplyFromOP(item);
     // Plus button: only for confession author, only on OTHER users' replies
-    const showPlusButton = isConfessionAuthor && !replyIsOwn;
+    const showPlusButton = isConfessionAuthor && !replyIsOwn && !item.parentReplyId;
+    const showConnectButton = isConfessionAuthor && !replyIsOwn && !item.parentReplyId;
+    const isConnectPending = !!item.hasActiveConnectRequest;
+    const isSendingConnect = creatingConnectReplyId === item.id;
     const isReplyingToThis = replyingToReplyId === item.id;
+    const childReplies = childRepliesByParent.get(item.id) || [];
 
     return (
       <View style={styles.replyCard}>
         <TouchableOpacity
-          onLongPress={() => replyIsOwn && handleDeleteReply(item)}
+          onLongPress={() => handleReplyActions(item)}
           activeOpacity={0.8}
         >
           <View style={styles.replyHeader}>
@@ -620,6 +829,28 @@ export default function ConfessionThreadScreen() {
                 />
               </TouchableOpacity>
             )}
+
+            {showConnectButton && (
+              <TouchableOpacity
+                onPress={() => handleCreateCommentConnect(item)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                style={[
+                  styles.connectButton,
+                  (isConnectPending || isSendingConnect) && styles.connectButtonDisabled,
+                ]}
+                disabled={isConnectPending || isSendingConnect}
+              >
+                {isSendingConnect ? (
+                  <ActivityIndicator size="small" color={COLORS.primary} />
+                ) : (
+                  <Ionicons
+                    name={isConnectPending ? 'time-outline' : 'heart-circle-outline'}
+                    size={18}
+                    color={isConnectPending ? COLORS.textMuted : COLORS.primary}
+                  />
+                )}
+              </TouchableOpacity>
+            )}
           </View>
           <Text style={styles.replyText}>
             {item.type === 'voice' ? `🎙️ Voice reply (${item.voiceDurationSec || 0}s)` : item.text}
@@ -651,6 +882,46 @@ export default function ConfessionThreadScreen() {
             </TouchableOpacity>
           </View>
         )}
+
+        {childReplies.length > 0 && (
+          <View style={styles.childRepliesContainer}>
+            {childReplies.map((childReply) => {
+              const childIsFromOP = isReplyFromOP(childReply);
+              return (
+                <TouchableOpacity
+                  key={childReply.id}
+                  style={styles.childReplyCard}
+                  onLongPress={() => handleReplyActions(childReply)}
+                  activeOpacity={0.85}
+                >
+                  <View style={styles.childReplyHeader}>
+                    <View style={[styles.replyAvatar, childReply.isAnonymous && styles.avatarAnonymous]}>
+                      <Ionicons
+                        name={childReply.isAnonymous ? 'eye-off' : 'person'}
+                        size={11}
+                        color={childReply.isAnonymous ? COLORS.textMuted : COLORS.primary}
+                      />
+                    </View>
+                    <Text style={styles.childReplyAuthor}>
+                      {childReply.isAnonymous ? 'Anonymous' : 'Someone'}
+                    </Text>
+                    {childIsFromOP && (
+                      <View style={styles.opBadge}>
+                        <Text style={styles.opBadgeText}>OP</Text>
+                      </View>
+                    )}
+                    <Text style={styles.childReplyTime}>{getTimeAgo(childReply.createdAt)}</Text>
+                  </View>
+                  <Text style={styles.childReplyText}>
+                    {childReply.type === 'voice'
+                      ? `🎙️ Voice reply (${childReply.voiceDurationSec || 0}s)`
+                      : childReply.text}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
       </View>
     );
   };
@@ -659,57 +930,71 @@ export default function ConfessionThreadScreen() {
   // RENDER: Confession Header (ListHeaderComponent)
   // ──────────────────────────────────────────────────────────────────────────
   const renderConfessionHeader = () => (
-    <View style={styles.confessionCard}>
-      {/* Author row */}
-      <View style={styles.confessionHeader}>
-        <View style={styles.authorRow}>
-          {!confession.isAnonymous && authorPhotoUrl ? (
-            <Image source={{ uri: authorPhotoUrl }} style={styles.avatarImage} contentFit="cover" />
-          ) : (
-            <View style={[styles.avatar, confession.isAnonymous && styles.avatarAnonymous]}>
-              <Ionicons
-                name={confession.isAnonymous ? 'eye-off' : 'person'}
-                size={16}
-                color={confession.isAnonymous ? COLORS.textMuted : COLORS.primary}
-              />
-            </View>
-          )}
-          <Text style={styles.authorName}>{displayName}</Text>
-          <Text style={styles.timeAgo}>{getTimeAgo(confession.createdAt)}</Text>
+    <View>
+      <View style={styles.confessionCard}>
+        {/* Author row */}
+        <View style={styles.confessionHeader}>
+          <View style={styles.authorRow}>
+            {!confession.isAnonymous && authorPhotoUrl ? (
+              <Image source={{ uri: authorPhotoUrl }} style={styles.avatarImage} contentFit="cover" />
+            ) : (
+              <View style={[styles.avatar, confession.isAnonymous && styles.avatarAnonymous]}>
+                <Ionicons
+                  name={confession.isAnonymous ? 'eye-off' : 'person'}
+                  size={16}
+                  color={confession.isAnonymous ? COLORS.textMuted : COLORS.primary}
+                />
+              </View>
+            )}
+            <Text style={styles.authorName}>{displayName}</Text>
+            <Text style={styles.timeAgo}>{getTimeAgo(confession.createdAt)}</Text>
+          </View>
+          <View style={[styles.moodBadge, { backgroundColor: badgeInfo.bg }]}>
+            <Text style={styles.moodEmoji}>{badgeInfo.emoji}</Text>
+            <Text style={[styles.moodLabel, { color: badgeInfo.color }]}>{badgeInfo.label}</Text>
+          </View>
         </View>
-        <View style={[styles.moodBadge, { backgroundColor: badgeInfo.bg }]}>
-          <Text style={styles.moodEmoji}>{badgeInfo.emoji}</Text>
-          <Text style={[styles.moodLabel, { color: badgeInfo.color }]}>{badgeInfo.label}</Text>
+
+        {/* Confession text */}
+        <Text style={styles.confessionText}>{confession.text}</Text>
+
+        {/* Reactions + Reply count */}
+        <View style={styles.actionsRow}>
+          <ReactionBar
+            topEmojis={topEmojis}
+            userEmoji={myReaction}
+            reactionCount={confession.reactionCount}
+            onReact={() => setShowReactionPicker(true)}
+            onToggleEmoji={handleToggleEmoji}
+            size="regular"
+          />
+          <View style={styles.replyCountBadge}>
+            <Ionicons name="chatbubble-outline" size={12} color={COLORS.primary} />
+            <Text style={styles.replyCountText}>
+              {totalReplyCount} {totalReplyCount === 1 ? 'Reply' : 'Replies'}
+            </Text>
+          </View>
         </View>
+
+        {/* Anonymous reply button (hidden for OP) */}
+        {!isOwnConfession && (
+          <TouchableOpacity style={styles.anonReplyButton} onPress={handleReplyAnonymously}>
+            <Ionicons name="chatbubble-ellipses-outline" size={18} color={COLORS.primary} />
+            <Text style={styles.anonReplyText}>Reply Anonymously</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
-      {/* Confession text */}
-      <Text style={styles.confessionText}>{confession.text}</Text>
-
-      {/* Reactions + Reply count */}
-      <View style={styles.actionsRow}>
-        <ReactionBar
-          topEmojis={topEmojis}
-          userEmoji={myReaction}
-          reactionCount={confession.reactionCount}
-          onReact={() => setShowReactionPicker(true)}
-          onToggleEmoji={handleToggleEmoji}
-          size="regular"
-        />
-        <View style={styles.replyCountBadge}>
-          <Ionicons name="chatbubble-outline" size={12} color={COLORS.primary} />
-          <Text style={styles.replyCountText}>
-            {replies.length} {replies.length === 1 ? 'Reply' : 'Replies'}
-          </Text>
+      {!isDemoMode && convexRepliesStatus !== 'Exhausted' && (
+        <View style={styles.loadEarlierContainer}>
+          {convexRepliesStatus === 'LoadingMore' ? (
+            <ActivityIndicator size="small" color={COLORS.primary} />
+          ) : convexRepliesStatus === 'CanLoadMore' ? (
+            <TouchableOpacity style={styles.loadEarlierButton} onPress={handleLoadMoreReplies}>
+              <Text style={styles.loadEarlierText}>Load earlier replies</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
-      </View>
-
-      {/* Anonymous reply button (hidden for OP) */}
-      {!isOwnConfession && (
-        <TouchableOpacity style={styles.anonReplyButton} onPress={handleReplyAnonymously}>
-          <Ionicons name="chatbubble-ellipses-outline" size={18} color={COLORS.primary} />
-          <Text style={styles.anonReplyText}>Reply Anonymously</Text>
-        </TouchableOpacity>
       )}
     </View>
   );
@@ -718,10 +1003,10 @@ export default function ConfessionThreadScreen() {
   // RENDER: Thread Footer
   // ──────────────────────────────────────────────────────────────────────────
   const renderThreadFooter = () => (
-    <View style={styles.threadFooter}>
+      <View style={styles.threadFooter}>
       <View style={styles.footerLine} />
       <Text style={styles.footerText}>
-        {replies.length === 0 ? 'No replies yet' : 'End of thread'}
+        {totalReplyCount === 0 ? 'No replies yet — your anonymous reply can start the conversation' : 'End of thread'}
       </Text>
       <View style={styles.footerLine} />
     </View>
@@ -750,14 +1035,14 @@ export default function ConfessionThreadScreen() {
         keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
       >
         <FlatList
-          data={replies}
+          data={topLevelReplies}
           keyExtractor={(item) => item.id}
           renderItem={renderReplyItem}
           ListHeaderComponent={renderConfessionHeader}
           ListFooterComponent={renderThreadFooter}
           contentContainerStyle={[
             styles.listContent,
-            { paddingBottom: showBottomComposer ? 80 : 20 },
+            { paddingBottom: showBottomComposer ? composerHeight : 20 },
           ]}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
@@ -765,7 +1050,10 @@ export default function ConfessionThreadScreen() {
 
         {/* Bottom Composer (hidden for OP) */}
         {showBottomComposer && (
-          <View style={[styles.bottomComposer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+          <View
+            style={[styles.bottomComposer, { paddingBottom: Math.max(insets.bottom, 12) }]}
+            onLayout={handleComposerLayout}
+          >
             <TouchableOpacity onPress={() => setShowEmojiPicker(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={{ fontSize: 20 }}>🙂</Text>
             </TouchableOpacity>
@@ -879,6 +1167,24 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.white,
     padding: 16,
     marginBottom: 8,
+  },
+  loadEarlierContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+  },
+  loadEarlierButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 18,
+    backgroundColor: COLORS.white,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+  },
+  loadEarlierText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   confessionHeader: {
     flexDirection: 'row',
@@ -1031,9 +1337,50 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     padding: 4,
   },
+  connectButton: {
+    marginLeft: 6,
+    padding: 4,
+  },
+  connectButtonDisabled: {
+    opacity: 0.7,
+  },
   replyText: {
     fontSize: 14,
     lineHeight: 20,
+    color: COLORS.text,
+  },
+  childRepliesContainer: {
+    marginTop: 10,
+    gap: 8,
+    paddingLeft: 12,
+    borderLeftWidth: 2,
+    borderLeftColor: 'rgba(255,107,107,0.12)',
+  },
+  childReplyCard: {
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  childReplyHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  childReplyAuthor: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  childReplyTime: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginLeft: 'auto',
+  },
+  childReplyText: {
+    fontSize: 13,
+    lineHeight: 18,
     color: COLORS.text,
   },
 

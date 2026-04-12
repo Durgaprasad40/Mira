@@ -1,7 +1,19 @@
-import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Modal } from 'react-native';
+import React, { useState, useCallback } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Modal, Pressable } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  withSequence,
+  withTiming,
+  runOnJS,
+} from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
 import { COLORS } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
+
+// Animated pressable for scale feedback
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
 // Standard reaction emojis for confessions
 export const CONFESSION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢'];
@@ -23,6 +35,118 @@ interface ReactionBarProps {
   size?: 'compact' | 'regular';
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// ANIMATED EMOJI CHIP - Scale animation on tap
+// ══════════════════════════════════════════════════════════════════════════
+interface AnimatedChipProps {
+  emoji: string;
+  count: number;
+  isSelected: boolean;
+  onPress: () => void;
+  size: 'compact' | 'regular';
+}
+
+function AnimatedChip({ emoji, count, isSelected, onPress, size }: AnimatedChipProps) {
+  const scale = useSharedValue(1);
+  const s = size === 'regular' ? regularOverrides : null;
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  const handlePress = useCallback(() => {
+    // Haptic feedback on reaction selection (meaningful action)
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {}
+
+    // Scale animation: 1 → 1.08 → 1.0 (subtle, premium)
+    scale.value = withSequence(
+      withTiming(1.08, { duration: 80 }),
+      withSpring(1, { damping: 15, stiffness: 350 })
+    );
+
+    onPress();
+  }, [onPress, scale]);
+
+  return (
+    <AnimatedPressable
+      style={[
+        styles.chip,
+        s?.chip,
+        isSelected && styles.chipSelected,
+        animatedStyle,
+      ]}
+      onPress={handlePress}
+    >
+      <Text style={[styles.chipEmoji, s?.chipEmoji]}>{emoji}</Text>
+      <Text
+        style={[
+          styles.chipCount,
+          s?.chipCount,
+          isSelected && styles.chipCountSelected,
+        ]}
+      >
+        {count}
+      </Text>
+    </AnimatedPressable>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ANIMATED ADD BUTTON - Scale + haptic feedback
+// ══════════════════════════════════════════════════════════════════════════
+interface AnimatedAddButtonProps {
+  userEmoji: string | null;
+  onPress: () => void;
+  size: 'compact' | 'regular';
+}
+
+function AnimatedAddButton({ userEmoji, onPress, size }: AnimatedAddButtonProps) {
+  const scale = useSharedValue(1);
+  const s = size === 'regular' ? regularOverrides : null;
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  const handlePressIn = useCallback(() => {
+    scale.value = withTiming(0.95, { duration: 60 });
+  }, [scale]);
+
+  const handlePressOut = useCallback(() => {
+    scale.value = withTiming(1, { duration: 120 });
+  }, [scale]);
+
+  const handlePress = useCallback(() => {
+    // No haptic for opening picker (minor action)
+    onPress();
+  }, [onPress]);
+
+  return (
+    <AnimatedPressable
+      style={[
+        styles.addButton,
+        s?.addButton,
+        userEmoji ? styles.addButtonActive : null,
+        animatedStyle,
+      ]}
+      onPress={handlePress}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+    >
+      {userEmoji ? (
+        <Text style={[styles.addButtonEmoji, s?.addButtonEmoji]}>
+          {userEmoji}
+        </Text>
+      ) : (
+        <Text style={[styles.addButtonIcon, s?.addButtonIcon]}>👍</Text>
+      )}
+    </AnimatedPressable>
+  );
+}
+
 export default function ReactionBar({
   topEmojis,
   userEmoji,
@@ -32,71 +156,52 @@ export default function ReactionBar({
   size = 'compact',
 }: ReactionBarProps) {
   const [showQuickPicker, setShowQuickPicker] = useState(false);
-  const s = size === 'regular' ? regularOverrides : null;
 
   const validEmojis = topEmojis.filter((e) => isProbablyEmoji(e.emoji));
   const visibleCount = validEmojis.reduce((sum, e) => sum + e.count, 0);
   const remaining = reactionCount - visibleCount;
 
-  const handleQuickSelect = (emoji: string) => {
+  const handleQuickSelect = useCallback((emoji: string) => {
+    // Haptic feedback on reaction selection (meaningful action)
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {}
+
     setShowQuickPicker(false);
     if (onToggleEmoji) {
       onToggleEmoji(emoji);
     } else {
       onReact();
     }
-  };
+  }, [onToggleEmoji, onReact]);
+
+  const handleOpenPicker = useCallback(() => {
+    // No haptic for opening picker (minor action)
+    setShowQuickPicker(true);
+  }, []);
 
   return (
     <View style={styles.row}>
-      {validEmojis.map((e, i) => {
-        const isSelected = userEmoji === e.emoji;
-        return (
-          <TouchableOpacity
-            key={i}
-            style={[
-              styles.chip,
-              s?.chip,
-              isSelected && styles.chipSelected,
-            ]}
-            onPress={() => onToggleEmoji ? onToggleEmoji(e.emoji) : onReact()}
-            activeOpacity={0.7}
-          >
-            <Text style={[styles.chipEmoji, s?.chipEmoji]}>{e.emoji}</Text>
-            <Text
-              style={[
-                styles.chipCount,
-                s?.chipCount,
-                isSelected && styles.chipCountSelected,
-              ]}
-            >
-              {e.count}
-            </Text>
-          </TouchableOpacity>
-        );
-      })}
+      {validEmojis.map((e, i) => (
+        <AnimatedChip
+          key={`${e.emoji}-${i}`}
+          emoji={e.emoji}
+          count={e.count}
+          isSelected={userEmoji === e.emoji}
+          onPress={() => onToggleEmoji ? onToggleEmoji(e.emoji) : onReact()}
+          size={size}
+        />
+      ))}
 
       {remaining > 0 && validEmojis.length > 0 && (
         <Text style={styles.moreCount}>+{remaining}</Text>
       )}
 
-      <TouchableOpacity
-        style={[
-          styles.addButton,
-          s?.addButton,
-          userEmoji ? styles.addButtonActive : null,
-        ]}
-        onPress={() => setShowQuickPicker(true)}
-        hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
-      >
-        {userEmoji ? (
-          <Text style={[styles.addButtonEmoji, s?.addButtonEmoji]}>
-            {userEmoji}
-          </Text>
-        ) : (
-          <Text style={[styles.addButtonIcon, s?.addButtonIcon]}>👍</Text>
-        )}
-      </TouchableOpacity>
+      <AnimatedAddButton
+        userEmoji={userEmoji}
+        onPress={handleOpenPicker}
+        size={size}
+      />
 
       {/* Quick Emoji Picker Modal */}
       <Modal
@@ -105,31 +210,66 @@ export default function ReactionBar({
         animationType="fade"
         onRequestClose={() => setShowQuickPicker(false)}
       >
-        <TouchableOpacity
+        <Pressable
           style={styles.quickPickerOverlay}
-          activeOpacity={1}
           onPress={() => setShowQuickPicker(false)}
         >
           <View style={styles.quickPickerContainer}>
             {CONFESSION_EMOJIS.map((emoji) => {
               const isSelected = userEmoji === emoji;
               return (
-                <TouchableOpacity
+                <QuickPickerEmoji
                   key={emoji}
-                  style={[
-                    styles.quickPickerEmoji,
-                    isSelected && styles.quickPickerEmojiSelected,
-                  ]}
+                  emoji={emoji}
+                  isSelected={isSelected}
                   onPress={() => handleQuickSelect(emoji)}
-                >
-                  <Text style={styles.quickPickerEmojiText}>{emoji}</Text>
-                </TouchableOpacity>
+                />
               );
             })}
           </View>
-        </TouchableOpacity>
+        </Pressable>
       </Modal>
     </View>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// QUICK PICKER EMOJI - Scale animation on tap
+// ══════════════════════════════════════════════════════════════════════════
+interface QuickPickerEmojiProps {
+  emoji: string;
+  isSelected: boolean;
+  onPress: () => void;
+}
+
+function QuickPickerEmoji({ emoji, isSelected, onPress }: QuickPickerEmojiProps) {
+  const scale = useSharedValue(1);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  const handlePressIn = useCallback(() => {
+    scale.value = withTiming(0.92, { duration: 50 });
+  }, [scale]);
+
+  const handlePressOut = useCallback(() => {
+    scale.value = withTiming(1, { duration: 100 });
+  }, [scale]);
+
+  return (
+    <AnimatedPressable
+      style={[
+        styles.quickPickerEmoji,
+        isSelected && styles.quickPickerEmojiSelected,
+        animatedStyle,
+      ]}
+      onPress={onPress}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+    >
+      <Text style={styles.quickPickerEmojiText}>{emoji}</Text>
+    </AnimatedPressable>
   );
 }
 
@@ -137,19 +277,21 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 6,
   },
 
   // ── Emoji chip ──
+  // Minimum 44px touch target via padding
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 14,
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    minHeight: 36,
+    borderRadius: 18,
     backgroundColor: COLORS.backgroundDark,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: 'transparent',
   },
   chipSelected: {
@@ -157,10 +299,10 @@ const styles = StyleSheet.create({
     borderColor: COLORS.primary,
   },
   chipEmoji: {
-    fontSize: 13,
+    fontSize: 14,
   },
   chipCount: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
     color: COLORS.textMuted,
   },
@@ -178,25 +320,26 @@ const styles = StyleSheet.create({
   },
 
   // ── Add / user-reaction button ──
+  // 36px visible, hitSlop extends to 44px+
   addButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: COLORS.backgroundDark,
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: 'transparent',
   },
   addButtonActive: {
-    backgroundColor: 'rgba(255,107,107,0.1)',
+    backgroundColor: 'rgba(255,107,107,0.12)',
     borderColor: COLORS.primary,
   },
   addButtonEmoji: {
-    fontSize: 14,
+    fontSize: 16,
   },
   addButtonIcon: {
-    fontSize: 15,
+    fontSize: 17,
   },
 
   // Quick emoji picker modal
@@ -240,25 +383,26 @@ const styles = StyleSheet.create({
 /** Size overrides for the "regular" (detail/thread) variant */
 const regularOverrides = StyleSheet.create({
   chip: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    minHeight: 40,
+    borderRadius: 20,
   },
   chipEmoji: {
-    fontSize: 14,
+    fontSize: 16,
   },
   chipCount: {
-    fontSize: 12,
+    fontSize: 13,
   },
   addButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
   },
   addButtonEmoji: {
-    fontSize: 16,
+    fontSize: 18,
   },
   addButtonIcon: {
-    fontSize: 16,
+    fontSize: 18,
   },
 });

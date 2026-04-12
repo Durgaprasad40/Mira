@@ -22,7 +22,7 @@ export default function PreMatchMessageScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId: targetUserId } = useLocalSearchParams<{ userId: string }>();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const { tier } = useSubscriptionStore();
   const isPremium = isDemoMode || tier === 'premium';
 
@@ -37,8 +37,10 @@ export default function PreMatchMessageScreen() {
   }, []);
 
   const targetUser = useQuery(
-    api.users.getUserById,
-    !isDemoMode && targetUserId && userId ? { userId: targetUserId as any, viewerId: userId as any } : 'skip'
+    api.users.getUserById as any,
+    !isDemoMode && targetUserId && userId && token
+      ? { userId: targetUserId as any, token, authUserId: userId }
+      : 'skip'
   );
 
   const templates = useQuery(
@@ -46,11 +48,6 @@ export default function PreMatchMessageScreen() {
     !isDemoMode && userId && targetUserId
       ? { userId: userId as any, targetUserId: targetUserId as any }
       : 'skip'
-  );
-
-  const canSend = useQuery(
-    api.messages.canSendMessage,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const sendPreMatchMessage = useMutation(api.messages.sendPreMatchMessage);
@@ -76,16 +73,11 @@ export default function PreMatchMessageScreen() {
       }
     }
 
-    if (!isDemoMode && !canSend?.canSend) {
-      Alert.alert('No Messages Remaining', 'You have used all your weekly messages. They reset on Monday.');
-      router.push('/(main)/subscription');
-      return;
-    }
-
     setSending(true);
     try {
       // MSG-002 FIX: Use authUserId for server-side verification
       await sendPreMatchMessage({
+        token: token ?? undefined,
         authUserId: userId!,
         toUserId: targetUserId as any,
         content: message,
@@ -132,7 +124,7 @@ export default function PreMatchMessageScreen() {
           <Avatar uri={targetUser.photos?.[0]?.url} size={64} />
           <Text style={styles.targetUserName}>{targetUser.name}</Text>
           <Text style={styles.targetUserSubtext}>
-            Send a message to stand out!{isDemoMode ? '' : ` (Uses 1 of your ${canSend?.remaining || 0} weekly messages)`}
+            Send a message to stand out before you match.
           </Text>
         </View>
 
@@ -193,14 +185,6 @@ export default function PreMatchMessageScreen() {
           disabled={sending || (!selectedTemplate && !customMessage.trim())}
           fullWidth
         />
-        {!isDemoMode && (
-          <>
-            <Text style={styles.footerText}>
-              Messages remaining: {canSend?.remaining || 0} of {canSend?.total || 0}
-            </Text>
-            <Text style={styles.footerSubtext}>Resets Monday</Text>
-          </>
-        )}
       </View>
     </View>
   );

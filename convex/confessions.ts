@@ -1,6 +1,6 @@
 import { mutation, query } from './_generated/server';
 import { v } from 'convex/values';
-import { Id } from './_generated/dataModel';
+import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
 // Phone number & email patterns for server-side validation
@@ -12,6 +12,76 @@ const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 // P1-01: Server-side rate limit (5 confessions per 24 hours)
 const CONFESSION_RATE_LIMIT = 5;
+
+type SerializedConfession = {
+  _id: Id<'confessions'>;
+  _creationTime: number;
+  userId: Id<'users'>;
+  text: string;
+  isAnonymous: boolean;
+  mood: 'romantic' | 'spicy' | 'emotional' | 'funny';
+  visibility: 'global';
+  imageUrl?: string;
+  authorName?: string;
+  authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
+  replyCount: number;
+  reactionCount: number;
+  voiceReplyCount?: number;
+  createdAt: number;
+  expiresAt?: number;
+  isDeleted?: boolean;
+  deletedAt?: number;
+  taggedUserId?: Id<'users'>;
+  trendingScore?: number;
+  isExpired?: boolean;
+};
+
+function serializeConfession(
+  confession: Doc<'confessions'>,
+  options?: {
+    includeTaggedUserId?: boolean;
+    trendingScore?: number;
+    isExpired?: boolean;
+  }
+): SerializedConfession {
+  const result: SerializedConfession = {
+    _id: confession._id,
+    _creationTime: confession._creationTime,
+    userId: confession.userId,
+    text: confession.text,
+    isAnonymous: confession.isAnonymous,
+    mood: confession.mood,
+    visibility: confession.visibility,
+    imageUrl: confession.imageUrl,
+    authorName: confession.authorName,
+    authorPhotoUrl: confession.authorPhotoUrl,
+    authorAge: confession.authorAge,
+    authorGender: confession.authorGender,
+    replyCount: confession.replyCount,
+    reactionCount: confession.reactionCount,
+    voiceReplyCount: confession.voiceReplyCount,
+    createdAt: confession.createdAt,
+    expiresAt: confession.expiresAt,
+    isDeleted: confession.isDeleted,
+    deletedAt: confession.deletedAt,
+  };
+
+  if (options?.includeTaggedUserId && !confession.isAnonymous) {
+    result.taggedUserId = confession.taggedUserId;
+  }
+
+  if (typeof options?.trendingScore === 'number') {
+    result.trendingScore = options.trendingScore;
+  }
+
+  if (typeof options?.isExpired === 'boolean') {
+    result.isExpired = options.isExpired;
+  }
+
+  return result;
+}
 
 // Create a new confession
 export const createConfession = mutation({
@@ -166,12 +236,8 @@ export const listConfessions = query({
           .slice(0, 3)
           .map(([emoji, count]) => ({ emoji, count }));
 
-        // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
-        const { taggedUserId: _omitTagged, ...confessionWithoutTagged } = c;
-        const safeConfession = c.isAnonymous ? confessionWithoutTagged : c;
-
         return {
-          ...safeConfession,
+          ...serializeConfession(c, { includeTaggedUserId: true }),
           replyPreviews: replies.map((r) => ({
             _id: r._id,
             text: r.text,
@@ -232,13 +298,13 @@ export const getTrendingConfessions = query({
       const score =
         (c.replyCount * 5 + c.reactionCount * 2 + voiceReplies * 1) /
         (hoursSince + 2);
-      // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
-      const { taggedUserId: _omitTagged, ...confessionWithoutTagged } = c;
-      const safeConfession = c.isAnonymous ? confessionWithoutTagged : c;
-      return { ...safeConfession, trendingScore: score };
+      return serializeConfession(c, {
+        includeTaggedUserId: true,
+        trendingScore: score,
+      });
     });
 
-    scored.sort((a, b) => b.trendingScore - a.trendingScore);
+    scored.sort((a, b) => (b.trendingScore ?? 0) - (a.trendingScore ?? 0));
 
     // Return top 5 trending
     return scored.slice(0, 5);
@@ -251,12 +317,7 @@ export const getConfession = query({
   handler: async (ctx, { confessionId }) => {
     const confession = await ctx.db.get(confessionId);
     if (!confession) return null;
-    // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
-    if (confession.isAnonymous) {
-      const { taggedUserId: _omitTagged, ...safeConfession } = confession;
-      return safeConfession;
-    }
-    return confession;
+    return serializeConfession(confession, { includeTaggedUserId: true });
   },
 });
 
@@ -358,7 +419,19 @@ export const getReplies = query({
       .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
       .order('asc')
       .collect();
-    return replies;
+    return replies.map((reply) => ({
+      _id: reply._id,
+      _creationTime: reply._creationTime,
+      confessionId: reply.confessionId,
+      userId: reply.userId,
+      text: reply.text,
+      isAnonymous: reply.isAnonymous,
+      type: reply.type,
+      voiceUrl: reply.voiceUrl,
+      voiceDurationSec: reply.voiceDurationSec,
+      parentReplyId: reply.parentReplyId,
+      createdAt: reply.createdAt,
+    }));
   },
 });
 
@@ -532,11 +605,12 @@ export const getMyConfessions = query({
       .order('desc')
       .collect();
 
-    // Add isExpired flag for each confession
-    return confessions.map((c) => ({
-      ...c,
-      isExpired: c.expiresAt !== undefined && c.expiresAt <= now,
-    }));
+    return confessions.map((confession) =>
+      serializeConfession(confession, {
+        includeTaggedUserId: true,
+        isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
+      })
+    );
   },
 });
 

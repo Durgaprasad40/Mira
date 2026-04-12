@@ -40,8 +40,9 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     textAlign: 'center',
   },
-  // ── Join messages: left-aligned, subtle ──
+  // ── Join messages: center-aligned, subtle ──
   joinContainer: {
+    alignSelf: 'center',
     paddingHorizontal: 12,
     paddingVertical: 2,
     marginVertical: 2,
@@ -50,5 +51,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: C.textLight,
     opacity: 0.65,
+    textAlign: 'center',
   },
 });

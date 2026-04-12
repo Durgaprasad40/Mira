@@ -4,22 +4,67 @@ import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
+import {
+  FRONTEND_RELATIONSHIP_INTENT_IDS,
+  normalizeRelationshipIntentValues,
+} from "../lib/discoveryNaming";
 
-// ALLOWED_RELATIONSHIP_INTENTS: Schema-safe values (excludes UI-only values like single_parent, just_18)
-const ALLOWED_RELATIONSHIP_INTENTS = new Set([
-  'long_term', 'short_term', 'fwb', 'figuring_out',
-  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
-]);
+const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
 
-// Sanitize relationshipIntent to only include schema-valid values
 function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | undefined {
   if (!intent || !Array.isArray(intent)) return intent;
-  const sanitized = intent.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
-  const removed = intent.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
+  const sanitized = normalizeRelationshipIntentValues(intent);
+  const removed = intent.filter(
+    (value) => normalizeRelationshipIntentValues(value).length === 0,
+  );
   if (removed.length > 0) {
     console.warn('[SANITIZE] Removed invalid relationshipIntent values:', removed);
   }
   return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function normalizeRelationshipIntentForResponse(intent: string[] | undefined): string[] {
+  return sanitizeRelationshipIntent(intent) ?? [];
+}
+
+function normalizeOnboardingDraft<T extends Record<string, any> | null | undefined>(draft: T): T {
+  if (!draft?.preferences?.relationshipIntent || !Array.isArray(draft.preferences.relationshipIntent)) {
+    return draft;
+  }
+
+  const normalizedRelationshipIntent = sanitizeRelationshipIntent(draft.preferences.relationshipIntent);
+  const currentIntent = draft.preferences.relationshipIntent;
+
+  if (
+    normalizedRelationshipIntent &&
+    normalizedRelationshipIntent.length === currentIntent.length &&
+    normalizedRelationshipIntent.every((value, index) => value === currentIntent[index])
+  ) {
+    return draft;
+  }
+
+  return {
+    ...draft,
+    preferences: {
+      ...draft.preferences,
+      relationshipIntent: normalizedRelationshipIntent,
+    },
+  } as T;
+}
+
+function sanitizeProfilePrompts(
+  prompts: Array<{ question: string; answer: string; section?: string }> | undefined
+): Array<{ question: string; answer: string }> | undefined {
+  if (!prompts || !Array.isArray(prompts)) return prompts;
+
+  const cleaned = prompts
+    .map((prompt) => ({
+      question: prompt.question?.trim().slice(0, 100) ?? "",
+      answer: prompt.answer?.trim().slice(0, 200) ?? "",
+    }))
+    .filter((prompt) => prompt.question.length > 0 && prompt.answer.length > 0);
+
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 // Get current user profile
@@ -46,6 +91,7 @@ export const getCurrentUser = query({
 
     return {
       ...user,
+      relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
       photos: photos.sort((a, b) => a.order - b.order),
     };
   },
@@ -138,7 +184,7 @@ export const getUserById = query({
       distance,
       lastActive: user.lastActive,
       lookingFor: user.lookingFor,
-      relationshipIntent: user.relationshipIntent,
+      relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
       activities: user.activities,
       profilePrompts: user.profilePrompts ?? [],
       photos: photos.sort((a, b) => a.order - b.order),
@@ -152,6 +198,12 @@ export const updateProfilePrompts = mutation({
   args: {
     token: v.string(), // SESSION AUTH: Validate session token server-side
     prompts: v.array(v.object({
+      section: v.optional(v.union(
+        v.literal('builder'),
+        v.literal('performer'),
+        v.literal('seeker'),
+        v.literal('grounded')
+      )),
       question: v.string(),
       answer: v.string(),
     })),
@@ -179,10 +231,7 @@ export const updateProfilePrompts = mutation({
     }
 
     // Exactly 4 prompts (one per section), answer max 200 chars
-    const cleaned = args.prompts.slice(0, 4).map((p) => ({
-      question: p.question.trim().slice(0, 100),
-      answer: p.answer.trim().slice(0, 200),
-    }));
+    const cleaned = sanitizeProfilePrompts(args.prompts.slice(0, 4)) ?? [];
 
     await ctx.db.patch(userId, { profilePrompts: cleaned });
     return { success: true };
@@ -262,14 +311,15 @@ export const updateProfile = mutation({
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -394,14 +444,15 @@ export const updatePreferences = mutation({
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -1229,14 +1280,15 @@ export const completeOnboarding = mutation({
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -1271,6 +1323,12 @@ export const completeOnboarding = mutation({
     maxDistance: v.optional(v.number()),
     // FIX: Add missing validators for profilePrompts and lgbtqSelf
     profilePrompts: v.optional(v.array(v.object({
+      section: v.optional(v.union(
+        v.literal('builder'),
+        v.literal('performer'),
+        v.literal('seeker'),
+        v.literal('grounded')
+      )),
       question: v.string(),
       answer: v.string(),
     }))),
@@ -1340,11 +1398,16 @@ export const completeOnboarding = mutation({
     if (pets !== undefined) cleanUpdates.pets = pets;
     if (insect !== undefined) cleanUpdates.insect = insect;
 
-    // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values
-    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    // DEFENSIVE SANITIZATION: normalize legacy stored slugs to frontend-canonical values
     if (cleanUpdates.relationshipIntent) {
       cleanUpdates.relationshipIntent = sanitizeRelationshipIntent(
         cleanUpdates.relationshipIntent as string[]
+      );
+    }
+
+    if (cleanUpdates.profilePrompts) {
+      cleanUpdates.profilePrompts = sanitizeProfilePrompts(
+        cleanUpdates.profilePrompts as Array<{ question: string; answer: string; section?: string }>
       );
     }
 
@@ -1816,7 +1879,7 @@ export const getOnboardingDraft = query({
     }
 
     return {
-      onboardingDraft: user.onboardingDraft ?? null,
+      onboardingDraft: normalizeOnboardingDraft(user.onboardingDraft ?? null),
     };
   },
 });
@@ -1882,8 +1945,7 @@ export const upsertOnboardingDraft = mutation({
       },
     };
 
-    // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values before saving
-    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    // DEFENSIVE SANITIZATION: normalize legacy stored slugs to frontend-canonical values
     if (mergedDraft.preferences?.relationshipIntent) {
       mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
         mergedDraft.preferences.relationshipIntent
@@ -1958,7 +2020,7 @@ export const getOnboardingStatus = query({
 
       // Onboarding state
       onboardingCompleted: user.onboardingCompleted || false,
-      onboardingDraft: user.onboardingDraft || null,
+      onboardingDraft: normalizeOnboardingDraft(user.onboardingDraft || null),
 
       // Phase-2 onboarding state (Private Mode)
       phase2OnboardingCompleted: user.phase2OnboardingCompleted || false,

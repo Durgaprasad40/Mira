@@ -15,4 +15,13 @@ if (!convexUrl) {
   );
 }
 
-export const convex = new ConvexReactClient(convexUrl);
+// LOG_FORMAT_FIX: Disable Convex server log forwarding to client console
+// Setting logger: false creates a noop logger, which prevents server-side
+// console.log calls from being forwarded to the client with styled
+// %c[CONVEX Q(...)] [LOG] formatting.
+// Note: verbose: false only affects client debug logs, NOT server log forwarding.
+export const convex = new ConvexReactClient(convexUrl, {
+  verbose: false,
+  logger: false,
+});
+

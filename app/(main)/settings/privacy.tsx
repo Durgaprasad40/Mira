@@ -1,5 +1,9 @@
+/*
+ * LOCKED (PRIVACY SETTINGS)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ */
 import React, { useState, useCallback, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -13,66 +17,88 @@ import { Toast } from '@/components/ui/Toast';
 
 export default function PrivacySettingsScreen() {
   const router = useRouter();
-  const { userId, token } = useAuthStore();
+  const { token } = useAuthStore();
 
   // Query current user privacy settings (live mode only)
   const currentUser = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Mutations for backend sync
   const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
-  const updateNearbySettings = useMutation(api.users.updateNearbySettings);
-  const updatePrivacySettings = useMutation(api.users.updatePrivacySettings);
 
   // Privacy toggles from persisted store
   const hideFromDiscover = usePrivacyStore((s) => s.hideFromDiscover);
-  const hideAge = usePrivacyStore((s) => s.hideAge);
-  const hideDistance = usePrivacyStore((s) => s.hideDistance);
-  const disableReadReceipts = usePrivacyStore((s) => s.disableReadReceipts);
 
   const setHideFromDiscover = usePrivacyStore((s) => s.setHideFromDiscover);
-  const setHideAge = usePrivacyStore((s) => s.setHideAge);
-  const setHideDistance = usePrivacyStore((s) => s.setHideDistance);
-  const setDisableReadReceipts = usePrivacyStore((s) => s.setDisableReadReceipts);
+  const [isHydrated, setIsHydrated] = useState(isDemoMode);
+  const [timedOut, setTimedOut] = useState(false);
+  const [discoveryPauseEndsAt, setDiscoveryPauseEndsAt] = useState<number | null>(null);
+
+  // P1-042 FIX: Track if initial sync has been done to prevent overwriting pending changes
+  const initialSyncDoneRef = React.useRef(false);
 
   // Hydrate local state from backend on load (live mode only)
+  // P1-042 FIX: Only sync once on initial load to prevent overwriting user's pending changes
   useEffect(() => {
-    if (currentUser) {
-      // Sync hideFromDiscover from isDiscoveryPaused
-      if (currentUser.isDiscoveryPaused !== undefined) {
-        setHideFromDiscover(currentUser.isDiscoveryPaused);
-      }
-      // Sync hideDistance
-      if (currentUser.hideDistance !== undefined) {
-        setHideDistance(currentUser.hideDistance);
-      }
-      // Sync hideAge
-      if (currentUser.hideAge !== undefined) {
-        setHideAge(currentUser.hideAge);
-      }
-      // Sync disableReadReceipts
-      if (currentUser.disableReadReceipts !== undefined) {
-        setDisableReadReceipts(currentUser.disableReadReceipts);
-      }
+    if (currentUser && !initialSyncDoneRef.current) {
+      initialSyncDoneRef.current = true;
+      const pauseUntil =
+        typeof currentUser.discoveryPausedUntil === 'number' &&
+        currentUser.discoveryPausedUntil > Date.now()
+          ? currentUser.discoveryPausedUntil
+          : null;
+      setDiscoveryPauseEndsAt(pauseUntil);
+      setHideFromDiscover(!!pauseUntil);
+      setIsHydrated(true);
     }
-  }, [currentUser]);
+  }, [currentUser, setHideFromDiscover]);
+
+  useEffect(() => {
+    if (isDemoMode || isHydrated || !token) return;
+
+    const timeout = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(timeout);
+  }, [isHydrated, token]);
+
+  useEffect(() => {
+    if (!discoveryPauseEndsAt) return;
+
+    const remainingMs = discoveryPauseEndsAt - Date.now();
+    if (remainingMs <= 0) {
+      setDiscoveryPauseEndsAt(null);
+      setHideFromDiscover(false);
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setDiscoveryPauseEndsAt(null);
+      setHideFromDiscover(false);
+    }, remainingMs + 250);
+
+    return () => clearTimeout(timeout);
+  }, [discoveryPauseEndsAt, setHideFromDiscover]);
 
   // Track if warning has been shown this session (session-only, no persistence needed)
   const [warningShownThisSession, setWarningShownThisSession] = useState(false);
+
+  const isLoading = !isDemoMode && !!token && !isHydrated && currentUser !== null && !timedOut;
+  const isUnavailable = !isDemoMode && (!token || currentUser === null || (!isHydrated && timedOut));
 
   // Handle "Hide from Discover" toggle with one-time warning (session-only)
   const handleHideFromDiscoverChange = useCallback(async (newValue: boolean) => {
     const applyChange = async () => {
       setHideFromDiscover(newValue);
       // Sync to backend in live mode
-      if (!isDemoMode && userId && currentUser?._id) {
+      if (!isDemoMode && token) {
         try {
-          await toggleDiscoveryPause({ authUserId: userId, paused: newValue });
+          await toggleDiscoveryPause({ token, paused: newValue });
+          setDiscoveryPauseEndsAt(newValue ? Date.now() + 24 * 60 * 60 * 1000 : null);
         } catch {
           Toast.show("Couldn't update setting. Please try again.");
           setHideFromDiscover(!newValue); // Revert on error
+          setDiscoveryPauseEndsAt(newValue ? null : discoveryPauseEndsAt);
         }
       }
     };
@@ -80,8 +106,8 @@ export default function PrivacySettingsScreen() {
     if (newValue && !warningShownThisSession) {
       // Show one-time warning (session-scoped, no AsyncStorage needed)
       Alert.alert(
-        'Hide from Discover',
-        'While hidden from Discover, you won\'t get new matches. Existing matches can still chat with you.',
+        'Pause Discovery for 24 hours',
+        'While paused, your profile won\'t appear in Discover for 24 hours. Existing matches can still chat with you.',
         [
           {
             text: 'Cancel',
@@ -100,49 +126,7 @@ export default function PrivacySettingsScreen() {
       return; // Don't toggle yet, wait for user confirmation
     }
     applyChange();
-  }, [warningShownThisSession, setHideFromDiscover, userId, currentUser, toggleDiscoveryPause, token]);
-
-  // Handle "Hide Distance" toggle with backend sync
-  const handleHideDistanceChange = useCallback(async (newValue: boolean) => {
-    setHideDistance(newValue);
-    // Sync to backend in live mode
-    if (!isDemoMode && userId && currentUser?._id) {
-      try {
-        await updateNearbySettings({ authUserId: userId, hideDistance: newValue });
-      } catch {
-        Toast.show("Couldn't update setting. Please try again.");
-        setHideDistance(!newValue); // Revert on error
-      }
-    }
-  }, [setHideDistance, userId, currentUser, updateNearbySettings, token]);
-
-  // Handle "Hide Age" toggle with backend sync
-  const handleHideAgeChange = useCallback(async (newValue: boolean) => {
-    setHideAge(newValue);
-    // Sync to backend in live mode
-    if (!isDemoMode && userId && currentUser?._id) {
-      try {
-        await updatePrivacySettings({ authUserId: userId, hideAge: newValue });
-      } catch {
-        Toast.show("Couldn't update setting. Please try again.");
-        setHideAge(!newValue); // Revert on error
-      }
-    }
-  }, [setHideAge, userId, currentUser, updatePrivacySettings, token]);
-
-  // Handle "Disable Read Receipts" toggle with backend sync
-  const handleDisableReadReceiptsChange = useCallback(async (newValue: boolean) => {
-    setDisableReadReceipts(newValue);
-    // Sync to backend in live mode
-    if (!isDemoMode && userId && currentUser?._id) {
-      try {
-        await updatePrivacySettings({ authUserId: userId, disableReadReceipts: newValue });
-      } catch {
-        Toast.show("Couldn't update setting. Please try again.");
-        setDisableReadReceipts(!newValue); // Revert on error
-      }
-    }
-  }, [setDisableReadReceipts, userId, currentUser, updatePrivacySettings, token]);
+  }, [warningShownThisSession, setHideFromDiscover, toggleDiscoveryPause, token, discoveryPauseEndsAt]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -154,6 +138,23 @@ export default function PrivacySettingsScreen() {
         <View style={{ width: 24 }} />
       </View>
 
+      {isLoading ? (
+        <View style={styles.stateContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.stateText}>Loading your privacy settings...</Text>
+        </View>
+      ) : isUnavailable ? (
+        <View style={styles.stateContainer}>
+          <Ionicons name="shield-outline" size={40} color={COLORS.textMuted} />
+          <Text style={styles.stateText}>We couldn&apos;t load your privacy settings.</Text>
+          <TouchableOpacity
+            style={styles.stateButton}
+            onPress={() => router.replace('/(main)/(tabs)/profile' as any)}
+          >
+            <Text style={styles.stateButtonText}>Back to Profile</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         {/* Visibility Toggles */}
         <View style={styles.section}>
@@ -162,9 +163,9 @@ export default function PrivacySettingsScreen() {
           {/* Hide from Discover */}
           <View style={styles.toggleRow}>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Hide me from Discover</Text>
+              <Text style={styles.toggleTitle}>Pause Discovery for 24 hours</Text>
               <Text style={styles.toggleDescription}>
-                Your profile won't appear in Discover while this is on.
+                Your profile stays out of Discover for 24 hours, then turns back on automatically.
               </Text>
             </View>
             <Switch
@@ -175,61 +176,32 @@ export default function PrivacySettingsScreen() {
             />
           </View>
 
-          {/* Hide Age */}
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Hide my age</Text>
-              <Text style={styles.toggleDescription}>
-                Your age will not be shown on your profile.
-              </Text>
-            </View>
-            <Switch
-              value={hideAge}
-              onValueChange={handleHideAgeChange}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-            />
-          </View>
-
-          {/* Hide Distance */}
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Hide my distance</Text>
-              <Text style={styles.toggleDescription}>
-                Other users won't see how far away you are.
-              </Text>
-            </View>
-            <Switch
-              value={hideDistance}
-              onValueChange={handleHideDistanceChange}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-            />
-          </View>
         </View>
 
-        {/* Messaging */}
+        {/* Location & Nearby */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Messaging</Text>
+          <Text style={styles.sectionTitle}>Location</Text>
 
-          {/* Disable Read Receipts (asymmetric) */}
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Disable read receipts</Text>
-              <Text style={styles.toggleDescription}>
-                Others won't see when you read their messages. You can still see theirs.
-              </Text>
+          {/* Nearby Settings Link */}
+          <TouchableOpacity
+            style={styles.linkRow}
+            onPress={() => router.push('/(main)/nearby-settings' as any)}
+          >
+            <View style={styles.linkInfo}>
+              <Ionicons name="location-outline" size={22} color={COLORS.text} style={styles.linkIcon} />
+              <View>
+                <Text style={styles.linkTitle}>Nearby Settings</Text>
+                <Text style={styles.linkDescription}>
+                  Control your visibility and discovery preferences
+                </Text>
+              </View>
             </View>
-            <Switch
-              value={disableReadReceipts}
-              onValueChange={handleDisableReadReceiptsChange}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-            />
-          </View>
+            <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+          </TouchableOpacity>
         </View>
 
       </ScrollView>
+      )}
     </SafeAreaView>
   );
 }
@@ -255,6 +227,31 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  stateContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  stateText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  stateButton: {
+    marginTop: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+  },
+  stateButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   section: {
     paddingHorizontal: 16,
@@ -288,6 +285,33 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   toggleDescription: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+  },
+  // Link rows (for navigation items)
+  linkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+  },
+  linkInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 12,
+  },
+  linkIcon: {
+    marginRight: 12,
+  },
+  linkTitle: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: COLORS.text,
+    marginBottom: 2,
+  },
+  linkDescription: {
     fontSize: 13,
     color: COLORS.textMuted,
     lineHeight: 18,

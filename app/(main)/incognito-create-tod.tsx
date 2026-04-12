@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,19 +6,20 @@ import {
   TextInput,
   TouchableOpacity,
   KeyboardAvoidingView,
+  ScrollView,
   Platform,
   Alert,
   ActivityIndicator,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
-import { useDemoStore } from '@/stores/demoStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { uploadMediaToConvex } from '@/lib/uploadUtils';
 import * as FileSystem from 'expo-file-system/legacy';
 
 /** Check if URL is a valid remote URL (http/https) */
@@ -42,99 +43,69 @@ function isUnstableCachePath(url: string | undefined | null): boolean {
 type PostType = 'truth' | 'dare';
 type VisibilityMode = 'anonymous' | 'public' | 'no_photo';
 
-/** Parse DOB string to calculate age */
-function calculateAge(dob: string | undefined): number | undefined {
-  if (!dob) return undefined;
-  const dobDate = new Date(dob);
-  if (isNaN(dobDate.getTime())) return undefined;
-  const today = new Date();
-  let age = today.getFullYear() - dobDate.getFullYear();
-  const monthDiff = today.getMonth() - dobDate.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dobDate.getDate())) {
-    age--;
-  }
-  return age > 0 ? age : undefined;
-}
-
 export default function CreateTodScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const params = useLocalSearchParams<{
+    editPromptId?: string;
+    editType?: string;
+    editText?: string;
+  }>();
+
+  // Edit mode detection
+  const isEditMode = !!params.editPromptId;
+  const editPromptId = params.editPromptId;
+
   const [postType, setPostType] = useState<PostType>('truth');
   const [content, setContent] = useState('');
   const [visibility, setVisibility] = useState<VisibilityMode>('anonymous');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Initialize state from edit params
+  useEffect(() => {
+    if (isEditMode && params.editText) {
+      setContent(params.editText);
+      if (params.editType === 'truth' || params.editType === 'dare') {
+        setPostType(params.editType);
+      }
+    }
+  }, [isEditMode, params.editText, params.editType]);
+
   // Get user data from canonical sources
-  const userId = useAuthStore((s) => s.userId);
-
-  // M-010 FIX: Generate stable session-scoped fallback ID once
-  // This ensures all anonymous operations use the same ID within a session
-  const stableAnonId = useMemo(() => `anon_session_${Date.now()}`, []);
-  const effectiveUserId = userId || stableAnonId;
-
-  // Source 1: demoStore - select STABLE primitives
-  const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
-  const demoProfiles = useDemoStore((s) => s.demoProfiles);
+  const token = useAuthStore((s) => s.token);
 
   // Source 2: privateProfileStore - Phase-2 data
   const p2DisplayName = usePrivateProfileStore((s) => s.displayName);
   const p2Age = usePrivateProfileStore((s) => s.age);
   const p2Gender = usePrivateProfileStore((s) => s.gender);
   const p2PhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
-  const p2BlurredPhotoUrls = usePrivateProfileStore((s) => s.blurredPhotoUrls);
+  const currentPrivateProfile = useQuery(
+    api.privateProfiles.getCurrentOnboardingProfile,
+    token ? { token } : 'skip'
+  );
 
-  // Derive identity - collect ALL photo candidates (https preferred, then file://)
+  // Derive the live Phase-2 identity snapshot used by the prompt.
   const ownerIdentity = useMemo(() => {
-    // Collect all photo candidates from Phase-2
     const allP2Photos: string[] = [];
-    if (p2PhotoUrls) allP2Photos.push(...p2PhotoUrls.filter(u => u && u.length > 0));
-    if (p2BlurredPhotoUrls) allP2Photos.push(...p2BlurredPhotoUrls.filter(u => u && u.length > 0));
-
-    // Try demoStore first (canonical for demo mode)
-    const demoProfile = currentDemoUserId ? demoProfiles[currentDemoUserId] : null;
-
-    if (demoProfile) {
-      const demoName = demoProfile.name;
-      const demoAge = demoProfile.dateOfBirth ? calculateAge(demoProfile.dateOfBirth) : undefined;
-      const demoGender = demoProfile.gender;
-
-      // Collect demo photos
-      const demoPhotos: string[] = [];
-      if (demoProfile.photoSlots) {
-        demoPhotos.push(...demoProfile.photoSlots.filter((p): p is string => p !== null && p.length > 0));
-      } else if (demoProfile.photos && demoProfile.photos.length > 0) {
-        demoPhotos.push(...demoProfile.photos.map(p => p.url).filter(u => u && u.length > 0));
-      }
-
-      // Combine: demo photos + P2 photos
-      const allPhotos = [...demoPhotos, ...allP2Photos];
-
-      if (demoName) {
-        return {
-          name: demoName,
-          age: demoAge,
-          gender: demoGender,
-          photoCandidates: allPhotos,
-        };
-      }
+    if (currentPrivateProfile?.privatePhotoUrls) {
+      allP2Photos.push(
+        ...currentPrivateProfile.privatePhotoUrls.filter((u: string) => u.length > 0)
+      );
     }
+    if (p2PhotoUrls) allP2Photos.push(...p2PhotoUrls.filter((u) => u && u.length > 0));
 
-    // Fallback to privateProfileStore (Phase-2 data)
-    if (p2DisplayName) {
-      return {
-        name: p2DisplayName,
-        age: p2Age > 0 ? p2Age : undefined,
-        gender: p2Gender || undefined,
-        photoCandidates: allP2Photos,
-      };
-    }
+    return {
+      name: currentPrivateProfile?.displayName || p2DisplayName || undefined,
+      age: currentPrivateProfile?.age || (p2Age > 0 ? p2Age : undefined),
+      gender: currentPrivateProfile?.gender || p2Gender || undefined,
+      photoCandidates: allP2Photos,
+    };
+  }, [currentPrivateProfile, p2DisplayName, p2Age, p2Gender, p2PhotoUrls]);
 
-    // No identity available
-    return { name: undefined, age: undefined, gender: undefined, photoCandidates: [] };
-  }, [currentDemoUserId, demoProfiles, p2DisplayName, p2Age, p2Gender, p2PhotoUrls, p2BlurredPhotoUrls]);
-
-  // Convex mutation
+  // Convex mutations
   const createPrompt = useMutation(api.truthDare.createPrompt);
+  const editPromptMutation = useMutation(api.truthDare.editPrompt);
+  const generateUploadUrl = useMutation(api.truthDare.generateUploadUrl);
 
   const maxLength = 280;
   const canSubmit = content.trim().length >= 10 && !isSubmitting;
@@ -209,16 +180,34 @@ export default function CreateTodScreen() {
     if (!canSubmit || isSubmittingRef.current) return;
     isSubmittingRef.current = true;
 
+    if (!token) {
+      isSubmittingRef.current = false;
+      Alert.alert('Sign in required', 'Please sign in again before posting.');
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
-      // TOD-001 FIX: Use authUserId for server-side verification
+      // EDIT MODE: Update existing prompt text only
+      if (isEditMode && editPromptId) {
+        await editPromptMutation({
+          promptId: editPromptId as any,
+          text: content.trim(),
+          token,
+        });
+        console.log(`[T/D REPORT] edited promptId=${editPromptId}`);
+        router.back();
+        return;
+      }
+
+      // CREATE MODE: Use strict session-token auth for server-side verification
       if (visibility === 'anonymous') {
         // Anonymous: no identity, no photo
         await createPrompt({
           type: postType,
           text: content.trim(),
-          authUserId: effectiveUserId,
+          token,
           isAnonymous: true,
           photoBlurMode: 'none',
         });
@@ -228,7 +217,7 @@ export default function CreateTodScreen() {
         await createPrompt({
           type: postType,
           text: content.trim(),
-          authUserId: effectiveUserId,
+          token,
           isAnonymous: false,
           photoBlurMode: 'none',
           ownerName: ownerIdentity.name,
@@ -238,19 +227,32 @@ export default function CreateTodScreen() {
         });
         console.log(`[T/D REPORT] created visibility=no_photo`);
       } else {
-        // Everyone (public): identity + photo
+        // Name + photo: identity + photo
         const photoResult = await resolveBestPhoto(ownerIdentity.photoCandidates || []);
+        if (!photoResult.url) {
+          throw new Error('Your profile photo is not ready yet.');
+        }
+
+        let ownerPhotoStorageId: string | undefined;
+        if (photoResult.type === 'file') {
+          ownerPhotoStorageId = await uploadMediaToConvex(
+            photoResult.url,
+            () => generateUploadUrl({ token }),
+            'photo'
+          );
+        }
 
         await createPrompt({
           type: postType,
           text: content.trim(),
-          authUserId: effectiveUserId,
+          token,
           isAnonymous: false,
           photoBlurMode: 'none',
           ownerName: ownerIdentity.name,
           ownerAge: ownerIdentity.age,
           ownerGender: ownerIdentity.gender,
-          ownerPhotoUrl: photoResult.url,
+          ownerPhotoUrl: photoResult.type === 'https' ? photoResult.url : undefined,
+          ownerPhotoStorageId: ownerPhotoStorageId as any,
         });
         console.log(`[T/D REPORT] created visibility=public photoType=${photoResult.type}`);
       }
@@ -265,133 +267,192 @@ export default function CreateTodScreen() {
   };
 
   const C = INCOGNITO_COLORS;
+  const bottomScrollPadding = Math.max(insets.bottom, 16) + 20;
 
   return (
     <KeyboardAvoidingView
-      style={[styles.container, { paddingTop: insets.top }]}
+      style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 8 : 0}
     >
-      {/* Header - close button only, no Post button here */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
-          <Ionicons name="close" size={24} color={C.text} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>New Post</Text>
-        {/* Spacer for alignment */}
-        <View style={{ width: 24 }} />
-      </View>
-
-      {/* Type Selector */}
-      <View style={styles.typeSelector}>
-        <TouchableOpacity
-          style={[styles.typeOption, postType === 'truth' && styles.typeOptionActive]}
-          onPress={() => setPostType('truth')}
-        >
-          <Ionicons name="help-circle" size={20} color={postType === 'truth' ? '#FFFFFF' : C.textLight} />
-          <Text style={[styles.typeLabel, postType === 'truth' && styles.typeLabelActive]}>Truth</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.typeOption, postType === 'dare' && styles.typeOptionDareActive]}
-          onPress={() => setPostType('dare')}
-        >
-          <Ionicons name="flash" size={20} color={postType === 'dare' ? '#FFFFFF' : C.textLight} />
-          <Text style={[styles.typeLabel, postType === 'dare' && styles.typeLabelActive]}>Dare</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Input */}
-      <View style={styles.inputContainer}>
-        <TextInput
-          style={styles.textInput}
-          placeholder={
-            postType === 'truth'
-              ? 'Ask a truth question...'
-              : 'Write a dare challenge...'
-          }
-          placeholderTextColor={C.textLight}
-          multiline
-          maxLength={maxLength}
-          value={content}
-          onChangeText={setContent}
-          autoFocus
-        />
-        <Text style={styles.charCount}>
-          {content.length}/{maxLength}
-        </Text>
-      </View>
-
-      {/* 3-Option Visibility Selector */}
-      <View style={styles.visibilityContainer}>
-        <Text style={styles.visibilityLabel}>Who can see your identity?</Text>
-        <View style={styles.visibilityOptions}>
-          {/* Anonymous */}
-          <TouchableOpacity
-            style={[styles.visibilityOption, visibility === 'anonymous' && styles.visibilityOptionActive]}
-            onPress={() => setVisibility('anonymous')}
-          >
-            <Ionicons
-              name="eye-off"
-              size={18}
-              color={visibility === 'anonymous' ? '#FFFFFF' : C.textLight}
-            />
-            <Text style={[styles.visibilityText, visibility === 'anonymous' && styles.visibilityTextActive]}>
-              Anonymous
-            </Text>
+      <View style={[styles.screen, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="close" size={24} color={C.text} />
           </TouchableOpacity>
-
-          {/* Public */}
-          <TouchableOpacity
-            style={[styles.visibilityOption, visibility === 'public' && styles.visibilityOptionActive]}
-            onPress={() => setVisibility('public')}
-          >
-            <Ionicons
-              name="person"
-              size={18}
-              color={visibility === 'public' ? '#FFFFFF' : C.textLight}
-            />
-            <Text style={[styles.visibilityText, visibility === 'public' && styles.visibilityTextActive]}>
-              Everyone
-            </Text>
-          </TouchableOpacity>
-
-          {/* Without photo */}
-          <TouchableOpacity
-            style={[styles.visibilityOption, visibility === 'no_photo' && styles.visibilityOptionActive]}
-            onPress={() => setVisibility('no_photo')}
-          >
-            <Ionicons
-              name="person-outline"
-              size={18}
-              color={visibility === 'no_photo' ? '#FFFFFF' : C.textLight}
-            />
-            <Text style={[styles.visibilityText, visibility === 'no_photo' && styles.visibilityTextActive]}>
-              No photo
-            </Text>
-          </TouchableOpacity>
+          <Text style={styles.headerTitle}>{isEditMode ? 'Edit Post' : 'New Post'}</Text>
+          <View style={{ width: 24 }} />
         </View>
-        <Text style={styles.visibilityHint}>
-          {visibility === 'anonymous'
-            ? 'Your identity is completely hidden'
-            : visibility === 'public'
-            ? 'Your profile photo is visible'
-            : 'Your name is visible, no photo'}
-        </Text>
 
-        {/* POST button - directly under visibility options */}
-        <TouchableOpacity
-          style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
-          onPress={handleSubmit}
-          disabled={!canSubmit}
-          activeOpacity={0.8}
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[
+            styles.scrollContent,
+            { paddingBottom: bottomScrollPadding },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+          showsVerticalScrollIndicator={false}
+          contentInsetAdjustmentBehavior="always"
+          scrollIndicatorInsets={{ bottom: bottomScrollPadding }}
         >
-          {isSubmitting ? (
-            <ActivityIndicator size="small" color="#FFFFFF" />
-          ) : (
-            <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
-              POST
+          <View style={[styles.typeSelector, isEditMode && { opacity: 0.5 }]}>
+            <TouchableOpacity
+              style={[styles.typeOption, postType === 'truth' && styles.typeOptionActive]}
+              onPress={() => !isEditMode && setPostType('truth')}
+              disabled={isEditMode}
+            >
+              <Ionicons name="help-circle" size={20} color={postType === 'truth' ? '#FFFFFF' : C.textLight} />
+              <Text style={[styles.typeLabel, postType === 'truth' && styles.typeLabelActive]}>Truth</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.typeOption, postType === 'dare' && styles.typeOptionDareActive]}
+              onPress={() => !isEditMode && setPostType('dare')}
+              disabled={isEditMode}
+            >
+              <Ionicons name="flash" size={20} color={postType === 'dare' ? '#FFFFFF' : C.textLight} />
+              <Text style={[styles.typeLabel, postType === 'dare' && styles.typeLabelActive]}>Dare</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.inputContainer}>
+            <TextInput
+              style={styles.textInput}
+              placeholder={
+                postType === 'truth'
+                  ? 'Ask a truth question...'
+                  : 'Write a dare challenge...'
+              }
+              placeholderTextColor={C.textLight}
+              multiline
+              maxLength={maxLength}
+              value={content}
+              onChangeText={setContent}
+              autoFocus
+            />
+            <Text style={styles.charCount}>
+              {content.length}/{maxLength}
             </Text>
+          </View>
+
+          {!isEditMode && (
+            <>
+              <View style={styles.visibilityContainer}>
+                <Text style={styles.visibilityLabel}>How should your identity appear?</Text>
+                <View style={styles.visibilityOptions}>
+                  <TouchableOpacity
+                    style={[styles.visibilityOption, visibility === 'anonymous' && styles.visibilityOptionActive]}
+                    onPress={() => setVisibility('anonymous')}
+                  >
+                    <Ionicons
+                      name="eye-off"
+                      size={18}
+                      color={visibility === 'anonymous' ? '#FFFFFF' : C.textLight}
+                    />
+                    <Text style={[styles.visibilityText, visibility === 'anonymous' && styles.visibilityTextActive]}>
+                      Anonymous
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.visibilityOption, visibility === 'public' && styles.visibilityOptionActive]}
+                    onPress={() => setVisibility('public')}
+                  >
+                    <Ionicons
+                      name="person"
+                      size={18}
+                      color={visibility === 'public' ? '#FFFFFF' : C.textLight}
+                    />
+                    <Text style={[styles.visibilityText, visibility === 'public' && styles.visibilityTextActive]}>
+                      Name + photo
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.visibilityOption, visibility === 'no_photo' && styles.visibilityOptionActive]}
+                    onPress={() => setVisibility('no_photo')}
+                  >
+                    <Ionicons
+                      name="person-outline"
+                      size={18}
+                      color={visibility === 'no_photo' ? '#FFFFFF' : C.textLight}
+                    />
+                    <Text style={[styles.visibilityText, visibility === 'no_photo' && styles.visibilityTextActive]}>
+                      Name only
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.visibilityHint}>
+                  {visibility === 'anonymous'
+                    ? 'Your identity is completely hidden'
+                    : visibility === 'public'
+                    ? 'Your name and profile photo appear on the post'
+                    : 'Your name appears on the post without a photo'}
+                </Text>
+              </View>
+
+              <View style={styles.postButtonInlineContainer}>
+                <TouchableOpacity
+                  style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
+                  onPress={handleSubmit}
+                  disabled={!canSubmit}
+                  activeOpacity={0.8}
+                >
+                  {isSubmitting ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
+                      {isEditMode ? 'SAVE' : 'POST'}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.howItWorksCard}>
+                <Text style={styles.howItWorksTitle}>How it works</Text>
+                <Text style={styles.howItWorksText}>
+                  Post, get replies, and connect with someone you like.
+                </Text>
+              </View>
+            </>
           )}
-        </TouchableOpacity>
+
+          {isEditMode && (
+            <View style={styles.postButtonInlineContainer}>
+              <TouchableOpacity
+                style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
+                onPress={handleSubmit}
+                disabled={!canSubmit}
+                activeOpacity={0.8}
+              >
+                {isSubmitting ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
+                    {isEditMode ? 'SAVE' : 'POST'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          )}
+
+          <View style={styles.guidelinesContainer}>
+            <Text style={styles.guidelinesTitle}>Before you post</Text>
+            <Text style={styles.guidelinesPoint}>• Be respectful to others</Text>
+            <Text style={styles.guidelinesPoint}>• Keep content safe and appropriate</Text>
+            <Text style={styles.guidelinesPoint}>• No scams or misleading content</Text>
+            <Text style={styles.guidelinesPoint}>• Respect privacy and consent</Text>
+            <Text style={styles.guidelinesLinkText}>
+              Read full{' '}
+              <Text
+                style={styles.guidelinesLink}
+                onPress={() => router.push('/(main)/community-guidelines')}
+              >
+                community guidelines
+              </Text>
+            </Text>
+          </View>
+        </ScrollView>
       </View>
     </KeyboardAvoidingView>
   );
@@ -401,6 +462,9 @@ const C = INCOGNITO_COLORS;
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  screen: { flex: 1, backgroundColor: C.background },
+  scroll: { flex: 1 },
+  scrollContent: { paddingBottom: 24 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingVertical: 12,
@@ -455,17 +519,47 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   visibilityHint: {
-    fontSize: 12, color: C.textLight, marginTop: 8, textAlign: 'center',
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 10,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  howItWorksCard: {
+    marginTop: 0,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: 'rgba(108, 92, 231, 0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(108, 92, 231, 0.18)',
+  },
+  howItWorksTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 4,
+  },
+  howItWorksText: {
+    fontSize: 13,
+    color: C.textLight,
+    lineHeight: 18,
+  },
+  postButtonInlineContainer: {
+    marginHorizontal: 16,
+    marginTop: 10,
+    marginBottom: 14,
   },
 
-  // Main POST button - placed directly under visibility options
+  // Main POST button - inline primary CTA
   postButtonMain: {
     backgroundColor: C.primary,
     borderRadius: 12,
-    paddingVertical: 16,
+    paddingVertical: 15,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 20,
   },
   postButtonMainDisabled: {
     backgroundColor: C.surface,
@@ -478,5 +572,39 @@ const styles = StyleSheet.create({
   },
   postButtonMainTextDisabled: {
     color: C.textLight,
+  },
+
+  // Guidelines section - below POST button
+  guidelinesContainer: {
+    marginTop: 8,
+    marginHorizontal: 16,
+    marginBottom: 0,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.04)',
+  },
+  guidelinesTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 8,
+  },
+  guidelinesPoint: {
+    fontSize: 12,
+    color: C.textLight,
+    marginBottom: 4,
+    lineHeight: 18,
+  },
+  guidelinesLinkText: {
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 8,
+    lineHeight: 18,
+  },
+  guidelinesLink: {
+    color: C.primary,
+    textDecorationLine: 'underline',
   },
 });

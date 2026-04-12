@@ -101,7 +101,8 @@ async function persistPhoto(cacheUri: string): Promise<string> {
 
 export default function AdditionalPhotosScreen() {
   useScreenTrace("ONB_ADDITIONAL_PHOTOS");
-  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, bio, setBio, clearAllPhotos, verificationReferencePrimary } = useOnboardingStore();
+  // PHASE-1 RESTRUCTURE: Bio added back - now MANDATORY
+  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, clearAllPhotos, verificationReferencePrimary, bio, setBio } = useOnboardingStore();
   const { userId, token } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -119,7 +120,7 @@ export default function AdditionalPhotosScreen() {
   // Query onboarding status for reference photo existence check (source of truth)
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Backend mutations
@@ -310,14 +311,11 @@ export default function AdditionalPhotosScreen() {
   // Warning state for minimum photos
   const [showPhotoWarning, setShowPhotoWarning] = useState(false);
 
-  // Error state for bio validation
-  const [bioError, setBioError] = useState<string | null>(null);
+  // PHASE-1 RESTRUCTURE: Bio added back - error state for validation
+  const [showBioError, setShowBioError] = useState(false);
 
-  // DIRTY FLAG: Track if user has manually edited bio to prevent auto-refill loops
-  const [bioDirty, setBioDirty] = useState(false);
   // Track if initial prefill has already happened
   const didPrefillPhotos = React.useRef(false);
-  const didPrefillBio = React.useRef(false);
 
   // Prefill photos from demoProfiles - run ONCE on mount when data is ready
   useEffect(() => {
@@ -346,20 +344,17 @@ export default function AdditionalPhotosScreen() {
     }
   }, [demoHydrated, demoProfile, photos, setPhotoAtIndex]);
 
-  // Prefill bio from demoProfiles - run ONCE on mount if bio is empty and not dirty
+  // PHASE-1 RESTRUCTURE: Bio prefill from demoProfile
+  const didPrefillBio = React.useRef(false);
   useEffect(() => {
-    // Skip if already prefilled, dirty, or not in demo mode
-    if (didPrefillBio.current || bioDirty || !isDemoMode || !demoHydrated) return;
+    if (didPrefillBio.current || !isDemoMode || !demoHydrated) return;
     if (!demoProfile?.bio) return;
-    // Only prefill if current bio is empty
-    if (bio && bio.trim().length > 0) return;
+    if (bio && bio.length > 0) return; // Already has a bio
 
-    // Mark as prefilled BEFORE setting to prevent re-runs
     didPrefillBio.current = true;
-
     setBio(demoProfile.bio);
     console.log('[PHOTOS] prefilled bio from demoProfile');
-  }, [demoHydrated, demoProfile, bio, bioDirty, setBio]);
+  }, [demoHydrated, demoProfile, bio, setBio]);
 
   // FIX 2: Removed redundant syncPhotosFromBackend on mount
   // The useQuery(api.photos.getUserPhotos) subscription at line 151-154 already provides
@@ -966,49 +961,45 @@ export default function AdditionalPhotosScreen() {
       });
     }
 
-    // Gate: minimum 2 photos required
-    // BUG FIX: Account for reference photo in effective count (matches backend logic)
-    // effectivePhotoCount = normal photos + reference photo (if exists)
-    const effectivePhotoCount = photoCount + (hasReferencePhoto ? 1 : 0);
+    // Gate: minimum photos required
+    // PRODUCT RULE FIX: Reference photo is for verification, NOT for profile display
+    // Users need at least 1 NORMAL/additional photo for their profile
+    // The reference photo does NOT count toward the minimum profile photo requirement
+    const MIN_NORMAL_PHOTOS_REQUIRED = 1; // At least 1 additional profile photo
 
-    if (effectivePhotoCount < MIN_PHOTOS_REQUIRED) {
-      console.warn(`[PHOTO_GATE] Blocked: effectivePhotoCount=${effectivePhotoCount} < MIN_PHOTOS_REQUIRED=${MIN_PHOTOS_REQUIRED}`);
-      console.warn('[PHOTO_GATE] Photo breakdown:', { normalPhotoCount: photoCount, hasReferencePhoto, effectivePhotoCount });
+    if (photoCount < MIN_NORMAL_PHOTOS_REQUIRED) {
+      console.warn(`[PHOTO_GATE] Blocked: normalPhotoCount=${photoCount} < MIN_NORMAL_PHOTOS_REQUIRED=${MIN_NORMAL_PHOTOS_REQUIRED}`);
+      console.warn('[PHOTO_GATE] Reference photo does NOT count toward profile minimum');
       setShowPhotoWarning(true);
       return;
     }
 
-    // BUG FIX: Log when reference photo allows bypass of "Photo Required" warning
-    if (hasReferencePhoto && photoCount < MIN_PHOTOS_REQUIRED) {
-      if (__DEV__) {
-        console.log('[PHOTO_REQUIRED_BLOCKED] referenceExists=true, bypassing normal photo requirement', {
-          normalPhotoCount: photoCount,
-          hasReferencePhoto,
-          effectivePhotoCount,
-          note: 'Reference photo counts toward MIN_PHOTOS_REQUIRED',
-        });
-      }
-    }
-
     if (__DEV__) {
-      console.log(`[PHOTO_GATE] Passed: effectivePhotoCount=${effectivePhotoCount} >= MIN_PHOTOS_REQUIRED=${MIN_PHOTOS_REQUIRED}`, {
+      console.log(`[PHOTO_GATE] Passed: normalPhotoCount=${photoCount} >= MIN_NORMAL_PHOTOS_REQUIRED=${MIN_NORMAL_PHOTOS_REQUIRED}`, {
         normalPhotos: photoCount,
-        referencePhoto: hasReferencePhoto ? 1 : 0,
+        hasReferencePhoto,
+        note: 'Reference photo is separate from profile photos',
       });
     }
 
-    // Gate: bio is mandatory
-    const trimmedBio = bio.trim();
-    if (!trimmedBio) {
-      setBioError('Write your bio to continue.');
+    // PHASE-1 RESTRUCTURE: Bio validation - MANDATORY
+    const trimmedBio = (bio || '').trim();
+    if (trimmedBio.length < VALIDATION.BIO_MIN_LENGTH) {
+      console.warn(`[BIO_GATE] Blocked: bio length=${trimmedBio.length} < BIO_MIN_LENGTH=${VALIDATION.BIO_MIN_LENGTH}`);
+      setShowBioError(true);
+      Alert.alert(
+        'Bio Required',
+        `Please write a short bio (at least ${VALIDATION.BIO_MIN_LENGTH} characters) to help others know you better.`,
+        [{ text: 'OK' }]
+      );
       return;
     }
 
-    // Clear warnings/errors if we passed all checks
+    // Clear warnings if we passed all checks
     setShowPhotoWarning(false);
-    setBioError(null);
+    setShowBioError(false);
 
-    // SAVE-AS-YOU-GO: Persist photos + bio to demoProfiles immediately
+    // SAVE-AS-YOU-GO: Persist photos and bio to demoProfiles immediately
     if (isDemoMode && userId) {
       const validPhotos = photos.filter((p): p is string => typeof p === 'string' && p.length > 0);
       const demoStore = useDemoStore.getState();
@@ -1016,7 +1007,7 @@ export default function AdditionalPhotosScreen() {
         photos: validPhotos.map((uri) => ({ url: uri })),
         bio: trimmedBio,
       });
-      console.log(`[PHOTOS] saved ${validPhotos.length} photos + bio to demoProfile`);
+      console.log(`[PHOTOS] saved ${validPhotos.length} photos and bio to demoProfile`);
     }
 
     // CENTRAL EDIT HUB: Return to Review if editing from there
@@ -1026,14 +1017,14 @@ export default function AdditionalPhotosScreen() {
       return;
     }
 
-    // Skip bio screen - go directly to permissions
+    // PHASE-1 RESTRUCTURE: Go to review after additional-photos (step 5 → step 6)
     // CRITICAL: Navigation MUST happen unconditionally after validation passes
     if (__DEV__) {
-      console.log('[PHOTO_GATE] All validations passed. Navigating to permissions...');
-      console.log('[ONB] additional-photos → permissions (continue)');
+      console.log('[PHOTO_GATE] All validations passed. Navigating to review...');
+      console.log('[ONB] additional-photos → review (continue)');
     }
-    setStep('permissions');
-    router.push('/(onboarding)/permissions');
+    setStep('review');
+    router.push('/(onboarding)/review');
   };
 
   // Render unified photo grid (ALL slots 0-8, primary included)
@@ -1270,7 +1261,7 @@ export default function AdditionalPhotosScreen() {
                 source={{ uri: primaryPhoto ?? undefined }}
                 style={styles.primaryImage}
                 contentFit="cover"
-                blurRadius={displayPhotoVariant === 'blurred' ? 15 : 0}
+                // REMOVED: blurRadius - display options removed from onboarding
               />
             ) : (
               <View style={styles.primaryPlaceholder}>
@@ -1307,82 +1298,48 @@ export default function AdditionalPhotosScreen() {
           </TouchableOpacity>
         )}
 
-        {/* Bio Section */}
+        {/* PHASE-1 RESTRUCTURE: Bio section added back - MANDATORY */}
         <View style={styles.bioSection}>
           <Text style={styles.sectionTitle}>About You</Text>
+          <Text style={styles.bioSubtitle}>
+            Write a short bio to help others get to know you
+          </Text>
           <TextInput
-            style={[styles.bioInput, bioError && styles.bioInputError]}
+            style={[
+              styles.bioInput,
+              showBioError && styles.bioInputError,
+            ]}
             value={bio}
             onChangeText={(text) => {
               setBio(text);
-              // Mark as dirty - user has manually edited
-              if (!bioDirty) setBioDirty(true);
-              // Clear error when user types
-              if (bioError) setBioError(null);
+              if (showBioError && text.trim().length >= VALIDATION.BIO_MIN_LENGTH) {
+                setShowBioError(false);
+              }
             }}
-            placeholder="Write a short bio about yourself…"
+            placeholder="Tell others about yourself..."
             placeholderTextColor={COLORS.textMuted}
             multiline
-            numberOfLines={3}
             maxLength={VALIDATION.BIO_MAX_LENGTH}
             textAlignVertical="top"
           />
           <View style={styles.bioFooter}>
-            {bioError ? (
-              <Text style={styles.bioErrorText}>{bioError}</Text>
-            ) : (
-              <View />
-            )}
+            <Text style={[
+              styles.bioHint,
+              showBioError && styles.bioHintError,
+            ]}>
+              {showBioError ? `Minimum ${VALIDATION.BIO_MIN_LENGTH} characters required` : 'Required'}
+            </Text>
             <Text style={styles.bioCharCount}>
-              {bio.length}/{VALIDATION.BIO_MAX_LENGTH}
+              {(bio || '').length}/{VALIDATION.BIO_MAX_LENGTH}
             </Text>
           </View>
         </View>
 
-        {/* Privacy Options */}
-        <View style={styles.privacySection}>
-          <Text style={styles.sectionTitle}>Display Options</Text>
-          {privacyOptions.map((option) => {
-            const isSelected = displayPhotoVariant === option.id;
-            const isDisabled = option.disabled;
-            return (
-              <TouchableOpacity
-                key={option.id}
-                style={[
-                  styles.privacyOption,
-                  isSelected && styles.privacyOptionSelected,
-                  isDisabled && styles.privacyOptionDisabled,
-                ]}
-                onPress={() => !isDisabled && handleSetDisplayPhotoVariant(option.id)}
-                disabled={isDisabled}
-              >
-                <View style={[styles.privacyIcon, isSelected && styles.privacyIconSelected]}>
-                  <Ionicons
-                    name={option.icon}
-                    size={20}
-                    color={isSelected ? COLORS.white : COLORS.primary}
-                  />
-                </View>
-                <View style={styles.privacyContent}>
-                  <View style={styles.privacyHeader}>
-                    <Text style={[styles.privacyTitle, isDisabled && styles.privacyTitleDisabled]}>
-                      {option.title}
-                    </Text>
-                    {isDisabled && (
-                      <View style={styles.comingSoonBadge}>
-                        <Text style={styles.comingSoonText}>Soon</Text>
-                      </View>
-                    )}
-                  </View>
-                  <Text style={styles.privacyDescription}>{option.description}</Text>
-                </View>
-                {isSelected && (
-                  <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} />
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+        {/* Display Options REMOVED from onboarding per user request
+         * Privacy options (blur/cartoon/original) are not shown during onboarding
+         * Onboarding uses normal/original photo flow only
+         * These options may be re-enabled in Edit Profile later if needed
+         */}
 
         {/* Unified Photo Grid (All 9 slots including primary) */}
         <View style={styles.gridSection}>
@@ -1401,11 +1358,11 @@ export default function AdditionalPhotosScreen() {
 
         {/* Footer */}
         <View style={styles.footer}>
-          {/* Inline warning when trying to proceed with < 2 photos */}
+          {/* Inline warning when trying to proceed with < 1 additional photos */}
           {showPhotoWarning && (
             <View style={styles.warningBanner}>
               <Ionicons name="warning" size={16} color={COLORS.error} />
-              <Text style={styles.warningText}>Add at least {MIN_PHOTOS_REQUIRED} photos to continue.</Text>
+              <Text style={styles.warningText}>Add at least 1 profile photo to continue.</Text>
             </View>
           )}
           <Button
@@ -1414,8 +1371,8 @@ export default function AdditionalPhotosScreen() {
             onPress={handleNext}
             fullWidth
           />
-          {photoCount < MIN_PHOTOS_REQUIRED && !showPhotoWarning && (
-            <Text style={styles.hint}>Add at least {MIN_PHOTOS_REQUIRED} photos to continue</Text>
+          {photoCount < 1 && !showPhotoWarning && (
+            <Text style={styles.hint}>Add at least 1 profile photo to continue</Text>
           )}
         </View>
       </ScrollView>
@@ -1577,39 +1534,50 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontWeight: '600',
   },
-  // Bio section
+  // PHASE-1 RESTRUCTURE: Bio section - MANDATORY during onboarding
   bioSection: {
-    marginBottom: 16,
+    marginHorizontal: 16,
+    marginBottom: 24,
+  },
+  bioSubtitle: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    marginBottom: 12,
+    lineHeight: 18,
   },
   bioInput: {
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 10,
-    padding: 12,
-    fontSize: 14,
+    borderRadius: 14,
+    padding: 16,
+    fontSize: 15,
     color: COLORS.text,
-    minHeight: 80,
+    minHeight: 120,
     textAlignVertical: 'top',
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    lineHeight: 22,
   },
   bioInputError: {
     borderColor: COLORS.error,
-    borderWidth: 2,
+    borderWidth: 1.5,
   },
   bioFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 4,
+    marginTop: 8,
   },
-  bioErrorText: {
+  bioHint: {
     fontSize: 12,
+    color: COLORS.textMuted,
+  },
+  bioHintError: {
     color: COLORS.error,
     fontWeight: '500',
   },
   bioCharCount: {
-    fontSize: 11,
-    color: COLORS.textLight,
+    fontSize: 12,
+    color: COLORS.textMuted,
   },
   // Privacy options section
   privacySection: {

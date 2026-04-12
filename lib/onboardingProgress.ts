@@ -8,26 +8,18 @@ import type { OnboardingStep } from '@/types';
 
 /**
  * Ordered list of onboarding steps for progress calculation.
- * Each screen/route gets its own entry for per-screen progress advancement.
+ * CLEANED UP: Matches actual navigation flow (removed obsolete steps).
+ * Flow: basic_info → preferences → photo_upload → face_verification → additional_photos → review
  * Excludes: welcome (pre-progress), tutorial (no progress bar shown).
+ * Pre-auth screens (email_phone, otp, password) are separate from onboarding progress.
  */
 export const ONBOARDING_PROGRESS_STEPS: OnboardingStep[] = [
-  'email_phone',
-  'otp',
-  'password',
-  'basic_info',
-  'consent',
-  'prompts_part1',     // NEW: Seed questions (identity, social battery, values)
-  'prompts_part2',     // NEW: Section prompts (builder, performer, seeker, grounded)
-  'profile_details',   // profile-details/index.tsx
-  'lifestyle',         // profile-details/lifestyle.tsx
-  'life_rhythm',       // profile-details/life-rhythm.tsx (city, social, sleep, travel, work, values)
-  'preferences',
-  'photo_upload',
-  'face_verification',
-  'additional_photos',
-  'permissions',
-  'review',            // Final step = 100%
+  'basic_info',        // Step 1: Name, DOB, gender
+  'preferences',       // Step 2: lookingFor, lgbtqPreference, relationshipIntent
+  'photo_upload',      // Step 3: Primary photo upload
+  'face_verification', // Step 4: Face verification
+  'additional_photos', // Step 5: Additional photos + displayPhotoVariant
+  'review',            // Step 6: Review and complete
   // 'tutorial' excluded - tutorial screen doesn't show progress bar
 ];
 
@@ -58,18 +50,12 @@ export function getProgressPercentage(step: OnboardingStep | undefined): number 
 
 /**
  * Route-to-step mapping for specific routes.
- * More specific routes are checked first.
+ * CLEANED UP: Only includes actual onboarding routes.
+ * Most routes use kebab-to-snake conversion (e.g., basic-info → basic_info).
  */
 const ROUTE_TO_STEP_MAP: Record<string, OnboardingStep> = {
-  // New 2-page prompt system
-  'prompts-part1': 'prompts_part1',
-  'prompts-part2': 'prompts_part2',
-  // Profile details sub-routes (must be before generic profile-details)
-  'profile-details/life-rhythm': 'life_rhythm',
-  'profile-details/lifestyle': 'lifestyle',
-  'profile-details/index': 'profile_details',
-  'profile-details': 'profile_details',
-  // All other routes use kebab-to-snake conversion
+  // All current routes use kebab-to-snake conversion automatically
+  // This map is for any special cases that don't follow the pattern
 };
 
 /**
@@ -118,12 +104,19 @@ export function routeToStep(routePath: string, editFromReview?: boolean): Onboar
 /**
  * Get progress step from route path string.
  * Convenience wrapper for OnboardingProgressHeader.
+ * Returns step number, total steps, and percentage for both stepwise and bar display.
  */
 export function getProgressFromRoute(
   routePath: string,
   editFromReview?: boolean
-): { step: OnboardingStep | null; percentage: number | null } {
+): {
+  step: OnboardingStep | null;
+  stepNumber: number | null;
+  totalSteps: number;
+  percentage: number | null;
+} {
   const step = routeToStep(routePath, editFromReview);
+  const stepNumber = step ? getStepNumber(step) : null;
   const percentage = step ? getProgressPercentage(step) : null;
-  return { step, percentage };
+  return { step, stepNumber, totalSteps: ONBOARDING_TOTAL_STEPS, percentage };
 }

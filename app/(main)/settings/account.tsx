@@ -1,4 +1,8 @@
-import React, { useState, useCallback } from 'react';
+/*
+ * LOCKED (ACCOUNT SETTINGS)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ */
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -7,6 +11,7 @@ import {
   TouchableOpacity,
   Alert,
   Modal,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -24,15 +29,17 @@ import { getDemoCurrentUser } from '@/lib/demoData';
 export default function AccountSettingsScreen() {
   const router = useRouter();
   const logout = useAuthStore((s) => s.logout);
-  const authUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const softDeleteMutation = useMutation(api.auth.softDeleteAccount);
+  const serverLogout = useMutation(api.auth.logout);
 
   // Query current user for email display (live mode only)
   const currentUserQuery = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && authUserId ? { userId: authUserId as any } : 'skip'
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
+  const [timedOut, setTimedOut] = useState(false);
 
   // Safe back navigation - ensures return to Profile tab
   const handleGoBack = useCallback(() => {
@@ -42,6 +49,17 @@ export default function AccountSettingsScreen() {
       router.replace('/(main)/(tabs)/profile' as any);
     }
   }, [router]);
+
+  useEffect(() => {
+    if (isDemoMode || currentUserQuery !== undefined || !token) return;
+
+    const timeout = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(timeout);
+  }, [currentUserQuery, token]);
+
+  const isLoading = !isDemoMode && !!token && currentUserQuery === undefined && !timedOut;
+  const isUnavailable =
+    !isDemoMode && (!token || currentUserQuery === null || (currentUserQuery === undefined && timedOut));
 
   // Delete confirmation modal state (Step 1: info modal)
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -56,6 +74,20 @@ export default function AccountSettingsScreen() {
           text: 'Log Out',
           style: 'destructive',
           onPress: async () => {
+            // SEC-3 FIX: Server logout FIRST (with timeout) to invalidate session
+            if (!isDemoMode && token) {
+              try {
+                await Promise.race([
+                  serverLogout({ token }),
+                  new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+                ]);
+                if (__DEV__) console.log('[Logout] Server session invalidated');
+              } catch (e) {
+                console.warn('[Logout] Server logout failed or timed out:', e);
+              }
+            }
+
+            // Clear local state after server logout attempt
             if (isDemoMode) {
               useDemoStore.getState().demoLogout();
             }
@@ -80,11 +112,11 @@ export default function AccountSettingsScreen() {
     // Step 2: Final confirmation alert
     Alert.alert(
       'Are you sure?',
-      'This will schedule your account for deletion. You can recover it within 30 days by logging in again.',
+      'This will deactivate your account. Sign in again at any time to reactivate it.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Delete',
+          text: 'Deactivate',
           style: 'destructive',
           onPress: async () => {
             try {
@@ -98,14 +130,14 @@ export default function AccountSettingsScreen() {
               }
 
               // Real mode: call soft delete mutation before logging out
-              if (!authUserId) {
-                Alert.alert('Error', 'Unable to delete account. Please try logging out and back in.');
+              if (!token) {
+                Alert.alert('Error', 'Unable to deactivate your account. Please try logging out and back in.');
                 return;
               }
 
               await softDeleteMutation({
-                authUserId,
-                reason: 'User requested account deletion',
+                token,
+                reason: 'User requested account deactivation',
               });
 
               // Clear local state and log out
@@ -113,7 +145,7 @@ export default function AccountSettingsScreen() {
               await logout();
               safeReplace(router, '/(auth)/welcome', 'account->delete');
             } catch (error: any) {
-              Alert.alert('Error', error.message || 'Failed to delete account. Please try again.');
+              Alert.alert('Error', error.message || 'Failed to deactivate account. Please try again.');
             }
           },
         },
@@ -135,6 +167,20 @@ export default function AccountSettingsScreen() {
         <View style={{ width: 24 }} />
       </View>
 
+      {isLoading ? (
+        <View style={styles.stateContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.stateText}>Loading your account details...</Text>
+        </View>
+      ) : isUnavailable ? (
+        <View style={styles.stateContainer}>
+          <Ionicons name="person-circle-outline" size={40} color={COLORS.textMuted} />
+          <Text style={styles.stateText}>We couldn&apos;t load your account details.</Text>
+          <TouchableOpacity style={styles.stateButton} onPress={handleGoBack}>
+            <Text style={styles.stateButtonText}>Back to Profile</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         {/* Account Info Section */}
         <View style={styles.section}>
@@ -155,7 +201,7 @@ export default function AccountSettingsScreen() {
               <Ionicons name="call-outline" size={22} color={COLORS.text} />
               <View style={styles.infoRowContent}>
                 <Text style={styles.infoRowLabel}>Phone</Text>
-                <Text style={styles.infoRowValue}>Not set</Text>
+                <Text style={styles.infoRowValue}>{currentUser?.phone || 'Not set'}</Text>
               </View>
             </View>
           </View>
@@ -178,20 +224,19 @@ export default function AccountSettingsScreen() {
           <View style={styles.dangerCard}>
             <View style={styles.dangerCardHeader}>
               <Ionicons name="warning-outline" size={20} color={COLORS.error} />
-              <Text style={styles.dangerCardTitle}>Delete Account</Text>
+              <Text style={styles.dangerCardTitle}>Deactivate Account</Text>
             </View>
             <Text style={styles.dangerCardDescription}>
-              Your account will be scheduled for deletion.{'\n'}
-              You can recover it within 30 days.{'\n'}
-              After 30 days, all data will be permanently deleted.
+              Your account will be deactivated until you sign in again.
             </Text>
             <TouchableOpacity style={styles.dangerButton} onPress={handleDeletePress} activeOpacity={0.8}>
               <Ionicons name="trash-outline" size={18} color={COLORS.white} />
-              <Text style={styles.dangerButtonText}>Delete My Account</Text>
+              <Text style={styles.dangerButtonText}>Deactivate My Account</Text>
             </TouchableOpacity>
           </View>
         </View>
       </ScrollView>
+      )}
 
       {/* Delete Info Modal (Step 1) */}
       <Modal
@@ -204,18 +249,15 @@ export default function AccountSettingsScreen() {
           <View style={styles.modalContainer}>
             <View style={styles.modalHeader}>
               <Ionicons name="alert-circle" size={32} color={COLORS.error} />
-              <Text style={styles.modalTitle}>Delete Account</Text>
+              <Text style={styles.modalTitle}>Deactivate Account</Text>
             </View>
 
             <View style={styles.modalInfoList}>
               <Text style={styles.modalInfoItem}>
-                • Your account will be scheduled for deletion.
+                • Your account will be deactivated.
               </Text>
               <Text style={styles.modalInfoItem}>
-                • You can recover it within 30 days.
-              </Text>
-              <Text style={styles.modalInfoItem}>
-                • After 30 days, all data will be permanently deleted.
+                • Signing in again will reactivate it.
               </Text>
             </View>
 
@@ -259,6 +301,31 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  stateContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  stateText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  stateButton: {
+    marginTop: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+  },
+  stateButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   section: {
     paddingHorizontal: 16,

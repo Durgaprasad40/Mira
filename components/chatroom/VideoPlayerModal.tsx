@@ -10,7 +10,7 @@ import {
 import { useVideoPlayer, VideoView, VideoPlayer } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { getVideoUri } from '@/lib/videoCache';
+import { getVideoUri, getCachedUri } from '@/lib/videoCache';
 
 const C = INCOGNITO_COLORS;
 
@@ -43,10 +43,19 @@ export default function VideoPlayerModal({ visible, videoUri, onClose }: VideoPl
   const [cachedUri, setCachedUri] = useState<string>(videoUri);
   const [isLoading, setIsLoading] = useState(true);
 
-  // VIDEO-CACHE-FIX: Load cached URI when modal opens
+  // MEDIA-INSTANT-FIX: Check cache synchronously first to avoid loading flash
   useEffect(() => {
     if (!visible || !videoUri) return;
 
+    // Check memory cache synchronously - instant return if cached
+    const cachedSync = getCachedUri(videoUri);
+    if (cachedSync) {
+      setCachedUri(cachedSync);
+      setIsLoading(false);
+      return;
+    }
+
+    // Not in memory cache - need async download
     let mounted = true;
     setIsLoading(true);
 

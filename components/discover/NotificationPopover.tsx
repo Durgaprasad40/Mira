@@ -41,13 +41,13 @@ export function NotificationPopover({
 }: NotificationPopoverProps) {
   const { notifications, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
 
-  // Mark all as seen when popover opens
+  // Keep expiry cleanup on open, but don't clear unread state until the user
+  // opens an item or explicitly taps "Mark all read".
   useEffect(() => {
     if (visible) {
-      markAllSeen();
       cleanupExpiredNotifications();
     }
-  }, [visible, markAllSeen, cleanupExpiredNotifications]);
+  }, [visible, cleanupExpiredNotifications]);
 
   const handleNotificationPress = (notification: AppNotification) => {
     if (!notification.isRead) {
@@ -60,14 +60,18 @@ export function NotificationPopover({
     // Build common query params for context
     const notifParams = `source=notification&notificationId=${notification._id}`;
     const dedupeParam = notification.dedupeKey ? `&dedupeKey=${encodeURIComponent(notification.dedupeKey)}` : '';
+    const actorUserId =
+      notification.data?.actorUserId ??
+      notification.data?.otherUserId ??
+      notification.data?.userId;
 
     switch (notification.type) {
       case 'match':
       case 'new_match':
       case 'match_created':
-        if (notification.data?.otherUserId) {
-          const mId = notification.data.matchId ?? `match_${notification.data.otherUserId}`;
-          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${notification.data.otherUserId}&${notifParams}${dedupeParam}` as any);
+        if (actorUserId) {
+          const mId = notification.data?.matchId ?? `match_${actorUserId}`;
+          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${actorUserId}&${notifParams}${dedupeParam}` as any);
         }
         break;
       case 'like':
@@ -75,11 +79,14 @@ export function NotificationPopover({
       case 'super_like':
       case 'superlike':
       case 'super_like_received':
+        if (!actorUserId) {
+          break;
+        }
         router.push({
           pathname: '/(main)/(tabs)/messages',
           params: {
             focus: 'likes',
-            profileId: notification.data?.otherUserId,
+            profileId: actorUserId,
             source: 'notification',
             notificationId: notification._id,
             dedupeKey: notification.dedupeKey,
@@ -104,7 +111,7 @@ export function NotificationPopover({
         router.push(`/(main)/(tabs)/home?${notifParams}${dedupeParam}` as any);
         break;
       case 'system':
-        router.push(`/(main)/settings?${notifParams}${dedupeParam}` as any);
+        router.push(`/(main)/(tabs)/profile?${notifParams}${dedupeParam}` as any);
         break;
       case 'subscription':
         router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);
@@ -242,7 +249,7 @@ export function NotificationPopover({
             <Text style={styles.headerTitle}>Notifications</Text>
             {notifications.length > 0 && (
               <TouchableOpacity onPress={markAllSeen}>
-                <Text style={styles.markAllText}>Mark Read</Text>
+                <Text style={styles.markAllText}>Mark all read</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -260,7 +267,7 @@ export function NotificationPopover({
             <View style={styles.emptyContainer}>
               <Ionicons name="notifications-outline" size={40} color={COLORS.textLight} />
               <Text style={styles.emptyTitle}>No notifications</Text>
-              <Text style={styles.emptySubtitle}>You're all caught up!</Text>
+              <Text style={styles.emptySubtitle}>New activity will show up here.</Text>
             </View>
           )}
 

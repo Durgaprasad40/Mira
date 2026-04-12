@@ -17,15 +17,15 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
-  TextInput,
-  Keyboard,
-  useWindowDimensions,
+  // PHASE-1 RESTRUCTURE: TextInput, Keyboard, useWindowDimensions removed - age/distance inputs removed
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
-import { Input, Button } from '@/components/ui';
+import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS } from '@/lib/constants';
+// PHASE-1 RESTRUCTURE: ACTIVITY_FILTERS, VALIDATION removed - activities/age/distance removed from onboarding
+import { Button } from '@/components/ui';
+// PHASE-1 RESTRUCTURE: Input removed - age/distance inputs removed
 import { Toast } from '@/components/ui/Toast';
 import { useOnboardingStore, LGBTQ_OPTIONS, LgbtqOption } from '@/stores/onboardingStore';
 import { useDemoStore } from '@/stores/demoStore';
@@ -34,56 +34,69 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import type { Gender, ActivityFilter, RelationshipIntent } from '@/types';
+import type { Gender, RelationshipIntent } from '@/types';
+// PHASE-1 RESTRUCTURE: ActivityFilter removed - activities removed from onboarding
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { useScreenTrace } from '@/lib/devTrace';
 
-// Age range constraints
-const MIN_AGE_LIMIT = 18;
-const MAX_AGE_LIMIT = 70;
-
-// Distance constraints
-const DISTANCE_MIN = 1;
-const DISTANCE_MAX = 150;
+// PHASE-1 RESTRUCTURE: Age/distance/interests constants removed from onboarding
+// Auto-set maxDistance = 50 when saving preferences
 const DISTANCE_DEFAULT = 50;
 
-const MIN_INTERESTS = 3;
-const MAX_INTERESTS = 7;
 const MAX_RELATIONSHIP_INTENTS = 3;
 
-// STABILITY FIX: Schema-safe relationship intent values (excludes UI-only values)
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
-  'long_term', 'short_term', 'fwb', 'figuring_out',
-  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+  'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes',
+  'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
 ]);
 
-// Sanitize relationshipIntent to only include schema-valid values before Convex mutation
+// Legacy → Current mapping for relationshipIntent values
+// These old values may exist in cached drafts or older user profiles
+const LEGACY_INTENT_MAP: Record<string, string> = {
+  'long_term': 'serious_vibes',
+  'short_term': 'keep_it_casual',
+  'fwb': 'keep_it_casual',
+  'figuring_out': 'exploring_vibes',
+  'short_to_long': 'see_where_it_goes',
+  'long_to_short': 'see_where_it_goes',
+  'casual': 'keep_it_casual',
+  'serious': 'serious_vibes',
+  'marriage': 'serious_vibes',
+  'friendship': 'just_friends',
+  'open': 'open_to_anything',
+};
+
+// Sanitize relationshipIntent: map legacy values AND filter invalid ones
 function sanitizeRelationshipIntent(arr: string[]): string[] {
-  const sanitized = arr.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
-  if (__DEV__ && sanitized.length !== arr.length) {
-    const removed = arr.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
-    console.warn('[PREFERENCES] Removed invalid relationshipIntent values:', removed);
+  // Step 1: Map legacy values to current valid values
+  const mapped = arr.map(v => LEGACY_INTENT_MAP[v] || v);
+
+  // Step 2: Filter to only valid values
+  const sanitized = mapped.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+
+  // Step 3: Deduplicate (multiple legacy values might map to same current value)
+  const deduped = [...new Set(sanitized)];
+
+  if (__DEV__ && (arr.length !== deduped.length || arr.some((v, i) => v !== mapped[i]))) {
+    console.log('[PREFERENCES] relationshipIntent normalization:', {
+      original: arr,
+      mapped,
+      final: deduped,
+    });
   }
-  return sanitized;
+  return deduped;
 }
 
 export default function PreferencesScreen() {
   useScreenTrace("ONB_PREFERENCES");
+  // PHASE-1 RESTRUCTURE: Simplified to only lookingFor, lgbtqPreference, relationshipIntent
   const {
     lookingFor,
     relationshipIntent,
-    activities,
     lgbtqPreference,
-    minAge,
-    maxAge,
-    maxDistance,
-    toggleLookingFor,
     toggleRelationshipIntent,
-    toggleActivity,
     toggleLgbtqPreference,
-    setActivities,
-    setMinAge,
-    setMaxAge,
     setMaxDistance,
     setLookingFor,
     setRelationshipIntent,
@@ -103,86 +116,23 @@ export default function PreferencesScreen() {
   // CENTRAL EDIT HUB: Detect if editing from Review screen
   const isEditFromReview = params.editFromReview === 'true';
   const scrollRef = useRef<ScrollView>(null);
-  const distanceSectionRef = useRef<View>(null);
-  const interestsSectionRef = useRef<View>(null);
+  // PHASE-1 RESTRUCTURE: distanceSectionRef, interestsSectionRef removed
   const relationshipIntentSectionRef = useRef<View>(null);
-  const { width: screenWidth } = useWindowDimensions();
 
-  // Validation state
+  // PHASE-1 RESTRUCTURE: Simplified validation state
   const [showTopError, setShowTopError] = useState(false);
-  const [interestsError, setInterestsError] = useState('');
   const [relationshipIntentError, setRelationshipIntentError] = useState('');
-  const [distanceError, setDistanceError] = useState('');
   const [lgbtqError, setLgbtqError] = useState('');
-  const [ageError, setAgeError] = useState(''); // STABILITY FIX: Age validation feedback
 
   // P1 STABILITY: Prevent double-submission on rapid taps
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Local text states for age inputs (allows temporary empty string while typing)
-  const [minAgeText, setMinAgeText] = useState(minAge.toString());
-  const [maxAgeText, setMaxAgeText] = useState(maxAge.toString());
-
-  // Local text state for distance input (allows empty/any value while typing, clamp only on Continue)
-  const [distanceText, setDistanceText] = useState(maxDistance.toString());
-
-  // Y positions for sections (captured via onLayout for safe scrolling)
-  const [distanceSectionY, setDistanceSectionY] = useState<number | null>(null);
+  // Y position for relationship intent section (for error scrolling)
   const [relationshipIntentSectionY, setRelationshipIntentSectionY] = useState<number | null>(null);
-  const [interestsSectionY, setInterestsSectionY] = useState<number | null>(null);
-  const [ageSectionY, setAgeSectionY] = useState<number | null>(null);
 
-  // Calculate interest chip width: 3 columns default, 2 for narrow screens (<360px)
-  const contentPadding = 48; // 24px * 2
-  const gapSize = 6;
-  const numColumns = screenWidth < 360 ? 2 : 3;
-  const interestChipWidth = (screenWidth - contentPadding - gapSize * (numColumns - 1)) / numColumns;
+  // PHASE-1 RESTRUCTURE: Keyboard height, activities sanitization, and age/distance sync removed
 
-  // Keyboard height state for Android
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
-
-  useEffect(() => {
-    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
-      setKeyboardHeight(e.endCoordinates.height);
-    });
-    const hideSub = Keyboard.addListener('keyboardDidHide', () => {
-      setKeyboardHeight(0);
-    });
-    return () => {
-      showSub.remove();
-      hideSub.remove();
-    };
-  }, []);
-
-  // Sanitize interests on mount: remove any "ghost" items not in current ACTIVITY_FILTERS
-  useEffect(() => {
-    const validKeys = new Set(ACTIVITY_FILTERS.map((a) => a.value));
-    const sanitized = activities.filter((item) => validKeys.has(item));
-    if (sanitized.length !== activities.length) {
-      // Ghost items found, update store to remove them
-      setActivities(sanitized as typeof activities);
-    }
-  }, []); // Run only on mount
-
-  // STABILITY FIX: Sync local text states after Convex hydration completes
-  // This ensures previously entered values are visible when user returns
-  useEffect(() => {
-    if (!isDemoMode && convexHydrated) {
-      // Sync from hydrated store values
-      setMinAgeText(minAge.toString());
-      setMaxAgeText(maxAge.toString());
-      setDistanceText(maxDistance.toString());
-      if (__DEV__) {
-        console.log('[PREFERENCES] Synced from hydrated store:', {
-          minAge,
-          maxAge,
-          maxDistance,
-        });
-      }
-    }
-  }, [convexHydrated]); // Run when hydration completes
-
-  // Prefill from demoProfiles if onboardingStore is empty
+  // PHASE-1 RESTRUCTURE: Simplified prefill - only lookingFor, relationshipIntent, lgbtqPreference
   useEffect(() => {
     if (isDemoMode && demoHydrated && demoProfile) {
       let loaded = false;
@@ -194,25 +144,6 @@ export default function PreferencesScreen() {
         setRelationshipIntent(demoProfile.relationshipIntent as RelationshipIntent[]);
         loaded = true;
       }
-      if (demoProfile.activities && demoProfile.activities.length > 0 && activities.length === 0) {
-        setActivities(demoProfile.activities as ActivityFilter[]);
-        loaded = true;
-      }
-      if (demoProfile.minAge != null && minAge === MIN_AGE_LIMIT) {
-        setMinAge(demoProfile.minAge);
-        setMinAgeText(demoProfile.minAge.toString());
-        loaded = true;
-      }
-      if (demoProfile.maxAge != null && maxAge === MAX_AGE_LIMIT) {
-        setMaxAge(demoProfile.maxAge);
-        setMaxAgeText(demoProfile.maxAge.toString());
-        loaded = true;
-      }
-      if (demoProfile.maxDistance != null && maxDistance === DISTANCE_DEFAULT) {
-        setMaxDistance(demoProfile.maxDistance);
-        setDistanceText(demoProfile.maxDistance.toString());
-        loaded = true;
-      }
       // Prefill LGBTQ Preference if available
       if (demoProfile.lgbtqPreference && demoProfile.lgbtqPreference.length > 0 && lgbtqPreference.length === 0) {
         setLgbtqPreference(demoProfile.lgbtqPreference as LgbtqOption[]);
@@ -222,39 +153,7 @@ export default function PreferencesScreen() {
     }
   }, [demoHydrated, demoProfile]);
 
-  // Scroll to distance input when focused (ensures visibility above keyboard)
-  const handleDistanceFocus = () => {
-    if (distanceSectionY !== null) {
-      setTimeout(() => {
-        scrollRef.current?.scrollTo({ y: distanceSectionY - 100, animated: true });
-      }, 100);
-    }
-  };
-
-  // Distance input change handler (text state only, no clamping until Continue)
-  const handleDistanceChange = (text: string) => {
-    // Allow only digits or empty string
-    const cleaned = text.replace(/[^0-9]/g, '');
-    setDistanceText(cleaned);
-    // Clear error when user types
-    if (distanceError) {
-      setDistanceError('');
-      if (!interestsError && !relationshipIntentError) setShowTopError(false);
-    }
-  };
-
-  // Age input change handlers (text state only, no store update, no clamping)
-  const handleMinAgeChange = (text: string) => {
-    // Allow only digits or empty string - no snapping back
-    const cleaned = text.replace(/[^0-9]/g, '');
-    setMinAgeText(cleaned);
-  };
-
-  const handleMaxAgeChange = (text: string) => {
-    // Allow only digits or empty string - no snapping back
-    const cleaned = text.replace(/[^0-9]/g, '');
-    setMaxAgeText(cleaned);
-  };
+  // PHASE-1 RESTRUCTURE: Distance/age handlers removed
 
   // A) Looking For: SINGLE-SELECT only
   const handleLookingForSelect = (gender: Gender) => {
@@ -264,20 +163,6 @@ export default function PreferencesScreen() {
     }
     // Replace with single selection
     setLookingFor([gender]);
-  };
-
-  const handleActivityToggle = (activity: ActivityFilter) => {
-    const isSelected = activities.includes(activity);
-    if (!isSelected && activities.length >= MAX_INTERESTS) {
-      Toast.show(`Maximum ${MAX_INTERESTS} interests allowed`);
-      return;
-    }
-    toggleActivity(activity);
-    // Clear error when user selects at least 1 interest
-    if (!isSelected && interestsError) {
-      setInterestsError('');
-      if (!relationshipIntentError) setShowTopError(false);
-    }
   };
 
   // C) Relationship Goal: MIN 1, MAX 3
@@ -293,9 +178,10 @@ export default function PreferencesScreen() {
     toggleRelationshipIntent(intentValue);
 
     // Clear error when user selects at least 1 intent
+    // PHASE-1 RESTRUCTURE: Simplified - no interestsError to check
     if (!isSelected && relationshipIntentError) {
       setRelationshipIntentError('');
-      if (!interestsError) setShowTopError(false);
+      setShowTopError(false);
     }
   };
 
@@ -311,7 +197,7 @@ export default function PreferencesScreen() {
     let hasError = false;
     let firstErrorY: number | null = null;
 
-    // C) Validate relationship intent: require 1-3
+    // Validate relationship intent: require 1-3
     if (relationshipIntent.length < 1) {
       setRelationshipIntentError('Select at least 1 relationship goal to continue.');
       hasError = true;
@@ -324,59 +210,7 @@ export default function PreferencesScreen() {
       setRelationshipIntentError('');
     }
 
-    // Validate interests: require at least 1
-    if (activities.length < 1) {
-      setInterestsError('Select at least 1 interest to continue.');
-      hasError = true;
-      if (firstErrorY === null) firstErrorY = interestsSectionY;
-    } else {
-      setInterestsError('');
-    }
-
-    // D) Validate distance: required, must be valid number within bounds
-    const trimmedDistance = distanceText.trim();
-    const parsedDistance = parseInt(trimmedDistance, 10);
-    if (!trimmedDistance || isNaN(parsedDistance)) {
-      setDistanceError('Enter a distance (1-150 miles).');
-      hasError = true;
-      if (firstErrorY === null) firstErrorY = distanceSectionY;
-    } else if (parsedDistance < DISTANCE_MIN) {
-      setDistanceError(`Distance must be at least ${DISTANCE_MIN} mile.`);
-      hasError = true;
-      if (firstErrorY === null) firstErrorY = distanceSectionY;
-    } else if (parsedDistance > DISTANCE_MAX) {
-      // STABILITY FIX: Show error instead of silent clamping
-      setDistanceError(`Distance must be at most ${DISTANCE_MAX} miles.`);
-      hasError = true;
-      if (firstErrorY === null) firstErrorY = distanceSectionY;
-    } else {
-      setDistanceError('');
-    }
-
-    // E) Validate age: parse and validate bounds with explicit feedback
-    let finalMin = parseInt(minAgeText, 10);
-    let finalMax = parseInt(maxAgeText, 10);
-
-    // Default empty values
-    if (isNaN(finalMin)) finalMin = MIN_AGE_LIMIT;
-    if (isNaN(finalMax)) finalMax = MAX_AGE_LIMIT;
-
-    // STABILITY FIX: Validate age bounds with user feedback instead of silent clamping
-    if (finalMin < MIN_AGE_LIMIT || finalMin > MAX_AGE_LIMIT) {
-      setAgeError(`Minimum age must be between ${MIN_AGE_LIMIT} and ${MAX_AGE_LIMIT}.`);
-      hasError = true;
-      if (firstErrorY === null) firstErrorY = ageSectionY;
-    } else if (finalMax < MIN_AGE_LIMIT || finalMax > MAX_AGE_LIMIT) {
-      setAgeError(`Maximum age must be between ${MIN_AGE_LIMIT} and ${MAX_AGE_LIMIT}.`);
-      hasError = true;
-      if (firstErrorY === null) firstErrorY = ageSectionY;
-    } else if (finalMin > finalMax) {
-      setAgeError('Minimum age cannot be greater than maximum age.');
-      hasError = true;
-      if (firstErrorY === null) firstErrorY = ageSectionY;
-    } else {
-      setAgeError('');
-    }
+    // PHASE-1 RESTRUCTURE: Activities/distance/age validation removed
 
     if (hasError) {
       setShowTopError(true);
@@ -392,31 +226,21 @@ export default function PreferencesScreen() {
     // P1 STABILITY: Mark as submitting after validation passes
     setIsSubmitting(true);
 
-    // Age values already validated above - use parsed values directly
-    const finalDistance = parsedDistance;
+    // PHASE-1 RESTRUCTURE: Auto-set maxDistance = 50
+    setMaxDistance(DISTANCE_DEFAULT);
 
-    // Commit to store and update text display
-    setMinAge(finalMin);
-    setMaxAge(finalMax);
-    setMinAgeText(finalMin.toString());
-    setMaxAgeText(finalMax.toString());
-    setMaxDistance(finalDistance);
-    setDistanceText(finalDistance.toString());
-
-    // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
+    // SAVE-AS-YOU-GO: Persist to demoProfiles immediately in demo mode
+    // PHASE-1 RESTRUCTURE: Simplified - only lookingFor, relationshipIntent, lgbtqPreference
     if (isDemoMode && userId) {
       const demoStore = useDemoStore.getState();
       const dataToSave: Record<string, any> = {};
       if (lookingFor.length > 0) dataToSave.lookingFor = lookingFor;
       if (relationshipIntent.length > 0) dataToSave.relationshipIntent = relationshipIntent;
-      if (activities.length > 0) dataToSave.activities = activities;
       // LGBTQ Preference is optional - only save if user selected any
       if (lgbtqPreference.length > 0) dataToSave.lgbtqPreference = lgbtqPreference;
-      dataToSave.minAge = finalMin;
-      dataToSave.maxAge = finalMax;
-      dataToSave.maxDistance = finalDistance;
+      dataToSave.maxDistance = DISTANCE_DEFAULT; // Auto-set
       demoStore.saveDemoProfile(userId, dataToSave);
-      console.log(`[PREFERENCES] saved: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, activities=${activities.length}, lgbtqPref=${lgbtqPreference.length}, age=${finalMin}-${finalMax}, dist=${finalDistance}`);
+      console.log(`[PREFERENCES] saved: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, lgbtqPref=${lgbtqPreference.length}, dist=${DISTANCE_DEFAULT}`);
     }
 
     // LIVE MODE: Persist to Convex onboarding draft
@@ -426,12 +250,9 @@ export default function PreferencesScreen() {
       // STABILITY FIX: Sanitize relationshipIntent before sending to Convex
       const sanitizedIntent = sanitizeRelationshipIntent(relationshipIntent);
       if (sanitizedIntent.length > 0) preferences.relationshipIntent = sanitizedIntent;
-      if (activities.length > 0) preferences.activities = activities;
       // LGBTQ Preference is optional - only save if user selected any
       if (lgbtqPreference.length > 0) preferences.lgbtqPreference = lgbtqPreference;
-      preferences.minAge = finalMin;
-      preferences.maxAge = finalMax;
-      preferences.maxDistance = finalDistance;
+      preferences.maxDistance = DISTANCE_DEFAULT; // Auto-set
 
       try {
         await upsertDraft({
@@ -441,7 +262,7 @@ export default function PreferencesScreen() {
             progress: { lastStepKey: 'preferences' },
           },
         });
-        if (__DEV__) console.log(`[ONB_DRAFT] Saved preferences: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, activities=${activities.length}, age=${finalMin}-${finalMax}, dist=${finalDistance}`);
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved preferences: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, lgbtqPref=${lgbtqPreference.length}, dist=${DISTANCE_DEFAULT}`);
       } catch (error) {
         if (__DEV__) console.error('[PREFERENCES] Failed to save draft:', error);
         // P1 STABILITY: Re-enable button on failure
@@ -459,34 +280,24 @@ export default function PreferencesScreen() {
       return;
     }
 
-    // FIX: Skip verification screens if user already passed face verification
-    // For demo mode, check demoProfile.faceVerificationPassed (persisted across logout)
-    const isAlreadyVerified = isDemoMode
-      ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
-      : faceVerificationPassed;
-
-    if (isAlreadyVerified) {
-      if (__DEV__) console.log('[ONB] preferences: facePassed=true -> skipping verification -> additional-photos');
-      setStep('additional_photos');
-      router.push('/(onboarding)/additional-photos' as any);
-    } else {
-      if (__DEV__) console.log('[ONB] preferences → photo-upload (continue)');
-      setStep('photo_upload');
-      router.push('/(onboarding)/photo-upload' as any);
-    }
+    // PHASE-1 RESTRUCTURE: Go to photo-upload (step 3)
+    if (__DEV__) console.log('[ONB] preferences → photo-upload (continue)');
+    setStep('photo_upload');
+    router.push('/(onboarding)/photo-upload' as any);
     // P1 STABILITY: Reset after navigation completes
     setIsSubmitting(false);
   };
 
-  // POST-VERIFICATION: Previous goes back
+  // PHASE-1 RESTRUCTURE: Previous goes back to basic-info (step 1)
   const handlePrevious = () => {
-    if (__DEV__) console.log('[ONB] preferences → profile-details (previous)');
-    setStep('profile_details');
-    router.push('/(onboarding)/profile-details' as any);
+    if (__DEV__) console.log('[ONB] preferences → basic-info (previous)');
+    setStep('basic_info');
+    router.push('/(onboarding)/basic-info' as any);
   };
 
   // P1 STABILITY: Include isSubmitting in disabled check
-  const canContinue = !isSubmitting && lookingFor.length > 0 && relationshipIntent.length >= 1 && activities.length >= 1;
+  // PHASE-1 RESTRUCTURE: Only check lookingFor and relationshipIntent
+  const canContinue = !isSubmitting && lookingFor.length > 0 && relationshipIntent.length >= 1;
 
   // STABILITY FIX: Wait for Convex hydration before rendering form
   // This prevents showing empty preferences when user returns with incomplete onboarding
@@ -527,7 +338,7 @@ export default function PreferencesScreen() {
     <ScrollView
       ref={scrollRef}
       style={styles.container}
-      contentContainerStyle={[styles.content, { paddingBottom: 24 + keyboardHeight }]}
+      contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
     >
       {showTopError && (
@@ -620,102 +431,7 @@ export default function PreferencesScreen() {
         {relationshipIntentError ? <Text style={styles.fieldError}>{relationshipIntentError}</Text> : null}
       </View>
 
-      <View
-        ref={interestsSectionRef}
-        style={styles.section}
-        onLayout={(e) => setInterestsSectionY(e.nativeEvent.layout.y)}
-      >
-        <View style={styles.interestsHeader}>
-          <Text style={styles.sectionTitle}>Interests</Text>
-          <Text style={[
-            styles.interestsCounter,
-            activities.length >= 1 && styles.interestsCounterValid
-          ]}>
-            {activities.length}/{MAX_INTERESTS} selected
-          </Text>
-        </View>
-        <View style={[styles.interestsGrid, interestsError ? styles.interestsGridError : null]}>
-          {ACTIVITY_FILTERS.map((activity) => (
-            <TouchableOpacity
-              key={activity.value}
-              style={[
-                styles.interestChip,
-                activities.includes(activity.value) && styles.interestChipSelected
-              ]}
-              onPress={() => handleActivityToggle(activity.value)}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.interestEmoji}>{activity.emoji}</Text>
-              <Text
-                style={[styles.interestLabel, activities.includes(activity.value) && styles.interestLabelSelected]}
-              >
-                {activity.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-        {interestsError ? <Text style={styles.fieldError}>{interestsError}</Text> : null}
-      </View>
-
-      <View
-        style={styles.section}
-        onLayout={(e) => setAgeSectionY(e.nativeEvent.layout.y)}
-      >
-        <Text style={styles.sectionTitle}>Age Range</Text>
-        <Text style={styles.sectionSubtitle}>{MIN_AGE_LIMIT} - {MAX_AGE_LIMIT} years</Text>
-        <View style={[styles.ageRow, ageError ? styles.ageRowError : null]}>
-          <View style={styles.ageInputContainer}>
-            <Text style={styles.ageLabel}>Min</Text>
-            <Input
-              value={minAgeText}
-              onChangeText={(text) => {
-                handleMinAgeChange(text);
-                if (ageError) setAgeError('');
-              }}
-              keyboardType="numeric"
-              style={styles.ageInput}
-            />
-          </View>
-          <Text style={styles.ageSeparator}>to</Text>
-          <View style={styles.ageInputContainer}>
-            <Text style={styles.ageLabel}>Max</Text>
-            <Input
-              value={maxAgeText}
-              onChangeText={(text) => {
-                handleMaxAgeChange(text);
-                if (ageError) setAgeError('');
-              }}
-              keyboardType="numeric"
-              style={styles.ageInput}
-            />
-          </View>
-        </View>
-        {ageError ? <Text style={styles.fieldError}>{ageError}</Text> : null}
-      </View>
-
-      <View
-        ref={distanceSectionRef}
-        style={styles.section}
-        onLayout={(e) => setDistanceSectionY(e.nativeEvent.layout.y)}
-      >
-        <Text style={styles.sectionTitle}>Maximum Distance</Text>
-        <Text style={styles.sectionSubtitle}>{DISTANCE_MIN} - {DISTANCE_MAX} miles</Text>
-        <View style={[styles.distanceInputWrapper, distanceError ? styles.distanceInputError : null]}>
-          <TextInput
-            value={distanceText}
-            onChangeText={handleDistanceChange}
-            onFocus={handleDistanceFocus}
-            keyboardType="numeric"
-            style={styles.distanceTextInput}
-            placeholderTextColor={COLORS.textMuted}
-            placeholder=""
-          />
-          <View style={styles.distanceSuffixContainer} pointerEvents="none">
-            <Text style={styles.distanceSuffix}>miles</Text>
-          </View>
-        </View>
-        {distanceError ? <Text style={styles.fieldError}>{distanceError}</Text> : null}
-      </View>
+      {/* PHASE-1 RESTRUCTURE: Interests, Age Range, and Distance sections removed */}
 
       <View style={styles.footer}>
         <Button
@@ -752,21 +468,23 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 24,
+    paddingBottom: 40,
   },
   title: {
     fontSize: 28,
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 10,
+    letterSpacing: -0.5,
   },
   subtitle: {
     fontSize: 16,
     color: COLORS.textLight,
-    marginBottom: 24,
-    lineHeight: 22,
+    marginBottom: 28,
+    lineHeight: 24,
   },
   section: {
-    marginBottom: 32,
+    marginBottom: 34,
   },
   topErrorBanner: {
     backgroundColor: COLORS.error + '15',
@@ -805,32 +523,34 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: COLORS.text,
-    marginBottom: 4,
+    marginBottom: 6,
+    letterSpacing: -0.3,
   },
   sectionSubtitle: {
     fontSize: 14,
     color: COLORS.textLight,
-    marginBottom: 16,
+    marginBottom: 18,
+    lineHeight: 20,
   },
   chipsContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
+    gap: 10,
   },
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 22,
     backgroundColor: COLORS.backgroundDark,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    gap: 6,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    gap: 8,
   },
   chipSelected: {
     backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
+    borderColor: COLORS.primaryDark,
   },
   chipEmoji: {
     fontSize: 16,
@@ -838,6 +558,7 @@ const styles = StyleSheet.create({
   chipText: {
     fontSize: 14,
     color: COLORS.text,
+    letterSpacing: -0.1,
   },
   chipTextSelected: {
     color: COLORS.white,
@@ -860,28 +581,28 @@ const styles = StyleSheet.create({
   interestsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 8,
   },
   interestChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 999,
     backgroundColor: COLORS.backgroundDark,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    gap: 4,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    gap: 5,
   },
   interestChipSelected: {
     backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
+    borderColor: COLORS.primaryDark,
   },
   interestEmoji: {
-    fontSize: 13,
+    fontSize: 14,
   },
   interestLabel: {
-    fontSize: 12,
+    fontSize: 13,
     color: COLORS.text,
   },
   interestLabelSelected: {
@@ -921,28 +642,28 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    paddingHorizontal: 16,
-    height: 52,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    paddingHorizontal: 18,
+    height: 56,
   },
   distanceInputError: {
     borderColor: COLORS.error,
-    borderWidth: 2,
+    borderWidth: 1.5,
   },
   distanceTextInput: {
     flex: 1,
-    fontSize: 16,
+    fontSize: 17,
     color: COLORS.text,
     paddingVertical: 0,
   },
   distanceSuffixContainer: {
-    marginLeft: 8,
+    marginLeft: 10,
   },
   distanceSuffix: {
     fontSize: 16,
-    color: COLORS.textLight,
+    color: COLORS.textMuted,
   },
   footer: {
     marginTop: 24,

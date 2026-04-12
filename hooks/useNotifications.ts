@@ -1,20 +1,52 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
-import { useSegments } from 'expo-router';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import { create } from 'zustand';
 import { log } from '@/utils/logger';
+import { usePhaseMode } from '@/lib/usePhaseMode';
+import { DEBUG_NOTIFICATIONS } from '@/lib/debugFlags';
 
 // Phase 1-only notification types — never shown in Phase 2 (private tabs)
 const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
 
-// Module-level phase tracking for creation-side blocking in Zustand store
-let _isInPhase2 = false;
-export function setPhase2Active(active: boolean) {
-  _isInPhase2 = active;
+// Phase 2-only notification types — never shown in Phase 1 (main discover)
+// PHASE SEPARATION: These types are created by Phase 2 (Deep Connect) backend and should
+// only appear in the Phase 2 notification bell, not in the Phase 1 bell.
+// - phase2_match: Matches created in Deep Connect
+// - phase2_like: Likes received in Deep Connect
+// - comment_connect: Confession comment connects
+// - tod_connect: Truth or Dare connections
+const PHASE2_ONLY_TYPES = new Set([
+  'phase2_match',
+  'phase2_like',
+  'tod_connect',
+]);
+
+// Types excluded from ALL in-app bells — messages have dedicated chat UI, not bell
+// Push notifications for messages still work; this only affects the bell popover
+const BELL_EXCLUDED_TYPES = new Set(['message', 'new_message']);
+
+function shouldIncludeBellNotification(type: string, isInPhase2: boolean): boolean {
+  if (BELL_EXCLUDED_TYPES.has(type)) {
+    return false;
+  }
+
+  if (isInPhase2) {
+    return !PHASE1_ONLY_TYPES.has(type);
+  }
+
+  return !PHASE2_ONLY_TYPES.has(type);
+}
+
+// REMOVED: Module-level phase tracking (_isInPhase2, setPhase2Active)
+// This was causing infinite loops when navigating to shared routes.
+// Phase is now derived directly from route in the hook below.
+// Export a no-op for backward compatibility (can be removed later)
+export function setPhase2Active(_active: boolean) {
+  // NO-OP: Phase is now derived from route, not toggled
 }
 
 /**
@@ -51,6 +83,27 @@ export interface AddNotificationInput {
   data?: Record<string, string | undefined>;
 }
 
+function getActorUserId(data?: Record<string, string | undefined>): string | undefined {
+  return data?.actorUserId ?? data?.otherUserId ?? data?.userId;
+}
+
+function normalizeNotificationData(
+  data?: Record<string, string | undefined>,
+  targetUserId?: string
+): Record<string, string | undefined> | undefined {
+  if (!data && !targetUserId) {
+    return undefined;
+  }
+
+  const actorUserId = getActorUserId(data);
+  return {
+    ...data,
+    actorUserId,
+    targetUserId: data?.targetUserId ?? targetUserId,
+    otherUserId: data?.otherUserId ?? actorUserId,
+  };
+}
+
 // ── Dedupe key computation ─────────────────────────────────────
 // Deterministic key per logical event so the same event doesn't create
 // duplicate rows.  Key schema:
@@ -64,7 +117,7 @@ export interface AddNotificationInput {
 //   confession_*      → "confession_<sub>:<confessionId>"
 //   fallback          → "<type>:<timestamp>"  (no dedupe — always unique)
 function computeDedupeKey(type: string, data?: Record<string, string | undefined>): string {
-  const userId = data?.otherUserId ?? data?.userId;
+  const userId = getActorUserId(data);
   switch (type) {
     case 'match':
     case 'new_match':
@@ -80,7 +133,7 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
       return `super_like:${userId ?? 'unknown'}`;
     case 'message':
     case 'new_message':
-      return `message:${data?.conversationId ?? userId ?? 'unknown'}`;
+      return `message:${data?.conversationId ?? userId ?? 'unknown'}:unread`;
     case 'crossed_paths':
       return `crossed_paths:${userId ?? 'unknown'}`;
     case 'profile_viewed':
@@ -92,6 +145,19 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
       return `confession_reaction:${data?.confessionId ?? 'unknown'}`;
     case 'confession_reply':
       return `confession_reply:${data?.confessionId ?? 'unknown'}`;
+    // P2-007 FIX: Phase-2 notification deduplication
+    case 'phase2_match':
+      // Dedupe by conversation ID (one notification per match conversation)
+      return `phase2_match:${data?.conversationId ?? userId ?? 'unknown'}`;
+    case 'phase2_like':
+      // Per-event: each Phase-2 like is unique by liker's userId
+      return `phase2_like:${userId ?? 'unknown'}`;
+    case 'tod_connect':
+      // Dedupe by answer/prompt context to avoid duplicate connect notifications
+      return `tod_connect:${data?.answerId ?? data?.promptId ?? userId ?? 'unknown'}`;
+    case 'comment_connect':
+      // Dedupe by conversation ID for comment-based connections
+      return `comment_connect:${data?.conversationId ?? userId ?? 'unknown'}`;
     default:
       return `${type}:${Date.now()}`;
   }
@@ -265,7 +331,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
     })),
   markReadForConversation: (conversationId: string) =>
     set((state) => {
-      const key = `message:${conversationId}`;
+      const key = `message:${conversationId}:unread`;
       return {
         notifications: state.notifications.map((n) =>
           n.dedupeKey === key && !n.isRead
@@ -276,10 +342,8 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
     }),
   addNotification: (input: AddNotificationInput) =>
     set((state) => {
-      // Creation-side guard: Block Phase 1-only notifications if currently in Phase 2
-      if (PHASE1_ONLY_TYPES.has(input.type) && _isInPhase2) {
-        return {};
-      }
+      // NOTE: Creation-side guard removed - phase filtering now happens in useNotifications hook
+      // All notifications are stored; display filtering happens at read time based on route
 
       const now = Date.now();
       const key = computeDedupeKey(input.type, input.data);
@@ -360,7 +424,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       const likeTypes = new Set(['like', 'like_received', 'super_like', 'superlike', 'super_like_received']);
       const filtered = state.notifications.filter((n) => {
         if (!likeTypes.has(n.type)) return true;
-        return n.data?.otherUserId !== userId;
+        return getActorUserId(n.data) !== userId;
       });
       return { notifications: filtered };
     }),
@@ -372,7 +436,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       const cleanupStartTime = Date.now() - 100; // 100ms grace period
       const filtered = state.notifications.filter((n) => {
         if (!likeTypes.has(n.type)) return true;
-        const userId = n.data?.otherUserId;
+        const userId = getActorUserId(n.data);
         if (!userId) return true;
         // BUGFIX #35: Don't delete notifications created after cleanup started
         if (n.createdAt && n.createdAt > cleanupStartTime) return true;
@@ -402,7 +466,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
     set((state) => {
       const filtered = state.notifications.filter((n) => {
         if (n.type !== 'crossed_paths') return true;
-        return n.data?.otherUserId !== userId;
+        return getActorUserId(n.data) !== userId;
       });
       return { notifications: filtered };
     }),
@@ -413,7 +477,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       const cleanupStartTime = Date.now() - 100; // 100ms grace period
       const filtered = state.notifications.filter((n) => {
         if (n.type !== 'crossed_paths') return true;
-        const userId = n.data?.otherUserId;
+        const userId = getActorUserId(n.data);
         // Keep notifications without otherUserId (legacy/generic crossed paths)
         if (!userId) return true;
         // BUGFIX #35: Don't delete notifications created after cleanup started
@@ -463,11 +527,22 @@ let __notifLogged = false;
  */
 export function useNotifications() {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
+  const authReady = useAuthStore((s) => s.authReady);
   const convexUserId = asUserId(userId);
+  const hasValidToken = typeof token === 'string' && token.trim().length > 0;
 
-  // Detect if we're in Phase 2 (private tabs) — filter out Phase 1-only notifications
-  const segments = useSegments();
-  const isInPhase2 = segments.includes('(private)' as never);
+  // ══════════════════════════════════════════════════════════════════════════════
+  // PHASE DETECTION: Derive notification phase directly from route
+  // - Phase 2 ('phase2'): Show Phase 2 notifications
+  // - Shared ('shared'): Show Phase 2 notifications (user came from Phase 2)
+  // - Phase 1 ('phase1'): Show Phase 1 notifications
+  //
+  // KEY FIX: Shared routes (incognito-chat, match-celebration) are reached FROM
+  // Phase 2, so the user expects to see Phase 2 notifications in the bell.
+  // ══════════════════════════════════════════════════════════════════════════════
+  const phaseMode = usePhaseMode();
+  const isInPhase2 = phaseMode === 'phase2' || phaseMode === 'shared';
 
   // BUGFIX #32: Track mounted state to prevent state updates after unmount
   const isMountedRef = useRef(true);
@@ -525,11 +600,9 @@ export function useNotifications() {
       // STABILITY: Stop polling after timeout - proceed with empty notifications
       if (pollAttempts >= MAX_POLL_ATTEMPTS) {
         clearInterval(interval);
-        if (__DEV__) {
-          console.warn('[useNotifications] demoStore ready timeout - proceeding without seed');
-        }
+        if (__DEV__ && DEBUG_NOTIFICATIONS) console.warn('[useNotifications] timeout');
         if (isMountedRef.current) {
-          setDemoStoreReady(true); // Unblock UI even if seed didn't complete
+          setDemoStoreReady(true);
         }
       }
     }, POLL_INTERVAL_MS);
@@ -537,10 +610,11 @@ export function useNotifications() {
     return () => clearInterval(interval);
   }, []);
 
-  // ── Convex queries (skipped in demo mode) ──
+  // ── Convex queries (skipped in legacy demo mode only) ──
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const convexNotifications = useQuery(
     api.notifications.getNotifications,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip',
+    !isDemoMode && convexUserId && authReady && hasValidToken ? {} : 'skip',
   );
   const markAsReadMutation = useMutation(api.notifications.markAsRead);
   const markAllAsReadMutation = useMutation(api.notifications.markAllAsRead);
@@ -566,12 +640,13 @@ export function useNotifications() {
         type: n.type,
         title: n.title,
         body: n.body,
-        data: n.data,
+        data: normalizeNotificationData(n.data, n.userId),
         createdAt: n.createdAt,
         readAt: n.readAt,
         // BUGFIX #19: Include expiresAt for proper expiry filtering
         expiresAt: n.expiresAt,
         isRead: !!n.readAt,
+        dedupeKey: n.dedupeKey,
       })),
     [convexSafe],
   );
@@ -615,21 +690,23 @@ export function useNotifications() {
   const baseNotifications = isDemoMode
     ? (demoStoreReady ? filteredDemoNotifs : EMPTY_ARRAY)
     : filteredConvexNotifs;
+  // Filter notifications for bell display:
+  // 1. Always exclude BELL_EXCLUDED_TYPES (messages have dedicated chat UI)
+  // 2. Phase separation: Phase 1 excludes Phase-2 types, Phase 2 excludes Phase-1 types
   const notifications: AppNotification[] = useMemo(
-    () => isInPhase2 ? baseNotifications.filter((n) => !PHASE1_ONLY_TYPES.has(n.type)) : baseNotifications,
+    () => {
+      return baseNotifications.filter((n) => shouldIncludeBellNotification(n.type, isInPhase2));
+    },
     [baseNotifications, isInPhase2],
   );
 
   // ── Derived count (single formula, no separate query) ──
   const unseenCount = notifications.filter((n) => !n.isRead).length;
 
-  // ── Debug logging (once globally, DEV only) ──
+  // ── Debug logging (once globally, DEV only, gated) ──
   useEffect(() => {
-    if (__DEV__ && !__notifLogged) {
-      console.log(
-        `[useNotifications] mode=${isDemoMode ? 'demo' : 'convex'} ` +
-          `total=${notifications.length} unseenCount=${unseenCount}`,
-      );
+    if (__DEV__ && DEBUG_NOTIFICATIONS && !__notifLogged) {
+      console.log(`[useNotifications] ${isDemoMode ? 'demo' : 'convex'} total=${notifications.length} unseen=${unseenCount}`);
       __notifLogged = true;
     }
   }, [notifications.length, unseenCount]);
@@ -640,10 +717,10 @@ export function useNotifications() {
       demoMarkAllRead();
       return;
     }
-    if (userId) {
-      markAllAsReadMutation({ authUserId: userId as string }).catch(console.error);
+    if (convexUserId) {
+      markAllAsReadMutation({}).catch(console.error);
     }
-  }, [userId, markAllAsReadMutation, demoMarkAllRead]);
+  }, [convexUserId, markAllAsReadMutation, demoMarkAllRead]);
 
   // ── Mark single notification as read ──
   // BUGFIX #33: Uses ref for pending reads to avoid setState on unmount warnings
@@ -660,15 +737,14 @@ export function useNotifications() {
 
         markAsReadMutation({
           notificationId: notificationId as any,
-          authUserId: userId as string,
         })
           .then(() => {
             // BUGFIX #33: Remove from ref on success (Convex query update triggers re-render)
             pendingReadsRef.current.delete(notificationId);
           })
           .catch((error) => {
-            // BUGFIX #33: Remove from ref on error (rollback) and force re-render to show notification again
-            console.error('[useNotifications] markRead failed, rolling back:', error);
+            // BUGFIX #33: Remove from ref on error (rollback)
+            if (__DEV__) console.error('[useNotifications] markRead failed:', error);
             pendingReadsRef.current.delete(notificationId);
             forceUpdate((n) => n + 1);
           });
@@ -682,11 +758,11 @@ export function useNotifications() {
     (dedupeKey: string) => {
       if (isDemoMode) {
         demoMarkReadByDedupeKey(dedupeKey);
-      } else if (userId) {
-        markReadByDedupeKeyMutation({ authUserId: userId, dedupeKey }).catch(console.error);
+      } else if (convexUserId) {
+        markReadByDedupeKeyMutation({ dedupeKey }).catch(console.error);
       }
     },
-    [demoMarkReadByDedupeKey, userId, markReadByDedupeKeyMutation],
+    [demoMarkReadByDedupeKey, convexUserId, markReadByDedupeKeyMutation],
   );
 
   // ── Mark all message notifications for a conversation as read (A2 fix: now supports Convex mode) ──
@@ -696,11 +772,11 @@ export function useNotifications() {
       const normalizedId = String(conversationId);
       if (isDemoMode) {
         demoMarkReadForConversation(normalizedId);
-      } else if (userId) {
-        markReadForConversationMutation({ authUserId: userId, conversationId: normalizedId }).catch(console.error);
+      } else if (convexUserId) {
+        markReadForConversationMutation({ conversationId: normalizedId }).catch(console.error);
       }
     },
-    [demoMarkReadForConversation, userId, markReadForConversationMutation],
+    [demoMarkReadForConversation, convexUserId, markReadForConversationMutation],
   );
 
   // ── Add notification (demo mode only — Convex mode uses server push) ──
@@ -732,5 +808,52 @@ export function useNotifications() {
     markReadForConversation,
     addNotification,
     cleanupExpiredNotifications,
+  };
+}
+
+export function useNotificationBellBadge() {
+  const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
+  const authReady = useAuthStore((s) => s.authReady);
+  const convexUserId = asUserId(userId);
+  const hasValidToken = typeof token === 'string' && token.trim().length > 0;
+  const phaseMode = usePhaseMode();
+  const isInPhase2 = phaseMode === 'phase2' || phaseMode === 'shared';
+  const phase = isInPhase2 ? 'phase2' : 'phase1';
+
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  // Pass token for demo auth mode support (backend uses requireAppUserId)
+  const convexUnseenCount = useQuery(
+    api.notifications.getBellUnreadCount,
+    !isDemoMode && convexUserId && authReady && hasValidToken ? { phase, token } : 'skip',
+  );
+
+  const demoNotifications = useDemoNotifStore((s) => s.notifications);
+  const [stableNow, setStableNow] = useState(() => Math.floor(Date.now() / 60000) * 60000);
+
+  useEffect(() => {
+    if (!isDemoMode) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setStableNow(Math.floor(Date.now() / 60000) * 60000);
+    }, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const demoUnseenCount = useMemo(
+    () =>
+      demoNotifications.reduce((count, notification) => {
+        if (notification.isRead || isExpired(notification, stableNow)) {
+          return count;
+        }
+        return shouldIncludeBellNotification(notification.type, isInPhase2) ? count + 1 : count;
+      }, 0),
+    [demoNotifications, isInPhase2, stableNow],
+  );
+
+  return {
+    unseenCount: isDemoMode ? demoUnseenCount : convexUnseenCount ?? 0,
   };
 }

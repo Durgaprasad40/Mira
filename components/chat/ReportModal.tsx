@@ -18,6 +18,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
 import { Toast } from '@/components/ui/Toast';
 import { trackEvent } from '@/lib/analytics';
+import { useAuthStore } from '@/stores/authStore';
 
 type ReportReason =
   | 'inappropriate_content'
@@ -52,6 +53,7 @@ export function ReportModal({
   onClose,
 }: ReportModalProps) {
   const insets = useSafeAreaInsets();
+  const token = useAuthStore((s) => s.token);
   const [selectedReason, setSelectedReason] = useState<ReportReason | null>(null);
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -76,7 +78,8 @@ export function ReportModal({
     setSubmitting(true);
     try {
       await reportMedia({
-        reporterId: reporterId as any,
+        token: token ?? undefined,
+        authUserId: reporterId,
         reportedUserId: reportedUserId as any,
         chatId: chatId as any,
         mediaId: mediaId ? (mediaId as any) : undefined,

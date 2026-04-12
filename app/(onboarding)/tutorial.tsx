@@ -8,7 +8,7 @@
  * Date locked: 2026-03-04
  */
 import React, { useState, useRef, useEffect } from "react";
-import { View, Text, StyleSheet } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { COLORS } from "@/lib/constants";
@@ -187,6 +187,13 @@ export default function TutorialScreen() {
             style={styles.nextButton}
             textStyle={styles.nextButtonText}
           />
+
+          {/* PHASE-1 RESTRUCTURE: Skip button added */}
+          {currentStep < steps.length - 1 && (
+            <TouchableOpacity style={styles.skipButton} onPress={handleComplete}>
+              <Text style={styles.skipText}>Skip Tutorial</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </SafeAreaView>
     </LinearGradient>
@@ -276,5 +283,17 @@ const styles = StyleSheet.create({
   },
   nextButtonText: {
     color: COLORS.primary,
+  },
+  // PHASE-1 RESTRUCTURE: Skip button styles
+  skipButton: {
+    marginTop: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    alignItems: "center",
+  },
+  skipText: {
+    fontSize: 14,
+    color: "rgba(255, 255, 255, 0.8)",
+    fontWeight: "500",
   },
 });

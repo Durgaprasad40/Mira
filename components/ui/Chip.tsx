@@ -5,7 +5,14 @@ import {
   StyleSheet,
   ViewStyle,
 } from 'react-native';
-import { COLORS } from '@/lib/constants';
+import {
+  COLORS,
+  SPACING,
+  SIZES,
+  FONT_SIZE,
+  FONT_WEIGHT,
+  HAIRLINE,
+} from '@/lib/constants';
 
 interface ChipProps {
   label: string;
@@ -65,22 +72,22 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 20,
-    borderWidth: 1,
+    borderRadius: SIZES.radius.xl,
+    borderWidth: HAIRLINE,
     borderColor: COLORS.border,
-    gap: 4,
+    gap: SPACING.xs,
   },
   small: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
+    paddingVertical: SPACING.xs + 2,
+    paddingHorizontal: SPACING.md,
   },
   medium: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.base,
   },
   large: {
-    paddingVertical: 12,
-    paddingHorizontal: 20,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.lg,
   },
   chipSelected: {
     backgroundColor: COLORS.primary,
@@ -90,34 +97,34 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   icon: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
   },
   label: {
     color: COLORS.text,
-    fontWeight: '500',
+    fontWeight: FONT_WEIGHT.medium,
   },
   smallText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
   },
   mediumText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
   },
   largeText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
   },
   labelSelected: {
     color: COLORS.white,
   },
   count: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.textMuted,
     backgroundColor: COLORS.border,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 10,
+    paddingHorizontal: SPACING.xs + 2,
+    paddingVertical: SPACING.xxs,
+    borderRadius: SIZES.radius.sm + 2,
     overflow: 'hidden',
-    marginLeft: 4,
+    marginLeft: SPACING.xs,
   },
   countSelected: {
     color: COLORS.primary,

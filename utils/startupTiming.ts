@@ -13,6 +13,8 @@
  * G) map markers ready
  */
 
+import { DEBUG_STARTUP } from '@/lib/debugFlags';
+
 type Milestone =
   | 'bundle_start'
   | 'root_layout'
@@ -50,10 +52,8 @@ export function markTiming(milestone: Milestone): void {
   if (state.times[milestone] !== undefined) return;
   state.times[milestone] = Date.now();
 
-  if (__DEV__) {
-    const elapsed = state.times[milestone]! - state.times.bundle_start!;
-    console.log(`[TIMING] ${milestone} @ +${elapsed}ms`);
-  }
+  // Individual milestone logs disabled to reduce DEV noise
+  // Summary is printed when boot completes (see tryPrintSummary)
 
   // Auto-print summary when key milestones are hit
   tryPrintSummary();
@@ -66,10 +66,7 @@ export function markTiming(milestone: Milestone): void {
 export function markDuration(metric: DurationMetric, durationMs: number): void {
   if (state.durations[metric] !== undefined) return;
   state.durations[metric] = durationMs;
-
-  if (__DEV__) {
-    console.log(`[DURATION] ${metric}: ${durationMs}ms`);
-  }
+  // Individual duration logs disabled - included in summary
 }
 
 /**
@@ -78,7 +75,7 @@ export function markDuration(metric: DurationMetric, durationMs: number): void {
  */
 function tryPrintSummary(): void {
   if (state.printed) return;
-  if (!__DEV__) return;
+  if (!__DEV__ || !DEBUG_STARTUP) return;
 
   const t = state.times;
   const start = t.bundle_start!;
@@ -91,45 +88,21 @@ function tryPrintSummary(): void {
 
   // Calculate durations
   const total = (t.first_tab ?? t.map_ready ?? Date.now()) - start;
-
-  // Hydration: max of auth and demo (whichever is later)
+  const bootHidden = t.boot_hidden ? t.boot_hidden - start : 0;
+  const bootCachesDuration = state.durations.boot_caches ?? 0;
   const authTime = t.auth_hydrated ? t.auth_hydrated - start : 0;
   const demoTime = t.demo_hydrated ? t.demo_hydrated - start : 0;
   const hydration = Math.max(authTime, demoTime);
-
-  // Route decision time (from hydration complete to route decision)
   const routeStart = Math.max(t.auth_hydrated ?? start, t.demo_hydrated ?? start);
   const route = t.route_decision ? t.route_decision - routeStart : 0;
-
-  // Location time (from start to first fix)
   const location = t.location_fix ? t.location_fix - (t.location_start ?? start) : 0;
-
-  // First screen time (from route decision to first tab)
   const firstScreen = t.first_tab ? t.first_tab - (t.route_decision ?? start) : 0;
 
   state.printed = true;
 
-  // Boot hidden time (from start)
-  const bootHidden = t.boot_hidden ? t.boot_hidden - start : 0;
-
-  // Boot caches duration (actual cache read time, not absolute timestamp)
-  const bootCachesDuration = state.durations.boot_caches ?? 0;
-
   console.log(
-    `[STARTUP_TIMING] bootHidden=${bootHidden}ms bootCachesDuration=${bootCachesDuration}ms total=${total}ms hydration=${hydration}ms route=${route}ms location=${location}ms firstScreen=${firstScreen}ms`
+    `[STARTUP_TIMING] boot=${bootHidden}ms cache=${bootCachesDuration}ms total=${total}ms`
   );
-
-  // Detailed breakdown
-  console.log('[STARTUP_TIMING] Breakdown:', {
-    bundle_to_root: t.root_layout ? t.root_layout - start : '-',
-    root_to_bootCaches: t.boot_caches_ready && t.root_layout ? t.boot_caches_ready - t.root_layout : '-',
-    root_to_auth: t.auth_hydrated && t.root_layout ? t.auth_hydrated - t.root_layout : '-',
-    root_to_demo: t.demo_hydrated && t.root_layout ? t.demo_hydrated - t.root_layout : '-',
-    bootCaches_to_route: t.route_decision && t.boot_caches_ready ? t.route_decision - t.boot_caches_ready : '-',
-    hydration_to_route: t.route_decision && routeStart ? t.route_decision - routeStart : '-',
-    route_to_tab: t.first_tab && t.route_decision ? t.first_tab - t.route_decision : '-',
-    location_to_fix: t.location_fix && t.location_start ? t.location_fix - t.location_start : '-',
-  });
 }
 
 /**

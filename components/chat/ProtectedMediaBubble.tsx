@@ -8,6 +8,7 @@ import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { log } from '@/utils/logger';
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
+import { useAuthStore } from '@/stores/authStore';
 
 // Phase-1 tile sizing (matches MediaMessage.tsx)
 const THUMB_WIDTH = 100;
@@ -62,6 +63,8 @@ export function ProtectedMediaBubble({
   onHoldEnd,
   onExpire,
 }: ProtectedMediaBubbleProps) {
+  const token = useAuthStore((s) => s.token);
+
   // ============================================================================
   // HOOKS-FIX: ALL hooks must be declared at the top, BEFORE any early returns
   // This ensures hooks are called in the same order on every render
@@ -70,15 +73,15 @@ export function ProtectedMediaBubble({
   // Fetch media info from Convex if mediaId is provided
   const mediaInfo = useQuery(
     api.media.getMediaInfo,
-    mediaId && userId ? { mediaId: mediaId as any, userId: userId as any } : 'skip'
+    mediaId && token ? { mediaId: mediaId as any, token, authUserId: userId } : 'skip'
   );
 
   // PREFETCH-FIX: Fetch media URL for prefetching (only if not expired and mediaId exists)
   // Note: We use isExpiredProp here since isExpired derived value isn't available yet
   const mediaUrlData = useQuery(
     api.protectedMedia.getMediaUrl,
-    mediaId && userId && !isExpiredProp
-      ? { messageId: messageId as any, userId: userId as any }
+    mediaId && token && !isExpiredProp
+      ? { messageId: messageId as any, token, authUserId: userId }
       : 'skip'
   );
 

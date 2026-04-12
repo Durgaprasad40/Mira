@@ -22,7 +22,7 @@ import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { safePush } from '@/lib/safeRouter';
 import { LoadingGuard } from '@/components/safety';
 import { Image } from 'expo-image';
-import { useQuery, useMutation } from 'convex/react';
+import { useQuery, useMutation, useConvex } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
@@ -103,6 +103,7 @@ export default function MessagesScreen() {
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
   const convexUserId = asUserId(userId);
+  const convex = useConvex();
   const [refreshing, setRefreshing] = useState(false);
 
   // Swipe mutation for Convex mode like/pass actions
@@ -255,17 +256,21 @@ export default function MessagesScreen() {
   // Creating new object references on every render causes Convex to re-subscribe
   // APP-P0-004: Split args - getConversations uses authUserId, others use userId
   const convexConversationsArgs = useMemo(
-    () => (!isDemoMode && userId ? { authUserId: userId } : 'skip' as const),
-    [userId]
+    () => (!isDemoMode && userId && token ? { token, authUserId: userId } : 'skip' as const),
+    [userId, token, retryKey]
+  );
+  const convexUnreadArgs = useMemo(
+    () => (!isDemoMode && userId && token ? { token, authUserId: userId } : 'skip' as const),
+    [userId, token, retryKey]
   );
   const convexQueryArgs = useMemo(
     () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
-    [convexUserId]
+    [convexUserId, retryKey]
   );
 
   // Convex queries (skipped in demo mode)
   const convexConversations = useQuery(api.messages.getConversations, convexConversationsArgs);
-  const convexUnreadCount = useQuery(api.messages.getUnreadCount, convexQueryArgs);
+  const convexUnreadCount = useQuery(api.messages.getUnreadCount, convexUnreadArgs);
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexQueryArgs);
   const convexLikesReceived = useQuery(api.likes.getLikesReceived, convexQueryArgs);
   const convexMatches = useQuery(api.matches.getMatches, convexQueryArgs);
@@ -322,11 +327,11 @@ export default function MessagesScreen() {
   useEffect(() => {
     // Only run when we have conversation data (meaning messages have arrived)
     if (!isDemoMode && userId && convexConversations && convexConversations.length > 0) {
-      markAllAsDelivered({ authUserId: userId }).catch(() => {
+      markAllAsDelivered({ token: token ?? undefined, authUserId: userId }).catch(() => {
         // Silent fail - delivery marking is best-effort
       });
     }
-  }, [isDemoMode, userId, convexConversations, markAllAsDelivered]);
+  }, [isDemoMode, userId, token, convexConversations, markAllAsDelivered]);
 
   // Combine message threads
   const demoThreads = useMemo(() => {
@@ -416,12 +421,55 @@ export default function MessagesScreen() {
   const showMessagesNudge =
     messagesNudgeStatus === 'needs_both' && !dismissedNudges.includes('messages');
 
-  const onRefresh = async () => {
+  const refetchLiveMessagesData = useCallback(async () => {
+    if (isDemoMode || !userId || !token || !convexUserId) {
+      return;
+    }
+
+    setRetryKey((k) => k + 1);
+
+    await Promise.all([
+      convex.query(api.messages.getConversations, { token, authUserId: userId }),
+      convex.query(api.messages.getUnreadCount, { token, authUserId: userId }),
+      convex.query(api.users.getCurrentUser, { userId: convexUserId }),
+      convex.query(api.likes.getLikesReceived, { userId: convexUserId }),
+      convex.query(api.matches.getMatches, { userId: convexUserId }),
+    ]);
+  }, [convex, convexUserId, isDemoMode, token, userId]);
+
+  const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    // Re-seed if needed
-    if (isDemoMode) demoSeed();
-    safeTimeout(() => setRefreshing(false), 300);
-  };
+
+    try {
+      if (isDemoMode) {
+        demoSeed();
+        return;
+      }
+
+      await refetchLiveMessagesData();
+    } catch (error) {
+      log.warn('[MESSAGES]', 'refresh failed', { error });
+      Toast.show('Couldn’t refresh messages. Please try again.');
+    } finally {
+      if (isDemoMode) {
+        safeTimeout(() => setRefreshing(false), 300);
+      } else {
+        setRefreshing(false);
+      }
+    }
+  }, [demoSeed, isDemoMode, refetchLiveMessagesData, safeTimeout]);
+
+  const handleRetry = useCallback(() => {
+    if (isDemoMode) {
+      demoSeed();
+      return;
+    }
+
+    void refetchLiveMessagesData().catch((error) => {
+      log.warn('[MESSAGES]', 'retry failed', { error });
+      Toast.show('Couldn’t reload messages. Please try again.');
+    });
+  }, [demoSeed, isDemoMode, refetchLiveMessagesData]);
 
   // Process matches: separate Super Likes (above) from New Matches
   // A match is "new" if it has no messages yet (lastMessage is null)
@@ -806,15 +854,15 @@ export default function MessagesScreen() {
   };
 
   // Loading state
-  const isLoading = !isDemoMode && conversations === undefined;
+  const isLoading = !isDemoMode && convexConversations === undefined;
 
   if (isLoading) {
     return (
       <LoadingGuard
         isLoading={true}
-        onRetry={() => setRetryKey((k) => k + 1)}
-        title="Loading conversations…"
-        subtitle="This is taking longer than expected. Check your connection and try again."
+        onRetry={handleRetry}
+        title="Loading your inbox..."
+        subtitle="We are syncing your latest conversations. Please try again if this takes too long."
       >
         <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
           <View style={styles.header}>
@@ -822,7 +870,7 @@ export default function MessagesScreen() {
           </View>
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="small" color={COLORS.primary} />
-            <Text style={styles.helperText}>Loading your conversations...</Text>
+            <Text style={styles.helperText}>Bringing your conversations up to date...</Text>
           </View>
         </SafeAreaView>
       </LoadingGuard>
@@ -936,9 +984,9 @@ export default function MessagesScreen() {
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Ionicons name="heart-outline" size={64} color={COLORS.textLight} />
-              <Text style={styles.emptyTitle}>No pending likes</Text>
+              <Text style={styles.emptyTitle}>No likes waiting right now</Text>
               <Text style={styles.emptySubtitle}>
-                When someone likes you, they'll appear here
+                New likes and super likes will show up here.
               </Text>
             </View>
           }
@@ -987,9 +1035,9 @@ export default function MessagesScreen() {
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
                 <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
-                <Text style={styles.emptyTitle}>No chats yet</Text>
+                <Text style={styles.emptyTitle}>Your inbox is quiet for now</Text>
                 <Text style={styles.emptySubtitle}>
-                  Match with someone or accept a confession to start chatting.
+                  When you match with someone or accept a confession, your conversations will appear here.
                 </Text>
               </View>
             }
@@ -1506,6 +1554,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textLight,
     textAlign: 'center',
+    lineHeight: 20,
+    maxWidth: 280,
   },
 
   // Empty states
@@ -1530,6 +1580,7 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
     lineHeight: 20,
+    maxWidth: 300,
   },
 
   // Match Modal

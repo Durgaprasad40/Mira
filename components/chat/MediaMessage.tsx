@@ -10,10 +10,16 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useMediaViewStore } from '@/stores/mediaViewStore';
+import { COLORS } from '@/lib/constants';
 
-// Thumbnail size: ~1/4th of original (was 200x150, now 100x75)
+// ═══════════════════════════════════════════════════════════════════════════
+// MEDIA SIZING - Consistent with bubble styling
+// ═══════════════════════════════════════════════════════════════════════════
+// DM-SECURE-FIX: Compact thumbnail size for DM secure mode (about 1/4 of legacy size)
 const THUMB_WIDTH = 100;
 const THUMB_HEIGHT = 75;
+// Border radius consistent with message bubbles
+const MEDIA_RADIUS = 12;
 
 // Check if URI is a local content:// URI (Android gallery) which doesn't work well with blur
 const isContentUri = (uri: string) => uri.startsWith('content://');
@@ -57,6 +63,20 @@ export default function MediaMessage({
       }
     };
   }, []);
+
+  // DOODLE-UNBLUR-FIX: Doodles ALWAYS render without blur, regardless of context
+  // Early return ensures doodles never enter secure/blur flow
+  if (type === 'doodle') {
+    return (
+      <Pressable style={styles.legacyContainer} onPress={onPress}>
+        <Image
+          source={{ uri: mediaUrl }}
+          style={styles.legacyThumbnail}
+          contentFit="cover"
+        />
+      </Pressable>
+    );
+  }
 
   // Secure mode: only when messageId is provided (chat rooms)
   const isSecureMode = !!messageId;
@@ -113,8 +133,59 @@ export default function MediaMessage({
     );
   }
 
+  // DM-SECURE-FIX: Determine interaction mode
+  // - If onPress is provided (and no onHoldStart): Use TAP-to-view with blur
+  // - If onHoldStart is provided: Use HOLD-to-view with blur (original group chat behavior)
+  const useTapMode = !!onPress && !onHoldStart;
+
+  // For content:// URIs (Android gallery), skip blur as expo-image can't render them properly with blur
+  const canBlur = !isContentUri(mediaUrl);
+
+  // DM-SECURE-FIX: TAP-to-view mode - blurred thumbnail, opens on tap
+  if (useTapMode) {
+    const handleTap = () => {
+      // Mark as viewed on tap
+      if (!hasBeenViewed && messageId) {
+        markViewed(messageId);
+      }
+      // For view-once, mark as consumed
+      if (viewOnce && messageId) {
+        markConsumed(messageId);
+      }
+      // Open viewer
+      onPress?.();
+    };
+
+    return (
+      <Pressable style={styles.container} onPress={handleTap}>
+        {/* Media thumbnail - blurred for privacy */}
+        <Image
+          source={{ uri: mediaUrl }}
+          style={styles.thumbnail}
+          contentFit="cover"
+          blurRadius={canBlur ? 25 : 0}
+        />
+
+        {/* Video indicator */}
+        {type === 'video' && (
+          <View style={styles.videoIndicator}>
+            <Ionicons name="play" size={14} color="#FFFFFF" />
+          </View>
+        )}
+
+        {/* Tap to view hint */}
+        <View style={styles.hintOverlay}>
+          <Text style={styles.hintText}>Tap to view</Text>
+        </View>
+
+        {/* Privacy overlay */}
+        <View style={[styles.blurOverlay, !canBlur && styles.darkOverlay]} />
+      </Pressable>
+    );
+  }
+
+  // HOLD-to-view mode (original group chat behavior)
   // PanResponder for secure media - handles hold without releasing on finger movement
-  // We use refs to access latest values without recreating PanResponder
   const onHoldStartRef = useRef(onHoldStart);
   const onHoldEndRef = useRef(onHoldEnd);
   const hasBeenViewedRef = useRef(hasBeenViewed);
@@ -133,40 +204,30 @@ export default function MediaMessage({
   markConsumedRef.current = markConsumed;
 
   const panResponder: PanResponderInstance = useMemo(() => PanResponder.create({
-    // Always become responder on touch start
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => false,
 
-    // Touch started - open viewer
     onPanResponderGrant: () => {
-      // Immediately open full-screen viewer
       onHoldStartRef.current?.();
-
-      // After 300ms of holding, mark as "viewed"
       markViewedTimeoutRef.current = setTimeout(() => {
         const msgId = messageIdRef.current;
         if (!hasBeenViewedRef.current && msgId) {
           markViewedRef.current(msgId);
         }
-        // For view-once, mark as consumed after viewing
         if (viewOnceRef.current && msgId) {
           markConsumedRef.current(msgId);
         }
       }, 300);
     },
 
-    // Touch ended (finger lifted) - close viewer
     onPanResponderRelease: () => {
-      // Cancel "mark as viewed" timeout if released too quickly
       if (markViewedTimeoutRef.current) {
         clearTimeout(markViewedTimeoutRef.current);
         markViewedTimeoutRef.current = null;
       }
-      // Immediately close viewer
       onHoldEndRef.current?.();
     },
 
-    // Touch interrupted (e.g., another gesture took over) - close viewer
     onPanResponderTerminate: () => {
       if (markViewedTimeoutRef.current) {
         clearTimeout(markViewedTimeoutRef.current);
@@ -175,17 +236,11 @@ export default function MediaMessage({
       onHoldEndRef.current?.();
     },
 
-    // Don't release responder on move - this is key to fixing the issue
     onPanResponderTerminationRequest: () => false,
   }), []);
 
-  // For content:// URIs (Android gallery), skip blur as expo-image can't render them properly with blur
-  // Instead show a semi-transparent overlay with the image visible underneath
-  const canBlur = !isContentUri(mediaUrl);
-
   return (
     <View style={styles.container} {...panResponder.panHandlers}>
-      {/* Media thumbnail - blur only if URI supports it */}
       <Image
         source={{ uri: mediaUrl }}
         style={styles.thumbnail}
@@ -193,32 +248,31 @@ export default function MediaMessage({
         blurRadius={canBlur ? 25 : 0}
       />
 
-      {/* Video indicator (always visible) */}
       {type === 'video' && (
         <View style={styles.videoIndicator}>
           <Ionicons name="play" size={14} color="#FFFFFF" />
         </View>
       )}
 
-      {/* Hold to view hint - always visible on thumbnails */}
       <View style={styles.hintOverlay}>
         <Text style={styles.hintText}>Hold to view</Text>
       </View>
 
-      {/* Semi-transparent overlay (darker for non-blurred to maintain privacy) */}
       <View style={[styles.blurOverlay, !canBlur && styles.darkOverlay]} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  // Secure mode (chat rooms) - small thumbnails
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SECURE MODE - Small thumbnails for chat rooms
+  // ═══════════════════════════════════════════════════════════════════════════
   container: {
     width: THUMB_WIDTH,
     height: THUMB_HEIGHT,
-    borderRadius: 8,
+    borderRadius: MEDIA_RADIUS,
     overflow: 'hidden',
-    backgroundColor: '#1E1E2E',
+    backgroundColor: COLORS.backgroundDark,
   },
   thumbnail: {
     width: '100%',
@@ -232,16 +286,16 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(30, 30, 46, 0.4)',
   },
   darkOverlay: {
-    backgroundColor: 'rgba(30, 30, 46, 0.7)', // Darker overlay for non-blurred images to maintain privacy
+    backgroundColor: 'rgba(30, 30, 46, 0.7)',
   },
   videoIndicator: {
     position: 'absolute',
-    top: 4,
-    right: 4,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    top: 6,
+    right: 6,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -252,28 +306,32 @@ const styles = StyleSheet.create({
   },
   hintText: {
     fontSize: 10,
-    color: 'rgba(255,255,255,0.4)',
-    fontWeight: '500',
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontWeight: '600',
     textAlign: 'center',
   },
   consumedOverlay: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#2C2C3A',
+    backgroundColor: COLORS.border,
   },
   consumedText: {
-    fontSize: 9,
-    color: 'rgba(255,255,255,0.4)',
-    marginTop: 2,
+    fontSize: 10,
+    color: 'rgba(0, 0, 0, 0.4)',
+    marginTop: 3,
+    fontWeight: '500',
   },
-  // Legacy mode (DMs) - larger previews
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LEGACY MODE - Larger previews for DMs
+  // ═══════════════════════════════════════════════════════════════════════════
   legacyContainer: {
-    width: 200,
-    height: 150,
-    borderRadius: 12,
+    width: 220,
+    height: 165,
+    borderRadius: 16,
     overflow: 'hidden',
-    backgroundColor: '#1E1E2E',
+    backgroundColor: COLORS.backgroundDark,
   },
   legacyThumbnail: {
     width: '100%',
@@ -283,6 +341,6 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    backgroundColor: 'rgba(0, 0, 0, 0.25)',
   },
 });

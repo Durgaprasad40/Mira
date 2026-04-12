@@ -4,22 +4,25 @@
  * Usage:
  *   Toast.show('Blocked');
  *   Toast.show('Reported — thanks for keeping Mira safe');
+ *   Toast.show('Someone crossed your path', undefined, () => router.push('/crossed-paths'));
  *
  * Renders at the top of the screen, auto-dismisses after a short delay.
  * Only one toast at a time (new calls replace the current one).
+ * If onTap is provided, toast becomes tappable.
  */
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Animated, StyleSheet, Text, View } from 'react-native';
+import { Animated, StyleSheet, Text, View, TouchableOpacity } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { COLORS } from '@/lib/constants';
 
 // ── Imperative API ──
 
-type ToastListener = (message: string, icon?: string) => void;
+type ToastListener = (message: string, icon?: string, onTap?: () => void) => void;
 let _listener: ToastListener | null = null;
 
 export const Toast = {
-  show(message: string, icon?: string) {
-    _listener?.(message, icon);
+  show(message: string, icon?: string, onTap?: () => void) {
+    _listener?.(message, icon, onTap);
   },
 };
 
@@ -27,14 +30,26 @@ export const Toast = {
 
 export function ToastHost() {
   const [text, setText] = useState('');
+  const [tapHandler, setTapHandler] = useState<(() => void) | null>(null);
   const opacity = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(-20)).current;
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const dismiss = useCallback(() => {
+    Animated.parallel([
+      Animated.timing(opacity, { toValue: 0, duration: 300, useNativeDriver: true }),
+      Animated.timing(translateY, { toValue: -20, duration: 300, useNativeDriver: true }),
+    ]).start(() => {
+      setText('');
+      setTapHandler(null);
+    });
+  }, [opacity, translateY]);
+
   const show = useCallback(
-    (message: string) => {
+    (message: string, _icon?: string, onTap?: () => void) => {
       if (timerRef.current) clearTimeout(timerRef.current);
       setText(message);
+      setTapHandler(onTap ? () => onTap : null);
 
       opacity.setValue(0);
       translateY.setValue(-20);
@@ -45,14 +60,23 @@ export function ToastHost() {
       ]).start();
 
       timerRef.current = setTimeout(() => {
-        Animated.parallel([
-          Animated.timing(opacity, { toValue: 0, duration: 300, useNativeDriver: true }),
-          Animated.timing(translateY, { toValue: -20, duration: 300, useNativeDriver: true }),
-        ]).start(() => setText(''));
+        dismiss();
       }, 2200);
     },
-    [opacity, translateY],
+    [opacity, translateY, dismiss],
   );
+
+  const handleTap = useCallback(() => {
+    // Light haptic on toast tap
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {
+      // Haptics not available
+    }
+    if (timerRef.current) clearTimeout(timerRef.current);
+    dismiss();
+    tapHandler?.();
+  }, [tapHandler, dismiss]);
 
   useEffect(() => {
     _listener = show;
@@ -64,17 +88,28 @@ export function ToastHost() {
 
   if (!text) return null;
 
+  const content = (
+    <View style={styles.pill}>
+      <Text style={styles.text}>{text}</Text>
+      {tapHandler && <Text style={styles.tapHint}>Tap to view</Text>}
+    </View>
+  );
+
   return (
     <Animated.View
       style={[
         styles.container,
         { opacity, transform: [{ translateY }] },
       ]}
-      pointerEvents="none"
+      pointerEvents={tapHandler ? 'auto' : 'none'}
     >
-      <View style={styles.pill}>
-        <Text style={styles.text}>{text}</Text>
-      </View>
+      {tapHandler ? (
+        <TouchableOpacity onPress={handleTap} activeOpacity={0.8}>
+          {content}
+        </TouchableOpacity>
+      ) : (
+        content
+      )}
     </Animated.View>
   );
 }
@@ -103,5 +138,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: COLORS.white,
+  },
+  tapHint: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.6)',
+    marginTop: 2,
+    textAlign: 'center',
   },
 });

@@ -61,9 +61,7 @@ export const PRIVATE_BOUNDARIES = [
   { key: 'meet_when_ready', label: 'Meet only when both ready' },
 ] as const;
 
-export type PrivateIntentKey = typeof PRIVATE_INTENT_CATEGORIES[number]['key'];
-export type PrivateDesireTagKey = typeof PRIVATE_DESIRE_TAGS[number]['key'];
-export type PrivateBoundaryKey = typeof PRIVATE_BOUNDARIES[number]['key'];
+// NOTE: PrivateIntentKey, PrivateDesireTag, PrivateBoundary types are defined in types/index.ts
 
 // ============================================================
 // Phase-2 Onboarding Prompts (Step 3)
@@ -153,7 +151,7 @@ export interface Phase2PromptAnswer {
 }
 
 // Validation constants
-export const PHASE2_PROMPT_MIN_TEXT_LENGTH = 10; // Minimum characters for text answers
+export const PHASE2_PROMPT_MIN_TEXT_LENGTH = 20; // Minimum characters for text answers
 export const PHASE2_PROMPT_MAX_TEXT_LENGTH = 200; // Maximum characters for text answers
 
 // ============================================================

@@ -105,7 +105,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [router, conversationId]);
 
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const flatListRef = useRef<FlashListRef<any>>(null);
 
   // Track screen focus to check for camera-composer handoff data
@@ -236,13 +236,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // SYNC-FIX: Use authUserId for consistent identity resolution across devices
   const conversation = useQuery(
     api.messages.getConversation,
-    !isDemo && conversationId && userId ? { conversationId: conversationId as any, authUserId: userId } : 'skip'
+    !isDemo && conversationId && userId && token
+      ? { conversationId: conversationId as any, token, authUserId: userId }
+      : 'skip'
   );
 
   // SYNC-FIX: Use authUserId for consistent identity resolution across devices
   const convexMessages = useQuery(
     api.messages.getMessages,
-    !isDemo && conversationId && userId ? { conversationId: conversationId as any, authUserId: userId } : 'skip'
+    !isDemo && conversationId && userId && token
+      ? { conversationId: conversationId as any, token, authUserId: userId }
+      : 'skip'
   );
 
   const currentUser = useQuery(
@@ -301,6 +305,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const sendMessage = useMutation(api.messages.sendMessage);
   const markAsRead = useMutation(api.messages.markAsRead);
   const markAsDelivered = useMutation(api.messages.markAsDelivered); // MESSAGE-TICKS-FIX
+  const markNotificationReadForConversation = useMutation(api.notifications.markReadForConversation);
   const updatePresence = useMutation(api.messages.updatePresence); // ONLINE-STATUS-FIX
   const sendPreMatchMessage = useMutation(api.messages.sendPreMatchMessage);
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
@@ -568,6 +573,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       const markedMessage = `[SYSTEM:truthdare]${inviterName} wants to play Truth or Dare!`;
       await sendMessage({
         conversationId: conversationId as any,
+        token: token ?? undefined,
         authUserId: userId,
         content: markedMessage,
         type: 'text',
@@ -575,7 +581,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to send invite');
     }
-  }, [userId, conversationId, otherUserId, sendInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, otherUserId, token, sendInviteMutation, currentUser, sendMessage]);
 
   // Respond to game invite
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
@@ -596,6 +602,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       const markedMessage = `[SYSTEM:truthdare]${responseText}`;
       await sendMessage({
         conversationId: conversationId as any,
+        token: token ?? undefined,
         authUserId: userId,
         content: markedMessage,
         type: 'text',
@@ -608,7 +615,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to respond to invite');
     }
-  }, [userId, conversationId, respondToInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, token, respondToInviteMutation, currentUser, sendMessage]);
 
   // End game (called from BottleSpinGame)
   const handleEndGame = useCallback(async () => {
@@ -654,6 +661,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         // MSG-001 FIX: Use authUserId for server-side verification
         await sendMessage({
           conversationId: conversationId as any,
+          token: token ?? undefined,
           authUserId: userId,
           content: markedMessage,
           type: 'text',
@@ -662,7 +670,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     } catch {
       // Silent fail - game continues even if message fails
     }
-  }, [conversationId, isDemo, userId, addDemoMessage, sendMessage, handleEndGame]);
+  }, [conversationId, isDemo, userId, token, addDemoMessage, sendMessage, handleEndGame]);
 
   const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
   const markNotifReadForConvo = useDemoNotifStore((s) => s.markReadForConversation);
@@ -678,17 +686,21 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       markNotifReadForConvo(conversationId);
     } else if (!isDemo && conversationId && userId) {
       // MSG-004 FIX: Use authUserId for server-side verification
-      markAsRead({ conversationId: conversationId as any, authUserId: userId })
+      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
         .catch((err) => {
           if (__DEV__) console.warn('[ChatScreen] markAsRead failed:', err);
         });
+      markNotificationReadForConversation({ authUserId: userId, conversationId })
+        .catch((err) => {
+          if (__DEV__) console.warn('[ChatScreen] markReadForConversation failed:', err);
+        });
       // MESSAGE-TICKS-FIX: Mark messages as delivered when conversation is opened
-      markAsDelivered({ conversationId: conversationId as any, authUserId: userId })
+      markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
         .catch((err) => {
           if (__DEV__) console.warn('[ChatScreen] markAsDelivered failed:', err);
         });
     }
-  }, [conversationId, userId, isDemo, markDemoRead, markNotifReadForConvo, markAsRead, markAsDelivered]);
+  }, [conversationId, userId, token, isDemo, markDemoRead, markNotifReadForConvo, markAsRead, markAsDelivered, markNotificationReadForConversation]);
 
   // TASK-3: Also mark as read when screen regains focus (handles navigation back scenarios)
   // This ensures badges are cleared even if user navigated away and back
@@ -698,12 +710,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (isDemo && conversationId) {
       markDemoRead(conversationId, getDemoUserId());
     } else if (!isDemo && conversationId && userId) {
-      markAsRead({ conversationId: conversationId as any, authUserId: userId })
+      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
         .catch((err) => {
           if (__DEV__) console.warn('[ChatScreen] markAsRead on focus failed:', err);
         });
+      markNotificationReadForConversation({ authUserId: userId, conversationId })
+        .catch((err) => {
+          if (__DEV__) console.warn('[ChatScreen] markReadForConversation on focus failed:', err);
+        });
     }
-  }, [isFocused, conversationId, userId, isDemo, markDemoRead, markAsRead]);
+  }, [isFocused, conversationId, userId, token, isDemo, markDemoRead, markAsRead, markNotificationReadForConversation]);
 
   // ONLINE-STATUS-FIX: Update presence periodically while chat is open
   // This allows the other user to see "Online" status
@@ -711,19 +727,19 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (isDemo || !userId) return;
 
     // Update presence immediately on mount
-    updatePresence({ authUserId: userId }).catch(() => {
+    updatePresence({ token: token ?? undefined, authUserId: userId }).catch(() => {
       // Silent fail - presence is best-effort
     });
 
     // Update every 30 seconds while chat is open
     const interval = setInterval(() => {
-      updatePresence({ authUserId: userId }).catch(() => {
+      updatePresence({ token: token ?? undefined, authUserId: userId }).catch(() => {
         // Silent fail
       });
     }, 30_000);
 
     return () => clearInterval(interval);
-  }, [userId, isDemo, updatePresence]);
+  }, [userId, token, isDemo, updatePresence]);
 
   // LIVE-TICK-FIX-V2: Track the last message ID we processed to detect truly new messages
   const lastProcessedMsgIdRef = useRef<string | null>(null);
@@ -785,7 +801,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         if (__DEV__) console.log('[LIVE-TICK-V2] Convex mode: calling markAsDelivered and markAsRead');
 
         // Mark as delivered (sets deliveredAt on all undelivered messages from other user)
-        markAsDelivered({ conversationId: conversationId as any, authUserId: userId })
+        markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
           .then((result) => {
             if (__DEV__) console.log('[LIVE-TICK-V2] markAsDelivered result:', result);
           })
@@ -794,7 +810,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           });
 
         // Mark as read (sets readAt on all unread messages from other user)
-        markAsRead({ conversationId: conversationId as any, authUserId: userId })
+        markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
           .then((result) => {
             if (__DEV__) console.log('[LIVE-TICK-V2] markAsRead result:', result);
           })
@@ -806,7 +822,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // Update last processed message ID
     lastProcessedMsgIdRef.current = latestMsgId;
-  }, [messages, conversationId, userId, isDemo, markDemoRead, markAsRead, markAsDelivered]);
+  }, [messages, conversationId, userId, token, isDemo, markDemoRead, markAsRead, markAsDelivered]);
 
   // Helper: scroll to bottom with reliable Android timing
   const scrollToBottom = useCallback((animated = true) => {
@@ -901,12 +917,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // Fire and forget - don't block UI for typing status updates
     setTypingStatus({
       conversationId: conversationId as any,
+      token: token ?? undefined,
       authUserId: userId,
       isTyping,
     }).catch(() => {
       // Silently ignore typing status errors
     });
-  }, [isDemo, conversationId, userId, setTypingStatus]);
+  }, [isDemo, conversationId, userId, token, setTypingStatus]);
 
   // Clear typing status when leaving the chat
   useEffect(() => {
@@ -914,12 +931,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       if (!isDemo && conversationId && userId) {
         setTypingStatus({
           conversationId: conversationId as any,
+          token: token ?? undefined,
           authUserId: userId,
           isTyping: false,
         }).catch(() => {});
       }
     };
-  }, [isDemo, conversationId, userId, setTypingStatus]);
+  }, [isDemo, conversationId, userId, token, setTypingStatus]);
 
   // Check for camera-composer handoff data when screen regains focus
   // This handles returning from camera-composer with captured photo/video
@@ -982,6 +1000,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       if (activeConversation.isPreMatch) {
         // MSG-002 FIX: Use authUserId for server-side verification
         await sendPreMatchMessage({
+          token: token ?? undefined,
           authUserId: userId,
           toUserId: (activeConversation as any).otherUser.id as any,
           content: text,
@@ -992,6 +1011,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         // MSG-001 FIX: Use authUserId for server-side verification
         await sendMessage({
           conversationId: conversationId as any,
+          token: token ?? undefined,
           authUserId: userId,
           type: 'text',
           content: text,
@@ -1047,6 +1067,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         // Send voice message
         await sendMessage({
           conversationId: conversationId as any,
+          token: token ?? undefined,
           authUserId: userId,
           type: 'voice',
           content: 'Voice message',
@@ -1058,7 +1079,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         Alert.alert('Error', 'Failed to send voice message. Please try again.');
       }
     }
-  }, [isDemo, activeConversation, conversationId, userId, addDemoMessage, generateUploadUrl, sendMessage]);
+  }, [isDemo, activeConversation, conversationId, userId, token, addDemoMessage, generateUploadUrl, sendMessage]);
 
   // Delete voice message (demo mode only)
   const handleVoiceDelete = useCallback((messageId: string) => {
@@ -1237,6 +1258,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // VIDEO-MIRROR-FIX: Pass isMirrored for front-camera video correction
       await sendProtectedImage({
         conversationId: conversationId as any,
+        token: token ?? undefined,
         authUserId: userId,
         imageStorageId: storageId,
         timer: options.timer,
@@ -1333,6 +1355,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         if (__DEV__) console.log('[EXPIRY] Marking media expired from bubble:', messageId);
         markMediaExpired({
           messageId: messageId as any,
+          token: token ?? undefined,
           authUserId: userId,
         }).catch((err) => {
           if (__DEV__) console.error('[EXPIRY] Failed to mark expired:', err);
@@ -1368,17 +1391,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         {isLoading ? (
           <>
             <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.loadingText}>Opening chat…</Text>
+            <Text style={styles.loadingText}>Opening your conversation...</Text>
           </>
         ) : (
           <>
             <Ionicons name="chatbubble-ellipses-outline" size={48} color={COLORS.textLight} />
-            <Text style={styles.loadingText}>Chat not found</Text>
+            <Text style={styles.loadingText}>This chat is no longer available.</Text>
             <TouchableOpacity
               style={styles.errorBackButton}
               onPress={handleBack}
             >
-              <Text style={styles.errorBackText}>Go Back</Text>
+              <Text style={styles.errorBackText}>Go back</Text>
             </TouchableOpacity>
           </>
         )}
@@ -1393,10 +1416,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Loading chat...</Text>
+        <Text style={styles.loadingText}>Syncing your conversation...</Text>
       </View>
     );
   }
+
+  const composerBottomPadding = source === 'messages'
+    ? (Platform.OS === 'android' ? 8 : 6)
+    : Math.max(insets.bottom, Platform.OS === 'android' ? 10 : 8);
 
   const canSendCustom = isDemo
     ? true
@@ -1592,6 +1619,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 senderId: item.senderId,
                 createdAt: item.createdAt,
                 readAt: item.readAt,
+                readReceiptVisible: item.readReceiptVisible,
                 deliveredAt: item.deliveredAt, // MESSAGE-TICKS-FIX: Pass deliveredAt for tick rendering
                 isProtected: item.isProtected ?? false,
                 // SECURE-MEDIA-FIX: Use merged protectedMedia with backend viewMode
@@ -1634,7 +1662,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             <View style={styles.emptyChat}>
               <Ionicons name="chatbubble-outline" size={40} color={COLORS.border} />
               <Text style={styles.emptyChatText}>
-                Say hello to {activeConversation.otherUser.name}!
+                Start the conversation with {activeConversation.otherUser.name}.
               </Text>
             </View>
           }
@@ -1643,7 +1671,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             justifyContent: (messages?.length ?? 0) > 0 ? 'flex-end' as const : 'center' as const,
             paddingTop: 8,
             paddingHorizontal: 12,
-            paddingBottom: composerHeight,
+            paddingBottom: composerHeight + composerBottomPadding,
           }}
           onScroll={onScroll}
           scrollEventThrottle={16}
@@ -1656,10 +1684,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             onLayout={onComposerLayout}
             style={styles.composerWrapper}
           >
-            {/* COMPOSER-SPACING-FIX: Conditional bottom spacing based on context
-                - Inside tabs (source='messages'): Tab bar handles safe area, use minimal padding
-                - Standalone screen: Apply full insets.bottom for safe area protection */}
-            <View style={{ paddingBottom: source === 'messages' ? 4 : insets.bottom }}>
+            <View style={{ paddingBottom: composerBottomPadding }}>
               {/* L2 FIX: Voice messages only work in demo mode - hide from production UI */}
               <MessageInput
                 onSend={handleSend}
@@ -1759,8 +1784,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 : undefined)
             : (conversation as any)?.matchId
         }
-        onBlockSuccess={() => router.back()}
-        onUnmatchSuccess={() => router.back()}
+        onBlockSuccess={handleBack}
+        onUnmatchSuccess={handleBack}
       />
 
       {/* Truth/Dare Invite Modal (first-tap flow) */}

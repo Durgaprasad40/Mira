@@ -12,7 +12,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams, useSegments } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, GENDER_OPTIONS, ORIENTATION_OPTIONS, RELATIONSHIP_INTENTS, INCOGNITO_COLORS } from '@/lib/constants';
+import { COLORS, GENDER_OPTIONS, ORIENTATION_OPTIONS, RELATIONSHIP_INTENTS, INCOGNITO_COLORS, VALIDATION } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { Button, Input } from '@/components/ui';
 import { useFilterStore, kmToMiles, milesToKm } from '@/stores/filterStore';
@@ -24,10 +24,10 @@ import { api } from '@/convex/_generated/api';
 import { asUserId } from '@/convex/id';
 import type { Gender, Orientation } from '@/types';
 
-// Age and distance limits
-const MIN_AGE = 18;
-const MAX_AGE = 70;
-const MAX_DISTANCE_MILES = 150; // UI shows miles
+// P2-005 FIX: Use centralized validation constants
+const MIN_AGE = VALIDATION.DISCOVERY_MIN_AGE;
+const MAX_AGE = VALIDATION.DISCOVERY_MAX_AGE;
+const MAX_DISTANCE_MILES = VALIDATION.MAX_DISTANCE; // UI shows miles
 const MAX_DISTANCE_KM = milesToKm(MAX_DISTANCE_MILES); // ~161km stored
 
 // "Looking for" is single-select (exactly 1)
@@ -91,16 +91,10 @@ export default function DiscoveryPreferencesScreen() {
   const textLightColor = isPhase2 ? INCOGNITO_COLORS.textLight : COLORS.textLight;
   const accentColor = isPhase2 ? INCOGNITO_COLORS.primary : COLORS.primary;
 
-  // Defensive cleanup: remove stale/invalid intent values from old saves
+  // Defensive cleanup: remove stale/invalid Phase-2 intent values
+  // NOTE: Phase-1 cleanup is now done during Convex hydration (see hydration effect below)
+  // to fix race condition where cleanup ran before data arrived
   useEffect(() => {
-    // Phase-1: Filter relationshipIntent to only valid RELATIONSHIP_INTENTS values
-    const validPhase1Keys = RELATIONSHIP_INTENTS.map(i => i.value);
-    const cleanedPhase1 = relationshipIntent.filter(v => validPhase1Keys.includes(v));
-    if (cleanedPhase1.length !== relationshipIntent.length) {
-      setRelationshipIntent(cleanedPhase1);
-      if (__DEV__) console.log('[Prefs] Cleaned stale Phase-1 intents:', relationshipIntent.length - cleanedPhase1.length, 'removed');
-    }
-
     // Phase-2: Filter privateIntentKeys to only valid PRIVATE_INTENT_CATEGORIES values
     const validPhase2Keys: string[] = PRIVATE_INTENT_CATEGORIES.map(c => c.key);
     const cleanedPhase2 = privateIntentKeys.filter(k => validPhase2Keys.includes(k));
@@ -205,17 +199,26 @@ export default function DiscoveryPreferencesScreen() {
     setMaxAge(serverMaxAge);
     setMaxDistanceKm(serverMaxDistance);
 
-    // Hydrate lookingFor (gender), relationshipIntent, orientation, and sortBy
+    // Hydrate lookingFor (gender), orientation, and sortBy
     if (serverLookingFor.length > 0) {
       setGender(serverLookingFor as Gender[]);
-    }
-    if (serverRelationshipIntent.length > 0) {
-      setRelationshipIntent(serverRelationshipIntent as any[]);
     }
     // Set orientation directly (don't use toggle, which would toggle OFF if same value)
     setOrientation(serverOrientation as Orientation | null);
     // Hydrate sortBy
     setSortBy(serverSortBy);
+
+    // Hydrate relationshipIntent with IMMEDIATE cleanup of invalid/stale values
+    // This fixes the bug where old values (e.g., "long_term") don't match new schema (e.g., "serious_vibes")
+    // and cause phantom selections that block new chip selection
+    if (serverRelationshipIntent.length > 0) {
+      const validPhase1Keys = RELATIONSHIP_INTENTS.map(i => i.value);
+      const cleanedIntent = serverRelationshipIntent.filter((v: string) => validPhase1Keys.includes(v as any));
+      setRelationshipIntent(cleanedIntent as any[]);
+      if (__DEV__ && cleanedIntent.length !== serverRelationshipIntent.length) {
+        console.log('[Prefs] Cleaned invalid intents during hydration:', serverRelationshipIntent.length - cleanedIntent.length, 'removed');
+      }
+    }
 
     // Update local input state
     setLocalMinAge(serverMinAge.toString());
@@ -411,26 +414,30 @@ export default function DiscoveryPreferencesScreen() {
             </Text>
             <View style={styles.chips}>
               {/* Phase 1: Multi-select relationship intents (min 1, max 3) */}
-              {!isPhase2 && RELATIONSHIP_INTENTS.map((intent) => (
-                <TouchableOpacity
-                  key={intent.value}
-                  style={[
-                    styles.chip,
-                    relationshipIntent.includes(intent.value) && styles.chipSelected,
-                  ]}
-                  onPress={() => handlePhase1IntentToggle(intent.value)}
-                >
-                  <Text style={styles.chipEmoji}>{intent.emoji}</Text>
-                  <Text
+              {!isPhase2 && RELATIONSHIP_INTENTS.map((intent) => {
+                const isSelected = relationshipIntent.includes(intent.value);
+                return (
+                  <TouchableOpacity
+                    key={intent.value}
                     style={[
-                      styles.chipText,
-                      relationshipIntent.includes(intent.value) && styles.chipTextSelected,
+                      styles.chip,
+                      isSelected && [styles.chipSelected, { backgroundColor: accentColor, borderColor: accentColor }],
                     ]}
+                    onPress={() => handlePhase1IntentToggle(intent.value)}
                   >
-                    {intent.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+                    <Text style={styles.chipEmoji}>{intent.emoji}</Text>
+                    <Text
+                      style={[
+                        styles.chipText,
+                        { color: COLORS.text },
+                        isSelected && styles.chipTextSelected,
+                      ]}
+                    >
+                      {intent.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
               {/* Phase 2: Multi-select private intents (min 1, max 5) */}
               {isPhase2 && PRIVATE_INTENT_CATEGORIES.map((intent) => (
                 <TouchableOpacity

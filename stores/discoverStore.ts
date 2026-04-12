@@ -14,8 +14,15 @@ const DAILY_STANDOUT_LIMIT = 2;
 const RANDOM_MATCH_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
 const RANDOM_MATCH_PROB = 0.10; // 10% chance per eligible swipe
 
+// P2-001 FIX: Use local date string instead of UTC
+// This ensures daily limits reset at user's local midnight, not UTC midnight
+// Format: YYYY-MM-DD (same as before, but using local time)
 function getTodayDateString(): string {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 interface DiscoverState {
@@ -68,24 +75,29 @@ export const useDiscoverStore = create<DiscoverState>()((set, get) => ({
   randomMatchShownThisSession: false,
 
   likesRemaining: () => {
-    if (isDemoMode) return 999;
+    // P0-004 FIX: Demo mode bypass only in __DEV__ builds
+    // Production builds have this check completely removed at compile time
+    if (__DEV__ && isDemoMode) return 999;
     const state = get();
     return Math.max(0, DAILY_LIKE_LIMIT - state.likesUsedToday);
   },
 
   standOutsRemaining: () => {
-    if (isDemoMode) return 99;
+    // P0-004 FIX: Demo mode bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return 99;
     const state = get();
     return Math.max(0, DAILY_STANDOUT_LIMIT - state.standOutsUsedToday);
   },
 
   hasReachedLikeLimit: () => {
-    if (isDemoMode) return false;
+    // P0-004 FIX: Demo mode bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return false;
     return get().likesUsedToday >= DAILY_LIKE_LIMIT;
   },
 
   hasReachedStandOutLimit: () => {
-    if (isDemoMode) return false;
+    // P0-004 FIX: Demo mode bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return false;
     return get().standOutsUsedToday >= DAILY_STANDOUT_LIMIT;
   },
 

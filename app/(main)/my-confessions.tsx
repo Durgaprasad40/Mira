@@ -10,15 +10,16 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery } from 'convex/react';
+import { usePaginatedQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { asUserId } from '@/convex/id';
 import { ConfessionMood } from '@/types';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
+
+const MY_CONFESSIONS_PAGE_SIZE = 20;
 
 export default function MyConfessionsScreen() {
   const router = useRouter();
@@ -31,10 +32,14 @@ export default function MyConfessionsScreen() {
   const userReactions = useConfessionStore((s) => s.userReactions);
 
   // Convex query (only when not in demo mode)
-  const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
-  const convexMyConfessions = useQuery(
-    api.confessions.getMyConfessions,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+  const {
+    results: convexMyConfessions,
+    status: convexMyConfessionsStatus,
+    loadMore: loadMoreMyConfessions,
+  } = usePaginatedQuery(
+    api.confessions.getMyConfessionsPage,
+    !isDemoMode && currentUserId ? {} : 'skip',
+    { initialNumItems: MY_CONFESSIONS_PAGE_SIZE }
   );
 
   // Unified confession type for the list
@@ -69,7 +74,6 @@ export default function MyConfessionsScreen() {
     }
     // Demo mode: filter to current user's confessions and add isExpired flag
     const now = Date.now();
-    const EXPIRY_MS = 24 * 60 * 60 * 1000;
     return demoConfessions
       .filter((c) => c.userId === currentUserId)
       .map((c) => ({
@@ -82,12 +86,19 @@ export default function MyConfessionsScreen() {
         replyCount: c.replyCount,
         reactionCount: c.reactionCount,
         createdAt: c.createdAt,
-        isExpired: c.createdAt + EXPIRY_MS < now,
+        isExpired: (c.expiresAt ?? (c.createdAt + 24 * 60 * 60 * 1000)) < now,
       }))
       .sort((a, b) => b.createdAt - a.createdAt);
   }, [isDemoMode, convexMyConfessions, demoConfessions, currentUserId]);
 
-  const isLoading = !isDemoMode && convexMyConfessions === undefined;
+  const isLoading = !isDemoMode && convexMyConfessionsStatus === 'LoadingFirstPage';
+
+  const handleLoadMore = () => {
+    if (isDemoMode || convexMyConfessionsStatus !== 'CanLoadMore') {
+      return;
+    }
+    loadMoreMyConfessions(MY_CONFESSIONS_PAGE_SIZE);
+  };
 
   const handleOpenThread = (confessionId: string) => {
     router.push({
@@ -143,6 +154,19 @@ export default function MyConfessionsScreen() {
         )}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
+        ListFooterComponent={
+          !isDemoMode && myConfessions.length > 0 ? (
+            <View style={styles.paginationFooter}>
+              {convexMyConfessionsStatus === 'LoadingMore' ? (
+                <ActivityIndicator size="small" color={COLORS.primary} />
+              ) : convexMyConfessionsStatus === 'CanLoadMore' ? (
+                <TouchableOpacity style={styles.loadMoreButton} onPress={handleLoadMore}>
+                  <Text style={styles.loadMoreButtonText}>Load more</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null
+        }
         ListEmptyComponent={
           isLoading ? (
             <View style={styles.loadingContainer}>
@@ -196,6 +220,24 @@ const styles = StyleSheet.create({
   listContent: {
     paddingTop: 4,
     paddingBottom: 40,
+  },
+  paginationFooter: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingBottom: 24,
+  },
+  loadMoreButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 18,
+    backgroundColor: COLORS.white,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+  },
+  loadMoreButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   loadingContainer: {
     flex: 1,

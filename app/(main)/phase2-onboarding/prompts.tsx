@@ -1,523 +1,438 @@
-/**
- * Phase-2 Onboarding Step 3: Prompts/Questions
- *
- * Four collapsible sections:
- * - Section 1: Multiple choice prompts (1-3)
- * - Section 2: Text input prompts (4-6)
- * - Section 3: Text input prompts (7-9)
- * - Section 4: Preference Strength (ranking signal)
- *
- * Validation:
- * - At least 1 answered prompt per section (1-3) required
- * - All 3 preference strength items required
- */
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  TextInput,
-  Keyboard,
+  ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { INCOGNITO_COLORS } from '@/lib/constants';
 import {
   PHASE2_SECTION1_PROMPTS,
   PHASE2_SECTION2_PROMPTS,
   PHASE2_SECTION3_PROMPTS,
   PHASE2_PROMPT_MIN_TEXT_LENGTH,
   PHASE2_PROMPT_MAX_TEXT_LENGTH,
-  Phase2PromptAnswer,
-  PREFERENCE_STRENGTH_OPTIONS,
-  INTENT_MATCH_OPTIONS,
-  PreferenceStrengthValue,
-  IntentMatchValue,
+  type Phase2PromptAnswer,
 } from '@/lib/privateConstants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
-import { Button } from '@/components/ui';
+import { useAuthStore } from '@/stores/authStore';
+import { useScreenTrace } from '@/lib/devTrace';
 
-// P2-PHOTO-001: Updated step numbers for 5-step flow
-const TOTAL_STEPS = 5;
-const CURRENT_STEP = 4;
+const C = INCOGNITO_COLORS;
 
-type SectionKey = 'section1' | 'section2' | 'section3' | 'section4';
+type SectionKey = 'section1' | 'section2' | 'section3';
+
+const SECTION1_PROMPT_IDS = new Set<string>(PHASE2_SECTION1_PROMPTS.map((prompt) => prompt.id));
+const SECTION2_PROMPT_IDS = new Set<string>(PHASE2_SECTION2_PROMPTS.map((prompt) => prompt.id));
+const SECTION3_PROMPT_IDS = new Set<string>(PHASE2_SECTION3_PROMPTS.map((prompt) => prompt.id));
+
+function isValidTextAnswer(answer: string) {
+  const length = answer.trim().length;
+  return length >= PHASE2_PROMPT_MIN_TEXT_LENGTH && length <= PHASE2_PROMPT_MAX_TEXT_LENGTH;
+}
+
+function getInitialDraftPromptAnswers(promptAnswers: Phase2PromptAnswer[]) {
+  return promptAnswers
+    .filter((answer) =>
+      SECTION1_PROMPT_IDS.has(answer.promptId) ||
+      SECTION2_PROMPT_IDS.has(answer.promptId) ||
+      SECTION3_PROMPT_IDS.has(answer.promptId)
+    )
+    .map((answer) => ({ ...answer }));
+}
 
 export default function Phase2PromptsScreen() {
+  useScreenTrace('P2_ONB_PROMPTS');
+
   const router = useRouter();
-  const isNavigating = useRef(false);
+  const insets = useSafeAreaInsets();
+  const token = useAuthStore((s) => s.token);
 
-  // Store
   const promptAnswers = usePrivateProfileStore((s) => s.promptAnswers);
-  const setPromptAnswer = usePrivateProfileStore((s) => s.setPromptAnswer);
-  const removePromptAnswer = usePrivateProfileStore((s) => s.removePromptAnswer);
-  const preferenceStrength = usePrivateProfileStore((s) => s.preferenceStrength);
-  const setPreferenceStrength = usePrivateProfileStore((s) => s.setPreferenceStrength);
+  const setPromptAnswers = usePrivateProfileStore((s) => s.setPromptAnswers);
+  const saveOnboardingPrompts = useMutation(api.privateProfiles.saveOnboardingPrompts);
 
-  // Local state for accordion expansion
-  const [expandedSection, setExpandedSection] = useState<SectionKey | null>('section1');
+  const [expandedSection, setExpandedSection] = useState<SectionKey>('section1');
+  const [activeTextPromptId, setActiveTextPromptId] = useState<string | null>(null);
+  const [draftPromptAnswers, setDraftPromptAnswers] = useState<Phase2PromptAnswer[]>(
+    () => getInitialDraftPromptAnswers(promptAnswers)
+  );
+  const [isSaving, setIsSaving] = useState(false);
 
-  // Local state for editing (which prompt is being answered)
-  const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
-  const [draftAnswer, setDraftAnswer] = useState('');
+  const getAnswer = useCallback(
+    (promptId: string) => draftPromptAnswers.find((answer) => answer.promptId === promptId)?.answer || '',
+    [draftPromptAnswers]
+  );
 
-  // Validation error state
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const updateDraftPromptAnswer = useCallback((promptId: string, question: string, answer: string) => {
+    setDraftPromptAnswers((current) => {
+      const nextAnswer = answer;
+      const existingIndex = current.findIndex((item) => item.promptId === promptId);
 
-  // Helper: get answer for a prompt
-  const getAnswer = useCallback((promptId: string): string | undefined => {
-    const found = promptAnswers.find((a) => a.promptId === promptId);
-    return found?.answer;
-  }, [promptAnswers]);
+      if (nextAnswer.trim().length === 0) {
+        if (existingIndex === -1) {
+          return current;
+        }
+        return current.filter((item) => item.promptId !== promptId);
+      }
 
-  // Helper: count answered prompts in a section
-  const countAnswered = useCallback((sectionPrompts: readonly { id: string }[]): number => {
-    return sectionPrompts.filter((p) => {
-      const answer = getAnswer(p.id);
-      return answer && answer.trim().length > 0;
-    }).length;
+      const nextEntry: Phase2PromptAnswer = { promptId, question, answer: nextAnswer };
+      if (existingIndex === -1) {
+        return [...current, nextEntry];
+      }
+
+      const next = [...current];
+      next[existingIndex] = nextEntry;
+      return next;
+    });
+  }, []);
+
+  const removeDraftPromptAnswer = useCallback((promptId: string) => {
+    setDraftPromptAnswers((current) => current.filter((item) => item.promptId !== promptId));
+  }, []);
+
+  const toggleSection = useCallback((section: SectionKey) => {
+    setExpandedSection((current) => (current === section ? current : section));
+  }, []);
+
+  const selectMultipleChoiceAnswer = useCallback(
+    (promptId: string, question: string, option: string) => {
+      const currentAnswer = getAnswer(promptId);
+      if (currentAnswer === option) {
+        removeDraftPromptAnswer(promptId);
+        return;
+      }
+      updateDraftPromptAnswer(promptId, question, option);
+    },
+    [getAnswer, removeDraftPromptAnswer, updateDraftPromptAnswer]
+  );
+
+  const toggleTextPrompt = useCallback((promptId: string) => {
+    setActiveTextPromptId((current) => (current === promptId ? null : promptId));
+  }, []);
+
+  const buildPayload = useCallback(() => {
+    const payload: Phase2PromptAnswer[] = [];
+
+    for (const prompt of PHASE2_SECTION1_PROMPTS) {
+      const answer = getAnswer(prompt.id).trim();
+      if (!answer) continue;
+      payload.push({
+        promptId: prompt.id,
+        question: prompt.question,
+        answer,
+      });
+    }
+
+    for (const prompt of [...PHASE2_SECTION2_PROMPTS, ...PHASE2_SECTION3_PROMPTS]) {
+      const answer = getAnswer(prompt.id).trim();
+      if (!isValidTextAnswer(answer)) continue;
+      payload.push({
+        promptId: prompt.id,
+        question: prompt.question,
+        answer,
+      });
+    }
+
+    return payload;
   }, [getAnswer]);
 
-  // Section counts
-  const section1Count = countAnswered(PHASE2_SECTION1_PROMPTS);
-  const section2Count = countAnswered(PHASE2_SECTION2_PROMPTS);
-  const section3Count = countAnswered(PHASE2_SECTION3_PROMPTS);
-
-  // Preference strength completeness check (done in-screen, not via store selector)
-  const prefStrengthCount =
-    (preferenceStrength.smoking ? 1 : 0) +
-    (preferenceStrength.drinking ? 1 : 0) +
-    (preferenceStrength.intent ? 1 : 0);
-  const isPrefStrengthComplete = prefStrengthCount === 3;
-
-  // Toggle section expansion
-  const toggleSection = (section: SectionKey) => {
-    setExpandedSection((prev) => (prev === section ? null : section));
-    setEditingPrompt(null);
-    setDraftAnswer('');
-    Keyboard.dismiss();
-  };
-
-  // Handle multiple choice selection (Section 1)
-  const handleChoiceSelect = (promptId: string, question: string, option: string) => {
-    setPromptAnswer(promptId, question, option);
-    setValidationError(null);
-  };
-
-  // Start editing a text prompt (Section 2/3)
-  const startTextEdit = (promptId: string) => {
-    const existingAnswer = getAnswer(promptId) || '';
-    setEditingPrompt(promptId);
-    setDraftAnswer(existingAnswer);
-  };
-
-  // Save text answer
-  const saveTextAnswer = (promptId: string, question: string) => {
-    const trimmed = draftAnswer.trim();
-    if (trimmed.length >= PHASE2_PROMPT_MIN_TEXT_LENGTH) {
-      setPromptAnswer(promptId, question, trimmed);
-      setValidationError(null);
-    } else if (trimmed.length === 0) {
-      removePromptAnswer(promptId);
-    }
-    setEditingPrompt(null);
-    setDraftAnswer('');
-    Keyboard.dismiss();
-  };
-
-  // Cancel text editing
-  const cancelTextEdit = () => {
-    setEditingPrompt(null);
-    setDraftAnswer('');
-    Keyboard.dismiss();
-  };
-
-  // Validate all sections and continue
-  const handleContinue = () => {
-    if (isNavigating.current) return;
-
-    // Validation: at least 1 answered per section
-    if (section1Count < 1) {
-      setValidationError('Please answer at least 1 question in "Question 1"');
-      setExpandedSection('section1');
-      return;
-    }
-    if (section2Count < 1) {
-      setValidationError('Please answer at least 1 question in "Question 2"');
-      setExpandedSection('section2');
-      return;
-    }
-    if (section3Count < 1) {
-      setValidationError('Please answer at least 1 question in "Question 3"');
-      setExpandedSection('section3');
-      return;
-    }
-    // Validation: all 3 preference strength items required
-    if (!isPrefStrengthComplete) {
-      setValidationError('Please complete all preference strength selections');
-      setExpandedSection('section4');
-      return;
-    }
-
-    setValidationError(null);
-    isNavigating.current = true;
-
-    // Navigate to Step 4 (review)
-    router.push('/(main)/phase2-onboarding/profile-setup' as any);
-
-    // Reset navigation lock after delay
-    setTimeout(() => {
-      isNavigating.current = false;
-    }, 1000);
-  };
-
-  // Go back to Step 2
-  const handleBack = () => {
-    if (isNavigating.current) return;
-    isNavigating.current = true;
-    router.back();
-    setTimeout(() => {
-      isNavigating.current = false;
-    }, 1000);
-  };
-
-  // Render Section 1 (Multiple Choice)
-  const renderSection1 = () => (
-    <View style={styles.sectionContent}>
-      {PHASE2_SECTION1_PROMPTS.map((prompt) => {
-        const currentAnswer = getAnswer(prompt.id);
-        return (
-          <View key={prompt.id} style={styles.promptCard}>
-            <Text style={styles.promptQuestion}>{prompt.question}</Text>
-            <View style={styles.optionsContainer}>
-              {prompt.options.map((option) => {
-                const isSelected = currentAnswer === option;
-                return (
-                  <TouchableOpacity
-                    key={option}
-                    style={[styles.optionChip, isSelected && styles.optionChipSelected]}
-                    onPress={() => handleChoiceSelect(prompt.id, prompt.question, option)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.optionText, isSelected && styles.optionTextSelected]}>
-                      {option}
-                    </Text>
-                    {isSelected && (
-                      <Ionicons name="checkmark-circle" size={18} color={COLORS.background} style={styles.checkIcon} />
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </View>
-        );
-      })}
-    </View>
+  const section1AnsweredCount = useMemo(
+    () => PHASE2_SECTION1_PROMPTS.filter((prompt) => getAnswer(prompt.id).trim().length > 0).length,
+    [getAnswer]
+  );
+  const section2AnsweredCount = useMemo(
+    () => PHASE2_SECTION2_PROMPTS.filter((prompt) => isValidTextAnswer(getAnswer(prompt.id))).length,
+    [getAnswer]
+  );
+  const section3AnsweredCount = useMemo(
+    () => PHASE2_SECTION3_PROMPTS.filter((prompt) => isValidTextAnswer(getAnswer(prompt.id))).length,
+    [getAnswer]
   );
 
-  // Render Text Input Section (Section 2/3)
-  const renderTextSection = (sectionPrompts: readonly { id: string; question: string }[]) => (
-    <View style={styles.sectionContent}>
-      {sectionPrompts.map((prompt) => {
-        const currentAnswer = getAnswer(prompt.id);
-        const isEditing = editingPrompt === prompt.id;
-        const hasAnswer = currentAnswer && currentAnswer.trim().length > 0;
+  const section1Complete = section1AnsweredCount > 0;
+  const section2Complete = section2AnsweredCount > 0;
+  const section3Complete = section3AnsweredCount > 0;
+  const canContinue = !!token && section1Complete && section2Complete && section3Complete && !isSaving;
 
-        return (
-          <View key={prompt.id} style={styles.promptCard}>
-            <Text style={styles.promptQuestion}>{prompt.question}</Text>
+  const handleContinue = useCallback(async () => {
+    if (!token || !canContinue) return;
 
-            {isEditing ? (
-              <View style={styles.textInputContainer}>
-                <TextInput
-                  style={styles.textInput}
-                  value={draftAnswer}
-                  onChangeText={setDraftAnswer}
-                  placeholder="Type your answer..."
-                  placeholderTextColor={COLORS.textMuted}
-                  multiline
-                  maxLength={PHASE2_PROMPT_MAX_TEXT_LENGTH}
-                  autoFocus
-                />
-                <Text style={styles.charCount}>
-                  {draftAnswer.length}/{PHASE2_PROMPT_MAX_TEXT_LENGTH}
-                  {draftAnswer.length > 0 && draftAnswer.length < PHASE2_PROMPT_MIN_TEXT_LENGTH && (
-                    <Text style={styles.minRequired}> (min {PHASE2_PROMPT_MIN_TEXT_LENGTH})</Text>
-                  )}
-                </Text>
-                <View style={styles.textButtonRow}>
-                  <TouchableOpacity style={styles.cancelButton} onPress={cancelTextEdit}>
-                    <Text style={styles.cancelButtonText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[
-                      styles.saveButton,
-                      draftAnswer.trim().length < PHASE2_PROMPT_MIN_TEXT_LENGTH && draftAnswer.trim().length > 0 && styles.saveButtonDisabled,
-                    ]}
-                    onPress={() => saveTextAnswer(prompt.id, prompt.question)}
-                    disabled={draftAnswer.trim().length > 0 && draftAnswer.trim().length < PHASE2_PROMPT_MIN_TEXT_LENGTH}
-                  >
-                    <Text style={styles.saveButtonText}>Save</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ) : hasAnswer ? (
-              <TouchableOpacity style={styles.answeredContainer} onPress={() => startTextEdit(prompt.id)}>
-                <Text style={styles.answeredText} numberOfLines={3}>{currentAnswer}</Text>
-                <Ionicons name="pencil" size={16} color={COLORS.primary} />
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity style={styles.addAnswerButton} onPress={() => startTextEdit(prompt.id)}>
-                <Ionicons name="add-circle-outline" size={20} color={COLORS.primary} />
-                <Text style={styles.addAnswerText}>Add your answer</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        );
-      })}
-    </View>
-  );
+    const payload = buildPayload();
+    setIsSaving(true);
+    try {
+      const result = await saveOnboardingPrompts({
+        token,
+        promptAnswers: payload,
+      });
 
-  // Render collapsible section header
+      if (!result?.success) {
+        throw new Error('Prompt answers could not be saved');
+      }
+
+      setPromptAnswers(payload);
+      router.push('/(main)/phase2-onboarding/profile-setup' as any);
+    } catch (error) {
+      Alert.alert(
+        'Unable to continue',
+        'We could not save your prompt answers. Please try again.'
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }, [buildPayload, canContinue, router, saveOnboardingPrompts, setPromptAnswers, token]);
+
   const renderSectionHeader = (
-    title: string,
     sectionKey: SectionKey,
-    answered: number,
-    total: number
+    title: string,
+    subtitle: string,
+    complete: boolean
   ) => {
     const isExpanded = expandedSection === sectionKey;
-    const hasMinimum = answered >= 1;
-
     return (
       <TouchableOpacity
-        style={[styles.sectionHeader, isExpanded && styles.sectionHeaderExpanded]}
+        style={styles.sectionHeader}
         onPress={() => toggleSection(sectionKey)}
-        activeOpacity={0.7}
+        activeOpacity={0.75}
       >
         <View style={styles.sectionHeaderLeft}>
-          <Text style={styles.sectionTitle}>{title}</Text>
-          <View style={[styles.countBadge, hasMinimum && styles.countBadgeComplete]}>
-            <Text style={[styles.countText, hasMinimum && styles.countTextComplete]}>
-              {answered}/{total} answered
-            </Text>
+          <View style={styles.sectionTitleRow}>
+            <Text style={styles.sectionTitle}>{title}</Text>
+            {complete ? (
+              <Ionicons name="checkmark-circle" size={18} color={C.primary} />
+            ) : null}
           </View>
+          <Text style={styles.sectionSubtitle}>{subtitle}</Text>
         </View>
         <Ionicons
           name={isExpanded ? 'chevron-up' : 'chevron-down'}
-          size={22}
-          color={COLORS.text}
+          size={20}
+          color={C.textLight}
         />
       </TouchableOpacity>
     );
   };
 
-  // Render Preference Strength section header
-  const renderPrefStrengthHeader = () => {
-    const isExpanded = expandedSection === 'section4';
+  const renderQuickQuestions = () => {
+    const isExpanded = expandedSection === 'section1';
+    return (
+      <View style={styles.sectionCard}>
+        {renderSectionHeader(
+          'section1',
+          'Quick Questions',
+          `${section1AnsweredCount}/3 answered`,
+          section1Complete
+        )}
+        {isExpanded ? (
+          <View style={styles.sectionContent}>
+            {PHASE2_SECTION1_PROMPTS.map((prompt) => {
+              const currentAnswer = getAnswer(prompt.id);
+              return (
+                <View key={prompt.id} style={styles.promptBlock}>
+                  <View style={styles.promptHeaderRow}>
+                    <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                    {currentAnswer ? (
+                      <Ionicons name="checkmark-circle" size={18} color={C.primary} />
+                    ) : null}
+                  </View>
+                  <View style={styles.optionsGrid}>
+                    {prompt.options.map((option) => {
+                      const selected = currentAnswer === option;
+                      return (
+                        <TouchableOpacity
+                          key={option}
+                          style={[styles.optionChip, selected && styles.optionChipSelected]}
+                          onPress={() => selectMultipleChoiceAnswer(prompt.id, prompt.question, option)}
+                          activeOpacity={0.75}
+                        >
+                          <Text style={[styles.optionText, selected && styles.optionTextSelected]}>
+                            {option}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
+      </View>
+    );
+  };
+
+  const renderTextSection = (
+    sectionKey: 'section2' | 'section3',
+    title: string,
+    prompts: ReadonlyArray<{ readonly id: string; readonly question: string }>,
+    answeredCount: number,
+    complete: boolean
+  ) => {
+    const isExpanded = expandedSection === sectionKey;
 
     return (
-      <TouchableOpacity
-        style={[styles.sectionHeader, isExpanded && styles.sectionHeaderExpanded]}
-        onPress={() => toggleSection('section4')}
-        activeOpacity={0.7}
-      >
-        <View style={styles.sectionHeaderLeft}>
-          <Text style={styles.sectionTitle}>Preference Strength</Text>
-          <View style={[styles.countBadge, isPrefStrengthComplete && styles.countBadgeComplete]}>
-            <Text style={[styles.countText, isPrefStrengthComplete && styles.countTextComplete]}>
-              {prefStrengthCount}/3 selected
-            </Text>
+      <View style={styles.sectionCard}>
+        {renderSectionHeader(
+          sectionKey,
+          title,
+          `${answeredCount}/3 answered`,
+          complete
+        )}
+        {isExpanded ? (
+          <View style={styles.sectionContent}>
+            {prompts.map((prompt) => {
+              const answer = getAnswer(prompt.id);
+              const isOpen = activeTextPromptId === prompt.id;
+              const valid = isValidTextAnswer(answer);
+              const answerLength = answer.trim().length;
+
+              return (
+                <View key={prompt.id} style={styles.promptBlock}>
+                  <TouchableOpacity
+                    style={styles.textPromptHeader}
+                    onPress={() => toggleTextPrompt(prompt.id)}
+                    activeOpacity={0.75}
+                  >
+                    <View style={styles.promptHeaderCopy}>
+                      <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                      {!isOpen && answer.trim().length > 0 ? (
+                        <Text style={styles.answerPreview} numberOfLines={2}>
+                          {answer.trim()}
+                        </Text>
+                      ) : (
+                        <Text style={styles.answerPlaceholder}>
+                          Tap to answer
+                        </Text>
+                      )}
+                    </View>
+                    <View style={styles.promptHeaderIcons}>
+                      {valid ? (
+                        <Ionicons name="checkmark-circle" size={18} color={C.primary} />
+                      ) : null}
+                      <Ionicons
+                        name={isOpen ? 'chevron-up' : 'chevron-down'}
+                        size={18}
+                        color={C.textLight}
+                      />
+                    </View>
+                  </TouchableOpacity>
+
+                  {isOpen ? (
+                    <View style={styles.textAnswerCard}>
+                      <TextInput
+                        style={styles.textInput}
+                        value={answer}
+                        onChangeText={(text) => updateDraftPromptAnswer(prompt.id, prompt.question, text)}
+                        placeholder="Type your answer..."
+                        placeholderTextColor={C.textLight}
+                        multiline
+                        maxLength={PHASE2_PROMPT_MAX_TEXT_LENGTH}
+                        textAlignVertical="top"
+                      />
+                      <View style={styles.inputFooter}>
+                        <Text style={styles.charCount}>
+                          {answerLength}/{PHASE2_PROMPT_MAX_TEXT_LENGTH}
+                        </Text>
+                        {valid ? (
+                          <View style={styles.validBadge}>
+                            <Ionicons name="checkmark-circle" size={16} color={C.primary} />
+                            <Text style={styles.validBadgeText}>Ready</Text>
+                          </View>
+                        ) : null}
+                      </View>
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })}
           </View>
-        </View>
-        <Ionicons
-          name={isExpanded ? 'chevron-up' : 'chevron-down'}
-          size={22}
-          color={COLORS.text}
-        />
-      </TouchableOpacity>
+        ) : null}
+      </View>
     );
   };
 
-  // Render Preference Strength section content
-  const renderPrefStrengthSection = () => (
-    <View style={styles.sectionContent}>
-      {/* Smoking preference */}
-      <View style={styles.promptCard}>
-        <Text style={styles.promptQuestion}>How important is smoking compatibility?</Text>
-        <View style={styles.optionsContainer}>
-          {PREFERENCE_STRENGTH_OPTIONS.map((opt) => {
-            const isSelected = preferenceStrength.smoking === opt.value;
-            return (
-              <TouchableOpacity
-                key={opt.value}
-                style={[styles.optionChip, isSelected && styles.optionChipSelected]}
-                onPress={() => {
-                  setPreferenceStrength('smoking', opt.value as PreferenceStrengthValue);
-                  setValidationError(null);
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.optionText, isSelected && styles.optionTextSelected]}>
-                  {opt.label}
-                </Text>
-                {isSelected && (
-                  <Ionicons name="checkmark-circle" size={18} color={COLORS.background} style={styles.checkIcon} />
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      </View>
+  const bottomHint = useMemo(() => {
+    if (canContinue) {
+      return 'Continue saves this entire prompt step at once.';
+    }
 
-      {/* Drinking preference */}
-      <View style={styles.promptCard}>
-        <Text style={styles.promptQuestion}>How important is drinking compatibility?</Text>
-        <View style={styles.optionsContainer}>
-          {PREFERENCE_STRENGTH_OPTIONS.map((opt) => {
-            const isSelected = preferenceStrength.drinking === opt.value;
-            return (
-              <TouchableOpacity
-                key={opt.value}
-                style={[styles.optionChip, isSelected && styles.optionChipSelected]}
-                onPress={() => {
-                  setPreferenceStrength('drinking', opt.value as PreferenceStrengthValue);
-                  setValidationError(null);
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.optionText, isSelected && styles.optionTextSelected]}>
-                  {opt.label}
-                </Text>
-                {isSelected && (
-                  <Ionicons name="checkmark-circle" size={18} color={COLORS.background} style={styles.checkIcon} />
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      </View>
-
-      {/* Intent match preference */}
-      <View style={styles.promptCard}>
-        <Text style={styles.promptQuestion}>How important is relationship intent compatibility?</Text>
-        <View style={styles.optionsContainer}>
-          {INTENT_MATCH_OPTIONS.map((opt) => {
-            const isSelected = preferenceStrength.intent === opt.value;
-            return (
-              <TouchableOpacity
-                key={opt.value}
-                style={[styles.optionChip, isSelected && styles.optionChipSelected]}
-                onPress={() => {
-                  setPreferenceStrength('intent', opt.value as IntentMatchValue);
-                  setValidationError(null);
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.optionText, isSelected && styles.optionTextSelected]}>
-                  {opt.label}
-                </Text>
-                {isSelected && (
-                  <Ionicons name="checkmark-circle" size={18} color={COLORS.background} style={styles.checkIcon} />
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      </View>
-    </View>
-  );
+    const missing: string[] = [];
+    if (!section1Complete) missing.push('Quick Questions');
+    if (!section2Complete) missing.push('Your Values');
+    if (!section3Complete) missing.push('Your Personality');
+    return `Finish: ${missing.join(', ')}`;
+  }, [canContinue, section1Complete, section2Complete, section3Complete]);
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <KeyboardAvoidingView
-        style={styles.keyboardView}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-      >
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleBack} style={styles.backButton}>
-            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.stepIndicator}>Step {CURRENT_STEP} of {TOTAL_STEPS}</Text>
-          <View style={styles.headerSpacer} />
-        </View>
+    <View style={[styles.container, { paddingTop: insets.top }]}>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <Ionicons name="arrow-back" size={24} color={C.text} />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Prompt answers</Text>
+        <Text style={styles.stepLabel}>Step 4 of 5</Text>
+      </View>
 
+      <KeyboardAvoidingView
+        style={styles.keyboard}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
         <ScrollView
           style={styles.scrollView}
-          contentContainerStyle={styles.scrollContent}
-          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={styles.content}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
         >
-          {/* Title */}
-          <Text style={styles.title}>Tell us about yourself</Text>
-          <Text style={styles.subtitle}>
-            Answer at least 1 question in each section to continue.
-          </Text>
-
-          {/* Validation Error */}
-          {validationError && (
-            <View style={styles.errorBanner}>
-              <Ionicons name="alert-circle" size={18} color={COLORS.error} />
-              <Text style={styles.errorText}>{validationError}</Text>
-            </View>
-          )}
-
-          {/* Section 1: Multiple Choice */}
-          <View style={styles.section}>
-            {renderSectionHeader('Question 1', 'section1', section1Count, PHASE2_SECTION1_PROMPTS.length)}
-            {expandedSection === 'section1' && renderSection1()}
+          <View style={styles.introCard}>
+            <Text style={styles.introTitle}>Answer a few questions before review</Text>
+            <Text style={styles.introText}>
+              Pick at least one answer in each section. We will save this whole step only when you continue.
+            </Text>
           </View>
 
-          {/* Section 2: Text Input */}
-          <View style={styles.section}>
-            {renderSectionHeader('Question 2', 'section2', section2Count, PHASE2_SECTION2_PROMPTS.length)}
-            {expandedSection === 'section2' && renderTextSection(PHASE2_SECTION2_PROMPTS)}
-          </View>
-
-          {/* Section 3: Text Input */}
-          <View style={styles.section}>
-            {renderSectionHeader('Question 3', 'section3', section3Count, PHASE2_SECTION3_PROMPTS.length)}
-            {expandedSection === 'section3' && renderTextSection(PHASE2_SECTION3_PROMPTS)}
-          </View>
-
-          {/* Section 4: Preference Strength */}
-          <View style={styles.section}>
-            {renderPrefStrengthHeader()}
-            {expandedSection === 'section4' && renderPrefStrengthSection()}
-          </View>
-
-          {/* Spacer for button */}
-          <View style={styles.bottomSpacer} />
+          {renderQuickQuestions()}
+          {renderTextSection('section2', 'Your Values', PHASE2_SECTION2_PROMPTS, section2AnsweredCount, section2Complete)}
+          {renderTextSection('section3', 'Your Personality', PHASE2_SECTION3_PROMPTS, section3AnsweredCount, section3Complete)}
         </ScrollView>
-
-        {/* Footer */}
-        <View style={styles.footer}>
-          <Button
-            title="Continue"
-            variant="primary"
-            onPress={handleContinue}
-            fullWidth
-            disabled={section1Count < 1 || section2Count < 1 || section3Count < 1 || !isPrefStrengthComplete}
-          />
-        </View>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+
+      <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}>
+        <Text style={styles.bottomHint}>{bottomHint}</Text>
+        <TouchableOpacity
+          style={[styles.continueButton, !canContinue && styles.continueButtonDisabled]}
+          onPress={handleContinue}
+          disabled={!canContinue || isSaving}
+          activeOpacity={0.8}
+        >
+          {isSaving ? (
+            <ActivityIndicator size="small" color="#FFFFFF" />
+          ) : (
+            <>
+              <Text style={styles.continueButtonText}>Continue to review</Text>
+              <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
+            </>
+          )}
+        </TouchableOpacity>
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
+  container: {
     flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  keyboardView: {
-    flex: 1,
+    backgroundColor: C.background,
   },
   header: {
     flexDirection: 'row',
@@ -525,59 +440,47 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 16,
     paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
   },
-  backButton: {
-    padding: 4,
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: C.text,
   },
-  stepIndicator: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.textLight,
+  stepLabel: {
+    fontSize: 12,
+    color: C.textLight,
   },
-  headerSpacer: {
-    width: 32,
+  keyboard: {
+    flex: 1,
   },
   scrollView: {
     flex: 1,
   },
-  scrollContent: {
-    padding: 20,
-    paddingBottom: 40,
+  content: {
+    paddingHorizontal: 16,
+    paddingBottom: 32,
   },
-  title: {
-    fontSize: 26,
-    fontWeight: '700',
-    color: COLORS.text,
-    marginBottom: 8,
-  },
-  subtitle: {
-    fontSize: 15,
-    color: COLORS.textLight,
-    marginBottom: 20,
-    lineHeight: 21,
-  },
-  errorBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.error + '15',
-    borderWidth: 1,
-    borderColor: COLORS.error + '40',
-    borderRadius: 10,
-    padding: 12,
+  introCard: {
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    padding: 16,
     marginBottom: 16,
-    gap: 8,
   },
-  errorText: {
+  introTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 6,
+  },
+  introText: {
     fontSize: 14,
-    color: COLORS.error,
-    flex: 1,
+    lineHeight: 20,
+    color: C.textLight,
   },
-  section: {
-    marginBottom: 12,
-    backgroundColor: COLORS.backgroundDark,
-    borderRadius: 14,
+  sectionCard: {
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    marginBottom: 16,
     overflow: 'hidden',
   },
   sectionHeader: {
@@ -585,177 +488,158 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     padding: 16,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  sectionHeaderExpanded: {
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
   },
   sectionHeaderLeft: {
+    flex: 1,
+    marginRight: 12,
+  },
+  sectionTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 6,
   },
   sectionTitle: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: '700',
+    color: C.text,
   },
-  countBadge: {
-    backgroundColor: COLORS.background,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  countBadgeComplete: {
-    backgroundColor: COLORS.primary + '20',
-  },
-  countText: {
-    fontSize: 12,
-    color: COLORS.textMuted,
-    fontWeight: '500',
-  },
-  countTextComplete: {
-    color: COLORS.primary,
+  sectionSubtitle: {
+    fontSize: 13,
+    color: C.textLight,
+    marginTop: 4,
   },
   sectionContent: {
-    padding: 16,
-    paddingTop: 12,
-  },
-  promptCard: {
-    marginBottom: 16,
-  },
-  promptQuestion: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginBottom: 12,
-    lineHeight: 21,
-  },
-  optionsContainer: {
-    gap: 8,
-  },
-  optionChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: COLORS.background,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-  },
-  optionChipSelected: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
-  },
-  optionText: {
-    fontSize: 14,
-    color: COLORS.text,
-    flex: 1,
-  },
-  optionTextSelected: {
-    color: COLORS.background,
-    fontWeight: '600',
-  },
-  checkIcon: {
-    marginLeft: 8,
-  },
-  textInputContainer: {
-    backgroundColor: COLORS.background,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 12,
-  },
-  textInput: {
-    fontSize: 15,
-    color: COLORS.text,
-    minHeight: 80,
-    textAlignVertical: 'top',
-    lineHeight: 21,
-  },
-  charCount: {
-    fontSize: 12,
-    color: COLORS.textMuted,
-    textAlign: 'right',
-    marginTop: 6,
-  },
-  minRequired: {
-    color: COLORS.error,
-  },
-  textButtonRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 10,
-    marginTop: 10,
-  },
-  cancelButton: {
-    paddingVertical: 8,
     paddingHorizontal: 16,
+    paddingBottom: 18,
   },
-  cancelButtonText: {
-    fontSize: 14,
-    color: COLORS.textMuted,
-    fontWeight: '500',
+  promptBlock: {
+    marginBottom: 18,
   },
-  saveButton: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 8,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-  },
-  saveButtonDisabled: {
-    backgroundColor: COLORS.textMuted,
-  },
-  saveButtonText: {
-    fontSize: 14,
-    color: COLORS.background,
-    fontWeight: '600',
-  },
-  answeredContainer: {
+  promptHeaderRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
-    backgroundColor: COLORS.background,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primary + '40',
-    padding: 12,
+    gap: 12,
+    marginBottom: 10,
   },
-  answeredText: {
-    fontSize: 14,
-    color: COLORS.text,
+  promptQuestion: {
     flex: 1,
-    marginRight: 8,
+    fontSize: 14,
     lineHeight: 20,
+    color: C.text,
+    fontWeight: '600',
   },
-  addAnswerButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.background,
-    borderWidth: 1,
-    borderColor: COLORS.primary + '40',
-    borderStyle: 'dashed',
-    borderRadius: 10,
-    paddingVertical: 14,
+  optionsGrid: {
     gap: 8,
   },
-  addAnswerText: {
+  optionChip: {
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    backgroundColor: C.background,
+  },
+  optionChipSelected: {
+    borderColor: C.primary,
+    backgroundColor: `${C.primary}14`,
+  },
+  optionText: {
+    color: C.text,
     fontSize: 14,
-    color: COLORS.primary,
-    fontWeight: '500',
+    lineHeight: 19,
   },
-  bottomSpacer: {
-    height: 20,
+  optionTextSelected: {
+    color: C.primary,
+    fontWeight: '600',
   },
-  footer: {
-    padding: 20,
+  textPromptHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  promptHeaderCopy: {
+    flex: 1,
+  },
+  promptHeaderIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  answerPreview: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: C.textLight,
+    marginTop: 6,
+  },
+  answerPlaceholder: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: C.textLight,
+    marginTop: 6,
+  },
+  textAnswerCard: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 12,
+    backgroundColor: C.background,
+    padding: 12,
+  },
+  textInput: {
+    minHeight: 112,
+    fontSize: 14,
+    lineHeight: 20,
+    color: C.text,
+  },
+  inputFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  charCount: {
+    fontSize: 12,
+    color: C.textLight,
+  },
+  validBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  validBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: C.primary,
+  },
+  bottomBar: {
+    paddingHorizontal: 16,
     paddingTop: 12,
     borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-    backgroundColor: COLORS.background,
+    borderTopColor: C.border,
+    backgroundColor: C.background,
+  },
+  bottomHint: {
+    fontSize: 13,
+    color: C.textLight,
+    marginBottom: 10,
+  },
+  continueButton: {
+    height: 50,
+    borderRadius: 12,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+  },
+  continueButtonDisabled: {
+    opacity: 0.55,
+  },
+  continueButtonText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
 });

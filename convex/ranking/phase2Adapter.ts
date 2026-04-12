@@ -27,6 +27,7 @@
 
 import { Id } from '../_generated/dataModel';
 import { NormalizedCandidate, NormalizedViewer, FairnessContext } from './rankingTypes';
+import { normalizeRelationshipIntentValues } from '../../lib/discoveryNaming';
 
 // ---------------------------------------------------------------------------
 // Phase-2 Profile Type (matches userPrivateProfiles table schema)
@@ -110,6 +111,7 @@ export interface Phase2CandidateContext {
  */
 export interface Phase2ViewerContext {
   blockedIds: Set<string>;         // Users the viewer has blocked
+  desireTagKeys?: string[];        // Viewer's desire tags for ranking boost
 }
 
 // ---------------------------------------------------------------------------
@@ -132,8 +134,9 @@ export function toNormalizedCandidate(
   const now = Date.now();
 
   // SAFETY: Guard all array accesses
-  const intentKeys = profile.privateIntentKeys ?? [];
+  const intentKeys = normalizeRelationshipIntentValues(profile.privateIntentKeys ?? []);
   const hobbies = profile.hobbies ?? [];
+  const desireTagKeys = profile.privateDesireTagKeys ?? [];
   const promptAnswers = profile.promptAnswers ?? [];
   const photoUrls = profile.privatePhotoUrls ?? [];
 
@@ -160,6 +163,7 @@ export function toNormalizedCandidate(
     // NOTE: Phase-2 uses different field names
     relationshipIntent: intentKeys,  // privateIntentKeys -> relationshipIntent
     activities: hobbies,             // hobbies -> activities
+    desireTagKeys,                   // Phase-2 desire alignment boost
 
     lifestyle: {
       smoking: profile.smoking,
@@ -235,6 +239,7 @@ export function toNormalizedViewer(
     // These empty arrays mean compatibility scoring will be minimal
     relationshipIntent: [],
     activities: [],
+    desireTagKeys: context.desireTagKeys,  // Viewer's desire tags for ranking boost
 
     lifestyle: {
       smoking: undefined,

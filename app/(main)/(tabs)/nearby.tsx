@@ -1,3 +1,12 @@
+/*
+ * LOCKED (NEARBY TAB)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - No logic/UI changes allowed
+ */
+
 /**
  * Nearby Tab - Full Implementation
  *
@@ -12,18 +21,16 @@
  * - Uses Discovery preferences for filtering (no separate Nearby filters)
  *
  * ============================================================================
- * LOCKED IMPLEMENTATIONS - DO NOT CHANGE WITHOUT APPROVAL
+ * IMPLEMENTATION NOTES
  * ============================================================================
- * The following behaviors are LOCKED and approved by Durga Prasad.
- * Do not modify without explicit unlock approval.
  *
- * 1. INDIVIDUAL PINK MARKERS (LOCKED)
- *    - Uses image={pinPink} prop for Android reliability
- *    - Do NOT replace with View-based markers
+ * 1. PINK PIN MARKERS (RESTORED - STABLE VERSION)
+ *    - Uses image={pinPink} prop for reliable Android rendering
+ *    - Same appearance on Metro (Samsung) and standalone APK (OnePlus)
  *    - Tap opens profile via Discover-style flow
  *
  * 2. CLUSTERING BEHAVIOR (LOCKED)
- *    - Uses react-native-map-clustering with image-based cluster markers
+ *    - Uses supercluster (JS) with react-native-maps for Fabric compatibility
  *    - Cluster tap zooms into cluster area to reveal individual markers
  *    - Do NOT change clustering radius or behavior without testing
  *
@@ -32,9 +39,9 @@
  *    - No follow mode
  *    - No second-state behavior
  *
- * ANDROID MARKER RELIABILITY:
- * View-based markers are UNRELIABLE on Android. All markers use image prop.
- * DO NOT switch back to View-based markers without extensive Android testing.
+ * ANDROID MARKER NOTE:
+ * Using image={pinPink} prop ensures consistent rendering across all builds.
+ * View-based markers had inconsistent rendering on Android.
  * ============================================================================
  *
  * FUTURE PHASES (documented for later):
@@ -52,22 +59,30 @@ import {
   ActivityIndicator,
   Linking,
   Platform,
+  Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
-import ClusteredMapView from 'react-native-map-clustering';
-import { Region, Marker } from 'react-native-maps';
+import MapView, { Region, Marker } from 'react-native-maps';
+import Supercluster from 'supercluster';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useLocationStore, useBestLocation } from '@/stores/locationStore';
 import { useAuthStore } from '@/stores/authStore';
-import { asUserId } from '@/convex/id';
 import { safePush } from '@/lib/safeRouter';
 import { COLORS } from '@/lib/constants';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
 import { log } from '@/utils/logger';
+import { Toast } from '@/components/ui/Toast';
+import { Badge } from '@/components/ui/Badge';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Haptics from 'expo-haptics';
+import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
+
+// Key for storing when user last viewed crossed paths
+const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S4: Error boundary for map crash containment
@@ -193,7 +208,6 @@ function getClusterImage(pointCount: number) {
 /** Explicit location UI states for stability */
 type LocationUIState =
   | 'checking'
-  | 'permission_required'
   | 'denied_needs_settings'
   | 'restricted'           // iOS parental controls
   | 'services_disabled'    // System-wide location off
@@ -216,28 +230,58 @@ interface NearbyUser {
   hideDistance: boolean;
 }
 
-/** Processed nearby user with fuzzed coordinates */
+type NearbyQueryStatus = 'ok' | 'viewer_unverified' | 'location_required';
+
+interface NearbyUsersQueryResult {
+  status: NearbyQueryStatus;
+  users: NearbyUser[];
+}
+
+/** Processed nearby user with backend-fuzzed map coordinates */
 interface ProcessedNearbyUser extends NearbyUser {
   fuzzedLat: number;
   fuzzedLng: number;
 }
 
+interface NearbyMapNotice {
+  message: string;
+  actionLabel?: string;
+  onPress?: () => void;
+}
+
+interface NearbySyncIssue {
+  kind: 'publish' | 'record';
+  message: string;
+  actionLabel: string;
+}
+
+/** GeoJSON Point properties for supercluster */
+interface UserPointProperties {
+  id: string;
+  user: ProcessedNearbyUser;
+}
+
+/** Cluster or point from supercluster - using any for cluster properties to handle library types */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ClusterFeature = Supercluster.ClusterFeature<any> | Supercluster.PointFeature<UserPointProperties>;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_LATITUDE_DELTA = 0.02; // ~2km view
-const DEFAULT_LONGITUDE_DELTA = 0.02;
+const DEFAULT_LATITUDE_DELTA = 0.004; // ~2x closer than original 0.008
+const DEFAULT_LONGITUDE_DELTA = 0.004;
 
 // Rate limiting constants for crossed paths detection
 const DETECTION_MIN_MOVEMENT_METERS = 60; // Only scan if moved 60m+
 const DETECTION_MIN_INTERVAL_MS = 30000; // Only scan every 30s+
+const PUBLISH_REFRESH_INTERVAL_MS = 30000; // Refresh publishedAt at least every 30s while Nearby is active
 
-// Privacy fuzzing constants
-const FUZZ_MIN_METERS = 50;  // Minimum offset
-const FUZZ_MAX_METERS = 150; // Maximum offset
-const STRONG_PRIVACY_FUZZ_MIN = 200; // Larger offset for users with strongPrivacyMode
-const STRONG_PRIVACY_FUZZ_MAX = 400;
+// P3-NEARBY-002: Query timeout constant (extracted from inline 30000ms)
+const QUERY_TIMEOUT_MS = 30000; // 30 seconds before showing error
+const LOCATION_ACQUIRE_TIMEOUT_MS = 15000; // 15 seconds before fallback error
+const LOADING_OVERLAY_DELAY_MS = 180;
+const MAP_FADE_IN_DURATION_MS = 220;
 
 // Demo fallback location (Mumbai)
 const DEMO_LOCATION = {
@@ -245,37 +289,9 @@ const DEMO_LOCATION = {
   longitude: DEMO_USER.longitude,
 };
 
-// ---------------------------------------------------------------------------
-// STABILITY FIX P1: Cryptographically secure session salt
-// ---------------------------------------------------------------------------
-// Module-level session salt for stable privacy fuzzing across Nearby remounts.
-// Generated once per app session (module load), not per component mount.
-// Combined with viewerId + otherId for deterministic per-user fuzzing.
-//
-// FIX: Use crypto API for unpredictable salt instead of Date.now()
-// This prevents reverse-engineering of fuzz offsets.
-// ---------------------------------------------------------------------------
-function generateSecureSessionSalt(): number {
-  try {
-    // Use Web Crypto API (available in Hermes/React Native)
-    const array = new Uint32Array(2);
-    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-      crypto.getRandomValues(array);
-      // Combine two 32-bit values into a larger number
-      return array[0] * 0x100000000 + array[1];
-    }
-  } catch {
-    // Fallback silently
-  }
-  // Fallback: combine Math.random with high-resolution time for entropy
-  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER) ^ Date.now();
-}
-
-const MODULE_SESSION_SALT = generateSecureSessionSalt();
-
-// Module-level flag: has empty state been shown this app session?
-// Resets only on full app restart (module reload).
-let hasShownEmptyStateThisSession = false;
+// Supercluster configuration (matches previous react-native-map-clustering behavior)
+const CLUSTER_RADIUS = 45;
+const CLUSTER_MAX_ZOOM = 20;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -319,63 +335,25 @@ function isValidMapCoordinate(
   return true;
 }
 
-/**
- * Simple deterministic hash for stable fuzzing.
- * Same input always produces same output within a session.
- */
-function simpleHash(str: string): number {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash |= 0;
-  }
-  return Math.abs(hash);
+/** Convert map region to zoom level for supercluster. */
+function getZoomFromRegion(region: Region): number {
+  const angle = region.longitudeDelta;
+  // Clamp zoom to reasonable range
+  return Math.max(0, Math.min(20, Math.round(Math.log(360 / angle) / Math.LN2)));
 }
 
 /**
- * Apply client-side privacy fuzzing to coordinates.
- * Deterministic per user+viewer+session so markers stay stable.
- * Never reveals exact location.
+ * Get map bounding box from region for supercluster.
+ * Returns [westLng, southLat, eastLng, northLat]
  */
-function applyPrivacyFuzz(
-  lat: number,
-  lng: number,
-  otherId: string,
-  viewerId: string,
-  sessionSalt: number,
-  strongPrivacyMode: boolean,
-): { lat: number; lng: number } {
-  // Deterministic seed
-  const seed = simpleHash(`${viewerId}:${otherId}:${sessionSalt}`);
-
-  // Random angle (0-360 degrees)
-  const angle = ((seed % 36000) / 100) * (Math.PI / 180);
-
-  // Random radius based on strongPrivacyMode preference
-  const minMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MIN : FUZZ_MIN_METERS;
-  const maxMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MAX : FUZZ_MAX_METERS;
-  const radiusMeters = minMeters + (seed % (maxMeters - minMeters + 1));
-
-  // Earth radius in meters
-  const R = 6371000;
-  const latRad = lat * (Math.PI / 180);
-  const lngRad = lng * (Math.PI / 180);
-  const d = radiusMeters / R;
-
-  const newLat = Math.asin(
-    Math.sin(latRad) * Math.cos(d) +
-    Math.cos(latRad) * Math.sin(d) * Math.cos(angle),
-  );
-  const newLng = lngRad + Math.atan2(
-    Math.sin(angle) * Math.sin(d) * Math.cos(latRad),
-    Math.cos(d) - Math.sin(latRad) * Math.sin(newLat),
-  );
-
-  return {
-    lat: newLat * (180 / Math.PI),
-    lng: newLng * (180 / Math.PI),
-  };
+function getBoundingBox(region: Region): [number, number, number, number] {
+  const { latitude, longitude, latitudeDelta, longitudeDelta } = region;
+  return [
+    longitude - longitudeDelta / 2, // west
+    latitude - latitudeDelta / 2,   // south
+    longitude + longitudeDelta / 2, // east
+    latitude + latitudeDelta / 2,   // north
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -386,17 +364,23 @@ export default function NearbyScreen() {
   const router = useRouter();
   const isDemo = isDemoMode;
 
-  // Map ref for programmatic control (any type for clustering library compatibility)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mapRef = useRef<any>(null);
+  // Map ref for programmatic control
+  const mapRef = useRef<MapView>(null);
 
-  // SuperCluster ref for accessing cluster leaves
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const superClusterRef = useRef<any>(null);
+  // Supercluster instance ref
+  const superclusterRef = useRef<Supercluster<UserPointProperties> | null>(null);
+
+  // Current map region for cluster computation
+  const [currentRegion, setCurrentRegion] = useState<Region | null>(null);
+  const [isNearbyFocused, setIsNearbyFocused] = useState(false);
+  const [publishRefreshTick, setPublishRefreshTick] = useState(0);
+
+  // Computed clusters/points to render
+  const [clusters, setClusters] = useState<ClusterFeature[]>([]);
 
   // Auth store
   const userId = useAuthStore((s) => s.userId);
-  const convexUserId = userId ? asUserId(userId) : undefined;
+  const token = useAuthStore((s) => s.token);
 
   // Location store
   const permissionStatus = useLocationStore((s) => s.permissionStatus);
@@ -407,33 +391,27 @@ export default function NearbyScreen() {
 
   // UI state
   const [locationUIState, setLocationUIState] = useState<LocationUIState>('checking');
+  const [locationTimeoutMessage, setLocationTimeoutMessage] = useState<string | null>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
   const [showEmptyState, setShowEmptyState] = useState(false);
+  const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
+  const [isMapReady, setIsMapReady] = useState(false);
+  const [retainedNearbyUsersResult, setRetainedNearbyUsersResult] = useState<NearbyUsersQueryResult | null>(null);
+  const [nearbyRefreshKey, setNearbyRefreshKey] = useState(0);
 
   // Mount guard for async operations
   const isMountedRef = useRef(true);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
-
-  // ---------------------------------------------------------------------------
-  // Query nearby users (live mode only)
-  // ---------------------------------------------------------------------------
-  const nearbyUsersQuery = useQuery(
-    api.crossedPaths.getNearbyUsers,
-    !isDemo && convexUserId ? { userId: convexUserId } : 'skip'
-  );
-
-  // Track query loading state for error detection
-  const isQueryActive = !isDemo && convexUserId !== undefined;
-  const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
 
   // Ref to track query timeout (prevents race condition)
   const queryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const locationAcquireTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const publishRefreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const loadingOverlayDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // P1-003 FIX: Ref to track query completion for timeout callback
+  // This provides fresh state check inside setTimeout, avoiding stale closure values
+  const queryCompletedRef = useRef(false);
 
   // Auto-retry refs (conservative: max 2 attempts, 5s delay)
   const autoRetryCountRef = useRef(0);
@@ -441,13 +419,159 @@ export default function NearbyScreen() {
   const AUTO_RETRY_MAX = 2;
   const AUTO_RETRY_DELAY_MS = 5000;
 
-  // Empty state auto-dismiss timer ref
-  const emptyStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const EMPTY_STATE_DISMISS_MS = 3000;
+  // ---------------------------------------------------------------------------
+  // P3 POLISH: Animation refs for premium feel
+  // ---------------------------------------------------------------------------
+  // P3-001: Empty state fade animation
+  const emptyStateOpacity = useRef(new Animated.Value(0)).current;
+  // P3-002: Recenter button press scale animation
+  const recenterScale = useRef(new Animated.Value(1)).current;
+  // P3-003: Loading overlay fade animation
+  const loadingOpacity = useRef(new Animated.Value(0)).current;
+  const mapOpacity = useRef(new Animated.Value(0)).current;
+  const lastNearbyRefreshAtRef = useRef(0);
+  const [nearbySyncIssue, setNearbySyncIssue] = useState<NearbySyncIssue | null>(null);
+  const requestNearbyRefresh = useCallback(
+    (options?: { force?: boolean; minIntervalMs?: number }) => {
+      const force = options?.force ?? false;
+      const minIntervalMs = options?.minIntervalMs ?? 1500;
+      const now = Date.now();
+
+      if (!force && now - lastNearbyRefreshAtRef.current < minIntervalMs) {
+        return false;
+      }
+
+      lastNearbyRefreshAtRef.current = now;
+      setNearbyRefreshKey((current) => current + 1);
+      return true;
+    },
+    [],
+  );
+
+  // P2-NEARBY-002: Centralized unmount cleanup for all timer refs
+  // This ensures all timers are cleared on unmount, regardless of effect state
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      // Clear all timer refs on unmount to prevent leaks
+      if (queryTimeoutRef.current) {
+        clearTimeout(queryTimeoutRef.current);
+        queryTimeoutRef.current = null;
+      }
+      if (locationAcquireTimeoutRef.current) {
+        clearTimeout(locationAcquireTimeoutRef.current);
+        locationAcquireTimeoutRef.current = null;
+      }
+      if (publishRefreshIntervalRef.current) {
+        clearInterval(publishRefreshIntervalRef.current);
+        publishRefreshIntervalRef.current = null;
+      }
+      if (loadingOverlayDelayRef.current) {
+        clearTimeout(loadingOverlayDelayRef.current);
+        loadingOverlayDelayRef.current = null;
+      }
+      if (autoRetryTimeoutRef.current) {
+        clearTimeout(autoRetryTimeoutRef.current);
+        autoRetryTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  // DEV-only startup log (runs once on mount, not on every render)
+  useEffect(() => {
+    if (__DEV__) {
+      log.info('[NEARBY]', 'NearbyScreen mounted', { isDemo });
+    }
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Query nearby users (live mode only)
+  // ---------------------------------------------------------------------------
+  const hasValidBestLocation = !!(
+    bestLocation &&
+    isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)
+  );
+  const blockingLocationErrorMessage = !hasValidBestLocation
+    ? (locationTimeoutMessage ?? error)
+    : null;
+  const passiveLocationErrorMessage = hasValidBestLocation
+    ? (locationTimeoutMessage ?? error)
+    : null;
+  const authToken =
+    typeof token === 'string' && token.trim().length > 0 ? token : null;
+  const shouldRunNearbyUsersQuery = Boolean(
+    !isDemo &&
+    authToken &&
+    isNearbyFocused &&
+    permissionStatus === 'granted' &&
+    !blockingLocationErrorMessage
+  );
+  const shouldRunCrossedPathSummaryQuery = Boolean(
+    !isDemo &&
+    authToken &&
+    isNearbyFocused
+  );
+
+  const nearbyUsersQuery = useQuery(
+    api.crossedPaths.getNearbyUsers,
+    shouldRunNearbyUsersQuery
+      ? { token: authToken!, refreshKey: nearbyRefreshKey }
+      : 'skip'
+  );
+
+  // ---------------------------------------------------------------------------
+  // Crossed Paths Badge - show dot when there are new entries
+  // ---------------------------------------------------------------------------
+  const crossedPathSummaryQuery = useQuery(
+    api.crossedPaths.getCrossedPathSummary,
+    shouldRunCrossedPathSummaryQuery ? { token: authToken! } : 'skip'
+  );
+
+  const [hasNewCrossedPaths, setHasNewCrossedPaths] = useState(false);
+
+  // Check if there are new crossed paths since last viewed
+  useEffect(() => {
+    if (!crossedPathSummaryQuery || crossedPathSummaryQuery.count === 0) {
+      setHasNewCrossedPaths(false);
+      return;
+    }
+
+    const latestTimestamp = crossedPathSummaryQuery.latestCreatedAt ?? 0;
+    if (!latestTimestamp) {
+      setHasNewCrossedPaths(false);
+      return;
+    }
+
+    // Get last seen timestamp from storage
+    // P1-005 FIX: Add mount guard to prevent state update after unmount
+    AsyncStorage.getItem(CROSSED_PATHS_LAST_SEEN_KEY).then((lastSeenStr) => {
+      if (!isMountedRef.current) return;
+      const lastSeen = lastSeenStr ? parseInt(lastSeenStr, 10) : 0;
+      setHasNewCrossedPaths(latestTimestamp > lastSeen);
+    }).catch(() => {
+      if (!isMountedRef.current) return;
+      // On error, assume there are new paths if we have any
+      setHasNewCrossedPaths(crossedPathSummaryQuery.count > 0);
+    });
+  }, [crossedPathSummaryQuery]);
+
+  // Track query loading state for error detection
+  const isQueryActive = shouldRunNearbyUsersQuery;
+  const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
+  const shouldShowLoadingState = (isQueryLoading || isRetrying) && !isDemo;
+
+  useEffect(() => {
+    if (userId) {
+      setRetainedNearbyUsersResult(null);
+    }
+  }, [userId]);
 
   // Clear timeout when query succeeds or on unmount
   useEffect(() => {
     if (nearbyUsersQuery !== undefined) {
+      // P1-003 FIX: Mark query as completed (checked by timeout callback)
+      queryCompletedRef.current = true;
       // Query succeeded - clear any pending timeout
       if (queryTimeoutRef.current) {
         clearTimeout(queryTimeoutRef.current);
@@ -464,8 +588,11 @@ export default function NearbyScreen() {
       if (queryError) {
         setQueryError(null);
       }
+      if (isRetrying) {
+        setIsRetrying(false);
+      }
     }
-  }, [nearbyUsersQuery, queryError]);
+  }, [nearbyUsersQuery, queryError, isRetrying]);
 
   // Set timeout for query loading (30 seconds)
   useEffect(() => {
@@ -478,15 +605,25 @@ export default function NearbyScreen() {
       clearTimeout(queryTimeoutRef.current);
     }
 
+    // P1-003 FIX: Reset completion flag when starting new query timeout
+    queryCompletedRef.current = false;
+
     queryTimeoutRef.current = setTimeout(() => {
       if (!isMountedRef.current) return;
+      // P1-003 FIX: Check ref for fresh state instead of stale closure value
+      // If query completed between timeout set and callback execution, skip error
+      if (queryCompletedRef.current) {
+        queryTimeoutRef.current = null;
+        return;
+      }
       // Only set error if query is still pending
-      if (nearbyUsersQuery === undefined && isQueryActive) {
-        setQueryError('Unable to load nearby users. Please check your connection.');
+      if (isQueryActive) {
+        setQueryError('Nearby is taking longer than usual to refresh.');
+        setIsRetrying(false);
         log.warn('[NEARBY]', 'query timeout - no data after 30s');
       }
       queryTimeoutRef.current = null;
-    }, 30000);
+    }, QUERY_TIMEOUT_MS);
 
     return () => {
       if (queryTimeoutRef.current) {
@@ -494,7 +631,49 @@ export default function NearbyScreen() {
         queryTimeoutRef.current = null;
       }
     };
-  }, [isQueryLoading, isQueryActive, nearbyUsersQuery]);
+  }, [isQueryLoading, isQueryActive]);
+
+  // P3-003: Delay + fade the loading overlay so quick refreshes do not flash
+  useEffect(() => {
+    if (loadingOverlayDelayRef.current) {
+      clearTimeout(loadingOverlayDelayRef.current);
+      loadingOverlayDelayRef.current = null;
+    }
+
+    if (shouldShowLoadingState) {
+      if (showLoadingOverlay) {
+        return;
+      }
+
+      loadingOverlayDelayRef.current = setTimeout(() => {
+        if (!isMountedRef.current) return;
+        setShowLoadingOverlay(true);
+        loadingOpacity.setValue(0);
+        Animated.timing(loadingOpacity, {
+          toValue: 1,
+          duration: 180,
+          useNativeDriver: true,
+        }).start();
+      }, LOADING_OVERLAY_DELAY_MS);
+    } else {
+      Animated.timing(loadingOpacity, {
+        toValue: 0,
+        duration: 140,
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (finished && isMountedRef.current) {
+          setShowLoadingOverlay(false);
+        }
+      });
+    }
+
+    return () => {
+      if (loadingOverlayDelayRef.current) {
+        clearTimeout(loadingOverlayDelayRef.current);
+        loadingOverlayDelayRef.current = null;
+      }
+    };
+  }, [loadingOpacity, shouldShowLoadingState, showLoadingOverlay]);
 
   // ---------------------------------------------------------------------------
   // Auto-retry on query error (conservative: max 2 attempts, 5s delay)
@@ -533,14 +712,8 @@ export default function NearbyScreen() {
         // Clear error and trigger retry (same as manual retry)
         setQueryError(null);
         setIsRetrying(true);
+        requestNearbyRefresh({ force: true });
         startLocationTracking();
-
-        // Clear retry feedback after delay
-        setTimeout(() => {
-          if (isMountedRef.current) {
-            setIsRetrying(false);
-          }
-        }, 2000);
       }
 
       autoRetryTimeoutRef.current = null;
@@ -553,7 +726,7 @@ export default function NearbyScreen() {
         autoRetryTimeoutRef.current = null;
       }
     };
-  }, [queryError, startLocationTracking]);
+  }, [queryError, requestNearbyRefresh, startLocationTracking]);
 
   // ---------------------------------------------------------------------------
   // Publish location mutation (live mode only)
@@ -561,7 +734,7 @@ export default function NearbyScreen() {
   const publishLocationMutation = useMutation(api.crossedPaths.publishLocation);
 
   // Track last published coords to avoid spam
-  const lastPublishedRef = useRef<{ lat: number; lng: number } | null>(null);
+  const lastPublishedRef = useRef<{ lat: number; lng: number; publishedAt: number } | null>(null);
   // Guard to prevent concurrent publish calls during initial mount/focus
   const isPublishingRef = useRef(false);
 
@@ -574,6 +747,33 @@ export default function NearbyScreen() {
   const lastDetectionTimeRef = useRef<number>(0);
   const lastDetectionLatLngRef = useRef<{ lat: number; lng: number } | null>(null);
 
+  // Anti-spam: Don't show crossed-path toast more than once per 10 minutes
+  const TOAST_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+  const lastToastTimeRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (publishRefreshIntervalRef.current) {
+      clearInterval(publishRefreshIntervalRef.current);
+      publishRefreshIntervalRef.current = null;
+    }
+
+    if (!isNearbyFocused || isDemo || !token || locationUIState !== 'ready') {
+      return;
+    }
+
+    publishRefreshIntervalRef.current = setInterval(() => {
+      if (!isMountedRef.current) return;
+      setPublishRefreshTick((current) => current + 1);
+    }, PUBLISH_REFRESH_INTERVAL_MS);
+
+    return () => {
+      if (publishRefreshIntervalRef.current) {
+        clearInterval(publishRefreshIntervalRef.current);
+        publishRefreshIntervalRef.current = null;
+      }
+    };
+  }, [isNearbyFocused, isDemo, token, locationUIState]);
+
   // Publish location when screen is ready and location is valid
   useEffect(() => {
     // Skip in demo mode
@@ -582,9 +782,13 @@ export default function NearbyScreen() {
       return;
     }
 
-    // Skip if no user ID
-    if (!convexUserId) {
-      if (__DEV__) console.log('[NEARBY] publishLocation skipped: no userId');
+    if (!isNearbyFocused) {
+      return;
+    }
+
+    // Skip if no token
+    if (!token) {
+      if (__DEV__) console.log('[NEARBY] publishLocation skipped: no token');
       return;
     }
 
@@ -607,14 +811,20 @@ export default function NearbyScreen() {
 
     const lat = bestLocation.latitude;
     const lng = bestLocation.longitude;
+    const now = Date.now();
 
-    // Skip if same coordinates already published (within ~10m threshold)
+    // Skip if same coordinates were published recently (within ~10m threshold + refresh window)
     const last = lastPublishedRef.current;
     if (last) {
       const latDiff = Math.abs(lat - last.lat);
       const lngDiff = Math.abs(lng - last.lng);
+      const timeSinceLastPublish = now - last.publishedAt;
       // ~10m threshold (0.0001 degrees ≈ 11m)
-      if (latDiff < 0.0001 && lngDiff < 0.0001) {
+      if (
+        latDiff < 0.0001 &&
+        lngDiff < 0.0001 &&
+        timeSinceLastPublish < PUBLISH_REFRESH_INTERVAL_MS
+      ) {
         if (__DEV__) console.log('[NEARBY] publishLocation skipped: same location');
         return;
       }
@@ -627,7 +837,7 @@ export default function NearbyScreen() {
     (async () => {
       try {
         const result = await publishLocationMutation({
-          userId: convexUserId,
+          token,
           latitude: lat,
           longitude: lng,
         });
@@ -635,8 +845,18 @@ export default function NearbyScreen() {
         // Guard: skip state updates if unmounted
         if (!isMountedRef.current) return;
 
-        // Update last published ref
-        lastPublishedRef.current = { lat, lng };
+        // Only treat the current coordinates as published if the backend actually refreshed them
+        if (result?.published) {
+          lastPublishedRef.current = {
+            lat,
+            lng,
+            publishedAt: result.publishedAt ?? Date.now(),
+          };
+          requestNearbyRefresh();
+          setNearbySyncIssue((currentIssue) =>
+            currentIssue?.kind === 'publish' ? null : currentIssue
+          );
+        }
 
         if (__DEV__) {
           console.log('[NEARBY] publishLocation success:', result);
@@ -682,8 +902,8 @@ export default function NearbyScreen() {
         // Rate limits passed - trigger crossed paths detection
         if (!isMountedRef.current) return;
         try {
-          await recordLocationMutation({
-            userId: convexUserId,
+          const result = await recordLocationMutation({
+            token,
             latitude: lat,
             longitude: lng,
             accuracy: bestLocation.accuracy,
@@ -694,13 +914,40 @@ export default function NearbyScreen() {
           lastDetectionLatLngRef.current = { lat, lng };
 
           if (__DEV__) {
-            console.log('[NEARBY] recordLocation success - crossed paths scan triggered');
+            console.log('[NEARBY] recordLocation success - crossed paths scan triggered', {
+              nearbyCount: result?.nearbyCount,
+            });
           }
+
+          // Show crossed-path toast if new crossings detected (with anti-spam)
+          if (result?.nearbyCount && result.nearbyCount > 0) {
+            const timeSinceLastToast = now - lastToastTimeRef.current;
+            if (timeSinceLastToast >= TOAST_COOLDOWN_MS) {
+              lastToastTimeRef.current = now;
+              Toast.show(
+                'You crossed paths with someone nearby',
+                undefined,
+                () => safePush(router, '/(main)/crossed-paths' as any, 'toast->crossed-paths')
+              );
+            } else if (__DEV__) {
+              console.log('[NEARBY] crossed-path toast suppressed (cooldown)', {
+                elapsed: Math.round(timeSinceLastToast / 1000) + 's',
+                cooldown: Math.round(TOAST_COOLDOWN_MS / 1000) + 's',
+              });
+            }
+          }
+          setNearbySyncIssue((currentIssue) =>
+            currentIssue?.kind === 'record' ? null : currentIssue
+          );
         } catch (recordErr) {
-          // recordLocation failure should not affect publishLocation flow
           if (__DEV__) {
-            console.warn('[NEARBY] recordLocation failed (non-critical):', recordErr);
+            console.warn('[NEARBY] recordLocation failed:', recordErr);
           }
+          setNearbySyncIssue({
+            kind: 'record',
+            message: 'Crossed Paths will catch up as soon as your location refresh finishes.',
+            actionLabel: 'Retry now',
+          });
         }
       } catch (err) {
         // Guard: skip logging if unmounted
@@ -709,13 +956,28 @@ export default function NearbyScreen() {
         if (__DEV__) {
           console.error('[NEARBY] publishLocation failed:', err);
         }
-        // Silently fail - don't crash the app
+        setNearbySyncIssue({
+          kind: 'publish',
+          message: 'Using your last good location while Nearby refreshes.',
+          actionLabel: 'Retry now',
+        });
       } finally {
         // Always reset publishing flag to allow future calls
         isPublishingRef.current = false;
       }
     })();
-  }, [isDemo, convexUserId, locationUIState, bestLocation, publishLocationMutation, recordLocationMutation]);
+  }, [
+    isDemo,
+    isNearbyFocused,
+    token,
+    locationUIState,
+    bestLocation,
+    publishRefreshTick,
+    publishLocationMutation,
+    requestNearbyRefresh,
+    recordLocationMutation,
+    router,
+  ]);
 
   // ---------------------------------------------------------------------------
   // Demo mode nearby users - placed around current location
@@ -748,7 +1010,7 @@ export default function NearbyScreen() {
         publishedAt: Date.now() - index * 60 * 60 * 1000, // Stagger by hours
         distance: offset.distance,
         freshness: 'solid' as const,
-        photoUrl: profile.photos?.[0]?.url ?? null,
+        photoUrl: getPrimaryPhotoUrl(profile.photos),
         isVerified: profile.isVerified ?? false,
         strongPrivacyMode: false,
         hideDistance: false,
@@ -757,14 +1019,43 @@ export default function NearbyScreen() {
   }, [isDemo, bestLocation]);
 
   // ---------------------------------------------------------------------------
-  // Combine and process nearby users with fuzzing
+  // Combine and process nearby users using backend-fuzzed coordinates
   // ---------------------------------------------------------------------------
-  const processedNearbyUsers = useMemo(() => {
-    const rawUsers: NearbyUser[] = isDemo
-      ? demoNearbyUsers
-      : (nearbyUsersQuery ?? []);
+  const nearbyUsersResult = useMemo<NearbyUsersQueryResult | null>(() => {
+    if (isDemo) {
+      return {
+        status: 'ok',
+        users: demoNearbyUsers,
+      };
+    }
 
-    const viewerId = userId || 'anonymous';
+    if (!nearbyUsersQuery) {
+      return null;
+    }
+
+    if (Array.isArray(nearbyUsersQuery)) {
+      return {
+        status: 'ok',
+        users: nearbyUsersQuery as NearbyUser[],
+      };
+    }
+
+    return nearbyUsersQuery as NearbyUsersQueryResult;
+  }, [demoNearbyUsers, isDemo, nearbyUsersQuery]);
+
+  useEffect(() => {
+    if (nearbyUsersResult?.status === 'ok') {
+      setRetainedNearbyUsersResult(nearbyUsersResult);
+    }
+  }, [nearbyUsersResult]);
+
+  const displayNearbyUsersResult = nearbyUsersResult ?? retainedNearbyUsersResult;
+  const hasRetainedNearbyResult =
+    nearbyUsersResult == null && retainedNearbyUsersResult?.status === 'ok';
+  const nearbyQueryStatus = displayNearbyUsersResult?.status ?? null;
+
+  const processedNearbyUsers = useMemo(() => {
+    const rawUsers: NearbyUser[] = displayNearbyUsersResult?.users ?? [];
     let validCount = 0;
     let skippedCount = 0;
 
@@ -784,20 +1075,10 @@ export default function NearbyScreen() {
         return true;
       })
       .map((user) => {
-        // Apply privacy fuzzing (use strongPrivacyMode for larger fuzz radius)
-        const fuzzed = applyPrivacyFuzz(
-          user.publishedLat,
-          user.publishedLng,
-          user.id,
-          viewerId,
-          MODULE_SESSION_SALT,
-          user.strongPrivacyMode,
-        );
-
         return {
           ...user,
-          fuzzedLat: fuzzed.lat,
-          fuzzedLng: fuzzed.lng,
+          fuzzedLat: user.publishedLat,
+          fuzzedLng: user.publishedLng,
         };
       });
 
@@ -809,13 +1090,13 @@ export default function NearbyScreen() {
     }
 
     return processed;
-  }, [isDemo, demoNearbyUsers, nearbyUsersQuery, userId]);
+  }, [displayNearbyUsersResult, userId]);
 
   // ---------------------------------------------------------------------------
-  // Sort and limit visible markers for performance (max 30)
-  // Filtering is handled by Discovery preferences at the backend level
+  // Sort visible markers fairly before clustering
+  // Filtering is handled by the backend so every eligible user is represented
   // ---------------------------------------------------------------------------
-  const visibleUsers = useMemo(() => {
+  const mapUsers = useMemo(() => {
     const sorted = [...processedNearbyUsers];
 
     // Sort: verified users first, then by freshness, then by distance
@@ -830,63 +1111,145 @@ export default function NearbyScreen() {
       return (a.distance ?? 1000) - (b.distance ?? 1000);
     });
 
-    return sorted.slice(0, 30);
+    return sorted;
   }, [processedNearbyUsers]);
 
-  // Alias for rendering (visibleUsers are the processed, sorted, limited markers)
-  const mapUsers = visibleUsers;
+  const clusterPoints = useMemo<Supercluster.PointFeature<UserPointProperties>[]>(() => {
+    return mapUsers
+      .filter((user) => isValidMapCoordinate(user.fuzzedLat, user.fuzzedLng))
+      .map((user) => ({
+        type: 'Feature' as const,
+        properties: {
+          id: user.id,
+          user,
+        },
+        geometry: {
+          type: 'Point' as const,
+          coordinates: [user.fuzzedLng, user.fuzzedLat],
+        },
+      }));
+  }, [mapUsers]);
+
+  const recomputeClusters = useCallback((region: Region | null) => {
+    if (!region || !superclusterRef.current) {
+      setClusters([]);
+      return;
+    }
+
+    try {
+      const zoom = getZoomFromRegion(region);
+      const bbox = getBoundingBox(region);
+      const newClusters = superclusterRef.current.getClusters(bbox, zoom);
+      setClusters(newClusters);
+    } catch (e) {
+      log.warn('[NEARBY]', 'Error computing clusters', { error: String(e) });
+      setClusters([]);
+    }
+  }, []);
 
   // ---------------------------------------------------------------------------
-  // Empty state: show once per app session, auto-dismiss after 3 seconds
+  // Supercluster: Initialize and compute clusters
   // ---------------------------------------------------------------------------
-  const isEmptyStateCondition = locationUIState === 'ready' && mapUsers.length === 0 && !isDemo && !isQueryLoading && !isRetrying;
+  useEffect(() => {
+    // Create supercluster instance with same settings as previous library
+    const cluster = new Supercluster<UserPointProperties>({
+      radius: CLUSTER_RADIUS,
+      maxZoom: CLUSTER_MAX_ZOOM,
+    });
+    cluster.load(clusterPoints);
+    superclusterRef.current = cluster;
+  }, [clusterPoints]);
 
   useEffect(() => {
-    // If conditions for empty state are not met, hide and clear timer
-    if (!isEmptyStateCondition) {
-      setShowEmptyState(false);
-      if (emptyStateTimerRef.current) {
-        clearTimeout(emptyStateTimerRef.current);
-        emptyStateTimerRef.current = null;
+    recomputeClusters(currentRegion);
+  }, [clusterPoints, currentRegion, recomputeClusters]);
+
+  // Handler for map region changes - recompute clusters
+  const handleRegionChangeComplete = useCallback((region: Region) => {
+    setCurrentRegion(region);
+  }, []);
+
+  // Handler for cluster press - zoom into cluster
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleClusterPress = useCallback((cluster: Supercluster.ClusterFeature<any>) => {
+    if (!mapRef.current || !superclusterRef.current) return;
+
+    try {
+      Haptics.selectionAsync().catch(() => {});
+      const clusterId = cluster.properties.cluster_id;
+      const expansionZoom = superclusterRef.current.getClusterExpansionZoom(clusterId);
+      const [lng, lat] = cluster.geometry.coordinates;
+
+      // Calculate new region based on expansion zoom
+      const latDelta = 360 / Math.pow(2, expansionZoom);
+      const lngDelta = latDelta;
+
+      mapRef.current.animateToRegion({
+        latitude: lat,
+        longitude: lng,
+        latitudeDelta: latDelta,
+        longitudeDelta: lngDelta,
+      }, 300);
+    } catch (e) {
+      log.warn('[NEARBY]', 'Error handling cluster press', { error: String(e) });
+    }
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Empty state: stay visible whenever Nearby is truthfully empty
+  // ---------------------------------------------------------------------------
+  const isEmptyStateCondition =
+    locationUIState === 'ready' &&
+    nearbyQueryStatus === 'ok' &&
+    mapUsers.length === 0 &&
+    !isDemo &&
+    (!shouldShowLoadingState || hasRetainedNearbyResult);
+
+  // P3-001: Animate empty state opacity on show/hide
+  useEffect(() => {
+    if (showEmptyState) {
+      if (!isEmptyStateCondition) {
+        Animated.timing(emptyStateOpacity, {
+          toValue: 0,
+          duration: 160,
+          useNativeDriver: true,
+        }).start(({ finished }) => {
+          if (finished && isMountedRef.current) {
+            setShowEmptyState(false);
+          }
+        });
+        return;
       }
+      Animated.timing(emptyStateOpacity, {
+        toValue: 1,
+        duration: 200,
+        useNativeDriver: true,
+      }).start();
       return;
     }
 
-    // If already shown this session, don't show again
-    if (hasShownEmptyStateThisSession) {
-      return;
+    if (isEmptyStateCondition) {
+      emptyStateOpacity.setValue(0);
+      setShowEmptyState(true);
     }
-
-    // Show empty state and mark as shown this session
-    hasShownEmptyStateThisSession = true;
-    setShowEmptyState(true);
-
-    // Auto-dismiss after 3 seconds
-    emptyStateTimerRef.current = setTimeout(() => {
-      if (isMountedRef.current) {
-        setShowEmptyState(false);
-      }
-      emptyStateTimerRef.current = null;
-    }, EMPTY_STATE_DISMISS_MS);
-
-    // Cleanup on unmount
-    return () => {
-      if (emptyStateTimerRef.current) {
-        clearTimeout(emptyStateTimerRef.current);
-        emptyStateTimerRef.current = null;
-      }
-    };
-  }, [isEmptyStateCondition]);
+  }, [emptyStateOpacity, isEmptyStateCondition, showEmptyState]);
 
   // ---------------------------------------------------------------------------
   // Navigation handlers for header buttons
   // ---------------------------------------------------------------------------
   const handleOpenCrossedPaths = useCallback(() => {
+    // Mark crossed paths as seen
+    AsyncStorage.setItem(CROSSED_PATHS_LAST_SEEN_KEY, Date.now().toString()).catch(() => {});
+    setHasNewCrossedPaths(false);
     safePush(router, '/(main)/crossed-paths' as any, 'nearby->crossed-paths');
   }, [router]);
 
   const handleOpenNearbySettings = useCallback(() => {
     safePush(router, '/(main)/nearby-settings' as any, 'nearby->nearby-settings');
+  }, [router]);
+
+  const handleOpenVerification = useCallback(() => {
+    safePush(router, '/(main)/verification' as any, 'nearby->verification');
   }, [router]);
 
   // ---------------------------------------------------------------------------
@@ -896,6 +1259,13 @@ export default function NearbyScreen() {
     if (!user?.id) {
       if (__DEV__) console.warn('[NEARBY] Marker press with no user');
       return;
+    }
+
+    // P2-002: Add haptic feedback on marker tap for premium feel
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {
+      // Haptics not available on device
     }
 
     log.info('[NEARBY]', 'marker tapped, opening profile', { id: user.id, name: user.name });
@@ -915,6 +1285,13 @@ export default function NearbyScreen() {
   const handleRecenterToMyLocation = useCallback(() => {
     if (!mapRef.current) return;
 
+    // P2-003: Add haptic feedback on recenter for premium feel
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {
+      // Haptics not available on device
+    }
+
     // Use real location if available
     if (bestLocation && isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)) {
       mapRef.current.animateToRegion({
@@ -929,25 +1306,90 @@ export default function NearbyScreen() {
     }
   }, [bestLocation]);
 
+  // P3-002: Recenter button press animation handlers
+  const handleRecenterPressIn = useCallback(() => {
+    Animated.spring(recenterScale, {
+      toValue: 0.95,
+      useNativeDriver: true,
+    }).start();
+  }, [recenterScale]);
+
+  const handleRecenterPressOut = useCallback(() => {
+    Animated.spring(recenterScale, {
+      toValue: 1,
+      friction: 3,
+      tension: 40,
+      useNativeDriver: true,
+    }).start();
+  }, [recenterScale]);
+
   // ---------------------------------------------------------------------------
   // Permission flow on focus - start/stop GPS tracking
   // ---------------------------------------------------------------------------
   useFocusEffect(
     useCallback(() => {
+      setIsNearbyFocused(true);
+      requestNearbyRefresh({ force: true });
       log.info('[NEARBY]', 'screen focused, starting location tracking');
       startLocationTracking();
 
       // Cleanup: stop tracking when leaving Nearby tab (battery optimization)
       return () => {
+        setIsNearbyFocused(false);
         log.info('[NEARBY]', 'screen unfocused, stopping location tracking');
         stopLocationTracking();
       };
-    }, [startLocationTracking, stopLocationTracking])
+    }, [requestNearbyRefresh, startLocationTracking, stopLocationTracking])
   );
 
   // ---------------------------------------------------------------------------
   // Derive UI state from location store
   // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (
+      isDemo ||
+      permissionStatus !== 'granted' ||
+      hasValidBestLocation ||
+      error ||
+      locationTimeoutMessage
+    ) {
+      if ((isDemo || permissionStatus !== 'granted' || hasValidBestLocation || error) && locationTimeoutMessage) {
+        setLocationTimeoutMessage(null);
+      }
+      if (locationAcquireTimeoutRef.current) {
+        clearTimeout(locationAcquireTimeoutRef.current);
+        locationAcquireTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    if (locationAcquireTimeoutRef.current) {
+      return;
+    }
+
+    locationAcquireTimeoutRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
+      const latestBestLocation = useLocationStore.getState().getBestLocation();
+      if (
+        latestBestLocation &&
+        isValidMapCoordinate(latestBestLocation.latitude, latestBestLocation.longitude)
+      ) {
+        locationAcquireTimeoutRef.current = null;
+        return;
+      }
+
+      setLocationTimeoutMessage('Unable to get your location. Please try again.');
+      locationAcquireTimeoutRef.current = null;
+    }, LOCATION_ACQUIRE_TIMEOUT_MS);
+
+    return () => {
+      if (locationAcquireTimeoutRef.current) {
+        clearTimeout(locationAcquireTimeoutRef.current);
+        locationAcquireTimeoutRef.current = null;
+      }
+    };
+  }, [isDemo, permissionStatus, hasValidBestLocation, error, locationTimeoutMessage]);
+
   useEffect(() => {
     // Demo mode: always ready with fallback location
     if (isDemo) {
@@ -978,19 +1420,20 @@ export default function NearbyScreen() {
 
     // Permission granted - check if we have valid coordinates
     if (permissionStatus === 'granted') {
-      if (error) {
+      if (hasValidBestLocation) {
+        setLocationUIState('ready');
+        return;
+      }
+
+      if (blockingLocationErrorMessage) {
         setLocationUIState('error');
         return;
       }
 
-      if (bestLocation && isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)) {
-        setLocationUIState('ready');
-      } else {
-        // Still waiting for GPS fix
-        setLocationUIState('checking');
-      }
+      // Still waiting for GPS fix
+      setLocationUIState('checking');
     }
-  }, [isDemo, permissionStatus, error, bestLocation]);
+  }, [blockingLocationErrorMessage, hasValidBestLocation, isDemo, permissionStatus]);
 
   // ---------------------------------------------------------------------------
   // Compute map region
@@ -1018,6 +1461,13 @@ export default function NearbyScreen() {
 
     return null;
   }, [isDemo, bestLocation]);
+
+  useEffect(() => {
+    if (locationUIState !== 'ready' || !mapRegion) {
+      setIsMapReady(false);
+      mapOpacity.setValue(0);
+    }
+  }, [locationUIState, mapOpacity, mapRegion]);
 
   // ---------------------------------------------------------------------------
   // Open device settings
@@ -1048,249 +1498,405 @@ export default function NearbyScreen() {
     // Clear error and show loading feedback
     setQueryError(null);
     setIsRetrying(true);
+    requestNearbyRefresh({ force: true });
 
-    // Re-trigger location tracking which will re-run query
+    // Re-trigger location tracking and force query identity change so retry is real
     startLocationTracking();
+  }, [requestNearbyRefresh, startLocationTracking]);
 
-    // Clear retry state after a delay (query will auto-resolve via Convex)
-    setTimeout(() => {
-      if (isMountedRef.current) {
-        setIsRetrying(false);
-      }
-    }, 2000);
-  }, [startLocationTracking]);
+  const handleRetryLocation = useCallback(() => {
+    setLocationTimeoutMessage(null);
+    stopLocationTracking();
+    startLocationTracking();
+  }, [startLocationTracking, stopLocationTracking]);
+
+  const handleRetryNearbySync = useCallback(() => {
+    setNearbySyncIssue(null);
+    lastPublishedRef.current = null;
+    lastDetectionTimeRef.current = 0;
+    lastDetectionLatLngRef.current = null;
+    setPublishRefreshTick((current) => current + 1);
+    requestNearbyRefresh({ force: true });
+  }, [requestNearbyRefresh]);
+
+  const mapNotice = useMemo<NearbyMapNotice | null>(() => {
+    if (nearbySyncIssue) {
+      return {
+        ...nearbySyncIssue,
+        onPress: handleRetryNearbySync,
+      };
+    }
+
+    if (queryError && hasRetainedNearbyResult) {
+      return {
+        message: 'Showing your last Nearby view while we reconnect.',
+        actionLabel: 'Retry',
+        onPress: handleRetryQuery,
+      };
+    }
+
+    if (passiveLocationErrorMessage) {
+      return {
+        message: 'Using your last good location while we refresh your position.',
+        actionLabel: 'Retry',
+        onPress: handleRetryLocation,
+      };
+    }
+
+    if (nearbyQueryStatus === 'location_required' && hasValidBestLocation) {
+      return {
+        message: 'Finishing your Nearby refresh...',
+        actionLabel: 'Retry',
+        onPress: handleRetryNearbySync,
+      };
+    }
+
+    return null;
+  }, [
+    hasValidBestLocation,
+    handleRetryLocation,
+    handleRetryNearbySync,
+    handleRetryQuery,
+    nearbyQueryStatus,
+    nearbySyncIssue,
+    passiveLocationErrorMessage,
+    queryError,
+    hasRetainedNearbyResult,
+  ]);
+
+  const shouldShowBlockingQueryError = Boolean(queryError && !hasRetainedNearbyResult);
 
   // ---------------------------------------------------------------------------
-  // Render: Checking state
+  // SHELL UI PATTERN: Header renders immediately, content area handles states
+  // This provides instant visual feedback when switching to Nearby tab
   // ---------------------------------------------------------------------------
-  if (locationUIState === 'checking') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-        </View>
+  // P1-001 FIX: Removed render-path DEV log that executed on every render
+  // State changes are logged via useEffect hooks, not in render path
+
+  // Helper: Render the appropriate content based on current state
+  // Header is rendered separately (shell pattern), only content varies
+  const renderContent = () => {
+    // Checking state - location being acquired
+    if (locationUIState === 'checking') {
+      return (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.statusText}>Getting your location...</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Render: Permission required
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'permission_required') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-        </View>
-        <View style={styles.centered}>
-          <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Location Access Needed</Text>
+          <Text style={styles.title}>Finding your location</Text>
           <Text style={styles.subtitle}>
-            To see people nearby, please enable location access.
+            Nearby works best with a fresh location. This usually takes a few seconds.
           </Text>
-          <TouchableOpacity style={styles.primaryButton} onPress={startLocationTracking}>
-            <Text style={styles.primaryButtonText}>Enable Location</Text>
-          </TouchableOpacity>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Denied - needs settings
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'denied_needs_settings') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-        </View>
+    // Denied - needs settings
+    if (locationUIState === 'denied_needs_settings') {
+      return (
         <View style={styles.centered}>
           <Ionicons name="navigate-circle-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Location Access Denied</Text>
+          <Text style={styles.title}>Turn on location for Nearby</Text>
           <Text style={styles.subtitle}>
-            Please enable location access in your device settings to see people nearby.
+            Nearby needs location access to place your map and show people around you.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
-            <Text style={styles.primaryButtonText}>Open Settings</Text>
+            <Text style={styles.primaryButtonText}>Turn On Location</Text>
           </TouchableOpacity>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Restricted (iOS parental controls)
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'restricted') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-        </View>
+    // Restricted (iOS parental controls)
+    if (locationUIState === 'restricted') {
+      return (
         <View style={styles.centered}>
           <Ionicons name="lock-closed-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Location Restricted</Text>
+          <Text style={styles.title}>Location isn't available here</Text>
           <Text style={styles.subtitle}>
-            Location access is restricted on this device, possibly due to parental controls or device management. Contact your device administrator for help.
+            This device is preventing location access, possibly because of parental controls or device management.
           </Text>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Location Services Disabled (system-wide)
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'services_disabled') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-        </View>
+    // Location Services Disabled (system-wide)
+    if (locationUIState === 'services_disabled') {
+      return (
         <View style={styles.centered}>
           <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Location Services Off</Text>
+          <Text style={styles.title}>Enable Location Services</Text>
           <Text style={styles.subtitle}>
-            Please enable Location Services in your device settings to see people nearby.
+            Turn on Location Services to keep Nearby live and up to date.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
             <Text style={styles.primaryButtonText}>Open Settings</Text>
           </TouchableOpacity>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Error state
-  // ---------------------------------------------------------------------------
-  if (locationUIState === 'error') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-        </View>
+    // Error state
+    if (locationUIState === 'error') {
+      return (
         <View style={styles.centered}>
           <Ionicons name="warning-outline" size={64} color={COLORS.warning} />
-          <Text style={styles.title}>Location Error</Text>
+          <Text style={styles.title}>We couldn't update your location yet</Text>
           <Text style={styles.subtitle}>
-            {error || 'Unable to get your location. Please try again.'}
+            {blockingLocationErrorMessage || 'Try again in a moment or move somewhere with a clearer GPS signal.'}
           </Text>
-          <TouchableOpacity style={styles.primaryButton} onPress={startLocationTracking}>
-            <Text style={styles.primaryButtonText}>Retry</Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={handleRetryLocation}>
+            <Text style={styles.primaryButtonText}>Try Again</Text>
           </TouchableOpacity>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Query error state
-  // ---------------------------------------------------------------------------
-  if (queryError) {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+    if (nearbyQueryStatus === 'viewer_unverified') {
+      return (
+        <View style={styles.centered}>
+          <Ionicons name="shield-checkmark-outline" size={64} color={COLORS.textLight} />
+          <Text style={styles.title}>Verify to use Nearby</Text>
+          <Text style={styles.subtitle}>
+            Finish verification to unlock Nearby and browse people who meet the same trust rules.
+          </Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={handleOpenVerification}>
+            <Text style={styles.primaryButtonText}>Verify Now</Text>
           </TouchableOpacity>
         </View>
+      );
+    }
+
+    // Query error state
+    if (shouldShowBlockingQueryError) {
+      return (
         <View style={styles.centered}>
           <Ionicons name="cloud-offline-outline" size={64} color={COLORS.warning} />
-          <Text style={styles.title}>Connection Issue</Text>
+          <Text style={styles.title}>Nearby needs a moment</Text>
           <Text style={styles.subtitle}>
             {queryError}
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={handleRetryQuery}>
-            <Text style={styles.primaryButtonText}>Try Again</Text>
+            <Text style={styles.primaryButtonText}>Refresh Nearby</Text>
           </TouchableOpacity>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // Render: Ready - show map
-  // ---------------------------------------------------------------------------
-  // Final safety check: ensure we have valid region
-  if (!mapRegion) {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
-        </View>
+    // Safety check: no map region yet
+    if (!mapRegion) {
+      if (__DEV__) {
+        log.info('[NEARBY]', 'Waiting for map region');
+      }
+      return (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.statusText}>Preparing map...</Text>
+          <Text style={styles.title}>Preparing your map</Text>
+          <Text style={styles.subtitle}>
+            We&apos;re getting Nearby ready for you.
+          </Text>
         </View>
-      </SafeAreaView>
-    );
-  }
+      );
+    }
 
+    // Ready state - render map with error boundary
+    // P1-001 FIX: Removed DEV log from render path (was logging on every render)
+
+    return (
+      <MapErrorBoundary>
+      <View style={styles.mapContainer}>
+        <Animated.View style={[styles.mapStage, { opacity: mapOpacity }]}>
+          <MapView
+            ref={mapRef}
+            style={styles.map}
+            initialRegion={mapRegion}
+            onRegionChangeComplete={handleRegionChangeComplete}
+            onMapReady={() => {
+              if (mapRegion) {
+                setCurrentRegion(mapRegion);
+              }
+              setIsMapReady(true);
+              mapOpacity.setValue(0);
+              Animated.timing(mapOpacity, {
+                toValue: 1,
+                duration: MAP_FADE_IN_DURATION_MS,
+                useNativeDriver: true,
+              }).start();
+            }}
+            showsUserLocation={permissionStatus === 'granted'}
+            showsMyLocationButton={false}
+            showsCompass={false}
+            rotateEnabled={true}
+            pitchEnabled={false}
+            moveOnMarkerPress={false}
+          >
+          {/* ================================================================
+           * CLUSTERING: Manual implementation with supercluster
+           * ================================================================
+           * STATUS: LOCKED - Do not change without Durga Prasad approval
+           *
+           * IMPLEMENTATION:
+           * - Uses supercluster (JS) for Fabric/New Architecture compatibility
+           * - Image-based cluster markers for Android reliability
+           * - Cluster tap → zooms to reveal individual markers
+           * - radius={45} matches previous react-native-map-clustering config
+           *
+           * DO NOT:
+           * - Change clustering radius without testing
+           * - Switch to View-based cluster markers
+           * ================================================================ */}
+          {clusters.map((feature) => {
+            const [lng, lat] = feature.geometry.coordinates;
+
+            // Safety: validate coordinates
+            if (!isValidMapCoordinate(lat, lng)) {
+              return null;
+            }
+
+            // Check if this is a cluster or individual point
+            const isCluster = feature.properties && 'cluster' in feature.properties && feature.properties.cluster;
+
+            if (isCluster) {
+              // Render cluster marker
+              const clusterFeature = feature as Supercluster.ClusterFeature<UserPointProperties>;
+              const pointCount = clusterFeature.properties.point_count ?? 2;
+              const clusterImage = getClusterImage(pointCount);
+
+              return (
+                <Marker
+                  key={`cluster-${clusterFeature.properties.cluster_id}`}
+                  coordinate={{ latitude: lat, longitude: lng }}
+                  anchor={{ x: 0.5, y: 1 }}
+                  onPress={() => handleClusterPress(clusterFeature)}
+                  image={clusterImage}
+                  tracksViewChanges={false}
+                />
+              );
+            } else {
+              // Render individual user marker
+              const pointFeature = feature as Supercluster.PointFeature<UserPointProperties>;
+              const user = pointFeature.properties.user;
+
+              return (
+                <Marker
+                  key={user.id}
+                  coordinate={{ latitude: lat, longitude: lng }}
+                  anchor={{ x: 0.5, y: 1 }}
+                  onPress={() => handleMarkerPress(user)}
+                  image={pinPink}
+                  tracksViewChanges={false}
+                />
+              );
+            }
+          })}
+          </MapView>
+        </Animated.View>
+
+        {!isMapReady && (
+          <View style={styles.mapBootOverlay} pointerEvents="none">
+            <View style={styles.mapBootCard}>
+              <ActivityIndicator size="small" color={COLORS.primary} />
+              <Text style={styles.mapBootText}>Loading your map…</Text>
+            </View>
+          </View>
+        )}
+
+        {mapNotice && (
+          <View style={styles.mapNoticeContainer} pointerEvents="box-none">
+            <View style={styles.mapNoticeCard}>
+              <Text style={styles.mapNoticeText}>{mapNotice.message}</Text>
+              {mapNotice.actionLabel && mapNotice.onPress ? (
+                <TouchableOpacity onPress={mapNotice.onPress} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={styles.mapNoticeAction}>{mapNotice.actionLabel}</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          </View>
+        )}
+
+        {/* Query loading indicator - shown while fetching nearby users */}
+        {/* P3-003: Animated fade-in for premium feel */}
+        {showLoadingOverlay && !isDemo && (
+          <Animated.View style={[styles.loadingOverlay, { opacity: loadingOpacity }]}>
+            <View style={styles.loadingCard}>
+              <ActivityIndicator size="small" color={COLORS.primary} />
+              <Text style={styles.loadingText}>
+                {isRetrying || hasRetainedNearbyResult
+                  ? 'Refreshing Nearby…'
+                  : 'Looking around you…'}
+              </Text>
+            </View>
+          </Animated.View>
+        )}
+
+        {/* Empty state overlay - stays visible whenever Nearby is currently empty */}
+        {/* P3-001: Animated fade in/out for premium feel */}
+        {showEmptyState && (
+          <Animated.View style={[styles.emptyOverlay, { opacity: emptyStateOpacity }]}>
+            <View style={styles.emptyCard}>
+              <Ionicons name="people-outline" size={32} color={COLORS.textLight} />
+              <Text style={styles.emptyTitle}>No one nearby right now</Text>
+              <Text style={styles.emptySubtitle}>
+                Your map is live. We&apos;ll show people here as soon as someone nearby appears.
+              </Text>
+              <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenCrossedPaths}>
+                <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
+                <Text style={styles.emptyActionText}>Crossed Paths</Text>
+              </TouchableOpacity>
+            </View>
+          </Animated.View>
+        )}
+
+        {/* My location button (static, tap-once recenter) */}
+        {/* P3-002: Animated scale on press for premium feel */}
+        {permissionStatus === 'granted' && bestLocation && (
+          <Animated.View style={{ transform: [{ scale: recenterScale }] }}>
+            <TouchableOpacity
+              style={styles.myLocationButton}
+              onPress={handleRecenterToMyLocation}
+              onPressIn={handleRecenterPressIn}
+              onPressOut={handleRecenterPressOut}
+              activeOpacity={1}
+            >
+              <Ionicons name="locate" size={22} color={COLORS.primary} />
+            </TouchableOpacity>
+          </Animated.View>
+        )}
+      </View>
+      </MapErrorBoundary>
+    );
+  };
+
+  // ---------------------------------------------------------------------------
+  // SHELL UI: Single return with instant header + dynamic content
+  // ---------------------------------------------------------------------------
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      {/* Header renders immediately (shell pattern) */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
-        </TouchableOpacity>
-
+        <View style={{ width: 44 }} />
         <Text style={styles.headerTitle}>Nearby</Text>
-
-        <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          <Ionicons name="settings-outline" size={22} color={COLORS.text} />
-        </TouchableOpacity>
-
+        <View style={styles.headerIcons}>
+          <TouchableOpacity
+            onPress={handleOpenNearbySettings}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Nearby settings"
+            accessibilityHint="Open Nearby settings"
+          >
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot animate style={styles.crossedPathsBadge} />
+              )}
+            </View>
+          </TouchableOpacity>
+        </View>
         {isDemo && (
           <View style={styles.demoBadge}>
             <Text style={styles.demoBadgeText}>DEMO</Text>
@@ -1298,177 +1904,8 @@ export default function NearbyScreen() {
         )}
       </View>
 
-      {/* STABILITY FIX S4: Error boundary around map for crash containment */}
-      <MapErrorBoundary>
-      <View style={styles.mapContainer}>
-        <ClusteredMapView
-          ref={mapRef}
-          style={styles.map}
-          initialRegion={mapRegion}
-          showsUserLocation={permissionStatus === 'granted'}
-          showsMyLocationButton={false}
-          showsCompass={false}
-          rotateEnabled={false}
-          pitchEnabled={false}
-          // ================================================================
-          // LOCKED: CLUSTERING BEHAVIOR
-          // ================================================================
-          // STATUS: LOCKED - Do not change without Durga Prasad approval
-          //
-          // IMPLEMENTATION:
-          // - Image-based cluster markers for Android reliability
-          // - Cluster tap → opens cluster results page (not just zoom)
-          // - radius={45} for "50% overlap" feel
-          //
-          // DO NOT:
-          // - Change clustering radius without testing
-          // - Switch to View-based cluster markers
-          // - Remove animation disabling (causes blank states)
-          // ================================================================
-          clusteringEnabled={true}
-          radius={45}
-          extent={512}
-          nodeSize={64}
-          minZoom={1}
-          maxZoom={20}
-          spiralEnabled={false}
-          animationEnabled={false}
-          superClusterRef={superClusterRef}
-          // CLUSTER MARKER RENDERER - Image-based with numbered count for Android reliability
-          // STABILITY FIX S5: Wrapped in try-catch for crash containment
-          renderCluster={(cluster) => {
-            try {
-              const { id, geometry, properties, onPress } = cluster;
-              const coords = geometry?.coordinates;
-              const lat = coords?.[1];
-              const lng = coords?.[0];
-              const pointCount = properties?.point_count ?? 2;
-
-              // Safety: validate coordinates
-              if (!isValidMapCoordinate(lat, lng)) {
-                return null;
-              }
-
-              // Select cluster image based on count
-              const clusterImage = getClusterImage(pointCount);
-
-              return (
-                <Marker
-                  key={`cluster-${id}`}
-                  coordinate={{ latitude: lat, longitude: lng }}
-                  anchor={{ x: 0.5, y: 1 }}
-                  onPress={() => {
-                    try {
-                      // Zoom into cluster area to reveal individual markers
-                      if (mapRef.current) {
-                        const region = {
-                          latitude: lat,
-                          longitude: lng,
-                          latitudeDelta: 0.01,
-                          longitudeDelta: 0.01,
-                        };
-                        mapRef.current.animateToRegion(region, 300);
-                      }
-                      if (onPress) onPress();
-                    } catch (e) {
-                      // Silently handle cluster tap errors
-                      log.warn('[Nearby] Cluster tap error:', String(e));
-                    }
-                  }}
-                  // CRITICAL: Use image prop with numbered cluster for Android reliability
-                  image={clusterImage}
-                />
-              );
-            } catch (e) {
-              // STABILITY FIX S5: Graceful fallback on render error
-              log.warn('[Nearby] Cluster render error:', String(e));
-              return null;
-            }
-          }}
-        >
-          {/* ================================================================
-           * LOCKED: INDIVIDUAL PINK MARKERS
-           * ================================================================
-           * IMPLEMENTATION: image={pinPink} for Android reliability
-           * STATUS: LOCKED - Do not change without Durga Prasad approval
-           *
-           * BEHAVIOR:
-           * - Individual marker tap → handleMarkerPress(user)
-           * - Navigate to Discover-style profile
-           *
-           * DO NOT:
-           * - Replace with View-based markers
-           * - Change the image prop approach
-           * - Modify anchor position
-           * ================================================================ */}
-          {/* STABILITY FIX S4: Safe marker rendering with validation */}
-          {mapUsers.map((user) => {
-            // Skip invalid markers silently
-            if (!isValidMapCoordinate(user.fuzzedLat, user.fuzzedLng)) {
-              return null;
-            }
-            return (
-              <Marker
-                key={user.id}
-                coordinate={{
-                  latitude: user.fuzzedLat,
-                  longitude: user.fuzzedLng,
-                }}
-                anchor={{ x: 0.5, y: 1 }}
-                onPress={() => handleMarkerPress(user)}
-                image={pinPink}
-              />
-            );
-          })}
-        </ClusteredMapView>
-
-        {/* Query loading indicator - shown while fetching nearby users */}
-        {(isQueryLoading || isRetrying) && !isDemo && (
-          <View style={styles.loadingOverlay}>
-            <View style={styles.loadingCard}>
-              <ActivityIndicator size="small" color={COLORS.primary} />
-              <Text style={styles.loadingText}>
-                {isRetrying ? 'Retrying...' : 'Finding people nearby...'}
-              </Text>
-            </View>
-          </View>
-        )}
-
-        {/* Empty state overlay - shown once per app session, auto-dismisses after 3s */}
-        {showEmptyState && (
-          <View style={styles.emptyOverlay}>
-            <View style={styles.emptyCard}>
-              <Ionicons name="people-outline" size={32} color={COLORS.textLight} />
-              <Text style={styles.emptyTitle}>No one nearby right now</Text>
-              <Text style={styles.emptySubtitle}>
-                Check back later or see who crossed your path
-              </Text>
-              <View style={styles.emptyActions}>
-                <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenCrossedPaths}>
-                  <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
-                  <Text style={styles.emptyActionText}>Crossed Paths</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenNearbySettings}>
-                  <Ionicons name="settings-outline" size={16} color={COLORS.primary} />
-                  <Text style={styles.emptyActionText}>Settings</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        )}
-
-        {/* My location button (static, tap-once recenter) */}
-        {permissionStatus === 'granted' && bestLocation && (
-          <TouchableOpacity
-            style={styles.myLocationButton}
-            onPress={handleRecenterToMyLocation}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="locate" size={22} color={COLORS.primary} />
-          </TouchableOpacity>
-        )}
-      </View>
-      </MapErrorBoundary>
+      {/* Content area - state-specific UI rendered below header */}
+      {renderContent()}
     </SafeAreaView>
   );
 }
@@ -1491,11 +1928,20 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
-  // CLEANUP: headerSpacer removed - unused
   headerTitle: {
     fontSize: 20,
     fontWeight: '600',
     color: COLORS.text,
+  },
+  headerIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  crossedPathsBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -4,
   },
   demoBadge: {
     position: 'absolute',
@@ -1530,11 +1976,6 @@ const styles = StyleSheet.create({
     marginTop: 8,
     lineHeight: 22,
   },
-  statusText: {
-    fontSize: 15,
-    color: COLORS.textLight,
-    marginTop: 12,
-  },
   primaryButton: {
     marginTop: 24,
     backgroundColor: COLORS.primary,
@@ -1550,8 +1991,35 @@ const styles = StyleSheet.create({
   mapContainer: {
     flex: 1,
   },
+  mapStage: {
+    flex: 1,
+  },
   map: {
     flex: 1,
+  },
+  mapBootOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  mapBootCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.96)',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  mapBootText: {
+    fontSize: 13,
+    color: COLORS.textLight,
   },
   // NOTE: Cluster markers use image={pinPink} for Android reliability.
   // Custom View-based cluster styles removed - they were unreliable on Android.
@@ -1580,6 +2048,38 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 13,
     color: COLORS.textLight,
+  },
+  mapNoticeContainer: {
+    position: 'absolute',
+    top: 64,
+    left: 16,
+    right: 16,
+    alignItems: 'center',
+  },
+  mapNoticeCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.97)',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  mapNoticeText: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.text,
+  },
+  mapNoticeAction: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   emptyOverlay: {
     position: 'absolute',
@@ -1613,11 +2113,6 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
     marginTop: 4,
-  },
-  emptyActions: {
-    flexDirection: 'row',
-    marginTop: 16,
-    gap: 12,
   },
   emptyActionButton: {
     flexDirection: 'row',

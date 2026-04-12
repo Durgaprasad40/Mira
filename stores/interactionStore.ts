@@ -25,6 +25,13 @@ interface StandOutResult {
   message: string;
 }
 
+interface DiscoverProfileActionResult {
+  profileId: string;
+  action: 'like' | 'pass' | 'super_like';
+  source: 'phase1_discover_profile' | 'phase1_explore_profile';
+  scopeKey?: string;
+}
+
 interface InteractionStore {
   // Compose confession
   composeResult: ComposeResult | null;
@@ -41,6 +48,10 @@ interface InteractionStore {
   // Stand out
   standOutResult: StandOutResult | null;
   setStandOutResult: (result: StandOutResult | null) => void;
+
+  // Phase-1 Discover profile -> deck sync
+  discoverProfileActionResult: DiscoverProfileActionResult | null;
+  setDiscoverProfileActionResult: (result: DiscoverProfileActionResult | null) => void;
 }
 
 export const useInteractionStore = create<InteractionStore>((set) => ({
@@ -55,4 +66,7 @@ export const useInteractionStore = create<InteractionStore>((set) => ({
 
   standOutResult: null,
   setStandOutResult: (result) => set({ standOutResult: result }),
+
+  discoverProfileActionResult: null,
+  setDiscoverProfileActionResult: (result) => set({ discoverProfileActionResult: result }),
 }));

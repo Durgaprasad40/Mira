@@ -13,7 +13,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { stringToUserId } from '@/convex/helpers';
 import { INCOGNITO_COLORS, COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -43,11 +42,11 @@ export default function AccountScreen() {
 
     Alert.alert(
       'Final Confirmation',
-      'Your private data will be hidden immediately and permanently deleted in 30 days. You can recover it during this period.',
+      'Your Deep Connect data will be hidden immediately and permanently deleted in 30 days. You can recover it during this period.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Delete',
+          text: 'Deactivate',
           style: 'destructive',
           onPress: async () => {
             // Prevent duplicate calls (double-tap guard)
@@ -58,7 +57,7 @@ export default function AccountScreen() {
 
               // CRITICAL: Verify userId exists before proceeding (non-demo mode)
               if (!isDemoMode && !userId) {
-                Alert.alert('Error', 'You must be logged in to delete private data.');
+                Alert.alert('Error', 'You must be logged in to deactivate Deep Connect.');
                 return;
               }
 
@@ -68,7 +67,7 @@ export default function AccountScreen() {
               // M-004 FIX: Server mutation with rollback on failure
               if (!isDemoMode && userId) {
                 try {
-                  await initiateDeletionMutation({ userId: stringToUserId(userId) });
+                  await initiateDeletionMutation({});
                 } catch (serverError) {
                   // M-004 FIX: Rollback optimistic update to keep local+server consistent
                   recoverPrivateData();
@@ -77,8 +76,8 @@ export default function AccountScreen() {
               }
 
               Alert.alert(
-                'Deletion Initiated',
-                'Your private data is now hidden. You have 30 days to recover it.',
+                'Deep Connect Deactivated',
+                'Your private profile is now hidden. You have 30 days to recover your data.',
                 [
                   {
                     text: 'OK',
@@ -90,8 +89,8 @@ export default function AccountScreen() {
                 ]
               );
             } catch (error) {
-              console.error('Error initiating deletion:', error);
-              Alert.alert('Error', 'Failed to initiate deletion. Please try again.');
+              console.error('Error deactivating Deep Connect:', error);
+              Alert.alert('Error', 'Failed to deactivate Deep Connect. Please try again.');
             } finally {
               setIsDeleting(false);
             }
@@ -123,21 +122,21 @@ export default function AccountScreen() {
 
           <View style={styles.dangerCard}>
             <View style={styles.dangerCardHeader}>
-              <Ionicons name="warning-outline" size={20} color={COLORS.error} />
-              <Text style={styles.dangerCardTitle}>Delete Private Data</Text>
+              <Ionicons name="eye-off-outline" size={20} color={COLORS.error} />
+              <Text style={styles.dangerCardTitle}>Deactivate Deep Connect</Text>
             </View>
             <Text style={styles.dangerCardDescription}>
-              All private profile data (photos, messages, secure media, settings) will be hidden immediately and permanently deleted in 30 days.{'\n'}
+              Your private profile and Deep Connect data will be hidden. You can recover them within 30 days.{'\n'}
               {'\n'}
-              You can recover your data within 30 days.
+              After 30 days, all data will be permanently deleted.
             </Text>
             <TouchableOpacity
               style={styles.dangerButton}
               onPress={handleDeletePress}
               activeOpacity={0.8}
             >
-              <Ionicons name="trash-outline" size={18} color="#FFF" />
-              <Text style={styles.dangerButtonText}>Delete Private Data</Text>
+              <Ionicons name="eye-off-outline" size={18} color="#FFF" />
+              <Text style={styles.dangerButtonText}>Deactivate Deep Connect</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -154,26 +153,26 @@ export default function AccountScreen() {
           <View style={styles.modalContainer}>
             <View style={styles.modalHeader}>
               <Ionicons name="alert-circle" size={32} color={COLORS.error} />
-              <Text style={styles.modalTitle}>Delete Private Data</Text>
+              <Text style={styles.modalTitle}>Deactivate Deep Connect</Text>
             </View>
 
             {/* Anti-Scam Warning */}
             <View style={styles.warningBox}>
               <Ionicons name="shield-checkmark-outline" size={20} color="#F59E0B" />
               <Text style={styles.warningText}>
-                If someone is asking you to delete your private profile, you may be getting scammed. Only proceed if YOU want to delete.
+                If someone is asking you to deactivate Deep Connect, you may be getting scammed. Only proceed if YOU want to deactivate.
               </Text>
             </View>
 
             <View style={styles.modalInfoList}>
               <Text style={styles.modalInfoItem}>
-                • Your private data will be hidden immediately
+                • Your private profile will be hidden immediately
               </Text>
               <Text style={styles.modalInfoItem}>
-                • You have 30 days to recover it
+                • You have 30 days to recover your data
               </Text>
               <Text style={styles.modalInfoItem}>
-                • After 30 days, all data will be permanently deleted
+                • After 30 days, all Deep Connect data will be permanently deleted
               </Text>
             </View>
 

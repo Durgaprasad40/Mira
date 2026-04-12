@@ -1,20 +1,23 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   View,
   Text,
   Pressable,
   StyleSheet,
-  StyleProp,
-  ViewStyle,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
+import { CHAT_SIZES, CHAT_FONTS, SPACING, SIZES, GENDER_COLORS } from '@/lib/responsive';
 
 interface ActiveUser {
   id: string;
   avatar?: string;
   isOnline: boolean;
+  /** Timestamp when user joined - used for stable time-based sorting (oldest first) */
+  joinedAt?: number;
+  /** User's gender for avatar border color */
+  gender?: 'male' | 'female' | 'other';
 }
 
 interface ActiveUsersStripProps {
@@ -22,119 +25,177 @@ interface ActiveUsersStripProps {
   /** Called when the entire strip is pressed (opens members list) */
   onPress?: () => void;
   theme?: 'light' | 'dark';
+  /** Hide the "X members" label - for room screen showing online-only */
+  hideLabel?: boolean;
 }
 
 const MAX_VISIBLE = 6;
+const AVATAR_SIZE = CHAT_SIZES.stripAvatar;
 
 export default function ActiveUsersStrip({
   users,
   onPress,
   theme = 'light',
+  hideLabel = false,
 }: ActiveUsersStripProps) {
   const C = theme === 'dark' ? INCOGNITO_COLORS : COLORS as any;
+  const isDark = theme === 'dark';
 
-  // MEMBER-STRIP FIX: Show all room members, not just online ones
-  // Being "in the room" means they're active members
-  if (users.length === 0) return null;
+  // STABILITY FIX: Sort users by joinedAt timestamp (oldest first)
+  // Falls back to ID comparison for determinism when timestamps are equal/missing
+  const sortedUsers = useMemo(() => {
+    return [...users].sort((a, b) => {
+      const aTime = a.joinedAt ?? Number.MAX_SAFE_INTEGER;
+      const bTime = b.joinedAt ?? Number.MAX_SAFE_INTEGER;
+      if (aTime !== bTime) return aTime - bTime; // Oldest first
+      return a.id.localeCompare(b.id); // Fallback for determinism
+    });
+  }, [users]);
 
-  const visible = users.slice(0, MAX_VISIBLE);
-  const extraCount = users.length - MAX_VISIBLE;
+  // Don't render if no users (especially for online-only mode)
+  if (sortedUsers.length === 0) return null;
+
+  const visible = sortedUsers.slice(0, MAX_VISIBLE);
+  const extraCount = sortedUsers.length - MAX_VISIBLE;
 
   return (
     <Pressable
       onPress={onPress}
       style={({ pressed }) => [
         styles.container,
-        { borderBottomColor: theme === 'dark' ? C.surface : C.border },
+        { borderBottomColor: isDark ? 'rgba(255,255,255,0.08)' : C.border },
         pressed && styles.pressed,
       ]}
     >
-      <Text style={[styles.label, { color: theme === 'dark' ? C.textLight : C.textMuted }]}>
-        Active members
-      </Text>
+      {/* Left: Label - hidden in room screen online-only mode */}
+      {!hideLabel && (
+        <Text style={[styles.label, { color: isDark ? C.textLight : C.textMuted }]}>
+          {sortedUsers.length} {sortedUsers.length === 1 ? 'online' : 'online'}
+        </Text>
+      )}
+
+      {/* Avatars row */}
       <View style={styles.avatarsRow}>
-        {visible.map((user) => (
+        {visible.map((user) => {
+          // AVATAR-BORDER-FIX: Use gender-based colors for consistency across all surfaces
+          const ringColor = GENDER_COLORS[user.gender || 'default'];
+          return (
           <View key={user.id} style={styles.avatarWrapper}>
             {user.avatar ? (
               <Image
                 source={{ uri: user.avatar }}
-                style={styles.avatar}
+                style={[
+                  styles.avatar,
+                  { borderColor: ringColor },
+                ]}
                 contentFit="cover"
               />
             ) : (
-              <View style={[styles.avatarFallback, { backgroundColor: theme === 'dark' ? C.accent : C.backgroundDark }]}>
-                <Ionicons name="person" size={14} color={C.textLight} />
+              <View
+                style={[
+                  styles.avatarFallback,
+                  {
+                    backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : C.backgroundDark,
+                    borderColor: ringColor,
+                  },
+                ]}
+              >
+                <Ionicons name="person" size={12} color={isDark ? C.textLight : C.textMuted} />
               </View>
             )}
-            {/* MEMBER-STRIP FIX: Only show online dot for recently active users */}
-            {user.isOnline && <View style={styles.onlineDot} />}
+            {user.isOnline && <View style={[styles.onlineDot, { borderColor: isDark ? '#1F1F2E' : '#FFFFFF' }]} />}
           </View>
-        ))}
+        );
+        })}
         {extraCount > 0 && (
-          <View style={[styles.moreCircle, { backgroundColor: theme === 'dark' ? C.accent : C.backgroundDark }]}>
-            <Text style={[styles.moreText, { color: C.textLight }]}>+{extraCount}</Text>
+          <View
+            style={[
+              styles.moreCircle,
+              {
+                backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : C.backgroundDark,
+              },
+            ]}
+          >
+            <Text style={[styles.moreText, { color: isDark ? C.textLight : C.textMuted }]}>
+              +{extraCount}
+            </Text>
           </View>
         )}
       </View>
+
+      {/* Chevron */}
+      <Ionicons
+        name="chevron-forward"
+        size={16}
+        color={isDark ? 'rgba(255,255,255,0.3)' : C.textMuted}
+      />
     </Pressable>
   );
 }
+
+// P0-002 FIX: Use responsive sizing for strip height
+const STRIP_HEIGHT = SIZES.button.md;
 
 const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 48,
-    paddingHorizontal: 12,
+    height: STRIP_HEIGHT,
+    paddingHorizontal: SPACING.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: SPACING.sm + 2,
   },
   pressed: {
     opacity: 0.7,
   },
   label: {
-    fontSize: 11,
-    marginRight: 8,
+    // P0-002 FIX: Responsive font size
+    fontSize: CHAT_FONTS.label,
+    fontWeight: '500',
   },
   avatarsRow: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: SPACING.xs + 2,
   },
   avatarWrapper: {
     position: 'relative',
   },
   avatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
+    borderWidth: 1.5,
   },
   avatarFallback: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
+    borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',
   },
   onlineDot: {
     position: 'absolute',
-    bottom: 0,
-    right: 0,
+    bottom: -1,
+    right: -1,
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#00B894',
+    backgroundColor: '#22C55E',
     borderWidth: 1.5,
-    borderColor: '#FFFFFF',
   },
   moreCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
     alignItems: 'center',
     justifyContent: 'center',
   },
   moreText: {
-    fontSize: 10,
-    fontWeight: '700',
+    // P0-002 FIX: Responsive font size
+    fontSize: CHAT_FONTS.secondary,
+    fontWeight: '600',
   },
 });

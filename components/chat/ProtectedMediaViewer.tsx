@@ -19,6 +19,7 @@ import { COLORS } from '@/lib/constants';
 import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
 import { getVideoUri } from '@/lib/videoCache';
+import { useAuthStore } from '@/stores/authStore';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -49,6 +50,7 @@ export function ProtectedMediaViewer({
   isHoldMode = false,
 }: ProtectedMediaViewerProps) {
   const insets = useSafeAreaInsets();
+  const token = useAuthStore((s) => s.token);
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -86,7 +88,7 @@ export function ProtectedMediaViewer({
 
   const mediaData = useQuery(
     api.protectedMedia.getMediaUrl,
-    visible && messageId ? { messageId: messageId as any, userId: userId as any } : 'skip'
+    visible && messageId && token ? { messageId: messageId as any, token, authUserId: userId } : 'skip'
   );
 
   // SECURE-REWRITE: Reset viewer state when opening
@@ -149,13 +151,15 @@ export function ProtectedMediaViewer({
 
   // Screenshot detection — fires on both platforms
   const handleScreenshot = useCallback(() => {
-    if (messageId && userId) {
-      logScreenshot({
+    if (messageId && userId && token) {
+      void logScreenshot({
         messageId: messageId as any,
+        token,
+        authUserId: userId,
         wasTaken: true,
-      });
+      }).catch(() => {});
     }
-  }, [messageId, userId, logScreenshot]);
+  }, [messageId, userId, token, logScreenshot]);
 
   useScreenshotDetection({
     enabled: visible,
@@ -174,10 +178,11 @@ export function ProtectedMediaViewer({
     // MSG-006 FIX: Use authUserId for server-side verification
     if (mediaData?.viewOnce && !hasExpired.current) {
       hasExpired.current = true;
-      markExpired({
+      void markExpired({
         messageId: messageId as any,
+        token: token ?? undefined,
         authUserId: userId,
-      });
+      }).catch(() => {});
     }
 
     // 5-1: Only update state if still mounted
@@ -190,7 +195,7 @@ export function ProtectedMediaViewer({
     hasMarkedViewed.current = false;
     hasExpired.current = false; // Reset for next open
     onClose();
-  }, [mediaData, messageId, userId, markExpired, onClose]);
+  }, [mediaData, messageId, userId, token, markExpired, onClose]);
 
   // SECURE-REWRITE: Process mediaData and set viewerState
   // Only transition state when data arrives; image load callback handles 'ready'
@@ -238,10 +243,11 @@ export function ProtectedMediaViewer({
       processUrl();
 
       // MSG-006 FIX: Use authUserId for server-side verification
-      markViewed({
+      void markViewed({
         messageId: messageId as any,
+        token: token ?? undefined,
         authUserId: userId,
-      });
+      }).catch(() => {});
 
       // ONCE-VIEW-FIX: Skip timer for view-once media
       // View-once media has NO timer - user can view as long as they want
@@ -265,19 +271,20 @@ export function ProtectedMediaViewer({
         setTimeLeft(mediaData.timerSeconds);
       }
     }
-  }, [visible, mediaData, markViewed, messageId, userId]);
+  }, [visible, mediaData, markViewed, messageId, userId, token]);
 
   // 6-2: handleExpire now includes handleClose in deps (no stale closure)
   // MSG-006 FIX: Use authUserId for server-side verification
   const handleExpire = useCallback(() => {
     if (hasExpired.current) return; // Already expired
     hasExpired.current = true;
-    markExpired({
+    void markExpired({
       messageId: messageId as any,
+      token: token ?? undefined,
       authUserId: userId,
-    });
+    }).catch(() => {});
     handleClose();
-  }, [messageId, userId, markExpired, handleClose]);
+  }, [messageId, userId, token, markExpired, handleClose]);
 
   // STABILITY FIX: C-5 - Fix timer infinite loop by using proper dependency pattern
   // Compute stable boolean outside effect to avoid expression in dependency array
@@ -334,14 +341,16 @@ export function ProtectedMediaViewer({
   }, [timeLeft, handleExpire, isViewOnce]);
 
   const handleRequestAccess = useCallback(() => {
-    if (mediaId) {
-      requestAccess({
+    if (mediaId && token) {
+      void requestAccess({
         mediaId: mediaId as any,
-        requesterId: userId as any,
-      });
-      setRequestedAccess(true);
+        token,
+        authUserId: userId,
+      })
+        .then(() => setRequestedAccess(true))
+        .catch(() => {});
     }
-  }, [mediaId, userId, requestAccess]);
+  }, [mediaId, userId, token, requestAccess]);
 
   // SECURE-REWRITE: Image load handlers (ONLY for images, not videos)
   const handleImageLoad = useCallback(() => {

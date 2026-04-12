@@ -60,8 +60,10 @@ const BIOS = [
   'Minimalist living, maximalist loving.',
 ];
 
+// CURRENT 9 RELATIONSHIP CATEGORIES
 const RELATIONSHIP_INTENTS: RelationshipIntent[] = [
-  'long_term', 'short_term', 'new_friends', 'fwb', 'figuring_out', 'open_to_anything',
+  'serious_vibes', 'keep_it_casual', 'just_friends', 'exploring_vibes', 'open_to_anything',
+  'see_where_it_goes', 'open_to_vibes', 'single_parent', 'new_to_dating',
 ];
 
 const ACTIVITY_TAGS: ActivityFilter[] = [

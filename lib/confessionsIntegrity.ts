@@ -1,4 +1,12 @@
 /**
+ * LOCKED (CONFESSIONS RANKING - DEMO MODE)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * LOCKED LOGIC:
+ * - Demo mode ranking: engagement-only scoring (no baseScore, no timeDecay)
+ * - Sort: rankingScore DESC, createdAt ASC tie-breaker
+ * - New posts appear at BOTTOM (score=0, newest createdAt)
+ *
  * confessionsIntegrity.ts — Pure helper module for confession state management
  *
  * Single source of truth for:
@@ -7,7 +15,7 @@
  *   - Badge computation (unseen ACTIVE confessions only)
  *   - Filtering by blocked users
  *   - Deduplication
- *   - Sorting (newest first)
+ *   - Sorting (ranking-based: engaged posts rise, new posts start at bottom)
  *
  * This module is PURE: it takes raw state and returns computed results.
  * No store calls, no side effects.
@@ -42,6 +50,8 @@ export interface TaggedConfessionItem {
   isExpired: boolean;
   replyCount: number;
   reactionCount: number;
+  // P1-PREVIEW FIX: Track if one-time preview has been consumed (persisted on backend)
+  previewConsumed?: boolean;
 }
 
 /** Input for processConfessionsIntegrity */
@@ -224,8 +234,31 @@ export function processConfessionsIntegrity(
     activePosts.push(confession);
   }
 
-  // Sort by createdAt (newest first)
-  activePosts.sort((a, b) => b.createdAt - a.createdAt);
+  // RANKING FIX: Sort by engagement-only scoring (not newest-first)
+  // - NO baseScore: Posts start at 0
+  // - NO timeDecay: Age doesn't penalize posts
+  // - ONLY engagement matters
+  // - Tie-breaker: createdAt ASC (newer posts appear LAST when same score)
+  activePosts.sort((a, b) => {
+    // Compute engagement-only ranking score for demo mode
+    const computeDemoRankingScore = (c: Confession) => {
+      const reactionScore = c.reactionCount * 2;
+      const commentScore = c.replyCount * 6;
+      // Engagement only - no baseScore, no timeDecay
+      return reactionScore + commentScore;
+    };
+
+    const scoreA = computeDemoRankingScore(a);
+    const scoreB = computeDemoRankingScore(b);
+
+    // Primary: rankingScore DESC (higher engagement = higher position)
+    if (scoreB !== scoreA) {
+      return scoreB - scoreA;
+    }
+
+    // Tie-breaker: createdAt ASC (older posts first, newer posts LAST)
+    return a.createdAt - b.createdAt;
+  });
 
   // Process confession threads
   const activeThreadIds: string[] = [];
@@ -398,7 +431,7 @@ export function shouldBlockConfessionThreadOpen(
   // Check linked confession expiry
   const linkedConfession = confessions.find((c) => c.id === confessionId);
   if (linkedConfession) {
-    const confessionExpiresAt = linkedConfession.createdAt + TWENTY_FOUR_HOURS_MS;
+    const confessionExpiresAt = linkedConfession.expiresAt ?? (linkedConfession.createdAt + TWENTY_FOUR_HOURS_MS);
     if (now > confessionExpiresAt) {
       return 'confession_expired';
     }
@@ -448,8 +481,8 @@ export function buildDemoTaggedConfessions(
       confessionText: c.text,
       confessionMood: c.mood,
       confessionCreatedAt: c.createdAt,
-      confessionExpiresAt: c.createdAt + TWENTY_FOUR_HOURS_MS,
-      isExpired: now > c.createdAt + TWENTY_FOUR_HOURS_MS,
+      confessionExpiresAt: c.expiresAt ?? (c.createdAt + TWENTY_FOUR_HOURS_MS),
+      isExpired: now > (c.expiresAt ?? (c.createdAt + TWENTY_FOUR_HOURS_MS)),
       replyCount: c.replyCount,
       reactionCount: c.reactionCount,
     }))

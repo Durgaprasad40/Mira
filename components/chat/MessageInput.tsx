@@ -1,10 +1,18 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Modal, Pressable } from 'react-native';
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Modal, Pressable, Keyboard } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { isDemoMode } from '@/config/demo';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
+
+const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
 
 interface MessageInputProps {
   onSend: (text: string, type?: 'text' | 'template') => void | Promise<void>;
@@ -24,6 +32,8 @@ interface MessageInputProps {
   onTextChange?: (text: string) => void;
   /** Called when user starts/stops typing (for production typing indicators). */
   onTypingChange?: (isTyping: boolean) => void;
+  /** Optional placeholder when composer is disabled for a known reason. */
+  disabledPlaceholder?: string;
 }
 
 export function MessageInput({
@@ -41,10 +51,79 @@ export function MessageInput({
   initialText = '',
   onTextChange,
   onTypingChange,
+  disabledPlaceholder,
 }: MessageInputProps) {
   const [text, setText] = useState(initialText);
   const [showTemplates, setShowTemplates] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [isFocused, setIsFocused] = useState(false);
+
+  // Send button animation
+  const sendButtonScale = useSharedValue(1);
+  const inputBorderColor = useSharedValue(0);
+
+  const sendButtonStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: sendButtonScale.value }],
+  }));
+
+  const inputAnimatedStyle = useAnimatedStyle(() => ({
+    borderWidth: 1.5,
+    borderColor: inputBorderColor.value === 1 ? COLORS.primary : 'transparent',
+  }));
+
+  const handleFocus = useCallback(() => {
+    setIsFocused(true);
+    if (showAttachMenu) {
+      setShowAttachMenu(false);
+    }
+    if (showTemplates) {
+      setShowTemplates(false);
+    }
+    inputBorderColor.value = withTiming(1, { duration: 150 });
+  }, [inputBorderColor, showAttachMenu, showTemplates]);
+
+  const [isSending, setIsSending] = useState(false);
+
+  // P1-A FIX: Ref-based guard to prevent duplicate sends on rapid double-tap
+  // State updates are async; ref is synchronous and prevents race
+  const isSendingRef = useRef(false);
+  const isTypingRef = useRef(false);
+
+  // Typing notification timer ref (for debouncing typing status)
+  const hideTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // P1-B FIX: Ref to hold latest onTypingChange callback
+  // Prevents stale closure in setTimeout
+  const onTypingChangeRef = useRef(onTypingChange);
+
+  // P1-B FIX: Sync ref when onTypingChange prop changes
+  useEffect(() => {
+    onTypingChangeRef.current = onTypingChange;
+  }, [onTypingChange]);
+
+  const emitTypingState = useCallback((nextIsTyping: boolean) => {
+    if (isTypingRef.current === nextIsTyping) return;
+    isTypingRef.current = nextIsTyping;
+    onTypingChangeRef.current?.(nextIsTyping);
+  }, []);
+
+  const handleBlur = useCallback(() => {
+    setIsFocused(false);
+    inputBorderColor.value = withTiming(0, { duration: 150 });
+    if (hideTypingTimerRef.current) {
+      clearTimeout(hideTypingTimerRef.current);
+      hideTypingTimerRef.current = null;
+    }
+    emitTypingState(false);
+  }, [emitTypingState, inputBorderColor]);
+
+  const handleSendPressIn = useCallback(() => {
+    sendButtonScale.value = withSpring(0.92, { damping: 15, stiffness: 400 });
+  }, [sendButtonScale]);
+
+  const handleSendPressOut = useCallback(() => {
+    sendButtonScale.value = withSpring(1, { damping: 15, stiffness: 400 });
+  }, [sendButtonScale]);
 
   // Voice recording
   const handleRecordingComplete = useCallback((result: VoiceRecorderResult) => {
@@ -92,44 +171,26 @@ export function MessageInput({
     if (!isDemoMode && onTypingChangeRef.current) {
       if (hasText) {
         // User is typing - notify immediately
-        onTypingChangeRef.current(true);
+        emitTypingState(true);
         // Stop typing after 2s of inactivity
         hideTypingTimerRef.current = setTimeout(() => {
-          // P1-B FIX: Use ref here - closure would capture stale onTypingChange
-          onTypingChangeRef.current?.(false);
+          emitTypingState(false);
         }, 2000);
       } else {
         // User cleared input - stop typing
-        onTypingChangeRef.current(false);
+        emitTypingState(false);
       }
     }
 
   };
 
-  const [isSending, setIsSending] = useState(false);
-
-  // P1-A FIX: Ref-based guard to prevent duplicate sends on rapid double-tap
-  // State updates are async; ref is synchronous and prevents race
-  const isSendingRef = useRef(false);
-
-  // Typing notification timer ref (for debouncing typing status)
-  const hideTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // P1-B FIX: Ref to hold latest onTypingChange callback
-  // Prevents stale closure in setTimeout
-  const onTypingChangeRef = useRef(onTypingChange);
-
-  // P1-B FIX: Sync ref when onTypingChange prop changes
-  useEffect(() => {
-    onTypingChangeRef.current = onTypingChange;
-  }, [onTypingChange]);
-
   // Cleanup timer on unmount
   useEffect(() => {
     return () => {
       if (hideTypingTimerRef.current) clearTimeout(hideTypingTimerRef.current);
+      emitTypingState(false);
     };
-  }, []);
+  }, [emitTypingState]);
 
   const handleSend = async () => {
     // P1-A FIX: Ref guard at START - prevents double-tap race condition
@@ -149,15 +210,17 @@ export function MessageInput({
 
     const trimmed = text.trim();
     handleTextChange('');
+    // P2-024 FIX: Dismiss keyboard after sending message
+    Keyboard.dismiss();
     // P1-A FIX: Set ref BEFORE async operation
     isSendingRef.current = true;
     setIsSending(true);
     try {
       await onSend(trimmed, 'text');
     } catch {
-      // Restore text so user can retry
+      // P1-RETRY-FIX: Restore text for retry, but don't show alert (parent handles it)
+      // ChatScreenInner already shows Alert with actual error message - avoid duplicate
       handleTextChange(trimmed);
-      Alert.alert('Send Failed', 'Message could not be sent. Please try again.');
     } finally {
       // P1-A FIX: Reset ref in finally (always runs)
       isSendingRef.current = false;
@@ -261,13 +324,16 @@ export function MessageInput({
             >
               <Pressable style={styles.menuOverlay} onPress={() => setShowAttachMenu(false)}>
                 <View style={styles.menuContainer}>
+                  <Text style={styles.menuCaption}>
+                    Secure media opens on tap. Choose view once or a timer before sending.
+                  </Text>
                   {/* Camera option */}
                   {onSendCamera && (
                     <TouchableOpacity style={styles.menuItem} onPress={handleCameraPress}>
                       <View style={[styles.menuIcon, { backgroundColor: COLORS.primary }]}>
                         <Ionicons name="camera" size={20} color={COLORS.white} />
                       </View>
-                      <Text style={styles.menuText}>Camera</Text>
+                      <Text style={styles.menuText}>Secure Camera</Text>
                     </TouchableOpacity>
                   )}
 
@@ -277,7 +343,7 @@ export function MessageInput({
                       <View style={[styles.menuIcon, { backgroundColor: COLORS.secondary }]}>
                         <Ionicons name="images" size={20} color={COLORS.white} />
                       </View>
-                      <Text style={styles.menuText}>Gallery</Text>
+                      <Text style={styles.menuText}>Secure Gallery</Text>
                     </TouchableOpacity>
                   )}
 
@@ -311,39 +377,56 @@ export function MessageInput({
           </TouchableOpacity>
         )}
 
-        <TextInput
-          style={[
-            styles.input,
-            !isDemoMode && !canSendCustom && isPreMatch && styles.inputDisabled,
-            isRecording && styles.inputRecording,
-          ]}
-          placeholder={isRecording ? 'Recording voice message...' : (!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...')}
-          placeholderTextColor={isRecording ? COLORS.error : COLORS.textLight}
-          value={text}
-          onChangeText={handleTextChange}
-          multiline
-          scrollEnabled
-          textAlignVertical="top"
-          blurOnSubmit={false}
-          maxLength={isDemoMode || canSendCustom ? undefined : 150}
-          editable={!disabled && !isRecording && (isDemoMode || canSendCustom || !isPreMatch)}
-          autoComplete="off"
-          textContentType="none"
-          importantForAutofill="noExcludeDescendants"
-        />
+        <Animated.View style={[styles.inputWrapper, inputAnimatedStyle]}>
+          <TextInput
+            style={[
+              styles.input,
+              !isDemoMode && !canSendCustom && isPreMatch && styles.inputDisabled,
+              isRecording && styles.inputRecording,
+            ]}
+            placeholder={
+              isRecording
+                ? 'Recording voice message...'
+                : disabled && disabledPlaceholder
+                  ? disabledPlaceholder
+                  : (!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...')
+            }
+            placeholderTextColor={isRecording ? COLORS.error : COLORS.textLight}
+            value={text}
+            onChangeText={handleTextChange}
+            onFocus={handleFocus}
+            onBlur={handleBlur}
+            multiline
+            scrollEnabled
+            textAlignVertical="top"
+            blurOnSubmit={false}
+            maxLength={isDemoMode || canSendCustom ? undefined : 150}
+            editable={!disabled && !isRecording && (isDemoMode || canSendCustom || !isPreMatch)}
+            autoComplete="off"
+            textContentType="none"
+            importantForAutofill="noExcludeDescendants"
+          />
+        </Animated.View>
 
         {!isRecording && (
-          <TouchableOpacity
-            style={[styles.sendButton, (!text.trim() || disabled || isSending) && styles.sendButtonDisabled]}
+          <AnimatedTouchable
+            style={[
+              styles.sendButton,
+              (!text.trim() || disabled || isSending) && styles.sendButtonDisabled,
+              sendButtonStyle,
+            ]}
             onPress={handleSend}
+            onPressIn={handleSendPressIn}
+            onPressOut={handleSendPressOut}
             disabled={!text.trim() || disabled || isSending}
+            activeOpacity={0.9}
           >
             {isSending ? (
               <ActivityIndicator size="small" color={COLORS.white} />
             ) : (
               <Ionicons name="send" size={20} color={COLORS.white} />
             )}
-          </TouchableOpacity>
+          </AnimatedTouchable>
         )}
       </View>
     </View>
@@ -461,6 +544,14 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 8,
   },
+  menuCaption: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: COLORS.textMuted,
+    marginBottom: 6,
+    paddingHorizontal: 16,
+    paddingTop: 4,
+  },
   menuItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -493,13 +584,17 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.error + '20',
     borderRadius: 22,
   },
-  input: {
+  inputWrapper: {
     flex: 1,
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  input: {
     backgroundColor: COLORS.backgroundDark,
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 10,
-    fontSize: 14,
+    fontSize: 15,
     color: COLORS.text,
     minHeight: 40,
     maxHeight: 100,

@@ -25,6 +25,8 @@ import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { isDemoMode, convex } from '@/hooks/useConvex';
+import { isDemoAuthMode } from '@/config/demo';
+import { ensureDemoUserConsent } from '@/lib/demoAuth';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
 import { decideNextOnboardingRoute, logOnboardingStatus } from '@/lib/onboardingRouting';
@@ -101,7 +103,7 @@ async function persistPhoto(cacheUri: string): Promise<string | null> {
 export default function PhotoUploadScreen() {
   useScreenTrace("ONB_PHOTO_UPLOAD");
   const { photos, setPhotoAtIndex, setStep, setVerificationPhoto, clearAllPhotos } = useOnboardingStore();
-  const { userId, faceVerificationPassed } = useAuthStore();
+  const { userId, token, faceVerificationPassed } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
   const [isUploading, setIsUploading] = useState(false);
@@ -124,7 +126,7 @@ export default function PhotoUploadScreen() {
   // C4 FIX: Include queryEnabled in skip condition to allow forced re-subscription
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId && queryEnabled ? { userId } : 'skip'
+    !isDemoMode && token && queryEnabled ? { token } : 'skip'
   );
 
   // Local state for immediate preview update
@@ -394,8 +396,77 @@ export default function PhotoUploadScreen() {
       return;
     }
 
-    // Demo mode: skip Convex upload, use local storage only
+    // =========================================================================
+    // DEMO AUTH MODE: Upload to Convex (same as live mode) for proper backend state
+    // This ensures referencePhotoExists is properly set in Convex
+    // =========================================================================
+    if (isDemoAuthMode) {
+      console.log('[DEMO_AUTH] PHOTO: Uploading to Convex in demo auth mode');
+      setIsUploading(true);
+
+      try {
+        // Step 0: CRITICAL - Ensure consent is set before upload
+        // ROOT CAUSE FIX: On app resume, consent may not be set (user from before fix)
+        if (token) {
+          console.log('[DEMO_AUTH] PHOTO: Ensuring consent is set...');
+          const consentOk = await ensureDemoUserConsent(token);
+          if (!consentOk) {
+            console.warn('[DEMO_AUTH] PHOTO: Could not verify consent, proceeding anyway');
+          } else {
+            console.log('[DEMO_AUTH] PHOTO: Consent confirmed');
+          }
+        }
+
+        // Step 1: Upload photo to Convex storage (same as live mode)
+        const uploadUrl = await generateUploadUrl();
+        const response = await fetch(currentPhoto);
+        const blob = await response.blob();
+
+        const uploadResponse = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'image/jpeg' },
+          body: blob,
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error(`Upload failed with status ${uploadResponse.status}`);
+        }
+
+        const uploadResult = await uploadResponse.json();
+        const storageId = uploadResult.storageId as Id<'_storage'>;
+        console.log(`[DEMO_AUTH] PHOTO: Uploaded to storage, storageId=${storageId}`);
+
+        // Step 2: Set verification reference photo in Convex
+        const result = await uploadVerificationReferencePhoto({
+          userId: userId as Id<'users'>,
+          storageId,
+          hasFace: true,
+          faceCount: 1,
+        });
+
+        if (!result.success) {
+          throw new Error(result.message || 'Failed to set reference photo');
+        }
+
+        console.log('[DEMO_AUTH] PHOTO: Reference photo set in Convex');
+        setVerificationPhoto(currentPhoto);
+
+        setStep('face_verification');
+        router.push('/(onboarding)/face-verification' as any);
+      } catch (error: any) {
+        console.error('[DEMO_AUTH] PHOTO: Upload error:', error);
+        Alert.alert('Upload Failed', error.message || 'Please try again.');
+      } finally {
+        setIsUploading(false);
+        uploadInProgressRef.current = false;
+      }
+      return;
+    }
+
+    // =========================================================================
+    // LEGACY DEMO MODE: skip Convex upload, use local storage only
     // Face verification in demo mode uses mockVerify which doesn't check reference photo
+    // =========================================================================
     if (isDemoMode) {
       console.log('[PHOTO_GATE] DEMO MODE: Skipping Convex upload, using local storage');
       setVerificationPhoto(currentPhoto);
@@ -668,32 +739,33 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   content: {
-    padding: 20,
-    paddingTop: 8,
-    paddingBottom: 32,
+    padding: 24,
+    paddingTop: 10,
+    paddingBottom: 40,
   },
   title: {
-    fontSize: 24,
+    fontSize: 26,
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 4,
+    marginBottom: 6,
+    letterSpacing: -0.5,
   },
   subtitle: {
-    fontSize: 14,
+    fontSize: 15,
     color: COLORS.textLight,
-    marginBottom: 16,
-    lineHeight: 20,
+    marginBottom: 20,
+    lineHeight: 22,
   },
   photoContainer: {
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 24,
   },
   photoPreview: {
     width: 200,
     height: 200,
     borderRadius: 100,
     overflow: 'hidden',
-    borderWidth: 4,
+    borderWidth: 3,
     borderColor: COLORS.primary,
     position: 'relative',
   },
@@ -703,8 +775,8 @@ const styles = StyleSheet.create({
   },
   photoCheckmark: {
     position: 'absolute',
-    bottom: 8,
-    right: 8,
+    bottom: 10,
+    right: 10,
     backgroundColor: COLORS.white,
     borderRadius: 14,
   },
@@ -721,83 +793,88 @@ const styles = StyleSheet.create({
   },
   placeholderText: {
     fontSize: 14,
-    color: COLORS.textLight,
-    marginTop: 8,
+    color: COLORS.textMuted,
+    marginTop: 10,
   },
   missingHint: {
     fontSize: 12,
     color: COLORS.error,
-    marginTop: 4,
+    marginTop: 6,
     textAlign: 'center',
+    fontWeight: '500',
   },
   actions: {
-    gap: 10,
-    marginBottom: 16,
+    gap: 12,
+    marginBottom: 20,
   },
   actionButton: {
     marginBottom: 0,
   },
   requirements: {
     backgroundColor: COLORS.backgroundDark,
-    padding: 14,
-    borderRadius: 12,
-    marginBottom: 12,
+    padding: 18,
+    borderRadius: 16,
+    marginBottom: 14,
   },
   requirementsTitle: {
     fontSize: 14,
     fontWeight: '600',
     color: COLORS.text,
-    marginBottom: 10,
+    marginBottom: 12,
+    letterSpacing: -0.2,
   },
   requirementItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    marginBottom: 8,
+    gap: 12,
+    marginBottom: 10,
   },
   requirementText: {
     fontSize: 13,
     color: COLORS.text,
     flex: 1,
+    lineHeight: 18,
   },
   privacyNote: {
-    backgroundColor: COLORS.primaryLight,
-    padding: 14,
-    borderRadius: 12,
+    backgroundColor: 'rgba(255, 107, 107, 0.08)',
+    padding: 18,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: COLORS.primary + '30',
-    marginBottom: 16,
+    borderColor: 'rgba(255, 107, 107, 0.2)',
+    marginBottom: 20,
   },
   privacyHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
+    gap: 10,
+    marginBottom: 10,
   },
   privacyTitle: {
     fontSize: 14,
     fontWeight: '600',
     color: COLORS.primary,
+    letterSpacing: -0.2,
   },
   privacyText: {
-    fontSize: 12,
+    fontSize: 13,
     color: COLORS.text,
-    marginBottom: 6,
+    marginBottom: 8,
+    lineHeight: 19,
   },
   privacyOption: {
-    fontSize: 12,
+    fontSize: 13,
     color: COLORS.text,
-    marginLeft: 8,
-    lineHeight: 18,
+    marginLeft: 10,
+    lineHeight: 20,
   },
   privacyFooter: {
-    fontSize: 11,
+    fontSize: 12,
     color: COLORS.textLight,
-    marginTop: 8,
+    marginTop: 10,
     fontStyle: 'italic',
   },
   footer: {
-    marginTop: 8,
+    marginTop: 12,
     paddingTop: 12,
   },
   loadingText: {

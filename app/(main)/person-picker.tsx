@@ -6,27 +6,57 @@ import {
   TouchableOpacity,
   FlatList,
   StyleSheet,
-  Image,
+  ActivityIndicator,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { DEMO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { useInteractionStore } from '@/stores/interactionStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 
 interface PersonItem {
   id: string;
   name: string;
-  photoUrl: string;
+  photoUrl: string | null;
 }
 
 export default function PersonPickerScreen() {
   const router = useRouter();
   const [search, setSearch] = useState('');
+  const { userId } = useAuthStore();
+
+  // Demo mode data
   const storeMatches = useDemoStore((s) => s.matches);
 
+  // Convex query for eligible tag targets (only in live mode)
+  const convexTargets = useQuery(
+    api.confessions.getEligibleTagTargets,
+    !isDemoMode && userId ? {} : 'skip'
+  );
+
+  // Determine loading state
+  const isLoading = !isDemoMode && convexTargets === undefined;
+
+  // Build people list based on mode
   const people: PersonItem[] = useMemo(() => {
+    if (!isDemoMode) {
+      // Live mode: use Convex query results
+      if (!convexTargets) return [];
+      return convexTargets.map((t) => ({
+        id: t.id,
+        name: t.name,
+        photoUrl: t.photoUrl,
+      }));
+    }
+
+    // Demo mode: use store matches + demo profiles
     const fromMatches: PersonItem[] = storeMatches.map((m) => ({
       id: m.otherUser.id,
       name: m.otherUser.name,
@@ -35,7 +65,7 @@ export default function PersonPickerScreen() {
     const fromProfiles: PersonItem[] = DEMO_PROFILES.map((p) => ({
       id: p._id,
       name: p.name,
-      photoUrl: p.photos[0]?.url || '',
+      photoUrl: getPrimaryPhotoUrl(p.photos),
     }));
 
     const seen = new Set<string>();
@@ -47,16 +77,17 @@ export default function PersonPickerScreen() {
       }
     }
     return all;
-  }, [storeMatches]);
+  }, [isDemoMode, convexTargets, storeMatches]);
 
+  // Filter by search
   const filtered = useMemo(() => {
     if (!search.trim()) return people;
     const q = search.toLowerCase();
     return people.filter((p) => p.name.toLowerCase().includes(q));
   }, [people, search]);
 
-  const handleSelect = (userId: string, name: string) => {
-    useInteractionStore.getState().setPersonPickerResult({ userId, name });
+  const handleSelect = (personId: string, name: string) => {
+    useInteractionStore.getState().setPersonPickerResult({ userId: personId, name });
     router.back();
   };
 
@@ -82,24 +113,41 @@ export default function PersonPickerScreen() {
         />
       </View>
 
-      <FlatList
-        data={filtered}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            style={styles.personRow}
-            onPress={() => handleSelect(item.id, item.name)}
-          >
-            <Image source={{ uri: item.photoUrl }} style={styles.personPhoto} />
-            <Text style={styles.personName}>{item.name}</Text>
-            <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-          </TouchableOpacity>
-        )}
-        contentContainerStyle={styles.list}
-        ListEmptyComponent={
-          <Text style={styles.emptyText}>No people found</Text>
-        }
-      />
+      {isLoading ? (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading...</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={filtered}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              style={styles.personRow}
+              onPress={() => handleSelect(item.id, item.name)}
+            >
+              <Image
+                source={{ uri: item.photoUrl || undefined }}
+                style={styles.personPhoto}
+                contentFit="cover"
+              />
+              <Text style={styles.personName}>{item.name}</Text>
+              <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          )}
+          contentContainerStyle={styles.list}
+          ListEmptyComponent={
+            <View style={styles.emptyContainer}>
+              <Ionicons name="heart-outline" size={48} color={COLORS.textMuted} />
+              <Text style={styles.emptyTitle}>No one to tag yet</Text>
+              <Text style={styles.emptyText}>
+                Like or match with someone first to confess to them.
+              </Text>
+            </View>
+          }
+        />
+      )}
     </View>
   );
 }
@@ -143,6 +191,7 @@ const styles = StyleSheet.create({
   },
   list: {
     paddingBottom: 40,
+    flexGrow: 1,
   },
   personRow: {
     flexDirection: 'row',
@@ -165,10 +214,35 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.text,
   },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 12,
+  },
+  loadingText: {
+    fontSize: 16,
+    color: COLORS.textMuted,
+  },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+    paddingTop: 80,
+  },
+  emptyTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginTop: 16,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
   emptyText: {
     textAlign: 'center',
-    marginTop: 40,
     fontSize: 15,
     color: COLORS.textMuted,
+    lineHeight: 22,
   },
 });

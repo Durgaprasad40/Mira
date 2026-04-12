@@ -35,6 +35,10 @@ import {
   shouldUseSharedEngine,
   shouldRunShadowComparison,
 } from './rankingConfig';
+import {
+  FRONTEND_RELATIONSHIP_INTENT_COMPATIBILITY,
+  normalizeRelationshipIntentValues,
+} from '../../lib/discoveryNaming';
 
 // ---------------------------------------------------------------------------
 // Score Components (0-100 each)
@@ -52,29 +56,25 @@ export function computeCompatibilityScore(
 ): number {
   let score = 0;
 
-  // SAFETY: Arrays already normalized by adapter, but guard anyway
-  const candidateIntent = candidate.relationshipIntent ?? [];
-  const viewerIntent = viewer.relationshipIntent ?? [];
+  // Normalize all legacy intent aliases to frontend-canonical values
+  // before compatibility comparison. Exact match / compatible-pair scoring
+  // remains unchanged; only the naming layer is unified.
+  const candidateIntent = normalizeRelationshipIntentValues(candidate.relationshipIntent);
+  const viewerIntent = normalizeRelationshipIntentValues(viewer.relationshipIntent);
   const candidateActivities = candidate.activities ?? [];
   const viewerActivities = viewer.activities ?? [];
-
-  // 1. Relationship intent alignment (0-30)
-  const intentCompat: Record<string, string[]> = {
-    long_term: ['long_term', 'short_to_long'],
-    short_term: ['short_term', 'long_to_short', 'fwb'],
-    fwb: ['fwb', 'short_term'],
-    figuring_out: ['figuring_out', 'open_to_anything'],
-    short_to_long: ['short_to_long', 'long_term', 'short_term'],
-    long_to_short: ['long_to_short', 'short_term'],
-    new_friends: ['new_friends', 'open_to_anything'],
-    open_to_anything: ['open_to_anything', 'figuring_out', 'new_friends'],
-  };
 
   let bestIntent = 0;
   for (const mine of viewerIntent) {
     for (const theirs of candidateIntent) {
       if (mine === theirs) bestIntent = Math.max(bestIntent, 30);
-      else if (intentCompat[mine]?.includes(theirs)) bestIntent = Math.max(bestIntent, 15);
+      else if (
+        FRONTEND_RELATIONSHIP_INTENT_COMPATIBILITY[mine]?.some(
+          (compatible) => compatible === theirs
+        )
+      ) {
+        bestIntent = Math.max(bestIntent, 15);
+      }
     }
   }
   score += bestIntent;
@@ -311,6 +311,34 @@ export function computeTotalBoosts(
 }
 
 // ---------------------------------------------------------------------------
+// Phase-2 Desire Alignment (Subtle Ranking Boost)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute desire tag overlap score between viewer and candidate.
+ * Returns normalized overlap (0-1) suitable for subtle boost calculation.
+ *
+ * Phase-2 only: Returns 0 for Phase-1 or empty arrays (no penalty).
+ * Safe: Handles undefined/empty arrays gracefully.
+ */
+export function getDesireOverlapScore(
+  viewerDesires: string[] | undefined,
+  candidateDesires: string[] | undefined
+): number {
+  // Safe handling: undefined or empty arrays = 0 (no boost, no penalty)
+  if (!viewerDesires || !candidateDesires) return 0;
+  if (viewerDesires.length === 0 || candidateDesires.length === 0) return 0;
+
+  // Count overlapping desires
+  const overlap = viewerDesires.filter(d => candidateDesires.includes(d)).length;
+  if (overlap === 0) return 0;
+
+  // Normalize by the larger set size (conservative: requires more overlap for high score)
+  const maxSize = Math.max(viewerDesires.length, candidateDesires.length);
+  return overlap / maxSize;
+}
+
+// ---------------------------------------------------------------------------
 // Trust/Safety Penalties
 // ---------------------------------------------------------------------------
 
@@ -369,6 +397,14 @@ export function computeRankScore(
   const boosts = computeTotalBoosts(candidate, config);
   score += boosts;
 
+  // Phase-2 only: Subtle desire alignment boost (max ~0.15 contribution)
+  // Safe: Returns 0 for Phase-1 (no desireTagKeys) - no penalty for mismatch
+  const desireOverlap = getDesireOverlapScore(viewer.desireTagKeys, candidate.desireTagKeys);
+  const desireBoost = desireOverlap * 15; // Max 15 points when perfect overlap (0.15 normalized)
+  // Add small randomness (0-0.2 range) to break ties and add variety
+  const desireNoise = desireOverlap > 0 ? Math.random() * 0.2 : 0;
+  score += desireBoost + desireNoise;
+
   // Apply trust penalty
   const penalty = computeTrustPenalty(candidate, config);
   score -= penalty;
@@ -384,6 +420,7 @@ export function computeRankScore(
       distance,
       fairness,
       boosts,
+      desireBoost: desireBoost + desireNoise, // Phase-2 only (0 for Phase-1)
       penalty,
     },
   };

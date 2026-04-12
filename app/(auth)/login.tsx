@@ -25,6 +25,9 @@ import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
+import { isDemoAuthMode } from "@/config/demo";
+import { getDemoOnboardingStatus, loginDemoUser } from "@/lib/demoAuth";
+import { getOnboardingResumeRoute } from "@/lib/onboardingRouting";
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -45,7 +48,62 @@ export default function LoginScreen() {
   const loginWithEmail = useMutation(api.auth.loginWithEmail);
 
   const handleLogin = async () => {
-    // Demo mode: local sign-in via demoStore
+    // =========================================================================
+    // DEMO AUTH MODE: Login via Convex backend with stable demo user
+    // =========================================================================
+    if (isDemoAuthMode) {
+      if (!email) { setError("Please enter your email"); return; }
+      if (!password) { setError("Please enter your password"); return; }
+      setIsLoading(true);
+      setError("");
+
+      try {
+        if (__DEV__) {
+          console.log('[DEMO_AUTH] Login attempt:', email);
+        }
+
+        const result = await loginDemoUser(email, password);
+
+        if (result.success) {
+          if (__DEV__) {
+            console.log('[DEMO_AUTH] Login successful:', {
+              userId: result.userId.substring(0, 8),
+              onboardingCompleted: result.onboardingCompleted,
+            });
+          }
+
+          if (result.onboardingCompleted) {
+            router.replace("/(main)/(tabs)/home");
+          } else {
+            const onboardingStatus = await getDemoOnboardingStatus(result.token);
+            const lastStepKey = onboardingStatus?.onboardingDraft?.progress?.lastStepKey;
+            const resumeRoute = getOnboardingResumeRoute(lastStepKey, onboardingStatus);
+
+            if (__DEV__) {
+              console.log('[DEMO_AUTH] Login onboarding route:', {
+                lastStepKey,
+                basicInfoComplete: onboardingStatus?.basicInfoComplete === true,
+                route: resumeRoute,
+              });
+            }
+
+            router.replace(resumeRoute as any);
+          }
+        } else {
+          setError("Demo login failed");
+        }
+      } catch (e: any) {
+        console.error('[DEMO_AUTH] Login error:', e);
+        setError(e.message || "Login failed");
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    // =========================================================================
+    // LEGACY DEMO MODE: local sign-in via demoStore
+    // =========================================================================
     if (isDemoMode) {
       if (!email) { setError("Please enter your email"); return; }
       if (!password) { setError("Please enter your password"); return; }

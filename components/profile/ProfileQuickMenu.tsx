@@ -20,6 +20,7 @@ import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
 import { safeReplace } from '@/lib/safeRouter';
+import { getDemoCurrentUser } from '@/lib/demoData';
 
 interface ProfileQuickMenuProps {
   visible: boolean;
@@ -29,7 +30,7 @@ interface ProfileQuickMenuProps {
 export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId, logout } = useAuthStore();
+  const { token, logout } = useAuthStore();
   const { tier } = useSubscriptionStore();
   const isPremium = tier === 'premium';
 
@@ -58,15 +59,11 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
     );
   };
 
-  const currentUser = useQuery(
-    api.users.getCurrentUser,
-    userId ? { userId: userId as any } : 'skip'
+  const currentUserQuery = useQuery(
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : 'skip'
   );
-
-  const messageQuota = useQuery(
-    api.messages.getUnreadCount,
-    userId ? { userId: userId as any } : 'skip'
-  );
+  const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
   const menuItems = [
     {
@@ -93,7 +90,7 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
       icon: 'settings-outline',
       onPress: () => {
         onClose();
-        router.push('/(main)/settings');
+        router.push('/(main)/(tabs)/profile');
       },
     },
     {

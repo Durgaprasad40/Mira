@@ -13,11 +13,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/config/demo';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+
+// Room creation cost
+const ROOM_COST = 1;
 
 const C = INCOGNITO_COLORS;
 
@@ -32,6 +35,15 @@ export default function CreateRoomScreen() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
+
+  // COIN-UX-FIX: Query user's coin balance
+  const walletQuery = useQuery(
+    api.chatRooms.getUserWalletCoins,
+    userId ? { authUserId: userId } : 'skip'
+  );
+  const currentCoins = walletQuery?.walletCoins ?? 0;
+  const hasEnoughCoins = currentCoins >= ROOM_COST;
+  const shortfall = Math.max(0, ROOM_COST - currentCoins);
 
   const handleCreate = useCallback(async () => {
     const trimmedName = roomName.trim();
@@ -75,8 +87,18 @@ export default function CreateRoomScreen() {
         authUserId: userId!,
       });
 
-      // Navigate to the new room
-      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any);
+      Alert.alert(
+        'Room Created',
+        `Invite code: ${result.joinCode}\nPassword: ${trimmedPassword}\n\nShare both to let someone in.`,
+        [
+          {
+            text: 'Go to Room',
+            onPress: () => {
+              router.replace(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any);
+            },
+          },
+        ]
+      );
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to create room');
     } finally {
@@ -138,19 +160,65 @@ export default function CreateRoomScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Coin cost note */}
-        <Text style={styles.coinNote}>Creating a private room costs 1 coin.</Text>
+        {/* COIN-UX-FIX: Coin Info Section */}
+        <View style={styles.coinSection}>
+          <View style={styles.coinHeader}>
+            <Ionicons name="wallet-outline" size={20} color={C.text} />
+            <Text style={styles.coinTitle}>Room Cost</Text>
+          </View>
+
+          {/* Balance Row */}
+          <View style={styles.coinRow}>
+            <Text style={styles.coinLabel}>Your balance</Text>
+            <Text style={[styles.coinValue, !hasEnoughCoins && styles.coinValueInsufficient]}>
+              {currentCoins} coins
+            </Text>
+          </View>
+
+          {/* Required Row */}
+          <View style={styles.coinRow}>
+            <Text style={styles.coinLabel}>Required</Text>
+            <Text style={styles.coinValue}>{ROOM_COST} coin for 24 hours</Text>
+          </View>
+
+          {/* Shortfall Row (only if insufficient) */}
+          {!hasEnoughCoins && (
+            <View style={styles.coinRow}>
+              <Text style={styles.coinLabel}>You need</Text>
+              <Text style={styles.coinValueShortfall}>{shortfall} more coin{shortfall !== 1 ? 's' : ''}</Text>
+            </View>
+          )}
+
+          {/* Status Message */}
+          <View style={[styles.coinStatus, hasEnoughCoins ? styles.coinStatusOk : styles.coinStatusWarn]}>
+            <Ionicons
+              name={hasEnoughCoins ? 'checkmark-circle' : 'alert-circle'}
+              size={16}
+              color={hasEnoughCoins ? '#22C55E' : '#F59E0B'}
+            />
+            <Text style={[styles.coinStatusText, hasEnoughCoins ? styles.coinStatusTextOk : styles.coinStatusTextWarn]}>
+              {hasEnoughCoins
+                ? 'You have enough coins to create this room'
+                : 'Chat and engage with more people to earn coins'}
+            </Text>
+          </View>
+        </View>
 
         {/* Submit Button */}
         <TouchableOpacity
-          style={[styles.createBtn, isSubmitting && styles.createBtnDisabled]}
+          style={[
+            styles.createBtn,
+            (isSubmitting || !hasEnoughCoins) && styles.createBtnDisabled,
+          ]}
           onPress={handleCreate}
-          disabled={isSubmitting}
+          disabled={isSubmitting || !hasEnoughCoins}
         >
           {isSubmitting ? (
             <ActivityIndicator color="#FFFFFF" />
           ) : (
-            <Text style={styles.createBtnText}>Create Room</Text>
+            <Text style={styles.createBtnText}>
+              {hasEnoughCoins ? 'Create Room' : 'Not Enough Coins'}
+            </Text>
           )}
         </TouchableOpacity>
       </KeyboardAvoidingView>
@@ -226,11 +294,70 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 14,
   },
-  coinNote: {
-    fontSize: 13,
+  // COIN-UX-FIX: Coin info section styles
+  coinSection: {
+    marginTop: 24,
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    padding: 16,
+  },
+  coinHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.1)',
+  },
+  coinTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: C.text,
+  },
+  coinRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  coinLabel: {
+    fontSize: 14,
     color: C.textLight,
-    textAlign: 'center',
-    marginTop: 20,
+  },
+  coinValue: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text,
+  },
+  coinValueInsufficient: {
+    color: '#F59E0B',
+  },
+  coinValueShortfall: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#EF4444',
+  },
+  coinStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.1)',
+  },
+  coinStatusOk: {},
+  coinStatusWarn: {},
+  coinStatusText: {
+    fontSize: 13,
+    flex: 1,
+  },
+  coinStatusTextOk: {
+    color: '#22C55E',
+  },
+  coinStatusTextWarn: {
+    color: '#F59E0B',
   },
   createBtn: {
     backgroundColor: C.primary,

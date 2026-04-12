@@ -40,6 +40,6 @@ yarn-error.*
 /ios
 /android
 
-# Temporarily ignore untracked Convex file to prevent api.d.ts regeneration
-convex/verificationProviders.ts
 *.backup
+build/
+convex/_generated

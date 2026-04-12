@@ -23,6 +23,15 @@ export default defineSchema({
       v.literal('transgender'),
       v.literal('prefer_not_to_say')
     ))), // LGBTQ identity (optional, max 2)
+    // Legacy compatibility: older user docs stored dating preference here.
+    // Active onboarding uses onboardingDraft.preferences.lgbtqPreference instead.
+    lgbtqPreference: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))),
 
     // Profile
     bio: v.string(),
@@ -129,6 +138,17 @@ export default defineSchema({
     // Preferences
     lookingFor: v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'))),
     relationshipIntent: v.array(v.union(
+      // Legacy compatibility: older user docs stored label-style slugs, now normalized to canonical values.
+      v.literal('serious_vibes'),
+      v.literal('keep_it_casual'),
+      v.literal('exploring_vibes'),
+      v.literal('see_where_it_goes'),
+      v.literal('open_to_vibes'),
+      v.literal('just_friends'),
+      v.literal('new_to_dating'),
+      // UI-only legacy compatibility: older top-level user rows may still carry these values.
+      v.literal('single_parent'),
+      v.literal('just_18'),
       v.literal('long_term'),
       v.literal('short_term'),
       v.literal('fwb'),
@@ -178,6 +198,10 @@ export default defineSchema({
       v.literal('age'),
       v.literal('recently_active')
     )),
+    // Legacy compatibility: older discover assignment experiments stored category metadata here.
+    // Active app logic no longer reads or writes these fields.
+    assignedDiscoverCategory: v.optional(v.string()),
+    discoverCategoryAssignedAt: v.optional(v.number()),
 
     // Subscription
     subscriptionTier: v.union(v.literal('free'), v.literal('basic'), v.literal('premium')),
@@ -227,6 +251,13 @@ export default defineSchema({
 
     // Profile Prompts (icebreakers)
     profilePrompts: v.optional(v.array(v.object({
+      // Legacy compatibility: older prompt entries persisted section metadata.
+      section: v.optional(v.union(
+        v.literal('builder'),
+        v.literal('performer'),
+        v.literal('seeker'),
+        v.literal('grounded')
+      )),
       question: v.string(),
       answer: v.string(),
     }))),
@@ -272,6 +303,12 @@ export default defineSchema({
         )),
         bio: v.optional(v.string()),
         profilePrompts: v.optional(v.array(v.object({
+          section: v.optional(v.union(
+            v.literal('builder'),
+            v.literal('performer'),
+            v.literal('seeker'),
+            v.literal('grounded')
+          )),
           question: v.string(),
           answer: v.string(),
         }))),
@@ -359,6 +396,17 @@ export default defineSchema({
           v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'), v.literal('transgender'), v.literal('bisexual'), v.literal('prefer_not_to_say')
         ))),
         relationshipIntent: v.optional(v.array(v.union(
+          // Legacy compatibility: older drafts stored label-style slugs that are now normalized to canonical values.
+          v.literal('serious_vibes'),
+          v.literal('keep_it_casual'),
+          v.literal('exploring_vibes'),
+          v.literal('see_where_it_goes'),
+          v.literal('open_to_vibes'),
+          v.literal('just_friends'),
+          v.literal('new_to_dating'),
+          // UI-only legacy compatibility: onboarding previously allowed these extra intent chips.
+          v.literal('single_parent'),
+          v.literal('just_18'),
           v.literal('long_term'), v.literal('short_term'), v.literal('fwb'), v.literal('figuring_out'),
           v.literal('short_to_long'), v.literal('long_to_short'), v.literal('new_friends'), v.literal('open_to_anything')
         ))),
@@ -510,6 +558,7 @@ export default defineSchema({
     order: v.number(),
     isPrimary: v.boolean(),
     hasFace: v.boolean(),
+    isBlurred: v.optional(v.boolean()), // legacy stored flag; active blur contract now uses variantType/displayPrimaryPhotoVariant/user.photoBlurred
     isNsfw: v.boolean(),
     width: v.optional(v.number()),
     height: v.optional(v.number()),
@@ -1098,6 +1147,9 @@ export default defineSchema({
     ageConfirmedAt: v.optional(v.number()),
     privatePhotosBlurred: v.array(v.id('_storage')),
     privatePhotoUrls: v.array(v.string()),
+    // Legacy compatibility: older Phase-2 profile docs stored a per-slot blur array.
+    // Active backend flows use privatePhotosBlurred/privatePhotoBlurLevel instead.
+    photoBlurSlots: v.optional(v.array(v.boolean())),
     privatePhotoBlurLevel: v.optional(v.number()),
     privateIntentKeys: v.array(v.string()),
     privateDesireTagKeys: v.array(v.string()),
@@ -1273,9 +1325,12 @@ export default defineSchema({
   todRateLimits: defineTable({
     userId: v.string(),
     actionType: v.union(
+      v.literal('prompt'), // legacy prompt-creation rate limit action
+      v.literal('connect'), // legacy connect-request rate limit action
       v.literal('answer'),
       v.literal('reaction'),
-      v.literal('report')
+      v.literal('report'),
+      v.literal('claim_media') // active secure-media claim rate limit action
     ),
     windowStart: v.number(), // Start of the rate limit window (day start)
     count: v.number(), // Actions in this window
@@ -1337,6 +1392,7 @@ export default defineSchema({
     userId: v.id('users'),
     text: v.string(),
     isAnonymous: v.boolean(),
+    authorVisibility: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur'), v.literal('blur_photo'))), // legacy visibility flag; isAnonymous is the active source of truth
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
     visibility: v.literal('global'),
     imageUrl: v.optional(v.string()),
@@ -1347,6 +1403,13 @@ export default defineSchema({
     replyCount: v.number(),
     reactionCount: v.number(),
     voiceReplyCount: v.optional(v.number()),
+    lastEngagementAt: v.optional(v.number()), // legacy ranking/engagement metadata
+    rankingScore: v.optional(v.number()), // legacy ranking/engagement metadata
+    recentEngagementWindowStart: v.optional(v.number()), // legacy ranking/engagement metadata
+    recentReactionCount: v.optional(v.number()), // legacy ranking/engagement metadata
+    recentReplyCount: v.optional(v.number()), // legacy ranking/engagement metadata
+    reportCount: v.optional(v.number()), // legacy moderation metadata
+    uniqueCommenters: v.optional(v.number()), // legacy ranking/engagement metadata
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
     taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
@@ -1385,6 +1448,8 @@ export default defineSchema({
     userId: v.id('users'),
     text: v.string(),
     isAnonymous: v.boolean(),
+    identityMode: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur'))), // legacy reply identity flag; isAnonymous is the active source of truth
+    hasActiveConnectRequest: v.optional(v.boolean()), // legacy flag ignored by current Confessions UI/backend contract
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
@@ -1659,15 +1724,26 @@ export default defineSchema({
       v.literal('pending'),          // Invite sent, waiting for response
       v.literal('active'),           // Invite accepted, game in progress
       v.literal('rejected'),         // Invite rejected
-      v.literal('ended')             // Game ended
+      v.literal('ended'),            // Game ended
+      v.literal('expired')           // Pending invite timed out
     ),
     createdAt: v.number(),
     respondedAt: v.optional(v.number()),  // When invite was accepted/rejected
     endedAt: v.optional(v.number()),      // When game was ended
-    cooldownUntil: v.optional(v.number()), // Cooldown end time (10 min after rejection/end)
+    endedReason: v.optional(v.string()),  // Legacy reason metadata from older Bottle Spin sessions
+    cooldownUntil: v.optional(v.number()), // Cooldown end time (1 hour after rejection/end)
     // Turn tracking for real-time sync across devices
     // NOTE: Using role-based turn tracking to avoid ID format mismatch issues
     currentTurnUserId: v.optional(v.string()), // Legacy - kept for compatibility
+    spinTurnRole: v.optional(v.union(
+      v.literal('inviter'),
+      v.literal('invitee')
+    )), // Legacy turn-role metadata from older Bottle Spin sessions
+    lastSelectedRole: v.optional(v.union(
+      v.literal('inviter'),
+      v.literal('invitee')
+    )), // Legacy spin history metadata from older Bottle Spin sessions
+    consecutiveSelectedCount: v.optional(v.number()), // Legacy anti-repeat counter from older Bottle Spin sessions
     currentTurnRole: v.optional(v.union(
       v.literal('inviter'),          // Inviter's turn to choose
       v.literal('invitee')           // Invitee's turn to choose

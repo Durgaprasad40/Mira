@@ -77,6 +77,14 @@ export function isCached(url: string): boolean {
 }
 
 /**
+ * Get cached URI synchronously (returns undefined if not cached)
+ * Use this for instant cache hits without async overhead.
+ */
+export function getCachedUri(url: string): string | undefined {
+  return memoryCache.get(url);
+}
+
+/**
  * Get cached URI for a video URL (async - will download if not cached)
  *
  * @param url Remote video URL

@@ -1,602 +1,274 @@
-/**
- * Phase 2 Onboarding - Step 1: Terms & Consent
- *
- * - User must agree to Private Mode rules
- * - Imports Phase-1 profile data from Convex (or demoStore in demo mode)
- * - Proceeds to profile setup (Step 2)
- *
- * 18+ check already done by PrivateConsentGate in _layout.tsx
- */
-import React, { useState, useEffect, useRef } from "react";
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
   ActivityIndicator,
   Alert,
-  InteractionManager,
-} from "react-native";
-import { useRouter, usePathname } from "expo-router";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
-import { useQuery } from "convex/react";
-import * as FileSystem from "expo-file-system/legacy";
-import { api } from "@/convex/_generated/api";
-import { INCOGNITO_COLORS } from "@/lib/constants";
-import { usePrivateProfileStore, Phase1ProfileData } from "@/stores/privateProfileStore";
-
-// Phase-1 Discover route for exit navigation
-const PHASE1_DISCOVER_ROUTE = "/(main)/(tabs)/home";
-import { useAuthStore } from "@/stores/authStore";
-import { useOnboardingStore } from "@/stores/onboardingStore";
-import { isDemoMode } from "@/hooks/useConvex";
-import { getDemoCurrentUser } from "@/lib/demoData";
-import { useDemoStore, photosToSlotsStable } from "@/stores/demoStore";
-import { PhotoSlots9, createEmptyPhotoSlots } from "@/types";
-import { useScreenTrace } from "@/lib/devTrace";
-
-// Persistent directory for Phase-1 photos imported into Phase-2
-const PHASE1_PHOTOS_DIR = "mira/phase1Photos/";
-
-/**
- * Check if a URI is a valid photo URI.
- * Accepts:
- * - Local file:// URIs (NOT in cache directories)
- * - Remote https:// URLs (from Convex storage)
- */
-function isValidPhotoUri(uri: string | null | undefined): boolean {
-  if (!uri || typeof uri !== 'string' || uri.length === 0) return false;
-  // Accept https:// URLs (Convex storage, etc.)
-  if (uri.startsWith('https://')) return true;
-  // Accept file:// URIs but reject cache/temp directories
-  if (uri.startsWith('file://')) {
-    if (uri.includes('/cache/') || uri.includes('/Cache/') || uri.includes('ImageManipulator')) return false;
-    if (uri.includes('unsplash.com')) return false;
-    return true;
-  }
-  return false;
-}
-
-/**
- * Validate and filter PhotoSlots9 - keeps slot positions, invalid URIs become null.
- */
-function validatePhotoSlots(slots: PhotoSlots9): PhotoSlots9 {
-  const result: PhotoSlots9 = createEmptyPhotoSlots();
-  for (let i = 0; i < 9; i++) {
-    const uri = slots[i];
-    result[i] = isValidPhotoUri(uri) ? uri : null;
-  }
-  return result;
-}
-
-/**
- * Filter out stale cache URIs that no longer exist on disk.
- * Cache files (ImageManipulator, etc.) are deleted after app relaunch.
- * Returns only URIs that actually exist or are remote (https).
- */
-async function filterStaleCacheUris(uris: string[]): Promise<{ kept: string[]; droppedMissing: number }> {
-  const kept: string[] = [];
-  let droppedMissing = 0;
-
-  for (const uri of uris) {
-    if (!uri || typeof uri !== "string") continue;
-
-    // Remote URLs are always valid (no local file check needed)
-    if (uri.startsWith("http://") || uri.startsWith("https://")) {
-      kept.push(uri);
-      continue;
-    }
-
-    // content:// and ph:// are system-managed, assume valid
-    if (uri.startsWith("content://") || uri.startsWith("ph://")) {
-      kept.push(uri);
-      continue;
-    }
-
-    // For file:// URIs, check if the file actually exists
-    if (uri.startsWith("file://")) {
-      try {
-        const info = await FileSystem.getInfoAsync(uri);
-        if (info.exists) {
-          kept.push(uri);
-        } else {
-          droppedMissing++;
-          if (__DEV__) console.log("[FilterStale] Dropped missing:", uri.slice(-60));
-        }
-      } catch (err) {
-        droppedMissing++;
-        if (__DEV__) console.log("[FilterStale] Check error:", uri.slice(-60), err);
-      }
-      continue;
-    }
-
-    // Unknown scheme, keep it
-    kept.push(uri);
-  }
-
-  return { kept, droppedMissing };
-}
-
-/**
- * Copy cache file:// URIs to persistent storage so they survive app restarts.
- * - Cache URIs (ImageManipulator, etc.) are volatile and disappear on relaunch
- * - We copy them to FileSystem.documentDirectory which is persistent
- */
-async function persistPhotoUris(uris: string[]): Promise<string[]> {
-  const results: string[] = [];
-  const destDir = FileSystem.documentDirectory + PHASE1_PHOTOS_DIR;
-
-  // Ensure destination directory exists (ignore errors if already exists)
-  await FileSystem.makeDirectoryAsync(destDir, { intermediates: true }).catch(() => {});
-  if (__DEV__) console.log("[PersistPhotos] destDir:", destDir);
-
-  for (const uri of uris) {
-    // CRITICAL: Keep fullUri as the UNMODIFIED original - never slice it
-    const fullUri = uri;
-    // short is ONLY for logging - NEVER use it for file operations
-    const short = typeof fullUri === "string" ? fullUri.slice(-70) : String(fullUri);
-
-    // Skip empty/invalid
-    if (!fullUri || typeof fullUri !== "string") continue;
-
-    // DEV assertion: fullUri must start with valid prefix
-    if (__DEV__) {
-      const isValidPrefix = fullUri.startsWith("file://") || fullUri.startsWith("http") || fullUri.startsWith("content://");
-      if (!isValidPrefix) {
-        console.error("[PersistPhotos] INVALID URI PREFIX:", fullUri);
-      }
-    }
-
-    // http/https/content/ph URIs don't need copying - they're either remote or system-managed
-    if (fullUri.startsWith("http") || fullUri.startsWith("content://") || fullUri.startsWith("ph://")) {
-      results.push(fullUri);
-      continue;
-    }
-
-    // Check if it's a cache URI that needs copying
-    const isCache = fullUri.startsWith("file://") &&
-      (fullUri.includes("/cache/") || fullUri.includes("/Cache/") || fullUri.includes("ImageManipulator"));
-
-    if (!isCache) {
-      // Already persistent or unknown format, keep as-is
-      results.push(fullUri);
-      continue;
-    }
-
-    // Copy cache file to persistent storage
-    try {
-      // Verify source exists - MUST use fullUri
-      if (__DEV__) console.log("[PersistPhotos] Checking source:", fullUri);
-      const sourceInfo = await FileSystem.getInfoAsync(fullUri);
-      if (!sourceInfo.exists) {
-        if (__DEV__) console.warn("[PersistPhotos] Source missing (short):", short);
-        // Still add to results so fallback works
-        results.push(fullUri);
-        continue;
-      }
-
-      // Generate filename and destination path
-      const filename = fullUri.split("/").pop() || `p1_${Date.now()}.jpg`;
-      const dest = destDir + filename;
-
-      // Check if already copied
-      const destInfo = await FileSystem.getInfoAsync(dest);
-      if (destInfo.exists) {
-        if (__DEV__) console.log("[PersistPhotos] Already exists:", dest);
-        results.push(dest);
-        continue;
-      }
-
-      // Copy to persistent storage - MUST use fullUri
-      await FileSystem.copyAsync({ from: fullUri, to: dest });
-
-      // Verify copy succeeded
-      const check = await FileSystem.getInfoAsync(dest);
-      if (__DEV__) {
-        console.log("[PersistPhotos] Copied:", { from: short, dest, exists: check.exists });
-      }
-
-      if (check.exists) {
-        results.push(dest);
-      } else {
-        results.push(fullUri);
-      }
-    } catch (err) {
-      if (__DEV__) console.error("[PersistPhotos] Error (short):", short, err);
-      results.push(fullUri);
-    }
-  }
-
-  if (__DEV__) {
-    console.log("[PersistPhotos] Done:", { input: uris.length, output: results.length });
-    results.forEach((r, i) => console.log(`[PersistPhotos] [${i}]:`, r));
-  }
-
-  return results;
-}
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { useMutation, useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { INCOGNITO_COLORS } from '@/lib/constants';
+import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { useAuthStore } from '@/stores/authStore';
+import { useIncognitoStore } from '@/stores/incognitoStore';
+import { useScreenTrace } from '@/lib/devTrace';
+import { PHASE2_ONBOARDING_ROUTE_MAP } from '@/lib/phase2Onboarding';
 
 const C = INCOGNITO_COLORS;
+const PHASE1_DISCOVER_ROUTE = '/(main)/(tabs)/home';
 
-export default function Phase2OnboardingTerms() {
-  useScreenTrace("P2_ONB_TERMS");
+function calculateAge(dateOfBirth?: string | null): number {
+  if (!dateOfBirth || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) {
+    return 0;
+  }
+
+  const [year, month, day] = dateOfBirth.split('-').map(Number);
+  const birthDate = new Date(year, month - 1, day, 12, 0, 0);
+  const now = new Date();
+  let age = now.getFullYear() - birthDate.getFullYear();
+  const monthDiff = now.getMonth() - birthDate.getMonth();
+
+  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < birthDate.getDate())) {
+    age--;
+  }
+
+  return age;
+}
+
+export default function Phase2OnboardingConsentScreen() {
+  useScreenTrace('P2_ONB_CONSENT');
+
   const router = useRouter();
-  const pathname = usePathname();
   const insets = useSafeAreaInsets();
+  const token = useAuthStore((s) => s.token);
 
-  // Log mount for debugging - show isDemoMode for verification
-  useEffect(() => {
-    if (__DEV__) {
-      console.log(`[P2] step1 MOUNTED pathname=${pathname}`);
-      console.log(`[P2] isDemoMode=${isDemoMode} env=${process.env.EXPO_PUBLIC_DEMO_MODE}`);
-    }
-    return () => {
-      if (__DEV__) {
-        console.log(`[P2] step1 UNMOUNTED`);
-      }
-    };
-  }, []);
+  const currentUser = useQuery(
+    api.users.getCurrentUserFromToken,
+    token ? { token } : 'skip'
+  );
 
-  // Terms checkboxes
-  const [rulesChecked, setRulesChecked] = useState(false);
-  const [screenshotChecked, setScreenshotChecked] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-
-  // Navigation guard: prevent double-tap on X button
-  const isExitingRef = useRef(false);
-
-  // O-001 FIX: Track mount state to prevent setState after unmount
-  const mountedRef = useRef(true);
-  useEffect(() => {
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
+  const acceptConsent = useMutation(api.users.acceptPrivateOnboardingConsent);
 
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
-  const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
+  const acceptPrivateTerms = useIncognitoStore((s) => s.acceptPrivateTerms);
 
-  // Handle X/Cancel button - explicit exit from Phase-2 onboarding
-  const handleExitOnboarding = () => {
-    if (isExitingRef.current) return; // Prevent double-tap
-    isExitingRef.current = true;
-    if (__DEV__) {
-      console.log("[P2 EXIT] pressed X -> routing to Phase-1 Discover");
+  const [rulesChecked, setRulesChecked] = useState(false);
+  const [noSharingChecked, setNoSharingChecked] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!currentUser) {
+      return;
     }
-    // Navigate to Phase-1 Discover
+
+    if (currentUser.consentAcceptedAt) {
+      setAcceptedTermsAt(currentUser.consentAcceptedAt);
+      acceptPrivateTerms();
+      setRulesChecked(true);
+      setNoSharingChecked(true);
+    }
+  }, [
+    acceptPrivateTerms,
+    currentUser,
+    setAcceptedTermsAt,
+  ]);
+
+  const importedBasics = useMemo(() => {
+    if (!currentUser) return null;
+    return {
+      handle: currentUser.handle || 'Not available',
+      age: calculateAge(currentUser.dateOfBirth),
+      gender: currentUser.gender || 'Not available',
+      city: currentUser.city || null,
+      isVerified: !!currentUser.isVerified,
+      hobbies: Array.isArray(currentUser.activities) ? currentUser.activities.slice(0, 4) : [],
+    };
+  }, [currentUser]);
+
+  const isLoading = currentUser === undefined;
+  const canContinue = !!token && !!currentUser && rulesChecked && noSharingChecked && !isSubmitting;
+
+  const handleExit = () => {
     router.replace(PHASE1_DISCOVER_ROUTE as any);
   };
 
-  // Get userId for Convex query
-  const userId = useAuthStore((s) => s.userId);
-
-  // Query Phase-1 profile from Convex (the real source of truth after onboarding)
-  // NOTE: getCurrentUser already includes ALL photos (including verification_reference)
-  // via the photos table join - no separate photo query needed
-  const convexUser = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
-  );
-
-  // BUG FIX (2026-03-06): Removed separate getUserPhotos query
-  // getUserPhotos EXCLUDES verification_reference photos, causing Phase 2 to miss the primary photo
-  // convexUser.photos already includes ALL photos, so we use that instead
-
-  // For demo mode, get demo user data
-  const demoUser = isDemoMode ? getDemoCurrentUser() : null;
-
-  // Extract photos from user object (handles different formats)
-  const extractPhotos = (user: any): { url: string }[] => {
-    if (!user) return [];
-
-    // Try user.photos first (most common)
-    let rawPhotos = user.photos;
-
-    // Fallback to user.photoUrls if photos doesn't exist
-    if (!rawPhotos?.length && user.photoUrls?.length) {
-      rawPhotos = user.photoUrls;
-    }
-
-    if (!rawPhotos?.length) return [];
-
-    return rawPhotos
-      .map((p: any) => {
-        // Handle string URLs directly
-        if (typeof p === 'string' && p.length > 0) {
-          return { url: p };
-        }
-        // Handle { url: string } objects
-        if (p?.url && typeof p.url === 'string' && p.url.length > 0) {
-          return { url: p.url };
-        }
-        // Handle { uri: string } objects
-        if (p?.uri && typeof p.uri === 'string' && p.uri.length > 0) {
-          return { url: p.uri };
-        }
-        return null;
-      })
-      .filter((p: any): p is { url: string } => p !== null);
-  };
-
-  const canContinue = rulesChecked && screenshotChecked && !isProcessing;
-
   const handleContinue = async () => {
-    if (isProcessing) return;
-    setIsProcessing(true);
+    if (!canContinue || !token) return;
 
+    setIsSubmitting(true);
     try {
-      // Mark terms accepted
-      setAcceptedTermsAt(Date.now());
+      const result = await acceptConsent({
+        token,
+        confirmAdult: true,
+        confirmNoSharing: true,
+      });
 
-      // Get Phase-1 profile data from Convex or demo
-      const phase1User = isDemoMode ? demoUser : convexUser;
-
-      // ============================================================
-      // SINGLE SOURCE OF TRUTH: Use mode-appropriate profile source
-      // Demo mode: demoStore.getCurrentProfile()
-      // Live mode: convexUser from Convex query
-      // ============================================================
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let canonicalProfile: any = null;
-
-      // Track source for logging
-      let profileSource = 'unknown';
-
-      if (isDemoMode) {
-        // Demo mode: Use demoStore as single source of truth
-        canonicalProfile = useDemoStore.getState().getCurrentProfile();
-        profileSource = 'demoStore.currentProfile';
-      } else if (convexUser) {
-        // Live mode: Use Convex user as single source of truth
-        // BUG FIX (2026-03-06): Use convexUser.photos which includes ALL photos
-        // (including verification_reference primary photo), not the separate
-        // getUserPhotos query which excludes verification_reference photos
-        const livePhotos: { url: string }[] = Array.isArray(convexUser.photos)
-          ? convexUser.photos
-              .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
-              .map((p: { url: string }) => ({ url: p.url }))
-          : [];
-
-        canonicalProfile = {
-          userId: convexUser._id as string,
-          name: convexUser.name,
-          dateOfBirth: convexUser.dateOfBirth,
-          gender: convexUser.gender,
-          activities: convexUser.activities,
-          maxDistance: convexUser.maxDistance,
-          height: convexUser.height,
-          smoking: convexUser.smoking,
-          drinking: convexUser.drinking,
-          kids: convexUser.kids,
-          education: convexUser.education,
-          religion: convexUser.religion,
-          photos: livePhotos,
-        };
-        profileSource = 'live:convexUser.photos';
+      if (!result?.success) {
+        throw new Error('Consent could not be saved');
       }
 
-      // FATAL: If no profile exists, block progression
-      if (!canonicalProfile) {
-        console.error("[P2 IMPORT] FATAL: No current profile found", { isDemoMode, hasConvexUser: !!convexUser });
-        Alert.alert("Error", "No profile found. Please complete Phase-1 setup first.");
-        // O-001 FIX: Guard setState after unmount
-        if (mountedRef.current) {
-          setIsProcessing(false);
-        }
-        return;
-      }
-
-      const profileId = canonicalProfile.userId;
-      let phase1PhotoSlots: PhotoSlots9 = createEmptyPhotoSlots();
-
-      // Use photoSlots from canonical profile (single source of truth)
-      if (canonicalProfile.photoSlots && canonicalProfile.photoSlots.some((s: string | null) => s !== null)) {
-        phase1PhotoSlots = [...canonicalProfile.photoSlots] as PhotoSlots9;
-      }
-      // Fallback: Convert flat photos array to slots
-      else if (canonicalProfile.photos && canonicalProfile.photos.length > 0) {
-        canonicalProfile.photos.forEach((p: { url: string }, idx: number) => {
-          if (idx < 9 && p.url) phase1PhotoSlots[idx] = p.url;
-        });
-      }
-      // Final fallback: onboardingStore for fresh users
-      else {
-        phase1PhotoSlots = useOnboardingStore.getState().photos;
-      }
-
-      // Validate slots - invalid URIs become null but slot positions are preserved
-      const validatedSlots = validatePhotoSlots(phase1PhotoSlots);
-
-      // Count non-null slots for logging
-      const nonNullSlots = validatedSlots
-        .map((uri, idx) => (uri ? idx : -1))
-        .filter((idx) => idx >= 0);
-
-      if (__DEV__) {
-        console.log("[P2 IMPORT]", {
-          profileId,
-          name: canonicalProfile.name,
-          nonNullSlots,
-          photosFromUser: Array.isArray(convexUser?.photos) ? convexUser.photos.length : 0,
-          source: profileSource,
-        });
-      }
-
-      // Build Phase-1 data object with SLOT-BASED photos
-      const phase1Data: Phase1ProfileData = {
-        name: canonicalProfile.name || phase1User?.name || '',
-        photoSlots: validatedSlots, // Pass full PhotoSlots9
-        photos: validatedSlots.filter(Boolean).map((url) => ({ url: url! })), // Legacy compat
-        dateOfBirth: canonicalProfile.dateOfBirth || phase1User?.dateOfBirth || '',
-        gender: canonicalProfile.gender || phase1User?.gender || '',
-        activities: canonicalProfile.activities || phase1User?.activities || [],
-        maxDistance: canonicalProfile.maxDistance || phase1User?.maxDistance || 50,
-        height: canonicalProfile.height ?? phase1User?.height ?? null,
-        weight: canonicalProfile.weight ?? phase1User?.weight ?? null,
-        smoking: canonicalProfile.smoking ?? phase1User?.smoking ?? null,
-        drinking: canonicalProfile.drinking ?? phase1User?.drinking ?? null,
-        kids: canonicalProfile.kids ?? phase1User?.kids ?? null,
-        education: canonicalProfile.education ?? phase1User?.education ?? null,
-        religion: canonicalProfile.religion ?? phase1User?.religion ?? null,
-      };
-
-      // FIX P2-DATA-001: Import data BEFORE navigation to prevent race condition
-      // NOTE: This imports profile info (name, age, gender, etc.) - photos are selected in next step
-      importPhase1Data(phase1Data);
-
-      // P2-PHOTO-001 FIX: Navigate to photo selection screen instead of auto-importing all photos
-      // User will explicitly select which Phase-1 photos to import into Phase-2
-      router.push("/(main)/(private-setup)/select-photos" as any);
-    } catch (err) {
-      if (__DEV__) console.error("[Phase2Onboarding] Error:", err);
+      setAcceptedTermsAt(result.consentAcceptedAt);
+      acceptPrivateTerms();
+      router.push(PHASE2_ONBOARDING_ROUTE_MAP['select-photos'] as any);
+    } catch (error) {
+      Alert.alert(
+        'Unable to continue',
+        'We could not save your Private Mode consent. Please try again.'
+      );
     } finally {
-      // O-001 FIX: Guard setState after unmount
-      if (mountedRef.current) {
-        setIsProcessing(false);
-      }
+      setIsSubmitting(false);
     }
   };
+
+  if (!token) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.centerState}>
+          <Ionicons name="alert-circle-outline" size={42} color={C.textLight} />
+          <Text style={styles.stateTitle}>Session required</Text>
+          <Text style={styles.stateText}>Please sign in again before entering Private Mode.</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.centerState}>
+          <ActivityIndicator size="large" color={C.primary} />
+          <Text style={styles.stateText}>Loading your profile…</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (!currentUser || !importedBasics) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.centerState}>
+          <Ionicons name="person-circle-outline" size={42} color={C.textLight} />
+          <Text style={styles.stateTitle}>Finish Phase-1 first</Text>
+          <Text style={styles.stateText}>We could not load your main profile for Private Mode.</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top + 8 }]}>
-      {/* Header */}
+    <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.topBar}>
-        <TouchableOpacity
-          onPress={handleExitOnboarding}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
+        <TouchableOpacity onPress={handleExit} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="close" size={22} color={C.textLight} />
         </TouchableOpacity>
-        <Text style={styles.stepIndicator}>Step 1 of 4</Text>
+        <Text style={styles.stepIndicator}>Step 1 of 5</Text>
       </View>
 
-      <ScrollView
-        style={styles.scrollView}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Welcome Section */}
-        <View style={styles.welcomeSection}>
-          <View style={styles.iconContainer}>
-            <Ionicons name="shield-checkmark" size={48} color={C.primary} />
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
+        <View style={styles.hero}>
+          <View style={styles.heroIcon}>
+            <Ionicons name="shield-checkmark" size={40} color={C.primary} />
           </View>
-          <Text style={styles.welcomeTitle}>Welcome to Private Mode</Text>
-          <Text style={styles.welcomeSubtitle}>
-            Create a fresh, separate identity for your private connections.
-            Your Phase-2 profile is completely independent from your main profile.
+          <Text style={styles.title}>Consent & eligibility</Text>
+          <Text style={styles.subtitle}>
+            Private Mode is a separate space. We only carry over the basics from your main profile and save
+            your consent on your account before you continue.
           </Text>
         </View>
 
-        {/* Terms Section */}
-        <View style={styles.termsSection}>
-          <View style={styles.sectionHeader}>
-            <Ionicons name="document-text-outline" size={20} color={C.primary} />
-            <Text style={styles.sectionTitle}>Private Mode Rules</Text>
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Imported from your main profile</Text>
+          <View style={styles.summaryCard}>
+            <View style={styles.summaryRow}>
+              <Text style={styles.summaryLabel}>Nickname</Text>
+              <Text style={styles.summaryValue}>{importedBasics.handle}</Text>
+            </View>
+            <View style={styles.summaryRow}>
+              <Text style={styles.summaryLabel}>Age</Text>
+              <Text style={styles.summaryValue}>{importedBasics.age > 0 ? importedBasics.age : 'Not available'}</Text>
+            </View>
+            <View style={styles.summaryRow}>
+              <Text style={styles.summaryLabel}>Gender</Text>
+              <Text style={styles.summaryValue}>{importedBasics.gender}</Text>
+            </View>
+            {importedBasics.city ? (
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>City</Text>
+                <Text style={styles.summaryValue}>{importedBasics.city}</Text>
+              </View>
+            ) : null}
+            <View style={[styles.summaryRow, styles.summaryRowLast]}>
+              <Text style={styles.summaryLabel}>Verified</Text>
+              <Text style={styles.summaryValue}>{importedBasics.isVerified ? 'Yes' : 'No'}</Text>
+            </View>
+          </View>
+          {importedBasics.hobbies.length > 0 ? (
+            <View style={styles.hobbiesWrap}>
+              {importedBasics.hobbies.map((hobby: string) => (
+                <View key={hobby} style={styles.hobbyChip}>
+                  <Text style={styles.hobbyChipText}>{hobby}</Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Private Mode rules</Text>
+          <View style={styles.rulesCard}>
+            <Text style={styles.ruleBullet}>• Adults 18+ only</Text>
+            <Text style={styles.ruleBullet}>• Consent and respect come first</Text>
+            <Text style={styles.ruleBullet}>• No screenshots, recording, or sharing private content</Text>
+            <Text style={styles.ruleBullet}>• Harassment, coercion, and abuse lead to removal</Text>
           </View>
 
-          <View style={styles.termsBox}>
-            <Text style={styles.termsBullet}>
-              <Text style={styles.bulletIcon}>•</Text> Adults 18+ only — no exceptions
-            </Text>
-            <Text style={styles.termsBullet}>
-              <Text style={styles.bulletIcon}>•</Text> Consent comes first — always ask, never assume
-            </Text>
-            <Text style={styles.termsBullet}>
-              <Text style={styles.bulletIcon}>•</Text> "No" means no — stop immediately when asked
-            </Text>
-            <Text style={styles.termsBullet}>
-              <Text style={styles.bulletIcon}>•</Text> Respect boundaries — no pressure, no manipulation
-            </Text>
-            <Text style={styles.termsBullet}>
-              <Text style={styles.bulletIcon}>•</Text> No harassment, threats, stalking, or coercion
-            </Text>
-            <Text style={styles.termsBullet}>
-              <Text style={styles.bulletIcon}>•</Text> No screenshots, recording, or sharing outside the app
-            </Text>
-            <Text style={styles.termsBullet}>
-              <Text style={styles.bulletIcon}>•</Text> No unsolicited explicit photos or messages
-            </Text>
-            <Text style={styles.termsBullet}>
-              <Text style={styles.bulletIcon}>•</Text> Violations result in suspension or permanent ban
-            </Text>
-          </View>
-
-          {/* Checkboxes */}
           <TouchableOpacity
-            style={[styles.checkRow, rulesChecked && styles.checkRowActive]}
-            onPress={() => setRulesChecked(!rulesChecked)}
-            activeOpacity={0.7}
+            style={[styles.checkboxRow, rulesChecked && styles.checkboxRowActive]}
+            onPress={() => setRulesChecked((value) => !value)}
+            activeOpacity={0.8}
           >
             <Ionicons
-              name={rulesChecked ? "checkbox" : "square-outline"}
+              name={rulesChecked ? 'checkbox' : 'square-outline'}
               size={20}
               color={rulesChecked ? C.primary : C.textLight}
             />
-            <Text style={styles.checkLabel}>
-              I agree to respect consent and boundaries
-            </Text>
+            <Text style={styles.checkboxText}>I confirm I am 18+ and agree to the Private Mode rules</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[
-              styles.checkRow,
-              screenshotChecked && styles.checkRowActive,
-            ]}
-            onPress={() => setScreenshotChecked(!screenshotChecked)}
-            activeOpacity={0.7}
+            style={[styles.checkboxRow, noSharingChecked && styles.checkboxRowActive]}
+            onPress={() => setNoSharingChecked((value) => !value)}
+            activeOpacity={0.8}
           >
             <Ionicons
-              name={screenshotChecked ? "checkbox" : "square-outline"}
+              name={noSharingChecked ? 'checkbox' : 'square-outline'}
               size={20}
-              color={screenshotChecked ? C.primary : C.textLight}
+              color={noSharingChecked ? C.primary : C.textLight}
             />
-            <Text style={styles.checkLabel}>
-              I will not screenshot or share private content
-            </Text>
+            <Text style={styles.checkboxText}>I will not screenshot, record, or share private content</Text>
           </TouchableOpacity>
-        </View>
-
-        {/* Info Note */}
-        <View style={styles.infoNote}>
-          <Ionicons name="information-circle-outline" size={18} color={C.textLight} />
-          <Text style={styles.infoNoteText}>
-            Your Private profile is separate from your main profile.
-            You'll create new photos and preferences specifically for Private Mode.
-          </Text>
         </View>
       </ScrollView>
 
-      {/* Bottom Action */}
-      <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 12 }]}>
+      <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}>
         <TouchableOpacity
-          style={[
-            styles.continueBtn,
-            !canContinue && styles.continueBtnDisabled,
-          ]}
+          style={[styles.continueButton, !canContinue && styles.continueButtonDisabled]}
           onPress={handleContinue}
           disabled={!canContinue}
           activeOpacity={0.8}
         >
-          {isProcessing ? (
-            <>
-              <ActivityIndicator size="small" color="#FFFFFF" />
-              <Text style={styles.continueBtnText}>Importing...</Text>
-            </>
+          {isSubmitting ? (
+            <ActivityIndicator size="small" color="#FFFFFF" />
           ) : (
             <>
-              <Text
-                style={[
-                  styles.continueBtnText,
-                  !canContinue && styles.continueBtnTextDisabled,
-                ]}
-              >
-                Continue
-              </Text>
-              <Ionicons
-                name="arrow-forward"
-                size={18}
-                color={canContinue ? "#FFFFFF" : C.textLight}
-              />
+              <Text style={styles.continueButtonText}>Continue to photos</Text>
+              <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
             </>
           )}
         </TouchableOpacity>
@@ -606,154 +278,170 @@ export default function Phase2OnboardingTerms() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.background },
-  scrollView: { flex: 1 },
-
-  // Top bar
+  container: {
+    flex: 1,
+    backgroundColor: C.background,
+  },
   topBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 6,
+    paddingVertical: 12,
   },
   stepIndicator: {
-    fontSize: 11,
+    fontSize: 12,
     color: C.textLight,
-    fontWeight: "500",
   },
-
-  // Welcome section
-  welcomeSection: {
-    paddingHorizontal: 24,
-    paddingTop: 24,
-    paddingBottom: 32,
-    alignItems: "center",
+  content: {
+    paddingHorizontal: 16,
+    paddingBottom: 40,
   },
-  iconContainer: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: C.primary + "15",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 16,
+  hero: {
+    paddingTop: 12,
+    paddingBottom: 24,
   },
-  welcomeTitle: {
-    fontSize: 22,
-    fontWeight: "700",
+  heroIcon: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: C.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 18,
+  },
+  title: {
+    fontSize: 26,
+    fontWeight: '700',
     color: C.text,
-    textAlign: "center",
     marginBottom: 8,
   },
-  welcomeSubtitle: {
-    fontSize: 14,
+  subtitle: {
+    fontSize: 15,
     color: C.textLight,
-    textAlign: "center",
-    lineHeight: 20,
+    lineHeight: 22,
   },
-
-  // Terms section
-  termsSection: {
-    paddingHorizontal: 16,
-    paddingBottom: 16,
-  },
-  sectionHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 12,
+  section: {
+    marginBottom: 24,
   },
   sectionTitle: {
     fontSize: 16,
-    fontWeight: "700",
+    fontWeight: '700',
     color: C.text,
+    marginBottom: 12,
   },
-  termsBox: {
+  summaryCard: {
     backgroundColor: C.surface,
-    borderRadius: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    marginBottom: 16,
+    borderRadius: 14,
+    padding: 16,
   },
-  termsBullet: {
-    fontSize: 13,
-    color: C.text,
-    lineHeight: 22,
+  summaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: C.background,
   },
-  bulletIcon: {
-    color: C.primary,
-    fontWeight: "700",
+  summaryRowLast: {
+    borderBottomWidth: 0,
   },
-
-  // Checkboxes
-  checkRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    backgroundColor: C.surface,
-    borderRadius: 8,
-    marginBottom: 8,
-    borderWidth: 1.5,
-    borderColor: "transparent",
-  },
-  checkRowActive: {
-    borderColor: C.primary + "50",
-    backgroundColor: C.primary + "0A",
-  },
-  checkLabel: {
-    fontSize: 13,
-    color: C.text,
-    flex: 1,
-    lineHeight: 18,
-  },
-
-  // Info note
-  infoNote: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    marginHorizontal: 16,
-    backgroundColor: C.surface,
-    borderRadius: 8,
-    marginBottom: 16,
-  },
-  infoNoteText: {
-    flex: 1,
-    fontSize: 12,
+  summaryLabel: {
+    fontSize: 14,
     color: C.textLight,
-    lineHeight: 18,
   },
-
-  // Bottom bar
+  summaryValue: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text,
+  },
+  hobbiesWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 12,
+  },
+  hobbyChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: C.surface,
+  },
+  hobbyChipText: {
+    fontSize: 12,
+    color: C.text,
+    fontWeight: '600',
+  },
+  rulesCard: {
+    backgroundColor: C.surface,
+    borderRadius: 14,
+    padding: 16,
+    gap: 8,
+    marginBottom: 14,
+  },
+  ruleBullet: {
+    fontSize: 14,
+    color: C.text,
+    lineHeight: 20,
+  },
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    padding: 14,
+    borderRadius: 12,
+    backgroundColor: C.surface,
+    marginBottom: 10,
+  },
+  checkboxRowActive: {
+    borderWidth: 1,
+    borderColor: C.primary,
+  },
+  checkboxText: {
+    flex: 1,
+    fontSize: 14,
+    color: C.text,
+    lineHeight: 20,
+  },
   bottomBar: {
     paddingHorizontal: 16,
     paddingTop: 12,
     borderTopWidth: 1,
     borderTopColor: C.surface,
   },
-  continueBtn: {
-    flexDirection: "row",
+  continueButton: {
     backgroundColor: C.primary,
-    borderRadius: 10,
-    paddingVertical: 14,
-    alignItems: "center",
-    justifyContent: "center",
+    borderRadius: 14,
+    paddingVertical: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     gap: 8,
   },
-  continueBtnDisabled: {
+  continueButtonDisabled: {
     backgroundColor: C.surface,
   },
-  continueBtnText: {
+  continueButtonText: {
     fontSize: 15,
-    fontWeight: "600",
-    color: "#FFFFFF",
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
-  continueBtnTextDisabled: {
+  centerState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    gap: 10,
+  },
+  stateTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: C.text,
+  },
+  stateText: {
+    fontSize: 14,
     color: C.textLight,
+    textAlign: 'center',
+    lineHeight: 20,
   },
 });

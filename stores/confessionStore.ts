@@ -1,4 +1,11 @@
 /**
+ * LOCKED (CONFESSIONS STORE - RANKING BEHAVIOR)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * LOCKED LOGIC:
+ * - addConfession: APPENDS to end (new posts at bottom)
+ * - Rate limit bypassed for TESTING (TODO: re-enable for production)
+ *
  * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
  * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
  */
@@ -264,8 +271,18 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
   },
 
   addConfession: (confession) => {
+    const normalizedConfession = confession.expiresAt
+      ? confession
+      : {
+          ...confession,
+          expiresAt: confession.createdAt + CONFESSION_EXPIRY_MS,
+        };
+
+    // RANKING FIX: APPEND new confession to END of list (not prepend)
+    // New posts start at bottom with negative ranking score
+    // They rise based on engagement (likes, comments, reactions)
     set((state) => ({
-      confessions: [confession, ...state.confessions],
+      confessions: [...state.confessions, normalizedConfession],
     }));
   },
 
@@ -463,15 +480,19 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
 
   // ── Replies ──
   addReply: (confessionId, reply) => {
-    if (__DEV__) console.log('[CONFESS] addReply:', { confessionId, replyId: reply.id });
+    if (__DEV__) console.log('[CONFESS] addReply:', { confessionId, replyId: reply.id, parentReplyId: reply.parentReplyId });
     set((state) => {
       const currentReplies = state.replies[confessionId] || [];
       const newReplies = [...currentReplies, reply];
 
+      // Only count top-level replies (those without parentReplyId) in replyCount
+      const topLevelReplies = newReplies.filter((r) => !r.parentReplyId);
+
       // Update the confession's replyCount and replyPreviews
       const updatedConfessions = state.confessions.map((c) => {
         if (c.id !== confessionId) return c;
-        const replyPreviews = newReplies.slice(-2).map((r) => ({
+        // Preview only shows top-level replies
+        const replyPreviews = topLevelReplies.slice(-2).map((r) => ({
           text: r.text,
           isAnonymous: r.isAnonymous,
           type: r.type || 'text',
@@ -479,7 +500,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
         }));
         return {
           ...c,
-          replyCount: newReplies.length,
+          replyCount: topLevelReplies.length, // Only count top-level replies
           replyPreviews,
         };
       });
@@ -495,12 +516,17 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     if (__DEV__) console.log('[CONFESS] deleteReply:', { confessionId, replyId });
     set((state) => {
       const currentReplies = state.replies[confessionId] || [];
-      const newReplies = currentReplies.filter((r) => r.id !== replyId);
+      // Also delete any child replies that have this reply as parent
+      const newReplies = currentReplies.filter((r) => r.id !== replyId && r.parentReplyId !== replyId);
+
+      // Only count top-level replies (those without parentReplyId) in replyCount
+      const topLevelReplies = newReplies.filter((r) => !r.parentReplyId);
 
       // Update the confession's replyCount and replyPreviews
       const updatedConfessions = state.confessions.map((c) => {
         if (c.id !== confessionId) return c;
-        const replyPreviews = newReplies.slice(-2).map((r) => ({
+        // Preview only shows top-level replies
+        const replyPreviews = topLevelReplies.slice(-2).map((r) => ({
           text: r.text,
           isAnonymous: r.isAnonymous,
           type: r.type || 'text',
@@ -508,7 +534,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
         }));
         return {
           ...c,
-          replyCount: newReplies.length,
+          replyCount: topLevelReplies.length, // Only count top-level replies
           replyPreviews,
         };
       });

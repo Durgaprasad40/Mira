@@ -20,6 +20,7 @@ import {
   NormalizedDiscoveryCandidate,
   DiscoveryViewerContext,
 } from './discoveryTypes';
+import { normalizeRelationshipIntentValues } from '../lib/discoveryNaming';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -126,9 +127,7 @@ function sanitizeStringArray(arr: string[] | undefined | null): string[] {
  * Phase-2 uses different intent key naming than Phase-1.
  */
 function normalizePhase2IntentKeys(intentKeys: string[]): string[] {
-  // Phase-2 intent keys may be different from Phase-1.
-  // Return as-is for now; scoring will handle compatibility mapping.
-  return sanitizeStringArray(intentKeys);
+  return normalizeRelationshipIntentValues(sanitizeStringArray(intentKeys));
 }
 
 /**

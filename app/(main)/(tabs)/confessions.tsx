@@ -29,7 +29,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { safePush } from '@/lib/safeRouter';
 import { LoadingGuard } from '@/components/safety';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery, useMutation } from 'convex/react';
+import { usePaginatedQuery, useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import EmojiPicker from 'rn-emoji-keyboard';
@@ -59,10 +59,7 @@ import { useDemoDmStore } from '@/stores/demoDmStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
-import SecretCrushCard from '@/components/confessions/SecretCrushCard';
 import { useConfessionNotifications } from '@/hooks/useConfessionNotifications';
-import { useConfessPreviewStore } from '@/stores/confessPreviewStore';
-import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import {
   processConfessionsIntegrity,
@@ -73,6 +70,7 @@ import {
 import { useScreenTrace } from '@/lib/devTrace';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+const FEED_PAGE_SIZE = 20;
 
 // TaggedConfessionItem is now imported from confessionsIntegrity.ts
 
@@ -81,19 +79,17 @@ export default function ConfessionsScreen() {
   const router = useRouter();
   const { openTagged } = useLocalSearchParams<{ openTagged?: string }>();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   // BUGFIX: In live mode, never use demo_user_1 fallback for Convex queries
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
   // Individual selectors to avoid full re-render on any store change
   const demoConfessions = useConfessionStore((s) => s.confessions);
   const userReactions = useConfessionStore((s) => s.userReactions);
-  const secretCrushes = useConfessionStore((s) => s.secretCrushes);
   const chats = useConfessionStore((s) => s.chats);
-  const seedConfessions = useConfessionStore((s) => s.seedConfessions);
   const demoToggleReaction = useConfessionStore((s) => s.toggleReaction);
   const demoReportConfession = useConfessionStore((s) => s.reportConfession);
   const addChat = useConfessionStore((s) => s.addChat);
-  const revealCrush = useConfessionStore((s) => s.revealCrush);
   const confessionThreads = useConfessionStore((s) => s.confessionThreads);
   const confessionBlockedIds = useConfessionStore((s) => s.blockedIds);
   const reportedConfessionIds = useConfessionStore((s) => s.reportedIds);
@@ -102,7 +98,6 @@ export default function ConfessionsScreen() {
   const markAllTaggedConfessionsSeen = useConfessionStore((s) => s.markAllTaggedConfessionsSeen);
   const cleanupExpiredConfessions = useConfessionStore((s) => s.cleanupExpiredConfessions);
   const cleanupExpiredChats = useConfessionStore((s) => s.cleanupExpiredChats);
-  const cleanupExpiredSecretCrushes = useConfessionStore((s) => s.cleanupExpiredSecretCrushes);
   const removeConfessionThreads = useConfessionStore((s) => s.removeConfessionThreads);
   const deleteConfession = useConfessionStore((s) => s.deleteConfession);
   const connectToConfession = useConfessionStore((s) => s.connectToConfession);
@@ -111,10 +106,10 @@ export default function ConfessionsScreen() {
   const canPostConfession = useConfessionStore((s) => s.canPostConfession);
   const getConfessionCountToday = useConfessionStore((s) => s.getConfessionCountToday);
   const recordConfessionTimestamp = useConfessionStore((s) => s.recordConfessionTimestamp);
-  const blockAuthor = useConfessionStore((s) => s.blockAuthor);
 
   // Global blocked user IDs (unified via blockStore - includes confession author blocks)
   const globalBlockedIds = useBlockStore((s) => s.blockedUserIds);
+  const blockUserLocal = useBlockStore((s) => s.blockUser);
 
   // DM store for conversation metadata
   const conversationMeta = useDemoDmStore((s) => s.meta);
@@ -123,6 +118,7 @@ export default function ConfessionsScreen() {
   const demoCurrentUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
   const demoMyProfile = demoCurrentUserId ? demoProfiles[demoCurrentUserId] : null;
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const convexUserQueryArgs = !isDemoMode && currentUserId ? { userId: asUserId(currentUserId) ?? currentUserId } : 'skip';
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexUserQueryArgs);
 
@@ -175,20 +171,23 @@ export default function ConfessionsScreen() {
   };
 
   const { notifyReaction, notifyReply } = useConfessionNotifications();
-  const { safeTimeout } = useScreenSafety();
   const [refreshing, setRefreshing] = useState(false);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
+  const [hiddenConfessionIds, setHiddenConfessionIds] = useState<string[]>([]);
   const [showToast, setShowToast] = useState(false);
-  const [toastMessage, setToastMessage] = useState('Posted anonymously');
-  const [toastIcon, setToastIcon] = useState<'checkmark-circle' | 'chatbubbles'>('checkmark-circle');
+  const [toastMessage, setToastMessage] = useState('Confession posted');
+  const [toastIcon, setToastIcon] = useState<'checkmark-circle' | 'chatbubbles' | 'alert-circle'>('checkmark-circle');
   const toastOpacity = useRef(new Animated.Value(0)).current;
+  const toastAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
+  const reactionTimeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const composerFocusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingBlockAuthorsRef = useRef<Set<string>>(new Set());
 
   // Emoji picker state
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [emojiTargetConfessionId, setEmojiTargetConfessionId] = useState<string | null>(null);
 
   // Profile preview state (one-time preview for tagged confessions)
-  const isPreviewUsed = useConfessPreviewStore((s) => s.isPreviewUsed);
   const [showPreviewConfirm, setShowPreviewConfirm] = useState(false);
   const [previewTarget, setPreviewTarget] = useState<{ confessionId: string; authorId: string } | null>(null);
 
@@ -200,7 +199,6 @@ export default function ConfessionsScreen() {
   const [showComposerEmoji, setShowComposerEmoji] = useState(false);
   const composerInputRef = useRef<TextInput>(null);
   const insets = useSafeAreaInsets();
-  const addConfession = useConfessionStore((s) => s.addConfession);
   const createConfessionMutation = useMutation(api.confessions.createConfession);
 
   // Tagging (confess-to) state
@@ -209,11 +207,11 @@ export default function ConfessionsScreen() {
   const [showDuplicatePicker, setShowDuplicatePicker] = useState(false);
   const [duplicateCandidates, setDuplicateCandidates] = useState<{ id: string; name: string; avatarUrl: string | null; age?: number; disambiguator: string }[]>([]);
 
-  // Query liked users for tagging candidates
-  const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
-  const likedUsersQuery = useQuery(
-    api.likes.getLikedUsers,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+  // Query auth-safe eligible tag targets for tagging candidates
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  const eligibleTagTargetsQuery = useQuery(
+    api.confessions.getEligibleTagTargets,
+    !isDemoMode && currentUserId ? {} : 'skip'
   );
 
   // Demo liked users (for demo mode) - IDs must match DEMO_PROFILES for profile lookup
@@ -231,8 +229,14 @@ export default function ConfessionsScreen() {
 
   const likedUsers = useMemo(() => {
     if (isDemoMode) return demoLikedUsers;
-    return likedUsersQuery || [];
-  }, [isDemoMode, demoLikedUsers, likedUsersQuery]);
+    return (eligibleTagTargetsQuery || []).map((user: any) => ({
+      id: user.id,
+      name: user.name,
+      avatarUrl: user.photoUrl || null,
+      age: user.age,
+      disambiguator: user.disambiguator,
+    }));
+  }, [isDemoMode, demoLikedUsers, eligibleTagTargetsQuery]);
 
   // Tagging suggestions logic
   // Rule: Short names (<=7) require full typing, long names (>7) show suggestions after 3+ chars
@@ -301,29 +305,30 @@ export default function ConfessionsScreen() {
     setTagInput('');
   }, []);
 
-  // Seed demo data on mount
-  useEffect(() => {
-    seedConfessions();
-  }, []);
-
-  // Convex queries (only when not in demo mode)
-  const convexConfessions = useQuery(
-    api.confessions.listConfessions,
-    !isDemoMode ? { sortBy: 'latest' as const } : 'skip'
+  // Convex queries (only when not in legacy demo mode)
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  const {
+    results: convexConfessions,
+    status: convexConfessionsStatus,
+    loadMore: loadMoreConfessions,
+  } = usePaginatedQuery(
+    api.confessions.listConfessionsPage,
+    !isDemoMode ? { refreshKey: retryKey } : 'skip',
+    { initialNumItems: FEED_PAGE_SIZE }
   );
   const convexTrending = useQuery(
     api.confessions.getTrendingConfessions,
-    !isDemoMode ? {} : 'skip'
+    !isDemoMode ? { refreshKey: retryKey, limit: 5 } : 'skip'
   );
 
   // Tagged confessions (confessions where I'm tagged)
   const convexTaggedConfessions = useQuery(
     api.confessions.listTaggedConfessionsForUser,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemoMode && currentUserId ? { refreshKey: retryKey } : 'skip'
   );
   const convexTaggedBadgeCount = useQuery(
     api.confessions.getTaggedConfessionBadgeCount,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemoMode && currentUserId ? { refreshKey: retryKey } : 'skip'
   );
 
   // Convex mutations
@@ -332,6 +337,8 @@ export default function ConfessionsScreen() {
   const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
   const markTaggedSeenMutation = useMutation(api.confessions.markTaggedConfessionsSeen);
   const getOrCreateForConfessionMutation = useMutation(api.confessions.getOrCreateForConfession);
+  const consumePreviewMutation = useMutation(api.confessions.consumePreview);
+  const blockUserMutation = useMutation(api.users.blockUser);
 
   // ══════════════════════════════════════════════════════════════════════════
   // INTEGRITY MODULE — Single source of truth for confession state
@@ -374,8 +381,8 @@ export default function ConfessionsScreen() {
         expiredThreadIds: [] as string[],
         activeTaggedConfessions: rawTaggedConfessions.filter((t) => !t.isExpired),
         badgeCount: rawTaggedConfessions.filter((t) => !t.seen && !t.isExpired).length,
-        activeSecretCrushes: secretCrushes.filter((sc) => sc.toUserId === currentUserId && !sc.isRevealed && Date.now() <= sc.expiresAt),
-        expiredSecretCrushIds: secretCrushes.filter((sc) => Date.now() > sc.expiresAt).map((sc) => sc.id),
+        activeSecretCrushes: [] as any[],
+        expiredSecretCrushIds: [] as string[],
         activeChats: chats.filter((c) => Date.now() <= c.expiresAt),
         expiredChatIds: chats.filter((c) => Date.now() > c.expiresAt).map((c) => c.id),
       };
@@ -389,7 +396,7 @@ export default function ConfessionsScreen() {
       blockedUserIds: globalBlockedIds,
       confessionBlockedIds,
       reportedConfessionIds,
-      secretCrushes,
+      secretCrushes: [],
       confessionChats: chats,
       seenConfessionIds: new Set(seenTaggedConfessionIds),
       currentUserId,
@@ -403,7 +410,6 @@ export default function ConfessionsScreen() {
     globalBlockedIds,
     confessionBlockedIds,
     reportedConfessionIds,
-    secretCrushes,
     chats,
     seenTaggedConfessionIds,
     currentUserId,
@@ -415,7 +421,7 @@ export default function ConfessionsScreen() {
     if (cleanupDoneRef.current) return;
     if (!isDemoMode) return; // Only cleanup in demo mode
 
-    const { expiredPostIds, expiredThreadIds, expiredChatIds, expiredSecretCrushIds } = integrityOutput;
+    const { expiredPostIds, expiredThreadIds, expiredChatIds } = integrityOutput;
 
     if (expiredPostIds.length > 0) {
       cleanupExpiredConfessions(expiredPostIds);
@@ -426,14 +432,10 @@ export default function ConfessionsScreen() {
     if (expiredChatIds.length > 0) {
       cleanupExpiredChats(expiredChatIds);
     }
-    if (expiredSecretCrushIds.length > 0) {
-      cleanupExpiredSecretCrushes(expiredSecretCrushIds);
-    }
-
-    if (expiredPostIds.length > 0 || expiredThreadIds.length > 0 || expiredChatIds.length > 0 || expiredSecretCrushIds.length > 0) {
+    if (expiredPostIds.length > 0 || expiredThreadIds.length > 0 || expiredChatIds.length > 0) {
       cleanupDoneRef.current = true;
     }
-  }, [isDemoMode, integrityOutput, cleanupExpiredConfessions, removeConfessionThreads, cleanupExpiredChats, cleanupExpiredSecretCrushes]);
+  }, [isDemoMode, integrityOutput, cleanupExpiredConfessions, removeConfessionThreads, cleanupExpiredChats]);
 
   // Use Convex data when available, demo data from integrity module as fallback
   const confessions = useMemo(() => {
@@ -461,6 +463,10 @@ export default function ConfessionsScreen() {
       if (globalBlockedIds.length > 0) {
         items = items.filter((c) => !globalBlockedIds.includes(c.userId));
       }
+      if (hiddenConfessionIds.length > 0) {
+        const hiddenSet = new Set(hiddenConfessionIds);
+        items = items.filter((c) => !hiddenSet.has(c.id));
+      }
       return items;
     }
     // Demo mode: use integrity output (already filtered and sorted)
@@ -470,12 +476,12 @@ export default function ConfessionsScreen() {
       posts = posts.filter((c) => !globalBlockedIds.includes(c.userId));
     }
     return posts;
-  }, [isDemoMode, convexConfessions, globalBlockedIds, integrityOutput.activePosts]);
+  }, [isDemoMode, convexConfessions, globalBlockedIds, integrityOutput.activePosts, hiddenConfessionIds]);
 
   // Trending confessions
   const trendingConfessions = useMemo(() => {
     if (!isDemoMode && convexTrending) {
-      return convexTrending.map((c: any) => ({
+      let items = convexTrending.map((c: any) => ({
         id: c._id,
         userId: c.userId,
         text: c.text,
@@ -487,6 +493,11 @@ export default function ConfessionsScreen() {
         createdAt: c.createdAt,
         trendingScore: c.trendingScore,
       }));
+      if (hiddenConfessionIds.length > 0) {
+        const hiddenSet = new Set(hiddenConfessionIds);
+        items = items.filter((c) => !hiddenSet.has(c.id));
+      }
+      return items;
     }
     // Demo mode — compute trending from active posts only
     const now = Date.now();
@@ -499,10 +510,7 @@ export default function ConfessionsScreen() {
     });
     scored.sort((a, b) => (b.trendingScore || 0) - (a.trendingScore || 0));
     return scored.slice(0, 1);
-  }, [isDemoMode, convexTrending, integrityOutput.activePosts]);
-
-  // Secret crushes from integrity output
-  const myCrushes = integrityOutput.activeSecretCrushes;
+  }, [isDemoMode, convexTrending, integrityOutput.activePosts, hiddenConfessionIds]);
 
   // Tagged confessions and badge from integrity output
   const [showTaggedSection, setShowTaggedSection] = useState(false);
@@ -517,11 +525,34 @@ export default function ConfessionsScreen() {
     return integrityOutput.badgeCount;
   }, [isDemoMode, convexTaggedBadgeCount, integrityOutput.badgeCount]);
 
+  const triggerRefetch = useCallback(() => {
+    setRetryKey((k) => k + 1);
+  }, []);
+
+  const handleLoadMoreConfessions = useCallback(() => {
+    if (isDemoMode || convexConfessionsStatus !== 'CanLoadMore') {
+      return;
+    }
+    loadMoreConfessions(FEED_PAGE_SIZE);
+  }, [isDemoMode, convexConfessionsStatus, loadMoreConfessions]);
+
+  const isRefreshReady = !isDemoMode
+    ? convexConfessionsStatus !== 'LoadingFirstPage' &&
+      convexTrending !== undefined &&
+      (!currentUserId || (convexTaggedConfessions !== undefined && convexTaggedBadgeCount !== undefined))
+    : true;
+
+  useEffect(() => {
+    if (refreshing && isRefreshReady) {
+      setRefreshing(false);
+    }
+  }, [refreshing, isRefreshReady]);
+
   const handleOpenTaggedSection = useCallback(() => {
     setShowTaggedSection(true);
     // Mark all as seen
-    if (!isDemoMode && convexUserId) {
-      markTaggedSeenMutation({ userId: convexUserId }).catch((e) => console.warn('[MarkSeen] Silent fail:', e));
+    if (!isDemoMode && currentUserId) {
+      markTaggedSeenMutation({}).catch((e) => console.warn('[MarkSeen] Silent fail:', e));
     } else if (isDemoMode) {
       // Demo mode: mark all tagged confessions as seen via store action
       const unseenIds = taggedConfessions.filter((t) => !t.seen).map((t) => t.confessionId);
@@ -529,7 +560,7 @@ export default function ConfessionsScreen() {
         markAllTaggedConfessionsSeen(unseenIds);
       }
     }
-  }, [isDemoMode, convexUserId, markTaggedSeenMutation, taggedConfessions, markAllTaggedConfessionsSeen]);
+  }, [isDemoMode, currentUserId, markTaggedSeenMutation, taggedConfessions, markAllTaggedConfessionsSeen]);
 
   const handleCloseTaggedSection = useCallback(() => {
     setShowTaggedSection(false);
@@ -544,8 +575,8 @@ export default function ConfessionsScreen() {
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    safeTimeout(() => setRefreshing(false), 800);
-  }, [safeTimeout]);
+    triggerRefetch();
+  }, [triggerRefetch]);
 
   const handleOpenEmojiPicker = useCallback((confessionId: string) => {
     setEmojiTargetConfessionId(confessionId);
@@ -553,15 +584,23 @@ export default function ConfessionsScreen() {
   }, []);
 
   // Show toast with custom message
-  const showToastMessage = useCallback((message: string, icon: 'checkmark-circle' | 'chatbubbles' = 'checkmark-circle') => {
+  const showToastMessage = useCallback((message: string, icon: 'checkmark-circle' | 'chatbubbles' | 'alert-circle' = 'checkmark-circle') => {
     setToastMessage(message);
     setToastIcon(icon);
     setShowToast(true);
-    Animated.sequence([
+    toastAnimationRef.current?.stop();
+    toastOpacity.setValue(0);
+    const animation = Animated.sequence([
       Animated.timing(toastOpacity, { toValue: 1, duration: 200, useNativeDriver: true }),
       Animated.delay(2000),
       Animated.timing(toastOpacity, { toValue: 0, duration: 200, useNativeDriver: true }),
-    ]).start(() => setShowToast(false));
+    ]);
+    toastAnimationRef.current = animation;
+    animation.start(({ finished }) => {
+      if (finished) {
+        setShowToast(false);
+      }
+    });
   }, [toastOpacity]);
 
   // BUGFIX #24: Track pending reactions to prevent double toast on rapid taps
@@ -575,7 +614,15 @@ export default function ConfessionsScreen() {
       pendingReactionsRef.current.add(reactionKey);
 
       // Clear pending after animation completes
-      setTimeout(() => pendingReactionsRef.current.delete(reactionKey), 500);
+      const existingTimeout = reactionTimeoutsRef.current.get(reactionKey);
+      if (existingTimeout) {
+        clearTimeout(existingTimeout);
+      }
+      const timeoutId = setTimeout(() => {
+        pendingReactionsRef.current.delete(reactionKey);
+        reactionTimeoutsRef.current.delete(reactionKey);
+      }, 500);
+      reactionTimeoutsRef.current.set(reactionKey, timeoutId);
 
       if (isDemoMode) {
         const result = demoToggleReaction(confessionId, emoji, currentUserId);
@@ -587,12 +634,9 @@ export default function ConfessionsScreen() {
         notifyReaction(confessionId);
         return;
       }
-      const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
-      // BUGFIX #24: Don't call demoToggleReaction in Convex mode - causes duplicate state updates
-      if (!convexUserId) return; // no valid user id — skip mutation
+      if (!currentUserId) return;
       toggleReactionMutation({
         confessionId: confessionId as Id<'confessions'>,
-        userId: convexUserId,
         type: emoji,
       }).then((result) => {
         if (result?.chatUnlocked) {
@@ -602,6 +646,7 @@ export default function ConfessionsScreen() {
         notifyReaction(confessionId);
       }).catch((err) => {
         console.error('[Confessions] toggleReaction failed:', err);
+        showToastMessage("Couldn't save your reaction. Please try again.", 'alert-circle');
       });
       // BUGFIX #24: Removed duplicate notifyReaction call here
     },
@@ -625,22 +670,29 @@ export default function ConfessionsScreen() {
     setDuplicateCandidates([]);
     setShowComposer(true);
     // Focus input after modal opens
-    setTimeout(() => composerInputRef.current?.focus(), 100);
+    if (composerFocusTimeoutRef.current) {
+      clearTimeout(composerFocusTimeoutRef.current);
+    }
+    composerFocusTimeoutRef.current = setTimeout(() => composerInputRef.current?.focus(), 100);
   }, []);
 
   const handleCloseComposer = useCallback(() => {
     Keyboard.dismiss();
+    if (composerFocusTimeoutRef.current) {
+      clearTimeout(composerFocusTimeoutRef.current);
+      composerFocusTimeoutRef.current = null;
+    }
     setShowComposer(false);
   }, []);
 
   const canSubmitComposer = composerText.trim().length >= 10 && !composerSubmitting;
 
-  const handleSubmitComposer = useCallback(() => {
+  const handleSubmitComposer = useCallback(async () => {
     if (!canSubmitComposer) return;
     const trimmed = composerText.trim();
 
     // Rate limit check
-    if (!canPostConfession()) {
+    if (isDemoMode && !canPostConfession()) {
       if (__DEV__) console.log('[CONFESS] confess_rate_limit_hit');
       Alert.alert(
         'Limit Reached',
@@ -693,60 +745,155 @@ export default function ConfessionsScreen() {
       return;
     }
 
-    const confessionId = `conf_new_${Date.now()}`;
-    addConfession({
-      id: confessionId,
-      userId: currentUserId,
-      text: trimmed,
-      isAnonymous: composerAnonymous,
-      mood: 'emotional' as const,
-      topEmojis: [],
-      replyPreviews: [],
-      visibility: 'global' as const,
-      replyCount: 0,
-      reactionCount: 0,
-      createdAt: Date.now(),
-      revealPolicy: 'never',
-      targetUserId: taggedUser?.id,
-      targetUserName: taggedUser?.name,
-      // Include author identity for non-anonymous confessions
-      ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
-      ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
-      ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
-      ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
-    });
+    try {
+      if (isDemoMode) {
+        const createdAt = Date.now();
+        const confessionId = `conf_new_${Date.now()}`;
+        useConfessionStore.getState().addConfession({
+          id: confessionId,
+          userId: currentUserId,
+          text: trimmed,
+          isAnonymous: composerAnonymous,
+          mood: 'emotional' as const,
+          topEmojis: [],
+          replyPreviews: [],
+          visibility: 'global' as const,
+          replyCount: 0,
+          reactionCount: 0,
+          createdAt,
+          expiresAt: createdAt + 24 * 60 * 60 * 1000,
+          revealPolicy: 'never',
+          targetUserId: taggedUser?.id,
+          targetUserName: taggedUser?.name,
+          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+        });
+        recordConfessionTimestamp();
+      } else {
+        await createConfessionMutation({
+          text: trimmed,
+          isAnonymous: composerAnonymous,
+          mood: 'emotional',
+          visibility: 'global',
+          taggedUserId: taggedUser?.id as any,
+          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+        });
+      }
 
-    // Sync to backend
-    if (!isDemoMode) {
-      createConfessionMutation({
-        userId: currentUserId as Id<'users'>,
-        text: trimmed,
-        isAnonymous: composerAnonymous,
-        mood: 'emotional',
-        visibility: 'global',
-        taggedUserId: taggedUser?.id as Id<'users'> | undefined,
-        // Include author identity for non-anonymous confessions
-        ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
-        ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
-        ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
-        ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
-      }).catch((error: any) => {
-        Alert.alert('Error', error.message || 'Failed to post confession');
-      });
+      triggerSuccessHaptic();
+      if (!isDemoMode) {
+        triggerRefetch();
+      }
+      setComposerSubmitting(false);
+      setShowComposer(false);
+      setComposerText('');
+      setTagInput('');
+      setTaggedUser(null);
+      const successMessage = composerAnonymous ? 'Posted anonymously' : 'Posted with your profile';
+      showToastMessage(successMessage, 'checkmark-circle');
+    } catch (error: any) {
+      setComposerSubmitting(false);
+      Alert.alert('Error', error?.message || 'Failed to post confession');
+      return;
     }
+  }, [canSubmitComposer, composerText, composerAnonymous, currentUserId, createConfessionMutation, taggedUser, canPostConfession, tagInput, recordConfessionTimestamp, getAuthorInfo, isDemoMode, showToastMessage, triggerRefetch]);
 
-    // Record timestamp for rate limiting
-    recordConfessionTimestamp();
+  useEffect(() => {
+    return () => {
+      toastAnimationRef.current?.stop();
+      if (composerFocusTimeoutRef.current) {
+        clearTimeout(composerFocusTimeoutRef.current);
+      }
+      reactionTimeoutsRef.current.forEach((timeoutId) => clearTimeout(timeoutId));
+      reactionTimeoutsRef.current.clear();
+    };
+  }, []);
 
-    // Haptic feedback for successful post
-    triggerSuccessHaptic();
+  const handleBlockAuthor = useCallback(
+    async (authorId: string) => {
+      if (!currentUserId || !authorId) {
+        Alert.alert('Unable to block user right now');
+        return;
+      }
 
-    setComposerSubmitting(false);
-    setShowComposer(false);
-    setComposerText('');
-    setTagInput('');
-    setTaggedUser(null);
-  }, [canSubmitComposer, composerText, composerAnonymous, currentUserId, addConfession, createConfessionMutation, taggedUser, canPostConfession, tagInput, recordConfessionTimestamp, convexCurrentUser, demoMyProfile, getAuthorInfo]);
+      if (isDemoMode) {
+        blockUserLocal(authorId);
+        triggerWarningHaptic();
+        showToastMessage('User blocked', 'checkmark-circle');
+        return;
+      }
+
+      if (pendingBlockAuthorsRef.current.has(authorId)) {
+        return;
+      }
+      pendingBlockAuthorsRef.current.add(authorId);
+
+      try {
+        const blockedUserId = asUserId(authorId);
+        if (!token || !blockedUserId) {
+          Alert.alert('Unable to block user right now');
+          return;
+        }
+
+        const result = await blockUserMutation({
+          token,
+          blockedUserId,
+        });
+
+        if (!result?.success) {
+          Alert.alert('Unable to block user right now');
+          return;
+        }
+
+        blockUserLocal(authorId);
+        triggerWarningHaptic();
+        showToastMessage('User blocked', 'checkmark-circle');
+      } catch {
+        Alert.alert('Unable to block user right now');
+      } finally {
+        pendingBlockAuthorsRef.current.delete(authorId);
+      }
+    },
+    [blockUserLocal, blockUserMutation, isDemoMode, showToastMessage, token]
+  );
+
+  const handleSubmitReport = useCallback(
+    async (confessionId: string, reason: 'spam' | 'harassment' | 'hate' | 'sexual' | 'other') => {
+      if (isDemoMode) {
+        demoReportConfession(confessionId);
+        triggerWarningHaptic();
+        showToastMessage('Report submitted', 'checkmark-circle');
+        return;
+      }
+
+      if (!currentUserId) {
+        Alert.alert('Unable to report right now');
+        return;
+      }
+
+      try {
+        await reportConfessionMutation({
+          confessionId: confessionId as any,
+          reason,
+        });
+        setHiddenConfessionIds((current) =>
+          current.includes(confessionId) ? current : [...current, confessionId]
+        );
+        triggerWarningHaptic();
+        showToastMessage('Report submitted', 'checkmark-circle');
+      } catch {
+        Alert.alert('Unable to report right now');
+      }
+    },
+    [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation, showToastMessage]
+  );
+
+  // removed old optimistic live add/report code below
 
   const handleComposerEmojiSelected = useCallback((emojiObj: any) => {
     setComposerText((prev) => prev + emojiObj.emoji);
@@ -780,12 +927,8 @@ export default function ConfessionsScreen() {
       // Real mode: Use Convex conversation and route to Messages chat
       if (!isDemoMode) {
         try {
-          const convexId = asUserId(currentUserId);
-          if (!convexId) return;
-
           const result = await getOrCreateForConfessionMutation({
             confessionId: confessionId as Id<'confessions'>,
-            userId: convexId,
           });
 
           // Route to Messages chat with confession source
@@ -842,20 +985,7 @@ export default function ConfessionsScreen() {
       ];
 
       const submitReport = (reason: 'spam' | 'harassment' | 'hate' | 'sexual' | 'other') => {
-        demoReportConfession(confessionId);
-        if (__DEV__) console.log('[CONFESS] confess_reported:', confessionId, 'reason:', reason);
-        if (!isDemoMode) {
-          const convexUserId = asUserId(currentUserId);
-          if (convexUserId) {
-            reportConfessionMutation({
-              confessionId: confessionId as Id<'confessions'>,
-              reporterId: convexUserId,
-              reason,
-            }).catch((e) => console.warn('[Report] Silent fail:', e));
-          }
-        }
-        triggerWarningHaptic();
-        showToastMessage('Report submitted', 'checkmark-circle');
+        void handleSubmitReport(confessionId, reason);
       };
 
       if (Platform.OS === 'ios') {
@@ -885,7 +1015,7 @@ export default function ConfessionsScreen() {
         );
       }
     },
-    [currentUserId, demoReportConfession, reportConfessionMutation, showToastMessage]
+    [handleSubmitReport]
   );
 
   // Handle Report/Block menu for a confession
@@ -909,9 +1039,7 @@ export default function ConfessionsScreen() {
               showReportReasonPicker(confessionId);
             } else if (buttonIndex === 2) {
               // Block
-              blockAuthor(authorId);
-              triggerWarningHaptic();
-              showToastMessage('User blocked', 'checkmark-circle');
+              void handleBlockAuthor(authorId);
             }
           }
         );
@@ -933,16 +1061,14 @@ export default function ConfessionsScreen() {
               text: 'Block User',
               style: 'destructive',
               onPress: () => {
-                blockAuthor(authorId);
-                triggerWarningHaptic();
-                showToastMessage('User blocked', 'checkmark-circle');
+                void handleBlockAuthor(authorId);
               },
             },
           ]
         );
       }
     },
-    [showReportReasonPicker, showToastMessage, blockAuthor]
+    [handleBlockAuthor, showReportReasonPicker]
   );
 
   const handleReport = useCallback(
@@ -953,17 +1079,43 @@ export default function ConfessionsScreen() {
     [showReportReasonPicker]
   );
 
-  const handleRevealCrush = useCallback(
-    (crushId: string) => {
-      Alert.alert('Reveal Identity', 'Are you sure you want to reveal who sent this?', [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Reveal',
-          onPress: () => revealCrush(crushId),
-        },
-      ]);
+  const openConfessPreview = useCallback(
+    async (targetUserId: string, confessionId?: string) => {
+      if (!currentUserId || !targetUserId) {
+        Alert.alert('Unable to view profile right now');
+        return;
+      }
+
+      try {
+        const result = await consumePreviewMutation({
+          targetUserId: targetUserId as any,
+          confessionId: confessionId as any,
+        });
+
+        if (!result?.allowed) {
+          if (result?.reason === 'already_used') {
+            Alert.alert('Already Viewed', 'You have already used your Confess profile preview.');
+          } else {
+            Alert.alert('Unable to view profile right now');
+          }
+          return;
+        }
+
+        safePush(
+          router,
+          {
+            pathname: '/(main)/profile/[id]',
+            params: confessionId
+              ? { id: targetUserId, mode: 'confess_preview', confessionId }
+              : { id: targetUserId, mode: 'confess_preview' },
+          } as any,
+          'confessions->profilePreview'
+        );
+      } catch {
+        Alert.alert('Unable to view profile right now');
+      }
     },
-    [revealCrush]
+    [consumePreviewMutation, currentUserId, router]
   );
 
   // Profile preview handlers (one-time preview for tagged confession receivers)
@@ -971,38 +1123,21 @@ export default function ConfessionsScreen() {
     (confessionId: string, authorId: string) => {
       // Guard: require valid userId
       if (!currentUserId) return;
-
-      // Check if already used
-      if (isPreviewUsed(confessionId, currentUserId)) {
-        Alert.alert('Already Viewed', 'You have already used your one-time profile preview for this confession.');
-        return;
-      }
       // Show confirmation modal
       setPreviewTarget({ confessionId, authorId });
       setShowPreviewConfirm(true);
     },
-    [isPreviewUsed, currentUserId]
+    [currentUserId]
   );
 
-  const handleConfirmPreview = useCallback(() => {
+  const handleConfirmPreview = useCallback(async () => {
     if (!previewTarget) return;
     // Close modal first
     setShowPreviewConfirm(false);
     const { confessionId, authorId } = previewTarget;
     setPreviewTarget(null);
-    // Navigate to profile in read-only mode
-    // Pass confessionId and receiverId so the profile screen can mark preview as used on mount
-    safePush(router, {
-      pathname: '/(main)/profile/[id]',
-      params: {
-        id: authorId,
-        mode: 'confess_preview',
-        confessionId,
-        receiverId: currentUserId,
-      },
-    } as any, 'confessions->profilePreview');
-    // NOTE: markPreviewUsed is called in the profile screen on successful mount, not here
-  }, [previewTarget, currentUserId, router]);
+    await openConfessPreview(authorId, confessionId);
+  }, [openConfessPreview, previewTarget]);
 
   const handleCancelPreview = useCallback(() => {
     setShowPreviewConfirm(false);
@@ -1012,24 +1147,18 @@ export default function ConfessionsScreen() {
   // Handle tapping @tag to open profile preview (read-only)
   const handleTagPress = useCallback(
     (targetUserId: string) => {
-      safePush(router, {
-        pathname: '/(main)/profile/[id]',
-        params: { id: targetUserId, mode: 'confess_preview' },
-      } as any, 'confessions->tagProfile');
+      void openConfessPreview(targetUserId);
     },
-    [router]
+    [openConfessPreview]
   );
 
   // Handle tapping on author identity (non-anonymous confessions only)
   // Opens full profile in read-only mode
   const handleAuthorPress = useCallback(
     (authorUserId: string) => {
-      safePush(router, {
-        pathname: '/(main)/profile/[id]',
-        params: { id: authorUserId, mode: 'confess_preview' },
-      } as any, 'confessions->authorProfile');
+      void openConfessPreview(authorUserId);
     },
-    [router]
+    [openConfessPreview]
   );
 
   // Handle Connect button (tagged user only)
@@ -1114,7 +1243,6 @@ export default function ConfessionsScreen() {
               if (!isDemoMode && currentUserId) {
                 deleteConfessionMutation({
                   confessionId: confessionId as Id<'confessions'>,
-                  userId: currentUserId as Id<'users'>,
                 }).catch((err) => {
                   if (__DEV__) console.warn('[CONFESS] Backend delete failed:', err);
                 });
@@ -1141,7 +1269,6 @@ export default function ConfessionsScreen() {
                 if (!isDemoMode && currentUserId) {
                   deleteConfessionMutation({
                     confessionId: confessionId as Id<'confessions'>,
-                    userId: currentUserId as Id<'users'>,
                   }).catch((err) => {
                     if (__DEV__) console.warn('[CONFESS] Backend delete failed:', err);
                   });
@@ -1155,7 +1282,11 @@ export default function ConfessionsScreen() {
     [currentUserId, deleteConfession, showToastMessage, deleteConfessionMutation]
   );
 
-  const isLoading = !isDemoMode && convexConfessions === undefined && demoConfessions.length === 0;
+  const isLoading = !isDemoMode
+    ? convexConfessionsStatus === 'LoadingFirstPage' ||
+      convexTrending === undefined ||
+      (!!currentUserId && (convexTaggedConfessions === undefined || convexTaggedBadgeCount === undefined))
+    : false;
 
   // BUGFIX #20: Trending hero card with null/empty guards
   const trendingHero = trendingConfessions.length > 0 && trendingConfessions[0]?.text
@@ -1182,20 +1313,6 @@ export default function ConfessionsScreen() {
           </View>
           <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
         </TouchableOpacity>
-      )}
-
-      {/* Secret Crushes */}
-      {myCrushes.length > 0 && (
-        <View style={styles.crushSection}>
-          {myCrushes.map((crush) => (
-            <SecretCrushCard
-              key={crush.id}
-              crush={crush}
-              onReveal={() => handleRevealCrush(crush.id)}
-              onDismiss={() => revealCrush(crush.id)}
-            />
-          ))}
-        </View>
       )}
 
       {/* Trending Section */}
@@ -1246,14 +1363,14 @@ export default function ConfessionsScreen() {
         </View>
       )}
     </View>
-  ), [myCrushes, trendingConfessions, trendingHero, handleRevealCrush, revealCrush, handleOpenThread, taggedConfessions, taggedBadgeCount, handleOpenTaggedSection]);
+  ), [trendingConfessions, trendingHero, handleOpenThread, handleTagPress, taggedConfessions, taggedBadgeCount, handleOpenTaggedSection]);
 
   return (
     <LoadingGuard
       isLoading={isLoading}
-      onRetry={() => setRetryKey((k) => k + 1)}
-      title="Finding confessions…"
-      subtitle="This is taking longer than expected. Check your connection and try again."
+      onRetry={triggerRefetch}
+      title="We couldn't refresh Confess"
+      subtitle="Pull to try again once your connection feels steady."
     >
       <SafeAreaView style={styles.container} edges={['top']}>
         {/* Compact header */}
@@ -1271,7 +1388,7 @@ export default function ConfessionsScreen() {
         </View>
 
         {/* Top hint */}
-        <Text style={styles.topHint}>Anonymous by default • Be respectful</Text>
+        <Text style={styles.topHint}>Anonymous by default • Kind words only</Text>
 
         {/* Feed */}
         <FlatList
@@ -1299,7 +1416,6 @@ export default function ConfessionsScreen() {
               authorGender={(item as any).authorGender}
               createdAt={item.createdAt}
               isTaggedForMe={isTaggedForMe}
-              previewUsed={isTaggedForMe && currentUserId ? isPreviewUsed(item.id, currentUserId) : undefined}
               isConnected={isConfessionConnected(item.id)}
               taggedUserId={item.targetUserId}
               taggedUserName={(item as any).targetUserName}
@@ -1308,7 +1424,6 @@ export default function ConfessionsScreen() {
               onPress={() => handleOpenThread(item.id)}
               onReact={() => handleOpenEmojiPicker(item.id)}
               onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}
-              onReplyAnonymously={() => handleReplyAnonymously(item.id, item.userId)}
               onReport={() => handleReportBlock(item.id, item.userId)}
               onViewProfile={isTaggedForMe ? () => handleViewProfileRequest(item.id, item.userId) : undefined}
               onLongPress={() => handleLongPressConfession(item.id, item.userId)}
@@ -1323,17 +1438,30 @@ export default function ConfessionsScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />
         }
         showsVerticalScrollIndicator={false}
+        ListFooterComponent={
+          !isDemoMode && convexConfessions.length > 0 ? (
+            <View style={styles.paginationFooter}>
+              {convexConfessionsStatus === 'LoadingMore' ? (
+                <ActivityIndicator size="small" color={COLORS.primary} />
+              ) : convexConfessionsStatus === 'CanLoadMore' ? (
+                <TouchableOpacity style={styles.loadMoreButton} onPress={handleLoadMoreConfessions}>
+                  <Text style={styles.loadMoreText}>Load more confessions</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null
+        }
         ListEmptyComponent={
           isLoading ? (
             <View style={styles.loadingContainer}>
               <ActivityIndicator size="large" color={COLORS.primary} />
-              <Text style={styles.loadingText}>Finding confessions...</Text>
+              <Text style={styles.loadingText}>Loading today's confessions...</Text>
             </View>
           ) : (
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyEmoji}>💬</Text>
-              <Text style={styles.emptyTitle}>No confessions yet</Text>
-              <Text style={styles.emptySubtitle}>Be the first to share something — it's anonymous by default.</Text>
+              <Text style={styles.emptyTitle}>It&apos;s quiet right now</Text>
+              <Text style={styles.emptySubtitle}>When someone shares a confession, it will show up here. Yours can start the conversation.</Text>
               <TouchableOpacity style={styles.emptyButton} onPress={handleOpenCompose}>
                 <Text style={styles.emptyButtonText}>Post a Confession</Text>
               </TouchableOpacity>
@@ -1348,7 +1476,7 @@ export default function ConfessionsScreen() {
           <Ionicons
             name={toastIcon}
             size={18}
-            color={toastIcon === 'chatbubbles' ? COLORS.primary : '#34C759'}
+            color={toastIcon === 'chatbubbles' ? COLORS.primary : toastIcon === 'alert-circle' ? COLORS.error : '#34C759'}
           />
           <Text style={styles.toastText}>{toastMessage}</Text>
         </Animated.View>
@@ -1854,6 +1982,25 @@ const styles = StyleSheet.create({
   listContent: {
     paddingTop: 4,
     paddingBottom: 96,
+  },
+  paginationFooter: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 4,
+    paddingBottom: 20,
+  },
+  loadMoreButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 18,
+    backgroundColor: COLORS.white,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+  },
+  loadMoreText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   emptyContainer: {
     alignItems: 'center',

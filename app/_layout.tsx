@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { AppState, AppStateStatus, LogBox } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 
 // P0-1 STABILITY FIX: Import Sentry for crash reporting
 import { initSentry, captureException, setUserContext, clearUserContext } from "@/lib/sentry";
+import { DEBUG_ONBOARDING_HYDRATION, DEBUG_BACKGROUND_LOCATION, DEBUG_STARTUP } from "@/lib/debugFlags";
 
 // Initialize Sentry FIRST, before any other code runs
 // This ensures we catch errors during app initialization
@@ -99,6 +100,7 @@ if (__DEV__) {
 })()
 import { ConvexProvider, useMutation, useQuery } from "convex/react";
 import { convex, isDemoMode } from "@/hooks/useConvex";
+import { isDemoAuthMode } from "@/config/demo";
 
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -113,28 +115,34 @@ import { collectDeviceFingerprint } from "@/lib/deviceFingerprint";
 import { markTiming } from "@/utils/startupTiming";
 import { autoSyncPhotosOnStartup } from "@/services/photoSync";
 import { checkAndHandleResetEpoch } from "@/lib/resetEpochCheck";
+import { startBackgroundLocation } from "@/utils/backgroundLocation";
+import { usePresenceAndLocation } from "@/hooks/usePresenceAndLocation";
+import { Toast } from "@/components/ui/Toast";
+import { safePush } from "@/lib/safeRouter";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { log } from "@/utils/logger";
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STARTUP LOG: Visible in adb logcat even in standalone APK
+// ══════════════════════════════════════════════════════════════════════════════
+log.info('[APP]', '═══════════════════════════════════════════════════');
+log.info('[APP]', 'Mira app starting', { env: __DEV__ ? 'DEV' : 'PROD' });
+log.info('[APP]', '═══════════════════════════════════════════════════');
 
 /**
- * ResetEpochChecker - Detects database resets and clears stale local caches
+ * ResetEpochChecker - Clears stale demo caches on database reset (non-blocking)
  *
- * How it works:
- * 1. Fetch current resetEpoch from Convex backend
- * 2. Compare with locally stored resetEpoch
- * 3. If mismatch: clear all persisted stores (user data is stale)
- * 4. Update local resetEpoch to match server
- * 5. Force navigation to logged-out state to prevent stale onboarding bypass
+ * SAFE BEHAVIOR:
+ * - Does NOT logout users
+ * - Does NOT clear auth or onboarding state
+ * - Only clears demo-related stores
+ * - Runs asynchronously, does not block UI render
  *
  * This prevents bugs where:
- * - After resetAllUsers, app still shows old user profile (Manmohan, 26)
  * - Demo users/messages still appear after demo mode disabled
- * - Cached onboardingCompleted=true allows bypassing onboarding
- * - Old chat room messages/members show despite empty backend
+ * - Stale demo data shows despite backend changes
  */
 function ResetEpochChecker() {
-  const router = useRouter();
-  const logout = useAuthStore((s) => s.logout);
-  const resetOnboarding = useOnboardingStore((s) => s.reset);
-  const demoLogout = useDemoStore((s) => s.demoLogout);
   const hasCheckedRef = useRef(false);
 
   // Fetch current reset epoch from server
@@ -148,33 +156,15 @@ function ResetEpochChecker() {
     if (hasCheckedRef.current) return;
     hasCheckedRef.current = true;
 
-    (async () => {
-      try {
-        const didClearCaches = await checkAndHandleResetEpoch(serverResetEpoch);
-
-        if (didClearCaches) {
-          // Database was reset - force logout and clear all stores
-          console.log('[RESET_EPOCH] Database reset detected - forcing logout...');
-
-          // Clear all auth/onboarding/demo stores
-          // STABILITY FIX: Await logout to ensure cleanup completes before navigation
-          await logout();
-          resetOnboarding();
-          if (isDemoMode) {
-            demoLogout();
-          }
-
-          // Force navigation to welcome screen (logged out state)
-          // This prevents stale onboardingCompleted from bypassing onboarding
-          // FIX: Navigate directly to welcome, not "/" which remounts index.tsx
-          console.log('[RESET_EPOCH] Navigating to welcome screen...');
-          router.replace('/(auth)/welcome');
-        }
-      } catch (error) {
-        console.error('[RESET_EPOCH] Error during reset epoch check:', error);
-      }
-    })();
-  }, [serverResetEpoch, logout, resetOnboarding, demoLogout, router]);
+    // NON-BLOCKING: Run async without awaiting - don't delay UI
+    checkAndHandleResetEpoch(serverResetEpoch)
+      .then((didClear) => {
+        if (didClear && __DEV__ && DEBUG_STARTUP) console.log('[RESET_EPOCH] cleared');
+      })
+      .catch((error) => {
+        console.error('[RESET_EPOCH] check error:', error);
+      });
+  }, [serverResetEpoch]);
 
   return null;
 }
@@ -325,6 +315,7 @@ function SessionValidator() {
   // validateSessionFull checks: expiry, revocation, user status, deletedAt
   // M2 FIX: Use hasValidToken to skip query for empty/whitespace tokens
   // M1 FIX: sessionRefreshTrigger gates query to force re-subscription on app resume
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const sessionStatus = useQuery(
     api.auth.validateSessionFull,
     sessionRefreshTrigger ? 'skip' : (!isDemoMode && hasValidToken ? { token } : 'skip')
@@ -332,6 +323,11 @@ function SessionValidator() {
 
   // Handle session validation result
   useEffect(() => {
+    // Demo auth mode: skip Convex session validation, trust local auth state
+    if (isDemoAuthMode) {
+      setSessionValidated(true);
+      return;
+    }
     // M2 FIX: Use hasValidToken for early return; only mark validated if token is truly null
     if (isDemoMode || !hasValidToken) {
       // Only mark as validated if token is truly absent (null), not empty/whitespace
@@ -510,15 +506,11 @@ function PhotoSyncManager() {
     // Call ensureCurrentUser mutation to create user record if missing
     (async () => {
       try {
-        if (__DEV__) console.log('[BOOTSTRAP] Ensuring Convex user exists for:', userId);
+        if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[BOOTSTRAP] ensuring user:', userId?.substring(0, 8));
         const result = await ensureUser({ authUserId: userId });
-        if (__DEV__) console.log('[BOOTSTRAP] User ensured, convexUserId:', result.userId);
-        // Note: result.userId is the Convex Id<"users"> for this authUserId
-        // We could optionally store it in authStore, but not needed since
-        // all queries/mutations handle the mapping automatically
+        if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[BOOTSTRAP] ensured:', result.userId?.substring(0, 8));
       } catch (error: any) {
         console.error('[BOOTSTRAP] Failed to ensure user:', error.message);
-        // Non-fatal: queries will handle missing user gracefully
       }
     })();
   }, [userId, authHydrated, ensureUser]);
@@ -574,6 +566,7 @@ function PhotoSyncManager() {
  */
 function OnboardingDraftHydrator() {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authHydrated = useAuthStore((s) => s._hasHydrated);
   const onboardingHydrated = useOnboardingStore((s) => s._hasHydrated);
   const hydrateFromDraft = useOnboardingStore((s) => s.hydrateFromDraft);
@@ -589,17 +582,18 @@ function OnboardingDraftHydrator() {
   }, []);
 
   // BUG FIX: Use getOnboardingStatus to get comprehensive data including basicInfo from user document
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId && authHydrated && onboardingHydrated
-      ? { userId }
+    !isDemoMode && token && authHydrated && onboardingHydrated
+      ? { token }
       : 'skip'
   );
 
   useEffect(() => {
-    // Only in production mode (not demo)
-    if (isDemoMode) {
-      // Demo mode doesn't use Convex for onboarding draft, mark as hydrated immediately
+    // Only in production mode (not demo/demo auth)
+    if (isDemoMode || isDemoAuthMode) {
+      // Demo/demo auth mode doesn't use Convex for onboarding draft, mark as hydrated immediately
       useOnboardingStore.getState().setConvexHydrated();
       return;
     }
@@ -618,8 +612,7 @@ function OnboardingDraftHydrator() {
 
     // P0 FIX #1: If no status found, mark hydration complete so screens don't wait indefinitely
     if (!onboardingStatus) {
-      if (__DEV__) console.log('[ONB_DRAFT] No onboarding status found');
-      // No status, but hydration attempt complete - mark as hydrated so screens don't wait
+      if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[ONB_DRAFT] no status');
       hydrateFromDraft(null);
       return;
     }
@@ -628,18 +621,13 @@ function OnboardingDraftHydrator() {
     // This must happen BEFORE user doc hydration so user doc can override stale draft data
     if (onboardingStatus.onboardingDraft) {
       const draft = onboardingStatus.onboardingDraft;
-      const draftKeys = Object.keys(draft).filter(
-        key => (draft as any)[key] != null
-      );
-      if (__DEV__) {
-        console.log(`[BASIC_HYDRATE] source=draft fields=${JSON.stringify(draftKeys)}`);
+      if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) {
+        const draftKeys = Object.keys(draft).filter(key => (draft as any)[key] != null);
+        console.log(`[BASIC_HYDRATE] draft fields=${draftKeys.length}`);
       }
       hydrateFromDraft(draft);
     } else {
-      if (__DEV__) {
-        console.log('[ONB_DRAFT] No draft found in Convex');
-      }
-      // Still call hydrateFromDraft with null to reset state properly
+      if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[ONB_DRAFT] no draft');
       hydrateFromDraft(null);
     }
 
@@ -651,17 +639,10 @@ function OnboardingDraftHydrator() {
       const hydratedFields: string[] = [];
 
       // P0 FIX #2: Always apply user doc data if present (user doc is authoritative, not draft)
-      // Remove the check for empty store fields - user doc should always win
+      // IDENTITY SIMPLIFICATION: Single name field
       if (name) {
-        const parts = name.trim().split(/\s+/);
-        if (parts.length === 1) {
-          store.setFirstName(parts[0]);
-          store.setLastName('');
-        } else {
-          store.setFirstName(parts[0]);
-          store.setLastName(parts.slice(1).join(' '));
-        }
-        hydratedFields.push('firstName', 'lastName');
+        store.setName(name);
+        hydratedFields.push('name');
       }
       if (nickname) {
         store.setNickname(nickname);
@@ -680,44 +661,33 @@ function OnboardingDraftHydrator() {
         }
       }
 
-      if (__DEV__ && hydratedFields.length > 0) {
-        console.log(`[BASIC_HYDRATE] source=user (authoritative) fields=${JSON.stringify(hydratedFields)}`);
+      if (__DEV__ && DEBUG_ONBOARDING_HYDRATION && hydratedFields.length > 0) {
+        console.log(`[BASIC_HYDRATE] user fields=${hydratedFields.length}`);
       }
     }
 
     // Hydrate face verification status flags
     if (onboardingStatus.faceVerificationPassed) {
       setFaceVerificationPassed(true);
-      if (__DEV__) console.log('[ONB_DRAFT] Hydrated faceVerificationPassed=true');
     }
     if (onboardingStatus.faceVerificationPending) {
       setFaceVerificationPending(true);
-      if (__DEV__) console.log('[ONB_DRAFT] Hydrated faceVerificationPending=true');
     }
 
     // BUG FIX: Hydrate verification reference photo as primary display photo
-    // This ensures the reference photo is used as primary even when normalPhotoCount=0
     if (onboardingStatus.referencePhotoExists && onboardingStatus.verificationReferencePhotoId) {
       const store = useOnboardingStore.getState();
-      // Only hydrate if not already set (don't overwrite user changes)
       if (!store.verificationReferencePrimary) {
         store.setVerificationReferencePrimary({
           storageId: onboardingStatus.verificationReferencePhotoId,
-          url: '', // Will be fetched in UI via getUrl() if needed
+          url: '',
         });
-        if (__DEV__) {
-          console.log('[REF_PRIMARY] Hydrated verification reference photo', {
-            exists: true,
-            source: 'backend',
-            storageId: onboardingStatus.verificationReferencePhotoId.substring(0, 12) + '...',
-          });
-        }
+        if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[REF_PRIMARY] hydrated ref photo');
       }
     }
 
-    // P0 FIX #1: Only mark hydration complete AFTER all steps succeed
     hasHydratedRef.current = true;
-    if (__DEV__) console.log('[ONB_DRAFT] Hydration complete');
+    if (__DEV__ && DEBUG_ONBOARDING_HYDRATION) console.log('[ONB_DRAFT] complete');
   }, [userId, authHydrated, onboardingHydrated, onboardingStatus, hydrateFromDraft, setFaceVerificationPassed, setFaceVerificationPending]);
 
   return null;
@@ -746,9 +716,195 @@ function DeviceFingerprintCollector() {
   return null;
 }
 
+/**
+ * PresenceAndLocationManager - Handles presence heartbeat and location publish
+ *
+ * PRESENCE FIX: Ensures "Online now" is displayed correctly on Discover cards.
+ * LOCATION FIX: Ensures fresh location is published to backend for distance calculation.
+ *
+ * This component:
+ * 1. Sends heartbeat to backend on app foreground (updates lastActive)
+ * 2. Sends heartbeat periodically while app is active (every 2 minutes)
+ * 3. Publishes location to backend when available (updates latitude/longitude for distance)
+ */
+function PresenceAndLocationManager() {
+  // This hook handles all the presence and location logic
+  usePresenceAndLocation();
+  return null;
+}
+
+/**
+ * BackgroundLocationManager - Starts background location tracking
+ *
+ * SAFETY:
+ * - Only starts when user is authenticated
+ * - Respects OS permissions (requests if needed)
+ * - Does NOT modify existing Nearby logic
+ * - Uses existing publishLocation mutation
+ * - Updates every ~20 min with 200m distance filter
+ *
+ * HARDENING (v2):
+ * - Respects user's preferred location mode (foreground vs background)
+ * - Only requests background permission if user selected background mode
+ * - Gracefully falls back to foreground-only if background denied
+ */
+function BackgroundLocationManager() {
+  const userId = useAuthStore((s) => s.userId);
+  const authHydrated = useAuthStore((s) => s._hasHydrated);
+  const hasStartedRef = useRef(false);
+
+  useEffect(() => {
+    // Wait for auth hydration
+    if (!authHydrated) return;
+
+    // Only start once per session and when user is logged in
+    if (hasStartedRef.current || !userId) return;
+    hasStartedRef.current = true;
+
+    // Start background location (respects user's preferred mode)
+    startBackgroundLocation().then((result) => {
+      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) {
+        console.log(`[BG_MANAGER] init: ${result.effectiveMode}, ok=${result.success}`);
+      }
+    }).catch((error) => {
+      console.warn('[BG_MANAGER] start failed:', error?.message);
+    });
+  }, [userId, authHydrated]);
+
+  return null;
+}
+
+/**
+ * CrossedPathToastManager - Shows in-app toast for crossed-path events globally
+ *
+ * BEHAVIOR:
+ * - Queries crossed-path history when app is foregrounded
+ * - Compares latest createdAt with AsyncStorage lastSeen timestamp
+ * - Shows tappable toast if new crossings detected
+ * - Uses 10-minute cooldown to prevent spam
+ * - Only triggers when user is authenticated and not on crossed-paths screen
+ *
+ * SAFETY:
+ * - READ-ONLY: Only reads from backend, no mutations
+ * - Non-blocking: silent failures don't affect app
+ */
+const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
+const TOAST_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+
+function CrossedPathToastManager() {
+  const router = useRouter();
+  const segments = useSegments();
+  const token = useAuthStore((s) => s.token);
+  const authHydrated = useAuthStore((s) => s._hasHydrated);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const lastToastTimeRef = useRef<number>(0);
+  const mountedRef = useRef(true);
+  const hasCheckedOnMountRef = useRef(false);
+
+  // Track mounted state
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  // Query crossed-path history (live mode only)
+  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  const crossedPathsSummary = useQuery(
+    api.crossedPaths.getCrossedPathSummary,
+    !isDemoMode && token ? { token } : 'skip'
+  );
+
+  // Check for new crossed paths and show toast
+  const checkAndShowToast = useCallback(async () => {
+    // Guard: must be authenticated and have data
+    if (!crossedPathsSummary || crossedPathsSummary.count === 0) return;
+    if (!mountedRef.current) return;
+
+    // Guard: don't show if already on crossed-paths screen
+    const currentPath = segments.join('/');
+    if (currentPath.includes('crossed-paths')) return;
+
+    // Find the latest createdAt timestamp
+    const latestCreatedAt = crossedPathsSummary.latestCreatedAt ?? 0;
+    if (!latestCreatedAt) return;
+
+    try {
+      // Get last seen timestamp from AsyncStorage
+      const lastSeenStr = await AsyncStorage.getItem(CROSSED_PATHS_LAST_SEEN_KEY);
+      const lastSeen = lastSeenStr ? parseInt(lastSeenStr, 10) : 0;
+
+      // Check if there are new crossings
+      if (latestCreatedAt > lastSeen) {
+        const now = Date.now();
+        const timeSinceLastToast = now - lastToastTimeRef.current;
+
+        // Check cooldown
+        if (timeSinceLastToast >= TOAST_COOLDOWN_MS) {
+          lastToastTimeRef.current = now;
+
+          // Show toast with navigation callback
+          Toast.show(
+            'You crossed paths with someone nearby',
+            undefined,
+            () => safePush(router, '/(main)/crossed-paths' as any, 'global-toast->crossed-paths')
+          );
+
+          // Update lastSeen to prevent duplicate toasts
+          // (Note: User will still see badge until they actually visit the screen)
+          // We intentionally do NOT update lastSeen here - let the crossed-paths screen do that
+          // This ensures the badge remains visible until user actually views the screen
+        }
+      }
+    } catch (error) {
+      // Silent failure - AsyncStorage errors are non-critical
+      if (__DEV__) {
+        console.warn('[CROSSED_TOAST] Failed to check lastSeen:', error);
+      }
+    }
+  }, [crossedPathsSummary, segments, router]);
+
+  // Check on initial data load (after mount)
+  useEffect(() => {
+    if (!authHydrated || !token) return;
+    if (hasCheckedOnMountRef.current) return;
+    if (!crossedPathsSummary || crossedPathsSummary.count === 0) return;
+
+    hasCheckedOnMountRef.current = true;
+    checkAndShowToast();
+  }, [authHydrated, token, crossedPathsSummary, checkAndShowToast]);
+
+  // Check on app resume (foreground)
+  useEffect(() => {
+    if (isDemoMode) return;
+    if (!authHydrated || !token) return;
+
+    const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      // If app was in background and is now active
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        // Give a small delay for query to potentially refresh
+        setTimeout(() => {
+          if (mountedRef.current) {
+            checkAndShowToast();
+          }
+        }, 500);
+      }
+      appStateRef.current = nextAppState;
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription.remove();
+  }, [authHydrated, token, checkAndShowToast]);
+
+  return null;
+}
+
 export default function RootLayout() {
   // Milestone A: RootLayout first render
   markTiming('root_layout');
+  log.info('[APP]', 'RootLayout rendering');
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -763,6 +919,9 @@ export default function RootLayout() {
           <PhotoSyncManager />
           <OnboardingDraftHydrator />
           <DeviceFingerprintCollector />
+          <PresenceAndLocationManager />
+          <BackgroundLocationManager />
+          <CrossedPathToastManager />
           <Stack screenOptions={{ headerShown: false }}>
             <Stack.Screen name="index" />
             <Stack.Screen name="demo-profile" />

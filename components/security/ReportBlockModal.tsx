@@ -286,13 +286,16 @@ export function ReportBlockModal({
         </>
       )}
 
-      {/* Uncrush */}
-      <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>
-        <Ionicons name="heart-dislike-outline" size={20} color={COLORS.textLight} />
-        <Text style={styles.actionText}>Uncrush</Text>
-      </TouchableOpacity>
+      {isDemoMode && (
+        <>
+          <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>
+            <Ionicons name="heart-dislike-outline" size={20} color={COLORS.textLight} />
+            <Text style={styles.actionText}>Uncrush</Text>
+          </TouchableOpacity>
 
-      <View style={styles.divider} />
+          <View style={styles.divider} />
+        </>
+      )}
 
       {/* Block */}
       <TouchableOpacity style={styles.actionRow} onPress={handleBlock}>

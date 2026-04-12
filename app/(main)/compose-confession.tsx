@@ -10,7 +10,6 @@ import {
   Switch,
   Alert,
   ScrollView,
-  Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -43,6 +42,8 @@ export default function ComposeConfessionScreen() {
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
   const addConfession = useConfessionStore((s) => s.addConfession);
+  const canPostConfession = useConfessionStore((s) => s.canPostConfession);
+  const recordConfessionTimestamp = useConfessionStore((s) => s.recordConfessionTimestamp);
   const setTimedReveal = useConfessionStore((s) => s.setTimedReveal);
   const createConfessionMutation = useMutation(api.confessions.createConfession);
 
@@ -105,8 +106,6 @@ export default function ComposeConfessionScreen() {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const inputRef = useRef<TextInput>(null);
-  const toastOpacity = useRef(new Animated.Value(0)).current;
-  const [showToast, setShowToast] = useState(false);
 
   // Listen for person picker result
   const personPickerResult = useInteractionStore((s) => s.personPickerResult);
@@ -121,9 +120,18 @@ export default function ComposeConfessionScreen() {
 
   const canSubmit = text.trim().length >= 10 && !isSubmitting;
 
-  const handleSubmit = useCallback(() => {
+  const handleSubmit = useCallback(async () => {
     if (!canSubmit || isSubmitting) return;
     const trimmed = text.trim();
+
+    if (isDemoMode && !canPostConfession()) {
+      Alert.alert(
+        'Limit Reached',
+        "You've reached today's confession limit. Try again later."
+      );
+      return;
+    }
+
     const phonePattern = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
     const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
     if (phonePattern.test(trimmed) || emailPattern.test(trimmed)) {
@@ -142,7 +150,6 @@ export default function ComposeConfessionScreen() {
       return;
     }
 
-    const confessionId = `conf_new_${Date.now()}`;
     const finalTarget = confessToSomeone ? targetUserId : undefined;
 
     // Get author info for non-anonymous confessions
@@ -161,75 +168,76 @@ export default function ComposeConfessionScreen() {
       return;
     }
 
-    addConfession({
-      id: confessionId,
-      userId: currentUserId,
-      text: trimmed,
-      isAnonymous,
-      mood: 'emotional' as const,
-      topEmojis: [],
-      replyPreviews: [],
-      targetUserId: finalTarget,
-      visibility: 'global' as const,
-      replyCount: 0,
-      reactionCount: 0,
-      createdAt: Date.now(),
-      revealPolicy: revealPolicy || 'never',
-      // Include author identity for non-anonymous confessions
-      ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
-      ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
-      ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
-      ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
-    });
+    try {
+      if (isDemoMode) {
+        const createdAt = Date.now();
+        const confessionId = `conf_new_${Date.now()}`;
 
-    // Debug event logging
-    logDebugEvent('CONFESSION_CREATED', 'New confession posted');
-    if (finalTarget) {
-      logDebugEvent('CONFESSION_TAGGED', 'Confession tagged someone');
+        addConfession({
+          id: confessionId,
+          userId: currentUserId,
+          text: trimmed,
+          isAnonymous,
+          mood: 'emotional' as const,
+          topEmojis: [],
+          replyPreviews: [],
+          targetUserId: finalTarget,
+          visibility: 'global' as const,
+          replyCount: 0,
+          reactionCount: 0,
+          createdAt,
+          expiresAt: createdAt + 24 * 60 * 60 * 1000,
+          revealPolicy: revealPolicy || 'never',
+          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+        });
+        recordConfessionTimestamp();
+
+        if (timedRevealOption && timedRevealOption !== 'never' && finalTarget) {
+          setTimedReveal(confessionId, timedRevealOption, finalTarget);
+        }
+
+        if (finalTarget) {
+          const { addSecretCrush } = useConfessionStore.getState();
+          addSecretCrush({
+            id: `sc_new_${Date.now()}`,
+            fromUserId: currentUserId,
+            toUserId: finalTarget,
+            confessionText: trimmed,
+            isRevealed: false,
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 1000 * 60 * 60 * 48,
+          });
+        }
+      } else {
+        const mutationPayload = {
+          text: trimmed,
+          isAnonymous,
+          mood: 'emotional' as any,
+          visibility: 'global' as any,
+          ...(finalTarget ? { taggedUserId: finalTarget as any } : {}),
+          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+        };
+        if (__DEV__) console.log('[COMPOSE] mutation payload:', mutationPayload);
+        await createConfessionMutation(mutationPayload);
+      }
+
+      logDebugEvent('CONFESSION_CREATED', 'New confession posted');
+      if (finalTarget) {
+        logDebugEvent('CONFESSION_TAGGED', 'Confession tagged someone');
+      }
+
+      router.back();
+    } catch (error: any) {
+      setIsSubmitting(false);
+      Alert.alert('Error', error?.message || 'Failed to post confession');
     }
-
-    if (timedRevealOption && timedRevealOption !== 'never' && finalTarget) {
-      setTimedReveal(confessionId, timedRevealOption, finalTarget);
-    }
-
-    if (finalTarget) {
-      const { addSecretCrush } = useConfessionStore.getState();
-      addSecretCrush({
-        id: `sc_new_${Date.now()}`,
-        fromUserId: currentUserId,
-        toUserId: finalTarget,
-        confessionText: trimmed,
-        isRevealed: false,
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 1000 * 60 * 60 * 48,
-      });
-    }
-
-    // Sync to backend (only if we have a valid userId)
-    if (!isDemoMode && currentUserId) {
-      const mutationPayload = {
-        userId: currentUserId as any,
-        text: trimmed,
-        isAnonymous,
-        mood: 'emotional' as any,
-        visibility: 'global' as any,
-        // Include tagged user if confessing to someone
-        ...(finalTarget ? { taggedUserId: finalTarget as any } : {}),
-        // Include author identity for non-anonymous confessions
-        ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
-        ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
-        ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
-        ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
-      };
-      if (__DEV__) console.log('[COMPOSE] mutation payload:', mutationPayload);
-      createConfessionMutation(mutationPayload).catch((error: any) => {
-        Alert.alert('Error', error.message || 'Failed to post confession');
-      });
-    }
-
-    // Navigate back
-    router.back();
-  }, [canSubmit, isSubmitting, text, isAnonymous, confessToSomeone, targetUserId, revealPolicy, timedRevealOption, currentUserId, addConfession, setTimedReveal, createConfessionMutation, router]);
+  }, [canSubmit, isSubmitting, text, isAnonymous, confessToSomeone, targetUserId, revealPolicy, timedRevealOption, currentUserId, addConfession, canPostConfession, recordConfessionTimestamp, setTimedReveal, createConfessionMutation, router, isDemoMode]);
 
   const handleEmojiSelected = (emoji: any) => {
     setText((prev) => prev + emoji.emoji);
@@ -242,7 +250,8 @@ export default function ComposeConfessionScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
     >
       {/* Header */}
       <View style={[styles.header, { paddingTop: Math.max(insets.top, 16) }]}>
@@ -263,10 +272,20 @@ export default function ComposeConfessionScreen() {
 
       <ScrollView
         style={styles.scrollBody}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 28 }]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
+        <View style={styles.introCard}>
+          <View style={styles.introIcon}>
+            <Ionicons name="sparkles-outline" size={18} color={COLORS.primary} />
+          </View>
+          <View style={styles.introCopy}>
+            <Text style={styles.introTitle}>Share something real</Text>
+            <Text style={styles.introSubtitle}>Keep it thoughtful, kind, and free of personal contact details.</Text>
+          </View>
+        </View>
+
         {/* Safety text */}
         <View style={styles.safetyBanner}>
           <Ionicons name="shield-checkmark" size={14} color={COLORS.primary} />
@@ -334,7 +353,7 @@ export default function ComposeConfessionScreen() {
                   ? targetName
                     ? `Sending to ${targetName}`
                     : 'Tap to pick a person'
-                  : 'Send a secret confession to someone'}
+                  : 'Send this to someone you have already liked'}
               </Text>
             </View>
           </View>
@@ -363,57 +382,61 @@ export default function ComposeConfessionScreen() {
           </TouchableOpacity>
         )}
 
-        {/* Reveal Policy */}
-        <View style={styles.toggleRow}>
-          <View style={styles.toggleInfo}>
-            <Ionicons
-              name={revealPolicy === 'allow_later' ? 'eye' : 'eye-off'}
-              size={20}
-              color={revealPolicy === 'allow_later' ? COLORS.primary : COLORS.textMuted}
-            />
-            <View>
-              <Text style={styles.toggleLabel}>Allow Reveal Later</Text>
-              <Text style={styles.toggleDesc}>
-                {revealPolicy === 'allow_later'
-                  ? 'You can reveal your identity in chat'
-                  : 'Identity stays hidden forever'}
-              </Text>
-            </View>
-          </View>
-          <Switch
-            value={revealPolicy === 'allow_later'}
-            onValueChange={(val) => setRevealPolicy(val ? 'allow_later' : 'never')}
-            trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
-            thumbColor={revealPolicy === 'allow_later' ? COLORS.primary : '#f4f3f4'}
-          />
-        </View>
-
-        {/* Timed Reveal */}
-        {confessToSomeone && revealPolicy === 'allow_later' && (
-          <View style={styles.timedSection}>
-            <Text style={styles.timedLabel}>Auto-reveal identity after:</Text>
-            <View style={styles.timedRow}>
-              {TIMED_OPTIONS.map((opt) => (
-                <TouchableOpacity
-                  key={opt.value}
-                  style={[
-                    styles.timedChip,
-                    timedRevealOption === opt.value && styles.timedChipActive,
-                  ]}
-                  onPress={() => setTimedRevealOption(opt.value)}
-                >
-                  <Text
-                    style={[
-                      styles.timedChipText,
-                      timedRevealOption === opt.value && styles.timedChipTextActive,
-                    ]}
-                  >
-                    {opt.label}
+        {isDemoMode && (
+          <>
+            {/* Reveal Policy */}
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleInfo}>
+                <Ionicons
+                  name={revealPolicy === 'allow_later' ? 'eye' : 'eye-off'}
+                  size={20}
+                  color={revealPolicy === 'allow_later' ? COLORS.primary : COLORS.textMuted}
+                />
+                <View>
+                  <Text style={styles.toggleLabel}>Allow Reveal Later</Text>
+                  <Text style={styles.toggleDesc}>
+                    {revealPolicy === 'allow_later'
+                      ? 'You can reveal your identity in chat'
+                      : 'Identity stays hidden forever'}
                   </Text>
-                </TouchableOpacity>
-              ))}
+                </View>
+              </View>
+              <Switch
+                value={revealPolicy === 'allow_later'}
+                onValueChange={(val) => setRevealPolicy(val ? 'allow_later' : 'never')}
+                trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+                thumbColor={revealPolicy === 'allow_later' ? COLORS.primary : '#f4f3f4'}
+              />
             </View>
-          </View>
+
+            {/* Timed Reveal */}
+            {confessToSomeone && revealPolicy === 'allow_later' && (
+              <View style={styles.timedSection}>
+                <Text style={styles.timedLabel}>Auto-reveal identity after:</Text>
+                <View style={styles.timedRow}>
+                  {TIMED_OPTIONS.map((opt) => (
+                    <TouchableOpacity
+                      key={opt.value}
+                      style={[
+                        styles.timedChip,
+                        timedRevealOption === opt.value && styles.timedChipActive,
+                      ]}
+                      onPress={() => setTimedRevealOption(opt.value)}
+                    >
+                      <Text
+                        style={[
+                          styles.timedChipText,
+                          timedRevealOption === opt.value && styles.timedChipTextActive,
+                        ]}
+                      >
+                        {opt.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            )}
+          </>
         )}
       </ScrollView>
 
@@ -430,7 +453,7 @@ export default function ComposeConfessionScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: COLORS.white,
+    backgroundColor: COLORS.backgroundDark,
   },
   header: {
     flexDirection: 'row',
@@ -468,15 +491,56 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingBottom: 40,
+    paddingTop: 12,
+  },
+  introCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderRadius: 18,
+    backgroundColor: COLORS.white,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+  },
+  introIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(255,107,107,0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  introCopy: {
+    flex: 1,
+  },
+  introTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 3,
+  },
+  introSubtitle: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: COLORS.textMuted,
   },
   safetyBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    backgroundColor: 'rgba(255,107,107,0.06)',
+    marginHorizontal: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    backgroundColor: COLORS.white,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 0,
+    borderColor: COLORS.border,
   },
   safetyText: {
     fontSize: 12,
@@ -487,8 +551,10 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 24,
     color: COLORS.text,
+    marginHorizontal: 16,
     paddingHorizontal: 16,
     paddingTop: 16,
+    backgroundColor: COLORS.white,
     minHeight: 120,
     maxHeight: 220,
   },
@@ -496,10 +562,16 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 16,
+    marginHorizontal: 16,
     paddingHorizontal: 16,
     paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.white,
+    borderBottomLeftRadius: 18,
+    borderBottomRightRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
+    borderColor: COLORS.border,
+    marginBottom: 12,
   },
   charCount: {
     fontSize: 12,
@@ -509,10 +581,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    marginHorizontal: 16,
     paddingHorizontal: 16,
     paddingVertical: 14,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: COLORS.border,
+    backgroundColor: COLORS.white,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+    marginBottom: 12,
   },
   toggleInfo: {
     flexDirection: 'row',
@@ -537,9 +613,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 10,
     marginHorizontal: 16,
-    marginBottom: 4,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,107,107,0.08)',
+    marginTop: -4,
+    marginBottom: 12,
+    borderRadius: 16,
+    backgroundColor: COLORS.white,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
   },
   pickPersonText: {
     fontSize: 14,
@@ -547,9 +626,15 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
   timedSection: {
+    marginHorizontal: 16,
+    marginTop: -4,
     paddingHorizontal: 16,
     paddingTop: 8,
     paddingBottom: 14,
+    borderRadius: 16,
+    backgroundColor: COLORS.white,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
   },
   timedLabel: {
     fontSize: 13,

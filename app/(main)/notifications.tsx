@@ -6,14 +6,17 @@ import {
   SectionList,
   TouchableOpacity,
   RefreshControl,
+  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useConvex } from 'convex/react';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
 import { useNotifications, useDemoNotifStore, type AppNotification } from '@/hooks/useNotifications';
 import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { api } from '@/convex/_generated/api';
 import { log } from '@/utils/logger';
 
 interface NotificationSection {
@@ -21,8 +24,12 @@ interface NotificationSection {
   data: AppNotification[];
 }
 
+// DEFENSIVE: Types that must NEVER render in notification screens (safety net if upstream filtering fails)
+const BELL_RENDER_EXCLUDED = new Set(['message', 'new_message']);
+
 export default function NotificationsScreen() {
   const router = useRouter();
+  const convex = useConvex();
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
   // STABILITY: Track refresh timeout for cleanup on unmount
@@ -96,7 +103,7 @@ export default function NotificationsScreen() {
   };
 
   // 4-4: Pass notificationId in navigation params so destination knows why it was opened
-  const handleNotificationPress = (notification: AppNotification) => {
+  const handleNotificationPress = async (notification: AppNotification) => {
     if (!notification.isRead) {
       markRead(notification._id);
     }
@@ -104,14 +111,18 @@ export default function NotificationsScreen() {
     // 4-4: Build common query params for context
     const notifParams = `source=notification&notificationId=${notification._id}`;
     const dedupeParam = notification.dedupeKey ? `&dedupeKey=${encodeURIComponent(notification.dedupeKey)}` : '';
+    const actorUserId =
+      notification.data?.actorUserId ??
+      notification.data?.otherUserId ??
+      notification.data?.userId;
 
     switch (notification.type) {
       case 'match':
       case 'new_match':
       case 'match_created':
-        if (notification.data?.otherUserId) {
-          const mId = notification.data.matchId ?? `match_${notification.data.otherUserId}`;
-          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${notification.data.otherUserId}&${notifParams}${dedupeParam}` as any);
+        if (actorUserId) {
+          const mId = notification.data?.matchId ?? `match_${actorUserId}`;
+          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${actorUserId}&${notifParams}${dedupeParam}` as any);
         }
         break;
       case 'like':
@@ -121,11 +132,11 @@ export default function NotificationsScreen() {
       case 'super_like_received': {
         // INVARIANT: A like_received notification may exist IF AND ONLY IF a pending Like exists
         // Validate the like still exists before navigating to Likes screen
-        const likeUserId = notification.data?.otherUserId;
+        const likeUserId = actorUserId;
 
         // Guard: Prevent crash if likeUserId is missing
         if (!likeUserId) {
-          console.warn('[Notifications] like notification missing otherUserId, skipping navigation');
+          console.warn('[Notifications] like notification missing actorUserId, skipping navigation');
           break;
         }
 
@@ -173,13 +184,14 @@ export default function NotificationsScreen() {
         }
         break;
       case 'crossed_paths': {
-        // FROZEN (2026-03-06): Nearby feature disabled for stability
-        // Redirect to home instead of nearby to prevent crashes
+        // Navigate to crossed-paths screen
         router.push({
-          pathname: '/(main)/(tabs)/home',
+          pathname: '/(main)/crossed-paths',
           params: {
             source: 'notification',
             notificationId: notification._id,
+            // If notification contains userId, pass it for potential highlighting
+            ...(notification.data?.userId && { highlightUserId: notification.data.userId }),
           },
         } as any);
         break;
@@ -188,14 +200,42 @@ export default function NotificationsScreen() {
         router.push(`/(main)/(tabs)/home?${notifParams}${dedupeParam}` as any);
         break;
       case 'system':
-        router.push(`/(main)/settings?${notifParams}${dedupeParam}` as any);
+        router.push(`/(main)/(tabs)/profile?${notifParams}${dedupeParam}` as any);
         break;
       case 'subscription':
         router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);
         break;
+      case 'comment_connect':
+        router.push(`/(main)/comment-connect-requests?${notifParams}${dedupeParam}` as any);
+        break;
       case 'confession_reaction':
       case 'confession_reply':
         if (notification.data?.confessionId) {
+          try {
+            const confession = await convex.query(api.confessions.getConfession, {
+              confessionId: notification.data.confessionId as any,
+            });
+
+            if (!confession || (confession.expiresAt !== undefined && confession.expiresAt <= Date.now())) {
+              Alert.alert(
+                'Confession unavailable',
+                'That confession expired or was removed before you opened it.'
+              );
+              return;
+            }
+          } catch (error) {
+            log.warn('[Notifications]', 'failed to validate confession notification target', {
+              notificationId: notification._id,
+              confessionId: notification.data.confessionId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            Alert.alert(
+              'Unable to open confession',
+              'Please try again in a moment.'
+            );
+            return;
+          }
+
           router.push({
             pathname: '/(main)/confession-thread',
             params: {
@@ -236,6 +276,8 @@ export default function NotificationsScreen() {
         return 'information-circle';
       case 'subscription':
         return 'card';
+      case 'comment_connect':
+        return 'chatbubble-ellipses';
       case 'weekly_refresh':
         return 'refresh';
       case 'confession_reaction':
@@ -269,6 +311,8 @@ export default function NotificationsScreen() {
         return '#607D8B';
       case 'system':
         return '#2196F3';
+      case 'comment_connect':
+        return COLORS.primary;
       case 'confession_reaction':
       case 'confession_reply':
         return '#9C27B0';
@@ -323,7 +367,9 @@ export default function NotificationsScreen() {
     </TouchableOpacity>
   );
 
-  const groupedNotifications = groupNotifications(notifications);
+  // DEFENSIVE: Filter out message types at render level (safety net), then group
+  const safeNotifications = notifications.filter((n) => !BELL_RENDER_EXCLUDED.has(n.type));
+  const groupedNotifications = groupNotifications(safeNotifications);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>

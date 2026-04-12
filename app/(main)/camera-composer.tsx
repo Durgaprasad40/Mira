@@ -1,9 +1,17 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Alert,
+  View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator,
 } from 'react-native';
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import { Video, ResizeMode } from 'expo-av';
+import {
+  Camera,
+  useCameraDevice,
+  useCameraPermission,
+  useMicrophonePermission,
+  type PhotoFile,
+  type VideoFile,
+} from 'react-native-vision-camera';
+// FFmpegKit removed - Maven artifacts unavailable (project retired Jan 2025)
+import { useVideoPlayer, VideoView } from 'expo-video';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
 import { Image } from 'expo-image';
@@ -18,9 +26,18 @@ const C = INCOGNITO_COLORS;
 const MAX_VIDEO_SEC_TOD = 60;
 const MAX_VIDEO_SEC_SECURE = 30;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// FRONT CAMERA VIDEO MIRROR FIX:
+// - isMirrored={true} for front camera: gives "mirror" orientation where
+//   user's LEFT hand appears on LEFT side (natural selfie experience)
+// - isMirrored={false} for back camera: gives "real world" orientation
+// The isMirrored prop is set dynamically based on `facing` state.
+// ═══════════════════════════════════════════════════════════════════════════
+
 export default function CameraComposerScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+
   const params = useLocalSearchParams<{
     mode?: string;
     promptId?: string;
@@ -31,14 +48,44 @@ export default function CameraComposerScreen() {
 
   const isTodAnswer = params.mode === 'tod_answer' && params.todConversationId;
   const isSecureCapture = params.mode === 'secure_capture' && params.conversationId;
+  const isPromptAnswer = !!params.promptId;
   const MAX_VIDEO_SEC = isSecureCapture ? MAX_VIDEO_SEC_SECURE : MAX_VIDEO_SEC_TOD;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // NAVIGATION GUARD: Prevent unexpected opening of camera-composer
+  // ═══════════════════════════════════════════════════════════════════════════
+  const hasValidParams = isTodAnswer || isSecureCapture || isPromptAnswer;
+  const isNavigatingAwayRef = useRef(false);
+
+  if (!hasValidParams && !isNavigatingAwayRef.current) {
+    isNavigatingAwayRef.current = true;
+    setTimeout(() => {
+      try {
+        if (router.canDismiss?.()) {
+          router.dismiss();
+        } else if (router.canGoBack()) {
+          router.back();
+        } else {
+          router.replace('/(main)/(tabs)/home');
+        }
+      } catch {
+        router.replace('/(main)/(tabs)/home');
+      }
+    }, 0);
+    return null;
+  }
 
   const [captureMode, setCaptureMode] = useState<'photo' | 'video'>(
     params.mode === 'video' ? 'video' : 'photo'
   );
 
-  const [permission, requestPermission] = useCameraPermissions();
+  // react-native-vision-camera permissions
+  const { hasPermission: hasCameraPermission, requestPermission: requestCameraPermission } = useCameraPermission();
+  const { hasPermission: hasMicPermission, requestPermission: requestMicPermission } = useMicrophonePermission();
   const [facing, setFacing] = useState<'front' | 'back'>('front');
+
+  // Get camera device
+  const device = useCameraDevice(facing);
 
   // Recording state
   const [isRecordingVideo, setIsRecordingVideo] = useState(false);
@@ -52,8 +99,20 @@ export default function CameraComposerScreen() {
   const [isCapturing, setIsCapturing] = useState(false);
   const [mediaVisibility, setMediaVisibility] = useState<TodMediaVisibility>('owner_only');
 
-  const cameraRef = useRef<CameraView>(null);
+  const cameraRef = useRef<Camera>(null);
   const videoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Video preview player
+  const previewPlayer = useVideoPlayer(capturedUri ?? '', (player) => {
+    player.loop = true;
+    player.muted = false;
+  });
+
+  useEffect(() => {
+    if (capturedUri && capturedType === 'video') {
+      previewPlayer.play();
+    }
+  }, [capturedUri, capturedType, previewPlayer]);
 
   // Cleanup timer on unmount
   useEffect(() => {
@@ -62,33 +121,75 @@ export default function CameraComposerScreen() {
     };
   }, []);
 
-  // PHOTO: Clean flow
+  // PHOTO: Take photo with vision camera
   const handleTakePhoto = async () => {
     if (!cameraRef.current || isCapturing) return;
     setIsCapturing(true);
 
     try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.8,
-        shutterSound: false
-      });
+      const photo: PhotoFile = await cameraRef.current.takePhoto();
 
-      if (photo?.uri) {
-        // Set state immediately - go to preview
-        setCapturedUri(photo.uri);
+      if (photo?.path) {
+        const photoUri = `file://${photo.path}`;
+        setCapturedUri(photoUri);
         setCapturedType('photo');
         setCapturedFacing(facing);
       }
     } catch (e) {
+      if (__DEV__) console.warn('[CameraComposer] Photo error:', e);
       Alert.alert('Error', 'Failed to take photo');
     } finally {
       setIsCapturing(false);
     }
   };
 
+  // VIDEO: Recording callbacks
+  const onRecordingFinished = useCallback((video: VideoFile) => {
+    if (__DEV__) console.log('[CameraComposer] Recording finished:', video.path);
+
+    if (videoTimerRef.current) {
+      clearInterval(videoTimerRef.current);
+      videoTimerRef.current = null;
+    }
+
+    setIsRecordingVideo(false);
+    const videoUri = `file://${video.path}`;
+    // Video orientation is handled at recording time via isMirrored prop
+    setCapturedUri(videoUri);
+  }, []);
+
+  const onRecordingError = useCallback((error: any) => {
+    if (__DEV__) console.warn('[CameraComposer] Recording error:', error);
+
+    if (videoTimerRef.current) {
+      clearInterval(videoTimerRef.current);
+      videoTimerRef.current = null;
+    }
+
+    setIsRecordingVideo(false);
+    Alert.alert('Error', 'Video recording failed');
+  }, []);
+
   // VIDEO: Start recording
   const handleStartVideo = async () => {
-    if (!cameraRef.current || isRecordingVideo) return;
+    if (__DEV__) console.log('[CameraComposer] handleStartVideo called');
+
+    if (!cameraRef.current || isRecordingVideo) {
+      return;
+    }
+
+    // Check microphone permission for video recording
+    if (!hasMicPermission) {
+      const result = await requestMicPermission();
+      if (!result) {
+        Alert.alert(
+          'Microphone Required',
+          'Video recording requires microphone access. Please grant permission in Settings.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+    }
 
     // Set state BEFORE recording
     setIsRecordingVideo(true);
@@ -108,21 +209,14 @@ export default function CameraComposerScreen() {
     }, 1000);
 
     try {
-      const video = await cameraRef.current.recordAsync({
-        maxDuration: MAX_VIDEO_SEC
+      // Start recording with vision camera
+      cameraRef.current.startRecording({
+        onRecordingFinished,
+        onRecordingError,
       });
-
-      // Recording finished - set URI and go to preview
-      if (video?.uri) {
-        setCapturedUri(video.uri);
-        setIsRecordingVideo(false);
-        if (videoTimerRef.current) {
-          clearInterval(videoTimerRef.current);
-          videoTimerRef.current = null;
-        }
-      }
+      if (__DEV__) console.log('[CameraComposer] Recording started');
     } catch (e) {
-      // Recording was stopped or failed
+      if (__DEV__) console.warn('[CameraComposer] Failed to start recording:', e);
       setIsRecordingVideo(false);
       if (videoTimerRef.current) {
         clearInterval(videoTimerRef.current);
@@ -132,16 +226,24 @@ export default function CameraComposerScreen() {
   };
 
   // VIDEO: Stop recording
-  const handleStopVideo = () => {
-    if (!cameraRef.current) return;
+  const handleStopVideo = async () => {
+    if (__DEV__) console.log('[CameraComposer] handleStopVideo called');
+
+    if (!cameraRef.current) {
+      return;
+    }
 
     if (videoTimerRef.current) {
       clearInterval(videoTimerRef.current);
       videoTimerRef.current = null;
     }
 
-    // This triggers recordAsync to resolve
-    cameraRef.current.stopRecording();
+    try {
+      await cameraRef.current.stopRecording();
+      if (__DEV__) console.log('[CameraComposer] Recording stopped');
+    } catch (e) {
+      if (__DEV__) console.warn('[CameraComposer] Stop recording error:', e);
+    }
   };
 
   // SUBMIT: Send to chat
@@ -159,6 +261,7 @@ export default function CameraComposerScreen() {
       const fileName = `${Date.now()}.${ext}`;
 
       // MIRROR FIX: Flip front camera photos
+      // (Videos are fixed at recording time with isMirrored={false})
       let finalUri = capturedUri;
       if (capturedType === 'photo' && capturedFacing === 'front') {
         try {
@@ -187,6 +290,13 @@ export default function CameraComposerScreen() {
         storageKey = 'tod_captured_media';
       }
 
+      // ═══════════════════════════════════════════════════════════════════════
+      // VIDEO ORIENTATION:
+      // - Front camera: isMirrored={true} at recording time gives mirror orientation
+      //   (LEFT hand shows as LEFT) - no playback transform needed
+      // - Back camera: isMirrored={false} gives real-world orientation - no transform
+      // - Both: video FILE is already correct, no playback correction needed
+      // ═══════════════════════════════════════════════════════════════════════
       setHandoff(storageKey, {
         uri: permanentUri,
         type: capturedType,
@@ -194,7 +304,7 @@ export default function CameraComposerScreen() {
         promptId: params.promptId,
         durationSec: capturedType === 'video' ? videoSeconds : undefined,
         visibility: isSecureCapture ? undefined : mediaVisibility,
-        isMirrored: capturedType === 'video' && capturedFacing === 'front',
+        isMirrored: false, // Video file is already correct orientation - no playback transform
       });
 
       router.back();
@@ -213,18 +323,30 @@ export default function CameraComposerScreen() {
   const formatTime = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
 
   // Permission check
-  if (!permission?.granted) {
+  if (!hasCameraPermission) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.permissionBox}>
           <Ionicons name="camera-outline" size={48} color={C.textLight} />
           <Text style={styles.permissionText}>Camera access is needed</Text>
-          <TouchableOpacity style={styles.permissionBtn} onPress={requestPermission}>
+          <TouchableOpacity style={styles.permissionBtn} onPress={requestCameraPermission}>
             <Text style={styles.permissionBtnText}>Grant Access</Text>
           </TouchableOpacity>
           <TouchableOpacity onPress={() => router.back()}>
             <Text style={styles.cancelText}>Cancel</Text>
           </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  // Device not available
+  if (!device) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.permissionBox}>
+          <ActivityIndicator size="large" color={C.primary} />
+          <Text style={styles.permissionText}>Loading camera...</Text>
         </View>
       </View>
     );
@@ -249,16 +371,15 @@ export default function CameraComposerScreen() {
 
         <View style={styles.previewArea}>
           {isVideo ? (
-            // VIDEO-PREVIEW-FIX: Use expo-av Video with proper mirroring for front camera
-            <Video
-              source={{ uri: capturedUri }}
-              style={[styles.previewMedia, isFrontCamera && styles.mirrored]}
-              resizeMode={ResizeMode.CONTAIN}
-              shouldPlay={true}
-              isLooping={true}
-              isMuted={false}
+            // VIDEO PREVIEW: Video file is already correct (no transform needed)
+            <VideoView
+              player={previewPlayer}
+              style={styles.previewMedia}
+              contentFit="contain"
+              nativeControls={false}
             />
           ) : (
+            // PHOTO PREVIEW: Show mirrored for selfie UX, flip actual file on submit
             <Image
               source={{ uri: capturedUri }}
               style={[styles.previewMedia, isFrontCamera && styles.mirrored]}
@@ -305,7 +426,6 @@ export default function CameraComposerScreen() {
           </View>
         )}
 
-        {/* ANDROID-SAFE-AREA-FIX: Use safe area inset for bottom spacing */}
         <View style={[styles.previewActions, { paddingBottom: insets.bottom + 20 }]}>
           <TouchableOpacity style={styles.retakeBtn} onPress={handleRetake}>
             <Ionicons name="refresh" size={20} color={C.text} />
@@ -334,13 +454,17 @@ export default function CameraComposerScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Camera */}
+      {/* Camera - FRONT CAMERA VIDEO FIX: isMirrored=true for front camera gives mirror orientation */}
       <View style={styles.cameraWrap}>
-        <CameraView
+        <Camera
           ref={cameraRef}
           style={styles.camera}
-          facing={facing}
-          mode={captureMode === 'video' ? 'video' : 'picture'}
+          device={device}
+          isActive={true}
+          photo={captureMode === 'photo'}
+          video={captureMode === 'video'}
+          audio={captureMode === 'video'}
+          isMirrored={facing === 'front'}
         />
 
         {captureMode === 'video' && isRecordingVideo && (
@@ -353,7 +477,7 @@ export default function CameraComposerScreen() {
         )}
       </View>
 
-      {/* Bottom controls - ANDROID-SAFE-AREA-FIX: Use safe area inset */}
+      {/* Bottom controls */}
       <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 16 }]}>
         {/* Mode toggle - hide when recording */}
         {!isRecordingVideo && (
@@ -406,7 +530,6 @@ export default function CameraComposerScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
-  // Permission
   permissionBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, padding: 32 },
   permissionText: { fontSize: 16, color: C.text, textAlign: 'center' },
   permissionBtn: {
@@ -414,12 +537,10 @@ const styles = StyleSheet.create({
   },
   permissionBtnText: { fontSize: 15, fontWeight: '600', color: '#FFF' },
   cancelText: { fontSize: 14, color: C.textLight, marginTop: 8 },
-  // Top bar
   topBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingVertical: 8,
   },
-  // Camera
   cameraWrap: { flex: 1, overflow: 'hidden', borderRadius: 12, marginHorizontal: 8 },
   camera: { flex: 1 },
   videoTimerOverlay: {
@@ -429,9 +550,7 @@ const styles = StyleSheet.create({
   },
   recordingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#F44336' },
   videoTimerText: { fontSize: 13, fontWeight: '600', color: '#FFF' },
-  // Bottom - ANDROID-SAFE-AREA-FIX: paddingBottom is applied dynamically via style prop
   bottomBar: { alignItems: 'center', paddingTop: 16, gap: 12 },
-  // Mode toggle
   modeToggleRow: { flexDirection: 'row', gap: 4 },
   modeToggleBtn: {
     paddingHorizontal: 16, paddingVertical: 5, borderRadius: 12,
@@ -439,7 +558,6 @@ const styles = StyleSheet.create({
   modeToggleActive: { backgroundColor: C.surface },
   modeToggleText: { fontSize: 11, fontWeight: '700', color: C.textLight, letterSpacing: 1 },
   modeToggleTextActive: { color: C.text },
-  // Capture buttons
   captureBtn: {
     width: 72, height: 72, borderRadius: 36, borderWidth: 4, borderColor: '#FFF',
     alignItems: 'center', justifyContent: 'center',
@@ -455,7 +573,6 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   videoStopInner: { width: 28, height: 28, borderRadius: 4, backgroundColor: '#F44336' },
-  // Preview
   previewHeader: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingVertical: 10,
@@ -470,7 +587,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12,
   },
   videoDurationText: { fontSize: 12, fontWeight: '600', color: '#FFF' },
-  // ANDROID-SAFE-AREA-FIX: paddingBottom is applied dynamically via style prop
   previewActions: {
     flexDirection: 'row', justifyContent: 'center', gap: 16, paddingTop: 20,
   },
@@ -484,7 +600,6 @@ const styles = StyleSheet.create({
     backgroundColor: C.primary, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 14,
   },
   submitBtnText: { fontSize: 14, fontWeight: '600', color: '#FFF' },
-  // Visibility selector
   visibilitySection: { paddingHorizontal: 16, paddingTop: 12 },
   visibilityLabel: { fontSize: 12, fontWeight: '600', color: C.textLight, marginBottom: 8 },
   visibilityOptions: { flexDirection: 'row', gap: 12 },

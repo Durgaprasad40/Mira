@@ -1,3 +1,11 @@
+/*
+ * LOCKED (PRIVATE TAB ENTRY)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - No logic/UI changes allowed
+ */
 import React from 'react';
 import { View, StyleSheet, ActivityIndicator, Text } from 'react-native';
 import { INCOGNITO_COLORS } from '@/lib/constants';

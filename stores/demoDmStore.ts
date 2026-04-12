@@ -31,7 +31,10 @@ export interface DemoDmMessage {
   // Protected media fields (synced from privateChatStore for bubble rendering)
   isProtected?: boolean;
   protectedMedia?: {
+    localUri?: string;            // Thumbnail URI for display
+    mediaType?: 'photo' | 'video'; // Media type for icon display
     timer: number;
+    expiresDurationMs?: number;   // Timer duration in ms
     viewingMode: 'tap' | 'hold';
     screenshotAllowed: boolean;
     viewOnce: boolean;

@@ -37,11 +37,11 @@ const LEGAL_URLS = {
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const { userId } = useAuthStore();
+  const { token } = useAuthStore();
 
   const currentUserQuery = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    api.users.getCurrentUserFromToken,
+    !isDemoMode && token ? { token } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
@@ -158,10 +158,10 @@ export default function SettingsScreen() {
       setPauseEnabled(paused);
       return;
     }
-    if (!userId) return;
+    if (!token) return;
 
     try {
-      await toggleDiscoveryPause({ authUserId: userId, paused });
+      await toggleDiscoveryPause({ token, paused });
       setPauseEnabled(paused);
     } catch {
       Toast.show('Couldn\u2019t update this setting. Please try again.');
@@ -175,10 +175,10 @@ export default function SettingsScreen() {
       setShowLastSeenEnabled(show);
       return;
     }
-    if (!userId) return;
+    if (!token) return;
 
     try {
-      await toggleShowLastSeenMut({ authUserId: userId, enabled: show });
+      await toggleShowLastSeenMut({ token, enabled: show });
       setShowLastSeenEnabled(show);
     } catch {
       Toast.show('Couldn\u2019t update this setting. Please try again.');
@@ -191,8 +191,8 @@ export default function SettingsScreen() {
       setShowBlurNotice(true);
     } else {
       if (isDemoMode) { setBlurEnabled(false); return; }
-      if (!userId || !togglePhotoBlurMut) return;
-      togglePhotoBlurMut({ authUserId: userId, blurred: false })
+      if (!token || !togglePhotoBlurMut) return;
+      togglePhotoBlurMut({ token, blurred: false })
         .then(() => setBlurEnabled(false))
         .catch(() => Toast.show('Couldn\u2019t update blur setting. Please try again.'));
     }
@@ -201,9 +201,9 @@ export default function SettingsScreen() {
   const handleBlurConfirm = async () => {
     setShowBlurNotice(false);
     if (isDemoMode) { setBlurEnabled(true); return; }
-    if (!userId || !togglePhotoBlurMut) return;
+    if (!token || !togglePhotoBlurMut) return;
     try {
-      await togglePhotoBlurMut({ authUserId: userId, blurred: true });
+      await togglePhotoBlurMut({ token, blurred: true });
       setBlurEnabled(true);
     } catch {
       Toast.show('Couldn\u2019t update blur setting. Please try again.');
@@ -211,10 +211,10 @@ export default function SettingsScreen() {
   };
 
   const handleToggleIncognito = async (enabled: boolean) => {
-    if (!userId) return;
+    if (!token) return;
 
     try {
-      await toggleIncognito({ authUserId: userId, enabled });
+      await toggleIncognito({ token, enabled });
       setIncognitoEnabled(enabled);
     } catch {
       Toast.show('Couldn\u2019t update this setting. Please try again.');

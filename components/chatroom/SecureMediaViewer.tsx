@@ -2,12 +2,12 @@
  * SecureMediaViewer
  *
  * Full-screen, privacy-first media viewer for chat rooms.
- * - Hold-to-view: Media only visible while finger is pressed
+ * TAP-TO-VIEW-FIX: Media visible immediately on open, tap close button or backdrop to dismiss
  * - Screenshot detection (Android): Blurs media and shows toast
  * - Solid dark background, isolated from chat UI
  * - No download/save/share options
  */
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -18,13 +18,11 @@ import {
   Platform,
   ToastAndroid,
   StatusBar,
-  PanResponder,
-  PanResponderInstance,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
-import { getVideoUri } from '@/lib/videoCache';
+import { getVideoUri, getCachedUri } from '@/lib/videoCache';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -43,12 +41,10 @@ interface SecureMediaViewerProps {
   visible: boolean;
   mediaUri: string;
   type: 'image' | 'video';
-  /** Controlled hold state - media is visible while true */
+  /** TAP-TO-VIEW-FIX: isHolding is now always true when visible (no hold required) */
   isHolding: boolean;
-  /** Called when touch ends on viewer surface (finger lifted) */
+  /** Called when user taps close button or backdrop */
   onClose: () => void;
-  /** Called when touch starts directly on viewer surface */
-  onHoldStart?: () => void;
 }
 
 /**
@@ -68,12 +64,16 @@ interface SecureVideoPlayerProps {
  * VIDEO-CACHE-FIX: Uses cached video URI for instant playback on repeat views.
  */
 function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPlayerProps) {
-  // VIDEO-CACHE-FIX: Track cached URI state
-  const [cachedUri, setCachedUri] = useState<string>(mediaUri);
-  const [isReady, setIsReady] = useState(false);
+  // VIDEO-CACHE-FIX: Check for synchronous cache hit first (instant playback)
+  const initialCached = getCachedUri(mediaUri);
+  const [cachedUri, setCachedUri] = useState<string>(initialCached || mediaUri);
+  const [isReady, setIsReady] = useState(!!initialCached);
 
-  // VIDEO-CACHE-FIX: Load cached URI on mount
+  // VIDEO-CACHE-FIX: Only fetch async if not already ready (sync cache miss)
   useEffect(() => {
+    // Skip if we got a sync cache hit (already ready)
+    if (isReady) return;
+
     let mounted = true;
 
     const loadCachedVideo = async () => {
@@ -97,14 +97,14 @@ function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPla
     return () => {
       mounted = false;
     };
-  }, [mediaUri]);
+  }, [mediaUri, isReady]);
 
   // Use cached URI for player
   const player = useVideoPlayer(cachedUri, (p) => {
     p.loop = true;
   });
 
-  // Control playback based on hold state
+  // Control playback based on visibility
   useEffect(() => {
     if (!player || !isReady) return;
 
@@ -135,7 +135,7 @@ function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPla
   return (
     <VideoView
       player={player}
-      style={[styles.video, !isPlaying && styles.videoHidden]}
+      style={styles.video}
       contentFit="contain"
       nativeControls={false}
     />
@@ -159,7 +159,6 @@ export default function SecureMediaViewer({
   type,
   isHolding,
   onClose,
-  onHoldStart,
 }: SecureMediaViewerProps) {
   const [screenshotBlocked, setScreenshotBlocked] = useState(false);
   const [mediaLoadError, setMediaLoadError] = useState(false);
@@ -174,38 +173,6 @@ export default function SecureMediaViewer({
       }
     };
   }, []);
-
-  // Use refs for callbacks to avoid recreating PanResponder
-  const onCloseRef = useRef(onClose);
-  const onHoldStartRef = useRef(onHoldStart);
-  onCloseRef.current = onClose;
-  onHoldStartRef.current = onHoldStart;
-
-  // PanResponder for the full-screen viewer surface
-  // This handles the case where finger moves onto viewer or user touches viewer directly
-  const viewerPanResponder: PanResponderInstance = useMemo(() => PanResponder.create({
-    // Capture touch events on the viewer surface
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => false,
-
-    // Touch started on viewer surface
-    onPanResponderGrant: () => {
-      onHoldStartRef.current?.();
-    },
-
-    // Touch ended (finger lifted) - close the viewer
-    onPanResponderRelease: () => {
-      onCloseRef.current?.();
-    },
-
-    // Touch interrupted - also close
-    onPanResponderTerminate: () => {
-      onCloseRef.current?.();
-    },
-
-    // Don't release on movement - key for hold-to-view
-    onPanResponderTerminationRequest: () => false,
-  }), []);
 
   // Reset states when viewer closes or mediaUri changes
   useEffect(() => {
@@ -272,7 +239,8 @@ export default function SecureMediaViewer({
 
   if (!visible || !mediaUri) return null;
 
-  const showMedia = isHolding && !screenshotBlocked;
+  // TAP-TO-VIEW-FIX: Show media immediately (no hold required), only hide during screenshot detection
+  const showMedia = !screenshotBlocked;
 
   return (
     <Modal
@@ -292,8 +260,8 @@ export default function SecureMediaViewer({
           <Ionicons name="close" size={28} color="#FFFFFF" />
         </Pressable>
 
-        {/* Media display area with PanResponder for hold-to-view */}
-        <View style={styles.mediaArea} {...viewerPanResponder.panHandlers}>
+        {/* TAP-TO-VIEW-FIX: Tap backdrop to close */}
+        <Pressable style={styles.mediaArea} onPress={onClose}>
           {type === 'image' ? (
             mediaLoadError ? (
               <View style={styles.errorOverlay}>
@@ -317,20 +285,12 @@ export default function SecureMediaViewer({
                 isPlaying={showMedia}
                 visible={visible}
               />
-              {/* Blur overlay for video */}
+              {/* Blur overlay for video during screenshot detection */}
               {!showMedia && (
                 <View style={styles.videoBlurOverlay}>
                   <View style={styles.blurPlaceholder} />
                 </View>
               )}
-            </View>
-          )}
-
-          {/* Instruction overlay when not holding */}
-          {!isHolding && !screenshotBlocked && (
-            <View style={styles.instructionOverlay}>
-              <Ionicons name="finger-print" size={48} color="rgba(255,255,255,0.3)" />
-              <Text style={styles.instructionText}>Hold to view</Text>
             </View>
           )}
 
@@ -341,7 +301,7 @@ export default function SecureMediaViewer({
               <Text style={styles.blockedText}>Screenshot blocked</Text>
             </View>
           )}
-        </View>
+        </Pressable>
       </View>
     </Modal>
   );
@@ -383,9 +343,6 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
-  videoHidden: {
-    opacity: 0,
-  },
   videoBlurOverlay: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
@@ -397,17 +354,6 @@ const styles = StyleSheet.create({
     height: 120,
     borderRadius: 60,
     backgroundColor: 'rgba(255,255,255,0.05)',
-  },
-  instructionOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  instructionText: {
-    marginTop: 12,
-    fontSize: 16,
-    color: 'rgba(255,255,255,0.4)',
-    fontWeight: '500',
   },
   blockedOverlay: {
     ...StyleSheet.absoluteFillObject,

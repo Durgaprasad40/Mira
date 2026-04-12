@@ -53,6 +53,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
 import { Id } from "@/convex/_generated/dataModel";
 import { isDemoMode } from "@/hooks/useConvex";
+import { isDemoAuthMode } from "@/config/demo";
 import { useDemoStore } from "@/stores/demoStore";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { saveAuthBootCache } from "@/stores/authBootCache";
@@ -71,34 +72,50 @@ function parseDOBString(dobString: string): Date {
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
-/**
- * Parse backend full name into firstName/lastName for display
- */
-function parseFullName(fullName: string): { firstName: string; lastName: string } {
-  const parts = fullName.trim().split(/\s+/);
-  if (parts.length === 1) {
-    return { firstName: parts[0], lastName: '' };
-  }
-  return {
-    firstName: parts[0],
-    lastName: parts.slice(1).join(' ')
-  };
-}
+// IDENTITY SIMPLIFICATION: Single name field - no parsing needed
 
-// STABILITY FIX: Schema-safe relationship intent values (excludes UI-only values)
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
-  'long_term', 'short_term', 'fwb', 'figuring_out',
-  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+  'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes',
+  'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
 ]);
 
-// Sanitize relationshipIntent to only include schema-valid values
+// Legacy → Current mapping for relationshipIntent values
+// These old values may exist in cached drafts or older user profiles
+const LEGACY_INTENT_MAP: Record<string, string> = {
+  'long_term': 'serious_vibes',
+  'short_term': 'keep_it_casual',
+  'fwb': 'keep_it_casual',
+  'figuring_out': 'exploring_vibes',
+  'short_to_long': 'see_where_it_goes',
+  'long_to_short': 'see_where_it_goes',
+  // Additional potential legacy values
+  'casual': 'keep_it_casual',
+  'serious': 'serious_vibes',
+  'marriage': 'serious_vibes',
+  'friendship': 'just_friends',
+  'open': 'open_to_anything',
+};
+
+// Sanitize relationshipIntent: map legacy values AND filter invalid ones
 function sanitizeRelationshipIntent(arr: string[]): string[] {
-  const sanitized = arr.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
-  if (__DEV__ && sanitized.length !== arr.length) {
-    const removed = arr.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
-    console.warn('[REVIEW] Removed invalid relationshipIntent values:', removed);
+  // Step 1: Map legacy values to current valid values
+  const mapped = arr.map(v => LEGACY_INTENT_MAP[v] || v);
+
+  // Step 2: Filter to only valid values
+  const sanitized = mapped.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+
+  // Step 3: Deduplicate (multiple legacy values might map to same current value)
+  const deduped = [...new Set(sanitized)];
+
+  if (__DEV__ && (arr.length !== deduped.length || arr.some((v, i) => v !== mapped[i]))) {
+    console.log('[REVIEW] relationshipIntent normalization:', {
+      original: arr,
+      mapped,
+      final: deduped,
+    });
   }
-  return sanitized;
+  return deduped;
 }
 
 export default function ReviewScreen() {
@@ -113,8 +130,7 @@ export default function ReviewScreen() {
   );
 
   const {
-    firstName,
-    lastName,
+    name, // IDENTITY SIMPLIFICATION: Single name field
     nickname,
     dateOfBirth,
     gender,
@@ -149,7 +165,7 @@ export default function ReviewScreen() {
     setStep,
   } = useOnboardingStore();
   const router = useRouter();
-  const { userId, setOnboardingCompleted, faceVerificationPassed, faceVerificationPending } = useAuthStore();
+  const { userId, token, setOnboardingCompleted, faceVerificationPassed, faceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
 
   // H8 FIX: Track mounted state to prevent setAuth after unmount
@@ -160,10 +176,19 @@ export default function ReviewScreen() {
   }, []);
 
   // BUG FIX: Always query backend status as authoritative source + fallback
-  const onboardingStatus = useQuery(
+  const onboardingStatusLive = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && !isDemoAuthMode && token ? { token } : 'skip'
   );
+
+  // Demo auth mode: Use demo onboarding status query
+  const onboardingStatusDemo = useQuery(
+    api.demoAuth.getDemoOnboardingStatus,
+    isDemoAuthMode && token ? { token } : 'skip'
+  );
+
+  // Use appropriate status based on mode
+  const onboardingStatus = isDemoAuthMode ? onboardingStatusDemo : onboardingStatusLive;
 
   // BUG FIX (2026-03-06): Use getCurrentUser which includes ALL photos
   // (including verification_reference primary photo), not getUserPhotos
@@ -175,28 +200,24 @@ export default function ReviewScreen() {
   // Extract photos from currentUser (includes verification_reference)
   const backendPhotos = currentUser?.photos ?? [];
 
+  // IDENTITY SIMPLIFICATION: Single name field
   // Fallback to backend data if store is empty
-  // Parse backend name into firstName/lastName for display
-  const getDisplayNames = (): { firstName: string; lastName: string } => {
-    // Priority 1: Store values
-    if (firstName || lastName) {
-      return { firstName: firstName || '', lastName: lastName || '' };
-    }
-    // Priority 2: demoProfile values (demo mode)
-    if (demoProfile?.firstName || demoProfile?.lastName) {
-      return { firstName: demoProfile.firstName || '', lastName: demoProfile.lastName || '' };
-    }
-    // Priority 3: Parse from backend or demoProfile name
-    const backendName = onboardingStatus?.basicInfo?.name || demoProfile?.name || '';
-    if (backendName) {
-      return parseFullName(backendName);
-    }
-    return { firstName: '', lastName: '' };
+  const getDisplayName = (): string => {
+    // Priority 1: Store value
+    if (name) return name;
+    // Priority 2: demoProfile value (demo mode)
+    if (demoProfile?.name) return demoProfile.name;
+    // Priority 3: Backend value
+    if (onboardingStatus?.basicInfo?.name) return onboardingStatus.basicInfo.name;
+    return '';
   };
-  const displayNames = getDisplayNames();
-  const displayFirstName = displayNames.firstName || "Not set";
-  const displayLastName = displayNames.lastName || "—";
-  const displayNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "—";
+  const displayName = getDisplayName() || "Not set";
+  // Format nickname for display: capitalize first letter
+  // Handles are stored lowercase for uniqueness, but display should look natural
+  const rawNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "";
+  const displayNickname = rawNickname
+    ? rawNickname.charAt(0).toUpperCase() + rawNickname.slice(1)
+    : "—";
   const displayDateOfBirth = dateOfBirth || onboardingStatus?.basicInfo?.dateOfBirth || demoProfile?.dateOfBirth || "";
   const displayGender = gender || onboardingStatus?.basicInfo?.gender || demoProfile?.gender || "";
 
@@ -204,21 +225,19 @@ export default function ReviewScreen() {
   React.useEffect(() => {
     if (__DEV__) {
       console.log('[REVIEW] basic info values:', {
-        displayFirstName,
-        displayLastName,
+        displayName,
         displayNickname,
         displayDateOfBirth,
         displayGender,
       });
       console.log('[REVIEW] basic info sources:', {
-        firstName: firstName ? 'store' : (demoProfile?.firstName ? 'demoProfile' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none')),
-        lastName: lastName ? 'store' : (demoProfile?.lastName ? 'demoProfile' : 'none'),
+        name: name ? 'store' : (demoProfile?.name ? 'demoProfile' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none')),
         nickname: nickname ? 'store' : (onboardingStatus?.basicInfo?.nickname ? 'backend' : 'none'),
         dateOfBirth: dateOfBirth ? 'store' : (onboardingStatus?.basicInfo?.dateOfBirth ? 'backend' : 'none'),
         gender: gender ? 'store' : (onboardingStatus?.basicInfo?.gender ? 'backend' : 'none'),
       });
     }
-  }, [firstName, lastName, nickname, dateOfBirth, gender, onboardingStatus, demoProfile, displayFirstName, displayLastName, displayNickname, displayDateOfBirth, displayGender]);
+  }, [name, nickname, dateOfBirth, gender, onboardingStatus, demoProfile, displayName, displayNickname, displayDateOfBirth, displayGender]);
 
   // PERFORMANCE LOG: Track photo rendering speed
   React.useEffect(() => {
@@ -239,23 +258,14 @@ export default function ReviewScreen() {
   }, [currentUser, backendPhotos]);
 
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
-  // Backend requires faceVerificationStatus === 'verified' - pending is NOT sufficient
+  // PHASE-1 RESTRUCTURE: Verification is now non-blocking - users can be unverified, pending, or verified
   const isVerified = isDemoMode
     ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
     : !!faceVerificationPassed;
+  const isPending = !!faceVerificationPending;
 
-  // CHECKPOINT GATE: Block access if face verification not completed
-  React.useEffect(() => {
-    if (isVerified) {
-      if (__DEV__) {
-        console.log("[REVIEW_GATE] verified=true (faceVerificationPassed) -> allow");
-        console.log("[REVIEW_GATE] faceVerificationPassed:", faceVerificationPassed);
-      }
-      return;
-    }
-    if (__DEV__) console.log("[REVIEW_GATE] verified=false -> redirect to face-verification");
-    router.replace("/(onboarding)/face-verification" as any);
-  }, [isVerified, router, faceVerificationPassed, faceVerificationPending]);
+  // PHASE-1 RESTRUCTURE: Checkpoint gate REMOVED - allow unverified users to review/complete onboarding
+  // The verification status will be shown on the review screen for transparency
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState("");
 
@@ -330,12 +340,8 @@ export default function ReviewScreen() {
         };
 
         // Only include basic fields if they have values (don't overwrite with empty)
-        // Store firstName/lastName separately and construct name for backend compat
-        if (firstName && firstName.trim().length > 0) profileData.firstName = firstName.trim();
-        if (lastName && lastName.trim().length > 0) profileData.lastName = lastName.trim();
-        // Construct full name from firstName/lastName for backward compat
-        const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
-        if (fullName.length > 0) profileData.name = fullName;
+        // IDENTITY SIMPLIFICATION: Single name field
+        if (name && name.trim().length > 0) profileData.name = name.trim();
         if (nickname && nickname.length > 0) profileData.handle = nickname;
         if (dateOfBirth && dateOfBirth.length > 0) profileData.dateOfBirth = dateOfBirth;
         if (gender) profileData.gender = gender;
@@ -384,11 +390,10 @@ export default function ReviewScreen() {
       }
 
       // Prepare onboarding data
-      // Construct full name from firstName/lastName for backend
-      const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
+      // IDENTITY SIMPLIFICATION: Single name field
       const onboardingData: any = {
         userId: userId as Id<"users">,
-        name: fullName,
+        name: (name || '').trim(),
         dateOfBirth,
         gender: payloadGender,
         bio,
@@ -418,6 +423,8 @@ export default function ReviewScreen() {
         // FIX: Add missing fields from demo mode payload
         profilePrompts: profilePrompts.length > 0 ? profilePrompts : undefined,
         lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined,
+        // P0 FIX: Include lgbtqPreference for LGBTQ matching
+        lgbtqPreference: lgbtqPreference.length > 0 ? lgbtqPreference : undefined,
         // photoStorageIds omitted - photos already uploaded in additional-photos screen
       };
 
@@ -458,6 +465,24 @@ export default function ReviewScreen() {
         }
       }
 
+      // FINAL DEFENSIVE NORMALIZATION: Ensure relationshipIntent NEVER contains legacy values
+      // This is the last line of defense before Convex mutation - even if store has stale data
+      if (onboardingData.relationshipIntent && Array.isArray(onboardingData.relationshipIntent)) {
+        const beforeFinal = [...onboardingData.relationshipIntent];
+        const mapped = onboardingData.relationshipIntent.map((v: string) => LEGACY_INTENT_MAP[v] || v);
+        const filtered = mapped.filter((v: string) => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+        const deduped = [...new Set(filtered)];
+        onboardingData.relationshipIntent = deduped.length > 0 ? deduped : undefined;
+
+        if (__DEV__) {
+          console.log('[REVIEW_SUBMIT] relationshipIntent FINAL normalization:', {
+            beforeFinal,
+            afterFinal: onboardingData.relationshipIntent,
+            hadLegacyValues: beforeFinal.some((v: string) => LEGACY_INTENT_MAP[v] !== undefined),
+          });
+        }
+      }
+
       // Debug log before mutation to verify all required fields
       if (__DEV__) {
         console.log('[REVIEW_SUBMIT] Final payload:', {
@@ -469,6 +494,7 @@ export default function ReviewScreen() {
           hasHeight: !!onboardingData.height,
           hasWeight: !!onboardingData.weight,
           activitiesCount: onboardingData.activities?.length || 0,
+          relationshipIntent: onboardingData.relationshipIntent, // ADDED: Show final intent values
         });
       }
 
@@ -522,21 +548,30 @@ export default function ReviewScreen() {
   };
 
   // PERFORMANCE FIX: Use backend photos directly (instant display, no download wait)
+  // BUG FIX: Include verification reference photo in review (getCurrentUser excludes it)
   // In demo mode, fall back to local photos from store
   const validPhotos = React.useMemo(() => {
     if (isDemoMode) {
       // Demo mode: use local photos from store
       return photos.filter((uri): uri is string => uri !== null && uri !== '');
     }
-    // Live mode: use backend photos (sorted by order)
-    if (!backendPhotos || backendPhotos.length === 0) {
-      return [];
-    }
-    return [...backendPhotos]
+
+    // Live mode: Start with reference photo if exists (from onboardingStatus)
+    const referencePhotoUrl = onboardingStatus?.verificationReferencePhotoUrl;
+    const referencePhotoList: string[] = referencePhotoUrl ? [referencePhotoUrl] : [];
+
+    // Add normal photos from backend (excludes verification_reference)
+    const normalPhotoUrls = [...(backendPhotos || [])]
       .sort((a, b) => a.order - b.order)
       .map(photo => photo.url)
       .filter((url): url is string => !!url);
-  }, [backendPhotos, photos]);
+
+    // Merge: reference photo first, then additional normal photos
+    // Deduplicate in case reference photo somehow appears in both
+    const allPhotos = [...new Set([...referencePhotoList, ...normalPhotoUrls])];
+
+    return allPhotos;
+  }, [backendPhotos, photos, onboardingStatus?.verificationReferencePhotoUrl]);
 
   // Helper to get label from options array
   const getLabel = (options: { value: string; label: string }[], value: string | null) => {
@@ -591,6 +626,33 @@ export default function ReviewScreen() {
         )}
       </View>
 
+      {/* PHASE-1 RESTRUCTURE: Verification Status Section (new) */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Verification Status</Text>
+        </View>
+        <View style={styles.verificationStatusRow}>
+          <Ionicons
+            name={isVerified ? "checkmark-circle" : isPending ? "time" : "close-circle"}
+            size={20}
+            color={isVerified ? COLORS.success : isPending ? "#F5A623" : COLORS.error}
+          />
+          <Text style={[
+            styles.verificationStatusText,
+            isVerified && styles.verificationStatusVerified,
+            isPending && styles.verificationStatusPending,
+            !isVerified && !isPending && styles.verificationStatusUnverified,
+          ]}>
+            {isVerified ? "Verified" : isPending ? "Pending Review" : "Not Verified"}
+          </Text>
+        </View>
+        {!isVerified && !isPending && (
+          <Text style={styles.verificationHint}>
+            You can verify your profile later in Settings
+          </Text>
+        )}
+      </View>
+
       {/* Basic Info Section - Name, Handle, Age, Gender, LGBTQ Identity */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
@@ -600,15 +662,11 @@ export default function ReviewScreen() {
           </TouchableOpacity>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>First Name:</Text>
-          <Text style={styles.infoValue}>{displayFirstName}</Text>
+          <Text style={styles.infoLabel}>Name:</Text>
+          <Text style={styles.infoValue}>{displayName}</Text>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Last Name:</Text>
-          <Text style={styles.infoValue}>{displayLastName}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>User ID:</Text>
+          <Text style={styles.infoLabel}>Nickname:</Text>
           <Text style={styles.infoValue}>@{displayNickname}</Text>
         </View>
         <View style={styles.infoRow}>
@@ -635,10 +693,10 @@ export default function ReviewScreen() {
         </View>
       </View>
 
-      {/* Photos & Bio Section */}
+      {/* Bio Section (PHASE-1 RESTRUCTURE: simplified from Photos & Bio) */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Photos & Bio</Text>
+          <Text style={styles.sectionTitle}>Bio</Text>
           <TouchableOpacity onPress={() => handleEdit("additional-photos")}>
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
@@ -646,216 +704,9 @@ export default function ReviewScreen() {
         <Text style={styles.bioText}>{bio || demoProfile?.bio || "No bio added"}</Text>
       </View>
 
-      {/* Prompts Section (New 2-Page System) */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>About You</Text>
-          <TouchableOpacity onPress={() => handleEdit("prompts")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
+      {/* PHASE-1 RESTRUCTURE: Prompts, Profile Details, Lifestyle, Life Rhythm sections REMOVED */}
 
-        {/* Seed Questions */}
-        {(seedQuestions.identityAnchor || seedQuestions.socialBattery || seedQuestions.valueTrigger) ? (
-          <View style={styles.promptSubsection}>
-            {seedQuestions.identityAnchor && (
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Describes you:</Text>
-                <Text style={styles.infoValue}>
-                  {IDENTITY_ANCHOR_OPTIONS.find(o => o.value === seedQuestions.identityAnchor)?.label || seedQuestions.identityAnchor}
-                </Text>
-              </View>
-            )}
-            {seedQuestions.socialBattery && (
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Social energy:</Text>
-                <Text style={styles.infoValue}>
-                  {seedQuestions.socialBattery <= 2 ? SOCIAL_BATTERY_LEFT_LABEL :
-                   seedQuestions.socialBattery >= 4 ? SOCIAL_BATTERY_RIGHT_LABEL :
-                   'Balanced'} ({seedQuestions.socialBattery}/5)
-                </Text>
-              </View>
-            )}
-            {seedQuestions.valueTrigger && (
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Good person sign:</Text>
-                <Text style={styles.infoValue}>
-                  {VALUE_TRIGGER_OPTIONS.find(o => o.value === seedQuestions.valueTrigger)?.label || seedQuestions.valueTrigger}
-                </Text>
-              </View>
-            )}
-          </View>
-        ) : null}
-
-        {/* Profile Prompts (Unified System) */}
-        {(() => {
-          const hasPrompts = profilePrompts && profilePrompts.length > 0;
-          return (
-            <>
-              <View style={styles.sectionPromptsHeader}>
-                <Text style={styles.sectionPromptsLabel}>Your Prompts</Text>
-                <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
-                  <Text style={styles.editLink}>Edit</Text>
-                </TouchableOpacity>
-              </View>
-              {hasPrompts ? (
-                profilePrompts.map((prompt, index) => (
-                  <View key={index} style={styles.promptItem}>
-                    <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                    <Text style={styles.promptAnswer}>{prompt.answer}</Text>
-                  </View>
-                ))
-              ) : (
-                <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
-                  <Text style={styles.emptyText}>No prompts added — Tap to add</Text>
-                </TouchableOpacity>
-              )}
-            </>
-          );
-        })()}
-      </View>
-
-      {/* Profile Details Section - Height, Weight, Job, Company, School, Education, Religion */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Profile Details</Text>
-          <TouchableOpacity onPress={() => handleEdit("profile-details")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Height:</Text>
-          <Text style={styles.infoValue}>{(height || demoProfile?.height) ? `${height || demoProfile?.height} cm` : "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Weight:</Text>
-          <Text style={styles.infoValue}>{(weight || demoProfile?.weight) ? `${weight || demoProfile?.weight} kg` : "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Job Title:</Text>
-          <Text style={styles.infoValue}>{jobTitle || demoProfile?.jobTitle || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Company:</Text>
-          <Text style={styles.infoValue}>{company || demoProfile?.company || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>School:</Text>
-          <Text style={styles.infoValue}>{school || demoProfile?.school || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Education:</Text>
-          <Text style={styles.infoValue}>
-            {(() => {
-              const eduValue = education || demoProfile?.education || null;
-              if (!eduValue) return "–";
-              if (eduValue === 'other') {
-                const otherText = educationOther || demoProfile?.educationOther || '';
-                return otherText ? `Other: ${otherText}` : 'Other';
-              }
-              return getLabel(EDUCATION_OPTIONS, eduValue) || "–";
-            })()}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Religion:</Text>
-          <Text style={styles.infoValue}>{getLabel(RELIGION_OPTIONS, religion || demoProfile?.religion || null) || "–"}</Text>
-        </View>
-      </View>
-
-      {/* Lifestyle Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Lifestyle</Text>
-          <TouchableOpacity onPress={() => handleEdit("profile-details/lifestyle")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Smoking:</Text>
-          <Text style={styles.infoValue}>{getLabel(SMOKING_OPTIONS, smoking || demoProfile?.smoking || null) || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Drinking:</Text>
-          <Text style={styles.infoValue}>{getLabel(DRINKING_OPTIONS, drinking || demoProfile?.drinking || null) || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Kids:</Text>
-          <Text style={styles.infoValue}>{getLabel(KIDS_OPTIONS, kids || demoProfile?.kids || null) || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Exercise:</Text>
-          <Text style={styles.infoValue}>{getLabel(EXERCISE_OPTIONS, exercise || demoProfile?.exercise || null) || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Pets:</Text>
-          <Text style={styles.infoValue}>
-            {(() => {
-              const petsData = pets.length > 0 ? pets : (demoProfile?.pets || []);
-              if (petsData.length === 0) return "–";
-              return petsData.map((p) => PETS_OPTIONS.find((o) => o.value === p)?.label ?? p).join(", ");
-            })()}
-          </Text>
-        </View>
-      </View>
-
-      {/* Life Rhythm Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Life Rhythm</Text>
-          <TouchableOpacity onPress={() => handleEdit("profile-details/life-rhythm")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>City:</Text>
-          <Text style={styles.infoValue}>{lifeRhythm.city || "–"}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Social Energy:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.socialRhythm
-              ? SOCIAL_RHYTHM_OPTIONS.find((o) => o.value === lifeRhythm.socialRhythm)?.label || "–"
-              : "–"}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Sleep Schedule:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.sleepSchedule
-              ? SLEEP_SCHEDULE_OPTIONS.find((o) => o.value === lifeRhythm.sleepSchedule)?.label || "–"
-              : "–"}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Travel Style:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.travelStyle
-              ? TRAVEL_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.travelStyle)?.label || "–"
-              : "–"}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Work Style:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.workStyle
-              ? WORK_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.workStyle)?.label || "–"
-              : "–"}
-          </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Core Values:</Text>
-          <Text style={styles.infoValue}>
-            {lifeRhythm.coreValues && lifeRhythm.coreValues.length > 0
-              ? lifeRhythm.coreValues
-                  .map((v) => CORE_VALUES_OPTIONS.find((o) => o.value === v)?.label || v)
-                  .join(", ")
-              : "–"}
-          </Text>
-        </View>
-      </View>
-
-      {/* Looking For Section - Gender Preference, LGBTQ Preference, Age, Distance */}
+      {/* Looking For Section - PHASE-1 RESTRUCTURE: Simplified to just Gender and LGBTQ Preference */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Looking For</Text>
@@ -882,14 +733,6 @@ export default function ReviewScreen() {
               return values.map((v: string) => LGBTQ_OPTIONS.find((o) => o.value === v)?.label || v).join(", ");
             })()}
           </Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Age Range:</Text>
-          <Text style={styles.infoValue}>{minAge || demoProfile?.minAge || 18} - {maxAge || demoProfile?.maxAge || 70} years</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Distance:</Text>
-          <Text style={styles.infoValue}>Up to {maxDistance || demoProfile?.maxDistance || 50} miles</Text>
         </View>
       </View>
 
@@ -921,33 +764,7 @@ export default function ReviewScreen() {
         })()}
       </View>
 
-      {/* Interests Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Interests</Text>
-          <TouchableOpacity onPress={() => handleEdit("preferences")}>
-            <Text style={styles.editLink}>Edit</Text>
-          </TouchableOpacity>
-        </View>
-        {(() => {
-          const activitiesData = activities.length > 0 ? activities : (demoProfile?.activities || []);
-          if (activitiesData.length === 0) return <Text style={styles.emptyText}>No interests selected</Text>;
-          return (
-            <View style={styles.chipsContainer}>
-              {activitiesData.map((activity) => {
-                const activityObj = ACTIVITY_FILTERS.find((a) => a.value === activity);
-                return (
-                  <View key={activity} style={styles.chip}>
-                    <Text style={styles.chipText}>
-                      {activityObj?.emoji} {activityObj?.label}
-                    </Text>
-                  </View>
-                );
-              })}
-            </View>
-          );
-        })()}
-      </View>
+      {/* PHASE-1 RESTRUCTURE: Interests Section REMOVED from onboarding review */}
 
       {/* Footer */}
       <View style={styles.footer}>
@@ -979,28 +796,31 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 24,
+    paddingBottom: 40,
   },
   progressText: {
     fontSize: 14,
     color: COLORS.primary,
     textAlign: "center",
-    marginBottom: 12,
+    marginBottom: 14,
+    fontWeight: "500",
   },
   title: {
     fontSize: 28,
     fontWeight: "700",
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 10,
+    letterSpacing: -0.5,
   },
   subtitle: {
     fontSize: 16,
     color: COLORS.textLight,
     marginBottom: 32,
-    lineHeight: 22,
+    lineHeight: 24,
   },
   section: {
-    marginBottom: 24,
-    paddingBottom: 24,
+    marginBottom: 26,
+    paddingBottom: 26,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
@@ -1008,49 +828,50 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
+    marginBottom: 14,
   },
   sectionTitle: {
     fontSize: 18,
     fontWeight: "600",
     color: COLORS.text,
+    letterSpacing: -0.3,
   },
   editLink: {
     fontSize: 14,
     color: COLORS.primary,
-    fontWeight: "500",
+    fontWeight: "600",
   },
   photosScroll: {
-    marginTop: 12,
+    marginTop: 14,
   },
   photoWrapper: {
     position: 'relative',
-    marginRight: 12,
+    marginRight: 14,
   },
   photoThumbnail: {
-    width: 80,
-    height: 120,
-    borderRadius: 12,
+    width: 85,
+    height: 125,
+    borderRadius: 14,
   },
   variantBadge: {
     position: 'absolute',
-    bottom: 4,
-    left: 4,
-    right: 4,
-    backgroundColor: COLORS.primary + 'E0',
-    borderRadius: 6,
-    paddingVertical: 2,
-    paddingHorizontal: 4,
+    bottom: 6,
+    left: 6,
+    right: 6,
+    backgroundColor: 'rgba(255, 107, 107, 0.9)',
+    borderRadius: 8,
+    paddingVertical: 3,
+    paddingHorizontal: 6,
     alignItems: 'center',
   },
   variantBadgeText: {
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '600',
     color: COLORS.white,
   },
   infoRow: {
     flexDirection: "row",
-    marginBottom: 8,
+    marginBottom: 10,
   },
   infoLabel: {
     fontSize: 15,
@@ -1066,30 +887,31 @@ const styles = StyleSheet.create({
   bioText: {
     fontSize: 15,
     color: COLORS.text,
-    lineHeight: 22,
-    marginTop: 8,
+    lineHeight: 24,
+    marginTop: 10,
   },
   emptyText: {
     fontSize: 14,
     color: COLORS.textMuted,
     fontStyle: "italic",
-    marginTop: 8,
+    marginTop: 10,
   },
   sectionPromptsHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
-    marginTop: 8,
+    marginBottom: 14,
+    marginTop: 10,
   },
   sectionPromptsLabel: {
     fontSize: 14,
     fontWeight: "600",
     color: COLORS.text,
+    letterSpacing: -0.2,
   },
   promptSubsection: {
-    marginBottom: 16,
-    paddingBottom: 12,
+    marginBottom: 18,
+    paddingBottom: 14,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
@@ -1097,32 +919,33 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "600",
     color: COLORS.primary,
-    marginBottom: 10,
+    marginBottom: 12,
+    letterSpacing: -0.2,
   },
   promptItem: {
-    marginBottom: 12,
+    marginBottom: 14,
   },
   promptQuestion: {
     fontSize: 13,
     fontWeight: "600",
     color: COLORS.textLight,
-    marginBottom: 4,
+    marginBottom: 6,
   },
   promptAnswer: {
     fontSize: 15,
     color: COLORS.text,
-    lineHeight: 20,
+    lineHeight: 22,
   },
   chipsContainer: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 8,
-    marginTop: 8,
+    gap: 10,
+    marginTop: 10,
   },
   chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
     backgroundColor: COLORS.backgroundDark,
   },
   chipText: {
@@ -1132,9 +955,35 @@ const styles = StyleSheet.create({
   preferenceText: {
     fontSize: 14,
     color: COLORS.textLight,
+    marginTop: 10,
+    lineHeight: 20,
+  },
+  // PHASE-1 RESTRUCTURE: Verification status styles
+  verificationStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
     marginTop: 8,
   },
+  verificationStatusText: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  verificationStatusVerified: {
+    color: COLORS.success,
+  },
+  verificationStatusPending: {
+    color: '#F5A623',
+  },
+  verificationStatusUnverified: {
+    color: COLORS.error,
+  },
+  verificationHint: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 4,
+  },
   footer: {
-    marginTop: 24,
+    marginTop: 28,
   },
 });
