@@ -106,7 +106,7 @@ export default function ChatsScreen() {
             username: bc.participantName,
             photoUrl: bc.participantPhotoUrl || '',
             age: bc.participantAge || 0,
-            source: source as 'tod' | 'room',
+            source: source as 'tod' | 'room' | 'desire',
             unlockedAt: bc.createdAt,
           });
           // Create local conversation with backend ID

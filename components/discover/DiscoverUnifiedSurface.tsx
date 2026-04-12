@@ -89,11 +89,14 @@ export default function DiscoverUnifiedSurface({
     [hiddenIdSet, profiles]
   );
 
-  const browseProfiles = useMemo(
+  const renderableProfiles = useMemo(
     () =>
       visibleProfiles
         .map(toProfileData)
-        .filter((profile) => profile.photos.length > 0 && !!profile.photos[0]?.url),
+        .filter(
+          (profile) =>
+            typeof profile.photos[0]?.url === "string" && profile.photos[0].url.length > 0
+        ),
     [visibleProfiles]
   );
 
@@ -226,7 +229,7 @@ export default function DiscoverUnifiedSurface({
               style={[styles.layer, { opacity: cardsOpacity, zIndex: mode === "cards" ? 2 : 1 }]}
             >
               <DiscoverCardStack
-                externalProfiles={visibleProfiles}
+                externalProfiles={renderableProfiles}
                 hideHeader
                 onProfileAction={handleProfileConsumed}
               />
@@ -238,7 +241,7 @@ export default function DiscoverUnifiedSurface({
             >
               <FlatList
                 ref={browseListRef}
-                data={browseProfiles}
+                data={renderableProfiles}
                 renderItem={renderBrowseCard}
                 keyExtractor={(item) => item.id}
                 numColumns={2}

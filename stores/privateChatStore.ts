@@ -16,7 +16,7 @@ interface UnlockedUser {
   username: string;
   photoUrl: string;
   age: number;
-  source: 'tod' | 'room';
+  source: 'tod' | 'room' | 'desire';
   unlockedAt: number;
 }
 
