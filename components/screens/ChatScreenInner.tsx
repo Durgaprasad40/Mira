@@ -312,6 +312,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const [isSending, setIsSending] = useState(false);
   const isSendingRef = useRef(false);
+  const pendingClientIdRef = useRef<string | null>(null);
+  const pendingMessageFingerprintRef = useRef<string | null>(null);
 
   // Protected media state
   const [pendingImageUri, setPendingImageUri] = useState<string | null>(null);
@@ -906,6 +908,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // B5 fix: persist drafts in both demo and Convex modes
   const handleDraftChange = useCallback((text: string) => {
+    const nextFingerprint = text.trim() ? `text:${text.trim()}` : null;
+    if (
+      pendingClientIdRef.current &&
+      nextFingerprint &&
+      pendingMessageFingerprintRef.current !== nextFingerprint
+    ) {
+      pendingClientIdRef.current = null;
+      pendingMessageFingerprintRef.current = null;
+    }
+
     if (conversationId) {
       if (text) {
         setDemoDraft(conversationId, text);
@@ -994,9 +1006,20 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     handleTypingChange(false);
     if (__DEV__) console.log('[STABILITY][ChatSend] starting async send');
 
-    // P0-2 STABILITY FIX: Generate clientMessageId for idempotency on retry
-    // Prevents duplicate messages if network fails and user retries
-    const clientMessageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    const messageFingerprint = `${type}:${text}`;
+    if (
+      pendingClientIdRef.current &&
+      pendingMessageFingerprintRef.current !== messageFingerprint
+    ) {
+      pendingClientIdRef.current = null;
+    }
+
+    let clientMessageId = pendingClientIdRef.current;
+    if (!clientMessageId) {
+      clientMessageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+      pendingClientIdRef.current = clientMessageId;
+    }
+    pendingMessageFingerprintRef.current = messageFingerprint;
 
     try {
       if (activeConversation.isPreMatch) {
@@ -1018,6 +1041,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           clientMessageId,
         });
       }
+      pendingClientIdRef.current = null;
+      pendingMessageFingerprintRef.current = null;
       // B5 fix: clear draft after successful send in Convex mode
       if (conversationId) clearDemoDraft(conversationId);
     } catch (error: any) {
