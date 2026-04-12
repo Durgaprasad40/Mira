@@ -1,5 +1,7 @@
 import { v } from 'convex/values';
 import { query, mutation } from './_generated/server';
+import type { QueryCtx } from './_generated/server';
+import type { Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
 import { resolveUserIdByAuthId } from './helpers';
@@ -10,6 +12,121 @@ import { computeRankScore, logBatchRankingComparison, DEFAULT_RANKING_CONFIG } f
 
 // Suppression window: 4 hours in milliseconds
 const SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
+
+type PrivateProfileDoc = {
+  userId: Id<'users'>;
+  privatePhotoUrls: string[];
+  revealPolicy?: 'mutual_only' | 'request_based';
+};
+
+type ViewerSafePhoto = {
+  _id: string;
+  url: string | null;
+};
+
+async function getRevealRows(
+  ctx: QueryCtx,
+  viewerId: Id<'users'>,
+  profileUserId: Id<'users'>
+) {
+  const [sentRequest, receivedRequest] = await Promise.all([
+    ctx.db
+      .query('revealRequests')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', viewerId).eq('toUserId', profileUserId)
+      )
+      .first(),
+    ctx.db
+      .query('revealRequests')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', profileUserId).eq('toUserId', viewerId)
+      )
+      .first(),
+  ]);
+
+  return { sentRequest, receivedRequest };
+}
+
+async function canViewerAccessPrivatePhotos(
+  ctx: QueryCtx,
+  viewerId: Id<'users'>,
+  profileUserId: Id<'users'>,
+  revealPolicy: 'mutual_only' | 'request_based'
+) {
+  if (viewerId === profileUserId) {
+    return true;
+  }
+
+  const { sentRequest, receivedRequest } = await getRevealRows(
+    ctx,
+    viewerId,
+    profileUserId
+  );
+
+  const mutualAccepted =
+    sentRequest?.status === 'accepted' &&
+    receivedRequest?.status === 'accepted';
+
+  if (mutualAccepted) {
+    return true;
+  }
+
+  if (revealPolicy === 'request_based') {
+    return (
+      sentRequest?.status === 'accepted' ||
+      receivedRequest?.status === 'accepted'
+    );
+  }
+
+  return false;
+}
+
+async function getViewerSafePhotos(
+  ctx: QueryCtx,
+  viewerId: Id<'users'>,
+  profile: PrivateProfileDoc
+) {
+  const revealPolicy = profile.revealPolicy ?? 'mutual_only';
+  const canViewFullPhotos = await canViewerAccessPrivatePhotos(
+    ctx,
+    viewerId,
+    profile.userId,
+    revealPolicy
+  );
+
+  if (!canViewFullPhotos) {
+    return {
+      photos:
+        profile.privatePhotoUrls.length > 0
+          ? ([{ _id: 'private_photo_locked', url: null }] as ViewerSafePhoto[])
+          : ([] as ViewerSafePhoto[]),
+      photoBlurred: profile.privatePhotoUrls.length > 0,
+      revealGranted: false,
+    };
+  }
+
+  const fullPhotos = await ctx.db
+    .query('photos')
+    .withIndex('by_user_order', (q) => q.eq('userId', profile.userId))
+    .collect();
+
+  const photos =
+    fullPhotos.length > 0
+      ? fullPhotos.map((photo) => ({
+          _id: photo._id,
+          url: photo.url,
+        }))
+      : profile.privatePhotoUrls.map((url, index) => ({
+          _id: `private_photo_${index}`,
+          url,
+        }));
+
+  return {
+    photos,
+    photoBlurred: false,
+    revealGranted: true,
+  };
+}
 
 // Get private discovery profiles (blurred photos only) with Phase-2 ranking
 // Filters out:
@@ -241,10 +358,19 @@ export const getProfiles = query({
 
     // Return only blurred data — never expose original photos
     // Cast to access optional schema fields that may not be in generated types yet
-    return limited.map(({ profile: p }) => {
+    return await Promise.all(limited.map(async ({ profile: p }) => {
       const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
       // Backward compat: older records may only have privateIntentKey (single)
       const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
+      const photoAccess = await getViewerSafePhotos(
+        ctx,
+        viewerUserId as Id<'users'>,
+        {
+          userId: p.userId,
+          privatePhotoUrls: p.privatePhotoUrls,
+          revealPolicy: p.revealPolicy,
+        }
+      );
       return {
         _id: p._id,
         userId: p.userId,
@@ -252,8 +378,11 @@ export const getProfiles = query({
         age: p.age,
         city: p.city,
         gender: p.gender,
-        blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
-        blurredPhotoUrls: p.privatePhotoUrls,
+        photos: photoAccess.photos,
+        photoBlurred: photoAccess.photoBlurred,
+        revealGranted: photoAccess.revealGranted,
+        blurredPhotoUrl: null,
+        blurredPhotoUrls: [],
         intentKeys,
         desireTagKeys: p.privateDesireTagKeys,
         privateBio: p.privateBio,
@@ -262,7 +391,7 @@ export const getProfiles = query({
         hobbies: profile.hobbies ?? [],
         isVerified: profile.isVerified ?? false,
       };
-    });
+    }));
   },
 });
 
@@ -300,6 +429,11 @@ export const getProfileCard = query({
     const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
     // Backward compat: older records may only have privateIntentKey (single)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
+    const photoAccess = await getViewerSafePhotos(ctx, args.viewerId, {
+      userId: p.userId,
+      privatePhotoUrls: p.privatePhotoUrls,
+      revealPolicy: p.revealPolicy,
+    });
 
     return {
       _id: p._id,
@@ -308,8 +442,11 @@ export const getProfileCard = query({
       age: p.age,
       city: p.city,
       gender: p.gender,
-      blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
-      blurredPhotoUrls: p.privatePhotoUrls,
+      photos: photoAccess.photos,
+      photoBlurred: photoAccess.photoBlurred,
+      revealGranted: photoAccess.revealGranted,
+      blurredPhotoUrl: null,
+      blurredPhotoUrls: [],
       intentKeys,
       desireTagKeys: p.privateDesireTagKeys,
       privateBio: p.privateBio,
@@ -361,6 +498,11 @@ export const getProfileByUserId = query({
 
     // Backward compat: older records may only have privateIntentKey (single), not privateIntentKeys (array)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
+    const photoAccess = await getViewerSafePhotos(ctx, args.viewerId, {
+      userId: p.userId,
+      privatePhotoUrls: p.privatePhotoUrls,
+      revealPolicy: p.revealPolicy,
+    });
 
     return {
       _id: p._id,
@@ -371,9 +513,11 @@ export const getProfileByUserId = query({
       city: p.city,
       gender: p.gender,
       bio: p.privateBio,
-      photos: p.privatePhotoUrls.map((url, i) => ({ _id: `photo_${i}`, url })),
-      blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
-      blurredPhotoUrls: p.privatePhotoUrls,
+      photos: photoAccess.photos,
+      photoBlurred: photoAccess.photoBlurred,
+      revealGranted: photoAccess.revealGranted,
+      blurredPhotoUrl: null,
+      blurredPhotoUrls: [],
       // Phase-2 intents (array)
       intentKeys,
       // Legacy single key for backward compat

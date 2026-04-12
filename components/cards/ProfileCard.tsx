@@ -24,12 +24,14 @@ const GENDER_LABELS: Record<string, string> = {
 
 export interface ProfileCardProps {
   name: string;
-  age: number;
+  age?: number;
   bio?: string;
   city?: string;
   isVerified?: boolean;
   distance?: number;
-  photos: { url: string }[];
+  ageHidden?: boolean;
+  distanceHidden?: boolean;
+  photos: { url: string | null }[];
   /** First profile prompt to display on discover card */
   profilePrompt?: { question: string; answer: string };
   /** Trust badges computed via getTrustBadges() */
@@ -66,6 +68,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   city,
   isVerified,
   distance,
+  ageHidden = false,
+  distanceHidden = false,
   photos,
   profilePrompt,
   trustBadges,
@@ -153,6 +157,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // 3B-2: Safe access with clamping
   const safeIndex = Math.min(Math.max(0, photoIndex), Math.max(0, photoCount - 1));
   const currentPhoto = photos?.[safeIndex] || photos?.[0];
+  const currentPhotoUrl =
+    typeof currentPhoto?.url === 'string' && currentPhoto.url.length > 0
+      ? currentPhoto.url
+      : null;
+  const showLockedPlaceholder = photoBlurred && !currentPhotoUrl;
+  const shouldShowAge = !ageHidden && typeof age === 'number' && age > 0;
+  const shouldShowDistance = !distanceHidden && typeof distance === 'number' && distance >= 0;
+  const titleText = shouldShowAge ? `${name}, ${age}` : name;
 
   const goNextPhoto = useCallback(() => {
     if (photoCount <= 1) return;
@@ -169,9 +181,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     return (
       <TouchableOpacity style={styles.gridCard} onPress={onPress} activeOpacity={0.8}>
         {/* 7-1: Show placeholder on image error or missing photo */}
-        {currentPhoto && !imageError ? (
+        {currentPhotoUrl && !imageError ? (
           <Image
-            source={{ uri: currentPhoto.url }}
+            source={{ uri: currentPhotoUrl }}
             style={styles.gridImage}
             contentFit="cover"
             blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
@@ -179,12 +191,19 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           />
         ) : (
           <View style={[styles.gridImage, styles.gridPlaceholder]}>
-            <Ionicons name="image-outline" size={32} color={COLORS.textLight} />
+            <Ionicons
+              name={showLockedPlaceholder ? 'lock-closed-outline' : 'image-outline'}
+              size={32}
+              color={COLORS.textLight}
+            />
+            {showLockedPlaceholder && (
+              <Text style={styles.placeholderLabel}>Private photo</Text>
+            )}
           </View>
         )}
         <View style={styles.gridOverlay}>
           <Text style={styles.gridName} numberOfLines={1}>
-            {name}, {age}
+            {titleText}
           </Text>
           {isVerified && <Ionicons name="checkmark-circle" size={14} color={COLORS.superLike} />}
         </View>
@@ -198,9 +217,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       {/* Photo area fills entire card */}
       <View style={styles.photoContainer}>
         {/* 7-1: Show placeholder on image error or missing photo */}
-        {currentPhoto && !imageError ? (
+        {currentPhotoUrl && !imageError ? (
           <Image
-            source={{ uri: currentPhoto.url }}
+            source={{ uri: currentPhotoUrl }}
             style={styles.image}
             contentFit="cover"
             blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
@@ -208,7 +227,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           />
         ) : (
           <View style={[styles.photoPlaceholder, dark && { backgroundColor: INCOGNITO_COLORS.accent }]}>
-            <Ionicons name="image-outline" size={48} color={TC.textLight} />
+            <Ionicons
+              name={showLockedPlaceholder ? 'lock-closed-outline' : 'image-outline'}
+              size={48}
+              color={TC.textLight}
+            />
+            {showLockedPlaceholder && (
+              <Text style={[styles.placeholderLabel, dark && { color: TC.textLight }]}>
+                Private photo
+              </Text>
+            )}
           </View>
         )}
 
@@ -260,7 +288,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           <View style={{ flex: 1 }}>
             <View style={styles.nameRow}>
               <Text style={styles.name}>
-                {name}, {age}
+                {titleText}
               </Text>
               {isVerified && <Text style={styles.verified}>✔︎</Text>}
             </View>
@@ -306,7 +334,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               </View>
             )}
           </View>
-          {!!distance && (
+          {shouldShowDistance && (
             <Text style={styles.distance}>{distance.toFixed(0)} km away</Text>
           )}
         </View>
@@ -367,6 +395,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.backgroundDark,
+  },
+  placeholderLabel: {
+    marginTop: 10,
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   // Tap zones for photo navigation (invisible, overlaid on photo)
   tapZoneLeft: {

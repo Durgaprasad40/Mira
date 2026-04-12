@@ -319,12 +319,20 @@ export default function ViewProfileScreen() {
           }}
           renderItem={({ item }) => (
             <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
-              <Image
-                source={{ uri: item.url }}
-                style={{ width: '100%', height: 500 }}
-                contentFit="cover"
-                blurRadius={isPhase2 ? 20 : 0}
-              />
+              {typeof item.url === 'string' && item.url.length > 0 ? (
+                <Image
+                  source={{ uri: item.url }}
+                  style={{ width: '100%', height: 500 }}
+                  contentFit="cover"
+                  blurRadius={profile.photoBlurred === true ? 20 : 0}
+                />
+              ) : (
+                <View style={styles.lockedPhotoSlide}>
+                  <Ionicons name="lock-closed-outline" size={42} color={COLORS.textLight} />
+                  <Text style={styles.lockedPhotoTitle}>Private photo</Text>
+                  <Text style={styles.lockedPhotoText}>Available only after reveal permission is granted.</Text>
+                </View>
+              )}
             </View>
           )}
           style={styles.photoCarousel}
@@ -364,7 +372,9 @@ export default function ViewProfileScreen() {
           const badges = getTrustBadges({
             isVerified: profile.isVerified,
             lastActive: (profile as any).lastActive,
-            photoCount: profile.photos?.length,
+            photoCount: Array.isArray(profile.photos)
+              ? profile.photos.filter((photo: any) => typeof photo?.url === 'string' && photo.url.length > 0).length
+              : 0,
             bio: profile.bio,
           });
           // Filter out the "Verified" badge from getTrustBadges since we show it separately
@@ -723,6 +733,27 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.backgroundDark,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  lockedPhotoSlide: {
+    width: '100%',
+    height: 500,
+    backgroundColor: COLORS.backgroundDark,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  lockedPhotoTitle: {
+    marginTop: 12,
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  lockedPhotoText: {
+    marginTop: 8,
+    fontSize: 14,
+    lineHeight: 20,
+    color: COLORS.textLight,
+    textAlign: 'center',
   },
   photoIndicators: {
     flexDirection: 'row',

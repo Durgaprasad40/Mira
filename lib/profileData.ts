@@ -6,17 +6,22 @@ export interface ProfileData {
   /** Phase-2 only: The user ID (distinct from profile doc _id) */
   userId?: string;
   name: string;
-  age: number;
+  age?: number;
+  ageHidden?: boolean;
   bio?: string;
   city?: string;
   isVerified?: boolean;
   verificationStatus?: string;
   distance?: number;
-  photos: { url: string }[];
+  distanceHidden?: boolean;
+  photos: { url: string | null }[];
+  photoBlurred?: boolean;
   tags?: string[];
   activities?: string[];
   relationshipIntent?: string[];
   lastActive?: number;
+  isActiveNow?: boolean;
+  wasActiveToday?: boolean;
   createdAt?: number;
   profilePrompts?: { question: string; answer: string }[];
   /** @deprecated Use privateIntentKeys[] instead */
@@ -27,20 +32,28 @@ export interface ProfileData {
   isIncognito?: boolean;
 }
 
-const EMPTY_PHOTOS: { url: string }[] = [];
+const EMPTY_PHOTOS: { url: string | null }[] = [];
 
 /**
  * Normalize any raw profile shape (Convex, demo, explore) into ProfileData.
  */
 export function toProfileData(p: any): ProfileData {
-  // Resolve each photo to a url string, then drop empties
-  const rawPhotos: { url: string }[] = Array.isArray(p.photos)
+  // Resolve each photo to a url string or explicit null placeholder.
+  const rawPhotos: { url: string | null }[] = Array.isArray(p.photos)
     ? p.photos
         .map((photo: any) => {
-          const url = typeof photo === "string" ? photo : photo?.url;
-          return typeof url === "string" && url ? { url } : null;
+          if (typeof photo === "string") {
+            return photo ? { url: photo } : null;
+          }
+          if (typeof photo?.url === "string") {
+            return photo.url ? { url: photo.url } : null;
+          }
+          if (photo?.url === null) {
+            return { url: null };
+          }
+          return null;
         })
-        .filter(Boolean) as { url: string }[]
+        .filter(Boolean) as { url: string | null }[]
     : EMPTY_PHOTOS;
 
   const result: ProfileData = {
@@ -49,12 +62,15 @@ export function toProfileData(p: any): ProfileData {
     userId: p.userId,
     name: p.name,
     age: p.age,
+    ageHidden: p.ageHidden === true,
     bio: p.bio,
     city: p.city,
     isVerified: p.isVerified,
     verificationStatus: p.verificationStatus,
     distance: p.distance ?? p.distanceKm,
+    distanceHidden: p.distanceHidden === true,
     photos: rawPhotos,
+    photoBlurred: p.photoBlurred === true || p.isBlurred === true,
     tags: Array.isArray(p.tags) ? p.tags : [],
     activities: Array.isArray(p.activities) ? p.activities : [],
     relationshipIntent: Array.isArray(p.relationshipIntent)
@@ -63,6 +79,8 @@ export function toProfileData(p: any): ProfileData {
         ? [p.relationshipIntent]
         : [],
     lastActive: p.lastActive ?? p.lastActiveAt,
+    isActiveNow: p.isActiveNow === true,
+    wasActiveToday: p.wasActiveToday === true,
     createdAt: p.createdAt,
     profilePrompts: p.profilePrompts,
     // Phase-2 only: preserve intent keys (array preferred, single for backward compat)
