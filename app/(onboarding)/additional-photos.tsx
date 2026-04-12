@@ -46,7 +46,7 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 // MUST match backend limit in convex/photos.ts (MAX 9 photos)
 const TOTAL_SLOTS = 9;
 const MAX_PHOTOS = 9; // Backend enforces maximum 9 photos
-const MIN_PHOTOS_REQUIRED = 2; // Must have at least 2 photos to continue
+const MIN_PHOTOS_REQUIRED = 1; // Allow onboarding to continue after the first photo
 
 // Compute uniform tile size: 3 columns with gaps, portrait aspect ratio
 const GRID_PADDING = 16;
@@ -969,8 +969,6 @@ export default function AdditionalPhotosScreen() {
     // Gate: minimum 2 photos required
     // BUG FIX: Account for reference photo in effective count (matches backend logic)
     // effectivePhotoCount = normal photos + reference photo (if exists)
-    const effectivePhotoCount = photoCount + (hasReferencePhoto ? 1 : 0);
-
     if (effectivePhotoCount < MIN_PHOTOS_REQUIRED) {
       console.warn(`[PHOTO_GATE] Blocked: effectivePhotoCount=${effectivePhotoCount} < MIN_PHOTOS_REQUIRED=${MIN_PHOTOS_REQUIRED}`);
       console.warn('[PHOTO_GATE] Photo breakdown:', { normalPhotoCount: photoCount, hasReferencePhoto, effectivePhotoCount });
@@ -997,12 +995,8 @@ export default function AdditionalPhotosScreen() {
       });
     }
 
-    // Gate: bio is mandatory
+    // Bio is optional during onboarding. Users can add it later from Edit Profile.
     const trimmedBio = bio.trim();
-    if (!trimmedBio) {
-      setBioError('Write your bio to continue.');
-      return;
-    }
 
     // Clear warnings/errors if we passed all checks
     setShowPhotoWarning(false);
@@ -1218,6 +1212,7 @@ export default function AdditionalPhotosScreen() {
   const referencePhotoExistsBackend = onboardingStatus?.referencePhotoExists ?? false;
   // Consider reference photo valid if backend says it exists OR we have a URL to display
   const hasReferencePhoto = referencePhotoExistsBackend || hasReferencePhotoUrl;
+  const effectivePhotoCount = photoCount + (hasReferencePhoto ? 1 : 0);
 
   // Face verification status - determines primary photo edit rules
   // BEFORE verification: primary (slot 0) is read-only (no Replace/Remove)
@@ -1310,6 +1305,7 @@ export default function AdditionalPhotosScreen() {
         {/* Bio Section */}
         <View style={styles.bioSection}>
           <Text style={styles.sectionTitle}>About You</Text>
+          <Text style={styles.sectionHint}>Optional for now. You can add this later from Edit Profile.</Text>
           <TextInput
             style={[styles.bioInput, bioError && styles.bioInputError]}
             value={bio}
@@ -1393,7 +1389,7 @@ export default function AdditionalPhotosScreen() {
             </Text>
           ) : (
             <Text style={styles.photoHelperText}>
-              Add up to {MAX_PHOTOS} photos. First photo is your primary.
+              Add up to {MAX_PHOTOS} photos. One photo is enough to continue, and more helps you get more matches.
             </Text>
           )}
           <View style={styles.photoGrid}>{renderPhotoGrid()}</View>
@@ -1414,7 +1410,10 @@ export default function AdditionalPhotosScreen() {
             onPress={handleNext}
             fullWidth
           />
-          {photoCount < MIN_PHOTOS_REQUIRED && !showPhotoWarning && (
+          {effectivePhotoCount < 2 ? (
+            <Text style={styles.secondaryHint}>Add more photos to get more matches.</Text>
+          ) : null}
+          {effectivePhotoCount < MIN_PHOTOS_REQUIRED && !showPhotoWarning && (
             <Text style={styles.hint}>Add at least {MIN_PHOTOS_REQUIRED} photos to continue</Text>
           )}
         </View>
@@ -1581,6 +1580,12 @@ const styles = StyleSheet.create({
   bioSection: {
     marginBottom: 16,
   },
+  sectionHint: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    marginBottom: 10,
+    lineHeight: 18,
+  },
   bioInput: {
     backgroundColor: COLORS.backgroundDark,
     borderRadius: 10,
@@ -1610,6 +1615,12 @@ const styles = StyleSheet.create({
   bioCharCount: {
     fontSize: 11,
     color: COLORS.textLight,
+  },
+  secondaryHint: {
+    textAlign: 'center',
+    fontSize: 13,
+    color: COLORS.primary,
+    marginTop: 12,
   },
   // Privacy options section
   privacySection: {

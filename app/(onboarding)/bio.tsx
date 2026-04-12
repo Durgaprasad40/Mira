@@ -71,15 +71,19 @@ export default function BioScreen() {
     // P0 STABILITY: Prevent double-tap
     if (isSubmitting) return;
 
-    // Run validation
-    const result = validateRequired({ bio }, validationRules);
+    const trimmedBio = bio.trim();
 
-    if (!result.ok) {
-      setErrors(result.errors as Record<string, string>);
-      setShowTopError(true);
-      // Scroll to first invalid field
-      scrollToFirstInvalid(scrollRef, { bio: bioInputRef }, result.firstInvalidKey as string);
-      return;
+    // Bio is optional. Only validate if the user entered something.
+    if (trimmedBio.length > 0) {
+      const result = validateRequired({ bio: trimmedBio }, validationRules);
+
+      if (!result.ok) {
+        setErrors(result.errors as Record<string, string>);
+        setShowTopError(true);
+        // Scroll to first invalid field
+        scrollToFirstInvalid(scrollRef, { bio: bioInputRef }, result.firstInvalidKey as string);
+        return;
+      }
     }
 
     setIsSubmitting(true);
@@ -89,24 +93,24 @@ export default function BioScreen() {
     setShowTopError(false);
 
     // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
-    if (isDemoMode && userId && bio.trim()) {
+    if (isDemoMode && userId && trimmedBio) {
       const demoStore = useDemoStore.getState();
-      demoStore.saveDemoProfile(userId, { bio: bio.trim() });
-      console.log(`[BIO] saved bio (${bio.trim().length} chars)`);
+      demoStore.saveDemoProfile(userId, { bio: trimmedBio });
+      console.log(`[BIO] saved bio (${trimmedBio.length} chars)`);
     }
 
     // LIVE MODE: Persist bio to onboarding draft in Convex
     // P1 STABILITY: Await and handle failure with user-visible alert
-    if (!isDemoMode && userId && bio.trim()) {
+    if (!isDemoMode && userId && trimmedBio) {
       try {
         await upsertDraft({
           userId: userId as any,
           patch: {
-            profileDetails: { bio: bio.trim() },
+            profileDetails: { bio: trimmedBio },
             progress: { lastStepKey: 'bio' },
           },
         });
-        if (__DEV__) console.log(`[ONB_DRAFT] Saved bio: ${bio.trim().length} chars`);
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved bio: ${trimmedBio.length} chars`);
       } catch (error) {
         if (__DEV__) console.error('[BIO] Failed to save draft:', error);
         // P1 STABILITY: Alert user but allow continue (non-blocking)
@@ -126,6 +130,14 @@ export default function BioScreen() {
     router.push('/(onboarding)/permissions' as any);
     // P1 STABILITY: Guard setState after navigation
     if (isMountedRef.current) setIsSubmitting(false);
+  };
+
+  const handleSkip = () => {
+    if (__DEV__) console.log('[ONB] bio skipped → permissions');
+    setErrors({});
+    setShowTopError(false);
+    setStep('permissions');
+    router.push('/(onboarding)/permissions' as any);
   };
 
   // Clear field error when user types
@@ -165,7 +177,7 @@ export default function BioScreen() {
 
       <Text style={styles.title}>Write your bio</Text>
       <Text style={styles.subtitle}>
-        Tell people about yourself. What makes you unique?
+        Tell people about yourself. You can also skip this for now and add it later.
       </Text>
 
       <View style={styles.inputContainer}>
@@ -209,6 +221,9 @@ export default function BioScreen() {
         <View style={styles.navRow}>
           <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
             <Text style={styles.navText}>Previous</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.navButton} onPress={handleSkip}>
+            <Text style={styles.navText}>Skip</Text>
           </TouchableOpacity>
         </View>
       </View>
