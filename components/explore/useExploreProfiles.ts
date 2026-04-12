@@ -3,6 +3,6 @@
  *
  * This hook provides the single source of truth for explore profiles.
  * Works in both demo mode (uses DEMO_PROFILES from demoStore) and
- * live mode (queries Convex getExploreProfiles).
+ * live mode (queries Convex getExploreCategoryProfiles).
  */
 export { useExploreProfiles } from '@/hooks/useExploreProfiles';

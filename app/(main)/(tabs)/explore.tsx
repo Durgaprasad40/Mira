@@ -679,7 +679,7 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: COLORS.backgroundSecondary,
+    backgroundColor: COLORS.card,
   },
 
   // Return Hook

@@ -23,7 +23,6 @@ const EMPTY_PROFILES: any[] = [];
 export function useExploreProfiles(options: { enabled?: boolean } = {}): any[] {
   const { enabled = true } = options;
   const userId = useAuthStore((s) => s.userId);
-  const token = useAuthStore((s) => s.token);
   const demo = useDemoStore(useShallow((s) => ({
     matchCount: s.matches.length,
     likesCount: s.likes.length,
@@ -40,11 +39,11 @@ export function useExploreProfiles(options: { enabled?: boolean } = {}): any[] {
   }, [blockedUserIds, demo.matchCount, demo.likesCount, demo.getExcludedUserIds]);
 
   const queryArgs = useMemo(() => {
-    if (!enabled || isDemoMode || !userId || !token) return 'skip' as const;
-    return { token, authUserId: userId };
-  }, [enabled, token, userId]);
+    if (!enabled || isDemoMode || !userId) return 'skip' as const;
+    return { userId };
+  }, [enabled, userId]);
 
-  const result = useQuery(api.discover.getExploreProfiles as any, queryArgs);
+  const result = useQuery(api.discover.getExploreCategoryProfiles, queryArgs);
 
   return useMemo(() => {
     // P0-004 FIX: Demo mode only available in __DEV__ builds
@@ -55,7 +54,7 @@ export function useExploreProfiles(options: { enabled?: boolean } = {}): any[] {
         (p) => !excludedSet.has(p._id),
       );
     }
-    // getExploreProfiles returns { profiles: [], totalCount }
+    // getExploreCategoryProfiles returns { profiles: [], totalCount }
     if (result && Array.isArray(result.profiles)) return result.profiles;
     return EMPTY_PROFILES;
   }, [result, excludedSet, demo.profiles]);

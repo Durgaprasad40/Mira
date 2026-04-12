@@ -62,6 +62,24 @@ const exploreCategoryResultCache = new Map<string, Pick<
 >>();
 const exploreCategoryLatestResultCache = new Map<string, ExploreCategoryCacheEntry>();
 
+function normalizeExploreCategoryStatus(
+  status: string | null | undefined,
+  hasProfiles: boolean,
+): ExploreCategoryStatus {
+  if (
+    status === 'ok' ||
+    status === 'viewer_missing' ||
+    status === 'discovery_paused' ||
+    status === 'invalid_category' ||
+    status === 'location_required' ||
+    status === 'verification_required' ||
+    status === 'empty_category'
+  ) {
+    return status;
+  }
+  return hasProfiles ? 'ok' : 'empty_category';
+}
+
 function getExploreCategoryCacheKey(categoryId: string, limit: number, offset: number, refreshKey: number) {
   return `${categoryId}:${limit}:${offset}:${refreshKey}`;
 }
@@ -78,7 +96,6 @@ export function useExploreCategoryProfiles({
   refreshKey = 0,
 }: UseExploreCategoryProfilesOptions): UseExploreCategoryProfilesResult {
   const userId = useAuthStore((s) => s.userId);
-  const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const allProfiles = useExploreProfiles({ enabled: isDemoMode });
   const category = EXPLORE_CATEGORIES.find((c) => c.id === categoryId);
@@ -151,13 +168,13 @@ export function useExploreCategoryProfiles({
         return;
       }
 
-      if (!userId || !token || !categoryId || !category) {
+      if (!userId || !categoryId || !category) {
         if (!cancelled) {
           setState({
             profiles: EMPTY_PROFILES,
             totalCount: 0,
             hasMore: false,
-            status: !userId || !token ? 'viewer_missing' : 'invalid_category',
+            status: !userId ? 'viewer_missing' : 'invalid_category',
             partialBatchExhausted: false,
             isLoading: false,
             isUsingBackend: true,
@@ -186,24 +203,26 @@ export function useExploreCategoryProfiles({
       }
 
       try {
-        // Pass token so the backend can resolve the trusted session user.
-        const result = await convex.query(api.discover.getExploreCategoryProfiles as any, {
+        const result = await convex.query(api.discover.getExploreCategoryProfiles, {
+          userId,
           categoryId,
           limit,
           offset,
           refreshKey,
-          token: token ?? undefined,
-          authUserId: userId,
         });
 
         if (cancelled) return;
 
+        const nextProfiles = result?.profiles ?? EMPTY_PROFILES;
+        const nextTotalCount = result?.totalCount ?? 0;
+        const nextStatus = normalizeExploreCategoryStatus(result?.status, nextProfiles.length > 0);
+
         const nextState = {
-          profiles: result?.profiles ?? EMPTY_PROFILES,
-          totalCount: result?.totalCount ?? 0,
-          hasMore: result?.hasMore === true,
-          status: result?.status ?? 'ok',
-          partialBatchExhausted: result?.partialBatchExhausted === true,
+          profiles: nextProfiles,
+          totalCount: nextTotalCount,
+          hasMore: false,
+          status: nextStatus,
+          partialBatchExhausted: false,
           isLoading: false,
           isUsingBackend: true,
           isStale: false,
@@ -261,7 +280,7 @@ export function useExploreCategoryProfiles({
     return () => {
       cancelled = true;
     };
-  }, [authReady, cacheKey, category, userId, categoryId, latestCacheKey, limit, offset, refreshKey, demoProfiles, token]);
+  }, [authReady, cacheKey, category, userId, categoryId, latestCacheKey, limit, offset, refreshKey, demoProfiles]);
 
   return state;
 }

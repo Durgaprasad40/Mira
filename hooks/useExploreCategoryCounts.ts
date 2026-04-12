@@ -47,6 +47,24 @@ const DEMO_CATEGORY_COUNTS: Record<string, number> = {
   nearby: 4,
 };
 
+function normalizeExploreCategoryCountsStatus(
+  status: string | null | undefined,
+): ExploreCategoryCountsStatus | null {
+  if (status === 'ok' || status === 'viewer_missing' || status === 'discovery_paused') {
+    return status;
+  }
+  return null;
+}
+
+function normalizeExploreNearbyStatus(
+  status: string | null | undefined,
+): ExploreNearbyAvailabilityStatus {
+  if (status === 'location_required' || status === 'verification_required') {
+    return status;
+  }
+  return 'ok';
+}
+
 /**
  * Fetch category counts from the backend using the single-category system.
  * Returns explicit loading and error state so the homepage can stay truthful.
@@ -56,7 +74,6 @@ const DEMO_CATEGORY_COUNTS: Record<string, number> = {
  */
 export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsResult {
   const userId = useAuthStore((s) => s.userId);
-  const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const lastGoodCountsRef = useRef<Record<string, number> | null>(null);
   const lastNearbyStatusRef = useRef<ExploreNearbyAvailabilityStatus>('ok');
@@ -64,7 +81,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   // Determine if we should skip the query
   // Skip if: demo mode (legacy store mode) OR auth not ready OR userId missing
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  const shouldSkip = isDemoMode || !authReady || !userId || !token;
+  const shouldSkip = isDemoMode || !authReady || !userId;
 
   // P1-001 FIX: Use useQuery() for reactive caching during the current Explore session.
   // refreshKey in args triggers re-fetch when changed (for manual refresh)
@@ -72,13 +89,13 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   // Pass token so the backend can resolve the trusted session user.
   const queryResult = useQuery(
     api.discover.getExploreCategoryCounts,
-    shouldSkip ? 'skip' : { refreshKey, token: token ?? undefined }
+    shouldSkip ? 'skip' : { refreshKey, userId }
   );
 
   useEffect(() => {
     if (queryResult && queryResult.status === 'ok' && queryResult.counts) {
       lastGoodCountsRef.current = queryResult.counts;
-      lastNearbyStatusRef.current = queryResult.nearbyStatus ?? 'ok';
+      lastNearbyStatusRef.current = normalizeExploreNearbyStatus(queryResult.nearbyStatus);
     }
   }, [queryResult]);
 
@@ -139,8 +156,8 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
 
   return {
     data: queryResult.counts ?? null,
-    status: queryResult.status ?? null,
-    nearbyStatus: queryResult.nearbyStatus ?? 'ok',
+    status: normalizeExploreCategoryCountsStatus(queryResult.status),
+    nearbyStatus: normalizeExploreNearbyStatus(queryResult.nearbyStatus),
     isLoading: false,
     isError: false,
     error: null,

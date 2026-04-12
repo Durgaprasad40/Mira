@@ -4,28 +4,19 @@ import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
+import {
+  FRONTEND_RELATIONSHIP_INTENT_IDS,
+  normalizeRelationshipIntentValues,
+} from "../lib/discoveryNaming";
 
-// ALLOWED_RELATIONSHIP_INTENTS: Schema-safe values (excludes UI-only values like single_parent, just_18)
-const ALLOWED_RELATIONSHIP_INTENTS = new Set([
-  'long_term', 'short_term', 'fwb', 'figuring_out',
-  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
-]);
+const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
 
-const RELATIONSHIP_INTENT_ALIASES: Record<string, string> = {
-  serious_vibes: 'long_term',
-  keep_it_casual: 'short_term',
-  exploring_vibes: 'figuring_out',
-  see_where_it_goes: 'short_to_long',
-  open_to_vibes: 'long_to_short',
-  just_friends: 'new_friends',
-};
-
-// Sanitize relationshipIntent to only include schema-valid values
 function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | undefined {
   if (!intent || !Array.isArray(intent)) return intent;
-  const normalized = intent.map((value) => RELATIONSHIP_INTENT_ALIASES[value] ?? value);
-  const sanitized = Array.from(new Set(normalized.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v))));
-  const removed = intent.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(RELATIONSHIP_INTENT_ALIASES[v] ?? v));
+  const sanitized = normalizeRelationshipIntentValues(intent);
+  const removed = intent.filter(
+    (value) => normalizeRelationshipIntentValues(value).length === 0,
+  );
   if (removed.length > 0) {
     console.warn('[SANITIZE] Removed invalid relationshipIntent values:', removed);
   }
@@ -320,14 +311,15 @@ export const updateProfile = mutation({
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -452,14 +444,15 @@ export const updatePreferences = mutation({
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -1287,14 +1280,15 @@ export const completeOnboarding = mutation({
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -1404,8 +1398,7 @@ export const completeOnboarding = mutation({
     if (pets !== undefined) cleanUpdates.pets = pets;
     if (insect !== undefined) cleanUpdates.insect = insect;
 
-    // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values
-    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    // DEFENSIVE SANITIZATION: normalize legacy stored slugs to frontend-canonical values
     if (cleanUpdates.relationshipIntent) {
       cleanUpdates.relationshipIntent = sanitizeRelationshipIntent(
         cleanUpdates.relationshipIntent as string[]
@@ -1952,8 +1945,7 @@ export const upsertOnboardingDraft = mutation({
       },
     };
 
-    // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values before saving
-    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    // DEFENSIVE SANITIZATION: normalize legacy stored slugs to frontend-canonical values
     if (mergedDraft.preferences?.relationshipIntent) {
       mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
         mergedDraft.preferences.relationshipIntent

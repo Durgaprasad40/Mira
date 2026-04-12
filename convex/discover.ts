@@ -3,6 +3,11 @@ import { query, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId } from './helpers';
 import {
+  FRONTEND_EXPLORE_CATEGORY_IDS,
+  normalizeExploreCategoryId,
+  normalizeRelationshipIntentValues,
+} from '../lib/discoveryNaming';
+import {
   CandidateProfile,
   CurrentUser,
   TrustSignals,
@@ -149,6 +154,8 @@ function preferenceMatchScore(
   },
 ): number {
   let score = 0;
+  const candidateIntent = normalizeRelationshipIntentValues(candidate.relationshipIntent);
+  const viewerIntent = normalizeRelationshipIntentValues(currentUser.relationshipIntent);
 
   // Same city? (0–30)
   if (candidate.city && currentUser.city && candidate.city === currentUser.city) {
@@ -161,18 +168,19 @@ function preferenceMatchScore(
 
   // Relationship intent alignment (0–30)
   const intentCompat: Record<string, string[]> = {
-    long_term: ['long_term', 'short_to_long'],
-    short_term: ['short_term', 'long_to_short', 'fwb'],
-    fwb: ['fwb', 'short_term'],
-    figuring_out: ['figuring_out', 'open_to_anything'],
-    short_to_long: ['short_to_long', 'long_term', 'short_term'],
-    long_to_short: ['long_to_short', 'short_term'],
-    new_friends: ['new_friends', 'open_to_anything'],
-    open_to_anything: ['open_to_anything', 'figuring_out', 'new_friends'],
+    serious_vibes: ['serious_vibes', 'see_where_it_goes'],
+    keep_it_casual: ['keep_it_casual', 'open_to_vibes'],
+    exploring_vibes: ['exploring_vibes', 'open_to_anything'],
+    see_where_it_goes: ['see_where_it_goes', 'serious_vibes', 'keep_it_casual'],
+    open_to_vibes: ['open_to_vibes', 'keep_it_casual'],
+    just_friends: ['just_friends', 'open_to_anything'],
+    open_to_anything: ['open_to_anything', 'exploring_vibes', 'just_friends'],
+    single_parent: ['single_parent'],
+    new_to_dating: ['new_to_dating'],
   };
   let bestIntent = 0;
-  for (const mine of currentUser.relationshipIntent) {
-    for (const theirs of candidate.relationshipIntent) {
+  for (const mine of viewerIntent) {
+    for (const theirs of candidateIntent) {
       if (mine === theirs) bestIntent = Math.max(bestIntent, 30);
       else if (intentCompat[mine]?.includes(theirs)) bestIntent = Math.max(bestIntent, 15);
     }
@@ -460,7 +468,7 @@ export const getDiscoverProfiles = query({
         lastActive: user.lastActive,
         createdAt: user.createdAt,
         lookingFor: user.lookingFor,
-        relationshipIntent: user.relationshipIntent,
+        relationshipIntent: normalizeRelationshipIntentValues(user.relationshipIntent),
         activities: user.activities,
         profilePrompts: user.profilePrompts,
         photos: photos.sort((a, b) => a.order - b.order),
@@ -490,7 +498,7 @@ export const getDiscoverProfiles = query({
         _id: currentUser._id as string,
         city: currentUser.city,
         activities: currentUser.activities,
-        relationshipIntent: currentUser.relationshipIntent,
+        relationshipIntent: normalizeRelationshipIntentValues(currentUser.relationshipIntent),
         lookingFor: currentUser.lookingFor,
         minAge: currentUser.minAge,
         maxAge: currentUser.maxAge,
@@ -673,20 +681,10 @@ export const getDiscoverProfiles = query({
 });
 
 // ---------------------------------------------------------------------------
-// getExploreProfiles — filtered category view
+// getExploreCategoryProfiles — filtered category view
 // ---------------------------------------------------------------------------
 
-const EXPLORE_CATEGORY_IDS = [
-  'long_term',
-  'short_term',
-  'figuring_out',
-  'short_to_long',
-  'long_to_short',
-  'new_friends',
-  'open_to_anything',
-  'single_parent',
-  'just_18',
-  'near_me',
+const EXTRA_EXPLORE_CATEGORY_IDS = [
   'online_now',
   'active_today',
   'free_tonight',
@@ -697,6 +695,11 @@ const EXPLORE_CATEGORY_IDS = [
   'gaming',
   'fitness',
   'music',
+] as const;
+
+const EXPLORE_CATEGORY_IDS = [
+  ...FRONTEND_EXPLORE_CATEGORY_IDS,
+  ...EXTRA_EXPLORE_CATEGORY_IDS,
 ] as const;
 
 type ExploreCategoryId = (typeof EXPLORE_CATEGORY_IDS)[number];
@@ -738,8 +741,25 @@ function isExploreCategoryId(value: string | undefined): value is ExploreCategor
   return typeof value === 'string' && (EXPLORE_CATEGORY_IDS as readonly string[]).includes(value);
 }
 
+function normalizePublicExploreCategoryId(value: string | undefined): ExploreCategoryId | undefined {
+  const normalizedFrontendId = normalizeExploreCategoryId(value);
+  if (normalizedFrontendId) {
+    return normalizedFrontendId;
+  }
+
+  if (
+    typeof value === 'string' &&
+    (EXTRA_EXPLORE_CATEGORY_IDS as readonly string[]).includes(value)
+  ) {
+    return value as ExploreCategoryId;
+  }
+
+  return undefined;
+}
+
 function candidateMatchesAnyIntent(candidate: { relationshipIntent: string[] }, targets: string[]): boolean {
-  return targets.some((intent) => candidate.relationshipIntent.includes(intent));
+  const normalizedCandidateIntents = normalizeRelationshipIntentValues(candidate.relationshipIntent);
+  return targets.some((intent) => normalizedCandidateIntents.includes(intent as any));
 }
 
 function candidateMatchesAnyActivity(candidate: { activities: string[] }, targets: string[]): boolean {
@@ -760,25 +780,25 @@ function isActiveTodayCandidate(candidate: { wasActiveToday: boolean }): boolean
 
 function matchesExploreCategory(candidate: ExploreCandidateBase, categoryId: ExploreCategoryId): boolean {
   switch (categoryId) {
-    case 'long_term':
-      return candidateMatchesAnyIntent(candidate, ['long_term', 'long_term_partner', 'long_term_open_to_short']);
-    case 'short_term':
-      return candidateMatchesAnyIntent(candidate, ['short_term_fun', 'short_term', 'fwb']);
-    case 'figuring_out':
-      return candidateMatchesAnyIntent(candidate, ['figuring_out']);
-    case 'short_to_long':
-      return candidateMatchesAnyIntent(candidate, ['short_term_open_to_long', 'short_to_long']);
-    case 'long_to_short':
-      return candidateMatchesAnyIntent(candidate, ['long_to_short', 'long_term_open_to_short']);
-    case 'new_friends':
-      return candidateMatchesAnyIntent(candidate, ['new_friends']);
+    case 'serious_vibes':
+      return candidateMatchesAnyIntent(candidate, ['serious_vibes']);
+    case 'keep_it_casual':
+      return candidateMatchesAnyIntent(candidate, ['keep_it_casual']);
+    case 'exploring_vibes':
+      return candidateMatchesAnyIntent(candidate, ['exploring_vibes']);
+    case 'see_where_it_goes':
+      return candidateMatchesAnyIntent(candidate, ['see_where_it_goes']);
+    case 'open_to_vibes':
+      return candidateMatchesAnyIntent(candidate, ['open_to_vibes']);
+    case 'just_friends':
+      return candidateMatchesAnyIntent(candidate, ['just_friends']);
     case 'open_to_anything':
       return candidateMatchesAnyIntent(candidate, ['open_to_anything']);
     case 'single_parent':
       return candidateMatchesAnyIntent(candidate, ['single_parent']);
-    case 'just_18':
-      return candidateMatchesAnyIntent(candidate, ['just_18']);
-    case 'near_me':
+    case 'new_to_dating':
+      return candidateMatchesAnyIntent(candidate, ['new_to_dating']);
+    case 'nearby':
       return isNearMeCandidate(candidate);
     case 'online_now':
       return isOnlineNowCandidate(candidate);
@@ -1018,8 +1038,9 @@ async function buildExploreCandidates(
   const effectiveMinAge = args.minAge ?? currentUser.minAge;
   const effectiveMaxAge = args.maxAge ?? currentUser.maxAge;
   const effectiveMaxDistance = args.maxDistance ?? currentUser.maxDistance;
+  const normalizedRelationshipIntentFilter = normalizeRelationshipIntentValues(args.relationshipIntent);
   const viewerAge = calculateAge(currentUser.dateOfBirth);
-  const activeCategoryId = isExploreCategoryId(args.categoryId) ? args.categoryId : undefined;
+  const activeCategoryId = normalizePublicExploreCategoryId(args.categoryId);
 
   const userBuckets = await Promise.all(
     effectiveGender.map((gender) =>
@@ -1057,6 +1078,7 @@ async function buildExploreCandidates(
       const candidateLookingFor = Array.isArray(user.lookingFor) ? user.lookingFor : [];
       const candidateRelationshipIntent = Array.isArray(user.relationshipIntent) ? (user.relationshipIntent as string[]) : [];
       const candidateActivities = Array.isArray(user.activities) ? (user.activities as string[]) : [];
+      const normalizedCandidateRelationshipIntent = normalizeRelationshipIntentValues(candidateRelationshipIntent);
 
       if (!candidateLookingFor.includes(currentUser.gender)) continue;
 
@@ -1067,8 +1089,8 @@ async function buildExploreCandidates(
       const rawDistance = getCandidateDistance(currentUser, user);
       if (!isDistanceAllowed(rawDistance, effectiveMaxDistance)) continue;
 
-      if (args.relationshipIntent && args.relationshipIntent.length > 0) {
-        if (!args.relationshipIntent.some((intent) => candidateRelationshipIntent.includes(intent))) continue;
+      if (normalizedRelationshipIntentFilter.length > 0) {
+        if (!normalizedRelationshipIntentFilter.some((intent) => normalizedCandidateRelationshipIntent.includes(intent))) continue;
       }
 
       if (args.activities && args.activities.length > 0) {
@@ -1097,7 +1119,7 @@ async function buildExploreCandidates(
         isActiveNow: typeof visibleLastActive === 'number' && Date.now() - visibleLastActive <= 10 * 60 * 1000,
         wasActiveToday: typeof visibleLastActive === 'number' && Date.now() - visibleLastActive <= 24 * 60 * 60 * 1000,
         lookingFor: candidateLookingFor,
-        relationshipIntent: candidateRelationshipIntent,
+        relationshipIntent: normalizedCandidateRelationshipIntent,
         activities: candidateActivities,
         profilePrompts: user.profilePrompts,
         photoBlurred: user.photoBlurred === true,
@@ -1116,7 +1138,7 @@ async function buildExploreCandidates(
   }
 
   candidates.sort((a, b) => {
-    if (activeCategoryId === 'near_me') {
+    if (activeCategoryId === 'nearby') {
       return (a.distance ?? 999) - (b.distance ?? 999);
     }
     if (activeCategoryId === 'online_now' || activeCategoryId === 'active_today') {
@@ -1170,7 +1192,7 @@ async function hydrateExploreProfiles(
   return results;
 }
 
-export const getExploreProfiles = query({
+export const getExploreCategoryProfiles = query({
   args: {
     userId: v.union(v.id('users'), v.string()),
     genderFilter: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')))),
@@ -1178,9 +1200,9 @@ export const getExploreProfiles = query({
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
     relationshipIntent: v.optional(v.array(v.union(
-      v.literal('long_term'), v.literal('short_term'), v.literal('fwb'),
-      v.literal('figuring_out'), v.literal('short_to_long'), v.literal('long_to_short'),
-      v.literal('new_friends'), v.literal('open_to_anything'),
+      v.literal('serious_vibes'), v.literal('keep_it_casual'), v.literal('exploring_vibes'),
+      v.literal('see_where_it_goes'), v.literal('open_to_vibes'), v.literal('just_friends'),
+      v.literal('open_to_anything'), v.literal('single_parent'), v.literal('new_to_dating'),
     ))),
     activities: v.optional(v.array(v.union(
       v.literal('coffee'), v.literal('date_night'), v.literal('sports'),
@@ -1222,7 +1244,11 @@ export const getExploreProfiles = query({
     });
 
     if (built.status !== 'ready') {
-      return { profiles: [], totalCount: 0, status: built.status };
+      return {
+        profiles: [],
+        totalCount: 0,
+        status: built.status === 'viewer_not_found' ? 'viewer_missing' : built.status,
+      };
     }
 
     const rankedCandidates = [...built.candidates];
@@ -1241,16 +1267,16 @@ export const getExploreProfiles = query({
     return {
       profiles: hydratedProfiles.slice(0, limit),
       totalCount: rankedCandidates.length,
-      status: 'ready' as const,
+      status: 'ok' as const,
     };
   },
 });
 
 // ---------------------------------------------------------------------------
-// getFilterCounts — badge numbers for explore grid
+// getExploreCategoryCounts — badge numbers for explore grid
 // ---------------------------------------------------------------------------
 
-export const getFilterCounts = query({
+export const getExploreCategoryCounts = query({
   args: {
     userId: v.union(v.id('users'), v.string()),
     refreshKey: v.optional(v.number()),
@@ -1263,16 +1289,18 @@ export const getFilterCounts = query({
 
     if (built.status !== 'ready') {
       return {
-        categoryCounts: createEmptyExploreCounts(),
+        counts: createEmptyExploreCounts(),
         totalCount: 0,
-        status: built.status,
+        status: built.status === 'viewer_not_found' ? 'viewer_missing' : built.status,
+        nearbyStatus: 'ok' as const,
       };
     }
 
     return {
-      categoryCounts: countExploreCategories(built.candidates),
+      counts: countExploreCategories(built.candidates),
       totalCount: built.candidates.length,
-      status: 'ready' as const,
+      status: 'ok' as const,
+      nearbyStatus: 'ok' as const,
     };
   },
 });

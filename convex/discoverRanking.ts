@@ -20,6 +20,7 @@
  */
 
 import { Id } from './_generated/dataModel';
+import { normalizeRelationshipIntentValues } from '../lib/discoveryNaming';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -167,21 +168,22 @@ export function compatibilityScore(
   let score = 0;
 
   // SAFETY: Normalize arrays to prevent crashes on undefined fields
-  const candidateIntent = candidate.relationshipIntent ?? [];
-  const userIntent = currentUser.relationshipIntent ?? [];
+  const candidateIntent = normalizeRelationshipIntentValues(candidate.relationshipIntent);
+  const userIntent = normalizeRelationshipIntentValues(currentUser.relationshipIntent);
   const candidateActivities = candidate.activities ?? [];
   const userActivities = currentUser.activities ?? [];
 
   // 1. Relationship intent alignment (0-30)
   const intentCompat: Record<string, string[]> = {
-    long_term: ['long_term', 'short_to_long'],
-    short_term: ['short_term', 'long_to_short', 'fwb'],
-    fwb: ['fwb', 'short_term'],
-    figuring_out: ['figuring_out', 'open_to_anything'],
-    short_to_long: ['short_to_long', 'long_term', 'short_term'],
-    long_to_short: ['long_to_short', 'short_term'],
-    new_friends: ['new_friends', 'open_to_anything'],
-    open_to_anything: ['open_to_anything', 'figuring_out', 'new_friends'],
+    serious_vibes: ['serious_vibes', 'see_where_it_goes'],
+    keep_it_casual: ['keep_it_casual', 'open_to_vibes'],
+    exploring_vibes: ['exploring_vibes', 'open_to_anything'],
+    see_where_it_goes: ['see_where_it_goes', 'serious_vibes', 'keep_it_casual'],
+    open_to_vibes: ['open_to_vibes', 'keep_it_casual'],
+    just_friends: ['just_friends', 'open_to_anything'],
+    open_to_anything: ['open_to_anything', 'exploring_vibes', 'just_friends'],
+    single_parent: ['single_parent'],
+    new_to_dating: ['new_to_dating'],
   };
 
   let bestIntent = 0;
