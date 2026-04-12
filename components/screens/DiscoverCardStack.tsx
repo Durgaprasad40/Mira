@@ -781,13 +781,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // ═══════════════════════════════════════════════════════════════════════════
   // VIEWER PROFILE QUERY - For computing common points with candidates
   // ═══════════════════════════════════════════════════════════════════════════
-  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  // Pass token for demo auth mode support (backend uses requireAppUserId)
   const viewerProfileArgs = useMemo(
-    () => !isDemoMode && userId && authReady && hasValidToken && !isPhase2 ? { token } : "skip" as const,
-    [authReady, hasValidToken, userId, isPhase2, token]
+    () => !isDemoMode && userId && authReady && !isPhase2 ? { userId } : "skip" as const,
+    [authReady, userId, isPhase2]
   );
-  const viewerProfile = useQuery(api.users.getCurrentUserDiscoverContext, viewerProfileArgs);
+  const viewerProfile = useQuery(api.users.getCurrentUser, viewerProfileArgs);
 
   // Use the correct profiles based on mode
   // PERF: For Phase-1, use prefetch-aware variable that provides data during initial query loading
@@ -1425,8 +1423,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Phase-1 swipe mutation (shared likes.ts)
   const swipeMutation = useMutation(api.likes.swipe);
-  // Phase-2 swipe mutation (isolated privateSwipes.ts) - STRICT ISOLATION
-  const phase2SwipeMutation = useMutation(api.privateSwipes.swipe);
   // Phase-2 only: Impression recording for ranking system
   const recordImpressionsMutation = useMutation(api.privateDiscover.recordDesireLandImpressions);
 
@@ -1981,26 +1977,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           });
         }
 
+        if (isPhase2 && !isDemoMode) {
+          resetPosition();
+          Toast.show("Desire Land swipes are temporarily unavailable.");
+          releaseSwipeLock(activeSwipeId);
+          return;
+        }
+
         const SWIPE_TIMEOUT_MS = 6000;
-        // PHASE-2 ISOLATION: Use separate mutation path for Phase-2 (Desire Land)
-        // Phase-2 writes to privateLikes/privateMatches/privateConversations
-        // Phase-1 writes to likes/matches/conversations (shared tables)
-        // P2-SWIPE-FIX: Phase-2 profiles have userId (from users table) separate from id (profile doc _id)
-        const phase2UserId = swipedProfile.userId || swipedProfile.id;
-        // LOG_NOISE_FIX: Removed verbose swipe log
-        const swipePromise = isPhase2
-          ? phase2SwipeMutation({
-              token: token!,
-              toUserId: phase2UserId as Id<'users'>,
-              action,
-              message: message,
-            })
-          : swipeMutation({
-              token: token!,
-              toUserId: swipedProfile.id as Id<'users'>,
-              action,
-              message: message,
-            });
+        const swipePromise = swipeMutation({
+          token: token!,
+          toUserId: swipedProfile.id as Id<'users'>,
+          action,
+          message: message,
+        });
 
         let result;
         if (isPhase2 && !isDemoMode) {
@@ -2120,7 +2110,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
       }
     },
-    [convexUserId, swipeMutation, phase2SwipeMutation, isPhase2, isDemoMode, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, releaseSwipeLock],
+    [convexUserId, swipeMutation, isPhase2, isDemoMode, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, releaseSwipeLock, resetPosition],
   );
 
   const animateSwipe = useCallback(
@@ -2193,6 +2183,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const thresholdY = SCREEN_HEIGHT * SWIPE_CONFIG.SWIPE_THRESHOLD_Y;
   const velocityX = SWIPE_CONFIG.SWIPE_VELOCITY_X;
   const velocityY = SWIPE_CONFIG.SWIPE_VELOCITY_Y;
+  // P1-FIX: Hardened pull-up gesture thresholds
+  // Minimum distance for profile open (10% of screen height)
+  const profileOpenMinDistance = SCREEN_HEIGHT * 0.10;
+  // Maximum distance before Stand Out triggers (less than thresholdY)
+  const profileOpenMaxDistance = SCREEN_HEIGHT * 0.16;
+  // Minimum upward velocity for intentional gesture
+  const profileOpenMinVelocity = 0.3;
 
   // JS callbacks to be called from UI thread via runOnJS
   const updateOverlayDirection = useCallback((newDir: "left" | "right" | "up" | null) => {
@@ -2225,8 +2222,25 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       }
       return;
     }
+    // P1-FIX: Hardened pull-up gesture for profile open
+    // Must be: intentionally vertical, sufficient distance, not too far (Stand Out territory)
+    const absX = Math.abs(dx);
+    const absY = Math.abs(dy);
+    const absVy = Math.abs(vy);
+    const isUpward = dy < 0;
+    const isPrimarilyVertical = absY > absX * 2; // Must be clearly vertical (2:1 ratio)
+    const hasMinDistance = absY >= profileOpenMinDistance;
+    const isBelowStandOut = absY < profileOpenMaxDistance;
+    const hasMinVelocity = absVy >= profileOpenMinVelocity;
+
+    // Profile open requires: upward + vertical + (distance OR velocity) + not Stand Out
+    if (isUpward && isPrimarilyVertical && isBelowStandOut && (hasMinDistance || hasMinVelocity)) {
+      resetPosition();
+      openProfileCb();
+      return;
+    }
     resetPosition();
-  }, [thresholdX, thresholdY, velocityX, velocityY, resetPosition, hasReachedStandOutLimit, standOutsRemaining]);
+  }, [thresholdX, thresholdY, velocityX, velocityY, profileOpenMinDistance, profileOpenMaxDistance, profileOpenMinVelocity, resetPosition, hasReachedStandOutLimit, standOutsRemaining, openProfileCb]);
 
   // P0-001 FIX: Keep handlePanEndRef in sync with latest handlePanEnd
   handlePanEndRef.current = handlePanEnd;
@@ -2586,6 +2600,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               </View>
             )}
           </TouchableOpacity>
+        </View>
+      )}
+
+      {/* GROWTH: Daily swipe counter - shows remaining likes with scarcity urgency */}
+      {!isPhase2 && likesLeft < 25 && (
+        <View style={[styles.swipeCounterPill, { top: cardTop + 8, right: 16 }]}>
+          <Ionicons
+            name={likesLeft <= 5 ? "flame" : "heart"}
+            size={12}
+            color={likesLeft <= 5 ? "#EF4444" : "#EC4899"}
+          />
+          <Text style={[
+            styles.swipeCounterText,
+            likesLeft <= 5 && styles.swipeCounterTextUrgent
+          ]}>
+            {likesLeft <= 5 ? `Only ${likesLeft} left!` : `${likesLeft} profiles left`}
+          </Text>
         </View>
       )}
 
@@ -3534,6 +3565,28 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "500",
     color: "rgba(255, 255, 255, 0.6)",
+  },
+
+  // GROWTH: Daily swipe counter pill
+  swipeCounterPill: {
+    position: "absolute",
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    gap: 4,
+    zIndex: 5,
+  },
+  swipeCounterText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#F472B6",
+  },
+  swipeCounterTextUrgent: {
+    color: "#EF4444",
+    fontWeight: "700",
   },
 
   // Match Reminder Pill (Phase-2 Only)
