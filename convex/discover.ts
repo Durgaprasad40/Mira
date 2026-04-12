@@ -20,6 +20,9 @@ import {
 import { shouldRunShadowComparison } from './ranking/rankingConfig';
 import { rankCandidates as sharedRankCandidates, logBatchRankingComparison } from './ranking/sharedRankingEngine';
 
+// DEV DEBUG: Structured logging
+import { convexLog, convexError } from './_logging';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -223,13 +226,16 @@ export const getDiscoverProfiles = query({
     filterVersion: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const startTime = Date.now();
     const { sortBy = 'recommended', limit = 20, offset = 0 } = args;
     // filterVersion intentionally unused — it's only to bust query cache
+
+    convexLog('discover.getDiscoverProfiles', { sortBy, limit, offset, status: 'started' });
 
     // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
     const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!userId) {
-      console.log('[getDiscoverProfiles] User not found for authUserId:', args.userId);
+      convexLog('discover.getDiscoverProfiles', { status: 'user_not_found', authUserId: String(args.userId).slice(-8) });
       return [];
     }
 

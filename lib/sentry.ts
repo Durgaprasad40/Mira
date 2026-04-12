@@ -133,8 +133,7 @@ export function initSentry(): void {
       enabled: true,
 
       // DEBUG_SENTRY_VERBOSE toggle: when true, enables full native SDK debug output
-      // When false (default), suppresses "Sentry Logger [log]" spam
-      // Error capture works regardless of this setting
+      // DEV DEBUG MODE: Full visibility enabled
       debug: DEBUG_SENTRY_VERBOSE,
 
       // Session tracking for crash-free rate
@@ -143,11 +142,11 @@ export function initSentry(): void {
       // Capture all errors (100%)
       sampleRate: 1.0,
 
-      // Performance tracing - reduced in production for perf
-      tracesSampleRate: IS_DEV ? 1.0 : 0.2,
+      // DEV DEBUG MODE: Full tracing (100%) for maximum visibility
+      tracesSampleRate: DEBUG_SENTRY_VERBOSE ? 1.0 : (IS_DEV ? 1.0 : 0.2),
 
-      // Profiling disabled in prod (can cause perf issues)
-      profilesSampleRate: IS_DEV ? 0.5 : 0,
+      // DEV DEBUG MODE: Full profiling (100%) for maximum visibility
+      profilesSampleRate: DEBUG_SENTRY_VERBOSE ? 1.0 : (IS_DEV ? 0.5 : 0),
 
       // Stack traces on all messages
       attachStacktrace: true,
@@ -155,15 +154,15 @@ export function initSentry(): void {
       // Native crash reporting
       enableNative: true,
 
-      // PERF: Disabled to prevent UI jank
+      // PERF: Disabled to prevent UI jank (keep disabled even in debug mode)
       enableUserInteractionTracing: false,
       enableAutoPerformanceTracing: false,
 
-      // Normalize error depths
-      normalizeDepth: 8,
+      // Normalize error depths - increased for debug mode
+      normalizeDepth: DEBUG_SENTRY_VERBOSE ? 12 : 8,
 
-      // Breadcrumb limit
-      maxBreadcrumbs: 50,
+      // Breadcrumb limit - increased for debug mode
+      maxBreadcrumbs: DEBUG_SENTRY_VERBOSE ? 100 : 50,
 
       // Remove heavy integrations that cause jank
       integrations: (integrations) => {
@@ -174,6 +173,17 @@ export function initSentry(): void {
 
       // APP-WIDE: Accept all events, tag with feature context
       beforeSend(event, hint) {
+        // DEV DEBUG MODE: Log every event to console for visibility
+        if (DEBUG_SENTRY_VERBOSE && IS_DEV) {
+          originalConsoleLog('[SENTRY EVENT]', {
+            type: event.exception ? 'exception' : 'message',
+            message: event.message || event.exception?.values?.[0]?.value,
+            tags: event.tags,
+            level: event.level,
+            timestamp: new Date().toISOString(),
+          });
+        }
+
         // Auto-tag with current feature and screen
         const feature = getCurrentFeature();
         const screen = getCurrentScreen();
@@ -184,6 +194,7 @@ export function initSentry(): void {
           feature: feature || 'unknown',
           feature_group: featureGroup,
           screen: screen || 'unknown',
+          debug_mode: DEBUG_SENTRY_VERBOSE ? 'verbose' : 'normal',
         };
 
         // Add feature context
@@ -193,10 +204,20 @@ export function initSentry(): void {
             feature,
             screen,
             feature_group: featureGroup,
+            debug_verbose: DEBUG_SENTRY_VERBOSE,
           },
         };
 
-        // Filter out known non-critical errors
+        // DEV DEBUG MODE: Capture ALL events, no filtering
+        if (DEBUG_SENTRY_VERBOSE) {
+          // Scrub sensitive data but don't filter any events
+          if (event.extra) {
+            event.extra = scrubSensitiveData(event.extra) as Record<string, unknown>;
+          }
+          return event;
+        }
+
+        // Normal mode: Filter out known non-critical errors
         const error = hint.originalException;
         if (error instanceof Error) {
           const msg = error.message?.toLowerCase() || '';

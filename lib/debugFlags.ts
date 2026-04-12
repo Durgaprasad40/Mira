@@ -86,6 +86,8 @@ export const DEBUG_TRUTH_DARE = false;
  * - Sentry native SDK debug output enabled (Sentry Logger [log])
  * - Breadcrumb filtering bypassed (all debug breadcrumbs kept)
  * - Feature/screen change logs restored
+ * - beforeSend logs every event to console
+ * - Full traces and profiles captured (100%)
  *
  * When FALSE (default):
  * - Clean Sentry mode, minimal log noise
@@ -97,10 +99,10 @@ export const DEBUG_TRUTH_DARE = false;
  * - Production always uses false regardless of env variable
  *
  * USAGE: Set env var to TRUE for deep Sentry diagnosis, omit/FALSE for normal operation
+ *
+ * DEV DEBUG MODE: Currently forced TRUE for maximum visibility
  */
-export const DEBUG_SENTRY_VERBOSE = __DEV__
-  ? process.env.EXPO_PUBLIC_SENTRY_DEBUG === 'true'
-  : false;
+export const DEBUG_SENTRY_VERBOSE = __DEV__ ? true : false;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS
