@@ -1,7 +1,7 @@
 /*
- * LOCKED (PHASE-1 TAB)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- * Nearby tab is the only Phase-1 tab currently unlocked.
+ * LOCKED (MAIN TABS / DISCOVER NAV)
+ * Explore is intentionally hidden from the bottom tab bar.
+ * Do NOT reintroduce a separate Explore tab unless Durga Prasad explicitly unlocks it.
  */
 import { useEffect, useRef, useMemo, useCallback } from "react";
 import { Tabs, useRouter, useFocusEffect } from "expo-router";
@@ -215,10 +215,7 @@ export default function MainTabsLayout() {
         <Tabs.Screen
           name="explore"
           options={{
-            title: "Explore",
-            tabBarIcon: ({ color, size }) => (
-              <Ionicons name="search" size={size} color={color} />
-            ),
+            href: null,
           }}
         />
         <Tabs.Screen

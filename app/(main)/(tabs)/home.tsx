@@ -1,12 +1,10 @@
 /*
- * LOCKED (PHASE-1 TAB)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- * Nearby tab is the only Phase-1 tab currently unlocked.
+ * LOCKED (DISCOVER ENTRY)
+ * Discover is the unified Cards/Browse entry point.
+ * Do NOT split Discover and Explore again unless Durga Prasad explicitly unlocks it.
  */
-import { DiscoverCardStack } from "@/components/screens/DiscoverCardStack";
-import { useScreenTrace } from "@/lib/devTrace";
+import DiscoverUnifiedSurface from "@/components/discover/DiscoverUnifiedSurface";
 
 export default function HomeScreen() {
-  useScreenTrace("HOME");
-  return <DiscoverCardStack />;
+  return <DiscoverUnifiedSurface initialMode="cards" />;
 }

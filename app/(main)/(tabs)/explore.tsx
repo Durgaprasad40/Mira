@@ -1,93 +1,54 @@
 /*
- * LOCKED (PHASE-1 TAB)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- * Nearby tab is the only Phase-1 tab currently unlocked.
+ * LOCKED (EXPLORE COMPATIBILITY ROUTE)
+ * This route intentionally redirects to Discover in Browse mode.
+ * Keep it lightweight and compatibility-only unless Durga Prasad explicitly unlocks it.
  */
-import { useCallback, useMemo, useState, useRef } from "react";
-import { StyleSheet } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect, useRouter, useLocalSearchParams } from "expo-router";
-import { safePush } from "@/lib/safeRouter";
-import { useScreenTrace } from "@/lib/devTrace";
-
-import ExploreTileGrid from "@/components/explore/ExploreTileGrid";
-import { useExploreProfiles } from "@/components/explore/useExploreProfiles";
+import { useEffect } from "react";
+import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useRouter } from "expo-router";
+import { COLORS } from "@/lib/constants";
 import {
-  ExploreCategory,
-  EXPLORE_CATEGORIES,
-} from "@/components/explore/exploreCategories";
+  DISCOVER_MODE_STORAGE_KEY,
+} from "@/components/discover/DiscoverUnifiedSurface";
 
-export default function ExploreScreen() {
-  useScreenTrace("EXPLORE");
+export default function ExploreCompatibilityScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams();
-  const [refreshing, setRefreshing] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
 
-  // profiles source (demo or real) — refreshKey forces re-evaluation
-  const profiles = useExploreProfiles();
+  useEffect(() => {
+    let cancelled = false;
 
-  // Track profiles ref to detect stale state
-  const profilesRef = useRef(profiles);
-  profilesRef.current = profiles;
+    AsyncStorage.setItem(DISCOVER_MODE_STORAGE_KEY, "browse")
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) {
+          router.replace("/(main)/(tabs)/home" as any);
+        }
+      });
 
-  // restore selected category from route params
-  const selectedCategoryId = typeof params.categoryId === "string"
-    ? params.categoryId
-    : null;
-
-  const selectedCategory: ExploreCategory | null = useMemo(() => {
-    if (!selectedCategoryId) return null;
-    return (
-      EXPLORE_CATEGORIES.find(c => c.id === selectedCategoryId) ?? null
-    );
-  }, [selectedCategoryId]);
-
-  // when user taps a category
-  const handleCategoryPress = useCallback(
-    (category: ExploreCategory) => {
-      safePush(router, {
-        pathname: "/explore-category/[categoryId]",
-        params: { categoryId: category.id },
-      }, 'explore->category');
-    },
-    [router]
-  );
-
-  // Refresh on focus — forces profile list to re-evaluate
-  useFocusEffect(
-    useCallback(() => {
-      // Trigger a refresh key update to force re-render with latest profiles
-      setRefreshKey((k) => k + 1);
-      return () => {};
-    }, [])
-  );
-
-  // Pull-to-refresh handler
-  const handleRefresh = useCallback(() => {
-    setRefreshing(true);
-    // Bump refresh key to force profiles re-evaluation
-    setRefreshKey((k) => k + 1);
-    // Short delay to show refresh indicator
-    setTimeout(() => setRefreshing(false), 500);
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-      <ExploreTileGrid
-        profiles={profiles}
-        selectedCategory={selectedCategory}
-        onCategoryPress={handleCategoryPress}
-        refreshing={refreshing}
-        onRefresh={handleRefresh}
-      />
-    </SafeAreaView>
+    <View style={styles.container}>
+      <ActivityIndicator size="small" color={COLORS.primary} />
+      <Text style={styles.text}>Opening Browse in Discover…</Text>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#FFFFFF",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+    backgroundColor: COLORS.background,
+  },
+  text: {
+    fontSize: 14,
+    color: COLORS.textLight,
   },
 });
