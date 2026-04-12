@@ -1,3 +1,8 @@
+/*
+ * LOCKED (DISCOVER CARD STACK)
+ * Shared production stack for Discover. When externalProfiles is provided,
+ * caller order must be preserved so unified Discover Cards/Browse stay aligned.
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
@@ -251,9 +256,17 @@ export interface DiscoverCardStackProps {
   externalProfiles?: any[];
   /** Hide the built-in header (caller renders its own). */
   hideHeader?: boolean;
+  /** Notify parent when a profile is acted on so sibling surfaces can stay in sync. */
+  onProfileAction?: (profileId: string, action: SwipeAction) => void;
 }
 
-export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader }: DiscoverCardStackProps) {
+export function DiscoverCardStack({
+  theme = "light",
+  mode = "phase1",
+  externalProfiles,
+  hideHeader,
+  onProfileAction,
+}: DiscoverCardStackProps) {
   const dark = theme === "dark";
   const isPhase2 = mode === "phase2";
   const C = dark ? INCOGNITO_COLORS : COLORS;
@@ -412,9 +425,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // 3B-6: Filter excluded from external profiles for both demo and live mode
       // (blocked users, matched users, swiped users should not appear in explore categories)
       const filtered = externalProfiles.filter((p: any) => !excludedSet.has(p._id ?? p.id));
-      const mapped = filtered.map(toProfileData);
-      // Demo mode: preserve array order for deterministic Discover feed
-      return isDemoMode ? mapped : rankProfiles(mapped);
+      // Preserve caller-provided order exactly. The unified Discover surface already
+      // supplies a ranked list and both Cards/Browse must stay aligned.
+      return filtered.map(toProfileData);
     }
     if (isDemoMode) {
       // Phase-2 demo mode: use DEMO_INCOGNITO_PROFILES (with privateIntentKeys)
@@ -499,10 +512,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     return rankProfiles(profilesSafe.map(toProfileData));
   }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
 
-  // Drop profiles with no valid primary photo — prevents blank Discover cards
+  // Drop profiles with no primary visual. Phase-1 still requires a real photo URL,
+  // while Phase-2 can intentionally render a locked placeholder as the lead card.
   const validProfiles = useMemo(
-    () => latestProfiles.filter((p) => (p.photos?.length ?? 0) > 0 && !!p.photos?.[0]?.url),
-    [latestProfiles],
+    () =>
+      latestProfiles.filter((p) => {
+        const hasPrimaryPhotoUrl =
+          typeof p.photos?.[0]?.url === "string" && p.photos[0].url.length > 0;
+        const hasLockedPhase2Placeholder =
+          isPhase2 &&
+          p.photoBlurred === true &&
+          (p.photos?.length ?? 0) > 0 &&
+          p.photos[0]?.url === null;
+
+        return hasPrimaryPhotoUrl || hasLockedPhase2Placeholder;
+      }),
+    [isPhase2, latestProfiles],
   );
 
   // Keep last non-empty profiles to prevent blank-frame flicker
@@ -921,10 +946,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // Check daily limits — release lock and bail without advancing
       if (direction === "right" && hasReachedLikeLimit()) { releaseSwipeLock(activeSwipeId); return; }
       if (direction === "up" && hasReachedStandOutLimit()) { releaseSwipeLock(activeSwipeId); return; }
+      const action: SwipeAction =
+        direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
 
       // ★ ALWAYS advance card FIRST — this guarantees the index moves
       // regardless of match/navigation/error below.
       advanceCard();
+      onProfileAction?.(swipedProfile.id, action);
 
       // F2-A: Track swipe for random match control
       incSwipe();
@@ -970,7 +998,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 id: swipedProfile.id,
                 name: swipedProfile.name,
                 age: swipedProfile.age,
-                photoUrl: swipedProfile.photos?.[0]?.url,
+                photoUrl: swipedProfile.photos?.[0]?.url ?? undefined,
               });
               if (isNewMatch) {
                 log.info('[MATCH]', 'phase2', { name: swipedProfile.name });
@@ -1015,7 +1043,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
 
         if (!convexUserId) { releaseSwipeLock(activeSwipeId); return; }
-        const action: SwipeAction = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
         // B5 fix: wrap mutation in Promise.race with 6s timeout to prevent stuck swipe lock
         const SWIPE_TIMEOUT_MS = 6000;
         const timeoutPromise = new Promise<null>((_, reject) =>
@@ -1040,7 +1067,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               id: swipedProfile.id,
               name: swipedProfile.name,
               age: swipedProfile.age,
-              photoUrl: swipedProfile.photos?.[0]?.url,
+              photoUrl: swipedProfile.photos?.[0]?.url ?? undefined,
             });
             if (isNewMatch) {
               trackEvent({ name: 'match_created', otherUserId: swipedProfile.id });
@@ -1088,7 +1115,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         releaseSwipeLock(activeSwipeId);
       }
     },
-    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch, releaseSwipeLock],
+    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch, onProfileAction, releaseSwipeLock],
   );
 
   const animateSwipe = useCallback(
@@ -1549,11 +1576,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <ProfileCard
               name={next.name}
               age={next.age}
+              ageHidden={next.ageHidden}
               bio={next.bio}
               city={next.city}
               isVerified={next.isVerified}
               distance={next.distance}
+              distanceHidden={next.distanceHidden}
               photos={next.photos}
+              photoBlurred={next.photoBlurred === true}
               trustBadges={nextBadges}
               profilePrompt={next.profilePrompts?.[0]}
               theme={isPhase2 ? "dark" : "light"}
@@ -1568,11 +1598,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <ProfileCard
               name={current.name}
               age={current.age}
+              ageHidden={current.ageHidden}
               bio={current.bio}
               city={current.city}
               isVerified={current.isVerified}
               distance={current.distance}
+              distanceHidden={current.distanceHidden}
               photos={current.photos}
+              photoBlurred={current.photoBlurred === true}
               trustBadges={currentBadges}
               profilePrompt={current.profilePrompts?.[0]}
               showCarousel
