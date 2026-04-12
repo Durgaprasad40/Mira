@@ -24,6 +24,7 @@ export interface NormalizedCandidate {
   // Compatibility signals (used for matching)
   relationshipIntent: string[];         // Phase-1: direct, Phase-2: intentKeys mapped
   activities: string[];                 // Phase-1: activities, Phase-2: hobbies
+  desireTagKeys?: string[];             // Phase-2 only: desire tags for subtle ranking boost
 
   lifestyle: {                          // Lifestyle preferences
     smoking?: string;
@@ -96,6 +97,7 @@ export interface NormalizedViewer {
   // Compatibility preferences
   relationshipIntent: string[];
   activities: string[];
+  desireTagKeys?: string[];             // Phase-2 only: desire tags for subtle ranking boost
 
   lifestyle: {
     smoking?: string;
@@ -231,6 +233,7 @@ export interface ScoredCandidate {
     distance: number;
     fairness: number;
     boosts: number;
+    desireBoost: number;         // Phase-2 only (0 for Phase-1)
     penalty: number;
   };
 }

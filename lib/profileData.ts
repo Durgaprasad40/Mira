@@ -29,6 +29,8 @@ export interface ProfileData {
   privateIntentKey?: string;
   /** Phase-2 only: Private intent category keys (multi-select, 1-5) */
   privateIntentKeys?: string[];
+  /** Phase-2 only: Desire tag keys (what they're looking for) */
+  desireTagKeys?: string[];
   /** True if user has incognito mode enabled */
   isIncognito?: boolean;
   /** Phase-2 only: Lifestyle data for premium card reveal */
@@ -103,6 +105,8 @@ export function toProfileData(p: any): ProfileData {
     // Phase-2 only: preserve intent keys (array preferred, single for backward compat)
     privateIntentKeys: p.privateIntentKeys ?? p.intentKeys ?? (p.privateIntentKey ? [p.privateIntentKey] : undefined),
     privateIntentKey: p.privateIntentKey ?? (p.privateIntentKeys?.[0] || p.intentKeys?.[0]),
+    // Phase-2 only: desire tags (what they're looking for)
+    desireTagKeys: Array.isArray(p.desireTagKeys) ? p.desireTagKeys : undefined,
     // Incognito mode indicator
     isIncognito: p.isIncognito === true || p.incognitoMode === true,
     // Phase-2 only: Lifestyle data for premium card reveal

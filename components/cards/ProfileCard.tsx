@@ -18,7 +18,11 @@ import Animated, {
   FadeIn,
   FadeOut,
   Layout,
+  runOnJS,
 } from 'react-native-reanimated';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+// P0-FIX: Haptic feedback for premium interactions
+import * as Haptics from 'expo-haptics';
 import { cmToFeetInches } from '@/lib/utils';
 import { trackAction } from '@/lib/sentry';
 import { getRenderableProfilePhotos } from '@/lib/profileData';
@@ -33,7 +37,7 @@ import type { PresenceStatus } from '@/hooks/usePresence';
 
 import { COLORS, INCOGNITO_COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
 import type { TrustBadge } from '@/lib/trustBadges';
-import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+import { PRIVATE_INTENT_CATEGORIES, PRIVATE_DESIRE_TAGS } from '@/lib/privateConstants';
 import { MatchSignalBadge } from './MatchSignalBadge';
 
 const PHASE1_ACTIVE_CARD_LOOKAHEAD = 2;
@@ -84,6 +88,8 @@ export interface ProfileCardProps {
   photoBlurred?: boolean;
   /** Face 2 only: intent category keys from PRIVATE_INTENT_CATEGORIES (array) */
   privateIntentKeys?: string[];
+  /** Phase-2 only: desire tag keys from PRIVATE_DESIRE_TAGS */
+  desireTagKeys?: string[];
   /** Phase-1 only: Gender preferences (looking for) */
   lookingFor?: string[];
   /** Phase-1 only: Relationship intent keys */
@@ -116,6 +122,10 @@ export interface ProfileCardProps {
   // Legacy props for non-Discover usage (explore grid etc.)
   user?: any;
   onPress?: () => void;
+  /** GROWTH: Match percentage (60-95%) from compatibility scoring */
+  matchScore?: number;
+  /** GROWTH: True if this person has already liked the viewer */
+  theyLikedMe?: boolean;
 }
 
 const BLUR_RADIUS = 25; // Strong but recognisable blur
@@ -133,6 +143,56 @@ interface PhotoStackProps {
   lookaheadCount: number;
   previousCount?: number;
 }
+
+// P1-FIX: Individual photo component with blur transition animation
+// Optimized for Android performance - uses single worklet-driven opacity animation
+const AnimatedPhoto = memo(function AnimatedPhoto({
+  photo,
+  isActive,
+  shouldBlur,
+  onError,
+}: {
+  photo: { url: string };
+  isActive: boolean;
+  shouldBlur: boolean;
+  onError?: () => void;
+}) {
+  // P1-FIX: Single shared value for blur overlay opacity (Android-safe)
+  const blurOverlayOpacity = useSharedValue(shouldBlur ? 1 : 0);
+
+  // Animate blur overlay when state changes
+  useEffect(() => {
+    // Use faster timing for better perceived responsiveness
+    blurOverlayOpacity.value = withTiming(shouldBlur ? 1 : 0, { duration: 200 });
+  }, [shouldBlur, blurOverlayOpacity]);
+
+  // Worklet-driven styles for maximum performance
+  const containerStyle = useAnimatedStyle(() => ({
+    opacity: isActive ? 1 : 0,
+  }));
+
+  const overlayStyle = useAnimatedStyle(() => ({
+    opacity: blurOverlayOpacity.value * 0.15, // Subtle overlay effect
+  }));
+
+  return (
+    <Animated.View style={[styles.image, containerStyle]}>
+      <Image
+        source={{ uri: photo.url }}
+        style={StyleSheet.absoluteFillObject}
+        contentFit="cover"
+        cachePolicy="memory-disk"
+        blurRadius={shouldBlur ? BLUR_RADIUS : undefined}
+        onError={isActive ? onError : undefined}
+      />
+      {/* P1-FIX: Always-mounted blur overlay with animated opacity (avoids mount/unmount) */}
+      <Animated.View
+        style={[StyleSheet.absoluteFillObject, { backgroundColor: '#000' }, overlayStyle]}
+        pointerEvents="none"
+      />
+    </Animated.View>
+  );
+});
 
 const PhotoStack = memo(function PhotoStack({
   photos,
@@ -158,18 +218,11 @@ const PhotoStack = memo(function PhotoStack({
       {visiblePhotos.map((photo, localIdx) => {
         const globalIdx = localIdx + indexOffset;
         return (
-          <Image
+          <AnimatedPhoto
             key={photo.url}
-            source={{ uri: photo.url }}
-            style={[
-              styles.image,
-              // PERF: Only current photo is visible; others are pre-rendered but hidden
-              { opacity: globalIdx === activeIndex ? 1 : 0 },
-            ]}
-            contentFit="cover"
-            cachePolicy="memory-disk"
-            blurRadius={shouldBlurPhoto ? BLUR_RADIUS : undefined}
-            // Only attach error handler to active photo
+            photo={photo}
+            isActive={globalIdx === activeIndex}
+            shouldBlur={shouldBlurPhoto}
             onError={globalIdx === activeIndex ? onError : undefined}
           />
         );
@@ -195,6 +248,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   onOpenProfile,
   photoBlurred = false,
   privateIntentKeys,
+  desireTagKeys,
   lookingFor,
   relationshipIntent,
   activities,
@@ -208,6 +262,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   smoking,
   drinking,
   onPress,
+  matchScore,
+  theyLikedMe,
 }) => {
   const dark = theme === 'dark';
   // PHASE-2 DETECTION: Check for non-empty privateIntentKeys array
@@ -535,8 +591,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     waveUnits: DisplayUnit[];
     waveDensity: WaveDensity;
     // Soft fallback data for late photos (compact reinforcement)
+    // P0-FIX: Added 'new_here' type for sparse profiles
     softFallback?: {
-      type: 'prompt' | 'interests' | 'intent' | 'bio' | 'cta';
+      type: 'prompt' | 'interests' | 'intent' | 'bio' | 'cta' | 'new_here';
       promptSnippet?: string;  // Shortened prompt answer
       interestChips?: { emoji: string; label: string }[];  // Top 2-3 interests
       intentLine?: string;     // Relationship intent
@@ -874,8 +931,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         }
       }
 
-      // Priority 4: Minimal CTA (prompts excluded to avoid repetition)
-      return { type: 'cta' };
+      // P0-FIX: Priority 4: Show "New here" message for sparse profiles
+      // This is more welcoming than just a CTA button
+      return { type: 'new_here' };
     };
 
     // Pre-build the fallback once (used when unique content exhausts)
@@ -1196,6 +1254,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       .map(a => ({ emoji: a!.emoji, label: a!.label }));
   }, [isPhase2, activities]);
 
+  // Phase-2: Get desire tags as chip labels (max 2 for card - secondary info)
+  const phase2Desires = useMemo(() => {
+    if (!isPhase2 || !desireTagKeys || desireTagKeys.length === 0) return [];
+    return desireTagKeys
+      .map(key => PRIVATE_DESIRE_TAGS.find(d => d.key === key))
+      .filter(Boolean)
+      .slice(0, 2)
+      .map(d => d!.label);
+  }, [isPhase2, desireTagKeys]);
+
   // Phase-2: Get first intent label for identity slide
   const phase2IntentLabel = useMemo(() => {
     if (!isPhase2 || !privateIntentKeys || privateIntentKeys.length === 0) {
@@ -1267,20 +1335,21 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // PHASE-2: ADAPTIVE PHOTO-STORY DISTRIBUTION
   // - Identity (name + age + badge) is ALWAYS visible on every photo
   // - Secondary content is DISTRIBUTED across photos based on photo count
-  // - Priority: intent → interests → prompt1 → lifestyle → prompt2 → bio
+  // - Priority: intent → desires → interests → prompt1 → lifestyle → prompt2 → bio
   // - If more photos than content, stay on last meaningful section
   // - NO modulo cycling, NO rigid photo-number hardcoding
   // ═══════════════════════════════════════════════════════════════════════════
-  type ContentSlot = 'intent' | 'interests' | 'prompt1' | 'lifestyle' | 'prompt2' | 'bio' | 'fallback';
+  type ContentSlot = 'intent' | 'desires' | 'interests' | 'prompt1' | 'lifestyle' | 'prompt2' | 'bio' | 'fallback';
 
   // Priority-ordered content slots (same priority for ALL users = premium consistency)
   const CONTENT_PRIORITY: ContentSlot[] = [
     'intent',     // 1. What they're looking for
-    'interests',  // 2. Shared hobbies/activities
-    'prompt1',    // 3. First personality prompt
-    'lifestyle',  // 4. Height/smoking/drinking
-    'prompt2',    // 5. Second personality prompt (if available)
-    'bio',        // 6. Bio snippet
+    'desires',    // 2. What they desire in a connection
+    'interests',  // 3. Shared hobbies/activities
+    'prompt1',    // 4. First personality prompt
+    'lifestyle',  // 5. Height/smoking/drinking
+    'prompt2',    // 6. Second personality prompt (if available)
+    'bio',        // 7. Bio snippet
   ];
 
   // Get first prompt (for prompt1 slot)
@@ -1301,6 +1370,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const slotHasData = useCallback((slot: ContentSlot): boolean => {
     switch (slot) {
       case 'intent': return !!phase2IntentLabel;
+      case 'desires': return phase2Desires.length > 0;
       case 'interests': return phase2Interests.length > 0;
       case 'prompt1': return !!phase2Prompt1;
       case 'lifestyle': return phase2Lifestyle.length > 0;
@@ -1309,7 +1379,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       case 'fallback': return true;
       default: return false;
     }
-  }, [phase2IntentLabel, phase2Interests, phase2Prompt1, phase2Lifestyle, phase2Prompt2, bio]);
+  }, [phase2IntentLabel, phase2Desires, phase2Interests, phase2Prompt1, phase2Lifestyle, phase2Prompt2, bio]);
 
   // Build DISTRIBUTED content slots based on photo count
   // Key insight: We distribute N content sections across M photos
@@ -1474,13 +1544,24 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     setImageError(true);
   }, [displayPhotos, photoCount, safeIndex]);
 
+  // P1-FIX: Retry all photos when all have failed
+  const handleRetryPhotos = useCallback(() => {
+    failedPhotoIndexesRef.current.clear();
+    setImageError(false);
+    setPhotoIndex(0);
+  }, []);
+
   const goNextPhoto = useCallback(() => {
     if (photoCount <= 1) return;
     setPhotoIndex((i) => {
       const newIndex = i + 1 < photoCount ? i + 1 : i;
-      // Track photo navigation for user journey replay
-      if (newIndex !== i && isPhase2) {
-        trackAction('photo_next', { index: newIndex, name });
+      // P0-FIX: Haptic feedback on photo tap
+      if (newIndex !== i) {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        // Track photo navigation for user journey replay
+        if (isPhase2) {
+          trackAction('photo_next', { index: newIndex, name });
+        }
       }
       return newIndex;
     });
@@ -1490,13 +1571,48 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     if (photoCount <= 1) return;
     setPhotoIndex((i) => {
       const newIndex = i > 0 ? i - 1 : i;
-      // Track photo navigation for user journey replay
-      if (newIndex !== i && isPhase2) {
-        trackAction('photo_prev', { index: newIndex, name });
+      // P0-FIX: Haptic feedback on photo tap
+      if (newIndex !== i) {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        // Track photo navigation for user journey replay
+        if (isPhase2) {
+          trackAction('photo_prev', { index: newIndex, name });
+        }
       }
       return newIndex;
     });
   }, [photoCount, isPhase2, name]);
+
+  // P1-FIX: Horizontal swipe gesture for photo navigation
+  // Uses directional locking to avoid conflict with card swipe gesture
+  const photoSwipeGesture = useMemo(() => {
+    if (!showCarousel || photoCount <= 1) {
+      // Return a no-op gesture if not in carousel mode or single photo
+      return Gesture.Pan().enabled(false);
+    }
+
+    return Gesture.Pan()
+      // Only activate for clear horizontal movement (20px horizontal before 12px vertical)
+      .activeOffsetX([-20, 20])
+      .failOffsetY([-12, 12])
+      // Minimum distance before gesture activates
+      .minDistance(15)
+      .onEnd((event) => {
+        const { translationX, velocityX } = event;
+        // Require meaningful horizontal movement or velocity
+        const isValidSwipe = Math.abs(translationX) > 30 || Math.abs(velocityX) > 300;
+
+        if (!isValidSwipe) return;
+
+        if (translationX < -30 || velocityX < -300) {
+          // Swipe left = next photo
+          runOnJS(goNextPhoto)();
+        } else if (translationX > 30 || velocityX > 300) {
+          // Swipe right = previous photo
+          runOnJS(goPrevPhoto)();
+        }
+      });
+  }, [showCarousel, photoCount, goNextPhoto, goPrevPhoto]);
 
   // Non-discover mode (explore grid, etc.) — simple card with onPress
   if (!showCarousel && onPress) {
@@ -1530,10 +1646,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // --- Discover card mode ---
   return (
     <View style={[styles.card, dark && styles.cardDark]}>
-      {/* Photo area fills entire card */}
+      {/* Photo area fills entire card - wrapped in gesture detector for horizontal swipe */}
+      <GestureDetector gesture={photoSwipeGesture}>
       <View style={styles.photoContainer}>
         {/* PERF: Memoized photo stack for instant switching */}
-        {displayPhotos.length > 0 ? (
+        {/* P1-FIX: Clear distinction between no-photo (profile has none) vs failed-photo (load error) */}
+        {displayPhotos.length > 0 && !imageError ? (
           <PhotoStack
             photos={displayPhotos}
             activeIndex={safeIndex}
@@ -1542,21 +1660,33 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             lookaheadCount={isPhase2 ? PHASE2_ACTIVE_CARD_LOOKAHEAD : PHASE1_ACTIVE_CARD_LOOKAHEAD}
             previousCount={isPhase2 ? PHASE2_ACTIVE_CARD_PREVIOUS : 0}
           />
-        ) : (
-          // Premium placeholder for no-photo state
-          <View style={[styles.photoPlaceholder, dark && styles.photoPlaceholderDark]}>
-            <View style={[styles.placeholderIconContainer, dark && styles.placeholderIconContainerDark]}>
-              <Ionicons name="person" size={56} color={dark ? 'rgba(255,255,255,0.3)' : TC.textLight} />
+        ) : displayPhotos.length === 0 ? (
+          // STATE 1: No photos uploaded - profile genuinely has no photos
+          <View style={[styles.photoPlaceholder, styles.noPhotoPlaceholder, dark && styles.photoPlaceholderDark]}>
+            <View style={[styles.placeholderIconContainer, styles.noPhotoIconContainer, dark && styles.placeholderIconContainerDark]}>
+              <Ionicons name="person" size={56} color={dark ? 'rgba(255,255,255,0.35)' : TC.textLight} />
             </View>
             <Text style={[styles.placeholderText, dark && styles.placeholderTextDark]}>No photo yet</Text>
+            <Text style={[styles.placeholderSubtext, dark && styles.placeholderSubtextDark]}>
+              This profile hasn't added photos
+            </Text>
           </View>
-        )}
-        {/* Fallback placeholder for error state */}
-        {imageError && (
-          <View style={[styles.photoPlaceholder, dark && styles.photoPlaceholderDark, StyleSheet.absoluteFillObject]}>
-            <View style={[styles.placeholderIconContainer, dark && styles.placeholderIconContainerDark]}>
-              <Ionicons name="image-outline" size={48} color={dark ? 'rgba(255,255,255,0.3)' : TC.textLight} />
+        ) : (
+          // STATE 2: Photos exist but failed to load - network/CDN error
+          <View style={[styles.photoPlaceholder, styles.failedPhotoPlaceholder, dark && styles.photoPlaceholderDark]}>
+            <View style={[styles.placeholderIconContainer, styles.failedPhotoIconContainer, dark && styles.placeholderIconContainerDark]}>
+              <Ionicons name="cloud-offline-outline" size={48} color={dark ? 'rgba(255,255,255,0.4)' : '#9CA3AF'} />
             </View>
+            <Text style={[styles.placeholderText, dark && styles.placeholderTextDark, { marginTop: 12 }]}>
+              Couldn't load photos
+            </Text>
+            <Text style={[styles.placeholderSubtext, dark && styles.placeholderSubtextDark]}>
+              Check your connection and try again
+            </Text>
+            <TouchableOpacity style={styles.retryButton} onPress={handleRetryPhotos}>
+              <Ionicons name="refresh-outline" size={16} color={COLORS.white} />
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </TouchableOpacity>
           </View>
         )}
 
@@ -1639,6 +1769,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </TouchableOpacity>
         )}
       </View>
+      </GestureDetector>
 
       {/* Info overlay at bottom - uses gradient instead of solid bg */}
       {/* PHASE-2: Photo-index-based content reveal system */}
@@ -1717,6 +1848,24 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             >
               <View style={styles.phase2IntentChip}>
                 <Text style={styles.phase2IntentChipText}>{phase2IntentLabel}</Text>
+              </View>
+            </Animated.View>
+          )}
+
+          {/* Desires slot - What they're looking for in a connection */}
+          {currentContentSlot === 'desires' && phase2Desires.length > 0 && (
+            <Animated.View
+              key={`desires-${photoIndex}`}
+              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
+              exiting={FadeOut.duration(150)}
+              style={styles.phase2RevealSection}
+            >
+              <View style={styles.phase2ChipsRow}>
+                {phase2Desires.map((label, idx) => (
+                  <View key={idx} style={styles.phase2DesireChip}>
+                    <Text style={styles.phase2DesireText}>{label}</Text>
+                  </View>
+                ))}
               </View>
             </Animated.View>
           )}
@@ -1835,10 +1984,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         /* PHASE-1: PREMIUM PROGRESSIVE REVEAL OVERLAY */
         <View style={[styles.overlay, styles.phase1PremiumOverlay]} pointerEvents="none">
           {/* P1A: Match Signal Badge - Top-right hook on Photo 1 */}
+          {/* GROWTH: Now shows "Why You're Seeing This" with match reasons */}
           <MatchSignalBadge
             commonCount={matchSignalCount}
             sameRelationshipIntent={hasSameRelationshipIntent}
             visible={photoIndex === 0 && !isPhase2}
+            matchScore={matchScore}
           />
 
           {/* ═══════════════════════════════════════════════════════════════════════════
@@ -1888,6 +2039,20 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               {isActiveToday && !isActiveNow && (
                 <View style={styles.phase1PresencePillMuted}>
                   <Text style={styles.phase1PresenceTextMuted}>Active Today</Text>
+                </View>
+              )}
+              {/* GROWTH: Match score badge - subtle compatibility indicator */}
+              {matchScore && matchScore >= 60 && (
+                <View style={styles.matchScorePill}>
+                  <Ionicons name="heart" size={10} color="#EC4899" />
+                  <Text style={styles.matchScoreText}>{matchScore}%</Text>
+                </View>
+              )}
+              {/* GROWTH: "They Liked You" badge - prominent inbound interest signal */}
+              {theyLikedMe && (
+                <View style={styles.theyLikedYouPill}>
+                  <Ionicons name="heart" size={11} color="#FFFFFF" />
+                  <Text style={styles.theyLikedYouText}>Likes You</Text>
                 </View>
               )}
             </View>
@@ -2079,7 +2244,18 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 </View>
               )}
 
-              {/* CTA - minimal view profile cue */}
+              {/* P0-FIX: New here message - friendly fallback for sparse profiles */}
+              {currentPhotoContent.softFallback.type === 'new_here' && (
+                <View style={styles.phase1NewHereCard}>
+                  <View style={styles.phase1NewHereIconRow}>
+                    <Ionicons name="sparkles" size={16} color="rgba(255,255,255,0.7)" />
+                    <Text style={styles.phase1NewHereText}>New here — still building profile</Text>
+                  </View>
+                  <Text style={styles.phase1NewHereSubtext}>Tap to learn more about {name}</Text>
+                </View>
+              )}
+
+              {/* CTA - minimal view profile cue (legacy, rarely used now) */}
               {currentPhotoContent.softFallback.type === 'cta' && (
                 <View style={styles.phase1ViewProfileCue}>
                   <Ionicons name="chevron-up" size={18} color="rgba(255,255,255,0.6)" />
@@ -2161,6 +2337,50 @@ const styles = StyleSheet.create({
   },
   placeholderTextDark: {
     color: 'rgba(255,255,255,0.3)',
+  },
+  // P1-FIX: Subtext for placeholder states
+  placeholderSubtext: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.3)',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  placeholderSubtextDark: {
+    color: 'rgba(255,255,255,0.25)',
+  },
+  // P1-FIX: Distinct styling for no-photo state (profile has no photos)
+  noPhotoPlaceholder: {
+    // Slightly warmer background to indicate "profile state" not error
+  },
+  noPhotoIconContainer: {
+    // Default styling works well - person icon is clear
+  },
+  // P1-FIX: Distinct styling for failed-photo state (network error)
+  failedPhotoPlaceholder: {
+    // Slightly different to indicate "error state"
+  },
+  failedPhotoIconContainer: {
+    backgroundColor: 'rgba(239, 68, 68, 0.1)', // Subtle red tint for error
+    borderColor: 'rgba(239, 68, 68, 0.2)',
+    borderWidth: 1,
+  },
+  // P1-FIX: Retry button for all-photos-failed state
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  retryButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   // Tap zones for photo navigation (invisible, overlaid on photo)
   tapZoneLeft: {
@@ -2742,6 +2962,19 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: 'rgba(255,255,255,0.85)',
   },
+  phase2DesireChip: {
+    backgroundColor: 'rgba(236,72,153,0.12)', // Subtle rose tint - secondary info
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(236,72,153,0.2)',
+  },
+  phase2DesireText: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.8)',
+  },
   phase2LifestyleChip: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2943,6 +3176,45 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '500',
     color: 'rgba(255, 255, 255, 0.7)',
+  },
+  // GROWTH: Match score pill - subtle compatibility indicator
+  matchScorePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(236, 72, 153, 0.2)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    marginLeft: 8,
+    gap: 3,
+  },
+  matchScoreText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#F472B6',
+  },
+  // GROWTH: "They Liked You" pill - prominent inbound interest
+  theyLikedYouPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EC4899',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 8,
+    gap: 4,
+    // Subtle glow effect
+    shadowColor: '#EC4899',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  theyLikedYouText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    letterSpacing: 0.3,
   },
   // Distance row - persistent on all photos
   phase1DistanceRowPersistent: {
@@ -3638,6 +3910,38 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.4)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
+  },
+  // P0-FIX: New here card - friendly fallback for sparse profiles
+  phase1NewHereCard: {
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: 'rgba(255,255,255,0.2)',
+  },
+  phase1NewHereIconRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  phase1NewHereText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.85)',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  phase1NewHereSubtext: {
+    fontSize: 12,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.6)',
+    textShadowColor: 'rgba(0,0,0,0.4)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+    marginLeft: 24, // Align with text above
   },
   // View profile cue - REDESIGNED: subtle, minimal
   phase1ViewProfileCue: {

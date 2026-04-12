@@ -1,12 +1,13 @@
 /**
  * MatchSignalBadge - Phase 1A Discover Redesign
  *
- * Shows a subtle "X in common" badge on Photo 1 when there's meaningful compatibility.
- * Provides an immediate hook to engage users.
+ * Shows "Why You're Seeing This" badges on Photo 1 for engagement.
+ * GROWTH: Enhanced to show multiple match reasons.
  *
  * DISPLAY CONDITIONS:
- * - commonCount >= 3 (shared interests)
+ * - commonCount >= 2 (shared interests)
  * - OR sameRelationshipIntent === true
+ * - OR matchScore >= 80
  *
  * POSITION: Top-right of card, only on photoIndex === 0
  */
@@ -21,26 +22,46 @@ interface MatchSignalBadgeProps {
   sameRelationshipIntent: boolean;
   /** Whether to show the badge (typically photoIndex === 0) */
   visible: boolean;
+  /** GROWTH: Match score (60-95%) for high compatibility signal */
+  matchScore?: number;
 }
 
 export function MatchSignalBadge({
   commonCount,
   sameRelationshipIntent,
   visible,
+  matchScore,
 }: MatchSignalBadgeProps) {
   // Only show if we have meaningful compatibility signal
-  const shouldShow = visible && (commonCount >= 3 || sameRelationshipIntent);
+  const hasHighMatch = matchScore && matchScore >= 85;
+  const hasGoodCommon = commonCount >= 2;
+  const shouldShow = visible && (hasGoodCommon || sameRelationshipIntent || hasHighMatch);
 
   if (!shouldShow) {
     return null;
   }
 
-  // Determine label
+  // GROWTH: Determine best label based on strongest signal
   let label: string;
-  if (commonCount >= 3) {
+  let emoji: string;
+
+  if (hasHighMatch) {
+    // High compatibility takes priority
+    label = `${matchScore}% Match`;
+    emoji = '💫';
+  } else if (sameRelationshipIntent && commonCount >= 2) {
+    // Both signals - show combined
+    label = `Same goals • ${commonCount} in common`;
+    emoji = '✨';
+  } else if (commonCount >= 3) {
     label = `${commonCount} in common`;
+    emoji = '✨';
   } else if (sameRelationshipIntent) {
     label = 'Same goals';
+    emoji = '🎯';
+  } else if (commonCount >= 2) {
+    label = `${commonCount} shared interests`;
+    emoji = '✨';
   } else {
     return null;
   }
@@ -51,7 +72,7 @@ export function MatchSignalBadge({
       exiting={FadeOut.duration(150)}
       style={styles.container}
     >
-      <Text style={styles.emoji}>✨</Text>
+      <Text style={styles.emoji}>{emoji}</Text>
       <Text style={styles.label}>{label}</Text>
     </Animated.View>
   );
