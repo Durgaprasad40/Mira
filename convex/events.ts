@@ -1,22 +1,15 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { resolveTrustedUserId } from './helpers';
 
 // Report that a screenshot was taken — deduplicates system messages
 export const reportScreenshotTaken = mutation({
   args: {
     mediaId: v.id('media'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    actorId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { mediaId } = args;
+    const { mediaId, actorId } = args;
     const now = Date.now();
-
-    const actorId = await resolveTrustedUserId(ctx, args);
-    if (!actorId) {
-      throw new Error('Unauthorized: authentication required');
-    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');
@@ -76,36 +69,14 @@ export const reportScreenshotTaken = mutation({
 export const reportScreenshotAttempted = mutation({
   args: {
     mediaId: v.id('media'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    actorId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { mediaId } = args;
+    const { mediaId, actorId } = args;
     const now = Date.now();
-
-    const actorId = await resolveTrustedUserId(ctx, args);
-    if (!actorId) {
-      throw new Error('Unauthorized: authentication required');
-    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');
-
-    const conversation = await ctx.db.get(media.chatId);
-    if (!conversation || !conversation.participants.includes(actorId)) {
-      throw new Error('Not authorized');
-    }
-
-    const permission = await ctx.db
-      .query('mediaPermissions')
-      .withIndex('by_media_recipient', (q) =>
-        q.eq('mediaId', mediaId).eq('recipientId', actorId)
-      )
-      .first();
-
-    if (!permission && media.ownerId !== actorId) {
-      throw new Error('Not authorized');
-    }
 
     await ctx.db.insert('securityEvents', {
       chatId: media.chatId,
@@ -123,16 +94,10 @@ export const reportScreenshotAttempted = mutation({
 export const getSecurityEvents = query({
   args: {
     mediaId: v.id('media'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { mediaId } = args;
-
-    const userId = await resolveTrustedUserId(ctx, args);
-    if (!userId) {
-      return [];
-    }
+    const { mediaId, userId } = args;
 
     const media = await ctx.db.get(mediaId);
     if (!media) return [];
@@ -152,8 +117,7 @@ export const getSecurityEvents = query({
 // Submit a media report
 export const reportMedia = mutation({
   args: {
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    reporterId: v.id('users'),
     reportedUserId: v.id('users'),
     chatId: v.id('conversations'),
     mediaId: v.optional(v.id('media')),
@@ -169,29 +133,8 @@ export const reportMedia = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
 
-    const reporterId = await resolveTrustedUserId(ctx, args);
-    if (!reporterId) {
-      throw new Error('Unauthorized: authentication required');
-    }
-
-    const conversation = await ctx.db.get(args.chatId);
-    if (!conversation || !conversation.participants.includes(reporterId)) {
-      throw new Error('Not authorized');
-    }
-
-    if (!conversation.participants.includes(args.reportedUserId)) {
-      throw new Error('Invalid report target');
-    }
-
-    if (args.mediaId) {
-      const media = await ctx.db.get(args.mediaId);
-      if (!media || media.chatId !== args.chatId) {
-        throw new Error('Invalid media report');
-      }
-    }
-
     await ctx.db.insert('mediaReports', {
-      reporterId,
+      reporterId: args.reporterId,
       reportedUserId: args.reportedUserId,
       mediaId: args.mediaId,
       chatId: args.chatId,

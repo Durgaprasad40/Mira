@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { mutation } from './_generated/server';
-import { resolveTrustedUserId, validateSessionToken } from './helpers';
+import { validateSessionToken } from './helpers';
 
 // Sender controls screenshot permission: OFF | ON | ON_FOR_10_MIN
 export const setScreenshotPermission = mutation({
@@ -96,17 +96,11 @@ export const setScreenshotPermission = mutation({
 export const requestScreenshotAccess = mutation({
   args: {
     mediaId: v.id('media'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    requesterId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { mediaId } = args;
+    const { mediaId, requesterId } = args;
     const now = Date.now();
-
-    const requesterId = await resolveTrustedUserId(ctx, args);
-    if (!requesterId) {
-      throw new Error('Unauthorized: authentication required');
-    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');

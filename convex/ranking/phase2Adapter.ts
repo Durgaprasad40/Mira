@@ -50,7 +50,6 @@ export interface Phase2PrivateProfile {
   privateIntentKeys: string[];          // Maps to relationshipIntent
   privateDesireTagKeys: string[];
   privateBio?: string;                  // Maps to bio
-  privatePhotoStorageIds?: string[];    // Canonical Phase-2 photo storage
   privatePhotoUrls: string[];           // Photo URLs
 
   // Profile details (imported from Phase-1 or edited)
@@ -136,9 +135,7 @@ export function toNormalizedCandidate(
   const intentKeys = profile.privateIntentKeys ?? [];
   const hobbies = profile.hobbies ?? [];
   const promptAnswers = profile.promptAnswers ?? [];
-  const photoCount = Array.isArray(profile.privatePhotoStorageIds) && profile.privatePhotoStorageIds.length > 0
-    ? profile.privatePhotoStorageIds.length
-    : (profile.privatePhotoUrls ?? []).length;
+  const photoUrls = profile.privatePhotoUrls ?? [];
 
   // Count filled prompts
   const promptsAnswered = promptAnswers.filter(
@@ -178,7 +175,7 @@ export function toNormalizedCandidate(
     // Profile quality signals
     bioLength,
     promptsAnswered,
-    photoCount,
+    photoCount: photoUrls.length,
 
     hasOptionalFields: {
       height: !!profile.height,
@@ -326,7 +323,7 @@ export function isValidPhase2Profile(profile: unknown): profile is Phase2Private
     typeof p.isPrivateEnabled === 'boolean' &&
     typeof p.isSetupComplete === 'boolean' &&
     Array.isArray(p.privateIntentKeys) &&
-    (Array.isArray(p.privatePhotoStorageIds) || Array.isArray(p.privatePhotoUrls))
+    Array.isArray(p.privatePhotoUrls)
   );
 }
 

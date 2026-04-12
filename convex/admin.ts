@@ -113,6 +113,7 @@ export const resetAllUsers = internalMutation({
       behaviorFlags: 0,
       userStrikes: 0,
       userPrivateProfiles: 0,
+      revealRequests: 0,
       confessions: 0,
       confessionReplies: 0,
       confessionReactions: 0,
@@ -416,7 +417,15 @@ export const resetAllUsers = internalMutation({
       }
     }
 
-    console.log(`  - Processed private profiles: ${deletionStats.userPrivateProfiles}`);
+    // Reveal requests
+    const allRevealRequests = await ctx.db.query('revealRequests').collect();
+    for (const reveal of allRevealRequests) {
+      if (isUserToDelete(reveal.fromUserId) || isUserToDelete(reveal.toUserId)) {
+        await ctx.db.delete(reveal._id);
+        deletionStats.revealRequests++;
+      }
+    }
+    console.log(`  - Processed private profiles: ${deletionStats.userPrivateProfiles}, reveal requests: ${deletionStats.revealRequests}`);
 
     // Confessions
     const allConfessions = await ctx.db.query('confessions').collect();
@@ -883,6 +892,7 @@ export const cleanupDemoUsers = internalMutation({
       behaviorFlags: 0,
       userStrikes: 0,
       userPrivateProfiles: 0,
+      revealRequests: 0,
       confessions: 0,
       confessionReplies: 0,
       confessionReactions: 0,
@@ -1167,7 +1177,15 @@ export const cleanupDemoUsers = internalMutation({
       }
     }
 
-    console.log(`  - Processed private profiles: ${deletionStats.userPrivateProfiles}`);
+    // Reveal requests
+    const allRevealRequests = await ctx.db.query('revealRequests').collect();
+    for (const reveal of allRevealRequests) {
+      if (isDemoUserId(reveal.fromUserId) || isDemoUserId(reveal.toUserId)) {
+        await ctx.db.delete(reveal._id);
+        deletionStats.revealRequests++;
+      }
+    }
+    console.log(`  - Processed private profiles: ${deletionStats.userPrivateProfiles}, reveal requests: ${deletionStats.revealRequests}`);
 
     // Confessions (check userId if exists)
     const allConfessions = await ctx.db.query('confessions').collect();

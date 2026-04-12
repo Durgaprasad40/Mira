@@ -66,7 +66,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { resolveUserIdByAuthId } from './helpers';
-import type { Id } from './_generated/dataModel';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -503,57 +502,14 @@ export const submitAnswer = mutation({
       throw new Error('Media answer requires a media URI');
     }
 
-    const now = Date.now();
-
     await ctx.db.patch(game._id, {
       roundPhase: 'round_complete',
       lastAnswerType: answerType,
       lastAnswerText: answerText?.trim() ?? null,
       lastAnswerMediaUri: answerMediaUri ?? null,
       lastAnswerDurationSec: answerDurationSec ?? null,
-      updatedAt: now,
+      updatedAt: Date.now(),
     });
-
-    // P2-005 FIX: Persist ToD answer as a message in privateMessages table
-    // This ensures the answer appears in chat history and persists across sessions
-    try {
-      // Get the conversation to validate it exists and get the proper ID
-      const conversation = await ctx.db.get(conversationId as Id<'privateConversations'>);
-      if (conversation) {
-        // Resolve responder's user ID for the message
-        const responderDbId = await resolveUserIdByAuthId(ctx, callerId);
-        if (responderDbId) {
-          // Build message content based on answer type
-          let messageContent: string;
-          let messageType: 'text' | 'system' = 'system';
-
-          if (answerType === 'text' && answerText) {
-            messageContent = `📝 T&D Answer: ${answerText.trim()}`;
-            messageType = 'text';
-          } else if (answerType === 'voice') {
-            messageContent = '🎙️ Answered with a voice message';
-          } else if (answerType === 'photo') {
-            messageContent = '📷 Answered with a photo';
-          } else if (answerType === 'video') {
-            messageContent = '🎬 Answered with a video';
-          } else {
-            messageContent = '✅ T&D Answer submitted';
-          }
-
-          await ctx.db.insert('privateMessages', {
-            conversationId: conversationId as Id<'privateConversations'>,
-            senderId: responderDbId as Id<'users'>,
-            type: messageType,
-            content: messageContent,
-            createdAt: now,
-          });
-        }
-      }
-    } catch (e) {
-      // Non-fatal: message persistence is best-effort
-      // Game state update succeeded, so we still return success
-      console.warn('[P2-005] Failed to persist ToD answer as message:', e);
-    }
 
     return { success: true };
   },

@@ -2,8 +2,7 @@ import { mutation, query, internalMutation } from './_generated/server';
 import { v } from 'convex/values';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
-import { requireAuthenticatedSessionUser, resolveUserIdByAuthId } from './helpers';
-import { filterContent } from './contentFilter'; // P0-001: Content filtering
+import { resolveUserIdByAuthId } from './helpers';
 
 // 24-hour auto-delete rule (same as Confessions)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
@@ -14,208 +13,115 @@ const RATE_LIMITS = {
   reaction: { max: 30, windowMs: 60 * 1000 }, // 30 reactions per minute
   report: { max: 10, windowMs: 24 * 60 * 60 * 1000 }, // 10 reports per day
   claim_media: { max: 20, windowMs: 60 * 1000 }, // 20 media claims per minute
-  prompt: { max: 5, windowMs: 60 * 60 * 1000 }, // P0-003: 5 prompts per hour
-  connect: { max: 10, windowMs: 60 * 60 * 1000 }, // P0-004: 10 connect requests per hour
 };
 
-// Report threshold for global soft-remove (P1-002: reduced from 5 to 3)
-const REPORT_HIDE_THRESHOLD = 3;
+// Report threshold for hiding
+const REPORT_HIDE_THRESHOLD = 5;
 
 // TOD-P2-001 FIX: Rate limit error message
 const RATE_LIMIT_ERROR = 'Rate limit exceeded. Please try again later.';
 
-// P1-001 FIX: Check if either user has blocked the other
-async function isBlockedBidirectional(
-  ctx: any,
-  userId1: Id<'users'>,
-  userId2: Id<'users'>
-): Promise<boolean> {
-  const block1 = await ctx.db
-    .query('blocks')
-    .withIndex('by_blocker_blocked', (q: any) =>
-      q.eq('blockerId', userId1).eq('blockedUserId', userId2)
-    )
-    .first();
-  if (block1) return true;
+const MIN_PROMPT_CHARS = 10;
+const MAX_PROMPT_CHARS = 280;
+const MAX_ANSWER_CHARS = 400;
+const MIN_MEDIA_VIEW_DURATION_SEC = 1;
+const MAX_MEDIA_VIEW_DURATION_SEC = 60;
 
-  const block2 = await ctx.db
-    .query('blocks')
-    .withIndex('by_blocker_blocked', (q: any) =>
-      q.eq('blockerId', userId2).eq('blockedUserId', userId1)
-    )
-    .first();
-  return !!block2;
+function trimText(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
-// PHASE-2 IDENTITY FIX: Helper to get Phase-2 displayName (nickname) instead of real name
-// T/D is a Phase-2 feature, so MUST use Phase-2 displayName everywhere
-// PRIVACY FIX: Always use handle from users table, never stored displayName
-// This ensures old records with full names stored are overridden
-async function getPhase2DisplayName(ctx: any, userId: Id<'users'>): Promise<string> {
-  // ALWAYS prefer handle from users table - stored displayName may contain old full names
-  const user = await ctx.db.get(userId);
-  return user?.handle || 'Anonymous';
-}
-
-function isRemoteUrl(url: string | undefined | null): url is string {
-  return !!url && (url.startsWith('http://') || url.startsWith('https://'));
-}
-
-async function requireTodSession(
-  ctx: any,
-  token: string
-): Promise<{ user: any; userId: Id<'users'>; userIdStr: string }> {
-  const user = await requireAuthenticatedSessionUser(ctx, token);
-  return {
-    user,
-    userId: user._id,
-    userIdStr: user._id as string,
-  };
-}
-
-function storedUserMatches(
-  storedUserId: string | undefined | null,
-  user: { _id: Id<'users'>; authUserId?: string | null; demoUserId?: string | null } | null
-): boolean {
-  if (!storedUserId || !user) return false;
-  return (
-    storedUserId === (user._id as string) ||
-    storedUserId === user.authUserId ||
-    storedUserId === user.demoUserId
-  );
-}
-
-async function resolveStoredUserId(
-  ctx: any,
-  storedUserId: string | undefined | null
-): Promise<Id<'users'> | null> {
-  if (!storedUserId) return null;
-
-  const directUser = await ctx.db.get(storedUserId as Id<'users'>);
-  if (directUser) {
-    return storedUserId as Id<'users'>;
+function validatePromptText(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length < MIN_PROMPT_CHARS) {
+    throw new Error(`Prompt must be at least ${MIN_PROMPT_CHARS} characters.`);
   }
-
-  return await resolveUserIdByAuthId(ctx, storedUserId);
+  if (trimmed.length > MAX_PROMPT_CHARS) {
+    throw new Error(`Prompt cannot exceed ${MAX_PROMPT_CHARS} characters.`);
+  }
+  return trimmed;
 }
 
-async function getBlockedUserRefSet(
-  ctx: any,
-  viewerUserId: Id<'users'>
-): Promise<Set<string>> {
-  const blockedRefs = new Set<string>();
-
-  const [blockedByMe, blockedMe] = await Promise.all([
-    ctx.db.query('blocks').withIndex('by_blocker', (q: any) => q.eq('blockerId', viewerUserId)).collect(),
-    ctx.db.query('blocks').withIndex('by_blocked', (q: any) => q.eq('blockedUserId', viewerUserId)).collect(),
-  ]);
-
-  const relatedUserIds = new Set<Id<'users'>>();
-  blockedByMe.forEach((block: any) => relatedUserIds.add(block.blockedUserId));
-  blockedMe.forEach((block: any) => relatedUserIds.add(block.blockerId));
-
-  await Promise.all(
-    Array.from(relatedUserIds).map(async (userId) => {
-      blockedRefs.add(userId as string);
-      const user = await ctx.db.get(userId);
-      if (user?.authUserId) blockedRefs.add(user.authUserId);
-      if (user?.demoUserId) blockedRefs.add(user.demoUserId);
-    })
-  );
-
-  return blockedRefs;
+function validateAnswerText(text: string | undefined): string | undefined {
+  const trimmed = trimText(text);
+  if (trimmed && trimmed.length > MAX_ANSWER_CHARS) {
+    throw new Error(`Answer cannot exceed ${MAX_ANSWER_CHARS} characters.`);
+  }
+  return trimmed;
 }
 
-async function assertNotBlockedWithStoredUser(
-  ctx: any,
-  viewerUserId: Id<'users'>,
-  otherStoredUserId: string | undefined | null,
-  errorMessage: string
-): Promise<void> {
-  const otherUserId = await resolveStoredUserId(ctx, otherStoredUserId);
-  if (!otherUserId) return;
+function validateViewDuration(durationSec: number | undefined): number | undefined {
+  if (durationSec === undefined) return undefined;
+  if (durationSec < MIN_MEDIA_VIEW_DURATION_SEC || durationSec > MAX_MEDIA_VIEW_DURATION_SEC) {
+    throw new Error(`View duration must be between ${MIN_MEDIA_VIEW_DURATION_SEC} and ${MAX_MEDIA_VIEW_DURATION_SEC} seconds.`);
+  }
+  return durationSec;
+}
 
-  if (await isBlockedBidirectional(ctx, viewerUserId, otherUserId)) {
+async function resolveRequiredTodUserId(
+  ctx: any,
+  authUserId: string,
+  errorMessage: string = 'Unauthorized'
+): Promise<Id<'users'>> {
+  if (!authUserId || authUserId.trim().length === 0) {
     throw new Error(errorMessage);
   }
+  const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  if (!userId) {
+    throw new Error(errorMessage);
+  }
+  return userId;
 }
 
-// Get trending prompts (1 truth + 1 dare), excluding expired
-export const getTrendingPrompts = query({
-  args: { token: v.string() },
-  handler: async (ctx, { token }) => {
-    await requireTodSession(ctx, token);
-    const now = Date.now();
-    const allTrending = await ctx.db
-      .query('todPrompts')
-      .withIndex('by_trending', (q) => q.eq('isTrending', true))
-      .collect();
+async function resolveOptionalTodUserId(
+  ctx: any,
+  authOrUserId: string | undefined
+): Promise<Id<'users'> | undefined> {
+  if (!authOrUserId || authOrUserId.trim().length === 0) {
+    return undefined;
+  }
+  return (await resolveUserIdByAuthId(ctx, authOrUserId)) ?? undefined;
+}
 
-    const active = allTrending.filter((p) => {
-      const expires = p.expiresAt ?? p.createdAt + TWENTY_FOUR_HOURS_MS;
-      if (expires <= now) return false;
-      // P0-002: Filter out hidden prompts
-      if (p.isHidden) return false;
-      return true;
-    });
+async function getBlockedUserIdsForViewer(
+  ctx: any,
+  viewerAuthOrUserId: string | undefined
+): Promise<Set<string>> {
+  const viewerUserId = await resolveOptionalTodUserId(ctx, viewerAuthOrUserId);
+  if (!viewerUserId) return new Set();
 
-    const truth = active.find((p) => p.type === 'truth') || null;
-    const dare = active.find((p) => p.type === 'dare') || null;
-    return { truth, dare };
-  },
-});
+  const blocksOut = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker', (q: any) => q.eq('blockerId', viewerUserId as Id<'users'>))
+    .collect();
+  const blocksIn = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocked', (q: any) => q.eq('blockedUserId', viewerUserId as Id<'users'>))
+    .collect();
 
-// Get answers for a prompt
-// P0-001 FIX: Resolve viewer server-side, filter hidden/globally-hidden answers
-export const getAnswersForPrompt = query({
-  args: { promptId: v.string(), token: v.string() },
-  handler: async (ctx, { promptId, token }) => {
-    const viewer = await requireTodSession(ctx, token);
-    const viewerId = viewer.userIdStr;
+  return new Set([
+    ...blocksOut.map((b: any) => b.blockedUserId as string),
+    ...blocksIn.map((b: any) => b.blockerId as string),
+  ]);
+}
 
-    const answers = await ctx.db
-      .query('todAnswers')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .order('desc')
-      .collect();
+async function hasBlockBetween(ctx: any, userA: string, userB: string): Promise<boolean> {
+  const direct = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker', (q: any) => q.eq('blockerId', userA as Id<'users'>))
+    .filter((q: any) => q.eq(q.field('blockedUserId'), userB as Id<'users'>))
+    .first();
+  if (direct) return true;
 
-    // P0-001 FIX: Filter out hidden/globally-hidden answers
-    return answers.filter((answer) => {
-      // Never show globally hidden answers (report threshold exceeded)
-      if (answer.isGloballyHidden === true) {
-        return false;
-      }
-
-      // If viewer is authenticated, filter out answers they reported
-      if (viewerId && answer.hiddenForUserIds?.includes(viewerId)) {
-        return false;
-      }
-
-      // Answer author can always see their own answer
-      if (viewerId && answer.userId === viewerId) {
-        return true;
-      }
-
-      return true;
-    });
-  },
-});
-
-// Check if CURRENT USER already answered a prompt
-// P0-002 FIX: Use server-side auth only - cannot query other users' participation
-export const hasUserAnswered = query({
-  args: { promptId: v.string(), token: v.string() },
-  handler: async (ctx, { promptId, token }) => {
-    const viewer = await requireTodSession(ctx, token);
-    const userId = viewer.userIdStr;
-
-    const existing = await ctx.db
-      .query('todAnswers')
-      .withIndex('by_prompt_user', (q) => q.eq('promptId', promptId).eq('userId', userId))
-      .first();
-    return !!existing;
-  },
-});
+  const reverse = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker', (q: any) => q.eq('blockerId', userB as Id<'users'>))
+    .filter((q: any) => q.eq(q.field('blockedUserId'), userA as Id<'users'>))
+    .first();
+  return !!reverse;
+}
 
 // Create a new Truth or Dare prompt
 // TOD-001 FIX: Auth hardening - verify caller identity server-side
@@ -223,7 +129,7 @@ export const createPrompt = mutation({
   args: {
     type: v.union(v.literal('truth'), v.literal('dare')),
     text: v.string(),
-    token: v.string(),
+    authUserId: v.string(), // TOD-001: Auth verification required
     isAnonymous: v.optional(v.boolean()),
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))),
     // Owner profile snapshot (for feed display)
@@ -235,46 +141,39 @@ export const createPrompt = mutation({
     ownerGender: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { userId, userIdStr } = await requireTodSession(ctx, args.token);
-
-    // P0-001: Content filtering - reject unsafe prompts
-    const contentCheck = filterContent(args.text);
-    if (!contentCheck.isClean) {
-      throw new Error('This prompt violates community guidelines');
+    // TOD-001 FIX: Verify caller identity
+    const { authUserId } = args;
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
     }
-
-    // P0-003: Rate limit prompt creation (5 per hour)
-    const rateCheck = await checkRateLimit(ctx, userIdStr, 'prompt');
-    if (!rateCheck.allowed) {
-      throw new Error('Too many prompts. Try again later.');
+    const ownerUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!ownerUserId) {
+      throw new Error('Unauthorized: user not found');
     }
+    const promptText = validatePromptText(args.text);
 
     const now = Date.now();
     const expiresAt = now + TWENTY_FOUR_HOURS_MS;
 
     // Resolve photo URL from storage ID if provided (ensures HTTPS URL)
-    let resolvedPhotoUrl = isRemoteUrl(args.ownerPhotoUrl) ? args.ownerPhotoUrl : undefined;
+    let resolvedPhotoUrl = args.ownerPhotoUrl;
     if (args.ownerPhotoStorageId) {
       const storageUrl = await ctx.storage.getUrl(args.ownerPhotoStorageId);
       if (storageUrl) {
         resolvedPhotoUrl = storageUrl;
         console.log(`[T/D] Resolved photo storageId to URL: ${storageUrl.substring(0, 60)}...`);
       }
-    } else if (args.ownerPhotoUrl && !resolvedPhotoUrl) {
-      throw new Error('Only persisted profile photos can be attached to prompts');
     }
 
     const promptId = await ctx.db.insert('todPrompts', {
       type: args.type,
-      text: args.text,
+      text: promptText,
       isTrending: false, // User-created prompts are never trending
-      ownerUserId: userIdStr,
+      ownerUserId, // TOD-001: Use resolved userId from authUserId
       answerCount: 0,
       activeCount: 0,
       createdAt: now,
       expiresAt,
-      isHidden: false,
-      totalReactionCount: 0,
       // Owner profile snapshot (default anonymous)
       isAnonymous: args.isAnonymous ?? true,
       photoBlurMode: args.photoBlurMode ?? 'none',
@@ -292,278 +191,32 @@ export const createPrompt = mutation({
   },
 });
 
-// Edit an existing prompt (owner only, text only)
-export const editPrompt = mutation({
-  args: {
-    promptId: v.id('todPrompts'),
-    text: v.string(),
-    token: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const { userIdStr } = await requireTodSession(ctx, args.token);
-    const { promptId } = args;
-
-    // Get the prompt
-    const prompt = await ctx.db.get(promptId);
-    if (!prompt) {
-      throw new Error('Prompt not found');
-    }
-
-    // Verify ownership
-    if (prompt.ownerUserId !== userIdStr) {
-      throw new Error('You can only edit your own prompts');
-    }
-
-    // Check if prompt is expired
-    if (prompt.expiresAt && prompt.expiresAt < Date.now()) {
-      throw new Error('Cannot edit an expired prompt');
-    }
-
-    // Content filtering
-    const contentCheck = filterContent(args.text);
-    if (!contentCheck.isClean) {
-      throw new Error('This prompt violates community guidelines');
-    }
-
-    // Update the prompt text
-    await ctx.db.patch(promptId, {
-      text: args.text,
-    });
-
-    console.log(`[T/D] Edited prompt: id=${promptId}, newText=${args.text.substring(0, 30)}...`);
-
-    return { success: true };
-  },
-});
-
-// Submit an answer (one per user per prompt)
-export const submitAnswer = mutation({
-  args: {
-    promptId: v.string(),
-    token: v.string(),
-    type: v.union(v.literal('text'), v.literal('photo'), v.literal('video'), v.literal('voice')),
-    text: v.optional(v.string()),
-    mediaUrl: v.optional(v.string()),
-    mediaStorageId: v.optional(v.id('_storage')),
-    durationSec: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
-    const { userIdStr: userId } = await requireTodSession(ctx, args.token);
-
-    if (args.mediaUrl && !isRemoteUrl(args.mediaUrl)) {
-      throw new Error('Only persisted media URLs can be attached to answers');
-    }
-
-    // TOD-P2-001 FIX: Enforce rate limit (10 answers per minute)
-    const now = Date.now();
-    const windowStart = now - RATE_LIMITS.answer.windowMs;
-    const recentAnswers = await ctx.db
-      .query('todAnswers')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
-      .filter((q) => q.gte(q.field('createdAt'), windowStart))
-      .collect();
-    if (recentAnswers.length >= RATE_LIMITS.answer.max) {
-      throw new Error(RATE_LIMIT_ERROR);
-    }
-
-    // Enforce one answer per user per prompt
-    const existing = await ctx.db
-      .query('todAnswers')
-      .withIndex('by_prompt_user', (q) => q.eq('promptId', args.promptId).eq('userId', userId))
-      .first();
-    if (existing) {
-      throw new Error('You already posted for this prompt.');
-    }
-
-    // SELF-COMMENT RESTRICTION: Owner cannot answer their own prompt
-    // Mirrors Confess pattern where self-interaction is blocked
-    const prompt = await ctx.db
-      .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), args.promptId as Id<'todPrompts'>))
-      .first();
-    if (prompt && prompt.ownerUserId === userId) {
-      throw new Error('You cannot answer your own prompt.');
-    }
-
-    const answerId = await ctx.db.insert('todAnswers', {
-      promptId: args.promptId,
-      userId,
-      type: args.type,
-      text: args.text,
-      mediaUrl: args.mediaUrl,
-      mediaStorageId: args.mediaStorageId,
-      durationSec: args.durationSec,
-      likeCount: 0,
-      createdAt: Date.now(),
-    });
-
-    // Increment answer count on prompt (reuse prompt from self-comment check above)
-    if (prompt) {
-      await ctx.db.patch(prompt._id, {
-        answerCount: prompt.answerCount + 1,
-        activeCount: prompt.activeCount + 1,
-      });
-    }
-
-    return answerId;
-  },
-});
-
-// Like an answer
-export const likeAnswer = mutation({
-  args: {
-    answerId: v.string(),
-    token: v.string(),
-  },
-  handler: async (ctx, { answerId, token }) => {
-    const { userId, userIdStr: likedByUserId } = await requireTodSession(ctx, token);
-
-    // TOD-P2-001 FIX: Enforce rate limit (30 reactions per minute)
-    const now = Date.now();
-    const windowStart = now - RATE_LIMITS.reaction.windowMs;
-    const recentLikes = await ctx.db
-      .query('todAnswerLikes')
-      .withIndex('by_user', (q) => q.eq('likedByUserId', likedByUserId))
-      .filter((q) => q.gte(q.field('createdAt'), windowStart))
-      .collect();
-    if (recentLikes.length >= RATE_LIMITS.reaction.max) {
-      throw new Error(RATE_LIMIT_ERROR);
-    }
-
-    // Check if already liked
-    const existing = await ctx.db
-      .query('todAnswerLikes')
-      .withIndex('by_answer_user', (q) => q.eq('answerId', answerId).eq('likedByUserId', likedByUserId))
-      .first();
-    if (existing) return { alreadyLiked: true };
-
-    await ctx.db.insert('todAnswerLikes', {
-      answerId,
-      likedByUserId,
-      createdAt: Date.now(),
-    });
-
-    // Increment like count on answer
-    const answer = await ctx.db
-      .query('todAnswers')
-      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
-      .first();
-    if (answer) {
-      await ctx.db.patch(answer._id, { likeCount: answer.likeCount + 1 });
-
-      // Get the prompt to find owner
-      const prompt = await ctx.db
-        .query('todPrompts')
-        .filter((q) => q.eq(q.field('_id'), answer.promptId as Id<'todPrompts'>))
-        .first();
-
-      // Create connect request for prompt owner
-      // CONNECT FIX: Resolve user IDs to Convex IDs for consistent storage format
-      if (prompt && prompt.ownerUserId !== likedByUserId) {
-        const likerDbId = userId;
-        const ownerDbId = await resolveStoredUserId(ctx, prompt.ownerUserId);
-        if (likerDbId && ownerDbId) {
-          await ctx.db.insert('todConnectRequests', {
-            promptId: answer.promptId,
-            answerId,
-            fromUserId: likerDbId,
-            toUserId: ownerDbId,
-            status: 'pending',
-            createdAt: Date.now(),
-          });
-        }
-      }
-    }
-
-    return { alreadyLiked: false };
-  },
-});
-
-// Unlike an answer
-export const unlikeAnswer = mutation({
-  args: {
-    answerId: v.string(),
-    token: v.string(),
-  },
-  handler: async (ctx, { answerId, token }) => {
-    const { userIdStr: likedByUserId } = await requireTodSession(ctx, token);
-
-    const existing = await ctx.db
-      .query('todAnswerLikes')
-      .withIndex('by_answer_user', (q) => q.eq('answerId', answerId).eq('likedByUserId', likedByUserId))
-      .first();
-    if (existing) {
-      await ctx.db.delete(existing._id);
-      const answer = await ctx.db
-        .query('todAnswers')
-        .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
-        .first();
-      if (answer && answer.likeCount > 0) {
-        await ctx.db.patch(answer._id, { likeCount: answer.likeCount - 1 });
-      }
-    }
-  },
-});
-
 // Get pending connect requests for current user (as recipient)
 // Returns enriched data with sender profile for UI display
 export const getPendingConnectRequests = query({
-  args: { token: v.string() },
-  handler: async (ctx, { token }) => {
-    const { userId, userIdStr } = await requireTodSession(ctx, token);
+  args: { authUserId: v.string() },
+  handler: async (ctx, { authUserId }) => {
+    if (!authUserId) return [];
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) return [];
 
-    // FIX: Query all pending requests and filter by toUserId in memory
-    // This bypasses potential index issues while we debug
-    // Query pending requests for this user
-    let requests = await ctx.db
+    const requests = await ctx.db
       .query('todConnectRequests')
-      .withIndex('by_to_user', (q) => q.eq('toUserId', userIdStr))
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
       .filter((q) => q.eq(q.field('status'), 'pending'))
       .order('desc')
       .collect();
 
-    // Fallback: If index returns nothing, try filter-based query (handles ID format edge cases)
-    if (requests.length === 0) {
-      const allPending = await ctx.db
-        .query('todConnectRequests')
-        .filter((q) => q.eq(q.field('status'), 'pending'))
-        .collect();
-
-      // Normalize IDs for comparison
-      const normalizedQueryId = userIdStr.trim();
-      requests = allPending.filter((r) => {
-        const normalizedStoredId = (r.toUserId || '').trim();
-        return normalizedStoredId === normalizedQueryId;
-      });
-    }
-
     // Enrich with sender profile and prompt data
     const enriched = await Promise.all(
       requests.map(async (req) => {
-        // P0-FIX: req.fromUserId is stored as Convex ID (resolved in sendTodConnectRequest)
-        // DO NOT double-resolve - use directly as Convex ID
-        // ID CONTRACT: todConnectRequests stores Convex IDs, NOT authUserIds
-        const senderDbId = req.fromUserId as Id<'users'>;
-        const sender = await ctx.db.get(senderDbId);
-
-        // [TD_ID_FLOW] Validate sender exists - log if mismatch (indicates corrupted request)
-        if (!sender) {
-          console.log('[TD_ID_MISMATCH] Sender not found for stored Convex ID:', {
-            requestId: req._id,
-            fromUserId: req.fromUserId,
-          });
-          return null; // Skip this request - data integrity issue
-        }
-
-        if (await isBlockedBidirectional(ctx, senderDbId, userId)) {
-          return null;
-        }
-
-        // PHASE-2 ISOLATION: Get Phase-2 private profile for photo (NO Phase-1 fallback)
-        const senderPrivateProfile = await ctx.db
-          .query('userPrivateProfiles')
-          .withIndex('by_user', (q: any) => q.eq('userId', senderDbId))
-          .first();
+        // fromUserId is stored as the Convex user id for this feature.
+        const sender =
+          await ctx.db.get(req.fromUserId as Id<'users'>) ??
+          (await (async () => {
+            const legacySenderId = await resolveUserIdByAuthId(ctx, req.fromUserId);
+            return legacySenderId ? ctx.db.get(legacySenderId) : null;
+          })());
 
         // Get prompt for context
         const prompt = await ctx.db
@@ -573,7 +226,7 @@ export const getPendingConnectRequests = query({
 
         // Calculate age from dateOfBirth
         let senderAge: number | null = null;
-        if (sender.dateOfBirth) {
+        if (sender?.dateOfBirth) {
           const birthDate = new Date(sender.dateOfBirth);
           const today = new Date();
           senderAge = today.getFullYear() - birthDate.getFullYear();
@@ -583,21 +236,17 @@ export const getPendingConnectRequests = query({
           }
         }
 
-        // PHASE-2 IDENTITY FIX: Use Phase-2 displayName (nickname), NOT real name
-        const senderDisplayName = await getPhase2DisplayName(ctx, senderDbId);
-
         return {
           _id: req._id,
           promptId: req.promptId,
           answerId: req.answerId,
           fromUserId: req.fromUserId,
           createdAt: req.createdAt,
-          // Sender profile snapshot - PHASE-2 IDENTITY: Use displayName
-          senderName: senderDisplayName,
-          // PHASE-2 ISOLATION: Use ONLY Phase-2 private photos, NO Phase-1 fallback
-          senderPhotoUrl: senderPrivateProfile?.privatePhotoUrls?.[0] ?? null,
+          // Sender profile snapshot
+          senderName: sender?.name ?? 'Someone',
+          senderPhotoUrl: sender?.primaryPhotoUrl ?? null,
           senderAge,
-          senderGender: sender.gender ?? null,
+          senderGender: sender?.gender ?? null,
           // Prompt context
           promptType: prompt?.type ?? 'truth',
           promptText: prompt?.text ?? '',
@@ -605,8 +254,7 @@ export const getPendingConnectRequests = query({
       })
     );
 
-    // Filter out null entries (corrupted requests with missing sender)
-    return enriched.filter((r): r is NonNullable<typeof r> => r !== null);
+    return enriched;
   },
 });
 
@@ -615,24 +263,15 @@ export const sendTodConnectRequest = mutation({
   args: {
     promptId: v.string(),
     answerId: v.string(),
-    token: v.string(),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { promptId, answerId, token }) => {
-    const { userId, userIdStr } = await requireTodSession(ctx, token);
-
-    // [T/D SEND] Debug: Log input params
-    console.log('[T/D SEND] Input:', {
-      promptId: promptId?.slice(-8),
-      answerId: answerId?.slice(-8),
-      userId: userIdStr?.slice(-8),
-    });
-    const fromUserId = userId;
-    console.log('[T/D SEND] Resolved fromUserId:', userIdStr?.slice(-8) ?? 'NULL');
-
-    // P0-004: Rate limit connect requests
-    const rateCheck = await checkRateLimit(ctx, userIdStr, 'connect');
-    if (!rateCheck.allowed) {
-      return { success: false, reason: RATE_LIMIT_ERROR };
+  handler: async (ctx, { promptId, answerId, authUserId }) => {
+    if (!authUserId) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!fromUserId) {
+      throw new Error('Unauthorized: user not found');
     }
 
     // Get prompt to verify ownership
@@ -644,10 +283,6 @@ export const sendTodConnectRequest = mutation({
       return { success: false, reason: 'Prompt not found' };
     }
     if (prompt.ownerUserId !== fromUserId) {
-      console.log('[T/D SEND] Ownership mismatch:', {
-        promptOwner: prompt.ownerUserId?.slice(-8),
-        fromUserId: fromUserId?.slice(-8),
-      });
       return { success: false, reason: 'Only prompt owner can send connect' };
     }
 
@@ -659,85 +294,66 @@ export const sendTodConnectRequest = mutation({
     if (!answer) {
       return { success: false, reason: 'Answer not found' };
     }
-
-    // CONNECT FIX: Resolve stored answer author reference to a canonical user ID
-    console.log('[T/D SEND] Answer userId (raw):', answer.userId?.slice(-8));
-    const toUserId = await resolveStoredUserId(ctx, answer.userId);
-    console.log('[T/D SEND] Resolved toUserId:', toUserId?.slice(-8) ?? 'NULL');
-    if (!toUserId) {
-      console.log('[T/D SEND] ERROR: Could not resolve answer.userId to Convex ID');
-      return { success: false, reason: 'Recipient user not found' };
+    if (answer.promptId !== promptId) {
+      return { success: false, reason: 'Answer does not belong to this prompt' };
     }
+
+    const isAnonymousAnswer = answer.isAnonymous !== false || answer.identityMode === 'anonymous';
+    if (isAnonymousAnswer) {
+      return { success: false, reason: 'Cannot connect to an anonymous answer' };
+    }
+
+    const toUserId = answer.userId;
 
     // Cannot connect to self
     if (toUserId === fromUserId) {
       return { success: false, reason: 'Cannot connect to yourself' };
     }
 
-    // P1-003 FIX: Check if either user has blocked the other
-    const blockAtoB = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', fromUserId as Id<'users'>).eq('blockedUserId', toUserId as Id<'users'>)
-      )
-      .first();
-    const blockBtoA = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', toUserId as Id<'users'>).eq('blockedUserId', fromUserId as Id<'users'>)
-      )
-      .first();
-    if (blockAtoB || blockBtoA) {
-      return { success: false, reason: 'Cannot connect with this user' };
+    if (await hasBlockBetween(ctx, fromUserId as string, toUserId as string)) {
+      return { success: false, reason: 'Connect unavailable for this user' };
     }
 
-    // P1-001 & P1-002 FIX: Check for ANY existing request between this pair (including removed)
-    // This prevents: 1) race conditions with simultaneous requests, 2) re-spam after rejection
-    // Check A→B (current user → answer author) - ALL statuses
-    const existingAtoB = await ctx.db
+    // Check for existing pending/connected request for this user pair
+    const existing = await ctx.db
       .query('todConnectRequests')
       .withIndex('by_from_to', (q) => q.eq('fromUserId', fromUserId).eq('toUserId', toUserId))
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('status'), 'pending'),
+          q.eq(q.field('status'), 'connected')
+        )
+      )
       .first();
 
-    if (existingAtoB) {
-      if (existingAtoB.status === 'removed') {
-        return { success: false, reason: 'Connect request was previously declined' };
-      }
+    if (existing) {
       return { success: false, reason: 'Request already exists' };
     }
 
-    // Check B→A (answer author → current user) - ALL statuses to prevent duplicate pairs
-    const existingBtoA = await ctx.db
+    const reverseExisting = await ctx.db
       .query('todConnectRequests')
       .withIndex('by_from_to', (q) => q.eq('fromUserId', toUserId).eq('toUserId', fromUserId))
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('status'), 'pending'),
+          q.eq(q.field('status'), 'connected')
+        )
+      )
       .first();
 
-    if (existingBtoA) {
-      if (existingBtoA.status === 'removed') {
-        return { success: false, reason: 'This user previously declined a request from you' };
-      }
-      return { success: false, reason: 'You already have a pending request from this user' };
+    if (reverseExisting) {
+      return { success: false, reason: 'Request already exists' };
     }
 
     // Create connect request
-    // FIX: Ensure IDs are stored as strings to match schema (v.string())
-    const fromUserIdStr = fromUserId as string;
-    const toUserIdStr = toUserId as string;
-    const requestDoc = {
+    await ctx.db.insert('todConnectRequests', {
       promptId,
       answerId,
-      fromUserId: fromUserIdStr,
-      toUserId: toUserIdStr,
-      status: 'pending' as const,
+      fromUserId,
+      toUserId,
+      status: 'pending',
       createdAt: Date.now(),
-    };
-    console.log('[T/D SEND] Creating request:', {
-      fromUserId: fromUserIdStr,
-      toUserId: toUserIdStr,
-      status: requestDoc.status,
     });
-    const requestId = await ctx.db.insert('todConnectRequests', requestDoc);
-    console.log('[T/D SEND] SUCCESS - Created request:', requestId);
 
     return { success: true };
   },
@@ -749,15 +365,16 @@ export const respondToConnect = mutation({
   args: {
     requestId: v.id('todConnectRequests'),
     action: v.union(v.literal('connect'), v.literal('remove')),
-    token: v.string(),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { requestId, action, token }) => {
-    const { user, userId, userIdStr } = await requireTodSession(ctx, token);
-    const recipientDbId = userId;
-    console.log('[T/D RESPOND] Auth check:', {
-      inputAuthUserId: userIdStr?.slice(-8),
-      resolvedRecipientDbId: userIdStr?.slice(-8) ?? 'NULL',
-    });
+  handler: async (ctx, { requestId, action, authUserId }) => {
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const recipientDbId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!recipientDbId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const request = await ctx.db.get(requestId);
     if (!request || request.status !== 'pending') {
@@ -765,60 +382,24 @@ export const respondToConnect = mutation({
     }
 
     // Only the intended recipient can respond
-    // FIX: Convert both to string for comparison (avoid type coercion issues)
-    const storedToUserId = request.toUserId as string;
-    const resolvedRecipient = recipientDbId as string;
-    console.log('[T/D RESPOND] Authorization check:', {
-      storedToUserId: storedToUserId?.slice(-8),
-      resolvedRecipient: resolvedRecipient?.slice(-8),
-      exactMatch: storedToUserId === resolvedRecipient,
-    });
-    if (storedToUserId !== resolvedRecipient) {
+    if (request.toUserId !== recipientDbId) {
       throw new Error('Unauthorized: only the request recipient can respond');
     }
 
     if (action === 'connect') {
-      // P0-003: Re-verify that fromUserId actually owns the prompt before accepting
-      const prompt = await ctx.db.get(request.promptId as Id<'todPrompts'>);
-      if (!prompt) {
-        return { success: false, reason: 'Prompt not found' };
-      }
-      if (prompt.ownerUserId !== request.fromUserId) {
-        console.log('[T/D RESPOND] SECURITY: fromUserId does not match prompt owner', {
-          fromUserId: request.fromUserId?.slice(-8),
-          promptOwner: prompt.ownerUserId?.slice(-8),
-        });
-        return { success: false, reason: 'Invalid connect request' };
-      }
-
-      // P1-001 FIX: Block check before creating connection
-      const senderDbId = request.fromUserId as Id<'users'>;
-      const isBlocked = await isBlockedBidirectional(ctx, senderDbId, recipientDbId as Id<'users'>);
-      if (isBlocked) {
-        return { success: false, reason: 'Cannot connect with blocked user' };
-      }
-
       await ctx.db.patch(requestId, { status: 'connected' });
-      const sender = await ctx.db.get(senderDbId);
-      if (!sender) {
+
+      // Resolve sender to Id<'users'>
+      const senderDbId = await resolveUserIdByAuthId(ctx, request.fromUserId);
+      if (!senderDbId) {
         return { success: false, reason: 'Sender user not found' };
       }
 
-      // Get sender profile for response (sender already fetched above)
+      // Get sender profile for response
+      const sender = await ctx.db.get(senderDbId as Id<'users'>);
 
       // Get recipient profile for response
       const recipient = await ctx.db.get(recipientDbId as Id<'users'>);
-
-      // PHASE-2 ISOLATION FIX: Fetch private profiles for Phase-2 photos
-      // Do NOT use primaryPhotoUrl (Phase-1) - use privatePhotoUrls (Phase-2) only
-      const senderPrivateProfile = await ctx.db
-        .query('userPrivateProfiles')
-        .withIndex('by_user', (q: any) => q.eq('userId', senderDbId))
-        .first();
-      const recipientPrivateProfile = await ctx.db
-        .query('userPrivateProfiles')
-        .withIndex('by_user', (q: any) => q.eq('userId', recipientDbId as Id<'users'>))
-        .first();
 
       // Calculate ages
       const calculateAge = (dob: string | undefined): number | null => {
@@ -836,27 +417,22 @@ export const respondToConnect = mutation({
       const senderAge = calculateAge(sender?.dateOfBirth);
       const recipientAge = calculateAge(recipient?.dateOfBirth);
 
-      // PHASE-2 IDENTITY FIX: Get Phase-2 displayNames (nicknames), NOT real names
-      const senderDisplayName = await getPhase2DisplayName(ctx, senderDbId as Id<'users'>);
-      const recipientDisplayName = await getPhase2DisplayName(ctx, recipientDbId as Id<'users'>);
-
       // Order participants for consistent deduplication (lower ID first)
-      const participantIds = [senderDbId as Id<'users'>, recipientDbId as Id<'users'>].sort() as [Id<'users'>, Id<'users'>];
+      const participantIds = [senderDbId as Id<'users'>, recipientDbId as Id<'users'>].sort();
 
-      // PHASE-2 FIX: Check if PRIVATE conversation already exists for this user pair
-      // Query privateConversationParticipants to find shared conversations
-      console.log('[T/D ACCEPT PHASE2] Creating Phase-2 conversation for T/D connect');
+      // Check if conversation already exists for this user pair
+      // Query conversationParticipants to find shared conversations
       const senderParticipations = await ctx.db
-        .query('privateConversationParticipants')
+        .query('conversationParticipants')
         .withIndex('by_user', (q) => q.eq('userId', senderDbId as Id<'users'>))
         .collect();
 
-      let existingConversationId: Id<'privateConversations'> | null = null;
+      let existingConversationId: Id<'conversations'> | null = null;
 
       for (const sp of senderParticipations) {
         // Check if recipient is also in this conversation
         const recipientInConvo = await ctx.db
-          .query('privateConversationParticipants')
+          .query('conversationParticipants')
           .withIndex('by_user_conversation', (q) =>
             q.eq('userId', recipientDbId as Id<'users'>).eq('conversationId', sp.conversationId)
           )
@@ -869,159 +445,62 @@ export const respondToConnect = mutation({
       }
 
       const now = Date.now();
-      let conversationId: Id<'privateConversations'>;
+      let conversationId: Id<'conversations'>;
 
       if (existingConversationId) {
-        // Reuse existing Phase-2 conversation
+        // Reuse existing conversation
         conversationId = existingConversationId;
         // Update lastMessageAt
         await ctx.db.patch(conversationId, { lastMessageAt: now });
-        console.log('[CONVO_IDEMPOTENT] T/D reusing existing conversation:', {
-          sender: (senderDbId as string)?.slice(-8),
-          recipient: (recipientDbId as string)?.slice(-8),
-          conversationId: (conversationId as string)?.slice(-8),
-        });
       } else {
-        // P1-009 FIX: Final defensive check - query by T/D source for this pair
-        // This catches any conversation created between the participant check and now
-        const recentTodConvos = await ctx.db
-          .query('privateConversations')
-          .withIndex('by_connection_source', (q) => q.eq('connectionSource', 'tod'))
-          .filter((q) =>
-            q.and(
-              q.eq(q.field('participants'), participantIds)
-            )
-          )
-          .first();
+        // Create new conversation in EXISTING conversations table
+        conversationId = await ctx.db.insert('conversations', {
+          participants: participantIds,
+          isPreMatch: false,
+          connectionSource: 'tod',
+          createdAt: now,
+          lastMessageAt: now,
+        });
 
-        if (recentTodConvos) {
-          // Another T/D conversation was just created for this pair - reuse it
-          conversationId = recentTodConvos._id;
-          await ctx.db.patch(conversationId, { lastMessageAt: now });
-          console.log('[CONVO_IDEMPOTENT] T/D found concurrent conversation:', {
-            sender: (senderDbId as string)?.slice(-8),
-            recipient: (recipientDbId as string)?.slice(-8),
-            conversationId: (conversationId as string)?.slice(-8),
-          });
-        } else {
-          // PHASE-2 FIX: Create new conversation in privateConversations table (NOT conversations)
-          conversationId = await ctx.db.insert('privateConversations', {
-            participants: participantIds,
-            connectionSource: 'tod',
-            createdAt: now,
-            lastMessageAt: now,
-          });
+        // Create conversationParticipants for BOTH users
+        await ctx.db.insert('conversationParticipants', {
+          conversationId,
+          userId: senderDbId as Id<'users'>,
+          unreadCount: 1, // Sender will see the system message as unread
+        });
 
-          // Create privateConversationParticipants for BOTH users
-          await ctx.db.insert('privateConversationParticipants', {
-            conversationId,
-            userId: senderDbId as Id<'users'>,
-            unreadCount: 1, // Sender will see the system message as unread
-          });
+        await ctx.db.insert('conversationParticipants', {
+          conversationId,
+          userId: recipientDbId as Id<'users'>,
+          unreadCount: 0, // Recipient is accepting, they'll see it immediately
+        });
 
-          await ctx.db.insert('privateConversationParticipants', {
-            conversationId,
-            userId: recipientDbId as Id<'users'>,
-            unreadCount: 0, // Recipient is accepting, they'll see it immediately
-          });
-
-          // RACE CONDITION PROTECTION: Post-hoc duplicate cleanup (matches privateSwipes.ts pattern)
-          // Check for any duplicate conversations created for this pair during the gap
-          const allPairConvos = await ctx.db
-            .query('privateConversations')
-            .filter((q) => q.eq(q.field('participants'), participantIds))
-            .collect();
-
-          if (allPairConvos.length > 1) {
-            // Duplicates detected - keep the one with lowest _id (deterministic winner)
-            allPairConvos.sort((a, b) => a._id.localeCompare(b._id));
-            const winnerConvoId = allPairConvos[0]._id;
-
-            if (conversationId !== winnerConvoId) {
-              // Our conversation lost the race - delete it and its participants, use winner
-              console.log('[T/D RACE] Lost race, cleaning up duplicate conversation:', {
-                ours: (conversationId as string)?.slice(-8),
-                winner: (winnerConvoId as string)?.slice(-8),
-              });
-              const ourParticipants = await ctx.db
-                .query('privateConversationParticipants')
-                .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-                .collect();
-              for (const p of ourParticipants) {
-                await ctx.db.delete(p._id);
-              }
-              await ctx.db.delete(conversationId);
-              conversationId = winnerConvoId;
-            } else {
-              // We won the race - delete duplicate conversations and their participants
-              console.log('[T/D RACE] Won race, cleaning up', allPairConvos.length - 1, 'duplicates');
-              for (let i = 1; i < allPairConvos.length; i++) {
-                const dupeConvo = allPairConvos[i];
-                const dupeParticipants = await ctx.db
-                  .query('privateConversationParticipants')
-                  .withIndex('by_conversation', (q) => q.eq('conversationId', dupeConvo._id))
-                  .collect();
-                for (const p of dupeParticipants) {
-                  await ctx.db.delete(p._id);
-                }
-                await ctx.db.delete(dupeConvo._id);
-              }
-            }
-          } else {
-            console.log('[T/D ACCEPT] Created new conversation:', (conversationId as string)?.slice(-8));
-          }
-
-          // Create initial system message in privateMessages table (only for winner)
-          // Check if system message already exists to avoid duplicates
-          const existingSystemMsg = await ctx.db
-            .query('privateMessages')
-            .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-            .filter((q) => q.eq(q.field('type'), 'system'))
-            .first();
-
-          if (!existingSystemMsg) {
-            await ctx.db.insert('privateMessages', {
-              conversationId,
-              senderId: recipientDbId as Id<'users'>, // System message attributed to recipient
-              type: 'system',
-              content: 'T&D connection accepted! Say hi 👋',
-              createdAt: now,
-            });
-          }
-        }
+        // Create initial system message
+        await ctx.db.insert('messages', {
+          conversationId,
+          senderId: recipientDbId as Id<'users'>, // System message attributed to recipient
+          type: 'system',
+          content: 'T&D connection accepted! Say hi!',
+          createdAt: now,
+        });
       }
-
-      // P0-008: Notify sender that their connect request was accepted
-      // PHASE-2 ROUTING FIX: Use 'tod_connect' type so notification appears in Phase-2 bell only
-      await ctx.db.insert('notifications', {
-        userId: senderDbId as Id<'users'>,
-        type: 'tod_connect',
-        title: 'T/D Connect Accepted!',
-        body: `${recipientDisplayName} accepted your connect request`,
-        data: { conversationId: conversationId as string },
-        dedupeKey: `tod_connect:${conversationId}`,
-        createdAt: now,
-        expiresAt: now + 24 * 60 * 60 * 1000,
-      });
 
       return {
         success: true,
         action: 'connected' as const,
         conversationId: conversationId as string,
-        // Sender profile (for recipient's display) - PHASE-2 IDENTITY: Use displayName
+        // Sender profile (for recipient's display)
         senderUserId: request.fromUserId,
         senderDbId: senderDbId as string,
-        senderName: senderDisplayName,
-        // PHASE-2 ISOLATION: Use Phase-2 private photos ONLY, NO fallback to primaryPhotoUrl
-        senderPhotoUrl: senderPrivateProfile?.privatePhotoUrls?.[0] ?? null,
+        senderName: sender?.name ?? 'Someone',
+        senderPhotoUrl: sender?.primaryPhotoUrl ?? null,
         senderAge,
         senderGender: sender?.gender ?? null,
-        // Recipient profile (for sender's display) - PHASE-2 IDENTITY: Use displayName
-        recipientUserId: user.authUserId ?? userIdStr,
+        // Recipient profile (for sender's display when they query)
+        recipientUserId: authUserId,
         recipientDbId: recipientDbId as string,
-        recipientName: recipientDisplayName,
-        // PHASE-2 ISOLATION: Use Phase-2 private photos ONLY, NO fallback to primaryPhotoUrl
-        recipientPhotoUrl: recipientPrivateProfile?.privatePhotoUrls?.[0] ?? null,
+        recipientName: recipient?.name ?? 'Someone',
+        recipientPhotoUrl: recipient?.primaryPhotoUrl ?? null,
         recipientAge,
         recipientGender: recipient?.gender ?? null,
       };
@@ -1037,10 +516,12 @@ export const checkTodConnectStatus = query({
   args: {
     promptId: v.string(),
     answerId: v.string(),
-    token: v.string(),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { promptId, answerId, token }) => {
-    const { userId, userIdStr } = await requireTodSession(ctx, token);
+  handler: async (ctx, { promptId, answerId, authUserId }) => {
+    if (!authUserId) return { status: 'none' as const };
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) return { status: 'none' as const };
 
     // Get the answer to find the other user
     const answer = await ctx.db
@@ -1049,14 +530,10 @@ export const checkTodConnectStatus = query({
       .first();
     if (!answer) return { status: 'none' as const };
 
-    // CONNECT FIX: Resolve answer.userId to Convex ID to match storage format
-    const answerAuthorDbId = await resolveStoredUserId(ctx, answer.userId);
-    if (!answerAuthorDbId) return { status: 'none' as const };
-
     // Check for request from current user to answer author
     const requestSent = await ctx.db
       .query('todConnectRequests')
-      .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', answerAuthorDbId))
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', answer.userId))
       .first();
 
     if (requestSent) {
@@ -1066,7 +543,7 @@ export const checkTodConnectStatus = query({
     // Check for request from answer author to current user
     const requestReceived = await ctx.db
       .query('todConnectRequests')
-      .withIndex('by_from_to', (q) => q.eq('fromUserId', answerAuthorDbId).eq('toUserId', userId))
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', answer.userId).eq('toUserId', userId))
       .first();
 
     if (requestReceived) {
@@ -1167,15 +644,19 @@ export const cleanupExpiredPrompts = internalMutation({
 
 // Generate upload URL for media
 export const generateUploadUrl = mutation({
-  args: { token: v.string() },
-  handler: async (ctx, args) => {
-    await requireTodSession(ctx, args.token);
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    await resolveRequiredTodUserId(ctx, authUserId, 'Unauthorized');
     return await ctx.storage.generateUploadUrl();
   },
 });
 
 // ============================================================
-// PRIVATE MEDIA FUNCTIONS (One-time view photo/video responses)
+// LEGACY PRIVATE MEDIA V1 (not used by the active Phase-2 tab flow)
+// Retained only for backward compatibility with older data/tooling.
+// Active Phase-2 prompt answers use todAnswers + claimAnswerMediaView instead.
 // ============================================================
 
 /**
@@ -1186,7 +667,7 @@ export const generateUploadUrl = mutation({
 export const submitPrivateMediaResponse = mutation({
   args: {
     promptId: v.string(),
-    token: v.string(),
+    fromUserId: v.string(),
     mediaType: v.union(v.literal('photo'), v.literal('video')),
     storageId: v.id('_storage'),
     viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))), // tap = tap once, hold = hold to view
@@ -1198,8 +679,6 @@ export const submitPrivateMediaResponse = mutation({
     responderPhotoUrl: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { user, userIdStr: fromUserId } = await requireTodSession(ctx, args.token);
-
     // Validate prompt exists
     const prompt = await ctx.db
       .query('todPrompts')
@@ -1213,7 +692,7 @@ export const submitPrivateMediaResponse = mutation({
     const existing = await ctx.db
       .query('todPrivateMedia')
       .withIndex('by_prompt_from', (q) =>
-        q.eq('promptId', args.promptId).eq('fromUserId', fromUserId)
+        q.eq('promptId', args.promptId).eq('fromUserId', args.fromUserId)
       )
       .filter((q) => q.eq(q.field('status'), 'pending'))
       .first();
@@ -1230,7 +709,7 @@ export const submitPrivateMediaResponse = mutation({
     const now = Date.now();
     const id = await ctx.db.insert('todPrivateMedia', {
       promptId: args.promptId,
-      fromUserId,
+      fromUserId: args.fromUserId,
       toUserId: prompt.ownerUserId,
       mediaType: args.mediaType,
       storageId: args.storageId,
@@ -1253,16 +732,13 @@ export const submitPrivateMediaResponse = mutation({
 /**
  * Get private media items for a prompt (owner only).
  * Returns metadata only, NOT the media URL.
- * P0-003 FIX: Resolve viewer identity server-side, not from client param
  */
 export const getPrivateMediaForOwner = query({
   args: {
     promptId: v.string(),
-    token: v.string(),
+    viewerUserId: v.string(),
   },
-  handler: async (ctx, { promptId, token }) => {
-    const { user } = await requireTodSession(ctx, token);
-
+  handler: async (ctx, { promptId, viewerUserId }) => {
     // Get the prompt to verify ownership
     const prompt = await ctx.db
       .query('todPrompts')
@@ -1272,7 +748,7 @@ export const getPrivateMediaForOwner = query({
     if (!prompt) return [];
 
     // Only prompt owner can see private media
-    if (!storedUserMatches(prompt.ownerUserId, user)) {
+    if (prompt.ownerUserId !== viewerUserId) {
       return [];
     }
 
@@ -1307,23 +783,20 @@ export const getPrivateMediaForOwner = query({
  * Begin viewing private media (owner only).
  * Sets status to 'viewing', starts timer, returns short-lived URL.
  * This is the ONLY way to get the media URL, and only works once.
- * P0-004 FIX: Resolve viewer identity server-side
  */
 export const beginPrivateMediaView = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
-    token: v.string(),
+    viewerUserId: v.string(),
   },
-  handler: async (ctx, { privateMediaId, token }) => {
-    const { userIdStr: viewerId, user } = await requireTodSession(ctx, token);
-
+  handler: async (ctx, { privateMediaId, viewerUserId }) => {
     const item = await ctx.db.get(privateMediaId);
     if (!item) {
       throw new Error('Private media not found');
     }
 
-    // AUTH CHECK: Only prompt owner (toUserId) can view
-    if (!storedUserMatches(item.toUserId, user)) {
+    // AUTH CHECK: Only prompt owner can view
+    if (item.toUserId !== viewerUserId) {
       throw new Error('Access denied: You are not the prompt owner');
     }
 
@@ -1366,21 +839,18 @@ export const beginPrivateMediaView = mutation({
 /**
  * Finalize private media view (called when timer ends or user closes).
  * Deletes the storage file and marks as expired/deleted.
- * P0-004 FIX: Resolve viewer identity server-side
  */
 export const finalizePrivateMediaView = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
-    token: v.string(),
+    viewerUserId: v.string(),
   },
-  handler: async (ctx, { privateMediaId, token }) => {
-    const { userIdStr: viewerId, user } = await requireTodSession(ctx, token);
-
+  handler: async (ctx, { privateMediaId, viewerUserId }) => {
     const item = await ctx.db.get(privateMediaId);
     if (!item) return { success: false };
 
     // AUTH CHECK: Only prompt owner can finalize
-    if (!storedUserMatches(item.toUserId, user)) {
+    if (item.toUserId !== viewerUserId) {
       throw new Error('Access denied');
     }
 
@@ -1410,30 +880,22 @@ export const finalizePrivateMediaView = mutation({
 export const sendPrivateMediaConnect = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
-    token: v.string(),
+    fromUserId: v.string(), // prompt owner sending the request
   },
-  handler: async (ctx, { privateMediaId, token }) => {
-    const { user, userIdStr: fromUserId } = await requireTodSession(ctx, token);
+  handler: async (ctx, { privateMediaId, fromUserId }) => {
     const item = await ctx.db.get(privateMediaId);
     if (!item) {
       throw new Error('Private media not found');
     }
 
     // Only prompt owner can send connect
-    if (!storedUserMatches(item.toUserId, user)) {
+    if (item.toUserId !== fromUserId) {
       throw new Error('Access denied');
     }
 
     // Can only connect if not already connected/pending
     if (item.connectStatus !== 'none') {
       return { success: false, reason: 'Already processed' };
-    }
-
-    // CONNECT FIX: Resolve user IDs to Convex IDs for consistent storage format
-    const senderDbId = await resolveStoredUserId(ctx, fromUserId);
-    const recipientDbId = await resolveStoredUserId(ctx, item.fromUserId);
-    if (!senderDbId || !recipientDbId) {
-      throw new Error('User not found');
     }
 
     // Update connect status
@@ -1445,8 +907,8 @@ export const sendPrivateMediaConnect = mutation({
     await ctx.db.insert('todConnectRequests', {
       promptId: item.promptId,
       answerId: item._id as string, // using privateMediaId as reference
-      fromUserId: senderDbId, // prompt owner (Convex ID)
-      toUserId: recipientDbId, // responder (Convex ID)
+      fromUserId: fromUserId, // prompt owner
+      toUserId: item.fromUserId, // responder
       status: 'pending',
       createdAt: Date.now(),
     });
@@ -1461,15 +923,14 @@ export const sendPrivateMediaConnect = mutation({
 export const rejectPrivateMediaConnect = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
-    token: v.string(),
+    fromUserId: v.string(),
   },
-  handler: async (ctx, { privateMediaId, token }) => {
-    const { user } = await requireTodSession(ctx, token);
+  handler: async (ctx, { privateMediaId, fromUserId }) => {
     const item = await ctx.db.get(privateMediaId);
     if (!item) return { success: false };
 
     // Only prompt owner can reject
-    if (!storedUserMatches(item.toUserId, user)) {
+    if (item.toUserId !== fromUserId) {
       throw new Error('Access denied');
     }
 
@@ -1668,92 +1129,21 @@ export const cleanupExpiredTodData = internalMutation({
 // GLOBAL FEED & THREAD QUERIES
 // ============================================================
 
-// P2-004: Safe limits to prevent excessive data loading
-const FEED_PROMPTS_LIMIT = 50; // Max prompts to return in feed
-const THREAD_ANSWERS_LIMIT = 100; // Max answers to load per thread
-
-function sortAnswersByEngagement(a: any, b: any) {
-  const aReactions = a.totalReactionCount ?? 0;
-  const bReactions = b.totalReactionCount ?? 0;
-  if (bReactions !== aReactions) return bReactions - aReactions;
-  return b.createdAt - a.createdAt;
-}
-
-function isAnswerVisibleToViewer(
-  answer: any,
-  viewer: { user: any; userIdStr: string },
-  blockedUserIds: Set<string>
-): boolean {
-  if (storedUserMatches(answer.userId, viewer.user)) return true;
-  if (blockedUserIds.has(answer.userId)) return false;
-
-  const hiddenForUserIds = (answer.hiddenForUserIds as string[] | undefined) ?? [];
-  if (viewer.userIdStr && hiddenForUserIds.includes(viewer.userIdStr)) return false;
-  if (answer.isGloballyHidden) return false;
-
-  return (answer.reportCount ?? 0) < REPORT_HIDE_THRESHOLD;
-}
-
-async function getAnswersByPromptIds(
-  ctx: any,
-  promptIds: string[]
-): Promise<Record<string, any[]>> {
-  const answerEntries = await Promise.all(
-    promptIds.map(async (promptId) => {
-      const answers = await ctx.db
-        .query('todAnswers')
-        .withIndex('by_prompt', (q: any) => q.eq('promptId', promptId))
-        .collect();
-      return [promptId, answers] as const;
-    })
-  );
-
-  return Object.fromEntries(answerEntries);
-}
-
-function buildPromptAnswerMetrics(
-  answersByPrompt: Record<string, any[]>,
-  viewer: { user: any; userIdStr: string },
-  blockedUserIds: Set<string>
-) {
-  const visibleAnswersByPrompt: Record<string, any[]> = {};
-  const visibleAnswerCounts: Record<string, number> = {};
-  const visibleReactionCounts: Record<string, number> = {};
-
-  for (const [promptId, answers] of Object.entries(answersByPrompt)) {
-    const visibleAnswers = answers
-      .filter((answer) => isAnswerVisibleToViewer(answer, viewer, blockedUserIds))
-      .sort(sortAnswersByEngagement);
-
-    visibleAnswersByPrompt[promptId] = visibleAnswers;
-    visibleAnswerCounts[promptId] = visibleAnswers.length;
-    visibleReactionCounts[promptId] = visibleAnswers.reduce(
-      (sum, answer) => sum + (answer.totalReactionCount ?? 0),
-      0
-    );
-  }
-
-  return { visibleAnswersByPrompt, visibleAnswerCounts, visibleReactionCounts };
-}
-
 /**
  * List all active (non-expired) prompts with their top 2 answers.
  * Ranking: totalReactionCount DESC, then createdAt DESC.
  * Respects hidden-by-reports logic for non-authors.
- * P2-004: Limited to FEED_PROMPTS_LIMIT prompts for performance.
  */
 export const listActivePromptsWithTop2Answers = query({
   args: {
-    token: v.string(),
-    refreshKey: v.optional(v.number()),
+    viewerUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { token }) => {
+  handler: async (ctx, { viewerUserId }) => {
     const now = Date.now();
-    const viewer = await requireTodSession(ctx, token);
-    const isViewerPromptOwner = (ownerUserId: string) => storedUserMatches(ownerUserId, viewer.user);
+    const viewerDbId = await resolveOptionalTodUserId(ctx, viewerUserId);
 
     // TOD-P2-002 FIX: Get blocked user IDs for viewer (both directions)
-    const blockedUserIds = await getBlockedUserRefSet(ctx, viewer.userId);
+    const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
 
     // Get all prompts
     const allPrompts = await ctx.db.query('todPrompts').collect();
@@ -1764,60 +1154,123 @@ export const listActivePromptsWithTop2Answers = query({
       if (expires <= now) return false;
       // TOD-P2-002 FIX: Filter out prompts from blocked users
       if (blockedUserIds.has(p.ownerUserId as string)) return false;
-      // P0-002: Filter out hidden prompts (unless viewer is owner)
-      if (p.isHidden && !isViewerPromptOwner(p.ownerUserId)) return false;
       return true;
     });
 
-    const promptIds = activePrompts.map((prompt) => prompt._id as unknown as string);
-    const answersByPrompt = await getAnswersByPromptIds(ctx, promptIds);
-    const { visibleAnswersByPrompt, visibleAnswerCounts, visibleReactionCounts } =
-      buildPromptAnswerMetrics(answersByPrompt, viewer, blockedUserIds);
+    // Compute totalReactionCount for each prompt (sum of all answer reactions)
+    const promptReactionCounts: Record<string, number> = {};
+    for (const prompt of activePrompts) {
+      const promptId = prompt._id as unknown as string;
+      const answers = await ctx.db
+        .query('todAnswers')
+        .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+        .collect();
+      promptReactionCounts[promptId] = answers.reduce(
+        (sum, a) => sum + (a.totalReactionCount ?? 0),
+        0
+      );
+    }
 
-    // CONFESS-STYLE RANKING: engagement score using exact Confess weights
-    // Confess formula (confessions.ts:125-126): replyCount * 6 + reactionCount * 2
-    // Applied here using visible answers only: visibleAnswerCount * 6 + visibleReactionCount * 2
-    // New posts (0 engagement) = score 0, appear at BOTTOM
-    // Tie-breaker: createdAt ASC (older first, newer posts go to bottom)
+    // Sort by answerCount DESC, then createdAt ASC (older first for ties)
+    // Prompts with more answers float to top; ties = older appears first (new goes to bottom)
     activePrompts.sort((a, b) => {
-      const promptIdA = a._id as unknown as string;
-      const promptIdB = b._id as unknown as string;
-      // Exact Confess weights: comments * 6, reactions * 2
-      const scoreA = ((visibleAnswerCounts[promptIdA] ?? 0) * 6) + ((visibleReactionCounts[promptIdA] ?? 0) * 2);
-      const scoreB = ((visibleAnswerCounts[promptIdB] ?? 0) * 6) + ((visibleReactionCounts[promptIdB] ?? 0) * 2);
-
-      // Primary: score DESC (higher engagement = higher position)
-      if (scoreB !== scoreA) return scoreB - scoreA;
-      // Tie-breaker: createdAt ASC (older first, new prompts go to bottom)
+      // Primary: answerCount DESC (more comments = higher)
+      if (b.answerCount !== a.answerCount) return b.answerCount - a.answerCount;
+      // Secondary: createdAt ASC (older first, new prompts go to bottom)
       return a.createdAt - b.createdAt;
     });
 
-    const rankedPrompts = activePrompts.slice(0, FEED_PROMPTS_LIMIT);
-
-    // For each prompt, get top 2 visible answers
+    // For each prompt, get top 2 answers
     const promptsWithAnswers = await Promise.all(
-      rankedPrompts.map(async (prompt) => {
+      activePrompts.map(async (prompt) => {
         const promptId = prompt._id as unknown as string;
-        const answers = answersByPrompt[promptId] ?? [];
-        const visibleAnswers = visibleAnswersByPrompt[promptId] ?? [];
-        const top2WithPreviews = visibleAnswers.slice(0, 2).map((answer) => ({
-          _id: answer._id,
-          promptId: answer.promptId,
-          userId: answer.userId,
-          type: answer.type,
-          text: answer.text,
-          mediaUrl: answer.mediaUrl,
-          createdAt: answer.createdAt,
-          editedAt: answer.editedAt,
-          isAnonymous: answer.isAnonymous,
-          visibility: answer.visibility,
-          authorName: answer.authorName,
-        }));
+
+        // Get all answers for this prompt
+        const answers = await ctx.db
+          .query('todAnswers')
+          .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+          .collect();
+
+        // Filter: exclude hidden answers (reportCount >= 5) UNLESS viewer is the author
+        // TOD-P2-002 FIX: Also exclude answers from blocked users
+        const visibleAnswers = answers.filter((a) => {
+          // TOD-P2-002 FIX: Filter out answers from blocked users
+          if (blockedUserIds.has(a.userId as string)) return false;
+          const isHidden = (a.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD;
+          if (!isHidden) return true;
+          // Author can always see their own answer
+          return viewerDbId && a.userId === viewerDbId;
+        });
+
+        // Rank: totalReactionCount DESC, createdAt DESC
+        visibleAnswers.sort((a, b) => {
+          const aReactions = a.totalReactionCount ?? 0;
+          const bReactions = b.totalReactionCount ?? 0;
+          if (bReactions !== aReactions) return bReactions - aReactions;
+          return b.createdAt - a.createdAt;
+        });
+
+        // Take top 2
+        const top2 = visibleAnswers.slice(0, 2);
+
+        // Get reaction counts for each answer
+        const top2WithReactions = await Promise.all(
+          top2.map(async (answer) => {
+            const reactions = await ctx.db
+              .query('todAnswerReactions')
+              .withIndex('by_answer', (q) => q.eq('answerId', answer._id as unknown as string))
+              .collect();
+
+            // Group by emoji - use array format for Convex compatibility (no emoji keys)
+            const emojiCountMap: Map<string, number> = new Map();
+            for (const r of reactions) {
+              emojiCountMap.set(r.emoji, (emojiCountMap.get(r.emoji) || 0) + 1);
+            }
+            const reactionCounts = Array.from(emojiCountMap.entries()).map(
+              ([emoji, count]) => ({ emoji, count })
+            );
+
+            // Get viewer's reaction if any
+            let myReaction: string | null = null;
+            if (viewerDbId) {
+              const myR = reactions.find((r) => r.userId === viewerDbId);
+              if (myR) myReaction = myR.emoji;
+            }
+
+            return {
+              _id: answer._id,
+              promptId: answer.promptId,
+              type: answer.type,
+              text: answer.text,
+              mediaUrl:
+                answer.type === 'voice'
+                  ? answer.mediaUrl
+                  : (viewerDbId && viewerDbId === answer.userId ? answer.mediaUrl : undefined),
+              durationSec: answer.durationSec,
+              createdAt: answer.createdAt,
+              editedAt: answer.editedAt,
+              totalReactionCount: answer.totalReactionCount ?? 0,
+              reactionCounts,
+              myReaction,
+              isAnonymous: answer.isAnonymous,
+              visibility: answer.visibility,
+              viewMode: answer.viewMode,
+              viewDurationSec: answer.viewDurationSec,
+              isHiddenForOthers: (answer.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD,
+            };
+          })
+        );
 
         // Check if viewer has answered this prompt
-        const myAnswer = answers.find((answer) => storedUserMatches(answer.userId, viewer.user));
-        const hasAnswered = !!myAnswer;
-        const myAnswerId = myAnswer ? (myAnswer._id as unknown as string) : null;
+        let hasAnswered = false;
+        let myAnswerId: string | null = null;
+        if (viewerDbId) {
+          const myAnswer = answers.find((a) => a.userId === viewerDbId);
+          if (myAnswer) {
+            hasAnswered = true;
+            myAnswerId = myAnswer._id as unknown as string;
+          }
+        }
 
         const promptIdStr = prompt._id as unknown as string;
         return {
@@ -1825,7 +1278,7 @@ export const listActivePromptsWithTop2Answers = query({
           type: prompt.type,
           text: prompt.text,
           isTrending: prompt.isTrending,
-          ownerUserId: prompt.ownerUserId,
+          answerCount: prompt.answerCount,
           activeCount: prompt.activeCount,
           createdAt: prompt.createdAt,
           expiresAt: prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS,
@@ -1836,11 +1289,10 @@ export const listActivePromptsWithTop2Answers = query({
           ownerAge: prompt.ownerAge,
           ownerGender: prompt.ownerGender,
           // Engagement metrics
-          answerCount: visibleAnswerCounts[promptIdStr] ?? 0,
-          totalReactionCount: visibleReactionCounts[promptIdStr] ?? 0,
+          totalReactionCount: promptReactionCounts[promptIdStr] ?? 0,
           // Answers and viewer state
-          top2Answers: top2WithPreviews,
-          totalAnswers: visibleAnswerCounts[promptIdStr] ?? 0,
+          top2Answers: top2WithReactions,
+          totalAnswers: visibleAnswers.length,
           hasAnswered,
           myAnswerId,
         };
@@ -1854,55 +1306,49 @@ export const listActivePromptsWithTop2Answers = query({
 /**
  * Get trending Truth and Dare prompts (one of each type with highest engagement).
  * Used for the "🔥 Trending" section at top of feed.
- * P1-006 FIX: Added block filtering to exclude blocked users
  */
 export const getTrendingTruthAndDare = query({
   args: {
-    token: v.string(),
-    refreshKey: v.optional(v.number()),
+    viewerUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { token }) => {
+  handler: async (ctx, { viewerUserId }) => {
     const now = Date.now();
-    const viewer = await requireTodSession(ctx, token);
-    const isViewerPromptOwner = (ownerUserId: string) => storedUserMatches(ownerUserId, viewer.user);
-
-    // P1-006 FIX: Resolve viewer ID and get blocked user IDs
-    const blockedUserIds = await getBlockedUserRefSet(ctx, viewer.userId);
+    const viewerDbId = await resolveOptionalTodUserId(ctx, viewerUserId);
+    const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
 
     // Get all prompts
     const allPrompts = await ctx.db.query('todPrompts').collect();
 
-    // Filter to active (not expired) and not from blocked users
+    // Filter to active (not expired)
     const activePrompts = allPrompts.filter((p) => {
       const expires = p.expiresAt ?? p.createdAt + TWENTY_FOUR_HOURS_MS;
-      if (expires <= now) return false;
-      // P1-006 FIX: Exclude prompts from blocked users
-      if (blockedUserIds.has(p.ownerUserId)) return false;
-      if (p.isHidden && !isViewerPromptOwner(p.ownerUserId)) return false;
-      return true;
+      return expires > now && !blockedUserIds.has(p.ownerUserId as string);
     });
 
-    const promptIds = activePrompts.map((prompt) => prompt._id as unknown as string);
-    const answersByPrompt = await getAnswersByPromptIds(ctx, promptIds);
-    const { visibleAnswerCounts, visibleReactionCounts } =
-      buildPromptAnswerMetrics(answersByPrompt, viewer, blockedUserIds);
+    // Compute totalReactionCount for each prompt
+    const promptReactionCounts: Record<string, number> = {};
+    for (const prompt of activePrompts) {
+      const promptId = prompt._id as unknown as string;
+      const answers = await ctx.db
+        .query('todAnswers')
+        .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+        .collect();
+      promptReactionCounts[promptId] = answers.reduce(
+        (sum, a) => sum + (a.totalReactionCount ?? 0),
+        0
+      );
+    }
 
     // Separate by type
     const darePrompts = activePrompts.filter((p) => p.type === 'dare');
     const truthPrompts = activePrompts.filter((p) => p.type === 'truth');
 
-    // Sort each by visible answer count DESC, then visible reaction count DESC, then createdAt DESC
+    // Sort each by answerCount DESC, then createdAt DESC (newer wins ties)
+    // Trending = highest engagement based on answer count
     const sortByEngagement = (a: typeof activePrompts[0], b: typeof activePrompts[0]) => {
-      const promptIdA = a._id as unknown as string;
-      const promptIdB = b._id as unknown as string;
-      const answerCountA = visibleAnswerCounts[promptIdA] ?? 0;
-      const answerCountB = visibleAnswerCounts[promptIdB] ?? 0;
-      if (answerCountB !== answerCountA) return answerCountB - answerCountA;
-
-      const reactionCountA = visibleReactionCounts[promptIdA] ?? 0;
-      const reactionCountB = visibleReactionCounts[promptIdB] ?? 0;
-      if (reactionCountB !== reactionCountA) return reactionCountB - reactionCountA;
-
+      // Primary: answerCount DESC
+      if (b.answerCount !== a.answerCount) return b.answerCount - a.answerCount;
+      // Secondary: createdAt DESC (newer first)
       return b.createdAt - a.createdAt;
     };
 
@@ -1922,9 +1368,7 @@ export const getTrendingTruthAndDare = query({
         type: prompt.type,
         text: prompt.text,
         isTrending: true,
-        ownerUserId: prompt.ownerUserId,
-        answerCount: visibleAnswerCounts[promptId] ?? 0,
-        totalAnswers: visibleAnswerCounts[promptId] ?? 0,
+        answerCount: prompt.answerCount,
         activeCount: prompt.activeCount,
         createdAt: prompt.createdAt,
         expiresAt: prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS,
@@ -1935,7 +1379,7 @@ export const getTrendingTruthAndDare = query({
         ownerAge: prompt.ownerAge,
         ownerGender: prompt.ownerGender,
         // Engagement metrics
-        totalReactionCount: visibleReactionCounts[promptId] ?? 0,
+        totalReactionCount: promptReactionCounts[promptId] ?? 0,
       };
     };
 
@@ -1949,17 +1393,15 @@ export const getTrendingTruthAndDare = query({
 /**
  * Get full thread for a prompt - all answers with reactions.
  * Respects hidden-by-reports: hidden answers only visible to their author.
- * P2-004: Limited to THREAD_ANSWERS_LIMIT answers for performance.
  */
 export const getPromptThread = query({
   args: {
     promptId: v.string(),
-    token: v.string(),
+    viewerUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { promptId, token }) => {
-    const viewer = await requireTodSession(ctx, token);
-    const viewerUserId = viewer.userIdStr;
-    const blockedUserIds = await getBlockedUserRefSet(ctx, viewer.userId);
+  handler: async (ctx, { promptId, viewerUserId }) => {
+    const viewerDbId = await resolveOptionalTodUserId(ctx, viewerUserId);
+    const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
 
     // Get prompt
     const prompt = await ctx.db
@@ -1968,30 +1410,31 @@ export const getPromptThread = query({
       .first();
 
     if (!prompt) return null;
+    if (blockedUserIds.has(prompt.ownerUserId as string)) return null;
 
-    // CONNECT FIX: Resolve viewerUserId to Convex ID for proper comparison
-    // prompt.ownerUserId is stored as Convex ID, viewerUserId is authUserId format
-    // Check if viewer is the prompt owner (using Convex IDs for both)
-    const isViewerPromptOwner = storedUserMatches(prompt.ownerUserId, viewer.user);
-
-    if (!isViewerPromptOwner && blockedUserIds.has(prompt.ownerUserId)) {
+    // Check if expired
+    const now = Date.now();
+    const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
+    if (expires <= now) {
       return {
-        prompt: null,
+        prompt: {
+          _id: prompt._id,
+          type: prompt.type,
+          text: prompt.text,
+          isTrending: prompt.isTrending,
+          answerCount: prompt.answerCount,
+          createdAt: prompt.createdAt,
+          expiresAt: expires,
+          isPromptOwner: viewerDbId === prompt.ownerUserId,
+          // Owner profile snapshot
+          isAnonymous: prompt.isAnonymous,
+          ownerName: prompt.ownerName,
+          ownerPhotoUrl: prompt.ownerPhotoUrl,
+          ownerAge: prompt.ownerAge,
+          ownerGender: prompt.ownerGender,
+        },
         answers: [],
-        isExpired: false,
-        isBlocked: true,
-        isViewerPromptOwner: false,
-      };
-    }
-
-    // P0-002: Check if prompt is hidden (unless viewer is owner)
-    if (prompt.isHidden && !isViewerPromptOwner) {
-      return {
-        prompt: null,
-        answers: [],
-        isExpired: false,
-        isHidden: true, // P0-002: Indicates prompt was hidden due to reports
-        isViewerPromptOwner: false,
+        isExpired: true,
       };
     }
 
@@ -2002,50 +1445,24 @@ export const getPromptThread = query({
       .collect();
 
     // Filter hidden answers (except for author)
-    // P1-002: Also check per-user hiding (hiddenForUserIds) and global hide (isGloballyHidden)
-    const visibleAnswers = answers
-      .filter((answer) => isAnswerVisibleToViewer(answer, viewer, blockedUserIds))
-      .sort(sortAnswersByEngagement);
-    const visibleAnswerCount = visibleAnswers.length;
-    const visibleReactionCount = visibleAnswers.reduce(
-      (sum, answer) => sum + (answer.totalReactionCount ?? 0),
-      0
-    );
+    const visibleAnswers = answers.filter((a) => {
+      if (blockedUserIds.has(a.userId as string)) return false;
+      const isHidden = (a.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD;
+      if (!isHidden) return true;
+      return viewerDbId && a.userId === viewerDbId;
+    });
 
-    // Check if expired after we compute visible counts so the thread count stays truthful.
-    const now = Date.now();
-    const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
-    if (expires <= now) {
-      return {
-        prompt: {
-          _id: prompt._id,
-          type: prompt.type,
-          text: prompt.text,
-          isTrending: prompt.isTrending,
-          ownerUserId: prompt.ownerUserId,
-          answerCount: visibleAnswerCount,
-          visibleAnswerCount,
-          createdAt: prompt.createdAt,
-          expiresAt: expires,
-          // Owner profile snapshot
-          isAnonymous: prompt.isAnonymous,
-          ownerName: prompt.ownerName,
-          ownerPhotoUrl: prompt.ownerPhotoUrl,
-          ownerAge: prompt.ownerAge,
-          ownerGender: prompt.ownerGender,
-        },
-        answers: [],
-        isExpired: true,
-        isViewerPromptOwner,
-      };
-    }
-
-    // P2-004: Apply limit to prevent loading too many answers
-    const limitedAnswers = visibleAnswers.slice(0, THREAD_ANSWERS_LIMIT);
+    // Rank: totalReactionCount DESC, createdAt DESC
+    visibleAnswers.sort((a, b) => {
+      const aReactions = a.totalReactionCount ?? 0;
+      const bReactions = b.totalReactionCount ?? 0;
+      if (bReactions !== aReactions) return bReactions - aReactions;
+      return b.createdAt - a.createdAt;
+    });
 
     // Enrich with reactions
     const enrichedAnswers = await Promise.all(
-      limitedAnswers.map(async (answer) => {
+      visibleAnswers.map(async (answer) => {
         const answerId = answer._id as unknown as string;
 
         const reactions = await ctx.db
@@ -2063,94 +1480,68 @@ export const getPromptThread = query({
         );
 
         // Get viewer's reaction
-        const myReaction = reactions.find((r) => storedUserMatches(r.userId, viewer.user))?.emoji ?? null;
+        let myReaction: string | null = null;
+        if (viewerDbId) {
+          const myR = reactions.find((r) => r.userId === viewerDbId);
+          if (myR) myReaction = myR.emoji;
+        }
 
         // Check if viewer reported this
-        const report = await ctx.db
-          .query('todAnswerReports')
-          .withIndex('by_answer_reporter', (q) =>
-            q.eq('answerId', answerId).eq('reporterId', viewerUserId)
-          )
-          .first();
-        const hasReported = !!report;
+        let hasReported = false;
+        if (viewerDbId) {
+          const report = await ctx.db
+            .query('todAnswerReports')
+            .withIndex('by_answer_reporter', (q) =>
+              q.eq('answerId', answerId).eq('reporterId', viewerDbId)
+            )
+            .first();
+          hasReported = !!report;
+        }
 
         // Check if viewer has viewed this media (one-time view tracking)
         let hasViewedMedia = false;
-        if (!storedUserMatches(answer.userId, viewer.user) && answer.mediaUrl) {
+        if (
+          viewerDbId &&
+          viewerDbId !== answer.userId &&
+          answer.type !== 'voice' &&
+          answer.mediaStorageId
+        ) {
           const viewRecord = await ctx.db
             .query('todAnswerViews')
             .withIndex('by_answer_viewer', (q) =>
-              q.eq('answerId', answerId).eq('viewerUserId', viewerUserId)
+              q.eq('answerId', answerId).eq('viewerUserId', viewerDbId)
             )
             .first();
           hasViewedMedia = viewRecord?.viewedAt !== undefined;
         }
 
         // Check if viewer (as prompt owner) has sent a connect request for this answer
-        // CONNECT FIX: Resolve both viewer and answer author to Convex IDs to match storage format
-        // P0-FIX: Also return connectStatus ('pending'/'connected') for UI differentiation
-        // RESTORED: hasSentConnect true for both 'pending' and 'connected' to prevent reconnect
         let hasSentConnect = false;
-        let connectStatus: 'none' | 'pending' | 'connected' = 'none';
-        if (!storedUserMatches(answer.userId, viewer.user)) {
-          const viewerDbId = viewer.userId;
-          const answerAuthorDbId = await resolveStoredUserId(ctx, answer.userId);
-          if (answerAuthorDbId) {
-            const connectReq = await ctx.db
-              .query('todConnectRequests')
-              .withIndex('by_from_to', (q) =>
-                q.eq('fromUserId', viewerDbId).eq('toUserId', answerAuthorDbId)
+        if (viewerDbId && viewerDbId !== answer.userId) {
+          const connectReq = await ctx.db
+            .query('todConnectRequests')
+            .withIndex('by_from_to', (q) =>
+              q.eq('fromUserId', viewerDbId).eq('toUserId', answer.userId)
+            )
+            .filter((q) =>
+              q.or(
+                q.eq(q.field('status'), 'pending'),
+                q.eq(q.field('status'), 'connected')
               )
-              .filter((q) =>
-                q.or(
-                  q.eq(q.field('status'), 'pending'),
-                  q.eq(q.field('status'), 'connected')
-                )
-              )
-              .first();
-            hasSentConnect = !!connectReq;
-            connectStatus = connectReq?.status === 'connected' ? 'connected' : connectReq?.status === 'pending' ? 'pending' : 'none';
-          }
+            )
+            .first();
+          hasSentConnect = !!connectReq;
         }
-
-        // P0-004 FIX: Server-side access control for private media
-        // Do NOT expose mediaUrl to unauthorized viewers
-        // Authorized viewers: answer author, prompt owner (for owner_only), everyone (for public)
-        const isAnswerAuthor = storedUserMatches(answer.userId, viewer.user);
-        const isPromptOwnerViewer = isViewerPromptOwner;
-        const isOwnerOnlyMedia = answer.visibility === 'owner_only';
-
-        // Determine if viewer is authorized to receive the media URL
-        let authorizedForMediaUrl = false;
-        if (isAnswerAuthor) {
-          // Answer author can always see their own media
-          authorizedForMediaUrl = true;
-        } else if (isOwnerOnlyMedia) {
-          // Owner-only media: only prompt owner can access
-          authorizedForMediaUrl = isPromptOwnerViewer;
-        } else {
-          // Public media: everyone can access (will go through claim flow)
-          authorizedForMediaUrl = true;
-        }
-
-        // P0-004 FIX: Only return mediaUrl if authorized, otherwise return null
-        // Keep hasMedia flag so UI can show "media exists" placeholder
-        const safeMediaUrl = authorizedForMediaUrl ? answer.mediaUrl : null;
-        const safeMediaStorageId = authorizedForMediaUrl ? answer.mediaStorageId : null;
-
-        // MEDIA ALWAYS EDITABLE: No lock based on views - sender can edit until expiry
-        // View tracking kept for analytics but does NOT affect edit ability
 
         return {
           _id: answer._id,
           promptId: answer.promptId,
-          userId: answer.userId,
           type: answer.type,
           text: answer.text,
-          mediaUrl: safeMediaUrl,
-          mediaStorageId: safeMediaStorageId,
-          // P0-004 FIX: Flag indicating media exists (for UI placeholder) even if URL hidden
-          hasMedia: !!answer.mediaStorageId,
+          mediaUrl:
+            answer.type === 'voice'
+              ? answer.mediaUrl
+              : (viewerDbId && viewerDbId === answer.userId ? answer.mediaUrl : undefined),
           durationSec: answer.durationSec,
           createdAt: answer.createdAt,
           editedAt: answer.editedAt,
@@ -2162,11 +1553,11 @@ export const getPromptThread = query({
           viewMode: answer.viewMode,
           viewDurationSec: answer.viewDurationSec,
           isHiddenForOthers: (answer.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD,
-          isOwnAnswer: storedUserMatches(answer.userId, viewer.user),
+          isOwnAnswer: viewerDbId === answer.userId,
           hasReported,
           hasViewedMedia,
           hasSentConnect,
-          connectStatus, // P0-FIX: 'none' | 'pending' | 'connected' for UI differentiation
+          hasMedia: !!answer.mediaStorageId,
           // Author identity snapshot
           authorName: answer.authorName,
           authorPhotoUrl: answer.authorPhotoUrl,
@@ -2175,29 +1566,9 @@ export const getPromptThread = query({
           photoBlurMode: answer.photoBlurMode,
           identityMode: answer.identityMode,
           isFrontCamera: answer.isFrontCamera ?? false,
-          // MEDIA ALWAYS EDITABLE: No lock - sender can update until expiry
-          isVisualMediaConsumed: false,
         };
       })
     );
-
-    // Get prompt reactions
-    const promptReactions = await ctx.db
-      .query('todPromptReactions')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-
-    // Group prompt reactions by emoji
-    const promptEmojiCountMap: Map<string, number> = new Map();
-    for (const r of promptReactions) {
-      promptEmojiCountMap.set(r.emoji, (promptEmojiCountMap.get(r.emoji) || 0) + 1);
-    }
-    const promptReactionCounts = Array.from(promptEmojiCountMap.entries()).map(
-      ([emoji, count]) => ({ emoji, count })
-    );
-
-    // Get viewer's reaction on prompt
-    const promptMyReaction = promptReactions.find((r) => storedUserMatches(r.userId, viewer.user))?.emoji ?? null;
 
     return {
       prompt: {
@@ -2205,25 +1576,19 @@ export const getPromptThread = query({
         type: prompt.type,
         text: prompt.text,
         isTrending: prompt.isTrending,
-        ownerUserId: prompt.ownerUserId,
-        answerCount: visibleAnswerCount,
-        visibleAnswerCount,
+        answerCount: prompt.answerCount,
         createdAt: prompt.createdAt,
         expiresAt: expires,
+        isPromptOwner: viewerDbId === prompt.ownerUserId,
         // Owner profile snapshot
         isAnonymous: prompt.isAnonymous,
         ownerName: prompt.ownerName,
         ownerPhotoUrl: prompt.ownerPhotoUrl,
         ownerAge: prompt.ownerAge,
         ownerGender: prompt.ownerGender,
-        // Prompt reactions
-        totalReactionCount: visibleReactionCount,
-        reactionCounts: promptReactionCounts,
-        myReaction: promptMyReaction,
       },
       answers: enrichedAnswers,
       isExpired: false,
-      isViewerPromptOwner,
     };
   },
 });
@@ -2239,7 +1604,7 @@ export const getPromptThread = query({
 async function checkRateLimit(
   ctx: any,
   userId: string,
-  actionType: 'answer' | 'reaction' | 'report' | 'claim_media' | 'prompt' | 'connect' // P0-003: Added 'prompt', P0-004: Added 'connect'
+  actionType: 'answer' | 'reaction' | 'report' | 'claim_media'
 ): Promise<{ allowed: boolean; remaining: number }> {
   const now = Date.now();
   const limit = RATE_LIMITS[actionType];
@@ -2296,7 +1661,7 @@ async function checkRateLimit(
 export const createOrEditAnswer = mutation({
   args: {
     promptId: v.string(),
-    token: v.string(),
+    userId: v.string(),
     // Optional: if provided, update text
     text: v.optional(v.string()),
     // Optional: if provided, set/replace media
@@ -2325,7 +1690,7 @@ export const createOrEditAnswer = mutation({
     type: v.optional(v.union(v.literal('text'), v.literal('photo'), v.literal('video'), v.literal('voice'))),
   },
   handler: async (ctx, args) => {
-    const { user, userId, userIdStr } = await requireTodSession(ctx, args.token);
+    const userId = await resolveRequiredTodUserId(ctx, args.userId, 'Unauthorized');
 
     // Validate prompt exists and not expired
     const prompt = await ctx.db
@@ -2337,22 +1702,6 @@ export const createOrEditAnswer = mutation({
       throw new Error('Prompt not found');
     }
 
-    if (prompt.isHidden && !storedUserMatches(prompt.ownerUserId, user)) {
-      throw new Error('Prompt is no longer available');
-    }
-
-    // SELF-COMMENT RESTRICTION: Owner cannot answer their own prompt
-    if (storedUserMatches(prompt.ownerUserId, user)) {
-      throw new Error('You cannot answer your own prompt.');
-    }
-
-    await assertNotBlockedWithStoredUser(
-      ctx,
-      userId,
-      prompt.ownerUserId,
-      'Cannot interact with this user'
-    );
-
     const now = Date.now();
     const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
     if (expires <= now) {
@@ -2360,7 +1709,7 @@ export const createOrEditAnswer = mutation({
     }
 
     // Check rate limit
-    const rateCheck = await checkRateLimit(ctx, userIdStr, 'answer');
+    const rateCheck = await checkRateLimit(ctx, userId, 'answer');
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment before posting again.');
     }
@@ -2369,30 +1718,27 @@ export const createOrEditAnswer = mutation({
     const existing = await ctx.db
       .query('todAnswers')
       .withIndex('by_prompt_user', (q) =>
-        q.eq('promptId', args.promptId).eq('userId', userIdStr)
+        q.eq('promptId', args.promptId).eq('userId', userId)
       )
       .first();
+
+    const normalizedText = validateAnswerText(args.text);
+    const viewDurationSec = validateViewDuration(args.viewDurationSec);
 
     // Generate media URL if storage ID provided
     let mediaUrl: string | undefined;
     if (args.mediaStorageId) {
       mediaUrl = await ctx.storage.getUrl(args.mediaStorageId) ?? undefined;
     }
-
-    let authorPhotoUrl = isRemoteUrl(args.authorPhotoUrl) ? args.authorPhotoUrl : undefined;
+    let resolvedAuthorPhotoUrl = args.authorPhotoUrl;
     if (args.authorPhotoStorageId) {
-      authorPhotoUrl = await ctx.storage.getUrl(args.authorPhotoStorageId) ?? undefined;
-    } else if (args.authorPhotoUrl && !authorPhotoUrl) {
-      throw new Error('Only persisted profile photos can be attached to answers');
+      resolvedAuthorPhotoUrl = await ctx.storage.getUrl(args.authorPhotoStorageId) ?? undefined;
     }
 
     if (existing) {
       // EDIT existing answer - MERGE updates
       // Build patch object with only changed fields
       const patch: Record<string, any> = { editedAt: now };
-
-      // MEDIA ALWAYS EDITABLE: No lock based on views
-      // Sender can replace/remove media anytime until prompt expires
 
       console.log(`[T/D] EDIT existing answer`, {
         existingText: existing.text,
@@ -2403,7 +1749,7 @@ export const createOrEditAnswer = mutation({
 
       // Text: update if provided, otherwise keep existing
       if (args.text !== undefined) {
-        patch.text = args.text.trim() || undefined;
+        patch.text = normalizedText;
         console.log(`[T/D] text updated to: ${patch.text}`);
       } else {
         console.log(`[T/D] text preserved: ${existing.text}`);
@@ -2422,44 +1768,42 @@ export const createOrEditAnswer = mutation({
         patch.mediaMime = undefined;
         patch.durationSec = undefined;
         patch.isFrontCamera = undefined;
-        // ONE-TIME VIEW RESET: Clear all view records when media is removed
-        const existingViews = await ctx.db
-          .query('todAnswerViews')
-          .withIndex('by_answer', (q) => q.eq('answerId', existing._id as any))
-          .collect();
-        for (const view of existingViews) {
-          await ctx.db.delete(view._id);
-        }
-        console.log(`[T/D] media removed from answer, cleared ${existingViews.length} view records`);
+        patch.viewMode = undefined;
+        patch.viewDurationSec = undefined;
+        patch.mediaViewedAt = undefined;
+        patch.promptOwnerViewedAt = undefined;
+        console.log(`[T/D] media removed from answer`);
       } else if (args.mediaStorageId) {
         // Replace media
         if (existing.mediaStorageId && existing.mediaStorageId !== args.mediaStorageId) {
           try {
             await ctx.storage.delete(existing.mediaStorageId);
           } catch { /* already deleted */ }
-          // ONE-TIME VIEW RESET: Clear all view records when media is replaced
-          const existingViews = await ctx.db
-            .query('todAnswerViews')
-            .withIndex('by_answer', (q) => q.eq('answerId', existing._id as any))
-            .collect();
-          for (const view of existingViews) {
-            await ctx.db.delete(view._id);
-          }
-          console.log(`[T/D] media replaced, cleared ${existingViews.length} view records`);
         }
         patch.mediaStorageId = args.mediaStorageId;
         patch.mediaUrl = mediaUrl;
         patch.mediaMime = args.mediaMime;
         patch.durationSec = args.durationSec;
         patch.isFrontCamera = args.isFrontCamera;
+        patch.viewMode = args.viewMode ?? existing.viewMode ?? 'tap';
+        patch.viewDurationSec = viewDurationSec ?? existing.viewDurationSec;
+        patch.mediaViewedAt = undefined;
+        patch.promptOwnerViewedAt = undefined;
         console.log(`[T/D] media replaced, storageId=${args.mediaStorageId}`);
+      } else if (args.viewMode !== undefined || args.viewDurationSec !== undefined) {
+        patch.viewMode = args.viewMode ?? existing.viewMode ?? 'tap';
+        patch.viewDurationSec = viewDurationSec ?? existing.viewDurationSec;
       }
       // else: keep existing media unchanged
 
       // Determine type based on final content
-      const finalText = patch.text !== undefined ? patch.text : existing.text;
-      const finalMedia = patch.mediaStorageId !== undefined ? patch.mediaStorageId : existing.mediaStorageId;
-      const finalMime = patch.mediaMime !== undefined ? patch.mediaMime : existing.mediaMime;
+      const finalText = args.text !== undefined ? normalizedText : existing.text;
+      const finalMedia = args.removeMedia ? undefined : (args.mediaStorageId ?? existing.mediaStorageId);
+      const finalMime = args.removeMedia ? undefined : (args.mediaMime ?? existing.mediaMime);
+
+      if (!finalText && !finalMedia) {
+        throw new Error('Answer requires text or media');
+      }
 
       // Compute type from content
       let type: 'text' | 'photo' | 'video' | 'voice' = 'text';
@@ -2475,17 +1819,22 @@ export const createOrEditAnswer = mutation({
       // Only update author snapshot if explicitly provided
       if (args.authorName !== undefined) patch.authorName = args.authorName;
       if (args.authorPhotoUrl !== undefined || args.authorPhotoStorageId !== undefined) {
-        patch.authorPhotoUrl = authorPhotoUrl;
+        patch.authorPhotoUrl = resolvedAuthorPhotoUrl;
       }
       if (args.authorAge !== undefined) patch.authorAge = args.authorAge;
       if (args.authorGender !== undefined) patch.authorGender = args.authorGender;
 
-      // View mode for media
-      if (finalMedia) {
-        patch.viewMode = args.viewMode ?? existing.viewMode ?? 'tap';
-      }
-
       console.log(`[T/D] identityMode reused=${existing.identityMode ?? 'anonymous'}`);
+
+      if (args.removeMedia || args.mediaStorageId) {
+        const priorViews = await ctx.db
+          .query('todAnswerViews')
+          .withIndex('by_answer', (q) => q.eq('answerId', existing._id as string))
+          .collect();
+        for (const view of priorViews) {
+          await ctx.db.delete(view._id);
+        }
+      }
 
       await ctx.db.patch(existing._id, patch);
 
@@ -2496,7 +1845,7 @@ export const createOrEditAnswer = mutation({
     } else {
       // CREATE new answer
       // Require at least text or media
-      const hasText = args.text && args.text.trim().length > 0;
+      const hasText = !!normalizedText;
       const hasMedia = !!args.mediaStorageId;
 
       if (!hasText && !hasMedia) {
@@ -2519,9 +1868,9 @@ export const createOrEditAnswer = mutation({
 
       const answerId = await ctx.db.insert('todAnswers', {
         promptId: args.promptId,
-        userId: userIdStr,
+        userId,
         type,
-        text: hasText ? args.text!.trim() : undefined,
+        text: normalizedText,
         mediaStorageId: args.mediaStorageId,
         mediaUrl,
         mediaMime: args.mediaMime,
@@ -2532,14 +1881,12 @@ export const createOrEditAnswer = mutation({
         isAnonymous: isAnon,
         visibility: args.visibility ?? 'public',
         viewMode: hasMedia ? (args.viewMode ?? 'tap') : undefined,
-        viewDurationSec: args.viewDurationSec,
+        viewDurationSec: hasMedia ? viewDurationSec : undefined,
         totalReactionCount: 0,
         reportCount: 0,
-        hiddenForUserIds: [],
-        isGloballyHidden: false,
         // Author identity snapshot (cleared for anonymous, photo cleared for no_photo)
         authorName: isAnon ? undefined : args.authorName,
-        authorPhotoUrl: isAnon || isNoPhoto ? undefined : authorPhotoUrl,
+        authorPhotoUrl: isAnon || isNoPhoto ? undefined : resolvedAuthorPhotoUrl,
         authorAge: isAnon ? undefined : args.authorAge,
         authorGender: isAnon ? undefined : args.authorGender,
         photoBlurMode: isNoPhoto ? 'blur' : 'none',
@@ -2568,11 +1915,11 @@ export const createOrEditAnswer = mutation({
 export const setAnswerReaction = mutation({
   args: {
     answerId: v.string(),
-    token: v.string(),
+    userId: v.string(),
     emoji: v.string(), // pass empty string to remove reaction
   },
-  handler: async (ctx, { answerId, token, emoji }) => {
-    const { user, userId, userIdStr } = await requireTodSession(ctx, token);
+  handler: async (ctx, { answerId, userId: argsUserId, emoji }) => {
+    const userId = await resolveRequiredTodUserId(ctx, argsUserId, 'Unauthorized');
 
     // Validate answer exists
     const answer = await ctx.db
@@ -2584,10 +1931,8 @@ export const setAnswerReaction = mutation({
       throw new Error('Answer not found');
     }
 
-    await assertNotBlockedWithStoredUser(ctx, userId, answer.userId, 'Cannot interact with this user');
-
     // Check rate limit
-    const rateCheck = await checkRateLimit(ctx, userIdStr, 'reaction');
+    const rateCheck = await checkRateLimit(ctx, userId, 'reaction');
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment.');
     }
@@ -2598,7 +1943,7 @@ export const setAnswerReaction = mutation({
     const existing = await ctx.db
       .query('todAnswerReactions')
       .withIndex('by_answer_user', (q) =>
-        q.eq('answerId', answerId).eq('userId', userIdStr)
+        q.eq('answerId', answerId).eq('userId', userId)
       )
       .first();
 
@@ -2627,92 +1972,13 @@ export const setAnswerReaction = mutation({
       // Create new reaction
       await ctx.db.insert('todAnswerReactions', {
         answerId,
-        userId: userIdStr,
+        userId,
         emoji,
         createdAt: now,
       });
       // Increment count
       await ctx.db.patch(answer._id, {
         totalReactionCount: (answer.totalReactionCount ?? 0) + 1,
-      });
-      return { ok: true, action: 'added', emoji };
-    }
-  },
-});
-
-/**
- * Set (upsert) an emoji reaction on a prompt.
- * One reaction per user per prompt. Changing updates counts.
- */
-export const setPromptReaction = mutation({
-  args: {
-    promptId: v.string(),
-    token: v.string(),
-    emoji: v.string(), // pass empty string to remove reaction
-  },
-  handler: async (ctx, { promptId, token, emoji }) => {
-    const { userId, userIdStr } = await requireTodSession(ctx, token);
-
-    // Validate prompt exists
-    const prompt = await ctx.db
-      .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
-      .first();
-
-    if (!prompt) {
-      throw new Error('Prompt not found');
-    }
-
-    await assertNotBlockedWithStoredUser(ctx, userId, prompt.ownerUserId, 'Cannot interact with this user');
-
-    // Check rate limit
-    const rateCheck = await checkRateLimit(ctx, userIdStr, 'reaction');
-    if (!rateCheck.allowed) {
-      throw new Error('Rate limit exceeded. Please wait a moment.');
-    }
-
-    const now = Date.now();
-
-    // Check for existing reaction
-    const existing = await ctx.db
-      .query('todPromptReactions')
-      .withIndex('by_prompt_user', (q) =>
-        q.eq('promptId', promptId).eq('userId', userIdStr)
-      )
-      .first();
-
-    if (emoji === '' || !emoji) {
-      // Remove reaction
-      if (existing) {
-        await ctx.db.delete(existing._id);
-        // Decrement count
-        const newCount = Math.max(0, (prompt.totalReactionCount ?? 0) - 1);
-        await ctx.db.patch(prompt._id, { totalReactionCount: newCount });
-      }
-      return { ok: true, action: 'removed' };
-    }
-
-    if (existing) {
-      // Update reaction
-      if (existing.emoji !== emoji) {
-        await ctx.db.patch(existing._id, {
-          emoji,
-          updatedAt: now,
-        });
-        return { ok: true, action: 'changed', oldEmoji: existing.emoji, newEmoji: emoji };
-      }
-      return { ok: true, action: 'unchanged' };
-    } else {
-      // Create new reaction
-      await ctx.db.insert('todPromptReactions', {
-        promptId,
-        userId: userIdStr,
-        emoji,
-        createdAt: now,
-      });
-      // Increment count
-      await ctx.db.patch(prompt._id, {
-        totalReactionCount: (prompt.totalReactionCount ?? 0) + 1,
       });
       return { ok: true, action: 'added', emoji };
     }
@@ -2727,17 +1993,14 @@ export const setPromptReaction = mutation({
 export const reportAnswer = mutation({
   args: {
     answerId: v.string(),
-    token: v.string(),
+    reporterId: v.string(),
     // Structured report reason (required)
-    // P0-002 FIX: Added 'privacy' and 'scam' to match reportPrompt and UI options
     reasonCode: v.union(
       v.literal('harassment'),
       v.literal('sexual'),
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
-      v.literal('privacy'),
-      v.literal('scam'),
       v.literal('other')
     ),
     // Optional additional details
@@ -2745,8 +2008,8 @@ export const reportAnswer = mutation({
     // Legacy field for backwards compatibility (deprecated)
     reason: v.optional(v.string()),
   },
-  handler: async (ctx, { answerId, token, reasonCode, reasonText, reason }) => {
-    const { userId, userIdStr } = await requireTodSession(ctx, token);
+  handler: async (ctx, { answerId, reporterId: argsReporterId, reasonCode, reasonText, reason }) => {
+    const reporterId = await resolveRequiredTodUserId(ctx, argsReporterId, 'Unauthorized');
 
     // Validate answer exists
     const answer = await ctx.db
@@ -2758,10 +2021,8 @@ export const reportAnswer = mutation({
       throw new Error('Answer not found');
     }
 
-    await assertNotBlockedWithStoredUser(ctx, userId, answer.userId, 'Cannot interact with this user');
-
     // Can't report own answer
-    if (storedUserMatches(answer.userId, { _id: userId })) {
+    if (answer.userId === reporterId) {
       throw new Error("You can't report your own answer");
     }
 
@@ -2769,7 +2030,7 @@ export const reportAnswer = mutation({
     const existingReport = await ctx.db
       .query('todAnswerReports')
       .withIndex('by_answer_reporter', (q) =>
-        q.eq('answerId', answerId).eq('reporterId', userIdStr)
+        q.eq('answerId', answerId).eq('reporterId', reporterId)
       )
       .first();
 
@@ -2778,7 +2039,7 @@ export const reportAnswer = mutation({
     }
 
     // Check rate limit (daily)
-    const rateCheck = await checkRateLimit(ctx, userIdStr, 'report');
+    const rateCheck = await checkRateLimit(ctx, reporterId, 'report');
     if (!rateCheck.allowed) {
       throw new Error('You have reached your daily report limit');
     }
@@ -2786,7 +2047,7 @@ export const reportAnswer = mutation({
     // Create report with structured reason
     await ctx.db.insert('todAnswerReports', {
       answerId,
-      reporterId: userIdStr,
+      reporterId,
       reasonCode,
       reasonText,
       reason, // Legacy field for backwards compatibility
@@ -2795,122 +2056,14 @@ export const reportAnswer = mutation({
 
     // Increment report count
     const newReportCount = (answer.reportCount ?? 0) + 1;
+    await ctx.db.patch(answer._id, { reportCount: newReportCount });
 
-    // P1-002: Add reporter to hiddenForUserIds for immediate per-user hiding
-    const currentHiddenFor = (answer.hiddenForUserIds as string[] | undefined) ?? [];
-    const updatedHiddenFor = currentHiddenFor.includes(userIdStr)
-      ? currentHiddenFor
-      : [...currentHiddenFor, userIdStr];
-
-    // Check if global threshold reached (3+ reports = hidden for everyone)
-    const isNowGloballyHidden = newReportCount >= REPORT_HIDE_THRESHOLD;
-
-    // Update answer with new report count and hiddenForUserIds
-    await ctx.db.patch(answer._id, {
-      reportCount: newReportCount,
-      hiddenForUserIds: updatedHiddenFor,
-      // P1-002: Set isGloballyHidden flag when threshold reached
-      ...(isNowGloballyHidden ? { isGloballyHidden: true } : {}),
-    });
-
-    console.log(`[T/D] reportAnswer success: answerId=${answerId}, reporterId=${userIdStr}, reportCount=${newReportCount}, isNowGloballyHidden=${isNowGloballyHidden}`);
+    // Check if threshold reached
+    const isNowHidden = newReportCount >= REPORT_HIDE_THRESHOLD;
 
     return {
       success: true,
       reportCount: newReportCount,
-      isNowHidden: isNowGloballyHidden,
-      // P1-002: Content is immediately hidden for the reporter
-      hiddenForReporter: true,
-    };
-  },
-});
-
-/**
- * P0-002: Report a prompt
- * Rate limited per day. Same user can't report same prompt twice.
- * If prompt reaches 3 unique reports, it's hidden from everyone except owner.
- * P1-002 FIX: Added demo mode support and reporterId arg for compatibility.
- */
-export const reportPrompt = mutation({
-  args: {
-    promptId: v.string(),
-    token: v.string(),
-    reasonCode: v.union(
-      v.literal('harassment'),
-      v.literal('sexual'),
-      v.literal('spam'),
-      v.literal('hate'),
-      v.literal('violence'),
-      v.literal('privacy'),
-      v.literal('scam'),
-      v.literal('other')
-    ),
-    reasonText: v.optional(v.string()),
-  },
-  handler: async (ctx, { promptId, token, reasonCode, reasonText }) => {
-    const { userId, userIdStr } = await requireTodSession(ctx, token);
-
-    // Get the prompt
-    const prompt = await ctx.db
-      .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
-      .first();
-
-    if (!prompt) {
-      throw new Error('Prompt not found');
-    }
-
-    await assertNotBlockedWithStoredUser(ctx, userId, prompt.ownerUserId, 'Cannot interact with this user');
-
-    // Can't report own prompt
-    if (storedUserMatches(prompt.ownerUserId, { _id: userId })) {
-      throw new Error('Cannot report your own prompt');
-    }
-
-    // Check if already reported by this user
-    const existingReport = await ctx.db
-      .query('todPromptReports')
-      .withIndex('by_prompt_reporter', (q) =>
-        q.eq('promptId', promptId).eq('reporterId', userIdStr)
-      )
-      .first();
-
-    if (existingReport) {
-      throw new Error('You have already reported this prompt');
-    }
-
-    // Check rate limit (daily)
-    const rateCheck = await checkRateLimit(ctx, userIdStr, 'report');
-    if (!rateCheck.allowed) {
-      throw new Error('You have reached your daily report limit');
-    }
-
-    // Create report
-    await ctx.db.insert('todPromptReports', {
-      promptId,
-      reporterId: userIdStr,
-      reasonCode,
-      reasonText,
-      createdAt: Date.now(),
-    });
-
-    // Count total reports for this prompt
-    const allReports = await ctx.db
-      .query('todPromptReports')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-
-    const reportCount = allReports.length;
-
-    // Check if threshold reached - mark prompt as hidden
-    const isNowHidden = reportCount >= REPORT_HIDE_THRESHOLD;
-    if (isNowHidden && !prompt.isHidden) {
-      await ctx.db.patch(prompt._id, { isHidden: true });
-    }
-
-    return {
-      success: true,
-      reportCount,
       isNowHidden,
     };
   },
@@ -2922,10 +2075,9 @@ export const reportPrompt = mutation({
 export const getUserAnswer = query({
   args: {
     promptId: v.string(),
-    token: v.string(),
+    userId: v.string(),
   },
-  handler: async (ctx, { promptId, token }) => {
-    const { userIdStr: userId } = await requireTodSession(ctx, token);
+  handler: async (ctx, { promptId, userId }) => {
     const answer = await ctx.db
       .query('todAnswers')
       .withIndex('by_prompt_user', (q) =>
@@ -2943,10 +2095,10 @@ export const getUserAnswer = query({
 export const deleteMyAnswer = mutation({
   args: {
     answerId: v.string(),
-    token: v.string(),
+    userId: v.string(),
   },
-  handler: async (ctx, { answerId, token }) => {
-    const { user } = await requireTodSession(ctx, token);
+  handler: async (ctx, { answerId, userId: argsUserId }) => {
+    const userId = await resolveRequiredTodUserId(ctx, argsUserId, 'Unauthorized');
 
     const answer = await ctx.db
       .query('todAnswers')
@@ -2957,7 +2109,7 @@ export const deleteMyAnswer = mutation({
       throw new Error('Answer not found');
     }
 
-    if (!storedUserMatches(answer.userId, user)) {
+    if (answer.userId !== userId) {
       throw new Error('You can only delete your own answers');
     }
 
@@ -2997,6 +2149,14 @@ export const deleteMyAnswer = mutation({
       await ctx.db.delete(v._id);
     }
 
+    const connectRequests = await ctx.db
+      .query('todConnectRequests')
+      .filter((q) => q.eq(q.field('answerId'), answerId))
+      .collect();
+    for (const request of connectRequests) {
+      await ctx.db.delete(request._id);
+    }
+
     // Decrement prompt answer count
     const prompt = await ctx.db
       .query('todPrompts')
@@ -3016,116 +2176,6 @@ export const deleteMyAnswer = mutation({
   },
 });
 
-/**
- * Delete user's own prompt (Truth or Dare post)
- */
-export const deleteMyPrompt = mutation({
-  args: {
-    promptId: v.string(),
-    token: v.string(),
-  },
-  handler: async (ctx, { promptId, token }) => {
-    const { user } = await requireTodSession(ctx, token);
-
-    const prompt = await ctx.db
-      .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
-      .first();
-
-    if (!prompt) {
-      throw new Error('Prompt not found');
-    }
-
-    if (!storedUserMatches(prompt.ownerUserId, user)) {
-      throw new Error('You can only delete your own prompts');
-    }
-
-    console.log(`[T/D] deleteMyPrompt allowed for promptId=${promptId}`);
-
-    // 1. Delete all answers and their related data
-    const answers = await ctx.db
-      .query('todAnswers')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-
-    for (const answer of answers) {
-      // Delete answer media if exists
-      if (answer.mediaStorageId) {
-        try {
-          await ctx.storage.delete(answer.mediaStorageId);
-        } catch { /* already deleted */ }
-      }
-
-      // Delete reactions
-      const reactions = await ctx.db
-        .query('todAnswerReactions')
-        .withIndex('by_answer', (q) => q.eq('answerId', answer._id))
-        .collect();
-      for (const r of reactions) {
-        await ctx.db.delete(r._id);
-      }
-
-      // Delete reports
-      const reports = await ctx.db
-        .query('todAnswerReports')
-        .withIndex('by_answer', (q) => q.eq('answerId', answer._id))
-        .collect();
-      for (const r of reports) {
-        await ctx.db.delete(r._id);
-      }
-
-      // Delete views
-      const views = await ctx.db
-        .query('todAnswerViews')
-        .withIndex('by_answer', (q) => q.eq('answerId', answer._id))
-        .collect();
-      for (const v of views) {
-        await ctx.db.delete(v._id);
-      }
-
-      // Delete the answer
-      await ctx.db.delete(answer._id);
-    }
-
-    // 2. Delete connect requests for this prompt
-    const connectRequests = await ctx.db
-      .query('todConnectRequests')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-    for (const cr of connectRequests) {
-      await ctx.db.delete(cr._id);
-    }
-
-    // 3. Delete private media for this prompt
-    const privateMedia = await ctx.db
-      .query('todPrivateMedia')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-    for (const pm of privateMedia) {
-      if (pm.storageId) {
-        try {
-          await ctx.storage.delete(pm.storageId);
-        } catch { /* already deleted */ }
-      }
-      await ctx.db.delete(pm._id);
-    }
-
-    // 4. Delete prompt reports
-    const promptReports = await ctx.db
-      .query('todPromptReports')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-    for (const pr of promptReports) {
-      await ctx.db.delete(pr._id);
-    }
-
-    // 5. Delete the prompt itself
-    await ctx.db.delete(prompt._id);
-
-    return { success: true };
-  },
-});
-
 // ============================================================
 // SECURE ANSWER MEDIA VIEWING APIs
 // ============================================================
@@ -3139,10 +2189,10 @@ export const deleteMyPrompt = mutation({
 export const claimAnswerMediaView = mutation({
   args: {
     answerId: v.string(),
-    token: v.string(),
+    viewerId: v.string(),
   },
-  handler: async (ctx, { answerId, token }) => {
-    const { user, userId, userIdStr: viewerId } = await requireTodSession(ctx, token);
+  handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
+    const viewerId = await resolveRequiredTodUserId(ctx, argsViewerId, 'Unauthorized');
 
     // Rate limit check
     const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
@@ -3165,8 +2215,10 @@ export const claimAnswerMediaView = mutation({
       return { status: 'no_media' as const };
     }
 
-    // MEDIA ALWAYS VIEWABLE: No block based on promptOwnerViewedAt
-    // Media remains accessible until prompt expires
+    // Check if media was already deleted (prompt owner viewed it)
+    if (answer.promptOwnerViewedAt) {
+      return { status: 'already_deleted' as const };
+    }
 
     // Get the prompt to check ownership
     const prompt = await ctx.db
@@ -3178,16 +2230,13 @@ export const claimAnswerMediaView = mutation({
       return { status: 'no_media' as const };
     }
 
-    await assertNotBlockedWithStoredUser(ctx, userId, prompt.ownerUserId, 'Access denied');
-    await assertNotBlockedWithStoredUser(ctx, userId, answer.userId, 'Access denied');
-
-    const isPromptOwner = storedUserMatches(prompt.ownerUserId, user);
-    const isAnswerAuthor = storedUserMatches(answer.userId, user);
+    const isPromptOwner = prompt.ownerUserId === viewerId;
+    const isAnswerAuthor = answer.userId === viewerId;
 
     // Authorization check based on visibility
     if (answer.visibility === 'owner_only') {
-      // Only prompt owner can view owner_only media
-      if (!isPromptOwner) {
+      // Prompt owner and answer author can view owner_only media.
+      if (!isPromptOwner && !isAnswerAuthor) {
         return { status: 'not_authorized' as const };
       }
     }
@@ -3202,7 +2251,7 @@ export const claimAnswerMediaView = mutation({
       role = 'viewer';
     }
 
-    // ONE-TIME PER USER: Each user can view media only once
+    // Check if already viewed (one-time enforcement)
     // Answer author can always re-view their own media
     if (!isAnswerAuthor) {
       const existingView = await ctx.db
@@ -3212,34 +2261,36 @@ export const claimAnswerMediaView = mutation({
         )
         .first();
 
-      // BLOCK re-view: Return already_viewed status
       if (existingView) {
-        console.log(`[T/D] mediaView BLOCKED already_viewed viewerId=${viewerId} answerId=${answerId}`);
         return { status: 'already_viewed' as const };
       }
-
-      // First view: record it
-      await ctx.db.insert('todAnswerViews', {
-        answerId,
-        viewerUserId: viewerId,
-        viewedAt: Date.now(),
-      });
-      console.log(`[T/D] mediaViewed first-view viewerId=${viewerId} answerId=${answerId}`);
-    } else {
-      console.log(`[T/D] mediaViewed allowed (answer author) answerId=${answerId}`);
     }
 
-    // Mark first claim time if not set
-    if (!answer.mediaViewedAt) {
-      await ctx.db.patch(answer._id, {
-        mediaViewedAt: Date.now(),
-      });
-    }
-
-    // Generate fresh URL via storage
+    // Generate a fresh URL before consuming one-time access.
     const url = await ctx.storage.getUrl(answer.mediaStorageId);
     if (!url) {
       return { status: 'no_media' as const };
+    }
+
+    const viewedAt = Date.now();
+
+    // Record the view (for non-authors) only after the media URL is ready.
+    if (!isAnswerAuthor) {
+      await ctx.db.insert('todAnswerViews', {
+        answerId,
+        viewerUserId: viewerId,
+        viewedAt,
+      });
+      console.log(`[T/D] mediaViewed allowed=true viewerId=${viewerId} answerId=${answerId}`);
+    } else {
+      console.log(`[T/D] mediaViewed allowed=true (owner) answerId=${answerId}`);
+    }
+
+    // Mark first successful claim time if not set.
+    if (!answer.mediaViewedAt) {
+      await ctx.db.patch(answer._id, {
+        mediaViewedAt: viewedAt,
+      });
     }
 
     return {
@@ -3261,10 +2312,10 @@ export const claimAnswerMediaView = mutation({
 export const finalizeAnswerMediaView = mutation({
   args: {
     answerId: v.string(),
-    token: v.string(),
+    viewerId: v.string(),
   },
-  handler: async (ctx, { answerId, token }) => {
-    const { user, userId, userIdStr: viewerId } = await requireTodSession(ctx, token);
+  handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
+    const viewerId = await resolveRequiredTodUserId(ctx, argsViewerId, 'Unauthorized');
 
     // Rate limit
     const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
@@ -3292,18 +2343,22 @@ export const finalizeAnswerMediaView = mutation({
       return { status: 'not_found' as const };
     }
 
-    await assertNotBlockedWithStoredUser(ctx, userId, prompt.ownerUserId, 'Access denied');
-    await assertNotBlockedWithStoredUser(ctx, userId, answer.userId, 'Access denied');
+    const isPromptOwner = prompt.ownerUserId === viewerId;
 
-    const isPromptOwner = storedUserMatches(prompt.ownerUserId, user);
-
-    // MEDIA ALWAYS EDITABLE: Do NOT delete media on owner view
-    // Just mark as viewed for analytics - sender can still update until expiry
+    // If prompt owner finalized viewing, delete media for everyone
     if (isPromptOwner && answer.mediaStorageId && !answer.promptOwnerViewedAt) {
-      // Mark as viewed by owner (for analytics only, no locking)
+      // Delete storage file
+      try {
+        await ctx.storage.delete(answer.mediaStorageId);
+      } catch {
+        // Already deleted
+      }
+
+      // Mark as viewed by owner (this locks it for everyone)
       await ctx.db.patch(answer._id, {
         promptOwnerViewedAt: Date.now(),
-        // DO NOT clear mediaStorageId/mediaUrl - keep media accessible
+        mediaStorageId: undefined,
+        mediaUrl: undefined,
       });
     }
 
@@ -3314,17 +2369,12 @@ export const finalizeAnswerMediaView = mutation({
 /**
  * Get URL for voice message playback.
  * Voice messages are NOT one-time secure - they can be replayed.
- * P0-006 FIX: Added authorization check for owner_only visibility.
  */
 export const getVoiceUrl = query({
   args: {
     answerId: v.string(),
-    token: v.string(),
   },
-  handler: async (ctx, { answerId, token }) => {
-    const viewer = await requireTodSession(ctx, token);
-    const viewerUserId = viewer.userIdStr;
-
+  handler: async (ctx, { answerId }) => {
     // Get the answer
     const answer = await ctx.db
       .query('todAnswers')
@@ -3338,18 +2388,6 @@ export const getVoiceUrl = query({
     // Must be voice type
     if (answer.type !== 'voice') {
       return { status: 'not_voice' as const };
-    }
-
-    // P0-006 FIX: Authorization check for owner_only visibility
-    if (answer.visibility === 'owner_only') {
-      // Get the prompt to find the owner
-      const prompt = await ctx.db.get(answer.promptId as Id<'todPrompts'>);
-      const isAnswerAuthor = viewerUserId === answer.userId;
-      const isPromptOwner = prompt && viewerUserId === prompt.ownerUserId;
-
-      if (!isAnswerAuthor && !isPromptOwner) {
-        return { status: 'unauthorized' as const };
-      }
     }
 
     // Try mediaUrl first (may already be set)
@@ -3379,9 +2417,13 @@ export const getVoiceUrl = query({
  * Used by chats.tsx to rehydrate from backend.
  */
 export const getUserConversations = query({
-  args: { token: v.string() },
-  handler: async (ctx, { token }) => {
-    const { userId: userDbId } = await requireTodSession(ctx, token);
+  args: { authUserId: v.string() },
+  handler: async (ctx, { authUserId }) => {
+    if (!authUserId) return [];
+
+    // Resolve auth user ID to Convex user ID
+    const userDbId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userDbId) return [];
 
     // Get all conversation participations for this user
     const participations = await ctx.db
@@ -3419,9 +2461,6 @@ export const getUserConversations = query({
           }
         }
 
-        // PHASE-2 IDENTITY FIX: Get Phase-2 displayName (nickname), NOT real name
-        const participantDisplayName = await getPhase2DisplayName(ctx, otherParticipantId);
-
         // Get last message for preview
         const lastMessage = await ctx.db
           .query('messages')
@@ -3433,7 +2472,7 @@ export const getUserConversations = query({
           id: conversation._id,
           participantId: otherParticipantId,
           participantAuthId: otherUser.authUserId ?? null,
-          participantName: participantDisplayName,
+          participantName: otherUser.name,
           participantPhotoUrl: otherUser.primaryPhotoUrl ?? null,
           participantAge: otherAge,
           participantGender: otherUser.gender ?? null,

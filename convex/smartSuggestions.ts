@@ -181,33 +181,33 @@ function getActivityIcon(activity: string): string {
 }
 
 function formatIntentLabel(intent: string): string {
-  // CURRENT 9 RELATIONSHIP CATEGORIES (matches schema.ts)
   const labels: Record<string, string> = {
-    serious_vibes: 'Serious Vibes',
-    keep_it_casual: 'Keep It Casual',
-    exploring_vibes: 'Exploring Vibes',
-    see_where_it_goes: 'See Where It Goes',
-    open_to_vibes: 'Open to Vibes',
-    just_friends: 'Just Friends',
+    long_term: 'Serious Vibes',
+    short_term: "Keepin' It Casual",
+    fwb: 'Friends with Benefits',
+    figuring_out: 'Exploring Vibes',
+    short_to_long: 'See Where It Goes',
+    long_to_short: 'Open to Vibes',
+    new_friends: 'Just Friends',
     open_to_anything: 'Open to Anything',
     single_parent: 'Single Parent',
-    new_to_dating: 'New to Dating',
+    just_18: 'Just 18',
   };
   return labels[intent] || intent;
 }
 
 function getIntentIcon(intent: string): string {
-  // CURRENT 9 RELATIONSHIP CATEGORIES (matches schema.ts)
   const icons: Record<string, string> = {
-    serious_vibes: '💑',
-    keep_it_casual: '🎉',
-    exploring_vibes: '🤔',
-    see_where_it_goes: '📈',
-    open_to_vibes: '📉',
-    just_friends: '👋',
-    open_to_anything: '✨',
-    single_parent: '👨‍👧',
-    new_to_dating: '🌱',
+    long_term: '💕',
+    short_term: '💫',
+    fwb: '🔥',
+    figuring_out: '🤔',
+    short_to_long: '💫→💕',
+    long_to_short: '💕→💫',
+    new_friends: '🤝',
+    open_to_anything: '🌟',
+    single_parent: '',
+    just_18: '',
   };
-  return icons[intent] || '✨';
+  return icons[intent] || '💫';
 }

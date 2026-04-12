@@ -3,108 +3,77 @@ import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
-import {
-  resolveUserIdByAuthId,
-  ensureUserByAuthId,
-  validateSessionToken,
-  requireAuthenticatedSessionUser,
-  getTrustedUserId,
-} from "./helpers";
+import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
 
-// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
+// ALLOWED_RELATIONSHIP_INTENTS: Schema-safe values (excludes UI-only values like single_parent, just_18)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
-  'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes',
-  'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
+  'long_term', 'short_term', 'fwb', 'figuring_out',
+  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
 ]);
 
-const PROFILE_PROMPT_SECTIONS = ['builder', 'performer', 'seeker', 'grounded'] as const;
-type ProfilePromptSection = (typeof PROFILE_PROMPT_SECTIONS)[number];
-
-function isProfilePromptSection(value: string): value is ProfilePromptSection {
-  return (PROFILE_PROMPT_SECTIONS as readonly string[]).includes(value);
-}
+const RELATIONSHIP_INTENT_ALIASES: Record<string, string> = {
+  serious_vibes: 'long_term',
+  keep_it_casual: 'short_term',
+  exploring_vibes: 'figuring_out',
+  see_where_it_goes: 'short_to_long',
+  open_to_vibes: 'long_to_short',
+  just_friends: 'new_friends',
+};
 
 // Sanitize relationshipIntent to only include schema-valid values
 function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | undefined {
   if (!intent || !Array.isArray(intent)) return intent;
-  const sanitized = intent.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
-  const removed = intent.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
+  const normalized = intent.map((value) => RELATIONSHIP_INTENT_ALIASES[value] ?? value);
+  const sanitized = Array.from(new Set(normalized.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v))));
+  const removed = intent.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(RELATIONSHIP_INTENT_ALIASES[v] ?? v));
   if (removed.length > 0) {
     console.warn('[SANITIZE] Removed invalid relationshipIntent values:', removed);
   }
   return sanitized.length > 0 ? sanitized : undefined;
 }
 
-function getSafeProfilePhotos<T extends { url?: string; isNsfw?: boolean; order: number }>(photos: T[]): T[] {
-  return photos
-    .filter((photo) => !photo.isNsfw && typeof photo.url === "string" && photo.url.trim().length > 0)
-    .sort((a, b) => a.order - b.order);
+function normalizeRelationshipIntentForResponse(intent: string[] | undefined): string[] {
+  return sanitizeRelationshipIntent(intent) ?? [];
 }
 
-async function buildCurrentUserResponse(
-  ctx: any,
-  userId: Id<"users">
-) {
-  const user = await ctx.db.get(userId);
-  if (!user) return null;
+function normalizeOnboardingDraft<T extends Record<string, any> | null | undefined>(draft: T): T {
+  if (!draft?.preferences?.relationshipIntent || !Array.isArray(draft.preferences.relationshipIntent)) {
+    return draft;
+  }
 
-  const allPhotos = await ctx.db
-    .query("photos")
-    .withIndex("by_user_order", (q: any) => q.eq("userId", userId))
-    .collect();
+  const normalizedRelationshipIntent = sanitizeRelationshipIntent(draft.preferences.relationshipIntent);
+  const currentIntent = draft.preferences.relationshipIntent;
 
-  const photos = allPhotos.filter((p: any) => p.photoType !== "verification_reference");
-  const safePhotos = getSafeProfilePhotos(photos);
-
-  return {
-    ...user,
-    photos: safePhotos,
-  };
-}
-
-function getPhase1SafetyDisplayName(user: any): string {
-  const firstName = user?.name?.trim()?.split(/\s+/)[0];
-  return firstName && firstName.length > 0 ? firstName : 'Unavailable user';
-}
-
-async function getPhase1SafetyPhotoUrl(
-  ctx: any,
-  userId: Id<'users'>
-): Promise<string | null> {
-  const photos = await ctx.db
-    .query('photos')
-    .withIndex('by_user_order', (q: any) => q.eq('userId', userId))
-    .collect();
-
-  const safePhotos = getSafeProfilePhotos(
-    photos.filter((photo: any) => photo.photoType !== 'verification_reference')
-  );
-
-  return safePhotos[0]?.url ?? null;
-}
-
-async function buildPhase1SafetyUserSummary(
-  ctx: any,
-  userId: Id<'users'>
-) {
-  const user = await ctx.db.get(userId);
-  const unavailable = !user || !user.isActive || !!user.deletedAt || !!user.isBanned;
-
-  if (unavailable) {
-    return {
-      displayName: 'Unavailable user',
-      photoUrl: null,
-      isVerified: false,
-      unavailable: true,
-    };
+  if (
+    normalizedRelationshipIntent &&
+    normalizedRelationshipIntent.length === currentIntent.length &&
+    normalizedRelationshipIntent.every((value, index) => value === currentIntent[index])
+  ) {
+    return draft;
   }
 
   return {
-    displayName: getPhase1SafetyDisplayName(user),
-    photoUrl: await getPhase1SafetyPhotoUrl(ctx, userId),
-    isVerified: !!user.isVerified,
-    unavailable: false,
-  };
+    ...draft,
+    preferences: {
+      ...draft.preferences,
+      relationshipIntent: normalizedRelationshipIntent,
+    },
+  } as T;
+}
+
+function sanitizeProfilePrompts(
+  prompts: Array<{ question: string; answer: string; section?: string }> | undefined
+): Array<{ question: string; answer: string }> | undefined {
+  if (!prompts || !Array.isArray(prompts)) return prompts;
+
+  const cleaned = prompts
+    .map((prompt) => ({
+      question: prompt.question?.trim().slice(0, 100) ?? "",
+      answer: prompt.answer?.trim().slice(0, 200) ?? "",
+    }))
+    .filter((prompt) => prompt.question.length > 0 && prompt.answer.length > 0);
+
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 // Get current user profile
@@ -120,52 +89,20 @@ export const getCurrentUser = query({
       return null;
     }
 
-    return await buildCurrentUserResponse(ctx, convexUserId);
-  },
-});
-
-// DEMO AUTH FIX: Accepts optional token for demo auth mode support.
-export const getCurrentUserDiscoverContext = query({
-  args: {
-    token: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    const convexUserId = await getTrustedUserId(
-      ctx,
-      { token: args.token },
-      "Unauthorized: Explore context requires a valid session"
-    );
     const user = await ctx.db.get(convexUserId);
-    if (!user) {
-      return null;
-    }
+    if (!user) return null;
+
+    // Get user's photos
+    const photos = await ctx.db
+      .query("photos")
+      .withIndex("by_user_order", (q) => q.eq("userId", convexUserId))
+      .collect();
 
     return {
-      _id: user._id,
-      activities: user.activities,
-      relationshipIntent: user.relationshipIntent,
-      lookingFor: user.lookingFor,
-      smoking: user.smoking,
-      drinking: user.drinking,
-      height: user.height,
-      isDiscoveryPaused: user.isDiscoveryPaused === true,
-      discoveryPausedUntil: user.discoveryPausedUntil,
-      hideAge: user.hideAge === true,
-      hideDistance: user.hideDistance === true,
-      showLastSeen: user.showLastSeen !== false,
-      hasDiscoverLocation:
-        typeof user.publishedLat === 'number' && typeof user.publishedLng === 'number',
+      ...user,
+      relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
+      photos: photos.sort((a, b) => a.order - b.order),
     };
-  },
-});
-
-export const getCurrentUserFromToken = query({
-  args: {
-    token: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const user = await requireAuthenticatedSessionUser(ctx, args.token);
-    return await buildCurrentUserResponse(ctx, user._id);
   },
 });
 
@@ -186,15 +123,9 @@ export const ensureCurrentUser = mutation({
 export const getUserById = query({
   args: {
     userId: v.id("users"),
-    token: v.optional(v.string()),
-    authUserId: v.optional(v.string()),
+    viewerId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const viewerId = await getTrustedUserId(
-      ctx,
-      args,
-      "Unauthorized: profile access requires a valid session"
-    );
     const user = await ctx.db.get(args.userId);
     if (!user || !user.isActive || user.isBanned) return null;
 
@@ -202,7 +133,7 @@ export const getUserById = query({
     const blocked = await ctx.db
       .query("blocks")
       .withIndex("by_blocker_blocked", (q) =>
-        q.eq("blockerId", args.userId).eq("blockedUserId", viewerId),
+        q.eq("blockerId", args.userId).eq("blockedUserId", args.viewerId),
       )
       .first();
 
@@ -211,153 +142,45 @@ export const getUserById = query({
     const reverseBlocked = await ctx.db
       .query("blocks")
       .withIndex("by_blocker_blocked", (q) =>
-        q.eq("blockerId", viewerId).eq("blockedUserId", args.userId),
+        q.eq("blockerId", args.viewerId).eq("blockedUserId", args.userId),
       )
       .first();
 
     if (reverseBlocked) return null;
 
-    // P0-004 FIX: Block profile lookup for anonymous confession participants
-    // If the requested user is an anonymousParticipantId in any conversation with the viewer,
-    // deny the profile lookup to protect their identity
-    const anonymousConversation = await ctx.db
-      .query("conversations")
-      .filter((q) =>
-        q.and(
-          q.eq(q.field("anonymousParticipantId"), args.userId),
-          q.or(
-            q.eq(q.field("participants"), [args.userId, viewerId]),
-            q.eq(q.field("participants"), [viewerId, args.userId])
-          )
-        )
-      )
-      .first();
-
-    if (anonymousConversation) {
-      // The requested user is anonymous in a conversation with the viewer
-      // Deny the profile lookup to protect their identity
-      return null;
-    }
-
     // Get photos
-    const allPhotos = await ctx.db
+    const photos = await ctx.db
       .query("photos")
       .withIndex("by_user_order", (q) => q.eq("userId", args.userId))
       .collect();
 
-    // PHOTO SOURCE FIX: Filter out verification_reference photos
-    // This ensures getUserById returns the same photos as getDiscoverProfiles
-    // for consistent photo counts between Discover card and opened profile
-    const photos = allPhotos.filter((p) => p.photoType !== 'verification_reference');
-    const safePhotos = getSafeProfilePhotos(photos);
-
     // Calculate distance if both have location
-    const viewer = await ctx.db.get(viewerId);
+    const viewer = await ctx.db.get(args.viewerId);
     let distance: number | undefined;
     if (
-      user.publishedLat &&
-      user.publishedLng &&
-      viewer?.publishedLat &&
-      viewer?.publishedLng
+      user.latitude &&
+      user.longitude &&
+      viewer?.latitude &&
+      viewer?.longitude
     ) {
       distance = calculateDistance(
-        user.publishedLat,
-        user.publishedLng,
-        viewer.publishedLat,
-        viewer.publishedLng,
+        user.latitude,
+        user.longitude,
+        viewer.latitude,
+        viewer.longitude,
       );
     }
 
-    const publicAge = user.hideAge === true ? undefined : calculateAge(user.dateOfBirth);
-    const publicDistance = user.hideDistance === true ? undefined : distance;
-    const publicLastActive = user.showLastSeen === false ? undefined : user.lastActive;
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // HARDENING FIX 3: CHECK FOR CONFESSION_COMMENT MATCH - RETURN MINI PROFILE
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Check if there's a confession_comment match between these users
-    // If so, return limited profile data to prevent data leaks
-    const confessionCommentMatch = await ctx.db
-      .query("matches")
-      .withIndex("by_user1", (q) => q.eq("user1Id", args.userId))
-      .filter((q) =>
-        q.and(
-          q.eq(q.field("user2Id"), viewerId),
-          q.eq(q.field("matchSource"), "confession_comment" as any)
-        )
-      )
-      .first();
-
-    const reverseConfessionCommentMatch = !confessionCommentMatch
-      ? await ctx.db
-          .query("matches")
-          .withIndex("by_user1", (q) => q.eq("user1Id", viewerId))
-          .filter((q) =>
-            q.and(
-              q.eq(q.field("user2Id"), args.userId),
-              q.eq(q.field("matchSource"), "confession_comment" as any)
-            )
-          )
-          .first()
-      : null;
-
-    const isConfessionCommentMatch = !!(confessionCommentMatch || reverseConfessionCommentMatch);
-
-    if (isConfessionCommentMatch) {
-      // MINI PROFILE: Return limited data for confession_comment matches
-      // Only expose: name (first name only), age, gender, one blurred photo
-      const firstName = user.name?.split(" ")[0] || "Anonymous";
-      // ORDER-BASED PRIMARY: First photo by order is primary (photos are pre-sorted by order)
-      const primaryPhoto = safePhotos[0];
-
-      return {
-        id: user._id,
-        name: firstName, // First name only
-        age: publicAge,
-        gender: user.gender,
-        // Limited fields - all others are undefined/hidden
-        bio: undefined,
-        height: undefined,
-        smoking: undefined,
-        drinking: undefined,
-        kids: undefined,
-        education: undefined,
-        religion: undefined,
-        jobTitle: undefined,
-        company: undefined,
-        school: undefined,
-        isVerified: user.isVerified,
-        verificationStatus: user.verificationStatus || "unverified",
-        city: user.city, // City is okay to show
-        distance: publicDistance,
-        lastActive: undefined, // Hide last active for privacy
-        lookingFor: undefined,
-        relationshipIntent: undefined,
-        activities: undefined,
-        profilePrompts: [], // No prompts
-        photos: primaryPhoto
-          ? [{ ...primaryPhoto, isBlurred: true }] // Single blurred photo
-          : [],
-        photoBlurred: true, // Force blur
-        isConfessionCommentProfile: true, // Flag for UI to show mini profile notice
-      };
-    }
-
-    // Return full public profile data
-    // Extract lifeRhythm from onboardingDraft for Deeper Traits section
-    const lifeRhythm = user.onboardingDraft?.lifeRhythm;
-
+    // Return public profile data
     return {
       id: user._id,
       name: user.name,
-      age: publicAge,
+      age: calculateAge(user.dateOfBirth),
       gender: user.gender,
       bio: user.bio,
       height: user.height,
       smoking: user.smoking,
       drinking: user.drinking,
-      exercise: user.exercise, // Added for Lifestyle section
-      pets: user.pets, // Added for Lifestyle section
       kids: user.kids,
       education: user.education,
       religion: user.religion,
@@ -367,57 +190,15 @@ export const getUserById = query({
       isVerified: user.isVerified,
       verificationStatus: user.verificationStatus || "unverified",
       city: user.city,
-      distance: publicDistance,
-      lastActive: publicLastActive,
+      distance,
+      lastActive: user.lastActive,
       lookingFor: user.lookingFor,
-      relationshipIntent: user.relationshipIntent,
+      relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
       activities: user.activities,
       profilePrompts: user.profilePrompts ?? [],
-      photos: safePhotos,
+      photos: photos.sort((a, b) => a.order - b.order),
       photoBlurred: user.photoBlurred === true,
-      // Deeper Traits from lifeRhythm (onboardingDraft)
-      sleepSchedule: lifeRhythm?.sleepSchedule,
-      socialRhythm: lifeRhythm?.socialRhythm,
-      travelStyle: lifeRhythm?.travelStyle,
-      workStyle: lifeRhythm?.workStyle,
-      coreValues: lifeRhythm?.coreValues,
     };
-  },
-});
-
-export const getCurrentUserProfileState = query({
-  args: {
-    token: v.string(),
-    refreshKey: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
-    void args.refreshKey;
-
-    try {
-      const user = await requireAuthenticatedSessionUser(ctx, args.token);
-      const profile = await buildCurrentUserResponse(ctx, user._id);
-      if (!profile) {
-        return {
-          status: 'missing_user' as const,
-          user: null,
-        };
-      }
-
-      return {
-        status: 'ok' as const,
-        user: profile,
-      };
-    } catch (error: any) {
-      const message = typeof error?.message === 'string' ? error.message : 'Profile unavailable';
-      const normalized = message.toLowerCase();
-
-      return {
-        status: normalized.includes('session') || normalized.includes('token') || normalized.includes('auth')
-          ? ('auth_error' as const)
-          : ('error' as const),
-        user: null,
-      };
-    }
   },
 });
 
@@ -426,61 +207,42 @@ export const updateProfilePrompts = mutation({
   args: {
     token: v.string(), // SESSION AUTH: Validate session token server-side
     prompts: v.array(v.object({
+      section: v.optional(v.union(
+        v.literal('builder'),
+        v.literal('performer'),
+        v.literal('seeker'),
+        v.literal('grounded')
+      )),
       question: v.string(),
       answer: v.string(),
-      section: v.optional(v.string()), // BUGFIX: Include section for reliable hydration
     })),
   },
   handler: async (ctx, args) => {
-    console.log('[PROMPTS_BACKEND] updateProfilePrompts called with', args.prompts.length, 'prompts');
-    args.prompts.forEach((p, i) => {
-      console.log(`[PROMPTS_BACKEND] Received[${i}]: section=${p.section ?? 'NONE'}, question="${p.question.substring(0, 40)}...", answerLen=${p.answer.length}`);
-    });
-
     // SESSION AUTH: Validate token and get userId (same pattern as photos.ts)
     const userId = await validateSessionToken(ctx, args.token);
     if (!userId) {
-      console.log('[PROMPTS_BACKEND] FAILED: Invalid session token');
       throw new Error('Unauthorized: invalid or expired session');
     }
 
     const user = await ctx.db.get(userId);
-    if (!user) {
-      console.log('[PROMPTS_BACKEND] FAILED: User not found for userId:', userId);
-      throw new Error("User not found");
-    }
+    if (!user) throw new Error("User not found");
 
     // BUGFIX #62: Reject empty prompts after trimming whitespace
     for (const prompt of args.prompts) {
       const trimmedQuestion = prompt.question.trim();
       const trimmedAnswer = prompt.answer.trim();
       if (trimmedQuestion.length === 0) {
-        console.log('[PROMPTS_BACKEND] FAILED: Empty question after trim');
         throw new Error("Prompt question cannot be empty");
       }
       if (trimmedAnswer.length === 0) {
-        console.log('[PROMPTS_BACKEND] FAILED: Empty answer after trim');
         throw new Error("Prompt answer cannot be empty");
       }
     }
 
     // Exactly 4 prompts (one per section), answer max 200 chars
-    // BUGFIX: Include section field for reliable hydration
-    const cleaned: { question: string; answer: string; section?: ProfilePromptSection }[] =
-      args.prompts.slice(0, 4).map((p) => {
-        const question = p.question.trim().slice(0, 100);
-        const answer = p.answer.trim().slice(0, 200);
-        const section =
-          typeof p.section === 'string' && isProfilePromptSection(p.section)
-            ? p.section
-            : undefined;
+    const cleaned = sanitizeProfilePrompts(args.prompts.slice(0, 4)) ?? [];
 
-        return section ? { question, answer, section } : { question, answer };
-      });
-
-    console.log('[PROMPTS_BACKEND] Saving', cleaned.length, 'cleaned prompts to profilePrompts field');
     await ctx.db.patch(userId, { profilePrompts: cleaned });
-    console.log('[PROMPTS_BACKEND] SUCCESS: Saved prompts for user:', userId);
     return { success: true };
   },
 });
@@ -488,9 +250,9 @@ export const updateProfilePrompts = mutation({
 // Update user profile
 export const updateProfile = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
     name: v.optional(v.string()),
-    bio: v.optional(v.union(v.string(), v.null())),
+    bio: v.optional(v.string()),
     height: v.optional(v.number()),
     weight: v.optional(v.number()),
     exercise: v.optional(
@@ -552,77 +314,75 @@ export const updateProfile = mutation({
         v.literal("prefer_not_to_say"),
       ),
     ),
-    jobTitle: v.optional(v.union(v.string(), v.null())),
-    company: v.optional(v.union(v.string(), v.null())),
-    school: v.optional(v.union(v.string(), v.null())),
-    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
+    jobTitle: v.optional(v.string()),
+    company: v.optional(v.string()),
+    school: v.optional(v.string()),
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("serious_vibes"),
-          v.literal("keep_it_casual"),
-          v.literal("exploring_vibes"),
-          v.literal("see_where_it_goes"),
-          v.literal("open_to_vibes"),
-          v.literal("just_friends"),
+          v.literal("long_term"),
+          v.literal("short_term"),
+          v.literal("fwb"),
+          v.literal("figuring_out"),
+          v.literal("short_to_long"),
+          v.literal("long_to_short"),
+          v.literal("new_friends"),
           v.literal("open_to_anything"),
-          v.literal("single_parent"),
-          v.literal("new_to_dating"),
         ),
       ),
     ),
-    // BUGFIX: Accept all 70 activities (matching schema.ts and ACTIVITY_FILTERS)
     activities: v.optional(
       v.array(
         v.union(
-          // Original 20 activities
-          v.literal("coffee"), v.literal("date_night"), v.literal("sports"), v.literal("movies"), v.literal("free_tonight"),
-          v.literal("foodie"), v.literal("gym_partner"), v.literal("concerts"), v.literal("travel"), v.literal("outdoors"),
-          v.literal("art_culture"), v.literal("gaming"), v.literal("nightlife"), v.literal("brunch"), v.literal("study_date"),
-          v.literal("this_weekend"), v.literal("beach_pool"), v.literal("road_trip"), v.literal("photography"), v.literal("volunteering"),
-          // Additional 50 activities (matching frontend ACTIVITY_FILTERS)
-          v.literal("late_night_talks"), v.literal("street_food"), v.literal("home_cooking"), v.literal("baking"), v.literal("healthy_eating"),
-          v.literal("weekend_getaways"), v.literal("long_drives"), v.literal("city_exploring"), v.literal("beach_vibes"), v.literal("mountain_views"),
-          v.literal("nature_walks"), v.literal("sunset_views"), v.literal("hiking"), v.literal("camping"), v.literal("stargazing"),
-          v.literal("gardening"), v.literal("gym"), v.literal("yoga"), v.literal("running"), v.literal("cycling"),
-          v.literal("meditation"), v.literal("pilates"), v.literal("music_lover"), v.literal("live_concerts"), v.literal("singing"),
-          v.literal("podcasts"), v.literal("binge_watching"), v.literal("thrillers"), v.literal("documentaries"), v.literal("anime"),
-          v.literal("k_dramas"), v.literal("board_games"), v.literal("chess"), v.literal("escape_rooms"), v.literal("drawing"),
-          v.literal("painting"), v.literal("writing"), v.literal("journaling"), v.literal("diy_projects"), v.literal("reading"),
-          v.literal("personal_growth"), v.literal("learning_new_skills"), v.literal("mindfulness"), v.literal("tech_enthusiast"), v.literal("startups"),
-          v.literal("coding"), v.literal("community_service"), v.literal("sustainability"), v.literal("plant_parenting"),
+          v.literal("coffee"),
+          v.literal("date_night"),
+          v.literal("sports"),
+          v.literal("movies"),
+          v.literal("free_tonight"),
+          v.literal("foodie"),
+          v.literal("gym_partner"),
+          v.literal("concerts"),
+          v.literal("travel"),
+          v.literal("outdoors"),
+          v.literal("art_culture"),
+          v.literal("gaming"),
+          v.literal("nightlife"),
+          v.literal("brunch"),
+          v.literal("study_date"),
+          v.literal("this_weekend"),
+          v.literal("beach_pool"),
+          v.literal("road_trip"),
+          v.literal("photography"),
+          v.literal("volunteering"),
         ),
       ),
     ),
     pets: v.optional(
-      v.union(
-        v.array(
-          v.union(
-            v.literal("dog"),
-            v.literal("cat"),
-            v.literal("bird"),
-            v.literal("fish"),
-            v.literal("rabbit"),
-            v.literal("hamster"),
-            v.literal("guinea_pig"),
-            v.literal("turtle"),
-            v.literal("parrot"),
-            v.literal("pigeon"),
-            v.literal("chicken"),
-            v.literal("duck"),
-            v.literal("goat"),
-            v.literal("cow"),
-            v.literal("horse"),
-            v.literal("snake"),
-            v.literal("lizard"),
-            v.literal("frog"),
-            v.literal("other"),
-            v.literal("none"),
-            v.literal("want_pets"),
-            v.literal("allergic"),
-          ),
+      v.array(
+        v.union(
+          v.literal("dog"),
+          v.literal("cat"),
+          v.literal("bird"),
+          v.literal("fish"),
+          v.literal("rabbit"),
+          v.literal("hamster"),
+          v.literal("guinea_pig"),
+          v.literal("turtle"),
+          v.literal("parrot"),
+          v.literal("pigeon"),
+          v.literal("chicken"),
+          v.literal("duck"),
+          v.literal("goat"),
+          v.literal("cow"),
+          v.literal("horse"),
+          v.literal("snake"),
+          v.literal("lizard"),
+          v.literal("frog"),
+          v.literal("other"),
+          v.literal("none"),
+          v.literal("want_pets"),
+          v.literal("allergic"),
         ),
-        v.null(),
       ),
     ),
     insect: v.optional(
@@ -637,41 +397,31 @@ export const updateProfile = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { token, bio, pets, insect, jobTitle, company, school, ...otherUpdates } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, bio, pets, insect, ...otherUpdates } = args;
 
-    // P2 VALIDATION: Bio length validation (max 500 chars - matches frontend)
-    if (bio !== undefined && bio !== null && bio.length > 500) {
-      throw new Error("Bio must be 500 characters or less");
+    // AUTH FIX: Resolve acting user from server-side auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
     }
 
-    // P2 VALIDATION: Height range (100-250 cm)
-    if (otherUpdates.height !== undefined) {
-      if (otherUpdates.height < 100 || otherUpdates.height > 250) {
-        throw new Error("Height must be between 100 and 250 cm");
-      }
-    }
-
-    // P2 VALIDATION: Weight range (30-300 kg)
-    if (otherUpdates.weight !== undefined) {
-      if (otherUpdates.weight < 30 || otherUpdates.weight > 300) {
-        throw new Error("Weight must be between 30 and 300 kg");
-      }
+    // BUGFIX #61: Bio length validation (max 300 chars)
+    if (bio !== undefined && bio.length > 300) {
+      throw new Error("Bio must be 300 characters or less");
     }
 
     // Server-side validation: pets max 3
-    if (pets !== undefined && pets !== null && pets.length > 3) {
+    if (pets !== undefined && pets.length > 3) {
       throw new Error("You can select up to 3 pets only");
     }
 
-    // Filter out undefined values and treat null as explicit clear for editable text/list fields.
+    // Filter out undefined values
     const cleanUpdates: Record<string, unknown> = {};
-    if (bio !== undefined) cleanUpdates.bio = bio ?? undefined;
-    if (jobTitle !== undefined) cleanUpdates.jobTitle = jobTitle ?? undefined;
-    if (company !== undefined) cleanUpdates.company = company ?? undefined;
-    if (school !== undefined) cleanUpdates.school = school ?? undefined;
-    if (pets !== undefined) cleanUpdates.pets = pets ?? undefined;
+    if (bio !== undefined) cleanUpdates.bio = bio;
+    if (pets !== undefined) cleanUpdates.pets = pets;
     if (insect !== undefined) cleanUpdates.insect = insect;
     for (const [key, value] of Object.entries(otherUpdates)) {
       if (value !== undefined) {
@@ -699,19 +449,17 @@ export const updatePreferences = mutation({
         ),
       ),
     ),
-    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("serious_vibes"),
-          v.literal("keep_it_casual"),
-          v.literal("exploring_vibes"),
-          v.literal("see_where_it_goes"),
-          v.literal("open_to_vibes"),
-          v.literal("just_friends"),
+          v.literal("long_term"),
+          v.literal("short_term"),
+          v.literal("fwb"),
+          v.literal("figuring_out"),
+          v.literal("short_to_long"),
+          v.literal("long_to_short"),
+          v.literal("new_friends"),
           v.literal("open_to_anything"),
-          v.literal("single_parent"),
-          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -740,13 +488,6 @@ export const updatePreferences = mutation({
   },
   handler: async (ctx, args) => {
     const { userId, minAge, maxAge, maxDistance, ...otherUpdates } = args;
-
-    // DEBUG: Log relationship category save
-    console.log('[RelationshipCategorySave] updatePreferences', {
-      source: 'updatePreferences',
-      userId,
-      relationshipIntent: args.relationshipIntent,
-    });
 
     // BUGFIX #37: Age bounds validation
     if (minAge !== undefined) {
@@ -787,28 +528,7 @@ export const updatePreferences = mutation({
       }
     }
 
-    // REAL-TIME SYNC FIX: When relationshipIntent changes, force category refresh
-    // This ensures Explore category visibility updates immediately, not after 28-48h
-    const intentChanged = args.relationshipIntent !== undefined;
-    if (intentChanged) {
-      cleanUpdates.assignedDiscoverCategory = undefined;
-      cleanUpdates.discoverCategoryAssignedAt = undefined;
-      console.log('[CategoryRefresh] Cleared category assignment due to relationshipIntent change', {
-        userId,
-        newIntent: args.relationshipIntent,
-      });
-    }
-
     await ctx.db.patch(userId, cleanUpdates);
-
-    // REAL-TIME SYNC FIX: Immediately reassign category after preference change
-    // This ensures the user appears in the correct category without delay
-    if (intentChanged) {
-      await ctx.scheduler.runAfter(0, internal.discoverCategories.assignCategory, {
-        userId,
-      });
-    }
-
     return { success: true };
   },
 });
@@ -817,15 +537,19 @@ export const updatePreferences = mutation({
 // APP-P0-001 FIX: Server-side auth - user can only update their own location
 export const updateLocation = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(),
     latitude: v.number(),
     longitude: v.number(),
     city: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { token, latitude, longitude, city } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, latitude, longitude, city } = args;
+
+    // APP-P0-001 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     await ctx.db.patch(userId, {
       latitude,
@@ -838,37 +562,24 @@ export const updateLocation = mutation({
   },
 });
 
-// Heartbeat - updates lastActive for presence (Online Now / Active Today)
-// Called periodically when app is in foreground to keep user marked as "online"
-// PRESENCE FIX: This mutation enables accurate "Online now" display on Discover cards
-export const heartbeat = mutation({
-  args: {
-    token: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const user = await requireAuthenticatedSessionUser(ctx, args.token);
-    const userId = user._id;
-
-    const now = Date.now();
-    await ctx.db.patch(userId, {
-      lastActive: now,
-    });
-
-    return { success: true, lastActive: now };
-  },
-});
-
 // Toggle incognito mode
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own incognito
 export const toggleIncognito = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { token, enabled } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, enabled } = args;
+
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
 
     // Check if user has incognito access
     const hasFullAccess =
@@ -897,7 +608,7 @@ export const toggleIncognito = mutation({
  */
 export const updateNearbySettings = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
     nearbyEnabled: v.optional(v.boolean()),
     crossedPathsEnabled: v.optional(v.boolean()),
     hideDistance: v.optional(v.boolean()),
@@ -912,9 +623,16 @@ export const updateNearbySettings = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { token, incognitoMode, ...updates } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, incognitoMode, ...updates } = args;
+
+    // P1 SECURITY: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error("Unauthorized: user not found");
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
 
     // Check premium access for incognito mode (premium-only, no gender-based access)
     if (incognitoMode !== undefined) {
@@ -947,13 +665,20 @@ export const updateNearbySettings = mutation({
  */
 export const pauseNearby = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
     paused: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { token, paused } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, paused } = args;
+
+    // P1 SECURITY: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error("Unauthorized: user not found");
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
 
     if (paused) {
       // Pause for 24 hours
@@ -975,13 +700,20 @@ export const pauseNearby = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own discovery pause
 export const toggleDiscoveryPause = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(),
     paused: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { token, paused } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, paused } = args;
+
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
 
     if (paused) {
       await ctx.db.patch(userId, {
@@ -1003,13 +735,20 @@ export const toggleDiscoveryPause = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own setting
 export const toggleShowLastSeen = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { token, enabled } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, enabled } = args;
+
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
 
     await ctx.db.patch(userId, { showLastSeen: enabled });
     return { success: true };
@@ -1020,14 +759,21 @@ export const toggleShowLastSeen = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only update their own privacy settings
 export const updatePrivacySettings = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(),
     hideAge: v.optional(v.boolean()),
     disableReadReceipts: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { token, hideAge, disableReadReceipts } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, hideAge, disableReadReceipts } = args;
+
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
 
     // Build update object with only provided fields
     const updates: Record<string, boolean> = {};
@@ -1046,7 +792,7 @@ export const updatePrivacySettings = mutation({
 // APP-P0-002 FIX: Server-side auth - user can only update their own settings
 export const updateNotificationSettings = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(),
     notificationsEnabled: v.optional(v.boolean()),
     emailNotificationsEnabled: v.optional(v.boolean()),
     // Notification type preferences
@@ -1057,7 +803,7 @@ export const updateNotificationSettings = mutation({
   },
   handler: async (ctx, args) => {
     const {
-      token,
+      authUserId,
       notificationsEnabled,
       emailNotificationsEnabled,
       notifyNewMatches,
@@ -1066,8 +812,14 @@ export const updateNotificationSettings = mutation({
       notifyProfileViews,
     } = args;
 
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    // APP-P0-002 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
 
     const updates: Record<string, boolean> = {};
     if (notificationsEnabled !== undefined) {
@@ -1177,12 +929,15 @@ export const markVerified = mutation({
 // Block user
 export const blockUser = mutation({
   args: {
-    token: v.string(),
+    // C2 SECURITY: Use authUserId for server-side validation
+    authUserId: v.string(),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { token, blockedUserId } = args;
-    const blockerId = await validateSessionToken(ctx, token);
+    const { authUserId, blockedUserId } = args;
+
+    // C2 SECURITY: Resolve auth ID to Convex user ID
+    const blockerId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!blockerId) {
       return { success: false, error: 'unauthorized' };
     }
@@ -1215,12 +970,15 @@ export const blockUser = mutation({
 // Unblock user
 export const unblockUser = mutation({
   args: {
-    token: v.string(),
+    // C2 SECURITY: Use authUserId for server-side validation
+    authUserId: v.string(),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { token, blockedUserId } = args;
-    const blockerId = await validateSessionToken(ctx, token);
+    const { authUserId, blockedUserId } = args;
+
+    // C2 SECURITY: Resolve auth ID to Convex user ID
+    const blockerId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!blockerId) {
       return { success: false, error: 'unauthorized' };
     }
@@ -1240,176 +998,11 @@ export const unblockUser = mutation({
   },
 });
 
-export const getCurrentUserBlockedUsers = query({
-  args: {
-    token: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
-
-    const blocks = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker', (q) => q.eq('blockerId', currentUser._id))
-      .collect();
-
-    const sortedBlocks = [...blocks].sort((a, b) => b.createdAt - a.createdAt);
-
-    return await Promise.all(
-      sortedBlocks.map(async (block) => {
-        const summary = await buildPhase1SafetyUserSummary(ctx, block.blockedUserId);
-        return {
-          blockedUserId: block.blockedUserId,
-          blockedAt: block.createdAt,
-          ...summary,
-        };
-      })
-    );
-  },
-});
-
-export const getCurrentUserReportCandidates = query({
-  args: {
-    token: v.string(),
-    limit: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
-    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
-    const currentUserId = currentUser._id;
-    const limit = Math.max(1, Math.min(args.limit ?? 30, 50));
-    const recentWindowStart = Date.now() - 30 * 24 * 60 * 60 * 1000;
-
-    const candidateMap = new Map<string, {
-      userId: Id<'users'>;
-      lastInteractionAt: number;
-      blockedAt: number | null;
-      contexts: Set<'blocked' | 'matched' | 'messaged' | 'liked' | 'liked_you'>;
-    }>();
-
-    const addCandidate = (
-      otherUserId: Id<'users'>,
-      timestamp: number,
-      context: 'blocked' | 'matched' | 'messaged' | 'liked' | 'liked_you',
-      blockedAt?: number
-    ) => {
-      if (otherUserId === currentUserId) return;
-
-      const key = String(otherUserId);
-      const existing = candidateMap.get(key);
-      if (existing) {
-        existing.lastInteractionAt = Math.max(existing.lastInteractionAt, timestamp);
-        if (blockedAt) {
-          existing.blockedAt = Math.max(existing.blockedAt ?? 0, blockedAt);
-        }
-        existing.contexts.add(context);
-        return;
-      }
-
-      candidateMap.set(key, {
-        userId: otherUserId,
-        lastInteractionAt: timestamp,
-        blockedAt: blockedAt ?? null,
-        contexts: new Set([context]),
-      });
-    };
-
-    const [
-      blocks,
-      matchesAsUser1,
-      matchesAsUser2,
-      participantRows,
-      outgoingLikes,
-      incomingLikes,
-    ] = await Promise.all([
-      ctx.db
-        .query('blocks')
-        .withIndex('by_blocker', (q) => q.eq('blockerId', currentUserId))
-        .collect(),
-      ctx.db
-        .query('matches')
-        .withIndex('by_user1', (q) => q.eq('user1Id', currentUserId))
-        .collect(),
-      ctx.db
-        .query('matches')
-        .withIndex('by_user2', (q) => q.eq('user2Id', currentUserId))
-        .collect(),
-      ctx.db
-        .query('conversationParticipants')
-        .withIndex('by_user', (q) => q.eq('userId', currentUserId))
-        .collect(),
-      ctx.db
-        .query('likes')
-        .withIndex('by_from_user', (q) => q.eq('fromUserId', currentUserId))
-        .collect(),
-      ctx.db
-        .query('likes')
-        .withIndex('by_to_user', (q) => q.eq('toUserId', currentUserId))
-        .collect(),
-    ]);
-
-    for (const block of blocks) {
-      addCandidate(block.blockedUserId, block.createdAt, 'blocked', block.createdAt);
-    }
-
-    for (const match of [...matchesAsUser1, ...matchesAsUser2]) {
-      if (!match.isActive && match.matchedAt < recentWindowStart) {
-        continue;
-      }
-      const otherUserId = match.user1Id === currentUserId ? match.user2Id : match.user1Id;
-      addCandidate(otherUserId, match.matchedAt, 'matched');
-    }
-
-    const conversations = await Promise.all(
-      participantRows.map((row) => ctx.db.get(row.conversationId))
-    );
-    for (const conversation of conversations) {
-      if (!conversation) continue;
-      if (conversation.sourceRoomId || conversation.connectionSource) continue;
-
-      const interactionAt = conversation.lastMessageAt ?? conversation.createdAt ?? 0;
-      if (interactionAt < recentWindowStart) continue;
-
-      const otherUserId = conversation.participants.find((participantId) => participantId !== currentUserId);
-      if (!otherUserId) continue;
-      addCandidate(otherUserId, interactionAt, 'messaged');
-    }
-
-    for (const like of outgoingLikes) {
-      if (like.action === 'pass' || like.createdAt < recentWindowStart) continue;
-      addCandidate(like.toUserId, like.createdAt, 'liked');
-    }
-
-    for (const like of incomingLikes) {
-      if (like.action === 'pass' || like.createdAt < recentWindowStart) continue;
-      addCandidate(like.fromUserId, like.createdAt, 'liked_you');
-    }
-
-    const candidates = [...candidateMap.values()]
-      .sort((a, b) => {
-        const aSortAt = Math.max(a.lastInteractionAt, a.blockedAt ?? 0);
-        const bSortAt = Math.max(b.lastInteractionAt, b.blockedAt ?? 0);
-        return bSortAt - aSortAt;
-      })
-      .slice(0, limit);
-
-    return await Promise.all(
-      candidates.map(async (candidate) => {
-        const summary = await buildPhase1SafetyUserSummary(ctx, candidate.userId);
-        return {
-          userId: candidate.userId,
-          lastInteractionAt: candidate.lastInteractionAt,
-          blockedAt: candidate.blockedAt,
-          contexts: Array.from(candidate.contexts),
-          ...summary,
-        };
-      })
-    );
-  },
-});
-
 // Report user
 export const reportUser = mutation({
   args: {
-    token: v.string(),
+    // C2 SECURITY: Use authUserId for server-side validation
+    authUserId: v.string(),
     reportedUserId: v.id("users"),
     reason: v.union(
       v.literal("fake_profile"),
@@ -1422,9 +1015,11 @@ export const reportUser = mutation({
     description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { token, reportedUserId, reason, description } = args;
+    const { authUserId, reportedUserId, reason, description } = args;
     const now = Date.now();
-    const reporterId = await validateSessionToken(ctx, token);
+
+    // C2 SECURITY: Resolve auth ID to Convex user ID
+    const reporterId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!reporterId) {
       return { success: false, error: 'unauthorized' };
     }
@@ -1488,10 +1083,17 @@ export const reportUser = mutation({
 // APP-P0-003 FIX: Server-side auth - user can only deactivate their own account
 export const deactivateAccount = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(),
   },
-  handler: async () => {
-    throw new Error('Deprecated: use auth.softDeleteAccount');
+  handler: async (ctx, args) => {
+    // APP-P0-003 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    await ctx.db.patch(userId, { isActive: false });
+    return { success: true };
   },
 });
 
@@ -1499,10 +1101,17 @@ export const deactivateAccount = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only reactivate their own account
 export const reactivateAccount = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(),
   },
-  handler: async () => {
-    throw new Error('Deprecated: sign in again to reactivate');
+  handler: async (ctx, args) => {
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    await ctx.db.patch(userId, { isActive: true, lastActive: Date.now() });
+    return { success: true };
   },
 });
 
@@ -1675,19 +1284,17 @@ export const completeOnboarding = mutation({
         ),
       ),
     ),
-    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("serious_vibes"),
-          v.literal("keep_it_casual"),
-          v.literal("exploring_vibes"),
-          v.literal("see_where_it_goes"),
-          v.literal("open_to_vibes"),
-          v.literal("just_friends"),
+          v.literal("long_term"),
+          v.literal("short_term"),
+          v.literal("fwb"),
+          v.literal("figuring_out"),
+          v.literal("short_to_long"),
+          v.literal("long_to_short"),
+          v.literal("new_friends"),
           v.literal("open_to_anything"),
-          v.literal("single_parent"),
-          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -1721,21 +1328,17 @@ export const completeOnboarding = mutation({
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
     // FIX: Add missing validators for profilePrompts and lgbtqSelf
-    // BUGFIX: Include section for reliable hydration
     profilePrompts: v.optional(v.array(v.object({
+      section: v.optional(v.union(
+        v.literal('builder'),
+        v.literal('performer'),
+        v.literal('seeker'),
+        v.literal('grounded')
+      )),
       question: v.string(),
       answer: v.string(),
-      section: v.optional(v.string()), // builder | performer | seeker | grounded
     }))),
     lgbtqSelf: v.optional(v.array(v.union(
-      v.literal('gay'),
-      v.literal('lesbian'),
-      v.literal('bisexual'),
-      v.literal('transgender'),
-      v.literal('prefer_not_to_say')
-    ))),
-    // P0 FIX: Add lgbtqPreference for LGBTQ matching
-    lgbtqPreference: v.optional(v.array(v.union(
       v.literal('gay'),
       v.literal('lesbian'),
       v.literal('bisexual'),
@@ -1779,38 +1382,14 @@ export const completeOnboarding = mutation({
     }
 
     // ONB-P0-002 FIX: Enforce face verification before onboarding completion
-    // PRODUCT RULE: Allow both "verified" AND "pending" to complete onboarding
-    // Only block "unverified" (user hasn't attempted verification at all)
-    const faceStatus = user.faceVerificationStatus || 'unverified';
-    const faceVerificationAllowed = faceStatus === 'verified' || faceStatus === 'pending';
-    if (!faceVerificationAllowed) {
+    // Only verified users can complete onboarding - PENDING status is not allowed
+    if (user.faceVerificationStatus !== 'verified') {
       throw new Error("Face verification required: please complete face verification before continuing");
     }
 
     // Server-side validation: pets max 3
     if (pets !== undefined && pets.length > 3) {
       throw new Error("You can select up to 3 pets only");
-    }
-
-    // P2 VALIDATION: Bio length validation (max 500 chars)
-    if (updates.bio !== undefined && (updates.bio as string).length > 500) {
-      throw new Error("Bio must be 500 characters or less");
-    }
-
-    // P2 VALIDATION: Height range (100-250 cm)
-    if (updates.height !== undefined) {
-      const h = updates.height as number;
-      if (h < 100 || h > 250) {
-        throw new Error("Height must be between 100 and 250 cm");
-      }
-    }
-
-    // P2 VALIDATION: Weight range (30-300 kg)
-    if (updates.weight !== undefined) {
-      const w = updates.weight as number;
-      if (w < 30 || w > 300) {
-        throw new Error("Weight must be between 30 and 300 kg");
-      }
     }
 
     // Filter out undefined values
@@ -1826,10 +1405,16 @@ export const completeOnboarding = mutation({
     if (insect !== undefined) cleanUpdates.insect = insect;
 
     // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values
-    // Keeps relationshipIntent aligned with the current 9 Explore-safe schema values
+    // This prevents schema validation errors from UI-only values like single_parent, just_18
     if (cleanUpdates.relationshipIntent) {
       cleanUpdates.relationshipIntent = sanitizeRelationshipIntent(
         cleanUpdates.relationshipIntent as string[]
+      );
+    }
+
+    if (cleanUpdates.profilePrompts) {
+      cleanUpdates.profilePrompts = sanitizeProfilePrompts(
+        cleanUpdates.profilePrompts as Array<{ question: string; answer: string; section?: string }>
       );
     }
 
@@ -1876,10 +1461,6 @@ export const completeOnboarding = mutation({
       }
     }
 
-    await ctx.scheduler.runAfter(0, internal.discoverCategories.assignCategory, {
-      userId,
-    });
-
     return { success: true };
   },
 });
@@ -1892,12 +1473,18 @@ export const completeOnboarding = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own photo blur
 export const togglePhotoBlur = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(),
     blurred: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const user = await requireAuthenticatedSessionUser(ctx, args.token);
-    const userId = user._id;
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
     await ctx.db.patch(userId, { photoBlurred: args.blurred });
     return { success: true, blurred: args.blurred };
   },
@@ -2203,16 +1790,6 @@ export const checkIsAdmin = query({
   },
 });
 
-export const checkCurrentUserIsAdmin = query({
-  args: {
-    token: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const user = await requireAuthenticatedSessionUser(ctx, args.token);
-    return { isAdmin: user.isAdmin === true };
-  },
-});
-
 // ═══════════════════════════════════════════════════════════════════════════
 // PREFERRED CHAT ROOM
 // Auto-opens the user's preferred room when entering the Chat Rooms tab.
@@ -2223,51 +1800,11 @@ export const checkCurrentUserIsAdmin = query({
  */
 export const getPreferredChatRoom = query({
   args: {
-    authUserId: v.string(),
+    userId: v.id("users"),
   },
-  handler: async (ctx, { authUserId }) => {
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { preferredChatRoomId: null };
-    }
-
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { preferredChatRoomId: null };
-    }
-
-    const user = await ctx.db.get(userId);
-    const preferredChatRoomId = user?.preferredChatRoomId ?? null;
-    if (!preferredChatRoomId) {
-      return { preferredChatRoomId: null };
-    }
-
-    const room = await ctx.db.get(preferredChatRoomId);
-    if (!room) {
-      return { preferredChatRoomId: null };
-    }
-
-    const now = Date.now();
-    if (room.expiresAt && room.expiresAt <= now) {
-      return { preferredChatRoomId: null };
-    }
-
-    const ban = await ctx.db
-      .query("chatRoomBans")
-      .withIndex("by_room_user", (q) => q.eq("roomId", preferredChatRoomId).eq("userId", userId))
-      .first();
-    if (ban) {
-      return { preferredChatRoomId: null };
-    }
-
-    const membership = await ctx.db
-      .query("chatRoomMembers")
-      .withIndex("by_room_user", (q) => q.eq("roomId", preferredChatRoomId).eq("userId", userId))
-      .first();
-    if (!membership) {
-      return { preferredChatRoomId: null };
-    }
-
-    return { preferredChatRoomId };
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    return { preferredChatRoomId: user?.preferredChatRoomId ?? null };
   },
 });
 
@@ -2296,28 +1833,6 @@ export const setPreferredChatRoom = mutation({
     if (!room) {
       throw new Error("Room not found");
     }
-
-    const now = Date.now();
-    if (room.expiresAt && room.expiresAt <= now) {
-      throw new Error("Room has expired");
-    }
-
-    const ban = await ctx.db
-      .query("chatRoomBans")
-      .withIndex("by_room_user", (q) => q.eq("roomId", roomId).eq("userId", userId))
-      .first();
-    if (ban) {
-      throw new Error("Access denied: you are banned from this room");
-    }
-
-    const membership = await ctx.db
-      .query("chatRoomMembers")
-      .withIndex("by_room_user", (q) => q.eq("roomId", roomId).eq("userId", userId))
-      .first();
-    if (!membership) {
-      throw new Error("Cannot save a room you have not joined");
-    }
-
     await ctx.db.patch(userId, { preferredChatRoomId: roomId });
     return { success: true };
   },
@@ -2371,7 +1886,7 @@ export const getOnboardingDraft = query({
     }
 
     return {
-      onboardingDraft: user.onboardingDraft ?? null,
+      onboardingDraft: normalizeOnboardingDraft(user.onboardingDraft ?? null),
     };
   },
 });
@@ -2393,13 +1908,6 @@ export const upsertOnboardingDraft = mutation({
     patch: v.any(), // Accepts partial draft updates
   },
   handler: async (ctx, args) => {
-    // DEBUG: Log relationship category save
-    console.log('[RelationshipCategorySave] upsertOnboardingDraft', {
-      source: 'upsertOnboardingDraft',
-      userId: args.userId,
-      relationshipIntent: args.patch?.preferences?.relationshipIntent,
-    });
-
     // MUTATION: can create
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
 
@@ -2445,63 +1953,7 @@ export const upsertOnboardingDraft = mutation({
     };
 
     // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values before saving
-    // Keeps draft preferences aligned with the current 9 Explore-safe schema values
-    if (mergedDraft.preferences?.relationshipIntent) {
-      mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
-        mergedDraft.preferences.relationshipIntent
-      );
-    }
-
-    await ctx.db.patch(userId, {
-      onboardingDraft: mergedDraft,
-    });
-
-    return { success: true };
-  },
-});
-
-export const upsertCurrentUserOnboardingDraft = mutation({
-  args: {
-    token: v.string(),
-    patch: v.any(),
-  },
-  handler: async (ctx, args) => {
-    const user = await requireAuthenticatedSessionUser(ctx, args.token);
-    const userId = user._id;
-    const existingDraft = user.onboardingDraft || {};
-
-    const lastUpdatedAt = existingDraft.progress?.lastUpdatedAt;
-    const now = Date.now();
-    if (lastUpdatedAt && (now - lastUpdatedAt) < 500) {
-      console.warn(`[DRAFT_RACE] Rapid draft update detected for user ${userId}: ${now - lastUpdatedAt}ms since last update`);
-    }
-
-    const safeMerge = (existing: any, patch: any) => {
-      if (!patch) return existing;
-      const merged = { ...(existing || {}) };
-      for (const [key, value] of Object.entries(patch)) {
-        if (value === null) {
-          delete merged[key];
-        } else if (value !== undefined) {
-          merged[key] = value;
-        }
-      }
-      return Object.keys(merged).length > 0 ? merged : undefined;
-    };
-
-    const mergedDraft = {
-      ...existingDraft,
-      basicInfo: safeMerge(existingDraft.basicInfo, args.patch.basicInfo),
-      profileDetails: safeMerge(existingDraft.profileDetails, args.patch.profileDetails),
-      lifestyle: safeMerge(existingDraft.lifestyle, args.patch.lifestyle),
-      lifeRhythm: safeMerge(existingDraft.lifeRhythm, args.patch.lifeRhythm),
-      preferences: safeMerge(existingDraft.preferences, args.patch.preferences),
-      progress: {
-        lastStepKey: args.patch.progress?.lastStepKey ?? existingDraft.progress?.lastStepKey,
-        lastUpdatedAt: now,
-      },
-    };
-
+    // This prevents schema validation errors from UI-only values like single_parent, just_18
     if (mergedDraft.preferences?.relationshipIntent) {
       mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
         mergedDraft.preferences.relationshipIntent
@@ -2522,11 +1974,15 @@ export const upsertCurrentUserOnboardingDraft = mutation({
  */
 export const getOnboardingStatus = query({
   args: {
-    token: v.string(),
+    userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
-    const userId = currentUser._id;
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+
+    if (!userId) {
+      console.log('[ONB_STATUS] User not found');
+      return null;
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) {
@@ -2572,7 +2028,7 @@ export const getOnboardingStatus = query({
 
       // Onboarding state
       onboardingCompleted: user.onboardingCompleted || false,
-      onboardingDraft: user.onboardingDraft || null,
+      onboardingDraft: normalizeOnboardingDraft(user.onboardingDraft || null),
 
       // Phase-2 onboarding state (Private Mode)
       phase2OnboardingCompleted: user.phase2OnboardingCompleted || false,
@@ -2599,54 +2055,16 @@ export const getOnboardingStatus = query({
 });
 
 /**
- * Canonical Phase-2 onboarding consent write.
- * This is the only active onboarding step that should set both consentAcceptedAt
- * and privateWelcomeConfirmed on the users table.
- */
-export const acceptPrivateOnboardingConsent = mutation({
-  args: {
-    token: v.string(),
-    confirmAdult: v.boolean(),
-    confirmNoSharing: v.boolean(),
-  },
-  handler: async (ctx, args) => {
-    if (!args.confirmAdult || !args.confirmNoSharing) {
-      throw new Error('Both onboarding consent confirmations are required');
-    }
-
-    const user = await requireAuthenticatedSessionUser(ctx, args.token);
-    const now = Date.now();
-
-    const consentAcceptedAt = user.consentAcceptedAt ?? now;
-    const privateWelcomeConfirmedAt = user.privateWelcomeConfirmedAt ?? now;
-
-    await ctx.db.patch(user._id, {
-      consentAcceptedAt,
-      privateWelcomeConfirmed: true,
-      privateWelcomeConfirmedAt,
-    });
-
-    return {
-      success: true,
-      consentAcceptedAt,
-      privateWelcomeConfirmed: true,
-    };
-  },
-});
-
-/**
- * Legacy helper retained for compatibility.
- * Active Phase-2 onboarding now marks completion inside privateProfiles.finalizeOnboardingProfile
- * so profile creation and onboarding gating cannot drift apart.
+ * Set Phase-2 onboarding as completed for a user.
+ * This is a one-time operation - once set, onboarding never shows again.
+ * Called from profile-setup.tsx when user completes Phase-2 onboarding.
  */
 export const setPhase2OnboardingCompleted = mutation({
   args: {
-    token: v.string(),
+    userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
-    const resolvedUserId = currentUser._id;
-
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!resolvedUserId) {
       console.warn('[P2_ONBOARD] setPhase2OnboardingCompleted: user not found');
       return { success: false, error: 'user_not_found' };
@@ -2681,17 +2099,16 @@ export const setPhase2OnboardingCompleted = mutation({
 });
 
 /**
- * Legacy helper retained for compatibility.
- * Active Phase-2 onboarding uses acceptPrivateOnboardingConsent instead.
+ * Set Private welcome/guidelines as confirmed for a user (18+ consent gate).
+ * This is a one-time operation - once set, consent screen never shows again.
+ * Called from PrivateConsentGate when user confirms.
  */
 export const setPrivateWelcomeConfirmed = mutation({
   args: {
-    token: v.string(),
+    userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    const currentUser = await requireAuthenticatedSessionUser(ctx, args.token);
-    const resolvedUserId = currentUser._id;
-
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!resolvedUserId) {
       console.warn('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: user not found');
       return { success: false, error: 'user_not_found' };
@@ -2964,16 +2381,14 @@ export const getMyBlockedUsers = query({
       .collect();
 
     // Fetch basic info for each blocked user
-    // PHASE-2 IDENTITY FIX: Use Phase-2 nickname, never real name
     const blockedUsers = await Promise.all(
       blocks.map(async (block) => {
         const user = await ctx.db.get(block.blockedUserId);
         if (!user) return null;
-
         return {
           blockId: block._id,
           blockedUserId: block.blockedUserId,
-          displayName: user.handle || 'Anonymous',
+          displayName: user.name || 'Unknown',
           blockedAt: block.createdAt,
         };
       })
@@ -3055,6 +2470,7 @@ export const getMyReports = query({
  * - deviceFingerprints
  * - behaviorFlags
  * - userStrikes
+ * - revealRequests
  * - todAnswers
  * - todConnectRequests
  * - todPrivateMedia
@@ -3140,7 +2556,10 @@ export const devWipeAllUserData = mutation({
     await wipeTable('confessionReactions');
     await wipeTable('confessionNotifications');
 
-    // 7. Chat rooms
+    // 7. Reveal requests
+    await wipeTable('revealRequests');
+
+    // 8. Chat rooms
     await wipeTable('chatRoomMembers');
 
     // 9. Verification and security

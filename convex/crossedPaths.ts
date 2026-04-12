@@ -1,8 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
-import { requireAuthenticatedSessionUser } from './helpers';
-import { computePresenceStatus } from './presence';
+import { resolveUserIdByAuthId } from './helpers';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
@@ -64,56 +63,6 @@ async function prefetchPhotoCounts(
   return counts;
 }
 
-function shouldIncludeReducedReachCandidate(viewerId: string, candidateId: string): boolean {
-  const pairId = `${viewerId}:${candidateId}`;
-  let hash = 0;
-  for (let i = 0; i < pairId.length; i++) {
-    hash = (hash + pairId.charCodeAt(i)) % 100;
-  }
-  return hash < 50;
-}
-
-function getSafeNearbyDisplayPhotos<
-  T extends { url?: string | null; isNsfw?: boolean; order?: number; photoType?: string | null }
->(photos: T[]): T[] {
-  return photos
-    .filter(
-      (photo) =>
-        photo.photoType !== 'verification_reference' &&
-        !photo.isNsfw &&
-        typeof photo.url === 'string' &&
-        photo.url.trim().length > 0
-    )
-    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-}
-
-async function prefetchPhotoSummaries(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
-  userIds: string[]
-): Promise<Map<string, { count: number; safeDisplayUrl: string | null }>> {
-  const summaries = new Map<string, { count: number; safeDisplayUrl: string | null }>();
-  const photoPromises = userIds.map((uid) =>
-    ctx.db
-      .query('photos')
-      .withIndex('by_user', (q: any) => q.eq('userId', uid))
-      .collect()
-  );
-
-  const photoResults = await Promise.all(photoPromises);
-
-  userIds.forEach((uid, i) => {
-    const photos = photoResults[i];
-    const safePhotos = getSafeNearbyDisplayPhotos(photos);
-    summaries.set(uid, {
-      count: photos.length,
-      safeDisplayUrl: safePhotos[0]?.url ?? null,
-    });
-  });
-
-  return summaries;
-}
-
 /**
  * Pre-fetch swipes from a user in a single query.
  * Returns a Map for O(1) lookup.
@@ -151,19 +100,18 @@ const CROSSED_MIN_METERS = 100;  // Minimum distance to trigger crossing
 const CROSSED_MAX_METERS = 750;  // Maximum distance for crossed paths
 
 // Location update gate
-const LOCATION_UPDATE_INTERVAL_MS = 30 * 1000; // 30 seconds
+const LOCATION_UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
-// Published location window (how often user can refresh their published location)
-const PUBLISH_WINDOW_MS = 30 * 1000; // 30 seconds
-const PUBLISH_MOVEMENT_OVERRIDE_METERS = 100; // allow refresh within window after meaningful movement
+// Published location window (privacy: only update shared location once per 6 hours)
+const PUBLISH_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 // Marker visibility tiers (for map)
 const SOLID_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // 1–3 days → solid marker
 const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 // >6 days → hidden
 
-// Map visibility freshness window (users visible if published within this window)
-const MAP_VISIBILITY_WINDOW_MS = 60 * 60 * 1000; // 60 minutes
+// Map visibility freshness window (Rule 4: only show users who published within 10 minutes)
+const MAP_VISIBILITY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
 // Crossed paths history
 const HISTORY_EXPIRY_MS = 28 * 24 * 60 * 60 * 1000; // 4 weeks (28 days)
@@ -171,13 +119,6 @@ const MAX_HISTORY_ENTRIES = 15; // Max crossed paths list entries
 
 // Grid size for approximate crossing location (privacy: round to ~300m)
 const LOCATION_GRID_METERS = 300;
-
-// SEC-1 FIX: Privacy fuzzing constants for Nearby map coordinates
-// Prevents exact location reconstruction from API responses
-const FUZZ_MIN_METERS = 50;
-const FUZZ_MAX_METERS = 150;
-const STRONG_PRIVACY_FUZZ_MIN = 200;
-const STRONG_PRIVACY_FUZZ_MAX = 400;
 
 // ---------------------------------------------------------------------------
 // Shared Places Constants (Phase-1)
@@ -224,635 +165,6 @@ const CROSS_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h per person (prevents 
 const CROSS_EVENT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (cleanup)
 
 // ---------------------------------------------------------------------------
-// DEV-ONLY NEARBY TEST MODE
-// ---------------------------------------------------------------------------
-// SAFE, TEMPORARY testing mode for real-device Nearby testing.
-// - ONLY active when ENABLE_NEARBY_DEV_TEST_MODE is true
-// - Production behavior is UNCHANGED when disabled
-// - Allows two phones in same room to see each other during testing
-// - Adds diagnostic logging to identify visibility failures
-//
-// TO ENABLE: Set ENABLE_NEARBY_DEV_TEST_MODE = true below
-// TO DISABLE: Set ENABLE_NEARBY_DEV_TEST_MODE = false (default)
-//
-// SAFETY: This flag ONLY affects Convex server-side logic.
-// The flag is checked at runtime; production builds should set this to false.
-// ---------------------------------------------------------------------------
-
-/**
- * DEV TEST MODE FLAG
- * Set to true to enable relaxed Nearby testing mode.
- * MUST be false for production deployments.
- */
-const ENABLE_NEARBY_DEV_TEST_MODE = false; // <-- SET TO false FOR PRODUCTION
-
-/**
- * DEV test mode configuration overrides.
- * These values ONLY apply when ENABLE_NEARBY_DEV_TEST_MODE is true.
- */
-const DEV_TEST_CONFIG = {
-  // Visibility: 60 minutes instead of 10 minutes
-  MAP_VISIBILITY_WINDOW_MS: 60 * 60 * 1000, // 60 minutes
-
-  // Publish throttle: 15 seconds for faster real-device testing
-  PUBLISH_WINDOW_MS: 15 * 1000, // 15 seconds
-
-  // Distance: Allow 0m minimum (same room testing)
-  NEARBY_MIN_METERS: 0,
-  NEARBY_MAX_METERS: 5000, // 5km for wider testing
-
-  // Crossed paths: Allow 0m minimum
-  CROSSED_MIN_METERS: 0,
-  CROSSED_MAX_METERS: 2000, // 2km for testing
-
-  // Location update gate: 15 seconds for faster real-device testing
-  LOCATION_UPDATE_INTERVAL_MS: 15 * 1000, // 15 seconds
-
-  // Profile requirements relaxation
-  SKIP_VERIFICATION_CHECK: true,
-  SKIP_PHOTO_COUNT_CHECK: true,
-  SKIP_PRIMARY_PHOTO_CHECK: true,
-  MIN_PHOTO_COUNT: 0, // Allow 0 photos in dev mode
-};
-
-/**
- * Get effective Nearby configuration.
- * Returns production values unless DEV test mode is enabled.
- */
-function getEffectiveNearbyConfig() {
-  if (ENABLE_NEARBY_DEV_TEST_MODE) {
-    return {
-      MAP_VISIBILITY_WINDOW_MS: DEV_TEST_CONFIG.MAP_VISIBILITY_WINDOW_MS,
-      PUBLISH_WINDOW_MS: DEV_TEST_CONFIG.PUBLISH_WINDOW_MS,
-      NEARBY_MIN_METERS: DEV_TEST_CONFIG.NEARBY_MIN_METERS,
-      NEARBY_MAX_METERS: DEV_TEST_CONFIG.NEARBY_MAX_METERS,
-      CROSSED_MIN_METERS: DEV_TEST_CONFIG.CROSSED_MIN_METERS,
-      CROSSED_MAX_METERS: DEV_TEST_CONFIG.CROSSED_MAX_METERS,
-      LOCATION_UPDATE_INTERVAL_MS: DEV_TEST_CONFIG.LOCATION_UPDATE_INTERVAL_MS,
-      SKIP_VERIFICATION_CHECK: DEV_TEST_CONFIG.SKIP_VERIFICATION_CHECK,
-      SKIP_PHOTO_COUNT_CHECK: DEV_TEST_CONFIG.SKIP_PHOTO_COUNT_CHECK,
-      SKIP_PRIMARY_PHOTO_CHECK: DEV_TEST_CONFIG.SKIP_PRIMARY_PHOTO_CHECK,
-      MIN_PHOTO_COUNT: DEV_TEST_CONFIG.MIN_PHOTO_COUNT,
-      IS_DEV_MODE: true,
-    };
-  }
-
-  // Production defaults (unchanged)
-  return {
-    MAP_VISIBILITY_WINDOW_MS,
-    PUBLISH_WINDOW_MS,
-    NEARBY_MIN_METERS: NEARBY_MIN_METERS,
-    NEARBY_MAX_METERS: NEARBY_MAX_METERS,
-    CROSSED_MIN_METERS: CROSSED_MIN_METERS,
-    CROSSED_MAX_METERS: CROSSED_MAX_METERS,
-    LOCATION_UPDATE_INTERVAL_MS,
-    SKIP_VERIFICATION_CHECK: false,
-    SKIP_PHOTO_COUNT_CHECK: false,
-    SKIP_PRIMARY_PHOTO_CHECK: false,
-    MIN_PHOTO_COUNT: 2,
-    IS_DEV_MODE: false,
-  };
-}
-
-type NearbyEligibilityStatus = 'ok' | 'viewer_unverified' | 'location_required';
-
-type NearbyEligibleCandidate = {
-  user: Doc<'users'>;
-  distance: number;
-  locationAgeMs: number;
-  photoSummary: {
-    count: number;
-    safeDisplayUrl: string | null;
-  };
-};
-
-type NearbyExploreExclusions = {
-  blockedUserIds?: Set<string>;
-  matchedUserIds?: Set<string>;
-  viewerReportedIds?: Set<string>;
-  conversationPartnerIds?: Set<string>;
-};
-
-function hasNearbyCoordinatePair(
-  lat: number | null | undefined,
-  lng: number | null | undefined,
-): boolean {
-  return typeof lat === 'number' && typeof lng === 'number';
-}
-
-async function prefetchPresenceRecords(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
-  userIds: Id<'users'>[],
-): Promise<Map<string, { lastSeenAt: number; appState: 'foreground' | 'background' | 'inactive' } | null>> {
-  const records = await Promise.all(
-    userIds.map((userId) =>
-      ctx.db
-        .query('presence')
-        .withIndex('by_user', (q: any) => q.eq('userId', userId))
-        .first()
-    )
-  );
-
-  const presenceMap = new Map<string, { lastSeenAt: number; appState: 'foreground' | 'background' | 'inactive' } | null>();
-  userIds.forEach((userId, index) => {
-    const record = records[index];
-    presenceMap.set(
-      userId as string,
-      record
-        ? {
-            lastSeenAt: record.lastSeenAt,
-            appState: record.appState,
-          }
-        : null
-    );
-  });
-
-  return presenceMap;
-}
-
-function passesNearbyVisibilityMode(
-  user: Doc<'users'>,
-  now: number,
-  presenceRecord: { lastSeenAt: number; appState: 'foreground' | 'background' | 'inactive' } | null,
-): boolean {
-  if (user.nearbyVisibilityMode === 'always' || !user.nearbyVisibilityMode) {
-    return true;
-  }
-
-  const fallbackLastSeenAt = typeof user.lastActive === 'number' ? user.lastActive : 0;
-  const lastSeenAt = presenceRecord?.lastSeenAt ?? fallbackLastSeenAt;
-  const appState = presenceRecord?.appState ?? 'inactive';
-
-  if (!lastSeenAt) {
-    return false;
-  }
-
-  if (user.nearbyVisibilityMode === 'app_open') {
-    return computePresenceStatus(lastSeenAt, appState, now).status === 'online';
-  }
-
-  if (user.nearbyVisibilityMode === 'recent') {
-    const recentThreshold = 30 * 60 * 1000;
-    return now - lastSeenAt <= recentThreshold;
-  }
-
-  return true;
-}
-
-export async function getEligibleNearbyCandidatesForViewer(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
-  currentUser: Doc<'users'>,
-  exploreExclusions?: NearbyExploreExclusions,
-): Promise<{
-  status: NearbyEligibilityStatus;
-  candidates: NearbyEligibleCandidate[];
-  now: number;
-}> {
-  const now = Date.now();
-
-  const config = getEffectiveNearbyConfig();
-
-  devLog('getNearbyUsers: STARTING QUERY', {
-    isDevMode: config.IS_DEV_MODE,
-    effectiveVisibilityWindowMs: config.MAP_VISIBILITY_WINDOW_MS,
-    effectiveMinMeters: config.NEARBY_MIN_METERS,
-    effectiveMaxMeters: config.NEARBY_MAX_METERS,
-    skipVerificationCheck: config.SKIP_VERIFICATION_CHECK,
-    skipPhotoCountCheck: config.SKIP_PHOTO_COUNT_CHECK,
-  });
-
-  const userId = currentUser._id;
-
-  devLog('getNearbyUsers: currentUser', {
-    userId,
-    name: currentUser.name,
-    verificationStatus: currentUser.verificationStatus,
-    publishedAt: currentUser.publishedAt ? new Date(currentUser.publishedAt).toISOString() : null,
-  });
-
-  if (!config.SKIP_VERIFICATION_CHECK && currentUser.verificationStatus !== 'verified') {
-    devLog('getNearbyUsers: BLOCKED - currentUser not verified', {
-      verificationStatus: currentUser.verificationStatus,
-    });
-    return {
-      status: 'viewer_unverified',
-      candidates: [],
-      now,
-    };
-  }
-
-  const myLat = hasNearbyCoordinatePair(currentUser.publishedLat, currentUser.publishedLng)
-    ? currentUser.publishedLat
-    : currentUser.latitude;
-  const myLng = hasNearbyCoordinatePair(currentUser.publishedLat, currentUser.publishedLng)
-    ? currentUser.publishedLng
-    : currentUser.longitude;
-
-  if (!hasNearbyCoordinatePair(myLat, myLng)) {
-    devLog('getNearbyUsers: BLOCKED - currentUser has no location', {
-      publishedLat: currentUser.publishedLat,
-      publishedLng: currentUser.publishedLng,
-      latitude: currentUser.latitude,
-      longitude: currentUser.longitude,
-    });
-    return {
-      status: 'location_required',
-      candidates: [],
-      now,
-    };
-  }
-
-  const viewerLat = myLat as number;
-  const viewerLng = myLng as number;
-
-  const myAge = calculateAge(currentUser.dateOfBirth);
-
-  let allUsers;
-  if (config.SKIP_VERIFICATION_CHECK) {
-    allUsers = await ctx.db
-      .query('users')
-      .filter((q: any) => q.eq(q.field('isActive'), true))
-      .collect();
-    devLog('getNearbyUsers: DEV MODE - querying ALL active users', { count: allUsers.length });
-  } else {
-    allUsers = await ctx.db
-      .query('users')
-      .withIndex('by_verification_status', (q: any) => q.eq('verificationStatus', 'verified'))
-      .collect();
-  }
-
-  const [blockedIds, swipedUsersMap] = await Promise.all([
-    prefetchBlockedUserIds(ctx, userId),
-    prefetchSwipes(ctx, userId),
-  ]);
-  const effectiveBlockedIds = new Set<string>([
-    ...blockedIds,
-    ...(exploreExclusions?.blockedUserIds ?? []),
-  ]);
-  const matchedUserIds = exploreExclusions?.matchedUserIds ?? new Set<string>();
-  const viewerReportedIds = exploreExclusions?.viewerReportedIds ?? new Set<string>();
-  const conversationPartnerIds = exploreExclusions?.conversationPartnerIds ?? new Set<string>();
-
-  const preVisibilityCandidates: Array<{
-    user: Doc<'users'>;
-    distance: number;
-    locationAgeMs: number;
-  }> = [];
-
-  const filterStats = {
-    total: 0,
-    passed: 0,
-    filtered_self: 0,
-    filtered_inactive: 0,
-    filtered_banned: 0,
-    filtered_incognito: 0,
-    filtered_nearbyDisabled: 0,
-    filtered_paused: 0,
-    filtered_visibilityMode: 0,
-    filtered_incompleteProfile: 0,
-    filtered_verificationEnforcement: 0,
-    filtered_noPublishedLocation: 0,
-    filtered_staleLocation: 0,
-    filtered_tooClose: 0,
-    filtered_tooFar: 0,
-    filtered_ageMismatch: 0,
-    filtered_genderMismatch: 0,
-    filtered_blocked: 0,
-    filtered_reported: 0,
-    filtered_matched: 0,
-    filtered_conversationPartner: 0,
-    filtered_swiped: 0,
-    filtered_noSafePhoto: 0,
-  };
-
-  for (const user of allUsers) {
-    filterStats.total++;
-
-    if (user._id === userId) {
-      filterStats.filtered_self++;
-      continue;
-    }
-
-    if (!user.isActive) {
-      filterStats.filtered_inactive++;
-      devLog('FILTERED: inactive', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    if (user.isBanned) {
-      filterStats.filtered_banned++;
-      devLog('FILTERED: banned', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    if (user.verificationEnforcementLevel === 'security_only') {
-      filterStats.filtered_verificationEnforcement++;
-      devLog('FILTERED: security_only', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    if (
-      user.verificationEnforcementLevel === 'reduced_reach' &&
-      !shouldIncludeReducedReachCandidate(String(userId), String(user._id))
-    ) {
-      filterStats.filtered_verificationEnforcement++;
-      devLog('FILTERED: reduced_reach', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    if (user.incognitoMode === true) {
-      filterStats.filtered_incognito++;
-      devLog('FILTERED: incognito', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    if (user.nearbyEnabled === false) {
-      filterStats.filtered_nearbyDisabled++;
-      devLog('FILTERED: nearbyDisabled', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
-      filterStats.filtered_paused++;
-      devLog('FILTERED: paused', {
-        userId: user._id,
-        name: user.name,
-        pausedUntil: new Date(user.nearbyPausedUntil).toISOString(),
-      });
-      continue;
-    }
-
-    if (!user.name || !user.bio || !user.dateOfBirth) {
-      filterStats.filtered_incompleteProfile++;
-      devLog('FILTERED: incompleteProfile', {
-        userId: user._id,
-        name: user.name,
-        hasBio: !!user.bio,
-        hasDateOfBirth: !!user.dateOfBirth,
-      });
-      continue;
-    }
-
-    if (
-      !hasNearbyCoordinatePair(user.publishedLat, user.publishedLng) ||
-      typeof user.publishedAt !== 'number'
-    ) {
-      filterStats.filtered_noPublishedLocation++;
-      devLog('FILTERED: noPublishedLocation', {
-        userId: user._id,
-        name: user.name,
-        publishedLat: user.publishedLat,
-        publishedLng: user.publishedLng,
-        publishedAt: user.publishedAt,
-      });
-      continue;
-    }
-
-    const locationAgeMs = now - user.publishedAt;
-    if (locationAgeMs > config.MAP_VISIBILITY_WINDOW_MS) {
-      filterStats.filtered_staleLocation++;
-      devLog('FILTERED: staleLocation', {
-        userId: user._id,
-        name: user.name,
-        publishedAt: new Date(user.publishedAt).toISOString(),
-        locationAgeMinutes: Math.round(locationAgeMs / 60000),
-        windowMinutes: Math.round(config.MAP_VISIBILITY_WINDOW_MS / 60000),
-      });
-      continue;
-    }
-
-    const distance = calculateDistanceMeters(
-      viewerLat,
-      viewerLng,
-      user.publishedLat as number,
-      user.publishedLng as number,
-    );
-
-    if (distance < config.NEARBY_MIN_METERS) {
-      filterStats.filtered_tooClose++;
-      devLog('FILTERED: tooClose', {
-        userId: user._id,
-        name: user.name,
-        distanceMeters: Math.round(distance),
-        minMeters: config.NEARBY_MIN_METERS,
-      });
-      continue;
-    }
-
-    if (distance > config.NEARBY_MAX_METERS) {
-      filterStats.filtered_tooFar++;
-      devLog('FILTERED: tooFar', {
-        userId: user._id,
-        name: user.name,
-        distanceMeters: Math.round(distance),
-        maxMeters: config.NEARBY_MAX_METERS,
-      });
-      continue;
-    }
-
-    const otherAge = calculateAge(user.dateOfBirth);
-    if (myAge < user.minAge || myAge > user.maxAge) {
-      filterStats.filtered_ageMismatch++;
-      devLog('FILTERED: ageMismatch (viewer not in target range)', {
-        userId: user._id,
-        name: user.name,
-        myAge,
-        targetMinAge: user.minAge,
-        targetMaxAge: user.maxAge,
-      });
-      continue;
-    }
-    if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) {
-      filterStats.filtered_ageMismatch++;
-      devLog('FILTERED: ageMismatch (target not in viewer range)', {
-        userId: user._id,
-        name: user.name,
-        otherAge,
-        viewerMinAge: currentUser.minAge,
-        viewerMaxAge: currentUser.maxAge,
-      });
-      continue;
-    }
-
-    if (!currentUser.lookingFor.includes(user.gender)) {
-      filterStats.filtered_genderMismatch++;
-      devLog('FILTERED: genderMismatch (viewer not looking for target gender)', {
-        userId: user._id,
-        name: user.name,
-        targetGender: user.gender,
-        viewerLookingFor: currentUser.lookingFor,
-      });
-      continue;
-    }
-    if (!user.lookingFor.includes(currentUser.gender)) {
-      filterStats.filtered_genderMismatch++;
-      devLog('FILTERED: genderMismatch (target not looking for viewer gender)', {
-        userId: user._id,
-        name: user.name,
-        viewerGender: currentUser.gender,
-        targetLookingFor: user.lookingFor,
-      });
-      continue;
-    }
-
-    if (effectiveBlockedIds.has(user._id as string)) {
-      filterStats.filtered_blocked++;
-      devLog('FILTERED: blocked', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    if (viewerReportedIds.has(user._id as string)) {
-      filterStats.filtered_reported++;
-      devLog('FILTERED: reported', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    if (matchedUserIds.has(user._id as string)) {
-      filterStats.filtered_matched++;
-      devLog('FILTERED: matched', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    if (conversationPartnerIds.has(user._id as string)) {
-      filterStats.filtered_conversationPartner++;
-      devLog('FILTERED: conversationPartner', { userId: user._id, name: user.name });
-      continue;
-    }
-
-    const existingSwipe = swipedUsersMap.get(user._id as string);
-    if (existingSwipe) {
-      if (existingSwipe.action !== 'pass') {
-        filterStats.filtered_swiped++;
-        devLog('FILTERED: swiped (liked/super_liked)', {
-          userId: user._id,
-          name: user.name,
-          action: existingSwipe.action,
-        });
-        continue;
-      }
-      if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) {
-        filterStats.filtered_swiped++;
-        devLog('FILTERED: swiped (recent pass)', {
-          userId: user._id,
-          name: user.name,
-          passedAt: new Date(existingSwipe.createdAt).toISOString(),
-        });
-        continue;
-      }
-    }
-
-    preVisibilityCandidates.push({
-      user,
-      distance,
-      locationAgeMs,
-    });
-  }
-
-  const presenceCheckUserIds = preVisibilityCandidates
-    .filter(({ user }) => user.nearbyVisibilityMode && user.nearbyVisibilityMode !== 'always')
-    .map(({ user }) => user._id);
-
-  const presenceByUserId = presenceCheckUserIds.length > 0
-    ? await prefetchPresenceRecords(ctx, presenceCheckUserIds)
-    : new Map<
-        string,
-        { lastSeenAt: number; appState: 'foreground' | 'background' | 'inactive' } | null
-      >();
-
-  const candidateUsers: Array<{
-    user: Doc<'users'>;
-    distance: number;
-    locationAgeMs: number;
-  }> = [];
-
-  for (const candidate of preVisibilityCandidates) {
-    if (
-      !passesNearbyVisibilityMode(
-        candidate.user,
-        now,
-        presenceByUserId.get(candidate.user._id as string) ?? null,
-      )
-    ) {
-      filterStats.filtered_visibilityMode++;
-      devLog('FILTERED: visibilityMode', {
-        userId: candidate.user._id,
-        name: candidate.user.name,
-        visibilityMode: candidate.user.nearbyVisibilityMode,
-      });
-      continue;
-    }
-
-    filterStats.passed++;
-    devLog('PASSED: User passed all filters', {
-      userId: candidate.user._id,
-      name: candidate.user.name,
-      distanceMeters: Math.round(candidate.distance),
-      locationAgeMinutes: Math.round(candidate.locationAgeMs / 60000),
-    });
-
-    candidateUsers.push(candidate);
-  }
-
-  devLog('getNearbyUsers: FILTER SUMMARY', filterStats);
-
-  const photoSummariesMap = await prefetchPhotoSummaries(
-    ctx,
-    candidateUsers.map(({ user }) => user._id as string)
-  );
-
-  const results: NearbyEligibleCandidate[] = [];
-  for (const candidate of candidateUsers) {
-    const photoSummary = photoSummariesMap.get(candidate.user._id as string);
-    const photoCount = photoSummary?.count ?? 0;
-
-    if (!config.SKIP_PHOTO_COUNT_CHECK && photoCount < config.MIN_PHOTO_COUNT) {
-      devLog('FILTERED (2nd pass): photoCount too low', {
-        userId: candidate.user._id,
-        name: candidate.user.name,
-        photoCount,
-        requiredMin: config.MIN_PHOTO_COUNT,
-      });
-      continue;
-    }
-
-    if (!config.SKIP_PRIMARY_PHOTO_CHECK && !photoSummary?.safeDisplayUrl) {
-      filterStats.filtered_noSafePhoto++;
-      devLog('FILTERED (2nd pass): no safe display photo', {
-        userId: candidate.user._id,
-        name: candidate.user.name,
-      });
-      continue;
-    }
-
-    results.push({
-      ...candidate,
-      photoSummary: photoSummary ?? {
-        count: photoCount,
-        safeDisplayUrl: null,
-      },
-    });
-  }
-
-  return {
-    status: 'ok',
-    candidates: results,
-    now,
-  };
-}
-
-/**
- * DEV-ONLY: Log why a user was filtered out.
- * Only logs when DEV test mode is enabled.
- */
-function devLog(message: string, data?: Record<string, unknown>) {
-  if (ENABLE_NEARBY_DEV_TEST_MODE) {
-    console.log(`[NEARBY-DEV] ${message}`, data ? JSON.stringify(data) : '');
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Deterministic dedupeKey generation for crossed paths
 // Uses sorted user IDs to ensure A-B == B-A (symmetric)
 // Includes 1-hour time bucket to allow new crossings in future hours
@@ -875,64 +187,31 @@ function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>, now: 
 }
 
 // ---------------------------------------------------------------------------
-// publishLocation — updates published location (short throttle for Nearby freshness)
+// publishLocation — updates published location (max once per 6 hours)
 // Called when Nearby screen is opened. Others see publishedLat/Lng, not live GPS.
-// P1 AUTH HARDENING: Uses validated session token for current-user resolution
 // ---------------------------------------------------------------------------
 
 export const publishLocation = mutation({
   args: {
-    token: v.string(),
+    userId: v.id('users'),
     latitude: v.number(),
     longitude: v.number(),
   },
   handler: async (ctx, args) => {
-    const { token, latitude, longitude } = args;
+    const { userId, latitude, longitude } = args;
     const now = Date.now();
 
-    // Get effective config (DEV vs production)
-    const config = getEffectiveNearbyConfig();
+    const user = await ctx.db.get(userId);
+    if (!user) return { success: false, reason: 'user_not_found' };
 
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
-
-    // Check if published location is still within the publish window
-    // DEV MODE: Uses shorter window than production for faster testing
-    const effectivePublishWindow = config.PUBLISH_WINDOW_MS;
-    if (user.publishedAt && now - user.publishedAt < effectivePublishWindow) {
-      const hasPublishedCoords =
-        user.publishedLat !== undefined &&
-        user.publishedLng !== undefined;
-      const distanceSincePublish = hasPublishedCoords
-        ? calculateDistanceMeters(user.publishedLat!, user.publishedLng!, latitude, longitude)
-        : Number.POSITIVE_INFINITY;
-
-      if (!hasPublishedCoords || distanceSincePublish < PUBLISH_MOVEMENT_OVERRIDE_METERS) {
-      const timeRemaining = Math.round((user.publishedAt + effectivePublishWindow - now) / 1000);
-        devLog('publishLocation: within_window (throttled)', {
-          userId: userId,
-          userName: user.name,
-          publishedAt: new Date(user.publishedAt).toISOString(),
-          windowMs: effectivePublishWindow,
-          timeRemainingSeconds: timeRemaining,
-          distanceSincePublishMeters: hasPublishedCoords ? Math.round(distanceSincePublish) : null,
-          isDevMode: config.IS_DEV_MODE,
-        });
-        return {
-          success: true,
-          published: false,
-          reason: 'within_window',
-          nextPublishAt: user.publishedAt + effectivePublishWindow,
-        };
-      }
-
-      devLog('publishLocation: movement override within window', {
-        userId: userId,
-        userName: user.name,
-        distanceSincePublishMeters: Math.round(distanceSincePublish),
-        overrideThresholdMeters: PUBLISH_MOVEMENT_OVERRIDE_METERS,
-        windowMs: effectivePublishWindow,
-      });
+    // Check if published location is still within the 6-hour window
+    if (user.publishedAt && now - user.publishedAt < PUBLISH_WINDOW_MS) {
+      return {
+        success: true,
+        published: false,
+        reason: 'within_window',
+        nextPublishAt: user.publishedAt + PUBLISH_WINDOW_MS,
+      };
     }
 
     // Publish new location
@@ -940,16 +219,6 @@ export const publishLocation = mutation({
       publishedLat: latitude,
       publishedLng: longitude,
       publishedAt: now,
-    });
-
-    devLog('publishLocation: SUCCESS - location published', {
-      userId: userId,
-      userName: user.name,
-      lat: latitude.toFixed(4),
-      lng: longitude.toFixed(4),
-      publishedAt: new Date(now).toISOString(),
-      effectiveWindowMs: effectivePublishWindow,
-      isDevMode: config.IS_DEV_MODE,
     });
 
     return {
@@ -966,21 +235,23 @@ export const publishLocation = mutation({
 // Returns { triggered: true } if alert should be shown, never reveals identity.
 // STABILITY FIX S2: Uses indexed query instead of full table scan
 // STABILITY FIX S6: Pre-fetches blocks before loop
-// P1 AUTH HARDENING: Uses validated session token for current-user resolution
 // ---------------------------------------------------------------------------
 
 export const detectCrossedUsers = mutation({
   args: {
-    token: v.string(),
+    userId: v.id('users'),
     myLat: v.number(),
     myLng: v.number(),
   },
   handler: async (ctx, args) => {
-    const { token, myLat, myLng } = args;
+    const { userId, myLat, myLng } = args;
     const now = Date.now();
 
-    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = currentUser._id;
+    // 1) Validate user exists
+    const currentUser = await ctx.db.get(userId);
+    if (!currentUser) {
+      return { triggered: false, reason: 'user_not_found' };
+    }
 
     // 2) Enforce cooldown — check most recent crossedEvent for this user
     const lastEvent = await ctx.db
@@ -1032,21 +303,24 @@ export const detectCrossedUsers = mutation({
     }
 
     // 4) Dedupe — filter out people we've already alerted about recently
-    // Fetch current user's recent events once instead of querying per candidate
+    // Batch fetch existing events for all candidates to avoid N+1
     const validCandidates: Id<'users'>[] = [];
-    const recentEventUserIds = new Set(
-      (
-        await ctx.db
-          .query('crossedEvents')
-          .withIndex('by_user_createdAt', (q) => q.eq('userId', userId))
-          .collect()
-      )
-        .filter((event) => now - event.createdAt < CROSS_DEDUPE_WINDOW_MS)
-        .map((event) => event.otherUserId as string)
+
+    // Pre-fetch existing events for candidates
+    const eventPromises = candidates.map((otherUserId) =>
+      ctx.db
+        .query('crossedEvents')
+        .withIndex('by_user_other', (q) =>
+          q.eq('userId', userId).eq('otherUserId', otherUserId),
+        )
+        .first()
     );
+    const existingEvents = await Promise.all(eventPromises);
 
     for (let i = 0; i < candidates.length; i++) {
-      if (!recentEventUserIds.has(candidates[i] as string)) {
+      const existingEvent = existingEvents[i];
+      // If no existing event, or existing event is older than dedupe window, allow
+      if (!existingEvent || now - existingEvent.createdAt >= CROSS_DEDUPE_WINDOW_MS) {
         validCandidates.push(candidates[i]);
       }
     }
@@ -1098,22 +372,21 @@ export const cleanupExpiredCrossedEvents = internalMutation({
 // recordLocation — called when user opens app / becomes active
 // STABILITY FIX S3: Uses indexed query instead of full table scan
 // STABILITY FIX S6/C2: Pre-fetches blocks before loop (eliminates N+1)
-// P1 AUTH HARDENING: Uses validated session token for current-user resolution
 // ---------------------------------------------------------------------------
 
 export const recordLocation = mutation({
   args: {
-    token: v.string(),
+    userId: v.id('users'),
     latitude: v.number(),
     longitude: v.number(),
     accuracy: v.optional(v.number()), // GPS accuracy in meters (for jitter protection)
   },
   handler: async (ctx, args) => {
-    const { token, latitude, longitude, accuracy } = args;
+    const { userId, latitude, longitude, accuracy } = args;
     const now = Date.now();
 
-    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = currentUser._id;
+    const currentUser = await ctx.db.get(userId);
+    if (!currentUser) return { success: false };
 
     // ---------------------------------------------------------------------------
     // GPS JITTER PROTECTION (server-side)
@@ -1221,15 +494,7 @@ export const recordLocation = mutation({
     for (const user of verifiedUsers) {
       if (user._id === userId) continue;
       if (!user.isActive) continue;
-      if (user.isBanned) continue;
       if (!user.latitude || !user.longitude) continue;
-      if (user.verificationEnforcementLevel === 'security_only') continue;
-      if (
-        user.verificationEnforcementLevel === 'reduced_reach' &&
-        !shouldIncludeReducedReachCandidate(String(userId), String(user._id))
-      ) {
-        continue;
-      }
 
       // Incognito mode: Skip users who are hidden (but they can still BE detected for crossings)
       // Note: Incognito users can still trigger crossings, they just don't appear on map
@@ -1263,55 +528,15 @@ export const recordLocation = mutation({
     }
 
     // STABILITY FIX: Fetch photo counts only for candidates (not all users)
-    const photoSummariesMap = await prefetchPhotoSummaries(ctx, candidateUserIds);
+    const photoCountsMap = await prefetchPhotoCounts(ctx, candidateUserIds);
 
     // Second pass: filter by photo count
     const nearbyUsers: UserWithDistance[] = [];
     for (const user of candidateUsers) {
-      const photoSummary = photoSummariesMap.get(user._id as string);
-      const photoCount = photoSummary?.count ?? 0;
+      const photoCount = photoCountsMap.get(user._id as string) || 0;
       if (photoCount < 2) continue;
-      if (!photoSummary?.safeDisplayUrl) continue;
       nearbyUsers.push(user);
     }
-
-    const [existingCrossedPathsAsUser1, existingCrossedPathsAsUser2, existingHistoryAsUser1, existingHistoryAsUser2] = await Promise.all([
-      ctx.db
-        .query('crossedPaths')
-        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-        .collect(),
-      ctx.db
-        .query('crossedPaths')
-        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-        .collect(),
-      ctx.db
-        .query('crossPathHistory')
-        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-        .collect(),
-      ctx.db
-        .query('crossPathHistory')
-        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-        .collect(),
-    ]);
-
-    const crossedPathsByOtherUserId = new Map<string, Doc<'crossedPaths'>>();
-    for (const crossedPath of [...existingCrossedPathsAsUser1, ...existingCrossedPathsAsUser2]) {
-      const otherUserId =
-        crossedPath.user1Id === userId ? crossedPath.user2Id : crossedPath.user1Id;
-      crossedPathsByOtherUserId.set(otherUserId as string, crossedPath);
-    }
-
-    const recentHistoryByOtherUserId = new Map<string, number>();
-    for (const historyEntry of [...existingHistoryAsUser1, ...existingHistoryAsUser2]) {
-      const otherUserId =
-        historyEntry.user1Id === userId ? historyEntry.user2Id : historyEntry.user1Id;
-      const latestForPair = recentHistoryByOtherUserId.get(otherUserId as string) ?? 0;
-      if (historyEntry.createdAt > latestForPair) {
-        recentHistoryByOtherUserId.set(otherUserId as string, historyEntry.createdAt);
-      }
-    }
-
-    let insertedHistoryEntry = false;
 
     // Record crossed paths + history
     for (const nearbyUser of nearbyUsers) {
@@ -1350,7 +575,12 @@ export const recordLocation = mutation({
 
       // --- Crossed paths record (for unlock logic) ---
       // BUGFIX #28: Use idempotent upsert pattern to prevent duplicate records
-      let crossedPath = crossedPathsByOtherUserId.get(nearbyUser._id as string) ?? null;
+      let crossedPath = await ctx.db
+        .query('crossedPaths')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', user1Id).eq('user2Id', user2Id),
+        )
+        .first();
 
       if (crossedPath) {
         // 1-hour cooldown per pair (faster notification for better UX)
@@ -1366,14 +596,9 @@ export const recordLocation = mutation({
         };
 
         await ctx.db.patch(crossedPath._id, updates);
-        crossedPath = {
-          ...crossedPath,
-          ...updates,
-          count: newCount,
-        };
-        crossedPathsByOtherUserId.set(nearbyUser._id as string, crossedPath);
       } else {
-        const insertedCrossedPathId = await ctx.db.insert('crossedPaths', {
+        // BUGFIX #28: Insert new record, then check for race condition duplicate
+        const newId = await ctx.db.insert('crossedPaths', {
           user1Id,
           user2Id,
           count: 1,
@@ -1398,28 +623,20 @@ export const recordLocation = mutation({
           }
           // Update crossedPath reference to the kept record
           crossedPath = allForPair[0];
-        } else {
-          crossedPath = {
-            _id: insertedCrossedPathId,
-            _creationTime: now,
-            user1Id,
-            user2Id,
-            count: 1,
-            lastCrossedAt: now,
-          } as Doc<'crossedPaths'>;
-        }
-
-        if (crossedPath) {
-          crossedPathsByOtherUserId.set(nearbyUser._id as string, crossedPath);
         }
       }
 
       // --- Cross-path history entry (MUTUAL — both users see this) ---
-      const existingHistoryCreatedAt = recentHistoryByOtherUserId.get(
-        nearbyUser._id as string,
-      ) ?? 0;
+      // BUGFIX #28: Check 24h duplicate control for same pair
+      const existingHistory = await ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', user1Id).eq('user2Id', user2Id),
+        )
+        .order('desc')
+        .first();
 
-      if (existingHistoryCreatedAt && now - existingHistoryCreatedAt < NOTIFICATION_COOLDOWN_MS) {
+      if (existingHistory && now - existingHistory.createdAt < NOTIFICATION_COOLDOWN_MS) {
         // Already have a recent history entry for this pair — skip
         continue;
       }
@@ -1443,8 +660,6 @@ export const recordLocation = mutation({
         createdAt: now,
         expiresAt: now + HISTORY_EXPIRY_MS,
       });
-      insertedHistoryEntry = true;
-      recentHistoryByOtherUserId.set(nearbyUser._id as string, now);
 
       // BUGFIX #28: Re-query to detect concurrent insert race condition for history
       const recentHistories = await ctx.db
@@ -1467,13 +682,21 @@ export const recordLocation = mutation({
         }
       }
 
+      // Re-fetch crossedPath to get latest state (may have been created/updated above)
+      const currentCrossedPath = await ctx.db
+        .query('crossedPaths')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', user1Id).eq('user2Id', user2Id),
+        )
+        .first();
+
       // Check notification cooldown on the canonical crossedPaths record
-      const canNotify = crossedPath && (
-        !crossedPath.lastNotifiedAt ||
-        now - crossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS
+      const canNotify = currentCrossedPath && (
+        !currentCrossedPath.lastNotifiedAt ||
+        now - currentCrossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS
       );
 
-      if (canNotify && crossedPath) {
+      if (canNotify && currentCrossedPath) {
         // Rate limiting: Check if user has received too many notifications in the last 24 hours
         const recentNotificationsUser1 = await ctx.db
           .query('notifications')
@@ -1498,12 +721,10 @@ export const recordLocation = mutation({
           .collect();
 
         // Update lastNotifiedAt to prevent race condition duplicates
-        await ctx.db.patch(crossedPath._id, { lastNotifiedAt: now });
-        crossedPath = { ...crossedPath, lastNotifiedAt: now };
-        crossedPathsByOtherUserId.set(nearbyUser._id as string, crossedPath);
+        await ctx.db.patch(currentCrossedPath._id, { lastNotifiedAt: now });
 
         // Generate dynamic notification text based on crossing count
-        const crossingCount = crossedPath.count;
+        const crossingCount = currentCrossedPath.count;
         const reasonText = formatReasonForNotification(compatibility.reasonTags[0] ?? 'common');
 
         // Dynamic title and body based on state
@@ -1603,9 +824,7 @@ export const recordLocation = mutation({
         }
       }
 
-    }
-
-    if (insertedHistoryEntry) {
+      // Enforce max entries per user — trim oldest
       await trimHistoryForUser(ctx, userId);
     }
 
@@ -1613,114 +832,149 @@ export const recordLocation = mutation({
   },
 });
 
-async function getVisibleCrossPathHistoryEntriesForUser(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ctx: any,
-  currentUser: Doc<'users'>,
-): Promise<{ entries: Doc<'crossPathHistory'>[]; now: number }> {
-  const userId = currentUser._id;
-  const now = Date.now();
-
-  const [mySwipes, blockedIds, asUser1, asUser2] = await Promise.all([
-    ctx.db
-      .query('likes')
-      .withIndex('by_from_user', (q: any) => q.eq('fromUserId', userId))
-      .collect(),
-    prefetchBlockedUserIds(ctx, userId),
-    ctx.db
-      .query('crossPathHistory')
-      .withIndex('by_user1', (q: any) => q.eq('user1Id', userId))
-      .collect(),
-    ctx.db
-      .query('crossPathHistory')
-      .withIndex('by_user2', (q: any) => q.eq('user2Id', userId))
-      .collect(),
-  ]);
-
-  const swipedUsersMap = new Map<string, { action: string; createdAt: number }>();
-  for (const swipe of mySwipes) {
-    swipedUsersMap.set(swipe.toUserId as string, {
-      action: swipe.action,
-      createdAt: swipe.createdAt,
-    });
-  }
-
-  const entries = [...asUser1, ...asUser2]
-    .filter((entry) => {
-      if (entry.expiresAt <= now) return false;
-
-      const isUser1 = entry.user1Id === userId;
-      if (isUser1 && entry.hiddenByUser1) return false;
-      if (!isUser1 && entry.hiddenByUser2) return false;
-
-      const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
-      if (blockedIds.has(otherUserId as string)) return false;
-
-      const existingSwipe = swipedUsersMap.get(otherUserId as string);
-      if (existingSwipe) {
-        if (existingSwipe.action !== 'pass') return false;
-        if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) return false;
-      }
-
-      return true;
-    })
-    .sort((a, b) => b.createdAt - a.createdAt);
-
-  return { entries, now };
-}
-
 // ---------------------------------------------------------------------------
 // getNearbyUsers — map markers with jittered coords & freshness
 // STABILITY FIX S1: Uses indexed query instead of full table scan
 // STABILITY FIX S6: Pre-fetches blocks before loop (eliminates N+1)
-// P1 AUTH HARDENING: Uses validated session token for current-user resolution
-// DEV TEST MODE: When enabled, relaxes filters for real-device testing
 // ---------------------------------------------------------------------------
 
 export const getNearbyUsers = query({
-  args: {
-    token: v.string(),
-    refreshKey: v.optional(v.number()),
-  },
-  handler: async (ctx, { token }) => {
-    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
-    const nearbyEligibility = await getEligibleNearbyCandidatesForViewer(ctx, currentUser);
-    const config = getEffectiveNearbyConfig();
+  args: { userId: v.id('users') },
+  handler: async (ctx, { userId }) => {
+    const now = Date.now();
 
-    if (nearbyEligibility.status !== 'ok') {
-      return {
-        status: nearbyEligibility.status,
-        users: [],
-      };
+    const currentUser = await ctx.db.get(userId);
+    if (!currentUser) return [];
+
+    // Current user must be verified to see nearby users
+    if (currentUser.verificationStatus !== 'verified') return [];
+
+    // Use current user's published location for distance checks
+    // (they should have published when opening Nearby screen)
+    const myLat = currentUser.publishedLat ?? currentUser.latitude;
+    const myLng = currentUser.publishedLng ?? currentUser.longitude;
+    if (!myLat || !myLng) return [];
+
+    // Get current user's age for filtering
+    const myAge = calculateAge(currentUser.dateOfBirth);
+
+    // STABILITY FIX S1: Use indexed query for verified users only
+    // This avoids iterating through ALL users in the database
+    const verifiedUsers = await ctx.db
+      .query('users')
+      .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+      .collect();
+
+    // STABILITY FIX S6/C2: Pre-fetch blocks and swipes before loop
+    const [blockedIds, swipedUsersMap] = await Promise.all([
+      prefetchBlockedUserIds(ctx, userId),
+      prefetchSwipes(ctx, userId),
+    ]);
+
+    // First pass: collect candidate user IDs that pass basic filters
+    const candidateUserIds: string[] = [];
+    const candidateUsers: typeof verifiedUsers = [];
+
+    for (const user of verifiedUsers) {
+      if (user._id === userId) continue;
+      if (!user.isActive) continue;
+
+      // Incognito mode: Hidden users don't appear on map
+      if (user.incognitoMode === true) continue;
+
+      // Nearby visibility opt-out: Respect user preference
+      if (user.nearbyEnabled === false) continue;
+
+      // Nearby pause: User has temporarily hidden from Nearby
+      if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) continue;
+
+      // Time-based visibility mode
+      if (user.nearbyVisibilityMode === 'app_open') {
+        const inactiveThreshold = 5 * 60 * 1000;
+        if (now - user.lastActive > inactiveThreshold) continue;
+      } else if (user.nearbyVisibilityMode === 'recent') {
+        const recentThreshold = 30 * 60 * 1000;
+        if (now - user.lastActive > recentThreshold) continue;
+      }
+
+      // Basic info completeness
+      if (!user.name || !user.bio || !user.dateOfBirth) continue;
+
+      // P0 FIX: Require valid primary photo URL
+      if (!user.primaryPhotoUrl) continue;
+
+      // Must have published location
+      if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
+
+      // Freshness: published location must be within 10 minutes
+      if (now - user.publishedAt > MAP_VISIBILITY_WINDOW_MS) continue;
+
+      // Distance check — 100m to 1km range
+      const distance = calculateDistanceMeters(
+        myLat,
+        myLng,
+        user.publishedLat,
+        user.publishedLng,
+      );
+      if (distance < NEARBY_MIN_METERS || distance > NEARBY_MAX_METERS) continue;
+
+      // Age filtering (both directions)
+      const otherAge = calculateAge(user.dateOfBirth);
+      if (myAge < user.minAge || myAge > user.maxAge) continue;
+      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
+
+      // Gender/orientation preference match (both directions)
+      if (!currentUser.lookingFor.includes(user.gender)) continue;
+      if (!user.lookingFor.includes(currentUser.gender)) continue;
+
+      // Block check (using pre-fetched set)
+      if (blockedIds.has(user._id as string)) continue;
+
+      // Skip filter (using pre-fetched map)
+      const existingSwipe = swipedUsersMap.get(user._id as string);
+      if (existingSwipe) {
+        if (existingSwipe.action !== 'pass') continue;
+        if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) continue;
+      }
+
+      candidateUserIds.push(user._id as string);
+      candidateUsers.push(user);
     }
 
-    const userId = currentUser._id;
-    const results = nearbyEligibility.candidates.map(({ user, distance, locationAgeMs, photoSummary }) => {
-      const freshness: 'solid' | 'faded' = locationAgeMs <= SOLID_WINDOW_MS ? 'solid' : 'faded';
+    // STABILITY FIX: Fetch photo counts only for candidates (not all users)
+    const photoCountsMap = await prefetchPhotoCounts(ctx, candidateUserIds);
 
-      const fuzzed = applyPrivacyFuzz(
+    // Second pass: filter by photo count and build results
+    const results = [];
+    for (let i = 0; i < candidateUsers.length; i++) {
+      const user = candidateUsers[i];
+      const photoCount = photoCountsMap.get(user._id as string) || 0;
+      if (photoCount < 2) continue;
+
+      const locationAge = now - user.publishedAt!;
+      const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
+      const distance = calculateDistanceMeters(
+        myLat,
+        myLng,
         user.publishedLat!,
         user.publishedLng!,
-        user._id,
-        userId,
-        user.strongPrivacyMode ?? false,
       );
 
-      return {
+      results.push({
         id: user._id,
-        name: user.handle || 'Anonymous',
+        name: user.name,
         age: calculateAge(user.dateOfBirth),
-        publishedLat: fuzzed.lat,
-        publishedLng: fuzzed.lng,
+        publishedLat: user.publishedLat!,
+        publishedLng: user.publishedLng!,
         publishedAt: user.publishedAt,
-        distance: user.hideDistance === true ? undefined : distance,
+        distance,
         freshness,
-        photoUrl: photoSummary.safeDisplayUrl,
+        photoUrl: user.primaryPhotoUrl ?? null,
         isVerified: user.isVerified,
         strongPrivacyMode: user.strongPrivacyMode ?? false,
         hideDistance: user.hideDistance ?? false,
-      };
-    });
+      });
+    }
 
     // Sort by recency first, then by distance
     results.sort((a, b) => {
@@ -1728,23 +982,10 @@ export const getNearbyUsers = query({
       if (Math.abs(recencyDiff) > 60 * 60 * 1000) {
         return recencyDiff;
       }
-      return (a.distance ?? NEARBY_MAX_METERS) - (b.distance ?? NEARBY_MAX_METERS);
+      return a.distance - b.distance;
     });
 
-    devLog('getNearbyUsers: FINAL RESULTS', {
-      resultCount: results.length,
-      isDevMode: config.IS_DEV_MODE,
-      users: results.map((r) => ({
-        id: r.id,
-        name: r.name,
-        distance: r.distance === undefined ? 'hidden' : Math.round(r.distance),
-      })),
-    });
-
-    return {
-      status: 'ok' as const,
-      users: results,
-    };
+    return results;
   },
 });
 
@@ -1755,41 +996,78 @@ export const getNearbyUsers = query({
 // ---------------------------------------------------------------------------
 
 export const getCrossPathHistory = query({
-  args: {
-    token: v.string(),
-    refreshKey: v.optional(v.number()),
-  },
-  handler: async (ctx, { token }) => {
-    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = currentUser._id;
-    const { entries, now } = await getVisibleCrossPathHistoryEntriesForUser(ctx, currentUser);
+  args: { userId: v.id('users') },
+  handler: async (ctx, { userId }) => {
+    const now = Date.now();
 
+    // Get current user for distance calculation
+    const currentUser = await ctx.db.get(userId);
     const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
     const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
-    const all = entries.slice(0, MAX_HISTORY_ENTRIES);
+
+    // Pre-fetch swipes for skip filtering (matches Discover behavior per Rule 9)
+    const mySwipes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+      .collect();
+    const swipedUsersMap = new Map<string, { action: string; createdAt: number }>();
+    for (const swipe of mySwipes) {
+      swipedUsersMap.set(swipe.toUserId as string, {
+        action: swipe.action,
+        createdAt: swipe.createdAt,
+      });
+    }
+
+    const asUser1 = await ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+      .collect();
+
+    const asUser2 = await ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+      .collect();
+
+    const all = [...asUser1, ...asUser2]
+      .filter((entry) => {
+        // Filter expired entries (4 weeks)
+        if (entry.expiresAt <= now) return false;
+
+        // Filter hidden entries for this user
+        const isUser1 = entry.user1Id === userId;
+        if (isUser1 && entry.hiddenByUser1) return false;
+        if (!isUser1 && entry.hiddenByUser2) return false;
+
+        // Skip filter: Same as Discover behavior (Rule 9)
+        const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
+        const existingSwipe = swipedUsersMap.get(otherUserId as string);
+        if (existingSwipe) {
+          if (existingSwipe.action !== 'pass') return false; // Skip likes/super_likes
+          if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) return false; // Skip recent passes
+        }
+
+        return true;
+      })
+      .sort((a, b) => b.createdAt - a.createdAt) // newest first
+      .slice(0, MAX_HISTORY_ENTRIES);
 
     // Collect unique other user IDs
     const otherUserIds = [...new Set(
       all.map((entry) => entry.user1Id === userId ? entry.user2Id : entry.user1Id)
     )];
 
-    const [crossedPathsAsUser1, crossedPathsAsUser2] = await Promise.all([
-      ctx.db
-        .query('crossedPaths')
-        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-        .collect(),
-      ctx.db
-        .query('crossedPaths')
-        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-        .collect(),
-    ]);
-
-    // Batch fetch crossing counts from crossedPaths table without per-user lookups
+    // Batch fetch crossing counts from crossedPaths table
     const crossingCountsMap = new Map<string, number>();
-    for (const crossedPath of [...crossedPathsAsUser1, ...crossedPathsAsUser2]) {
-      const otherUserId =
-        crossedPath.user1Id === userId ? crossedPath.user2Id : crossedPath.user1Id;
-      crossingCountsMap.set(otherUserId as string, crossedPath.count);
+    for (const otherUserId of otherUserIds) {
+      const orderedUser1 = userId < otherUserId ? userId : otherUserId;
+      const orderedUser2 = userId < otherUserId ? otherUserId : userId;
+      const crossedPath = await ctx.db
+        .query('crossedPaths')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', orderedUser1).eq('user2Id', orderedUser2),
+        )
+        .first();
+      crossingCountsMap.set(otherUserId as string, crossedPath?.count ?? 1);
     }
 
     // Parallel fetch all users
@@ -1802,10 +1080,20 @@ export const getCrossPathHistory = query({
       if (user) usersMap.set(id as string, user as Doc<'users'>);
     });
 
-    const photoSummariesMap = await prefetchPhotoSummaries(
-      ctx,
-      otherUserIds.map((id) => String(id))
+    // Parallel fetch all primary photos
+    const photosMap = new Map<string, string | null>();
+    const photoFetches = await Promise.all(
+      otherUserIds.map((id) =>
+        ctx.db
+          .query('photos')
+          .withIndex('by_user', (q) => q.eq('userId', id))
+          .filter((q) => q.eq(q.field('isPrimary'), true))
+          .first()
+      )
     );
+    otherUserIds.forEach((id, i) => {
+      photosMap.set(id as string, photoFetches[i]?.url ?? null);
+    });
 
     // Build results using pre-fetched data
     const results = [];
@@ -1813,21 +1101,13 @@ export const getCrossPathHistory = query({
       const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
       const otherUser = usersMap.get(otherUserId as string);
       if (!otherUser || !otherUser.isActive) continue;
-      if (otherUser.isBanned) continue;
-      if (otherUser.verificationEnforcementLevel === 'security_only') continue;
-      if (
-        otherUser.verificationEnforcementLevel === 'reduced_reach' &&
-        !shouldIncludeReducedReachCandidate(String(userId), String(otherUserId))
-      ) {
-        continue;
-      }
 
       // P0 FIX: Privacy filtering - hide users who disabled/paused Nearby
       if (otherUser.nearbyEnabled === false) continue;
       if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
 
-      const photoSummary = photoSummariesMap.get(otherUserId as string);
-      if (!photoSummary?.safeDisplayUrl) continue;
+      // P0 FIX: Require valid primary photo URL
+      if (!otherUser.primaryPhotoUrl) continue;
 
       const crossingCount = crossingCountsMap.get(otherUserId as string) || 1;
 
@@ -1863,14 +1143,10 @@ export const getCrossPathHistory = query({
       // Calculate relative time for display
       const relativeTime = formatRelativeTime(entry.createdAt, now);
 
-      // PHASE-2 PRIVACY FIX: Use handle (anonymous username) ONLY, never real name
-      // Phase-2 surfaces must NEVER expose first name or last name
-      const displayName = otherUser.handle || 'Anonymous';
-
       results.push({
         id: entry._id,
         otherUserId,
-        otherUserName: displayName,
+        otherUserName: otherUser.name,
         otherUserAge: calculateAge(otherUser.dateOfBirth),
         areaName: displayAreaName,
         // Approximate crossing location (not current location — persists across travel)
@@ -1889,8 +1165,8 @@ export const getCrossPathHistory = query({
         whyExplanation,
         createdAt: entry.createdAt,
         expiresAt: entry.expiresAt,
-        photoUrl: photoSummary.safeDisplayUrl,
-        initial: displayName.charAt(0).toUpperCase(),
+        photoUrl: photosMap.get(otherUserId as string),
+        initial: otherUser.name.charAt(0),
         isVerified: otherUser.isVerified,
       });
     }
@@ -1905,35 +1181,24 @@ export const getCrossPathHistory = query({
   },
 });
 
-export const getCrossedPathSummary = query({
-  args: {
-    token: v.string(),
-  },
-  handler: async (ctx, { token }) => {
-    const currentUser = await requireAuthenticatedSessionUser(ctx, token);
-    const { entries } = await getVisibleCrossPathHistoryEntriesForUser(ctx, currentUser);
-
-    return {
-      count: entries.length,
-      latestCreatedAt: entries.length > 0 ? entries[0].createdAt : null,
-    };
-  },
-});
-
 // ---------------------------------------------------------------------------
 // hideCrossedPath — mark a crossed path as hidden for the current user
 // ---------------------------------------------------------------------------
 
-// P1 AUTH HARDENING: Uses validated session token for current-user resolution.
+// P2 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
 export const hideCrossedPath = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(), // P2 SECURITY: Server-side auth instead of trusting client
     historyId: v.id('crossPathHistory'),
   },
   handler: async (ctx, args) => {
-    const { token, historyId } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, historyId } = args;
+
+    // P2 SECURITY: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const entry = await ctx.db.get(historyId);
     if (!entry) {
@@ -1963,16 +1228,20 @@ export const hideCrossedPath = mutation({
 // deleteCrossedPath — permanently delete a crossed path entry
 // ---------------------------------------------------------------------------
 
-// P1 AUTH HARDENING: Uses validated session token for current-user resolution.
+// P2 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
 export const deleteCrossedPath = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(), // P2 SECURITY: Server-side auth instead of trusting client
     historyId: v.id('crossPathHistory'),
   },
   handler: async (ctx, args) => {
-    const { token, historyId } = args;
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
+    const { authUserId, historyId } = args;
+
+    // P2 SECURITY: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const entry = await ctx.db.get(historyId);
     if (!entry) {
@@ -2222,8 +1491,7 @@ export const getCrossedPaths = query({
         distanceRange,
         user: {
           id: otherUserId,
-          // PHASE-2 PRIVACY: Use handle (anonymous username) ONLY, never real name
-          name: otherUser.handle || 'Anonymous',
+          name: otherUser.name,
           age: calculateAge(otherUser.dateOfBirth),
           photoUrl: photosMap.get(otherUserId as string),
           isVerified: otherUser.isVerified,
@@ -2306,21 +1574,14 @@ export const getCrossedPathsCount = query({
  */
 export const getSharedPlaces = query({
   args: {
-    token: v.string(),
+    viewerId: v.id('users'),    // Current user viewing the profile
     profileUserId: v.id('users'), // User whose profile is being viewed
   },
   handler: async (ctx, args) => {
-    const { token, profileUserId } = args;
-    const viewer = await requireAuthenticatedSessionUser(ctx, token);
-    const viewerId = viewer._id;
+    const { viewerId, profileUserId } = args;
 
     // Don't show shared places for self
     if (viewerId === profileUserId) {
-      return [];
-    }
-
-    const blockedIds = await prefetchBlockedUserIds(ctx, viewerId);
-    if (blockedIds.has(profileUserId as string)) {
       return [];
     }
 
@@ -2415,62 +1676,6 @@ export const getSharedPlaces = query({
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * SEC-1 FIX: Server-side privacy fuzzing for location coordinates.
- * Applies deterministic random offset based on user ID hash.
- * Ensures same user always gets same fuzzing for consistent map rendering.
- *
- * @param lat - Original latitude
- * @param lng - Original longitude
- * @param userId - User ID (for deterministic hash)
- * @param viewerId - Viewer ID (combined with userId for unique offset per viewer)
- * @param strongPrivacyMode - If true, apply larger fuzz radius
- * @returns Fuzzed coordinates
- */
-function applyPrivacyFuzz(
-  lat: number,
-  lng: number,
-  userId: string,
-  viewerId: string,
-  strongPrivacyMode: boolean,
-): { lat: number; lng: number } {
-  // Create deterministic hash from combined IDs (consistent across sessions)
-  const combined = `${userId}_${viewerId}_privacy_fuzz`;
-  let hash = 0;
-  for (let i = 0; i < combined.length; i++) {
-    hash = ((hash << 5) - hash) + combined.charCodeAt(i);
-    hash |= 0;
-  }
-
-  // Convert hash to pseudo-random values between 0 and 1
-  const hashAbs = Math.abs(hash);
-  const r1 = (hashAbs % 10000) / 10000;
-  const r2 = ((hashAbs >> 8) % 10000) / 10000;
-
-  // Determine fuzz radius based on privacy mode
-  const minMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MIN : FUZZ_MIN_METERS;
-  const maxMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MAX : FUZZ_MAX_METERS;
-
-  // Random distance within range
-  const fuzzDistance = minMeters + r1 * (maxMeters - minMeters);
-
-  // Random angle (0 to 2π)
-  const angle = r2 * 2 * Math.PI;
-
-  // Convert meters to degrees (approximate: 1 degree ≈ 111km at equator)
-  // Adjust for latitude to account for longitude compression
-  const metersPerDegreeLat = 111000;
-  const metersPerDegreeLng = 111000 * Math.cos(lat * Math.PI / 180);
-
-  const latOffset = (fuzzDistance * Math.cos(angle)) / metersPerDegreeLat;
-  const lngOffset = (fuzzDistance * Math.sin(angle)) / metersPerDegreeLng;
-
-  return {
-    lat: lat + latOffset,
-    lng: lng + lngOffset,
-  };
-}
-
 function calculateDistanceMeters(
   lat1: number,
   lon1: number,
@@ -2547,32 +1752,25 @@ function offsetCoords(
 
 /** Trim cross-path history to MAX_HISTORY_ENTRIES for a given user. */
 async function trimHistoryForUser(ctx: any, userId: Id<'users'>) {
-  const [asUser1, asUser2] = await Promise.all([
-    ctx.db
-      .query('crossPathHistory')
-      .withIndex('by_user1', (q: any) => q.eq('user1Id', userId))
-      .collect(),
-    ctx.db
-      .query('crossPathHistory')
-      .withIndex('by_user2', (q: any) => q.eq('user2Id', userId))
-      .collect(),
-  ]);
+  const asUser1 = await ctx.db
+    .query('crossPathHistory')
+    .withIndex('by_user1', (q: any) => q.eq('user1Id', userId))
+    .collect();
 
-  const visibleEntries = [
-    ...asUser1.filter((entry: any) => !entry.hiddenByUser1),
-    ...asUser2.filter((entry: any) => !entry.hiddenByUser2),
-  ].sort((a: any, b: any) => b.createdAt - a.createdAt);
+  const asUser2 = await ctx.db
+    .query('crossPathHistory')
+    .withIndex('by_user2', (q: any) => q.eq('user2Id', userId))
+    .collect();
 
-  if (visibleEntries.length > MAX_HISTORY_ENTRIES) {
-    const toHide = visibleEntries.slice(MAX_HISTORY_ENTRIES);
-    for (const entry of toHide) {
-      if (entry.user1Id === userId) {
-        if (!entry.hiddenByUser1) {
-          await ctx.db.patch(entry._id, { hiddenByUser1: true });
-        }
-      } else if (!entry.hiddenByUser2) {
-        await ctx.db.patch(entry._id, { hiddenByUser2: true });
-      }
+  const all = [...asUser1, ...asUser2].sort(
+    (a: any, b: any) => b.createdAt - a.createdAt,
+  );
+
+  // Delete entries beyond the limit
+  if (all.length > MAX_HISTORY_ENTRIES) {
+    const toDelete = all.slice(MAX_HISTORY_ENTRIES);
+    for (const entry of toDelete) {
+      await ctx.db.delete(entry._id);
     }
   }
 }
@@ -2821,17 +2019,12 @@ function formatReasonForNotification(reasonTag: string): string {
   }
 
   if (type === 'lookingFor') {
-    // CURRENT 9 RELATIONSHIP CATEGORIES
     const labels: Record<string, string> = {
-      serious_vibes: 'something serious',
-      keep_it_casual: 'keeping it casual',
-      exploring_vibes: 'figuring things out',
-      see_where_it_goes: 'seeing where it goes',
-      open_to_vibes: 'staying open',
-      just_friends: 'new friends',
-      open_to_anything: 'open to anything',
-      single_parent: 'a fellow parent',
-      new_to_dating: 'starting fresh',
+      long_term: 'something long-term',
+      short_term: 'something casual',
+      fwb: 'keeping it casual',
+      figuring_out: 'figuring things out',
+      new_friends: 'new friends',
     };
     return `You're both looking for ${labels[value] ?? value}`;
   }

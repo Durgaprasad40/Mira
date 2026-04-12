@@ -6,34 +6,6 @@ import { resolveUserIdByAuthId } from './helpers';
 // 4-2: Notification TTL (24 hours in milliseconds)
 const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 
-type NotificationData = {
-  actorUserId?: string;
-  targetUserId?: string;
-  matchId?: string;
-  conversationId?: string;
-  userId?: string;
-  pairKey?: string;
-  likeType?: 'like' | 'super_like';
-};
-
-function normalizeNotificationData(
-  data: NotificationData | undefined,
-  targetUserId?: string
-): NotificationData | undefined {
-  if (!data && !targetUserId) {
-    return undefined;
-  }
-
-  const actorUserId = data?.actorUserId ?? data?.userId;
-  const normalizedTargetUserId = data?.targetUserId ?? targetUserId;
-
-  return {
-    ...data,
-    actorUserId,
-    targetUserId: normalizedTargetUserId,
-  };
-}
-
 // Get notifications for a user
 // 4-3: Filters out expired notifications server-side to prevent render race
 export const getNotifications = query({
@@ -70,11 +42,7 @@ export const getNotifications = query({
       )
     );
 
-    const notifications = await queryBuilder.order('desc').take(limit);
-    return notifications.map((notification) => ({
-      ...notification,
-      data: normalizeNotificationData(notification.data as NotificationData | undefined, notification.userId as string),
-    }));
+    return await queryBuilder.order('desc').take(limit);
   },
 });
 
@@ -182,7 +150,6 @@ export const createNotification = mutation({
     type: v.union(
       v.literal('match'),
       v.literal('message'),
-      v.literal('like'),
       v.literal('super_like'),
       v.literal('crossed_paths'),
       v.literal('subscription'),
@@ -192,20 +159,15 @@ export const createNotification = mutation({
     title: v.string(),
     body: v.string(),
     data: v.optional(v.object({
-      actorUserId: v.optional(v.string()),
-      targetUserId: v.optional(v.string()),
       matchId: v.optional(v.string()),
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
-      pairKey: v.optional(v.string()),
-      likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
     })),
     // 4-1: Optional dedupeKey for upsert behavior
     dedupeKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { userId, type, title, body, dedupeKey } = args;
-    const data = normalizeNotificationData(args.data as NotificationData | undefined, userId as string);
+    const { userId, type, title, body, data, dedupeKey } = args;
     const now = Date.now();
     const expiresAt = now + NOTIFICATION_TTL_MS; // 4-2: Set expiry
 
@@ -252,20 +214,18 @@ export const createNotification = mutation({
 });
 
 // Compute dedupeKey from notification type and data (matches client-side logic)
-function computeDedupeKey(type: string, data?: NotificationData): string {
-  const actorUserId = data?.actorUserId ?? data?.userId;
+function computeDedupeKey(type: string, data?: { matchId?: string; conversationId?: string; userId?: string; pairKey?: string }): string {
+  const userId = data?.userId;
   switch (type) {
     case 'match':
-      return `match:${data?.matchId ?? actorUserId ?? 'unknown'}`;
+      return `match:${data?.matchId ?? userId ?? 'unknown'}`;
     case 'message':
-      return `message:${data?.conversationId ?? actorUserId ?? 'unknown'}:unread`;
-    case 'like':
-      return `like:${actorUserId ?? 'unknown'}`;
+      return `message:${data?.conversationId ?? userId ?? 'unknown'}`;
     case 'super_like':
-      return `super_like:${actorUserId ?? 'unknown'}`;
+      return `super_like:${userId ?? 'unknown'}`;
     case 'crossed_paths':
       // Use pairKey if available (deterministic sorted pair format), fallback to userId
-      return data?.pairKey ?? `crossed_paths:${actorUserId ?? 'unknown'}`;
+      return data?.pairKey ?? `crossed_paths:${userId ?? 'unknown'}`;
     default:
       return `${type}:unknown`;
   }
@@ -297,12 +257,8 @@ export const markReadByDedupeKey = mutation({
 
     let count = 0;
     for (const notification of notifications) {
-      const notifDedupeKey =
-        notification.dedupeKey ??
-        computeDedupeKey(
-          notification.type,
-          normalizeNotificationData(notification.data as NotificationData | undefined, notification.userId as string)
-        );
+      // Compute dedupeKey from type+data
+      const notifDedupeKey = computeDedupeKey(notification.type, notification.data);
       if (notifDedupeKey === dedupeKey) {
         await ctx.db.patch(notification._id, { readAt: now });
         count++;

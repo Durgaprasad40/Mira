@@ -2,9 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { softMaskText } from './softMask';
-import { resolveTrustedUserId, resolveUserIdByAuthId } from './helpers';
-import { shouldCreateNotification } from './notificationPreferences';
-import { getUnreadCount as getConversationUnreadCount } from './unreadCounts';
+import { resolveUserIdByAuthId } from './helpers';
 
 // Phase-2: Helper to check if user has any active chatRoom readOnly penalty
 async function hasActiveChatRoomPenalty(
@@ -45,6 +43,34 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
+// UNREAD-RULE: Message types that count toward unread badges
+// Includes: text, image (photo), video, voice, template, dare
+// Excludes: system (screenshot events, permission events, T&D connection system messages, etc.)
+const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice', 'template', 'dare'];
+
+// C1/C2/C3-REPAIR: Helper to compute unread count from source of truth (messages table)
+// Used for: race-safe updates, fallback when participant rows are missing, backfill
+async function computeUnreadCountFromMessages(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: Id<'conversations'>,
+  userId: Id<'users'>
+): Promise<number> {
+  const unreadMessages = await ctx.db
+    .query('messages')
+    .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+    .filter((q) =>
+      q.and(
+        q.neq(q.field('senderId'), userId),
+        q.eq(q.field('readAt'), undefined)
+      )
+    )
+    .collect();
+
+  // UNREAD-RULE: Only count messages with countable types
+  // System messages (screenshot_taken, permission_granted, T&D state, etc.) are excluded
+  return unreadMessages.filter((m) => COUNTABLE_MESSAGE_TYPES.includes(m.type)).length;
+}
+
 // C1/C2/C3-REPAIR: Helper to upsert participant row with recomputed unread count
 // Avoids race conditions by always recomputing from source of truth
 async function upsertParticipantUnreadCount(
@@ -52,7 +78,7 @@ async function upsertParticipantUnreadCount(
   conversationId: Id<'conversations'>,
   userId: Id<'users'>
 ): Promise<void> {
-  const unreadCount = await getConversationUnreadCount(ctx, conversationId, userId);
+  const unreadCount = await computeUnreadCountFromMessages(ctx, conversationId, userId);
 
   const existing = await ctx.db
     .query('conversationParticipants')
@@ -79,8 +105,7 @@ async function upsertParticipantUnreadCount(
 export const sendMessage = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    authUserId: v.string(), // MSG-001: Auth verification required
     type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare'), v.literal('voice')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
@@ -92,13 +117,16 @@ export const sendMessage = mutation({
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, type, content, imageStorageId, templateId, audioStorageId, audioDurationMs, clientMessageId } = args;
+    const { conversationId, authUserId, type, content, imageStorageId, templateId, audioStorageId, audioDurationMs, clientMessageId } = args;
     const now = Date.now();
 
-    // SECURITY PATCH: Derive caller identity only from trusted server auth
-    const senderId = await resolveTrustedUserId(ctx, args);
-    if (!senderId) {
+    // MSG-001 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
       throw new Error('Unauthorized: authentication required');
+    }
+    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!senderId) {
+      throw new Error('Unauthorized: user not found');
     }
 
     // Phase-2: Block DMs if user has active chatRoom readOnly penalty
@@ -223,7 +251,7 @@ export const sendMessage = mutation({
 
     // Create notification for recipient
     // 9-5: Add TTL and dedupe key for message notifications
-    if (recipientId && await shouldCreateNotification(ctx, recipientId, 'message')) {
+    if (recipientId) {
       const dedupeKey = `message:${conversationId}:unread`;
       // Check for existing notification with same dedupe key
       const existingNotif = await ctx.db
@@ -238,11 +266,6 @@ export const sendMessage = mutation({
         // Update existing notification instead of creating duplicate
         await ctx.db.patch(existingNotif._id, {
           body: notificationBody,
-          data: {
-            actorUserId: senderId as string,
-            targetUserId: recipientId as string,
-            conversationId: conversationId as string,
-          } as any,
           createdAt: now,
           expiresAt: now + 24 * 60 * 60 * 1000,
         });
@@ -252,11 +275,7 @@ export const sendMessage = mutation({
           type: 'message',
           title: 'New Message',
           body: notificationBody,
-          data: {
-            actorUserId: senderId as string,
-            targetUserId: recipientId as string,
-            conversationId: conversationId as string,
-          } as any,
+          data: { conversationId: conversationId },
           dedupeKey,
           createdAt: now,
           expiresAt: now + 24 * 60 * 60 * 1000,
@@ -272,8 +291,7 @@ export const sendMessage = mutation({
 // MSG-002 FIX: Auth hardening - verify caller identity server-side
 export const sendPreMatchMessage = mutation({
   args: {
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    authUserId: v.string(), // MSG-002: Auth verification required
     toUserId: v.id('users'),
     content: v.string(),
     templateId: v.optional(v.string()),
@@ -281,13 +299,16 @@ export const sendPreMatchMessage = mutation({
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { toUserId, content, templateId, clientMessageId } = args;
+    const { authUserId, toUserId, content, templateId, clientMessageId } = args;
     const now = Date.now();
 
-    // SECURITY PATCH: Derive caller identity only from trusted server auth
-    const fromUserId = await resolveTrustedUserId(ctx, args);
-    if (!fromUserId) {
+    // MSG-002 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
       throw new Error('Unauthorized: authentication required');
+    }
+    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!fromUserId) {
+      throw new Error('Unauthorized: user not found');
     }
 
     // Phase-2: Block DMs if user has active chatRoom readOnly penalty
@@ -400,40 +421,29 @@ export const sendPreMatchMessage = mutation({
     // M1 FIX: Privacy-safe notification body - never expose message content
     const dedupeKey = `message:${conversation._id}:unread`;
     const notificationBody = 'You have a new message';
-    if (await shouldCreateNotification(ctx, toUserId, 'message')) {
-      const existingNotif = await ctx.db
-        .query('notifications')
-        .withIndex('by_user_dedupe', (q) => q.eq('userId', toUserId).eq('dedupeKey', dedupeKey))
-        .first();
+    const existingNotif = await ctx.db
+      .query('notifications')
+      .withIndex('by_user_dedupe', (q) => q.eq('userId', toUserId).eq('dedupeKey', dedupeKey))
+      .first();
 
-      if (existingNotif) {
-        await ctx.db.patch(existingNotif._id, {
-          title: `${fromUser.name} sent you a message`,
-          body: notificationBody,
-          data: {
-            actorUserId: fromUserId as string,
-            targetUserId: toUserId as string,
-            conversationId: conversation._id as string,
-          } as any,
-          createdAt: now,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
-      } else {
-        await ctx.db.insert('notifications', {
-          userId: toUserId,
-          type: 'message',
-          title: `${fromUser.name} sent you a message`,
-          body: notificationBody,
-          data: {
-            actorUserId: fromUserId as string,
-            targetUserId: toUserId as string,
-            conversationId: conversation._id as string,
-          } as any,
-          dedupeKey,
-          createdAt: now,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
-      }
+    if (existingNotif) {
+      await ctx.db.patch(existingNotif._id, {
+        title: `${fromUser.name} sent you a message`,
+        body: notificationBody,
+        createdAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+      });
+    } else {
+      await ctx.db.insert('notifications', {
+        userId: toUserId,
+        type: 'message',
+        title: `${fromUser.name} sent you a message`,
+        body: notificationBody,
+        data: { conversationId: conversation._id, userId: fromUserId },
+        dedupeKey,
+        createdAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+      });
     }
 
     return { success: true, messageId, conversationId: conversation._id };
@@ -445,15 +455,21 @@ export const sendPreMatchMessage = mutation({
 export const getMessages = query({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.optional(v.id('users')), // Legacy support
+    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
     limit: v.optional(v.number()),
     before: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const { conversationId, limit = 50, before } = args;
 
-    const userId = await resolveTrustedUserId(ctx, args);
+    // SYNC-FIX: Resolve user ID consistently using auth helper
+    let userId: Id<'users'> | undefined = args.userId;
+    if (!userId && args.authUserId) {
+      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
+      userId = resolved ?? undefined;
+    }
+
     if (!userId) {
       return [];
     }
@@ -467,10 +483,6 @@ export const getMessages = query({
     if (!conversation.participants.includes(userId)) {
       return [];
     }
-
-    const otherParticipantId = conversation.participants.find((id) => id !== userId);
-    const otherParticipant = otherParticipantId ? await ctx.db.get(otherParticipantId) : null;
-    const hideOwnReadReceipts = otherParticipant?.disableReadReceipts === true;
 
     // SYNC-FIX: Deterministic query - same for all devices
     let query = ctx.db
@@ -531,18 +543,11 @@ export const getMessages = query({
 
     // Strip imageStorageId from protected messages and add isProtected flag + media metadata
     return messages.reverse().map((msg) => {
-      const readReceiptVisible = !(hideOwnReadReceipts && msg.senderId === userId);
-      const baseReadReceiptFields = {
-        readAt: readReceiptVisible ? msg.readAt : undefined,
-        readReceiptVisible,
-      };
-
       // Voice messages: include audio URL
       if (msg.type === 'voice' && msg.audioStorageId) {
         const { audioStorageId, ...rest } = msg;
         return {
           ...rest,
-          ...baseReadReceiptFields,
           isProtected: false,
           audioUrl: audioUrlMap.get(audioStorageId as string) ?? null,
         };
@@ -569,7 +574,6 @@ export const getMessages = query({
 
         return {
           ...rest,
-          ...baseReadReceiptFields,
           isProtected: true,
           // SECURE-MEDIA-FIX: Include media metadata for both sender and receiver
           viewMode: media?.viewMode ?? 'tap',
@@ -582,7 +586,7 @@ export const getMessages = query({
           recipientOpened: !!(permission?.openedAt),
         };
       }
-      return { ...msg, ...baseReadReceiptFields, isProtected: false };
+      return { ...msg, isProtected: false };
     });
   },
 });
@@ -592,14 +596,17 @@ export const getMessages = query({
 export const markAsRead = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    authUserId: v.string(), // MSG-004: Auth verification required
   },
   handler: async (ctx, args) => {
-    const { conversationId } = args;
+    const { conversationId, authUserId } = args;
     const now = Date.now();
 
-    const userId = await resolveTrustedUserId(ctx, args);
+    // MSG-004 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      return; // Silent return for mark-as-read (non-critical)
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return; // Silent return for mark-as-read (non-critical)
     }
@@ -640,14 +647,17 @@ export const markAsRead = mutation({
 export const markAsDelivered = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId } = args;
+    const { conversationId, authUserId } = args;
     const now = Date.now();
 
-    const userId = await resolveTrustedUserId(ctx, args);
+    // Verify caller identity
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: false, count: 0 };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return { success: false, count: 0 };
     }
@@ -682,13 +692,16 @@ export const markAsDelivered = mutation({
 // This ensures "delivered" state is set when message reaches device, not when conversation is opened
 export const markAllAsDelivered = mutation({
   args: {
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
+    const { authUserId } = args;
     const now = Date.now();
 
-    const userId = await resolveTrustedUserId(ctx, args);
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: false, count: 0 };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return { success: false, count: 0 };
     }
@@ -728,13 +741,16 @@ export const markAllAsDelivered = mutation({
 // Called periodically while user is in a conversation to show "Online" status
 export const updatePresence = mutation({
   args: {
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
+    const { authUserId } = args;
     const now = Date.now();
 
-    const userId = await resolveTrustedUserId(ctx, args);
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: false };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return { success: false };
     }
@@ -749,14 +765,20 @@ export const updatePresence = mutation({
 export const getConversation = query({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.optional(v.id('users')), // Legacy support
+    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
   },
   handler: async (ctx, args) => {
     const { conversationId } = args;
     const now = Date.now();
 
-    const userId = await resolveTrustedUserId(ctx, args);
+    // SYNC-FIX: Resolve user ID consistently using auth helper
+    let userId: Id<'users'> | undefined = args.userId;
+    if (!userId && args.authUserId) {
+      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
+      userId = resolved ?? undefined;
+    }
+
     if (!userId) {
       return null;
     }
@@ -820,15 +842,15 @@ export const getConversation = query({
 // APP-P0-004 FIX: Server-side auth - resolve userId from authUserId to prevent cross-user access
 export const getConversations = query({
   args: {
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    authUserId: v.string(), // APP-P0-004: Changed from userId: v.id('users')
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { limit = 50 } = args;
+    const { authUserId, limit = 50 } = args;
     const now = Date.now();
 
-    const userId = await resolveTrustedUserId(ctx, args);
+    // APP-P0-004 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return []; // Unauthorized - return empty array
     }
@@ -904,9 +926,22 @@ export const getConversations = query({
             .first()
         )
       ),
-      // Batch fetch unread counts for each conversation using the shared rule
+      // Batch fetch unread messages for each conversation
       Promise.all(
-        userConversations.map((c) => getConversationUnreadCount(ctx, c._id, userId))
+        userConversations.map((c) =>
+          ctx.db
+            .query('messages')
+            .withIndex('by_conversation', (q) =>
+              q.eq('conversationId', c._id)
+            )
+            .filter((q) =>
+              q.and(
+                q.neq(q.field('senderId'), userId),
+                q.eq(q.field('readAt'), undefined)
+              )
+            )
+            .collect()
+        )
       ),
     ]);
 
@@ -929,7 +964,7 @@ export const getConversations = query({
 
       const photo = photoMap.get(otherUserId);
       const lastMessage = lastMessages[i];
-      const unreadCount = unreadCounts[i] || 0;
+      const unreadCount = unreadCounts[i]?.length || 0;
 
       // PRIVACY FIX: Check if the other user should be shown anonymously
       // This happens when they're the confession author on an anonymous confession
@@ -972,16 +1007,10 @@ export const getConversations = query({
 // Check if user can send messages
 export const canSendMessage = query({
   args: {
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveTrustedUserId(ctx, args);
-    if (!userId) {
-      return { canSend: false, remaining: 0, total: 0 };
-    }
-
-    const user = await ctx.db.get(userId);
+    const user = await ctx.db.get(args.userId);
     if (!user) return { canSend: false, remaining: 0, total: 0 };
 
     // Women can always send
@@ -1014,12 +1043,13 @@ export const canSendMessage = query({
 
 export const getUnreadCount = query({
   args: {
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
-    const userId = await resolveTrustedUserId(ctx, args);
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!userId) {
+      console.log('[getUnreadCount] User not found for authUserId:', args.userId);
       return 0;
     }
 
@@ -1059,7 +1089,7 @@ export const getUnreadCount = query({
       // Skip if already covered by participant row
       if (coveredConversationIds.has(conversation._id as string)) continue;
 
-      const count = await getConversationUnreadCount(ctx, conversation._id, userId);
+      const count = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
       // BADGE-FIX: Add 1 if conversation has any unread, not the count itself
       if (count > 0) {
         totalUnreadConversations += 1;
@@ -1140,7 +1170,7 @@ export const getUnreadDmCountsByRoom = query({
       // Skip if already covered by participant row
       if (coveredConversationIds.has(conversation._id as string)) continue;
 
-      const unreadCount = await getConversationUnreadCount(ctx, conversation._id, userId);
+      const unreadCount = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
       if (unreadCount > 0) {
         const roomIdStr = conversation.sourceRoomId as string;
         byRoomId[roomIdStr] = (byRoomId[roomIdStr] || 0) + unreadCount;
@@ -1257,7 +1287,7 @@ export const backfillConversationParticipants = internalMutation({
       // For each participant, upsert their row with recomputed unread count
       for (const participantId of conversation.participants) {
         // Recompute from source of truth (same logic as upsertParticipantUnreadCount)
-        const unreadCount = await getConversationUnreadCount(
+        const unreadCount = await computeUnreadCountFromMessages(
           ctx,
           conversation._id,
           participantId
@@ -1308,15 +1338,15 @@ export const backfillConversationParticipants = internalMutation({
 export const setTypingStatus = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    authUserId: v.string(),
     isTyping: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, isTyping } = args;
+    const { conversationId, authUserId, isTyping } = args;
     const now = Date.now();
 
-    const userId = await resolveTrustedUserId(ctx, args);
+    // Resolve auth ID to user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) return;
 
     // Verify user is part of conversation
@@ -1353,18 +1383,12 @@ export const setTypingStatus = mutation({
 export const getTypingStatus = query({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { conversationId } = args;
+    const { conversationId, userId } = args;
     const now = Date.now();
     const TYPING_TIMEOUT = 5000; // 5 seconds
-
-    const userId = await resolveTrustedUserId(ctx, args);
-    if (!userId) {
-      return { isTyping: false };
-    }
 
     // Get conversation to find the other participant
     const conversation = await ctx.db.get(conversationId);

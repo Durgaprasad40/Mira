@@ -5,21 +5,9 @@
  * for the Safety + Trust features. Supports text, image, video, and audio messages.
  */
 import { v } from 'convex/values';
-import { mutation, query, QueryCtx } from './_generated/server';
+import { mutation, query } from './_generated/server';
 import { resolveUserIdByAuthId } from './helpers';
 import { Id } from './_generated/dataModel';
-
-/**
- * PHASE-2 IDENTITY FIX: Get Phase-2 nickname for display.
- * Never exposes real name in Phase-2 contexts.
- */
-async function getPhase2DisplayName(ctx: QueryCtx, userId: Id<'users'>): Promise<string> {
-  const privateProfile = await ctx.db
-    .query('userPrivateProfiles')
-    .withIndex('by_user', (q) => q.eq('userId', userId))
-    .first();
-  return privateProfile?.displayName || 'Anonymous';
-}
 
 // Category type for type safety
 const SUPPORT_CATEGORY = v.union(
@@ -179,11 +167,9 @@ export const getMySupportRequests = query({
               .withIndex('by_user', (q: any) => q.eq('userId', req.relatedUserId))
               .filter((q: any) => q.eq(q.field('isPrimary'), true))
               .first();
-            // PHASE-2 IDENTITY FIX: Use Phase-2 nickname, never real name
-            const nickname = await getPhase2DisplayName(ctx, user._id);
             relatedUser = {
               userId: user._id,
-              displayName: nickname,
+              displayName: user.name || 'Unknown',
               photoUrl: photo?.url || user.primaryPhotoUrl || null,
             };
           }
@@ -244,11 +230,9 @@ export const getSupportRequestById = query({
           .withIndex('by_user', (q: any) => q.eq('userId', request.relatedUserId))
           .filter((q: any) => q.eq(q.field('isPrimary'), true))
           .first();
-        // PHASE-2 IDENTITY FIX: Use Phase-2 nickname, never real name
-        const nickname = await getPhase2DisplayName(ctx, user._id);
         relatedUser = {
           userId: user._id,
-          displayName: nickname,
+          displayName: user.name || 'Unknown',
           photoUrl: photo?.url || user.primaryPhotoUrl || null,
         };
       }
@@ -499,12 +483,10 @@ export const getSelectableUsersForSupportCase = query({
           .filter((q: any) => q.eq(q.field('isPrimary'), true))
           .first();
 
-        // PHASE-2 IDENTITY FIX: Use Phase-2 nickname, never real name
-        const nickname = await getPhase2DisplayName(ctx, user._id);
         const sourceInfo = userSourceMap.get(userIdStr)!;
         return {
           userId: user._id,
-          displayName: nickname,
+          displayName: user.name || 'Unknown',
           photoUrl: photo?.url || user.primaryPhotoUrl || null,
           sourceType: sourceInfo.sourceType,
           lastInteractionAt: sourceInfo.timestamp,
@@ -552,13 +534,11 @@ export const getSafeUserInfo = query({
       .filter((q: any) => q.eq(q.field('isPrimary'), true))
       .first();
 
-    // PHASE-2 IDENTITY FIX: Use Phase-2 nickname, never real name
-    const nickname = await getPhase2DisplayName(ctx, user._id);
     return {
       success: true,
       user: {
         userId: user._id,
-        displayName: nickname,
+        displayName: user.name || 'Unknown',
         photoUrl: photo?.url || user.primaryPhotoUrl || null,
       },
     };

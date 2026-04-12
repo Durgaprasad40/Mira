@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, action, internalMutation, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, ensureUserByAuthId, requireAuthenticatedSessionUser } from './helpers';
+import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
 // ---------------------------------------------------------------------------
 // Session-based Auth Helper (matches app's custom auth system)
@@ -59,8 +59,7 @@ export const generateUploadUrl = mutation({
 
 /**
  * Get the URL for a storage ID.
- * Used only for immediate owner-side preview after upload.
- * Callers must not persist the returned clear URL.
+ * Used by Phase-2 private profile to get permanent URLs after upload.
  */
 export const getStorageUrl = mutation({
   args: { storageId: v.id('_storage') },
@@ -125,11 +124,9 @@ export const addPhoto = mutation({
     isNsfwDetected: v.optional(v.boolean()), // Client-side NSFW detection result
     // C1 SECURITY: Session token for auth validation (MANDATORY - custom auth system)
     token: v.string(),
-    // Slot position (0-8) for photo placement - if provided, use this instead of auto-incrementing
-    slotOrder: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected, token, slotOrder } = args;
+    const { storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected, token } = args;
 
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
@@ -215,10 +212,7 @@ export const addPhoto = mutation({
     for (const photo of existingPhotos) {
       maxOrder = Math.max(maxOrder, photo.order);
     }
-    // Use client-provided slotOrder if valid (0-8), otherwise auto-increment
-    const order = (slotOrder !== undefined && slotOrder >= 0 && slotOrder <= 8)
-      ? slotOrder
-      : maxOrder + 1;
+    const order = maxOrder + 1;
 
     // BUG FIX: If verification_reference is primary, this is NOT the "first photo"
     // so it should NOT auto-become primary. Only explicit isPrimary=true should make it primary.
@@ -448,23 +442,40 @@ export const deletePhoto = mutation({
     const storageIdToDelete = photo.storageId;
     await ctx.db.delete(photoId);
 
-    // Reorder remaining photos - order=0 becomes primary (order is source of truth)
+    // Reorder remaining photos
     const remainingPhotos = photos
       .filter((p) => p._id !== photoId)
       .sort((a, b) => a.order - b.order);
 
     for (let i = 0; i < remainingPhotos.length; i++) {
-      // ORDER-BASED PRIMARY: First photo (order=0) is always primary
-      await ctx.db.patch(remainingPhotos[i]._id, {
-        order: i,
-        // LEGACY: Keep isPrimary in sync for backward compat, but order is source of truth
-        isPrimary: i === 0,
-      });
+      const updates: Record<string, unknown> = { order: i };
+      // If deleted photo was primary, make first photo primary
+      if (photo.isPrimary && i === 0) {
+        updates.isPrimary = true;
+      }
+      await ctx.db.patch(remainingPhotos[i]._id, updates);
     }
 
-    // PRIMARY PHOTO: Derive from order=0, NOT from isPrimary query
-    // Get first photo by order (which is the remaining photo at index 0 after reorder)
-    const primaryPhoto = remainingPhotos.length > 0 ? remainingPhotos[0] : null;
+    // STABILITY FIX: C-10 + H-2 - Keep primaryPhotoUrl in sync after delete
+    // Query for primary photo, fallback to first by order if none marked primary (defensive)
+    let primaryPhoto = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.eq(q.field('isPrimary'), true))
+      .first();
+
+    // H-2: Defensive fallback - if no isPrimary found but photos exist, use first by order
+    if (!primaryPhoto) {
+      primaryPhoto = await ctx.db
+        .query('photos')
+        .withIndex('by_user_order', (q) => q.eq('userId', userId))
+        .first();
+      // If we found a photo, mark it as primary for consistency
+      if (primaryPhoto) {
+        await ctx.db.patch(primaryPhoto._id, { isPrimary: true });
+      }
+    }
+
     await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
 
     // CONSISTENCY FIX B2: Delete from storage LAST (best effort)
@@ -509,7 +520,6 @@ export const deletePhoto = mutation({
 });
 
 // Reorder photos
-// SAFE REORDER: Uses order-only for primary derivation, validates no photo loss
 export const reorderPhotos = mutation({
   args: {
     // IDOR-P1-003 FIX: Removed userId - now derived from server auth
@@ -528,19 +538,7 @@ export const reorderPhotos = mutation({
 
     const { photoIds } = args;
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // VALIDATION: Get all user's regular display photos BEFORE reorder
-    // ═══════════════════════════════════════════════════════════════════════════
-    const allUserPhotos = await ctx.db
-      .query('photos')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
-
-    const regularPhotos = allUserPhotos.filter(p => p.photoType !== 'verification_reference');
-    const originalCount = regularPhotos.length;
-    const originalIds = new Set(regularPhotos.map(p => p._id as string));
-
-    // SECURITY: Verify all photos belong to user AND are regular display photos
+    // SECURITY: Verify all photos belong to user before reordering
     for (const photoId of photoIds) {
       const photo = await ctx.db.get(photoId);
       if (!photo) {
@@ -549,146 +547,25 @@ export const reorderPhotos = mutation({
       if (photo.userId !== userId) {
         throw new Error('Unauthorized photo modification');
       }
-      if (photo.photoType === 'verification_reference') {
-        throw new Error('Cannot reorder verification reference photos');
-      }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // VALIDATION: Ensure same photo count and same IDs (no photo loss)
-    // ═══════════════════════════════════════════════════════════════════════════
-    const receivedIds = new Set(photoIds.map(id => id as string));
-    const sameCount = photoIds.length === originalCount;
-    const allOriginalPresent = regularPhotos.every(p => receivedIds.has(p._id as string));
-    const noExtraIds = photoIds.every(id => originalIds.has(id as string));
-    const noDuplicates = receivedIds.size === photoIds.length;
-
-    if (!sameCount || !allOriginalPresent || !noExtraIds || !noDuplicates) {
-      console.error('[PHOTO_REORDER_ABORT] Validation failed:', {
-        sameCount, allOriginalPresent, noExtraIds, noDuplicates,
-        originalCount, receivedCount: photoIds.length,
-      });
-      throw new Error('Photo reorder validation failed: photo count mismatch or missing photos');
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // SAFE REORDER: Update order values (order determines primary)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // Update order
     for (let i = 0; i < photoIds.length; i++) {
       await ctx.db.patch(photoIds[i], {
         order: i,
-        // LEGACY: Keep isPrimary in sync for backward compat, but order is source of truth
         isPrimary: i === 0,
       });
     }
 
-    // PRIMARY PHOTO: Derive from order=0, NOT from isPrimary query
-    const primaryPhoto = await ctx.db.get(photoIds[0]);
+    // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync with isPrimary
+    const primaryPhoto = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.eq(q.field('isPrimary'), true))
+      .first();
     await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
 
     return { success: true };
-  },
-});
-
-// Reorder photos with token-based auth (for apps using custom session auth)
-// SAFE REORDER: Uses order-only for primary derivation, validates no photo loss
-export const reorderPhotosWithToken = mutation({
-  args: {
-    photoIds: v.array(v.id('photos')),
-    token: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const { photoIds, token } = args;
-
-    // Validate session token
-    const userId = await validateSessionToken(ctx, token);
-    if (!userId) {
-      throw new Error('Unauthorized: invalid or expired session');
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // VALIDATION: Get all user's regular display photos BEFORE reorder
-    // ═══════════════════════════════════════════════════════════════════════════
-    const allUserPhotos = await ctx.db
-      .query('photos')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
-
-    // Filter to regular display photos only (exclude verification_reference)
-    const regularPhotos = allUserPhotos.filter(p => p.photoType !== 'verification_reference');
-    const originalCount = regularPhotos.length;
-    const originalIds = new Set(regularPhotos.map(p => p._id as string));
-
-    console.log('[PHOTO_REORDER_VALIDATE] Before reorder:', {
-      userId: userId.slice(-6),
-      originalCount,
-      receivedCount: photoIds.length,
-      originalIds: regularPhotos.map(p => (p._id as string).slice(-6)).join(','),
-      receivedIds: photoIds.map(id => (id as string).slice(-6)).join(','),
-    });
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // SAFETY CHECK: Verify all photos belong to user AND are regular display photos
-    // ═══════════════════════════════════════════════════════════════════════════
-    for (const photoId of photoIds) {
-      const photo = await ctx.db.get(photoId);
-      if (!photo) {
-        throw new Error('Photo not found');
-      }
-      if (photo.userId !== userId) {
-        throw new Error('Unauthorized photo modification');
-      }
-      // Do not allow reordering verification_reference photos
-      if (photo.photoType === 'verification_reference') {
-        throw new Error('Cannot reorder verification reference photos');
-      }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // VALIDATION: Ensure same photo count and same IDs (no photo loss)
-    // ═══════════════════════════════════════════════════════════════════════════
-    const receivedIds = new Set(photoIds.map(id => id as string));
-    const sameCount = photoIds.length === originalCount;
-    const allOriginalPresent = regularPhotos.every(p => receivedIds.has(p._id as string));
-    const noExtraIds = photoIds.every(id => originalIds.has(id as string));
-    const noDuplicates = receivedIds.size === photoIds.length;
-
-    if (!sameCount || !allOriginalPresent || !noExtraIds || !noDuplicates) {
-      console.error('[PHOTO_REORDER_ABORT] Validation failed:', {
-        sameCount,
-        allOriginalPresent,
-        noExtraIds,
-        noDuplicates,
-        originalCount,
-        receivedCount: photoIds.length,
-      });
-      throw new Error('Photo reorder validation failed: photo count mismatch or missing photos');
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // SAFE REORDER: Update order values only (order determines primary, not isPrimary)
-    // Legacy: Still write isPrimary for backward compatibility but it's derived from order
-    // ═══════════════════════════════════════════════════════════════════════════
-    for (let i = 0; i < photoIds.length; i++) {
-      await ctx.db.patch(photoIds[i], {
-        order: i,
-        // LEGACY: Keep isPrimary in sync for backward compat, but order is source of truth
-        isPrimary: i === 0,
-      });
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PRIMARY PHOTO: Derive from order=0, NOT from isPrimary query
-    // This is the single source of truth for primary photo
-    // ═══════════════════════════════════════════════════════════════════════════
-    const primaryPhoto = await ctx.db.get(photoIds[0]);
-    if (primaryPhoto) {
-      await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto.url });
-    }
-
-    console.log('[PHOTO_REORDER_SAVE] Reordered', photoIds.length, 'photos, primary (order=0):', photoIds[0]);
-
-    return { success: true, primaryPhotoId: photoIds[0], primaryPhotoUrl: primaryPhoto?.url };
   },
 });
 
@@ -713,23 +590,6 @@ export const getUserPhotos = query({
     // BUG FIX: Filter out verification_reference photos (those are private, not for profile display)
     const normalPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
 
-    return normalPhotos.sort((a, b) => a.order - b.order);
-  },
-});
-
-export const getCurrentUserPhotos = query({
-  args: {
-    token: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const user = await requireAuthenticatedSessionUser(ctx, args.token);
-
-    const photos = await ctx.db
-      .query('photos')
-      .withIndex('by_user_order', (q) => q.eq('userId', user._id))
-      .collect();
-
-    const normalPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
     return normalPhotos.sort((a, b) => a.order - b.order);
   },
 });
@@ -1342,13 +1202,7 @@ export const cleanupPendingUpload = mutation({
       .filter((q) => q.eq(q.field('storageId'), args.storageId))
       .first();
 
-    const privateProfiles = await ctx.db.query('userPrivateProfiles').collect();
-    const privateProfileUsingStorage = privateProfiles.find((profile) =>
-      Array.isArray((profile as any).privatePhotoStorageIds) &&
-      (profile as any).privatePhotoStorageIds.includes(args.storageId)
-    );
-
-    if (photoUsingStorage || privateProfileUsingStorage) {
+    if (photoUsingStorage) {
       // Photo exists - do NOT delete storage, just clean up pending record
       await ctx.db.delete(pending._id);
       return { success: true, deleted: false, reason: 'in_use' };
@@ -1411,13 +1265,7 @@ export const cleanupStalePendingUploads = mutation({
         .filter((q) => q.eq(q.field('storageId'), pending.storageId))
         .first();
 
-      const privateProfiles = await ctx.db.query('userPrivateProfiles').collect();
-      const privateProfileUsingStorage = privateProfiles.find((profile) =>
-        Array.isArray((profile as any).privatePhotoStorageIds) &&
-        (profile as any).privatePhotoStorageIds.includes(pending.storageId)
-      );
-
-      if (photoUsingStorage || privateProfileUsingStorage) {
+      if (photoUsingStorage) {
         // Photo exists - only delete pending record, NOT storage
         await ctx.db.delete(pending._id);
         skippedCount++;
@@ -1549,89 +1397,5 @@ export const retryFailedStorageDeletions = internalMutation({
     }
 
     return { successCount, failCount, abandonedCount, processed: failedDeletions.length };
-  },
-});
-
-// ---------------------------------------------------------------------------
-// Per-Photo Blur (Phase-1 feature)
-// ---------------------------------------------------------------------------
-
-/**
- * Toggle blur on a specific photo by its order (slot index).
- * This is the backend source of truth for per-photo blur state.
- * When isBlurred=true, other users see this photo with blur applied.
- */
-export const setPhotoBlur = mutation({
-  args: {
-    token: v.string(),
-    order: v.number(), // Photo slot index (0-8)
-    isBlurred: v.boolean(),
-  },
-  handler: async (ctx, args) => {
-    // Validate session token
-    const userId = await validateSessionToken(ctx, args.token);
-    if (!userId) {
-      throw new Error('Unauthorized: invalid or expired session');
-    }
-
-    // Find the photo by userId and order
-    const photo = await ctx.db
-      .query('photos')
-      .withIndex('by_user_order', (q) =>
-        q.eq('userId', userId).eq('order', args.order)
-      )
-      .first();
-
-    if (!photo) {
-      // No photo at this slot - silently succeed (user may have deleted it)
-      return { success: true, isBlurred: args.isBlurred, photoFound: false };
-    }
-
-    // Update the blur state
-    await ctx.db.patch(photo._id, { isBlurred: args.isBlurred });
-
-    return { success: true, isBlurred: args.isBlurred, photoFound: true };
-  },
-});
-
-/**
- * Batch update blur state for multiple photos at once.
- * Used when saving Edit Profile to persist all blur changes atomically.
- */
-export const setPhotosBlur = mutation({
-  args: {
-    token: v.string(),
-    blurStates: v.array(v.object({
-      order: v.number(),
-      isBlurred: v.boolean(),
-    })),
-  },
-  handler: async (ctx, args) => {
-    // Validate session token
-    const userId = await validateSessionToken(ctx, args.token);
-    if (!userId) {
-      throw new Error('Unauthorized: invalid or expired session');
-    }
-
-    // Get all user's photos
-    const photos = await ctx.db
-      .query('photos')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
-
-    // Create a map of order -> photo for quick lookup
-    const photosByOrder = new Map(photos.map(p => [p.order, p]));
-
-    // Update each photo's blur state
-    let updatedCount = 0;
-    for (const { order, isBlurred } of args.blurStates) {
-      const photo = photosByOrder.get(order);
-      if (photo) {
-        await ctx.db.patch(photo._id, { isBlurred });
-        updatedCount++;
-      }
-    }
-
-    return { success: true, updatedCount };
   },
 });

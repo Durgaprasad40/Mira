@@ -1,54 +1,50 @@
 import { v } from "convex/values";
-import { mutation, query, internalMutation, MutationCtx } from "./_generated/server";
-import { Id } from "./_generated/dataModel";
+import { mutation, query, internalMutation, QueryCtx, MutationCtx } from "./_generated/server";
 import { logAdminAction } from "./adminLog";
-import { requireAdminSessionUser, requireAuthenticatedSessionUser } from "./helpers";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const SESSION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-async function createPendingVerificationSession(
-  ctx: MutationCtx,
-  userId: Id<"users">,
-  selfieStorageId: Id<"_storage">,
-  metadata: {
-    width?: number;
-    height?: number;
-    format?: string;
-  } | undefined,
-  now: number
-) {
-  const pendingSessions = await ctx.db
-    .query("verificationSessions")
-    .withIndex("by_user_status", (q) =>
-      q.eq("userId", userId).eq("status", "pending")
-    )
-    .collect();
+/**
+ * Validate admin access from session token.
+ * Returns the admin user if valid, throws if unauthorized.
+ */
+async function requireAdmin(ctx: QueryCtx | MutationCtx, token: string) {
+  const now = Date.now();
 
-  for (const session of pendingSessions) {
-    await ctx.db.patch(session._id, { status: "expired" });
+  // Look up session by token
+  const session = await ctx.db
+    .query("sessions")
+    .withIndex("by_token", (q) => q.eq("token", token))
+    .first();
+
+  if (!session || session.expiresAt < now) {
+    throw new Error("Unauthorized: Invalid or expired session");
   }
 
-  const sessionId = await ctx.db.insert("verificationSessions", {
-    userId,
-    selfieStorageId,
-    status: "pending",
-    selfieMetadata: metadata,
-    createdAt: now,
-    expiresAt: now + SESSION_EXPIRY_MS,
-  });
+  // Get user and verify admin status
+  const user = await ctx.db.get(session.userId);
+  if (!user || !user.isActive || user.isBanned) {
+    throw new Error("Unauthorized: Invalid user");
+  }
 
-  await ctx.db.patch(userId, {
-    verificationStatus: "pending_verification",
-  });
+  // Check if session was revoked
+  if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
+    throw new Error("Unauthorized: Session revoked");
+  }
 
-  return { sessionId };
+  // Verify admin privilege
+  if (!user.isAdmin) {
+    throw new Error("Unauthorized: Admin access required");
+  }
+
+  return user;
 }
 
 // Create a new verification session
 export const createVerificationSession = mutation({
   args: {
-    token: v.string(),
+    userId: v.id("users"),
     selfieStorageId: v.id("_storage"),
     metadata: v.optional(
       v.object({
@@ -59,38 +55,88 @@ export const createVerificationSession = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { token, selfieStorageId, metadata } = args;
+    const { userId, selfieStorageId, metadata } = args;
     const now = Date.now();
-    const user = await requireAuthenticatedSessionUser(ctx, token);
 
-    return await createPendingVerificationSession(
-      ctx,
-      user._id,
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    // Expire old pending sessions for this user
+    const pendingSessions = await ctx.db
+      .query("verificationSessions")
+      .withIndex("by_user_status", (q) =>
+        q.eq("userId", userId).eq("status", "pending")
+      )
+      .collect();
+
+    for (const session of pendingSessions) {
+      await ctx.db.patch(session._id, { status: "expired" });
+    }
+
+    // Create new session
+    const sessionId = await ctx.db.insert("verificationSessions", {
+      userId,
       selfieStorageId,
-      metadata,
-      now
-    );
+      status: "pending",
+      selfieMetadata: metadata,
+      createdAt: now,
+      expiresAt: now + SESSION_EXPIRY_MS,
+    });
+
+    // Update user verification status
+    await ctx.db.patch(userId, {
+      verificationStatus: "pending_verification",
+    });
+
+    return { sessionId };
   },
 });
 
 // Review a verification session (admin action)
 export const reviewVerificationSession = mutation({
   args: {
-    token: v.string(),
     sessionId: v.id("verificationSessions"),
     approved: v.boolean(),
     rejectionReason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    await requireAdminSessionUser(ctx, args.token);
-    throw new Error("Deprecated: use adminReviewVerification");
+    const { sessionId, approved, rejectionReason } = args;
+    const now = Date.now();
+
+    const session = await ctx.db.get(sessionId);
+    if (!session) throw new Error("Session not found");
+    if (session.status !== "pending") throw new Error("Session is not pending");
+
+    if (approved) {
+      await ctx.db.patch(sessionId, {
+        status: "approved",
+        reviewedAt: now,
+      });
+      await ctx.db.patch(session.userId, {
+        isVerified: true,
+        verificationStatus: "verified",
+        verificationEnforcementLevel: "none",
+        verificationCompletedAt: now,
+      });
+    } else {
+      await ctx.db.patch(sessionId, {
+        status: "rejected",
+        rejectionReason,
+        reviewedAt: now,
+      });
+      await ctx.db.patch(session.userId, {
+        verificationStatus: "unverified",
+      });
+    }
+
+    return { success: true };
   },
 });
 
 // Retry verification (rate-limited)
 export const retryVerification = mutation({
   args: {
-    token: v.string(),
+    userId: v.id("users"),
     selfieStorageId: v.id("_storage"),
     metadata: v.optional(
       v.object({
@@ -101,10 +147,8 @@ export const retryVerification = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { token, selfieStorageId, metadata } = args;
+    const { userId, selfieStorageId, metadata } = args;
     const now = Date.now();
-    const user = await requireAuthenticatedSessionUser(ctx, token);
-    const userId = user._id;
 
     // Rate limit: max 3 rejected sessions per 30 days
     const recentRejected = await ctx.db
@@ -124,23 +168,43 @@ export const retryVerification = mutation({
       );
     }
 
-    return await createPendingVerificationSession(
-      ctx,
+    // Expire old pending sessions
+    const pendingSessions = await ctx.db
+      .query("verificationSessions")
+      .withIndex("by_user_status", (q) =>
+        q.eq("userId", userId).eq("status", "pending")
+      )
+      .collect();
+
+    for (const session of pendingSessions) {
+      await ctx.db.patch(session._id, { status: "expired" });
+    }
+
+    const sessionId = await ctx.db.insert("verificationSessions", {
       userId,
       selfieStorageId,
-      metadata,
-      now
-    );
+      status: "pending",
+      selfieMetadata: metadata,
+      createdAt: now,
+      expiresAt: now + SESSION_EXPIRY_MS,
+    });
+
+    await ctx.db.patch(userId, {
+      verificationStatus: "pending_verification",
+    });
+
+    return { sessionId };
   },
 });
 
 // Get verification status for a user
 export const getVerificationStatus = query({
   args: {
-    token: v.string(),
+    userId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const user = await requireAuthenticatedSessionUser(ctx, args.token);
+    const user = await ctx.db.get(args.userId);
+    if (!user) return null;
 
     const status = user.verificationStatus || "unverified";
 
@@ -148,7 +212,7 @@ export const getVerificationStatus = query({
     const pendingSession = await ctx.db
       .query("verificationSessions")
       .withIndex("by_user_status", (q) =>
-        q.eq("userId", user._id).eq("status", "pending")
+        q.eq("userId", args.userId).eq("status", "pending")
       )
       .first();
 
@@ -163,11 +227,10 @@ export const getVerificationStatus = query({
 // Dismiss verification reminder
 export const dismissVerificationReminder = mutation({
   args: {
-    token: v.string(),
+    userId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const user = await requireAuthenticatedSessionUser(ctx, args.token);
-    await ctx.db.patch(user._id, {
+    await ctx.db.patch(args.userId, {
       verificationReminderDismissedAt: Date.now(),
     });
     return { success: true };
@@ -322,7 +385,7 @@ export const getPendingManualReviews = query({
     const { token, limit = 50, offset = 0 } = args;
 
     // Admin gate: verify session token belongs to an admin
-    await requireAdminSessionUser(ctx, token);
+    await requireAdmin(ctx, token);
 
     // Get pending verification sessions
     const pendingSessions = await ctx.db
@@ -396,7 +459,7 @@ export const adminReviewVerification = mutation({
     const now = Date.now();
 
     // Admin gate: verify session token belongs to an admin
-    const admin = await requireAdminSessionUser(ctx, token);
+    const admin = await requireAdmin(ctx, token);
 
     const session = await ctx.db.get(sessionId);
     if (!session) throw new Error("Session not found");

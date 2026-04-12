@@ -96,16 +96,6 @@ function countAllPromptsAnswered(profile: any): number {
   return 0;
 }
 
-function countPrivatePhotos(profile: any): number {
-  if (Array.isArray(profile?.privatePhotoStorageIds) && profile.privatePhotoStorageIds.length > 0) {
-    return profile.privatePhotoStorageIds.length;
-  }
-  if (Array.isArray(profile?.privatePhotoUrls)) {
-    return profile.privatePhotoUrls.length;
-  }
-  return 0;
-}
-
 /**
  * Compute base score (0-50) from profile completeness.
  * - Photos: 0-15 (3 pts per photo, max 5)
@@ -114,7 +104,8 @@ function countPrivatePhotos(profile: any): number {
  * - Verification: 0-10
  */
 function computeBaseScore(profile: any): number {
-  const photoCount = countPrivatePhotos(profile);
+  // Phase-2 profiles use privatePhotoUrls
+  const photoCount = profile.privatePhotoUrls?.length ?? 0;
   const photoScore = Math.min(15, photoCount * 3);
 
   const desireLen = profile.privateBio?.trim().length ?? 0;
@@ -272,7 +263,7 @@ export const debugRanking = query({
 
     // Compute score breakdown
     // Base score components
-    const photoCount = countPrivatePhotos(profile);
+    const photoCount = profile.privatePhotoUrls?.length ?? 0;
     const photoScore = Math.min(15, photoCount * 3);
 
     const desireLen = profile.privateBio?.trim().length ?? 0;

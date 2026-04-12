@@ -1,3 +1,8 @@
+/**
+ * LEGACY DARE V1
+ * Not part of the active Phase-2 Truth or Dare tab flow.
+ * Retained because the older chat-driven dare route is still reachable elsewhere.
+ */
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';

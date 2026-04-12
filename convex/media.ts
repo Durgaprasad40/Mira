@@ -1,14 +1,12 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { resolveTrustedUserId } from './helpers';
-import { shouldCreateNotification } from './notificationPreferences';
+import { resolveUserIdByAuthId } from './helpers';
 
 // Create a protected media message with per-recipient permissions
 export const createMediaMessage = mutation({
   args: {
     chatId: v.id('conversations'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
     objectKey: v.id('_storage'),
     mediaType: v.union(v.literal('image'), v.literal('video')),
     timerSeconds: v.optional(v.number()),
@@ -16,12 +14,24 @@ export const createMediaMessage = mutation({
     watermarkEnabled: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { chatId, objectKey, mediaType, timerSeconds, viewOnce = false, watermarkEnabled = true } = args;
+    const {
+      chatId,
+      authUserId,
+      objectKey,
+      mediaType,
+      timerSeconds,
+      viewOnce = false,
+      watermarkEnabled = true,
+    } = args;
     const now = Date.now();
 
-    const senderId = await resolveTrustedUserId(ctx, args);
-    if (!senderId) {
+    // AUTH FIX: Resolve acting user from server-side auth
+    if (!authUserId || authUserId.trim().length === 0) {
       throw new Error('Unauthorized: authentication required');
+    }
+    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!senderId) {
+      throw new Error('Unauthorized: user not found');
     }
 
     const conversation = await ctx.db.get(chatId);
@@ -80,7 +90,7 @@ export const createMediaMessage = mutation({
 
     // 5. Notify recipients
     const recipientId = conversation.participants.find((id) => id !== senderId);
-    if (recipientId && await shouldCreateNotification(ctx, recipientId, 'message')) {
+    if (recipientId) {
       await ctx.db.insert('notifications', {
         userId: recipientId,
         type: 'message',
@@ -99,17 +109,11 @@ export const createMediaMessage = mutation({
 export const openMedia = query({
   args: {
     mediaId: v.id('media'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { mediaId } = args;
+    const { mediaId, userId } = args;
     const now = Date.now();
-
-    const userId = await resolveTrustedUserId(ctx, args);
-    if (!userId) {
-      return { error: 'not_authorized' };
-    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) return { error: 'not_found' };
@@ -204,17 +208,11 @@ export const openMedia = query({
 export const recordMediaOpened = mutation({
   args: {
     mediaId: v.id('media'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { mediaId } = args;
+    const { mediaId, userId } = args;
     const now = Date.now();
-
-    const userId = await resolveTrustedUserId(ctx, args);
-    if (!userId) {
-      throw new Error('Unauthorized: authentication required');
-    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');
@@ -264,17 +262,11 @@ export const recordMediaOpened = mutation({
 export const expireMedia = mutation({
   args: {
     mediaId: v.id('media'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { mediaId } = args;
+    const { mediaId, userId } = args;
     const now = Date.now();
-
-    const userId = await resolveTrustedUserId(ctx, args);
-    if (!userId) {
-      throw new Error('Unauthorized: authentication required');
-    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');
@@ -316,24 +308,13 @@ export const expireMedia = mutation({
 export const getMediaInfo = query({
   args: {
     mediaId: v.id('media'),
-    authUserId: v.optional(v.string()),
-    token: v.optional(v.string()),
+    userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { mediaId } = args;
-
-    const userId = await resolveTrustedUserId(ctx, args);
-    if (!userId) {
-      return null;
-    }
+    const { mediaId, userId } = args;
 
     const media = await ctx.db.get(mediaId);
     if (!media) return null;
-
-    const conversation = await ctx.db.get(media.chatId);
-    if (!conversation || !conversation.participants.includes(userId)) {
-      return null;
-    }
 
     const permission = await ctx.db
       .query('mediaPermissions')

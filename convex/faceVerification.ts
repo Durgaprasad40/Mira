@@ -93,10 +93,8 @@ export const getVerificationReferencePhotoUrl = internalQuery({
       return verificationPhoto.url;
     }
 
-    // Fall back to primary photo - ORDER IS SOURCE OF TRUTH
-    // Sort by order and take first (order=0 is primary)
-    const sortedPhotos = photos.sort((a, b) => a.order - b.order);
-    const primaryPhoto = sortedPhotos[0];
+    // Fall back to primary photo
+    const primaryPhoto = photos.find(p => p.isPrimary) || photos[0];
     if (!primaryPhoto) {
       return null;
     }

@@ -276,12 +276,12 @@ export async function ensureUserByAuthId(
  * Validate session token and return the authenticated user ID.
  * Uses session table to verify token is valid, not expired, and not revoked.
  *
- * @param ctx - Convex query or mutation context
+ * @param ctx - Convex mutation context
  * @param token - Session token to validate
  * @returns userId if valid, null if invalid/expired/revoked
  */
 export async function validateSessionToken(
-  ctx: QueryCtx | MutationCtx,
+  ctx: MutationCtx,
   token: string
 ): Promise<Id<"users"> | null> {
   const now = Date.now();
@@ -308,123 +308,4 @@ export async function validateSessionToken(
   }
 
   return session.userId;
-}
-
-/**
- * Resolve the currently authenticated user from a trusted server-side identity.
- * Accepts either:
- * - a validated session token (primary path for this app), or
- * - Convex auth identity subject (fallback for future auth integrations)
- *
- * If authUserId is also provided, it must resolve to the same user or the
- * request is rejected.
- */
-export async function resolveTrustedUserId(
-  ctx: QueryCtx | MutationCtx,
-  {
-    token,
-    authUserId,
-  }: {
-    token?: string | null;
-    authUserId?: string | null;
-  }
-): Promise<Id<"users"> | null> {
-  let trustedUserId: Id<"users"> | null = null;
-
-  const trimmedToken = token?.trim();
-  if (trimmedToken) {
-    trustedUserId = await validateSessionToken(ctx, trimmedToken);
-  } else {
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      trustedUserId = await resolveUserIdByAuthId(ctx, identity.subject);
-    }
-  }
-
-  if (!trustedUserId) {
-    return null;
-  }
-
-  const trimmedAuthUserId = authUserId?.trim();
-  if (!trimmedAuthUserId) {
-    return trustedUserId;
-  }
-
-  const claimedUserId = await resolveUserIdByAuthId(ctx, trimmedAuthUserId);
-  if (!claimedUserId || claimedUserId !== trustedUserId) {
-    return null;
-  }
-
-  return trustedUserId;
-}
-
-/**
- * Resolve the current user from trusted auth and fail closed when missing.
- * Explore and other client-callable reads should use this instead of
- * trusting caller-supplied IDs.
- */
-export async function getTrustedUserId(
-  ctx: QueryCtx | MutationCtx,
-  auth: {
-    token?: string | null;
-    authUserId?: string | null;
-  },
-  errorMessage = 'Unauthorized: authentication required'
-): Promise<Id<'users'>> {
-  const userId = await resolveTrustedUserId(ctx, auth);
-  if (!userId) {
-    throw new Error(errorMessage);
-  }
-
-  return userId;
-}
-
-/**
- * Backward-compatible Convex-auth helper for callers that rely on
- * authenticated identity rather than app session tokens.
- */
-export async function requireAuthenticatedUserId(
-  ctx: QueryCtx | MutationCtx,
-  errorMessage = 'Unauthorized: authentication required'
-): Promise<Id<'users'>> {
-  const identity = await ctx.auth.getUserIdentity();
-  const authUserId = identity?.subject?.trim();
-
-  if (!authUserId) {
-    throw new Error(errorMessage);
-  }
-
-  const userId = await resolveUserIdByAuthId(ctx, authUserId);
-  if (!userId) {
-    throw new Error(errorMessage);
-  }
-
-  const user = await ctx.db.get(userId);
-  if (!user || !user.isActive || !!user.deletedAt || !!user.isBanned) {
-    throw new Error(errorMessage);
-  }
-
-  return userId;
-}
-
-/**
- * Resolve the authenticated session user from a validated session token.
- * Shared by endpoints that need the full user document after auth.
- */
-export async function requireAuthenticatedSessionUser(
-  ctx: QueryCtx | MutationCtx,
-  token: string,
-  errorMessage = 'Unauthorized: invalid or expired session'
-): Promise<Doc<'users'>> {
-  const userId = await validateSessionToken(ctx, token);
-  if (!userId) {
-    throw new Error(errorMessage);
-  }
-
-  const user = await ctx.db.get(userId);
-  if (!user || !user.isActive || !!user.deletedAt || !!user.isBanned) {
-    throw new Error(errorMessage);
-  }
-
-  return user;
 }

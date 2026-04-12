@@ -2,7 +2,6 @@ import { v } from 'convex/values';
 import { mutation, query, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
-import { shouldCreateNotification } from './notificationPreferences';
 
 // D1-REPAIR: Helper to check if either user has blocked the other
 // Returns true if blocked (should prevent messaging)
@@ -260,22 +259,16 @@ export const swipe = mutation({
 
       // Notify the receiver
       // D3: Add dedupeKey and expiresAt for consistency with messages.ts notifications
-      if (await shouldCreateNotification(ctx, toUserId, 'message')) {
-        await ctx.db.insert('notifications', {
-          userId: toUserId,
-          type: 'message',
-          title: 'New Direct Message!',
-          body: `${fromUser.name} sent you a message`,
-          data: {
-            actorUserId: fromUserId as string,
-            targetUserId: toUserId as string,
-            conversationId: conversationId as string,
-          } as any,
-          dedupeKey: `message:${conversationId}:unread`,
-          createdAt: now,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
-      }
+      await ctx.db.insert('notifications', {
+        userId: toUserId,
+        type: 'message',
+        title: 'New Direct Message!',
+        body: `${fromUser.name} sent you a message`,
+        data: { conversationId: conversationId, userId: fromUserId },
+        dedupeKey: `message:${conversationId}:unread`,
+        createdAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+      });
 
       return { success: true, isMatch: false };
     }
@@ -466,39 +459,27 @@ export const swipe = mutation({
         // Create notifications for both users
         // D5: Add dedupeKey and expiresAt for match notifications
         const toUser = await ctx.db.get(toUserId);
-        if (await shouldCreateNotification(ctx, fromUserId, 'match')) {
-          await ctx.db.insert('notifications', {
-            userId: fromUserId,
-            type: 'match',
-            title: 'New Match!',
-            body: `You matched with ${toUser?.name || 'someone'}!`,
-            data: {
-              actorUserId: toUserId as string,
-              targetUserId: fromUserId as string,
-              matchId: matchId as string,
-            } as any,
-            dedupeKey: `match:${matchId}`,
-            createdAt: now,
-            expiresAt: now + 24 * 60 * 60 * 1000,
-          });
-        }
+        await ctx.db.insert('notifications', {
+          userId: fromUserId,
+          type: 'match',
+          title: 'New Match!',
+          body: `You matched with ${toUser?.name || 'someone'}!`,
+          data: { matchId: matchId },
+          dedupeKey: `match:${matchId}`,
+          createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
 
-        if (await shouldCreateNotification(ctx, toUserId, 'match')) {
-          await ctx.db.insert('notifications', {
-            userId: toUserId,
-            type: 'match',
-            title: 'New Match!',
-            body: `You matched with ${fromUser.name}!`,
-            data: {
-              actorUserId: fromUserId as string,
-              targetUserId: toUserId as string,
-              matchId: matchId as string,
-            } as any,
-            dedupeKey: `match:${matchId}`,
-            createdAt: now,
-            expiresAt: now + 24 * 60 * 60 * 1000,
-          });
-        }
+        await ctx.db.insert('notifications', {
+          userId: toUserId,
+          type: 'match',
+          title: 'New Match!',
+          body: `You matched with ${fromUser.name}!`,
+          data: { matchId: matchId },
+          dedupeKey: `match:${matchId}`,
+          createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
 
         return { success: true, isMatch: true, matchId };
       }
@@ -510,39 +491,27 @@ export const swipe = mutation({
     const senderName = fromUser.name || 'Someone';
 
     if (action === 'like') {
-      if (await shouldCreateNotification(ctx, toUserId, 'like')) {
-        await ctx.db.insert('notifications', {
-          userId: toUserId,
-          type: 'like',
-          title: `${senderName} liked you`,
-          body: 'Check your likes to see their profile',
-          data: {
-            actorUserId: fromUserId as string,
-            targetUserId: toUserId as string,
-            likeType: 'like',
-          } as any,
-          dedupeKey: `like:${fromUserId}`,
-          createdAt: now,
-          // No expiresAt - notification stays until acted on
-        });
-      }
+      await ctx.db.insert('notifications', {
+        userId: toUserId,
+        type: 'like',
+        title: `${senderName} liked you`,
+        body: 'Check your likes to see their profile',
+        data: { userId: fromUserId, likeType: 'like' },
+        dedupeKey: `like:${fromUserId}`,
+        createdAt: now,
+        // No expiresAt - notification stays until acted on
+      });
     } else if (action === 'super_like') {
-      if (await shouldCreateNotification(ctx, toUserId, 'super_like')) {
-        await ctx.db.insert('notifications', {
-          userId: toUserId,
-          type: 'super_like',
-          title: `${senderName} super liked you`,
-          body: 'Open your likes to view their profile',
-          data: {
-            actorUserId: fromUserId as string,
-            targetUserId: toUserId as string,
-            likeType: 'super_like',
-          } as any,
-          dedupeKey: `super_like:${fromUserId}`,
-          createdAt: now,
-          // No expiresAt - notification stays until acted on
-        });
-      }
+      await ctx.db.insert('notifications', {
+        userId: toUserId,
+        type: 'super_like',
+        title: `${senderName} super liked you`,
+        body: 'Open your likes to view their profile',
+        data: { userId: fromUserId, likeType: 'super_like' },
+        dedupeKey: `super_like:${fromUserId}`,
+        createdAt: now,
+        // No expiresAt - notification stays until acted on
+      });
     }
 
     return { success: true, isMatch: false };

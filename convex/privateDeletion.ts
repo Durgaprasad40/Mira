@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { mutation, query, QueryCtx, MutationCtx } from "./_generated/server";
+import { mutation, query, QueryCtx } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { userIdToString, resolveUserIdByAuthId } from "./helpers";
 
@@ -22,34 +22,16 @@ export async function isPrivateDataDeleted(
   return deletionState?.status === 'pending_deletion';
 }
 
-async function getCurrentAuthenticatedUserId(
-  ctx: QueryCtx | MutationCtx
-): Promise<Id<"users"> | null> {
-  const identity = await ctx.auth.getUserIdentity();
-  if (!identity?.subject) {
-    return null;
-  }
-
-  return await resolveUserIdByAuthId(ctx, identity.subject);
-}
-
-async function requireCurrentAuthenticatedUserId(
-  ctx: MutationCtx
-): Promise<Id<"users">> {
-  const userId = await getCurrentAuthenticatedUserId(ctx);
-  if (!userId) {
-    throw new Error("Authentication required");
-  }
-
-  return userId;
-}
-
 // Get private deletion state for a user
 export const getPrivateDeletionState = query({
-  args: {},
-  handler: async (ctx) => {
-    const userId = await getCurrentAuthenticatedUserId(ctx);
+  args: {
+    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!userId) {
+      console.log('[getPrivateDeletionState] User not found for authUserId:', args.userId);
       return {
         status: 'active' as const,
         deletedAt: null,
@@ -80,16 +62,17 @@ export const getPrivateDeletionState = query({
 
 // Initiate private data deletion (soft delete with 30-day recovery window)
 export const initiatePrivateDeletion = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const userId = await requireCurrentAuthenticatedUserId(ctx);
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
     const now = Date.now();
     const recoverUntil = now + THIRTY_DAYS_MS;
 
     // Check if deletion state already exists
     const existingState = await ctx.db
       .query("privateDeletionStates")
-      .withIndex("by_userId", (q) => q.eq("userId", userId))
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
       .first();
 
     if (existingState) {
@@ -103,7 +86,7 @@ export const initiatePrivateDeletion = mutation({
     } else {
       // Create new record
       await ctx.db.insert("privateDeletionStates", {
-        userId,
+        userId: args.userId,
         status: 'pending_deletion',
         deletedAt: now,
         recoverUntil,
@@ -122,14 +105,15 @@ export const initiatePrivateDeletion = mutation({
 
 // Recover private data (restore from soft delete)
 export const recoverPrivateDeletion = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const userId = await requireCurrentAuthenticatedUserId(ctx);
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
     const now = Date.now();
 
     const existingState = await ctx.db
       .query("privateDeletionStates")
-      .withIndex("by_userId", (q) => q.eq("userId", userId))
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
       .first();
 
     if (!existingState) {
@@ -246,7 +230,25 @@ export const cleanupExpiredDeletions = mutation({
         await ctx.db.delete(prompt._id);
       }
 
-      // 8. Delete todConnectRequests to user
+      // 8. Delete revealRequests from user
+      const revealsFrom = await ctx.db
+        .query("revealRequests")
+        .withIndex("by_from_user", (q) => q.eq("fromUserId", userId))
+        .collect();
+      for (const reveal of revealsFrom) {
+        await ctx.db.delete(reveal._id);
+      }
+
+      // 9. Delete revealRequests to user
+      const revealsTo = await ctx.db
+        .query("revealRequests")
+        .withIndex("by_to_user", (q) => q.eq("toUserId", userId))
+        .collect();
+      for (const reveal of revealsTo) {
+        await ctx.db.delete(reveal._id);
+      }
+
+      // 10. Delete todConnectRequests to user
       const connectsTo = await ctx.db
         .query("todConnectRequests")
         .withIndex("by_to_user", (q) => q.eq("toUserId", userIdString))

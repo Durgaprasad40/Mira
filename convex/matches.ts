@@ -1,8 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { getTrustedUserId, resolveUserIdByAuthId } from './helpers';
-import { getUnreadCount as getConversationUnreadCount } from './unreadCounts';
+import { resolveUserIdByAuthId } from './helpers';
 
 // Get all matches for a user
 // FIX: Excludes blocked users (bidirectional)
@@ -107,7 +106,20 @@ export const getMatches = query({
         )
       ),
       Promise.all(
-        validConversations.map((c) => getConversationUnreadCount(ctx, c._id, userId))
+        validConversations.map((c) =>
+          ctx.db
+            .query('messages')
+            .withIndex('by_conversation', (q) =>
+              q.eq('conversationId', c._id)
+            )
+            .filter((q) =>
+              q.and(
+                q.neq(q.field('senderId'), userId),
+                q.eq(q.field('readAt'), undefined)
+              )
+            )
+            .collect()
+        )
       ),
     ]);
 
@@ -116,7 +128,7 @@ export const getMatches = query({
       validConversations.map((c, i) => [c._id as string, lastMessages[i]])
     );
     const unreadCountMap = new Map(
-      validConversations.map((c, i) => [c._id as string, unreadCounts[i] || 0])
+      validConversations.map((c, i) => [c._id as string, unreadCounts[i]?.length || 0])
     );
 
     // Build result
@@ -176,16 +188,10 @@ export const getMatches = query({
 export const getMatch = query({
   args: {
     matchId: v.id('matches'),
-    token: v.optional(v.string()),
-    authUserId: v.optional(v.string()),
+    userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { matchId } = args;
-    const userId = await getTrustedUserId(
-      ctx,
-      args,
-      'Unauthorized: match access requires a valid session'
-    );
+    const { matchId, userId } = args;
 
     const match = await ctx.db.get(matchId);
     if (!match || !match.isActive) return null;

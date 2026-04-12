@@ -58,7 +58,6 @@ export interface Phase2PrivateProfileRecord {
   promptAnswers?: { promptId: string; question: string; answer: string }[];
 
   // Media
-  privatePhotoStorageIds?: string[];
   privatePhotoUrls: string[];
 
   // Lifestyle (imported from Phase-1 or edited)
@@ -156,16 +155,6 @@ function normalizePhase2Prompts(
       question: p.question?.trim() ?? '',
       answer: p.answer?.trim() ?? '',
     }));
-}
-
-function countPrivatePhotos(profile: { privatePhotoStorageIds?: string[]; privatePhotoUrls?: string[] }): number {
-  if (Array.isArray(profile.privatePhotoStorageIds) && profile.privatePhotoStorageIds.length > 0) {
-    return profile.privatePhotoStorageIds.length;
-  }
-  if (Array.isArray(profile.privatePhotoUrls)) {
-    return profile.privatePhotoUrls.length;
-  }
-  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +257,7 @@ export function normalizePhase2Candidate(
     bioLength: profile.privateBio?.trim().length ?? 0,
     prompts: normalizedPrompts,
     promptsAnswered,
-    photoCount: countPrivatePhotos(profile),
+    photoCount: profile.privatePhotoUrls?.length ?? 0,
 
     // Activity & Freshness
     lastActiveAt: metrics?.lastPhase2ActiveAt ?? profile.updatedAt,
