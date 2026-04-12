@@ -1,288 +1,61 @@
-import React, { useMemo } from 'react';
-import {
-  View,
-  Text,
-  FlatList,
-  TouchableOpacity,
-  StyleSheet,
-  ActivityIndicator,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+/**
+ * MY CONFESSIONS - BLOCKED
+ *
+ * This feature is temporarily blocked due to missing backend function:
+ * - api.confessions.getMyConfessionsPage (doesn't exist - did you mean getMyConfessions?)
+ *
+ * DO NOT REMOVE this blocking code until backend is implemented.
+ */
+import React from 'react';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { usePaginatedQuery } from 'convex/react';
-import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
-import { useAuthStore } from '@/stores/authStore';
-import { useConfessionStore } from '@/stores/confessionStore';
-import { isDemoMode } from '@/hooks/useConvex';
-import { ConfessionMood } from '@/types';
-import ConfessionCard from '@/components/confessions/ConfessionCard';
-
-const MY_CONFESSIONS_PAGE_SIZE = 20;
 
 export default function MyConfessionsScreen() {
+  const insets = useSafeAreaInsets();
   const router = useRouter();
-  const userId = useAuthStore((s) => s.userId);
-  // BUGFIX: In live mode, never use demo_user_1 fallback for Convex queries
-  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
-  // Demo store
-  const demoConfessions = useConfessionStore((s) => s.confessions);
-  const userReactions = useConfessionStore((s) => s.userReactions);
-
-  // Convex query (only when not in demo mode)
-  const {
-    results: convexMyConfessions,
-    status: convexMyConfessionsStatus,
-    loadMore: loadMoreMyConfessions,
-  } = usePaginatedQuery(
-    api.confessions.getMyConfessionsPage,
-    !isDemoMode && currentUserId ? {} : 'skip',
-    { initialNumItems: MY_CONFESSIONS_PAGE_SIZE }
-  );
-
-  // Unified confession type for the list
-  type MyConfession = {
-    id: string;
-    text: string;
-    isAnonymous: boolean;
-    mood: ConfessionMood;
-    authorName?: string;
-    authorPhotoUrl?: string;
-    replyCount: number;
-    reactionCount: number;
-    createdAt: number;
-    isExpired: boolean;
-  };
-
-  // Merge data
-  const myConfessions = useMemo((): MyConfession[] => {
-    if (!isDemoMode && convexMyConfessions) {
-      return convexMyConfessions.map((c: any) => ({
-        id: c._id,
-        text: c.text,
-        isAnonymous: c.isAnonymous,
-        mood: c.mood,
-        authorName: c.authorName,
-        authorPhotoUrl: c.authorPhotoUrl,
-        replyCount: c.replyCount,
-        reactionCount: c.reactionCount,
-        createdAt: c.createdAt,
-        isExpired: c.isExpired,
-      }));
-    }
-    // Demo mode: filter to current user's confessions and add isExpired flag
-    const now = Date.now();
-    return demoConfessions
-      .filter((c) => c.userId === currentUserId)
-      .map((c) => ({
-        id: c.id,
-        text: c.text,
-        isAnonymous: c.isAnonymous,
-        mood: c.mood,
-        authorName: c.authorName,
-        authorPhotoUrl: c.authorPhotoUrl,
-        replyCount: c.replyCount,
-        reactionCount: c.reactionCount,
-        createdAt: c.createdAt,
-        isExpired: (c.expiresAt ?? (c.createdAt + 24 * 60 * 60 * 1000)) < now,
-      }))
-      .sort((a, b) => b.createdAt - a.createdAt);
-  }, [isDemoMode, convexMyConfessions, demoConfessions, currentUserId]);
-
-  const isLoading = !isDemoMode && convexMyConfessionsStatus === 'LoadingFirstPage';
-
-  const handleLoadMore = () => {
-    if (isDemoMode || convexMyConfessionsStatus !== 'CanLoadMore') {
-      return;
-    }
-    loadMoreMyConfessions(MY_CONFESSIONS_PAGE_SIZE);
-  };
-
-  const handleOpenThread = (confessionId: string) => {
-    router.push({
-      pathname: '/(main)/confession-thread',
-      params: { confessionId },
-    } as any);
-  };
-
-  const handleOpenCompose = () => {
-    router.push('/(main)/compose-confession' as any);
-  };
+  if (__DEV__) {
+    console.log('[BLOCKED FEATURE]', 'my_confessions');
+  }
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => router.back()}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <Ionicons name="chevron-back" size={24} color={COLORS.text} />
+    <View style={[styles.container, { paddingTop: insets.top }]}>
+      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+      </TouchableOpacity>
+
+      <View style={styles.content}>
+        <View style={styles.iconContainer}>
+          <Ionicons name="chatbox-outline" size={64} color={COLORS.primary} />
+        </View>
+        <Text style={styles.title}>My Confessions</Text>
+        <Text style={styles.subtitle}>Coming Soon</Text>
+        <Text style={styles.description}>
+          View your confessions. This feature is being enhanced.
+        </Text>
+        <TouchableOpacity style={styles.goBackBtn} onPress={() => router.back()}>
+          <Text style={styles.goBackText}>Go Back</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>My Confessions</Text>
-        <View style={{ width: 24 }} />
       </View>
-
-      {/* Hint */}
-      <Text style={styles.hint}>
-        Expired confessions are hidden from the public feed but saved here forever.
-      </Text>
-
-      {/* List */}
-      <FlatList
-        data={myConfessions}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <ConfessionCard
-            id={item.id}
-            text={item.text}
-            isAnonymous={item.isAnonymous}
-            mood={item.mood}
-            topEmojis={[]}
-            userEmoji={userReactions[item.id] || null}
-            replyPreviews={[]}
-            replyCount={item.replyCount}
-            reactionCount={item.reactionCount}
-            authorName={item.authorName}
-            createdAt={item.createdAt}
-            isExpired={item.isExpired}
-            onPress={() => handleOpenThread(item.id)}
-            onReact={() => {}}
-          />
-        )}
-        contentContainerStyle={styles.listContent}
-        showsVerticalScrollIndicator={false}
-        ListFooterComponent={
-          !isDemoMode && myConfessions.length > 0 ? (
-            <View style={styles.paginationFooter}>
-              {convexMyConfessionsStatus === 'LoadingMore' ? (
-                <ActivityIndicator size="small" color={COLORS.primary} />
-              ) : convexMyConfessionsStatus === 'CanLoadMore' ? (
-                <TouchableOpacity style={styles.loadMoreButton} onPress={handleLoadMore}>
-                  <Text style={styles.loadMoreButtonText}>Load more</Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-          ) : null
-        }
-        ListEmptyComponent={
-          isLoading ? (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color={COLORS.primary} />
-              <Text style={styles.loadingText}>Loading...</Text>
-            </View>
-          ) : (
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyEmoji}>📝</Text>
-              <Text style={styles.emptyTitle}>No confessions yet</Text>
-              <Text style={styles.emptySubtitle}>
-                Your confessions will appear here after you post them.
-              </Text>
-              <TouchableOpacity style={styles.emptyButton} onPress={handleOpenCompose}>
-                <Text style={styles.emptyButtonText}>Post a Confession</Text>
-              </TouchableOpacity>
-            </View>
-          )
-        }
-      />
-    </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.backgroundDark,
+  container: { flex: 1, backgroundColor: COLORS.background },
+  backButton: { position: 'absolute', top: 60, left: 16, zIndex: 10, padding: 8 },
+  content: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 },
+  iconContainer: {
+    width: 120, height: 120, borderRadius: 60,
+    backgroundColor: COLORS.primary + '20',
+    justifyContent: 'center', alignItems: 'center', marginBottom: 24,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
-  },
-  headerTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  hint: {
-    fontSize: 12,
-    color: COLORS.textLight,
-    textAlign: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-  },
-  listContent: {
-    paddingTop: 4,
-    paddingBottom: 40,
-  },
-  paginationFooter: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingBottom: 24,
-  },
-  loadMoreButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 18,
-    backgroundColor: COLORS.white,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: COLORS.border,
-  },
-  loadMoreButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingTop: 80,
-    gap: 12,
-  },
-  loadingText: {
-    fontSize: 16,
-    color: COLORS.textLight,
-  },
-  emptyContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 40,
-    marginTop: 80,
-  },
-  emptyEmoji: {
-    fontSize: 56,
-    marginBottom: 16,
-  },
-  emptyTitle: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: COLORS.text,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  emptySubtitle: {
-    fontSize: 15,
-    color: COLORS.textLight,
-    textAlign: 'center',
-    lineHeight: 22,
-    marginBottom: 24,
-  },
-  emptyButton: {
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 24,
-  },
-  emptyButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: COLORS.white,
-  },
+  title: { fontSize: 24, fontWeight: '700', color: COLORS.text, marginBottom: 8, textAlign: 'center' },
+  subtitle: { fontSize: 18, fontWeight: '600', color: COLORS.primary, marginBottom: 16 },
+  description: { fontSize: 14, color: COLORS.textLight, textAlign: 'center', lineHeight: 22, marginBottom: 32 },
+  goBackBtn: { backgroundColor: COLORS.primary, paddingHorizontal: 32, paddingVertical: 14, borderRadius: 12 },
+  goBackText: { fontSize: 16, fontWeight: '600', color: '#FFFFFF' },
 });

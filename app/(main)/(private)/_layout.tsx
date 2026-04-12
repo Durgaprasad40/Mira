@@ -21,7 +21,8 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 // REMOVED: setPhase2Active import - no longer toggling phase via module variable
 // Notification phase is now derived directly from route in useNotifications
-import { prewarmTodCache } from './(tabs)/truth-or-dare';
+// BLOCKED: prewarmTodCache removed - truth-or-dare screen is blocked
+// import { prewarmTodCache } from './(tabs)/truth-or-dare';
 import { decideNextOnboardingRoute } from '@/lib/onboardingRouting';
 import { useRouteTrace } from '@/lib/devTrace';
 import { usePhaseMode, isSharedRoute } from '@/lib/usePhaseMode';
@@ -376,34 +377,39 @@ export default function PrivateLayout() {
   // NOTE: Nav lock reset is handled ONLY by explicit exit actions (X button in onboarding)
   // No automatic segment-based or focus-based reset here to prevent double-entry bugs
 
-  const convexPrivateProfile = useQuery(
-    api.privateProfiles.getCurrentOnboardingProfile,
-    !isDemoMode && token ? { token } : 'skip'
-  );
+  // BLOCKED: getCurrentOnboardingProfile doesn't exist - skip query
+  // const convexPrivateProfile = useQuery(
+  //   api.privateProfiles.getCurrentOnboardingProfile,
+  //   !isDemoMode && token ? { token } : 'skip'
+  // );
+  const convexPrivateProfile = null; // Blocked until backend is implemented
 
-  // PHASE-1 GUARD: Query Phase-1 onboarding status to block Phase-2 access if incomplete
-  const phase1OnboardingStatus = useQuery(
-    api.users.getOnboardingStatus,
-    !isDemoMode && token ? { token } : 'skip'
-  );
+  // BLOCKED: getOnboardingStatus expects { userId } not { token } - using local store only
+  // const phase1OnboardingStatus = useQuery(
+  //   api.users.getOnboardingStatus,
+  //   !isDemoMode && token ? { token } : 'skip'
+  // );
+  // Type annotation to avoid 'never' inference
+  const phase1OnboardingStatus: {
+    phase2OnboardingCompleted?: boolean;
+    privateWelcomeConfirmed?: boolean;
+    faceVerificationStatus?: string;
+    normalPhotoCount?: number;
+    onboardingCompleted?: boolean;
+  } | null = null; // Blocked until backend args are fixed
 
-  // PREWARM: Start T/D queries early so data is cached when user opens T/D tab
-  const prewarmPromptsData = useQuery(
-    api.truthDare.listActivePromptsWithTop2Answers,
-    !isDemoMode && token ? { token } : 'skip'
-  );
-  // P0 FIX: Prewarm token-authenticated trending data so blocked users stay filtered
-  const prewarmTrendingData = useQuery(
-    api.truthDare.getTrendingTruthAndDare,
-    !isDemoMode && token ? { token } : 'skip'
-  );
+  // BLOCKED: T/D queries have wrong args and screen is blocked
+  // const prewarmPromptsData = useQuery(...);
+  // const prewarmTrendingData = useQuery(...);
+  const prewarmPromptsData = undefined;
+  const prewarmTrendingData = undefined;
 
-  // Push data into module-level cache as soon as it arrives
-  useEffect(() => {
-    if (prewarmPromptsData !== undefined || prewarmTrendingData !== undefined) {
-      prewarmTodCache(prewarmPromptsData, prewarmTrendingData);
-    }
-  }, [prewarmPromptsData, prewarmTrendingData]);
+  // BLOCKED: prewarmTodCache no longer exists
+  // useEffect(() => {
+  //   if (prewarmPromptsData !== undefined || prewarmTrendingData !== undefined) {
+  //     prewarmTodCache(prewarmPromptsData, prewarmTrendingData);
+  //   }
+  // }, [prewarmPromptsData, prewarmTrendingData]);
 
   // ST-001 FIX: Hydrate privateProfileStore from Convex on app restart
   // This ensures Phase-2 profile state survives app restarts

@@ -1,248 +1,61 @@
-import React, { useState, useMemo } from 'react';
-import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  FlatList,
-  StyleSheet,
-  ActivityIndicator,
-} from 'react-native';
-import { Image } from 'expo-image';
-import { Ionicons } from '@expo/vector-icons';
+/**
+ * PERSON PICKER - BLOCKED
+ *
+ * This feature is temporarily blocked due to missing backend function:
+ * - api.confessions.getEligibleTagTargets (doesn't exist)
+ *
+ * DO NOT REMOVE this blocking code until backend is implemented.
+ */
+import React from 'react';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useQuery } from 'convex/react';
-import { api } from '@/convex/_generated/api';
+import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
-import { DEMO_PROFILES } from '@/lib/demoData';
-import { useDemoStore } from '@/stores/demoStore';
-import { useInteractionStore } from '@/stores/interactionStore';
-import { useAuthStore } from '@/stores/authStore';
-import { isDemoMode } from '@/hooks/useConvex';
-import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
-
-interface PersonItem {
-  id: string;
-  name: string;
-  photoUrl: string | null;
-}
 
 export default function PersonPickerScreen() {
+  const insets = useSafeAreaInsets();
   const router = useRouter();
-  const [search, setSearch] = useState('');
-  const { userId } = useAuthStore();
 
-  // Demo mode data
-  const storeMatches = useDemoStore((s) => s.matches);
-
-  // Convex query for eligible tag targets (only in live mode)
-  const convexTargets = useQuery(
-    api.confessions.getEligibleTagTargets,
-    !isDemoMode && userId ? {} : 'skip'
-  );
-
-  // Determine loading state
-  const isLoading = !isDemoMode && convexTargets === undefined;
-
-  // Build people list based on mode
-  const people: PersonItem[] = useMemo(() => {
-    if (!isDemoMode) {
-      // Live mode: use Convex query results
-      if (!convexTargets) return [];
-      return convexTargets.map((t) => ({
-        id: t.id,
-        name: t.name,
-        photoUrl: t.photoUrl,
-      }));
-    }
-
-    // Demo mode: use store matches + demo profiles
-    const fromMatches: PersonItem[] = storeMatches.map((m) => ({
-      id: m.otherUser.id,
-      name: m.otherUser.name,
-      photoUrl: m.otherUser.photoUrl,
-    }));
-    const fromProfiles: PersonItem[] = DEMO_PROFILES.map((p) => ({
-      id: p._id,
-      name: p.name,
-      photoUrl: getPrimaryPhotoUrl(p.photos),
-    }));
-
-    const seen = new Set<string>();
-    const all: PersonItem[] = [];
-    for (const person of [...fromMatches, ...fromProfiles]) {
-      if (!seen.has(person.id)) {
-        seen.add(person.id);
-        all.push(person);
-      }
-    }
-    return all;
-  }, [isDemoMode, convexTargets, storeMatches]);
-
-  // Filter by search
-  const filtered = useMemo(() => {
-    if (!search.trim()) return people;
-    const q = search.toLowerCase();
-    return people.filter((p) => p.name.toLowerCase().includes(q));
-  }, [people, search]);
-
-  const handleSelect = (personId: string, name: string) => {
-    useInteractionStore.getState().setPersonPickerResult({ userId: personId, name });
-    router.back();
-  };
+  if (__DEV__) {
+    console.log('[BLOCKED FEATURE]', 'person_picker');
+  }
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-          <Ionicons name="close" size={24} color={COLORS.text} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Confess to Someone</Text>
-        <View style={{ width: 24 }} />
-      </View>
+    <View style={[styles.container, { paddingTop: insets.top }]}>
+      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+      </TouchableOpacity>
 
-      <View style={styles.searchRow}>
-        <Ionicons name="search" size={18} color={COLORS.textMuted} />
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search..."
-          placeholderTextColor={COLORS.textMuted}
-          value={search}
-          onChangeText={setSearch}
-          autoFocus
-        />
-      </View>
-
-      {isLoading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Loading...</Text>
+      <View style={styles.content}>
+        <View style={styles.iconContainer}>
+          <Ionicons name="people-outline" size={64} color={COLORS.primary} />
         </View>
-      ) : (
-        <FlatList
-          data={filtered}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              style={styles.personRow}
-              onPress={() => handleSelect(item.id, item.name)}
-            >
-              <Image
-                source={{ uri: item.photoUrl || undefined }}
-                style={styles.personPhoto}
-                contentFit="cover"
-              />
-              <Text style={styles.personName}>{item.name}</Text>
-              <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-            </TouchableOpacity>
-          )}
-          contentContainerStyle={styles.list}
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Ionicons name="heart-outline" size={48} color={COLORS.textMuted} />
-              <Text style={styles.emptyTitle}>No one to tag yet</Text>
-              <Text style={styles.emptyText}>
-                Like or match with someone first to confess to them.
-              </Text>
-            </View>
-          }
-        />
-      )}
+        <Text style={styles.title}>Select Person</Text>
+        <Text style={styles.subtitle}>Coming Soon</Text>
+        <Text style={styles.description}>
+          Select a person to tag. This feature is being enhanced.
+        </Text>
+        <TouchableOpacity style={styles.goBackBtn} onPress={() => router.back()}>
+          <Text style={styles.goBackText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.white,
+  container: { flex: 1, backgroundColor: COLORS.background },
+  backButton: { position: 'absolute', top: 60, left: 16, zIndex: 10, padding: 8 },
+  content: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 },
+  iconContainer: {
+    width: 120, height: 120, borderRadius: 60,
+    backgroundColor: COLORS.primary + '20',
+    justifyContent: 'center', alignItems: 'center', marginBottom: 24,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
-  },
-  headerTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  searchRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginHorizontal: 16,
-    marginTop: 12,
-    marginBottom: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 12,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 15,
-    color: COLORS.text,
-  },
-  list: {
-    paddingBottom: 40,
-    flexGrow: 1,
-  },
-  personRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
-  },
-  personPhoto: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  personName: {
-    flex: 1,
-    fontSize: 15,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 12,
-  },
-  loadingText: {
-    fontSize: 16,
-    color: COLORS.textMuted,
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 32,
-    paddingTop: 80,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: COLORS.text,
-    marginTop: 16,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  emptyText: {
-    textAlign: 'center',
-    fontSize: 15,
-    color: COLORS.textMuted,
-    lineHeight: 22,
-  },
+  title: { fontSize: 24, fontWeight: '700', color: COLORS.text, marginBottom: 8, textAlign: 'center' },
+  subtitle: { fontSize: 18, fontWeight: '600', color: COLORS.primary, marginBottom: 16 },
+  description: { fontSize: 14, color: COLORS.textLight, textAlign: 'center', lineHeight: 22, marginBottom: 32 },
+  goBackBtn: { backgroundColor: COLORS.primary, paddingHorizontal: 32, paddingVertical: 14, borderRadius: 12 },
+  goBackText: { fontSize: 16, fontWeight: '600', color: '#FFFFFF' },
 });
