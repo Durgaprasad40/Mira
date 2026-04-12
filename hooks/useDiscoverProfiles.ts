@@ -9,12 +9,17 @@ import { useShallow } from "zustand/react/shallow";
 
 const EMPTY_PROFILES: any[] = [];
 
+type UseDiscoverProfilesResult = {
+  profiles: any[];
+  isLoading: boolean;
+};
+
 /**
  * Hook to get discover profiles.
  * Works in both demo mode (uses demoStore) and live mode (queries Convex).
  * Returns profiles excluding blocked users, matched users, and conversation partners.
  */
-export function useDiscoverProfiles(): any[] {
+export function useDiscoverProfiles(): UseDiscoverProfilesResult {
   const userId = useAuthStore((s) => s.userId);
 
   const demo = useDemoStore(
@@ -39,18 +44,28 @@ export function useDiscoverProfiles(): any[] {
   }, [userId]);
 
   const result = useQuery(api.discover.getDiscoverProfiles, queryArgs);
+  const isLoading = !isDemoMode && !!userId && result === undefined;
 
   return useMemo(() => {
     // Demo mode: filter from demoStore profiles
     if (isDemoMode) {
-      return demo.profiles.filter((p) => !excludedSet.has(p._id));
+      return {
+        profiles: demo.profiles.filter((p) => !excludedSet.has(p._id)),
+        isLoading: false,
+      };
     }
 
     // Live mode: use Convex query result (returns array directly)
     if (result && Array.isArray(result)) {
-      return result;
+      return {
+        profiles: result,
+        isLoading: false,
+      };
     }
 
-    return EMPTY_PROFILES;
-  }, [demo.profiles, result, excludedSet]);
+    return {
+      profiles: EMPTY_PROFILES,
+      isLoading,
+    };
+  }, [demo.profiles, excludedSet, isLoading, result]);
 }

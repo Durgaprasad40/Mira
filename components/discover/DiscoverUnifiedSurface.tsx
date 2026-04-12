@@ -46,7 +46,7 @@ export default function DiscoverUnifiedSurface({
 }: DiscoverUnifiedSurfaceProps) {
   useScreenTrace("DISCOVER_UNIFIED");
 
-  const profiles = useDiscoverProfiles();
+  const { profiles, isLoading: isProfilesLoading } = useDiscoverProfiles();
   const [mode, setMode] = useState<DiscoverSurfaceMode>(initialMode);
   const [modeHydrated, setModeHydrated] = useState(false);
   const [hiddenProfileIds, setHiddenProfileIds] = useState<string[]>([]);
@@ -179,6 +179,8 @@ export default function DiscoverUnifiedSurface({
     []
   );
 
+  const showDiscoverLoading = !modeHydrated || isProfilesLoading;
+
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
       <View style={styles.header}>
@@ -211,49 +213,52 @@ export default function DiscoverUnifiedSurface({
         })}
       </View>
 
-      {!modeHydrated ? (
-        <View style={styles.loadingState}>
-          <ActivityIndicator size="small" color={COLORS.primary} />
-        </View>
-      ) : null}
-
       <View style={styles.contentArea}>
-        <Animated.View
-          pointerEvents={mode === "cards" ? "auto" : "none"}
-          style={[styles.layer, { opacity: cardsOpacity, zIndex: mode === "cards" ? 2 : 1 }]}
-        >
-          <DiscoverCardStack
-            externalProfiles={visibleProfiles}
-            hideHeader
-            onProfileAction={handleProfileConsumed}
-          />
-        </Animated.View>
+        {showDiscoverLoading ? (
+          <View style={styles.loadingState}>
+            <ActivityIndicator size="small" color={COLORS.primary} />
+            <Text style={styles.loadingText}>Finding people for you...</Text>
+          </View>
+        ) : (
+          <>
+            <Animated.View
+              pointerEvents={mode === "cards" ? "auto" : "none"}
+              style={[styles.layer, { opacity: cardsOpacity, zIndex: mode === "cards" ? 2 : 1 }]}
+            >
+              <DiscoverCardStack
+                externalProfiles={visibleProfiles}
+                hideHeader
+                onProfileAction={handleProfileConsumed}
+              />
+            </Animated.View>
 
-        <Animated.View
-          pointerEvents={mode === "browse" ? "auto" : "none"}
-          style={[styles.layer, { opacity: browseOpacity, zIndex: mode === "browse" ? 2 : 1 }]}
-        >
-          <FlatList
-            ref={browseListRef}
-            data={browseProfiles}
-            renderItem={renderBrowseCard}
-            keyExtractor={(item) => item.id}
-            numColumns={2}
-            showsVerticalScrollIndicator={false}
-            columnWrapperStyle={styles.gridRow}
-            contentContainerStyle={styles.gridContent}
-            ListHeaderComponent={
-              <Text style={styles.browseHint}>
-                Browse uses the same ordered Discover profiles. Tap a card to open the full profile and act from there.
-              </Text>
-            }
-            ListEmptyComponent={browseEmpty}
-            onScroll={(event) => {
-              browseScrollOffsetRef.current = event.nativeEvent.contentOffset.y;
-            }}
-            scrollEventThrottle={16}
-          />
-        </Animated.View>
+            <Animated.View
+              pointerEvents={mode === "browse" ? "auto" : "none"}
+              style={[styles.layer, { opacity: browseOpacity, zIndex: mode === "browse" ? 2 : 1 }]}
+            >
+              <FlatList
+                ref={browseListRef}
+                data={browseProfiles}
+                renderItem={renderBrowseCard}
+                keyExtractor={(item) => item.id}
+                numColumns={2}
+                showsVerticalScrollIndicator={false}
+                columnWrapperStyle={styles.gridRow}
+                contentContainerStyle={styles.gridContent}
+                ListHeaderComponent={
+                  <Text style={styles.browseHint}>
+                    Browse uses the same ordered Discover profiles. Tap a card to open the full profile and act from there.
+                  </Text>
+                }
+                ListEmptyComponent={browseEmpty}
+                onScroll={(event) => {
+                  browseScrollOffsetRef.current = event.nativeEvent.contentOffset.y;
+                }}
+                scrollEventThrottle={16}
+              />
+            </Animated.View>
+          </>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -323,9 +328,15 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
   loadingState: {
+    flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    paddingBottom: 8,
+    gap: 10,
+    paddingHorizontal: 24,
+  },
+  loadingText: {
+    fontSize: 14,
+    color: COLORS.textLight,
   },
   contentArea: {
     flex: 1,
