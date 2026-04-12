@@ -17,6 +17,7 @@ import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
 import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
+const PHASE2_CHAT_TEMPORARILY_DISABLED = true;
 
 const connectionIcon = (source: string) => {
   switch (source) {
@@ -40,6 +41,28 @@ export default function ChatsScreen() {
   useScreenTrace("P2_CHATS");
   const router = useRouter();
   const insets = useSafeAreaInsets();
+
+  if (PHASE2_CHAT_TEMPORARILY_DISABLED) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top + 24, paddingHorizontal: 20 }]}>
+        <View style={styles.disabledState}>
+          <Ionicons name="chatbubble-ellipses-outline" size={42} color={C.primary} />
+          <Text style={styles.disabledTitle}>Private chat is coming soon</Text>
+          <Text style={styles.disabledText}>
+            Deep Connect matching stays active, but private chat is temporarily disabled for test users while we finish hardening it.
+          </Text>
+          <TouchableOpacity
+            style={styles.disabledPrimaryButton}
+            onPress={() => router.replace('/(main)/(private)/(tabs)/desire-land' as any)}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.disabledPrimaryButtonText}>Back to Deep Connect</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   const conversations = usePrivateChatStore((s) => s.conversations);
   const messages = usePrivateChatStore((s) => s.messages);
   const blockUser = usePrivateChatStore((s) => s.blockUser);
@@ -449,6 +472,37 @@ export default function ChatsScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  disabledState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+  },
+  disabledTitle: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: C.text,
+    textAlign: 'center',
+  },
+  disabledText: {
+    maxWidth: 320,
+    fontSize: 14,
+    lineHeight: 21,
+    color: C.textLight,
+    textAlign: 'center',
+  },
+  disabledPrimaryButton: {
+    marginTop: 8,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 999,
+    backgroundColor: C.primary,
+  },
+  disabledPrimaryButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.background,
+  },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingVertical: 12,

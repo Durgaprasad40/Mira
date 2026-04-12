@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  Alert, View, Text, StyleSheet, ScrollView, TouchableOpacity,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -9,7 +9,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
-import { usePrivateChatStore } from '@/stores/privateChatStore';
 import type { IncognitoProfile } from '@/types';
 
 const C = INCOGNITO_COLORS;
@@ -42,43 +41,11 @@ export default function PrivateProfileViewScreen() {
     );
   }
 
-  const { conversations, createConversation, unlockUser } = usePrivateChatStore();
-
   const handleMessage = () => {
-    if (!profile) return;
-
-    // Check if conversation already exists with this user
-    const existing = conversations.find((c) => c.participantId === profile.id);
-    if (existing) {
-      router.push({ pathname: '/(main)/incognito-chat', params: { id: existing.id } } as any);
-      return;
-    }
-
-    // Create new conversation
-    const convoId = `ic_profile_${profile.id}_${Date.now()}`;
-
-    unlockUser({
-      id: profile.id,
-      username: profile.username,
-      photoUrl: profile.photoUrl,
-      age: profile.age,
-      source: 'tod',
-      unlockedAt: Date.now(),
-    });
-
-    createConversation({
-      id: convoId,
-      participantId: profile.id,
-      participantName: profile.username,
-      participantAge: profile.age,
-      participantPhotoUrl: profile.photoUrl,
-      lastMessage: 'Say hi!',
-      lastMessageAt: Date.now(),
-      unreadCount: 0,
-      connectionSource: 'tod',
-    });
-
-    router.push({ pathname: '/(main)/incognito-chat', params: { id: convoId } } as any);
+    Alert.alert(
+      'Coming soon',
+      'Private chat is temporarily disabled for test users while we finish hardening it.'
+    );
   };
 
   const genderIcon = profile.gender === 'male' ? 'male' : profile.gender === 'female' ? 'female' : 'male-female';

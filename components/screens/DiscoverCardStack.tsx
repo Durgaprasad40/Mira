@@ -46,12 +46,8 @@ import { getProfileCompleteness, NUDGE_MESSAGES } from "@/lib/profileCompletenes
 import { ProfileNudge } from "@/components/ui/ProfileNudge";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
-import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
-import type { IncognitoConversation, ConnectionSource } from "@/types";
 import type { Id } from "@/convex/_generated/dataModel";
-
-import { markPhase2Matched } from "@/lib/phase2MatchSession";
 
 // Type for swipe actions
 type SwipeAction = 'like' | 'pass' | 'super_like';
@@ -60,37 +56,10 @@ import { log } from "@/utils/logger";
 // Demo mode match rate (20% for realistic testing)
 const DEMO_MATCH_RATE = 0.2;
 
-/** Create Phase 2 private conversation for match. Returns true if new, false if duplicate. */
+/** Phase-2 chat is temporarily disabled for testing; keep users in Deep Connect. */
 function handlePhase2Match(profile: { id: string; name: string; age?: number; photoUrl?: string }): boolean {
-  // Check idempotency via shared session module
-  if (!markPhase2Matched(profile.id)) {
-    return false;
-  }
-
-  const conversationId = `ic_desire_${profile.id}`;
-  const conversation: IncognitoConversation = {
-    id: conversationId,
-    participantId: profile.id,
-    participantName: profile.name,
-    participantAge: profile.age ?? 0,
-    participantPhotoUrl: profile.photoUrl ?? '',
-    lastMessage: 'Matched! Start chatting.',
-    lastMessageAt: Date.now(),
-    unreadCount: 0,
-    connectionSource: 'desire' as ConnectionSource,
-  };
-
-  usePrivateChatStore.getState().createConversation(conversation);
-  usePrivateChatStore.getState().unlockUser({
-    id: profile.id,
-    username: profile.name,
-    photoUrl: profile.photoUrl ?? '',
-    age: profile.age ?? 0,
-    source: 'tod',
-    unlockedAt: Date.now(),
-  });
-
-  log.info('[MATCH]', 'private', { name: profile.name });
+  Toast.show("Private chat is coming soon for test users.");
+  log.info('[MATCH]', 'phase2_chat_disabled', { name: profile.name, profileId: profile.id });
   return true;
 }
 

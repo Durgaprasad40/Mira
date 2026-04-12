@@ -42,6 +42,8 @@ import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import type { IncognitoMessage } from '@/types';
 import { formatBottleSpinCooldown } from '@/lib/bottleSpin';
 
+const PHASE2_CHAT_TEMPORARILY_DISABLED = true;
+
 /** Look up Phase-2 intent label for a participant (checks both demoStore and DEMO_INCOGNITO_PROFILES) */
 const getIntentLabel = (participantId: string): string | null => {
   // First check demoStore profiles (for DesireLand matches with demo_profile_* IDs)
@@ -72,6 +74,33 @@ export default function PrivateChatScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const flatListRef = useRef<FlashListRef<IncognitoMessage>>(null);
+
+  if (PHASE2_CHAT_TEMPORARILY_DISABLED) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top + 24, paddingHorizontal: 20 }]}>
+        <View style={styles.disabledState}>
+          <Ionicons name="chatbubble-ellipses-outline" size={42} color={INCOGNITO_COLORS.primary} />
+          <Text style={styles.disabledTitle}>Private chat is coming soon</Text>
+          <Text style={styles.disabledText}>
+            This screen is temporarily disabled for test users while we finish hardening Phase-2 chat persistence.
+          </Text>
+          <TouchableOpacity
+            style={styles.disabledPrimaryButton}
+            onPress={() => {
+              if (router.canGoBack()) {
+                router.back();
+              } else {
+                router.replace('/(main)/(private)/(tabs)/desire-land' as any);
+              }
+            }}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.disabledPrimaryButtonText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
 
   // ─── Composer height tracking (matches locked chat-rooms pattern) ───
   const [composerHeight, setComposerHeight] = useState(56);
@@ -131,6 +160,8 @@ export default function PrivateChatScreen() {
 
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
+  const pendingClientIdRef = useRef<string | null>(null);
+  const pendingMessageTextRef = useRef<string | null>(null);
 
   // ─── Scroll to bottom helper (with Android timing fix - matches locked pattern) ───
   const scrollToBottom = useCallback((animated = true) => {
@@ -404,18 +435,48 @@ export default function PrivateChatScreen() {
     });
   }, [id, conversation?.id]);
 
+  const handleTextChange = useCallback((value: string) => {
+    const trimmed = value.trim();
+    if (
+      pendingClientIdRef.current &&
+      trimmed &&
+      pendingMessageTextRef.current !== trimmed
+    ) {
+      pendingClientIdRef.current = null;
+      pendingMessageTextRef.current = null;
+    }
+
+    setText(value);
+  }, []);
+
   const handleSend = () => {
     if (!text.trim() || !id) return;
+    const trimmed = text.trim();
+    if (
+      pendingClientIdRef.current &&
+      pendingMessageTextRef.current !== trimmed
+    ) {
+      pendingClientIdRef.current = null;
+    }
+
+    let clientMessageId = pendingClientIdRef.current;
+    if (!clientMessageId) {
+      clientMessageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+      pendingClientIdRef.current = clientMessageId;
+    }
+    pendingMessageTextRef.current = trimmed;
     const newMsg: IncognitoMessage = {
-      id: `im_${Date.now()}`,
+      id: clientMessageId,
       conversationId: id,
       senderId: 'me',
-      content: text.trim(),
+      content: trimmed,
       createdAt: Date.now(),
       isRead: false,
     };
     addMessage(id, newMsg);
     setText('');
+    pendingClientIdRef.current = null;
+    pendingMessageTextRef.current = null;
   };
 
   const handleReport = (reason: string) => {
@@ -848,7 +909,7 @@ export default function PrivateChatScreen() {
                 placeholder={isRecording ? 'Recording voice message...' : 'Type a message...'}
                 placeholderTextColor={isRecording ? '#FF4444' : C.textLight}
                 value={text}
-                onChangeText={setText}
+                onChangeText={handleTextChange}
                 multiline
                 scrollEnabled
                 textAlignVertical="top"
@@ -1003,6 +1064,37 @@ const SOFT_ACCENT_ACTIVE = '#9B7DC4'; // Slightly brighter for active timer
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  disabledState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+  },
+  disabledTitle: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: C.text,
+    textAlign: 'center',
+  },
+  disabledText: {
+    maxWidth: 320,
+    fontSize: 14,
+    lineHeight: 21,
+    color: C.textLight,
+    textAlign: 'center',
+  },
+  disabledPrimaryButton: {
+    marginTop: 8,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 999,
+    backgroundColor: C.primary,
+  },
+  disabledPrimaryButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.background,
+  },
   keyboardAvoid: { flex: 1 },
   chatArea: { flex: 1 },
   emptyContainer: {
