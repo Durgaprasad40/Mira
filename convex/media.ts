@@ -115,6 +115,19 @@ export const openMedia = query({
     const { mediaId, userId } = args;
     const now = Date.now();
 
+    // AUTH FIX: Verify caller identity matches the requested userId.
+    // This prevents a client from impersonating another participant when
+    // requesting a protected media URL.
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      return { error: 'not_authorized' };
+    }
+
+    const callerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (callerUserId !== userId) {
+      return { error: 'not_authorized' };
+    }
+
     const media = await ctx.db.get(mediaId);
     if (!media) return { error: 'not_found' };
 

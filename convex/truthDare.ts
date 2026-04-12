@@ -389,14 +389,25 @@ export const respondToConnect = mutation({
     if (action === 'connect') {
       await ctx.db.patch(requestId, { status: 'connected' });
 
-      // Resolve sender to Id<'users'>
-      const senderDbId = await resolveUserIdByAuthId(ctx, request.fromUserId);
+      // T&D connect requests store fromUserId as the Convex user id.
+      // Keep a legacy auth-id fallback only for older rows that may still
+      // contain auth identifiers from earlier experiments.
+      let senderDbId = request.fromUserId as Id<'users'>;
+      let sender = await ctx.db.get(senderDbId);
+      if (!sender) {
+        const legacySenderDbId = await resolveUserIdByAuthId(ctx, request.fromUserId);
+        if (legacySenderDbId) {
+          senderDbId = legacySenderDbId;
+          sender = await ctx.db.get(legacySenderDbId);
+        }
+      }
+
       if (!senderDbId) {
         return { success: false, reason: 'Sender user not found' };
       }
-
-      // Get sender profile for response
-      const sender = await ctx.db.get(senderDbId as Id<'users'>);
+      if (!sender) {
+        return { success: false, reason: 'Sender user not found' };
+      }
 
       // Get recipient profile for response
       const recipient = await ctx.db.get(recipientDbId as Id<'users'>);
@@ -2464,7 +2475,7 @@ export const getUserConversations = query({
         // Get last message for preview
         const lastMessage = await ctx.db
           .query('messages')
-          .withIndex('by_conversation_created', (q) => q.eq('conversationId', p.conversationId))
+          .withIndex('by_conversation', (q) => q.eq('conversationId', p.conversationId))
           .order('desc')
           .first();
 

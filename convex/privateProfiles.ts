@@ -7,6 +7,18 @@ import { resolveUserIdByAuthId } from './helpers';
 export const getByUserId = query({
   args: { userId: v.id('users') },
   handler: async (ctx, args) => {
+    // AUTH FIX: Raw private profile access is self-only.
+    // Cross-user Phase-2 viewing must use the viewer-safe privateDiscover path instead.
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      return null;
+    }
+
+    const callerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!callerUserId || callerUserId !== args.userId) {
+      return null;
+    }
+
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
     if (isDeleted) {
