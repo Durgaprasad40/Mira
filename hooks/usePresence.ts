@@ -1,42 +1,25 @@
 /**
- * usePresence Hook (P0 Unified Presence System)
+ * usePresence Hook
  *
- * SINGLE SOURCE OF TRUTH for user presence (Online Now / Active Today / Offline).
- *
- * ARCHITECTURE:
- * - Calls markActive() mutation on app foreground and every 30s while active
- * - Calls markBackground() when app goes to background
- * - Calls markInactive() when app terminates (best effort)
- * - Uses reactive query getUserPresence() for real-time status
- *
- * THRESHOLDS (standardized):
- * - Online Now: lastSeenAt within 10 minutes AND appState = 'foreground'
- * - Active Today: lastSeenAt within 24 hours
- * - Offline: lastSeenAt > 24 hours ago OR appState = 'inactive'
- *
- * USAGE:
- * - Call usePresenceHeartbeat() from root _layout.tsx to start heartbeat
- * - Call useUserPresence(userId) to get reactive presence for a specific user
- * - Call useBatchPresence(userIds) to get presence for multiple users
+ * The dedicated Convex `presence.*` module no longer exists in this checkout.
+ * Presence is now derived from `users.lastActive`, which is still updated by
+ * existing auth, messaging, and chat flows.
  */
-import { useEffect, useRef, useCallback } from 'react';
-import { AppState, AppStateStatus } from 'react-native';
-import { useMutation, useQuery } from 'convex/react';
+import { useCallback, useMemo } from 'react';
+import { useQueries, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
-import { isDemoMode } from '@/hooks/useConvex';
 import { DEBUG_PRESENCE } from '@/lib/debugFlags';
 
 // =============================================================================
-// CONSTANTS (match backend)
+// CONSTANTS
 // =============================================================================
 
-/** Heartbeat interval: 30 seconds (as specified in backend) */
-export const HEARTBEAT_INTERVAL_MS = 30 * 1000;
-
-/** Throttle: Don't send heartbeats more often than every 20 seconds */
-const HEARTBEAT_THROTTLE_MS = 20 * 1000;
+/** Kept for compatibility with existing callers/docs. */
+export const HEARTBEAT_INTERVAL_MS = 15 * 1000;
+const ONLINE_WINDOW_MS = 10 * 60 * 1000;
+const ACTIVE_TODAY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // =============================================================================
 // TYPES
@@ -56,6 +39,61 @@ interface PresenceQueryOptions {
   respectPrivacy?: boolean;
 }
 
+function derivePresenceInfo(
+  lastSeenAt: number | undefined,
+  respectPrivacy?: boolean
+): PresenceInfo | undefined {
+  if (!lastSeenAt || !Number.isFinite(lastSeenAt)) {
+    return respectPrivacy
+      ? {
+          status: 'offline',
+          lastSeenAt: 0,
+          appState: 'inactive',
+          label: '',
+          isHidden: true,
+        }
+      : undefined;
+  }
+
+  const now = Date.now();
+  const delta = Math.max(0, now - lastSeenAt);
+
+  if (delta <= ONLINE_WINDOW_MS) {
+    return {
+      status: 'online',
+      lastSeenAt,
+      appState: 'foreground',
+      label: 'Online now',
+    };
+  }
+
+  if (delta <= ACTIVE_TODAY_WINDOW_MS) {
+    return {
+      status: 'active_today',
+      lastSeenAt,
+      appState: 'background',
+      label: 'Active today',
+    };
+  }
+
+  return {
+    status: 'offline',
+    lastSeenAt,
+    appState: 'inactive',
+    label: '',
+  };
+}
+
+function useCurrentViewerId(): Id<'users'> | undefined {
+  const { userId } = useAuthStore();
+  const currentUser = useQuery(
+    api.users.getCurrentUser,
+    userId ? { userId } : 'skip'
+  );
+
+  return currentUser?._id as Id<'users'> | undefined;
+}
+
 // =============================================================================
 // PRESENCE HEARTBEAT HOOK (Global)
 // =============================================================================
@@ -64,130 +102,18 @@ interface PresenceQueryOptions {
  * Start presence heartbeat for the current user.
  * Call this ONCE from root _layout.tsx.
  *
- * This hook:
- * - Sends markActive() on foreground and every 30s
- * - Sends markBackground() when app goes to background
- * - Automatically handles auth state changes
+ * The dedicated backend heartbeat endpoints were removed from the current
+ * backend contract. Keep this hook as a safe no-op so existing callers do not
+ * crash while presence continues to be derived from `users.lastActive`.
  */
 export function usePresenceHeartbeat() {
-  const { userId, token } = useAuthStore();
+  const { userId } = useAuthStore();
 
-  const markActiveMutation = useMutation(api.presence.markActive);
-  const markBackgroundMutation = useMutation(api.presence.markBackground);
-  const markInactiveMutation = useMutation(api.presence.markInactive);
-
-  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastHeartbeatRef = useRef<number>(0);
-  const currentAppStateRef = useRef<AppStateStatus>(AppState.currentState);
-
-  // Send heartbeat (markActive)
-  const sendHeartbeat = useCallback(async () => {
-    if (isDemoMode || !userId || !token) return;
-
-    const now = Date.now();
-    // Throttle heartbeats
-    if (now - lastHeartbeatRef.current < HEARTBEAT_THROTTLE_MS) {
-      return;
-    }
-
-    try {
-      lastHeartbeatRef.current = now;
-      await markActiveMutation({ token });
-
-      if (__DEV__ && DEBUG_PRESENCE) {
-        console.log(`[PRESENCE] markActive: ${userId.slice(-6)}`);
-      }
-    } catch (err) {
-      // Silent failure - don't break app
-      if (__DEV__ && DEBUG_PRESENCE) {
-        console.warn('[PRESENCE] markActive failed:', String(err).slice(0, 50));
-      }
-    }
-  }, [userId, token, markActiveMutation]);
-
-  // Mark as background
-  const markBackground = useCallback(async () => {
-    if (isDemoMode || !userId || !token) return;
-
-    try {
-      await markBackgroundMutation({ token });
-
-      if (__DEV__ && DEBUG_PRESENCE) {
-        console.log(`[PRESENCE] markBackground: ${userId.slice(-6)}`);
-      }
-    } catch (err) {
-      // Silent failure
-      if (__DEV__ && DEBUG_PRESENCE) {
-        console.warn('[PRESENCE] markBackground failed:', String(err).slice(0, 50));
-      }
-    }
-  }, [userId, token, markBackgroundMutation]);
-
-  // Mark as inactive (on logout or app terminate)
   const markInactive = useCallback(async () => {
-    if (isDemoMode || !userId || !token) return;
-
-    try {
-      await markInactiveMutation({ token });
-
-      if (__DEV__ && DEBUG_PRESENCE) {
-        console.log(`[PRESENCE] markInactive: ${userId.slice(-6)}`);
-      }
-    } catch (err) {
-      // Silent failure - best effort on terminate
+    if (__DEV__ && DEBUG_PRESENCE && userId) {
+      console.log(`[PRESENCE] heartbeat noop: ${userId.slice(-6)}`);
     }
-  }, [userId, token, markInactiveMutation]);
-
-  // Handle app state changes
-  useEffect(() => {
-    if (isDemoMode || !userId) return;
-
-    const handleAppStateChange = (nextAppState: AppStateStatus) => {
-      const prevAppState = currentAppStateRef.current;
-      currentAppStateRef.current = nextAppState;
-
-      if (nextAppState === 'active') {
-        // App came to foreground
-        if (__DEV__ && DEBUG_PRESENCE) {
-          console.log('[PRESENCE] app → foreground');
-        }
-        sendHeartbeat();
-      } else if (nextAppState === 'background' && prevAppState === 'active') {
-        // App went to background
-        if (__DEV__ && DEBUG_PRESENCE) {
-          console.log('[PRESENCE] app → background');
-        }
-        markBackground();
-      } else if (nextAppState === 'inactive') {
-        // App is terminating or transitioning
-        // markInactive is best-effort here
-        markInactive();
-      }
-    };
-
-    // Subscribe to app state changes
-    const subscription = AppState.addEventListener('change', handleAppStateChange);
-
-    // Initial heartbeat on mount
-    if (AppState.currentState === 'active') {
-      sendHeartbeat();
-    }
-
-    // Start heartbeat interval
-    heartbeatIntervalRef.current = setInterval(() => {
-      if (AppState.currentState === 'active') {
-        sendHeartbeat();
-      }
-    }, HEARTBEAT_INTERVAL_MS);
-
-    return () => {
-      subscription.remove();
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = null;
-      }
-    };
-  }, [userId, sendHeartbeat, markBackground, markInactive]);
+  }, [userId]);
 
   // Return markInactive for explicit logout scenarios
   return { markInactive };
@@ -208,12 +134,18 @@ export function useUserPresence(
   userId: Id<'users'> | null | undefined,
   options: PresenceQueryOptions = {}
 ): PresenceInfo | undefined {
-  const presence = useQuery(
-    api.presence.getUserPresence,
-    userId ? { userId, respectPrivacy: options.respectPrivacy } : 'skip'
+  const viewerId = useCurrentViewerId();
+  const profile = useQuery(
+    api.users.getUserById,
+    userId && viewerId
+      ? { userId, viewerId }
+      : 'skip'
   );
 
-  return presence;
+  return useMemo(
+    () => derivePresenceInfo(profile?.lastActive, options.respectPrivacy),
+    [profile?.lastActive, options.respectPrivacy]
+  );
 }
 
 /**
@@ -227,14 +159,55 @@ export function useBatchPresence(
   userIds: Id<'users'>[] | null | undefined,
   options: PresenceQueryOptions = {}
 ): Record<string, PresenceInfo> | undefined {
-  const presence = useQuery(
-    api.presence.getBatchPresence,
-    userIds && userIds.length > 0
-      ? { userIds, respectPrivacy: options.respectPrivacy }
-      : 'skip'
+  const viewerId = useCurrentViewerId();
+
+  const uniqueUserIds = useMemo(
+    () => Array.from(new Set((userIds ?? []).map((id) => id as string))),
+    [userIds]
   );
 
-  return presence;
+  const queries = useMemo(() => {
+    if (!viewerId || uniqueUserIds.length === 0) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      uniqueUserIds.map((id) => [
+        id,
+        {
+          query: api.users.getUserById,
+          args: {
+            userId: id as Id<'users'>,
+            viewerId,
+          },
+        },
+      ])
+    );
+  }, [viewerId, uniqueUserIds]);
+
+  const profiles = useQueries(queries);
+
+  return useMemo(() => {
+    if (!viewerId || !userIds || userIds.length === 0) {
+      return undefined;
+    }
+
+    const presenceByUserId: Record<string, PresenceInfo> = {};
+
+    for (const userId of userIds) {
+      const result = profiles[userId as string];
+      if (!result || result instanceof Error) {
+        continue;
+      }
+
+      const presence = derivePresenceInfo(result.lastActive, options.respectPrivacy);
+      if (presence) {
+        presenceByUserId[userId as string] = presence;
+      }
+    }
+
+    return presenceByUserId;
+  }, [viewerId, userIds, profiles, options.respectPrivacy]);
 }
 
 // =============================================================================

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,8 @@ import {
   ScrollView,
   TouchableOpacity,
   useWindowDimensions,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -32,6 +34,16 @@ import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { useInteractionStore } from '@/stores/interactionStore';
 import { formatDiscoverDistanceKm } from '@/lib/distanceRules';
 import { getRenderableProfilePhotos } from '@/lib/profileData';
+// P0-FIX: Haptic feedback for premium interactions
+import * as Haptics from 'expo-haptics';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withRepeat,
+  withTiming,
+  Easing,
+  interpolate,
+} from 'react-native-reanimated';
 
 // Gender labels for "Looking for" display
 const GENDER_LABELS: Record<string, string> = {
@@ -69,6 +81,154 @@ function getVerificationBadgeState(profile: { isVerified?: boolean; verification
   }
 }
 
+// P0-FIX: Profile skeleton loader component (matches profile layout)
+function ProfileSkeleton({ insets, screenWidth }: { insets: { top: number }; screenWidth: number }) {
+  const shimmerAnim = useSharedValue(0);
+
+  React.useEffect(() => {
+    shimmerAnim.value = withRepeat(
+      withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+      -1,
+      true
+    );
+  }, []);
+
+  const shimmerStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(shimmerAnim.value, [0, 1], [0.3, 0.7]),
+  }));
+
+  return (
+    <View style={skeletonStyles.container}>
+      {/* Photo placeholder */}
+      <Animated.View
+        style={[
+          skeletonStyles.photoPlaceholder,
+          { height: 500 + insets.top, paddingTop: insets.top },
+          shimmerStyle,
+        ]}
+      />
+
+      {/* Photo indicators */}
+      <View style={skeletonStyles.indicators}>
+        {[0, 1, 2].map((i) => (
+          <Animated.View
+            key={i}
+            style={[
+              skeletonStyles.indicator,
+              i === 0 && skeletonStyles.indicatorActive,
+              shimmerStyle,
+            ]}
+          />
+        ))}
+      </View>
+
+      {/* Content area */}
+      <View style={skeletonStyles.content}>
+        {/* Name row */}
+        <Animated.View style={[skeletonStyles.nameBlock, shimmerStyle]} />
+
+        {/* Trust badges row */}
+        <View style={skeletonStyles.badgesRow}>
+          <Animated.View style={[skeletonStyles.badge, shimmerStyle]} />
+          <Animated.View style={[skeletonStyles.badge, shimmerStyle]} />
+        </View>
+
+        {/* Bio section */}
+        <Animated.View style={[skeletonStyles.sectionTitle, shimmerStyle]} />
+        <Animated.View style={[skeletonStyles.textBlock, shimmerStyle]} />
+        <Animated.View style={[skeletonStyles.textBlockShort, shimmerStyle]} />
+
+        {/* Interests section */}
+        <Animated.View style={[skeletonStyles.sectionTitle, { marginTop: 24 }, shimmerStyle]} />
+        <View style={skeletonStyles.chipsRow}>
+          {[0, 1, 2, 3].map((i) => (
+            <Animated.View key={i} style={[skeletonStyles.chip, shimmerStyle]} />
+          ))}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+const skeletonStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
+  photoPlaceholder: {
+    width: '100%',
+    backgroundColor: COLORS.backgroundDark,
+  },
+  indicators: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    gap: 8,
+  },
+  indicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.border,
+  },
+  indicatorActive: {
+    width: 24,
+    backgroundColor: COLORS.textMuted,
+  },
+  content: {
+    padding: 16,
+  },
+  nameBlock: {
+    width: 180,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundDark,
+    marginBottom: 16,
+  },
+  badgesRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 24,
+  },
+  badge: {
+    width: 100,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  sectionTitle: {
+    width: 120,
+    height: 20,
+    borderRadius: 4,
+    backgroundColor: COLORS.backgroundDark,
+    marginBottom: 12,
+  },
+  textBlock: {
+    width: '100%',
+    height: 16,
+    borderRadius: 4,
+    backgroundColor: COLORS.backgroundDark,
+    marginBottom: 8,
+  },
+  textBlockShort: {
+    width: '70%',
+    height: 16,
+    borderRadius: 4,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  chipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  chip: {
+    width: 80,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.backgroundDark,
+  },
+});
+
 export default function ViewProfileScreen() {
   const { id: userId, mode, fromChat, source, actionScope } = useLocalSearchParams<{
     id: string;
@@ -85,33 +245,54 @@ export default function ViewProfileScreen() {
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
   const { userId: currentUserId, token } = useAuthStore();
+  const currentViewer = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+  );
+  const currentViewerId = currentViewer?._id as Id<'users'> | undefined;
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [showReportBlock, setShowReportBlock] = useState(false);
   const [isActionPending, setIsActionPending] = useState(false);
   const [sharedPlacesReady, setSharedPlacesReady] = useState(false);
+  // P1-FIX: Sticky header visibility state
+  const [showStickyHeader, setShowStickyHeader] = useState(false);
+  // P1-FIX: Last scroll position for hysteresis
+  const lastScrollYRef = useRef(0);
+
+  // P1-FIX: Responsive threshold based on photo height (500) + safe area + buffer
+  // Using useMemo to compute once when insets change
+  const { stickyHeaderShowThreshold, stickyHeaderHideThreshold } = useMemo(() => {
+    const photoHeight = 500;
+    const baseThreshold = photoHeight + insets.top;
+    // Show when scrolled past ~80% of photo area
+    const showAt = baseThreshold * 0.8;
+    // Hide when scrolled back to ~60% (hysteresis to prevent flicker)
+    const hideAt = baseThreshold * 0.6;
+    return { stickyHeaderShowThreshold: showAt, stickyHeaderHideThreshold: hideAt };
+  }, [insets.top]);
   const setDiscoverProfileActionResult = useInteractionStore((s) => s.setDiscoverProfileActionResult);
 
   // Phase-1: Use users.getUserById
   const convexPhase1Profile = useQuery(
-    api.users.getUserById as any,
-    !isDemoMode && !isPhase2 && userId && currentUserId && token
-      ? { userId: userId as any, token, authUserId: currentUserId }
+    api.users.getUserById,
+    !isDemoMode && !isPhase2 && userId && currentViewerId
+      ? { userId: userId as Id<'users'>, viewerId: currentViewerId }
       : 'skip'
   );
 
   // Shared Places query (Phase-1 only, not for demo mode)
   const sharedPlaces = useQuery(
     api.crossedPaths.getSharedPlaces,
-    !isDemoMode && !isPhase2 && userId && token && sharedPlacesReady
-      ? { token, profileUserId: userId as any }
+    !isDemoMode && !isPhase2 && userId && currentViewerId && sharedPlacesReady
+      ? { viewerId: currentViewerId, profileUserId: userId as Id<'users'> }
       : 'skip'
   );
 
   // Phase-2: Use privateDiscover.getProfileByUserId
   const convexPhase2Profile = useQuery(
     api.privateDiscover.getProfileByUserId,
-    !isDemoMode && isPhase2 && userId && currentUserId
-      ? { userId: userId as any }
+    !isDemoMode && isPhase2 && userId && currentViewerId
+      ? { userId: userId as Id<'users'>, viewerId: currentViewerId }
       : 'skip'
   );
 
@@ -354,6 +535,20 @@ export default function ViewProfileScreen() {
     }
   };
 
+  // P1-FIX: Handle scroll to show/hide sticky header with hysteresis
+  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const scrollY = event.nativeEvent.contentOffset.y;
+    const wasScrollingDown = scrollY > lastScrollYRef.current;
+    lastScrollYRef.current = scrollY;
+
+    // Hysteresis: different thresholds for showing vs hiding to prevent flicker
+    if (wasScrollingDown && scrollY > stickyHeaderShowThreshold) {
+      setShowStickyHeader(true);
+    } else if (!wasScrollingDown && scrollY < stickyHeaderHideThreshold) {
+      setShowStickyHeader(false);
+    }
+  };
+
   // Handle missing userId param
   if (!userId) {
     return (
@@ -372,12 +567,9 @@ export default function ViewProfileScreen() {
   const isLoading = !isDemoMode && convexProfile === undefined;
   const isNotFound = isDemoMode ? !profile : convexProfile === null;
 
+  // P0-FIX: Profile skeleton loader (replaces plain text)
   if (isLoading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <Text style={styles.loadingText}>Loading profile...</Text>
-      </View>
-    );
+    return <ProfileSkeleton insets={insets} screenWidth={screenWidth} />;
   }
 
   if (isNotFound || !profile) {
@@ -395,73 +587,116 @@ export default function ViewProfileScreen() {
   const age = typeof profile.age === 'number' && profile.age > 0 ? profile.age : null;
   const profileIdentity = age ? `${profile.name}, ${age}` : profile.name;
 
-  return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      {/* Header: No back button, no overlay, just the 3-dots menu in top-right */}
-      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
-        {/* Spacer to push menu to the right */}
-        <View style={{ flex: 1 }} />
-        {!isConfessPreview && (
-          <TouchableOpacity
-            onPress={() => setShowReportBlock(true)}
-            style={styles.moreButton}
-          >
-            <Ionicons name="ellipsis-horizontal" size={18} color={COLORS.white} />
-          </TouchableOpacity>
-        )}
-      </View>
+  // P1-FIX: Determine if action buttons should be shown
+  const showActionButtons = fromChat !== '1' && !isConfessPreview;
 
-      {visiblePhotos.length > 0 ? (
-        <FlatList
-          horizontal
-          pagingEnabled
-          showsHorizontalScrollIndicator={false}
-          bounces={false}
-          snapToAlignment="start"
-          decelerationRate="fast"
-          snapToInterval={screenWidth}
-          disableIntervalMomentum
-          data={visiblePhotos}
-          keyExtractor={(item, index) => item._id || `photo-${index}`}
-          initialNumToRender={1}
-          windowSize={2}
-          maxToRenderPerBatch={1}
-          removeClippedSubviews
-          onMomentumScrollEnd={(e) => {
-            const index = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
-            setCurrentPhotoIndex(index);
-          }}
-          renderItem={({ item }) => (
-            <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
-              <Image
-                source={{ uri: item.url }}
-                style={{ width: '100%', height: 500 }}
-                contentFit="cover"
-                blurRadius={isPhase2 ? 20 : profile.photoBlurred ? 20 : 0}
-              />
+  return (
+    <View style={styles.rootContainer}>
+      {/* P1-FIX: Sticky Header - appears when scrolled past photo */}
+      {showStickyHeader && (
+        <View style={[styles.stickyHeader, { paddingTop: insets.top }]}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.stickyBackButton}>
+            <Ionicons name="chevron-back" size={24} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.stickyHeaderTitle} numberOfLines={1}>
+            {profileIdentity}
+          </Text>
+          {!isConfessPreview && (
+            <TouchableOpacity
+              onPress={() => setShowReportBlock(true)}
+              style={styles.stickyMoreButton}
+            >
+              <Ionicons name="ellipsis-horizontal" size={18} color={COLORS.text} />
+            </TouchableOpacity>
+          )}
+          {isConfessPreview && <View style={{ width: 36 }} />}
+        </View>
+      )}
+
+      <ScrollView
+        style={styles.container}
+        showsVerticalScrollIndicator={false}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+        contentContainerStyle={showActionButtons ? { paddingBottom: 100 } : undefined}
+      >
+        {/* Header: No back button, no overlay, just the 3-dots menu in top-right */}
+        <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
+          {/* Spacer to push menu to the right */}
+          <View style={{ flex: 1 }} />
+          {!isConfessPreview && (
+            <TouchableOpacity
+              onPress={() => setShowReportBlock(true)}
+              style={styles.moreButton}
+            >
+              <Ionicons name="ellipsis-horizontal" size={18} color={COLORS.white} />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Photo carousel with count indicator */}
+        <View style={styles.photoCarouselContainer}>
+          {visiblePhotos.length > 0 ? (
+            <FlatList
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              bounces={false}
+              snapToAlignment="start"
+              decelerationRate="fast"
+              snapToInterval={screenWidth}
+              disableIntervalMomentum
+              data={visiblePhotos}
+              keyExtractor={(item, index) => item._id || `photo-${index}`}
+              initialNumToRender={1}
+              windowSize={2}
+              maxToRenderPerBatch={1}
+              removeClippedSubviews
+              onMomentumScrollEnd={(e) => {
+                const index = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
+                setCurrentPhotoIndex(index);
+              }}
+              renderItem={({ item }) => (
+                <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
+                  <Image
+                    source={{ uri: item.url }}
+                    style={{ width: '100%', height: 500 }}
+                    contentFit="cover"
+                    blurRadius={isPhase2 ? 20 : profile.photoBlurred ? 20 : 0}
+                  />
+                </View>
+              )}
+              style={styles.photoCarousel}
+            />
+          ) : (
+            <View style={[styles.photoPlaceholder, { height: 500 + insets.top, paddingTop: insets.top }]}>
+              <Ionicons name="person" size={64} color={COLORS.textLight} />
             </View>
           )}
-          style={styles.photoCarousel}
-        />
-      ) : (
-        <View style={[styles.photoPlaceholder, { height: 500 + insets.top, paddingTop: insets.top }]}>
-          <Ionicons name="person" size={64} color={COLORS.textLight} />
-        </View>
-      )}
 
-      {visiblePhotos.length > 1 && (
-        <View style={styles.photoIndicators}>
-          {visiblePhotos.map((_: any, index: number) => (
-            <View
-              key={index}
-              style={[
-                styles.indicator,
-                index === currentPhotoIndex && styles.indicatorActive,
-              ]}
-            />
-          ))}
+          {/* P1-FIX: Photo count indicator (e.g., "2/5") */}
+          {visiblePhotos.length > 1 && (
+            <View style={[styles.photoCountIndicator, { top: insets.top + 16 }]}>
+              <Text style={styles.photoCountText}>
+                {currentPhotoIndex + 1}/{visiblePhotos.length}
+              </Text>
+            </View>
+          )}
         </View>
-      )}
+
+        {visiblePhotos.length > 1 && (
+          <View style={styles.photoIndicators}>
+            {visiblePhotos.map((_: any, index: number) => (
+              <View
+                key={index}
+                style={[
+                  styles.indicator,
+                  index === currentPhotoIndex && styles.indicatorActive,
+                ]}
+              />
+            ))}
+          </View>
+        )}
 
       <View style={styles.content}>
         <View style={styles.nameRow}>
@@ -748,53 +983,125 @@ export default function ViewProfileScreen() {
           </View>
         )}
 
-        {/* Action Buttons - Hidden in confess_preview mode or when opened from chat */}
-        {fromChat === '1' || isConfessPreview ? null : (
-          <View style={styles.actions}>
-            <TouchableOpacity
-              style={[styles.actionButton, styles.passButton, isActionPending && styles.actionButtonDisabled]}
-              onPress={() => handleSwipe('pass')}
-              activeOpacity={isActionPending ? 1 : 0.7}
-              disabled={isActionPending}
-            >
-              <Ionicons name="close" size={28} color={COLORS.pass} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.actionButton, styles.superLikeButton, isActionPending && styles.actionButtonDisabled]}
-              onPress={() => handleSwipe('super_like')}
-              activeOpacity={isActionPending ? 1 : 0.7}
-              disabled={isActionPending}
-            >
-              <Ionicons name="star" size={28} color={COLORS.superLike} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.actionButton, styles.likeButton, isActionPending && styles.actionButtonDisabled]}
-              onPress={() => handleSwipe('like')}
-              activeOpacity={isActionPending ? 1 : 0.7}
-              disabled={isActionPending}
-            >
-              <Ionicons name="heart" size={28} color={COLORS.like} />
-            </TouchableOpacity>
-          </View>
-        )}
+        {/* Action Buttons placeholder removed - now sticky at bottom */}
       </View>
+      </ScrollView>
+
+      {/* P1-FIX: Sticky Action Buttons - Fixed at bottom of screen */}
+      {showActionButtons && (
+        <View style={[styles.stickyActions, { paddingBottom: insets.bottom + 8 }]}>
+          <TouchableOpacity
+            style={[styles.actionButton, styles.passButton, isActionPending && styles.actionButtonDisabled]}
+            onPress={() => handleSwipe('pass')}
+            activeOpacity={isActionPending ? 1 : 0.7}
+            disabled={isActionPending}
+          >
+            <Ionicons name="close" size={28} color={COLORS.pass} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionButton, styles.superLikeButton, isActionPending && styles.actionButtonDisabled]}
+            onPress={() => handleSwipe('super_like')}
+            activeOpacity={isActionPending ? 1 : 0.7}
+            disabled={isActionPending}
+          >
+            <Ionicons name="star" size={28} color={COLORS.superLike} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionButton, styles.likeButton, isActionPending && styles.actionButtonDisabled]}
+            onPress={() => handleSwipe('like')}
+            activeOpacity={isActionPending ? 1 : 0.7}
+            disabled={isActionPending}
+          >
+            <Ionicons name="heart" size={28} color={COLORS.like} />
+          </TouchableOpacity>
+        </View>
+      )}
 
       <ReportBlockModal
         visible={showReportBlock}
         onClose={() => setShowReportBlock(false)}
         reportedUserId={userId || ''}
         reportedUserName={profile?.name || 'this user'}
-        authToken={token || undefined}
+        currentUserId={currentUserId || ''}
         onBlockSuccess={() => router.back()}
       />
-    </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  // P1-FIX: Root container for sticky layout
+  rootContainer: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
+  },
+  // P1-FIX: Sticky header styles
+  stickyHeader: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 100,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    backgroundColor: COLORS.background,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  stickyBackButton: {
+    padding: 6,
+    marginRight: 8,
+  },
+  stickyHeaderTitle: {
+    flex: 1,
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.text,
+    textAlign: 'center',
+  },
+  stickyMoreButton: {
+    padding: 6,
+    marginLeft: 8,
+  },
+  // P1-FIX: Photo carousel container for count indicator positioning
+  photoCarouselContainer: {
+    position: 'relative',
+  },
+  // P1-FIX: Photo count indicator (e.g., "2/5")
+  photoCountIndicator: {
+    position: 'absolute',
+    right: 16,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  photoCountText: {
+    color: COLORS.white,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  // P1-FIX: Sticky action buttons at bottom
+  stickyActions: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingTop: 12,
+    gap: 24,
+    backgroundColor: COLORS.background,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
   },
   loadingContainer: {
     flex: 1,
@@ -1091,13 +1398,7 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     marginLeft: 12,
   },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 24,
-    gap: 24,
-  },
+  // Note: actions style replaced by stickyActions (P1-FIX)
   actionButton: {
     width: 56,
     height: 56,
