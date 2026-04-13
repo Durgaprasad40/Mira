@@ -285,9 +285,10 @@ export default function SupportTicketScreen() {
           const attachment = attachments[i];
           setUploadProgress(`Uploading ${i + 1} of ${attachments.length}...`);
 
+          // CONTRACT FIX: generateUploadUrl expects no arguments
           const storageId = await uploadMediaToConvex(
             attachment.uri,
-            () => generateUploadUrl({ token }),
+            () => generateUploadUrl(),
             attachment.type
           );
 
