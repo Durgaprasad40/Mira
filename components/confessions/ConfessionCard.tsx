@@ -304,7 +304,8 @@ export default function ConfessionCard({
   // Determine effective visibility mode (backward compat: use isAnonymous if authorVisibility not set)
   const effectiveVisibility: ConfessionAuthorVisibility = authorVisibility || (isAnonymous ? 'anonymous' : 'open');
   const isFullyAnonymous = effectiveVisibility === 'anonymous';
-  const isBlurPhoto = effectiveVisibility === 'blur_photo';
+  // Handle both 'blur_photo' (current) and 'blur' (legacy schema value)
+  const isBlurPhoto = effectiveVisibility === 'blur_photo' || (effectiveVisibility as string) === 'blur';
   // Tag display logic - show actual tagged user name to all viewers
   // Author remains anonymous, but target is visible
   const getTagDisplayText = (): string | null => {

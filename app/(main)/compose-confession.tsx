@@ -178,12 +178,11 @@ export default function ComposeConfessionScreen() {
     }
 
     // Get user data for non-anonymous modes
+    // Both blur_photo and open_to_all need photo URL - blur_photo blurs it on display
     if (isDemoMode && demoCurrentUser) {
       return {
         authorName: demoCurrentUser.name,
-        // blur_photo mode: show name but no photo URL
-        // open_to_all mode: show name AND photo URL
-        authorPhotoUrl: mode === 'open_to_all' ? demoCurrentUser.photos?.[0]?.url : undefined,
+        authorPhotoUrl: demoCurrentUser.photos?.[0]?.url,
         authorAge: (demoCurrentUser as any).age,
         authorGender: (demoCurrentUser as any).gender,
       };
@@ -193,9 +192,7 @@ export default function ComposeConfessionScreen() {
       const primaryPhoto = convexCurrentUser.photos?.find((photo: any) => photo.isPrimary) ?? convexCurrentUser.photos?.[0];
       return {
         authorName: (convexCurrentUser as any).name,
-        // blur_photo mode: show name but no photo URL
-        // open_to_all mode: show name AND photo URL
-        authorPhotoUrl: mode === 'open_to_all' ? primaryPhoto?.url : undefined,
+        authorPhotoUrl: primaryPhoto?.url,
         authorAge: computeAge((convexCurrentUser as any).dateOfBirth),
         authorGender: (convexCurrentUser as any).gender,
       };
@@ -325,12 +322,17 @@ export default function ComposeConfessionScreen() {
         });
       } else {
         // Live mode create: new confession
+        // Map frontend identityMode to backend authorVisibility
+        const authorVisibility = identityMode === 'anonymous' ? 'anonymous'
+          : identityMode === 'blur_photo' ? 'blur_photo'
+          : 'open';
         await createConfessionMutation({
           userId: currentUserId,
           text: trimmed,
           isAnonymous,
           mood: selectedMood,
           visibility: 'global',
+          authorVisibility,
           taggedUserId: taggedUser?.id as any,
           ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
           ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),

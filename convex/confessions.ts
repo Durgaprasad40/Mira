@@ -19,6 +19,7 @@ type SerializedConfession = {
   userId: Id<'users'>;
   text: string;
   isAnonymous: boolean;
+  authorVisibility?: 'anonymous' | 'open' | 'blur_photo';
   mood: 'romantic' | 'spicy' | 'emotional' | 'funny';
   visibility: 'global';
   imageUrl?: string;
@@ -52,6 +53,7 @@ function serializeConfession(
     userId: confession.userId,
     text: confession.text,
     isAnonymous: confession.isAnonymous,
+    authorVisibility: confession.authorVisibility as 'anonymous' | 'open' | 'blur_photo' | undefined,
     mood: confession.mood,
     visibility: confession.visibility,
     imageUrl: confession.imageUrl,
@@ -91,6 +93,7 @@ export const createConfession = mutation({
     isAnonymous: v.boolean(),
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
     visibility: v.literal('global'),
+    authorVisibility: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur_photo'))),
     imageUrl: v.optional(v.string()),
     authorName: v.optional(v.string()),
     authorPhotoUrl: v.optional(v.string()),
@@ -161,6 +164,7 @@ export const createConfession = mutation({
       userId: userId,
       text: trimmed,
       isAnonymous: args.isAnonymous,
+      authorVisibility: args.authorVisibility,
       mood: args.mood,
       visibility: args.visibility,
       imageUrl: args.imageUrl,

@@ -1,6 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useCallback } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   StyleSheet,
   Text,
@@ -9,7 +10,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
 
 import { api } from '@/convex/_generated/api';
@@ -19,6 +20,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { safePush } from '@/lib/safeRouter';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
+import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
 
 export default function MyConfessionsScreen() {
   const router = useRouter();
@@ -27,6 +29,21 @@ export default function MyConfessionsScreen() {
 
   const demoConfessions = useConfessionStore((s) => s.confessions);
   const demoUserReactions = useConfessionStore((s) => s.userReactions);
+  const demoDeleteConfession = useConfessionStore((s) => s.deleteConfession);
+
+  // Convex current user for effectiveViewerId
+  const convexCurrentUser = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+  );
+  const effectiveViewerId = isDemoMode ? currentUserId : convexCurrentUser?._id;
+
+  // Delete mutation
+  const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
+
+  // Menu state
+  const [showMenuSheet, setShowMenuSheet] = useState(false);
+  const [menuTargetConfession, setMenuTargetConfession] = useState<{ id: string; authorId: string } | null>(null);
 
   const liveMyConfessions = useQuery(
     api.confessions.getMyConfessions,
@@ -40,9 +57,12 @@ export default function MyConfessionsScreen() {
         userId: confession.userId,
         text: confession.text,
         isAnonymous: confession.isAnonymous,
+        authorVisibility: confession.authorVisibility,
         mood: confession.mood,
         authorName: confession.authorName,
         authorPhotoUrl: confession.authorPhotoUrl,
+        authorAge: confession.authorAge,
+        authorGender: confession.authorGender,
         replyCount: confession.replyCount ?? 0,
         reactionCount: confession.reactionCount ?? 0,
         createdAt: confession.createdAt,
@@ -60,9 +80,12 @@ export default function MyConfessionsScreen() {
         userId: confession.userId,
         text: confession.text,
         isAnonymous: confession.isAnonymous,
+        authorVisibility: confession.authorVisibility,
         mood: confession.mood,
         authorName: confession.authorName,
         authorPhotoUrl: confession.authorPhotoUrl,
+        authorAge: confession.authorAge,
+        authorGender: confession.authorGender,
         replyCount: confession.replyCount ?? 0,
         reactionCount: confession.reactionCount ?? 0,
         createdAt: confession.createdAt,
@@ -71,6 +94,66 @@ export default function MyConfessionsScreen() {
   }, [currentUserId, demoConfessions, liveMyConfessions]);
 
   const isLoading = !isDemoMode && liveMyConfessions === undefined;
+
+  // Handlers
+  const handleOpenThread = useCallback((confessionId: string) => {
+    safePush(
+      router,
+      { pathname: '/(main)/confession-thread', params: { confessionId } } as any,
+      'myConfessions->thread'
+    );
+  }, [router]);
+
+  const handleOpenMenuSheet = useCallback((confessionId: string, authorId: string) => {
+    setMenuTargetConfession({ id: confessionId, authorId });
+    setShowMenuSheet(true);
+  }, []);
+
+  const handleCloseMenuSheet = useCallback(() => {
+    setShowMenuSheet(false);
+    setMenuTargetConfession(null);
+  }, []);
+
+  const handleMenuEdit = useCallback(() => {
+    if (!menuTargetConfession) return;
+    safePush(
+      router,
+      {
+        pathname: '/(main)/compose-confession',
+        params: { editId: menuTargetConfession.id, mode: 'edit' },
+      } as any,
+      'myConfessions->editConfession'
+    );
+  }, [menuTargetConfession, router]);
+
+  const handleMenuDelete = useCallback(() => {
+    if (!menuTargetConfession) return;
+    Alert.alert(
+      'Delete Confession',
+      'Are you sure you want to delete this confession? This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (isDemoMode) {
+                demoDeleteConfession(menuTargetConfession.id);
+              } else {
+                await deleteConfessionMutation({
+                  confessionId: menuTargetConfession.id as any,
+                  userId: currentUserId!,
+                });
+              }
+            } catch (error: any) {
+              Alert.alert('Error', error?.message || 'Failed to delete confession');
+            }
+          },
+        },
+      ]
+    );
+  }, [menuTargetConfession, currentUserId, deleteConfessionMutation, demoDeleteConfession]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -99,6 +182,7 @@ export default function MyConfessionsScreen() {
             id={item.id}
             text={item.text}
             isAnonymous={item.isAnonymous}
+            authorVisibility={item.authorVisibility}
             mood={item.mood}
             topEmojis={[]}
             userEmoji={isDemoMode ? (demoUserReactions[item.id] ?? null) : null}
@@ -107,18 +191,19 @@ export default function MyConfessionsScreen() {
             reactionCount={item.reactionCount}
             authorName={item.authorName}
             authorPhotoUrl={item.authorPhotoUrl}
+            authorAge={item.authorAge}
+            authorGender={item.authorGender}
             createdAt={item.createdAt}
             isExpired={item.isExpired}
-            // EXPLICIT INTERACTION CONTRACT for My Confessions (/my-confessions)
-            // This is a READ-ONLY archive screen - NO tap navigation, NO long-press menu
-            // P0 FIX: Disabled tap-to-thread to prevent app crash on Android
+            authorId={item.userId}
+            viewerId={effectiveViewerId ?? undefined}
+            // EXPLICIT INTERACTION CONTRACT for My Confessions
+            // Owner can tap to view thread and long-press to edit/delete
             screenContext="my-confessions"
-            enableTapToOpenThread={false}
-            enableLongPressMenu={false}
-            onCardPress={() => {
-              // Tap is disabled - this is a read-only archive view
-              console.log('[MY_CONFESSIONS_TAP] Card tapped (read-only mode), id:', item?.id);
-            }}
+            enableTapToOpenThread={true}
+            enableLongPressMenu={true}
+            onCardPress={() => handleOpenThread(item.id)}
+            onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
             onReact={() => {}}
           />
         )}
@@ -144,6 +229,15 @@ export default function MyConfessionsScreen() {
             </View>
           )
         }
+      />
+
+      {/* Owner menu sheet for edit/delete */}
+      <ConfessionMenuSheet
+        visible={showMenuSheet}
+        isOwner={true}
+        onClose={handleCloseMenuSheet}
+        onEdit={handleMenuEdit}
+        onDelete={handleMenuDelete}
       />
     </SafeAreaView>
   );

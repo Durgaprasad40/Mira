@@ -44,6 +44,7 @@ type FeedConfession = {
   userId: string;
   text: string;
   isAnonymous: boolean;
+  authorVisibility?: 'anonymous' | 'open' | 'blur_photo';
   mood: 'romantic' | 'spicy' | 'emotional' | 'funny';
   authorName?: string;
   authorPhotoUrl?: string;
@@ -274,6 +275,7 @@ export default function ConfessionsScreen() {
           userId: confession.userId,
           text: confession.text,
           isAnonymous: confession.isAnonymous,
+          authorVisibility: confession.authorVisibility,
           mood: confession.mood,
           authorName: confession.authorName,
           authorPhotoUrl: confession.authorPhotoUrl,
@@ -1069,6 +1071,7 @@ export default function ConfessionsScreen() {
               id={item.id}
               text={item.text}
               isAnonymous={item.isAnonymous}
+              authorVisibility={item.authorVisibility}
               mood={item.mood}
               topEmojis={item.topEmojis}
               userEmoji={userEmoji}

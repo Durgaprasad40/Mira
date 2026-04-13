@@ -47,6 +47,7 @@ type Confession = {
   userId: string;
   text: string;
   isAnonymous: boolean;
+  authorVisibility?: 'anonymous' | 'open' | 'blur_photo';
   mood: string;
   authorName?: string;
   authorPhotoUrl?: string;
@@ -211,16 +212,46 @@ export default function ConfessionThreadScreen() {
   const renderHeader = useCallback(() => {
     if (!confession) return null;
 
+    // Determine effective visibility mode (same logic as ConfessionCard)
+    const effectiveVisibility = confession.authorVisibility || (confession.isAnonymous ? 'anonymous' : 'open');
+    const isFullyAnonymous = effectiveVisibility === 'anonymous';
+    const isBlurPhoto = effectiveVisibility === 'blur_photo' || (effectiveVisibility as string) === 'blur';
+
+    // Build display name with age and gender (same logic as ConfessionCard)
+    const getDisplayName = (): string => {
+      if (isFullyAnonymous) return 'Anonymous';
+      if (!confession.authorName) return 'Someone';
+      let name = confession.authorName;
+      if (confession.authorAge) {
+        name += `, ${confession.authorAge}`;
+      }
+      if (confession.authorGender) {
+        const genderLabel = confession.authorGender === 'male' ? 'M'
+          : confession.authorGender === 'female' ? 'F'
+          : confession.authorGender === 'non_binary' ? 'NB'
+          : confession.authorGender === 'lesbian' ? 'F' : '';
+        if (genderLabel) name += ` ${genderLabel}`;
+      }
+      return name;
+    };
+
     return (
       <View style={styles.headerSection}>
         {/* Hero confession card - matches ConfessionCard component styling */}
         <View style={styles.confessionCard}>
           {/* Author row - matches homepage card */}
           <View style={styles.authorRow}>
-            {confession.isAnonymous ? (
+            {isFullyAnonymous ? (
               <View style={[styles.avatar, styles.avatarAnonymous]}>
                 <Ionicons name="eye-off" size={12} color={COLORS.textMuted} />
               </View>
+            ) : isBlurPhoto && confession.authorPhotoUrl ? (
+              <Image
+                source={{ uri: confession.authorPhotoUrl }}
+                style={styles.avatarImage}
+                contentFit="cover"
+                blurRadius={20}
+              />
             ) : confession.authorPhotoUrl ? (
               <Image
                 source={{ uri: confession.authorPhotoUrl }}
@@ -232,9 +263,8 @@ export default function ConfessionThreadScreen() {
                 <Ionicons name="person" size={12} color={COLORS.primary} />
               </View>
             )}
-            <Text style={[styles.authorName, !confession.isAnonymous && styles.authorNamePublic]}>
-              {confession.isAnonymous ? 'Anonymous' : confession.authorName || 'Someone'}
-              {confession.authorAge && !confession.isAnonymous ? `, ${confession.authorAge}` : ''}
+            <Text style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>
+              {getDisplayName()}
             </Text>
             <Text style={styles.timeAgo}>{formatTimeAgo(confession.createdAt)}</Text>
           </View>
