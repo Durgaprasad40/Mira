@@ -105,16 +105,18 @@ export default function PromptThreadScreen() {
 
 
   // Fetch thread data from Convex
+  // FIX: Backend expects { promptId, viewerUserId }, not { token }
   const threadData = useQuery(
     api.truthDare.getPromptThread,
-    promptId && token ? { promptId, token } : 'skip'
+    promptId ? { promptId, viewerUserId: userId || undefined } : 'skip'
   );
 
   // RECEIVER VISIBILITY: Fetch pending connect requests for this user
   // This allows non-prompt-owners (answer authors) to see incoming connect requests
+  // FIX: Backend expects { authUserId }, not { token }
   const pendingRequests = useQuery(
     api.truthDare.getPendingConnectRequests,
-    token ? { token } : 'skip'
+    userId ? { authUserId: userId } : 'skip'
   );
   const respondToConnect = useMutation(api.truthDare.respondToConnect);
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
@@ -893,9 +895,10 @@ export default function PromptThreadScreen() {
           console.log('[T/D UPLOAD] start', { type: mediaType, isFrontCamera });
 
           try {
+            // FIX: generateUploadUrl takes no args
             mediaStorageId = await uploadMediaToConvex(
               attachment.uri,
-              () => generateUploadUrl({ token }),
+              () => generateUploadUrl(),
               mediaType
             );
             const storageIdPrefix = mediaStorageId?.substring(0, 8) ?? 'none';
@@ -919,9 +922,10 @@ export default function PromptThreadScreen() {
         authorPhotoUrl.length > 0;
 
       if (shouldAttachProfilePhoto && authorPhotoUrl && !(authorPhotoUrl.startsWith('http://') || authorPhotoUrl.startsWith('https://'))) {
+        // FIX: generateUploadUrl takes no args
         authorPhotoStorageId = await uploadMediaToConvex(
           authorPhotoUrl,
-          () => generateUploadUrl({ token }),
+          () => generateUploadUrl(),
           'photo'
         );
       }
@@ -929,9 +933,10 @@ export default function PromptThreadScreen() {
       // Create or edit the answer with MERGE behavior
       // Only send fields that are explicitly provided
       console.log('[T/D BEHAVIOR] createOrEditAnswer start', { identityMode, visibility: mediaVisibility === 'private' ? 'owner_only' : 'public' });
+      // FIX: Backend expects { userId }, not { token }
       await createOrEditAnswer({
         promptId,
-        token,
+        userId: userId ?? '',
         // Text - send if provided (even empty string is valid to clear)
         text: text.trim() || undefined,
         // Media - only send if new attachment or removeMedia
