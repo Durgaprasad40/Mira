@@ -414,8 +414,8 @@ export default function PromptThreadScreen() {
     });
 
     try {
-      if (!token) return;
-      const result = await setReaction({ answerId, token, emoji });
+      if (!userId) return;
+      const result = await setReaction({ answerId, userId, emoji });
       // Handle server returning ok: false (no throw, graceful fail)
       if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
         console.warn('[T/D REACTION] failed', { reason: (result as any).reason });
@@ -431,11 +431,11 @@ export default function PromptThreadScreen() {
     } finally {
       pendingReactionsRef.current.delete(answerId);
     }
-  }, [token, setReaction]);
+  }, [userId, setReaction]);
 
   // Handle prompt emoji reaction
   const handlePromptReact = useCallback(async (emoji: string) => {
-    if (!token || !promptId) {
+    if (!userId || !promptId) {
       console.log('[T/D PROMPT REACTION] skip - no userId or promptId');
       return;
     }
@@ -449,7 +449,7 @@ export default function PromptThreadScreen() {
     });
 
     try {
-      const result = await setPromptReaction({ promptId, token, emoji });
+      const result = await setPromptReaction({ promptId, userId, emoji });
       if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
         console.warn('[T/D PROMPT REACTION] failed', { reason: (result as any).reason });
       } else {
@@ -461,7 +461,7 @@ export default function PromptThreadScreen() {
         Alert.alert('Slow down', 'Please wait a moment before reacting again.');
       }
     }
-  }, [token, promptId, setPromptReaction]);
+  }, [userId, promptId, setPromptReaction]);
 
   // Open report modal
   const handleReport = useCallback((answerId: string, authorId: string) => {
@@ -481,11 +481,11 @@ export default function PromptThreadScreen() {
 
     setIsSubmittingReport(true);
     try {
-      if (isReportingPrompt && promptId && token) {
+      if (isReportingPrompt && promptId && userId) {
         // P0-002: Report the prompt
         const result = await reportPromptMutation({
           promptId,
-          token,
+          reporterId: userId,
           reasonCode: selectedReportReason,
           reasonText: reportReasonText.trim() || undefined,
         });
@@ -496,11 +496,11 @@ export default function PromptThreadScreen() {
         } else {
           Alert.alert('Reported', 'Thank you for your report. We will review it.');
         }
-      } else if (reportingAnswerId && token) {
+      } else if (reportingAnswerId && userId) {
         // Report the answer
         const result = await reportAnswer({
           answerId: reportingAnswerId,
-          token,
+          reporterId: userId,
           reasonCode: selectedReportReason,
           reasonText: reportReasonText.trim() || undefined,
         });
@@ -525,7 +525,7 @@ export default function PromptThreadScreen() {
     } finally {
       setIsSubmittingReport(false);
     }
-  }, [token, promptId, reportingAnswerId, isReportingPrompt, selectedReportReason, reportReasonText, reportAnswer, reportPromptMutation, router]);
+  }, [userId, promptId, reportingAnswerId, isReportingPrompt, selectedReportReason, reportReasonText, reportAnswer, reportPromptMutation, router]);
 
   // Close report modal
   const closeReportModal = useCallback(() => {
@@ -624,7 +624,7 @@ export default function PromptThreadScreen() {
 
   // Handle delete own comment
   const handleDeleteAnswer = useCallback(async (answerId: string) => {
-    if (!token) return;
+    if (!userId) return;
 
     Alert.alert(
       'Delete Comment',
@@ -636,7 +636,7 @@ export default function PromptThreadScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await deleteAnswer({ answerId, token });
+              await deleteAnswer({ answerId, userId });
             } catch (error) {
               Alert.alert('Error', 'Failed to delete comment. Please try again.');
             }
@@ -644,7 +644,7 @@ export default function PromptThreadScreen() {
         },
       ]
     );
-  }, [token, deleteAnswer]);
+  }, [userId, deleteAnswer]);
 
   // Open 3-dot menu
   const handleOpenMenu = useCallback((answerId: string, authorId: string, isOwn: boolean) => {
@@ -688,13 +688,13 @@ export default function PromptThreadScreen() {
   // RECEIVER: Handle accept T&D connect request
   // FIX: Show success sheet instead of navigating directly to chat
   const handleAcceptConnect = useCallback(async (requestId: string) => {
-    if (!token) return;
+    if (!userId) return;
     setRespondingTo(requestId);
     try {
       const result = await respondToConnect({
         requestId: requestId as any,
         action: 'connect',
-        token,
+        authUserId: userId,
       });
       if (__DEV__) {
         console.log('[T/D ACCEPT RESULT]', {
@@ -723,17 +723,17 @@ export default function PromptThreadScreen() {
     } finally {
       setRespondingTo(null);
     }
-  }, [token, respondToConnect]);
+  }, [userId, respondToConnect]);
 
   // RECEIVER: Handle reject T&D connect request
   const handleRejectConnect = useCallback(async (requestId: string) => {
-    if (!token) return;
+    if (!userId) return;
     setRespondingTo(requestId);
     try {
       const result = await respondToConnect({
         requestId: requestId as any,
         action: 'remove',
-        token,
+        authUserId: userId,
       });
       if (__DEV__) {
         console.log('[T/D THREAD] Reject result:', result);
@@ -746,12 +746,12 @@ export default function PromptThreadScreen() {
     } finally {
       setRespondingTo(null);
     }
-  }, [token, respondToConnect]);
+  }, [userId, respondToConnect]);
 
   // Handle send T&D connect request (prompt owner → answer author)
   // P0-007 FIX: Add double-tap guard + backend is authoritative for dedup
   const handleSendConnect = useCallback(async (answerId: string) => {
-    if (!token || !promptId) return;
+    if (!userId || !promptId) return;
     if (connectSending) return; // P0-007: Prevent double-tap while request in flight
 
     setConnectSending(answerId);
@@ -759,7 +759,7 @@ export default function PromptThreadScreen() {
       const result = await sendConnectRequest({
         promptId,
         answerId,
-        token,
+        authUserId: userId,
       });
 
       if (result.success) {
@@ -775,7 +775,7 @@ export default function PromptThreadScreen() {
     } finally {
       setConnectSending(null);
     }
-  }, [token, promptId, connectSending, sendConnectRequest]);
+  }, [userId, promptId, connectSending, sendConnectRequest]);
 
   // Handle tap-to-view for media content
   // P0-001 FIX: Backend is the source of truth for view state.
@@ -809,7 +809,7 @@ export default function PromptThreadScreen() {
     // The backend will return the appropriate status.
 
     // Guard: ensure user is authenticated before claiming
-    if (!token) {
+    if (!userId) {
       Alert.alert('Sign In Required', 'Please sign in to view media.');
       return;
     }
@@ -820,7 +820,7 @@ export default function PromptThreadScreen() {
       // Backend claim is atomic and records the view at this moment (P0-002 FIX)
       const result = await claimAnswerMediaView({
         answerId,
-        token,
+        viewerId: userId,
       });
 
       // Handle backend responses
@@ -865,16 +865,16 @@ export default function PromptThreadScreen() {
       // P0-001 FIX: Always clear the pending flag
       pendingMediaClaimsRef.current.delete(answerId);
     }
-  }, [token, claimAnswerMediaView]);
+  }, [userId, claimAnswerMediaView]);
 
   // Handle closing the media viewer
   const handleCloseMediaViewer = useCallback(async () => {
-    if (viewingMedia && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed && token) {
+    if (viewingMedia && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed && userId) {
       // Finalize the view for non-owners
       try {
         await finalizeAnswerMediaView({
           answerId: viewingMedia.answerId,
-          token,
+          viewerId: userId,
         });
         console.log('[T/D] Media view finalized');
       } catch (error) {
@@ -891,7 +891,7 @@ export default function PromptThreadScreen() {
     setViewingMedia(null);
     // T/D VIDEO FIX: Reset video progress state
     setVideoProgress({ position: 0, duration: 0, isPlaying: false });
-  }, [viewingMedia, token, finalizeAnswerMediaView]);
+  }, [viewingMedia, userId, finalizeAnswerMediaView]);
 
   // Unified submit handler - handles text + optional media attachment
   // Uses MERGE behavior: only sends fields that changed
@@ -902,7 +902,7 @@ export default function PromptThreadScreen() {
     identityMode: IdentityMode;
     mediaVisibility?: 'private' | 'public';
   }) => {
-    if (!promptId || !token) return;
+    if (!promptId || !userId) return;
 
     setIsSubmitting(true);
 
@@ -946,10 +946,10 @@ export default function PromptThreadScreen() {
           console.log('[T/D UPLOAD] start', { type: mediaType, isFrontCamera });
 
           try {
-            // FIX: generateUploadUrl takes no args
+            // FIX: generateUploadUrl requires authUserId
             mediaStorageId = await uploadMediaToConvex(
               attachment.uri,
-              () => generateUploadUrl(),
+              () => generateUploadUrl({ authUserId: userId }),
               mediaType
             );
             const storageIdPrefix = mediaStorageId?.substring(0, 8) ?? 'none';
@@ -973,10 +973,10 @@ export default function PromptThreadScreen() {
         authorPhotoUrl.length > 0;
 
       if (shouldAttachProfilePhoto && authorPhotoUrl && !(authorPhotoUrl.startsWith('http://') || authorPhotoUrl.startsWith('https://'))) {
-        // FIX: generateUploadUrl takes no args
+        // FIX: generateUploadUrl requires authUserId
         authorPhotoStorageId = await uploadMediaToConvex(
           authorPhotoUrl,
-          () => generateUploadUrl(),
+          () => generateUploadUrl({ authUserId: userId }),
           'photo'
         );
       }
@@ -1034,7 +1034,7 @@ export default function PromptThreadScreen() {
     }
     // P0-005 FIX: Don't reset isSubmitting in finally - let the useEffect handle it
     // when data arrives, providing continuous loading feedback
-  }, [promptId, token, generateUploadUrl, createOrEditAnswer, authorProfile, myAnswer]);
+  }, [promptId, userId, generateUploadUrl, createOrEditAnswer, authorProfile, myAnswer]);
 
   // Helper for gender icon
   const getCommentGenderIcon = (gender: string | undefined): string => {

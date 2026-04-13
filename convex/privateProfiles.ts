@@ -550,3 +550,46 @@ export const upsertByAuthId = mutation({
     return { success: true, profileId };
   },
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHOTO BLUR SLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Update photo blur slots for user's private profile.
+ * Each slot indicates whether that photo position should be blurred.
+ */
+export const updatePhotoBlurSlots = mutation({
+  args: {
+    authUserId: v.string(),
+    photoBlurSlots: v.array(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    // Resolve auth ID to user ID
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Find existing profile
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    const now = Date.now();
+
+    if (existing) {
+      // Update existing profile
+      await ctx.db.patch(existing._id, {
+        photoBlurSlots: args.photoBlurSlots,
+        updatedAt: now,
+      });
+      return { success: true };
+    }
+
+    // No profile exists yet - this shouldn't happen in normal flow
+    // but we handle it gracefully
+    throw new Error('Private profile not found. Please complete profile setup first.');
+  },
+});

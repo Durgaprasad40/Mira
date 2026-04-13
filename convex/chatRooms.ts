@@ -3155,3 +3155,426 @@ export const getUnreadDmCountsByRoom = query({
     };
   },
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PASSWORD-PROTECTED ROOM ENTRY
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Password attempt limits and cooldowns.
+ * Stage 1: 3 immediate attempts
+ * Stage 2: 3-minute cooldown, then 1 attempt
+ * Stage 3: 2-minute cooldown, then 1 final attempt
+ * Stage 4: Permanently blocked
+ */
+const PASSWORD_STAGE_CONFIG = {
+  1: { maxAttempts: 3, cooldownMs: 0 },
+  2: { maxAttempts: 1, cooldownMs: 3 * 60 * 1000 }, // 3 minutes
+  3: { maxAttempts: 1, cooldownMs: 2 * 60 * 1000 }, // 2 minutes
+  4: { maxAttempts: 0, cooldownMs: 0 }, // blocked
+} as const;
+
+/**
+ * Get current password attempt state for a user and room.
+ * Used by PasswordEntryModal to display attempt status.
+ */
+export const getPasswordAttemptState = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Validate auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { stage: 1, attemptsRemaining: 3, blocked: false, cooldown: false };
+    }
+
+    // Look up existing attempt record
+    const attemptRecord = await ctx.db
+      .query('chatRoomPasswordAttempts')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('authUserId', authUserId))
+      .first();
+
+    if (!attemptRecord) {
+      // No attempts yet - Stage 1, 3 attempts available
+      return { stage: 1, attemptsRemaining: 3, blocked: false, cooldown: false };
+    }
+
+    // Check if blocked
+    if (attemptRecord.blocked) {
+      return { stage: 4, attemptsRemaining: 0, blocked: true, cooldown: false };
+    }
+
+    const now = Date.now();
+    const stage = attemptRecord.stage;
+    const stageConfig = PASSWORD_STAGE_CONFIG[stage as keyof typeof PASSWORD_STAGE_CONFIG];
+
+    // Check if in cooldown
+    if (attemptRecord.cooldownUntil && attemptRecord.cooldownUntil > now) {
+      return {
+        stage,
+        attemptsRemaining: 0,
+        blocked: false,
+        cooldown: true,
+        cooldownRemainingMs: attemptRecord.cooldownUntil - now,
+      };
+    }
+
+    // Calculate remaining attempts
+    const attemptsUsed = attemptRecord.attempts;
+    const attemptsRemaining = Math.max(0, stageConfig.maxAttempts - attemptsUsed);
+
+    return {
+      stage,
+      attemptsRemaining,
+      blocked: false,
+      cooldown: false,
+    };
+  },
+});
+
+/**
+ * Join a password-protected room with password verification.
+ * Implements staged attempt limits with cooldowns.
+ */
+export const joinRoomWithPassword = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    password: v.string(),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, password, authUserId }) => {
+    // Validate auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+
+    // Get the room
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      return { success: false, message: 'Room not found' };
+    }
+
+    // Check if room is expired
+    if (room.expiresAt && room.expiresAt < Date.now()) {
+      return { success: false, message: 'This room has expired' };
+    }
+
+    // Check if room requires password
+    if (!room.passwordEncrypted) {
+      // No password required - just check if user can join
+      return { success: false, message: 'This room does not require a password' };
+    }
+
+    // Get or create attempt record
+    let attemptRecord = await ctx.db
+      .query('chatRoomPasswordAttempts')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('authUserId', authUserId))
+      .first();
+
+    const now = Date.now();
+
+    // Initialize record if doesn't exist
+    if (!attemptRecord) {
+      const newRecordId = await ctx.db.insert('chatRoomPasswordAttempts', {
+        roomId,
+        authUserId,
+        stage: 1,
+        attempts: 0,
+        lastAttemptAt: now,
+        blocked: false,
+      });
+      attemptRecord = await ctx.db.get(newRecordId);
+      if (!attemptRecord) {
+        return { success: false, message: 'Failed to create attempt record' };
+      }
+    }
+
+    // Check if permanently blocked
+    if (attemptRecord.blocked) {
+      return {
+        success: false,
+        blocked: true,
+        message: 'Maximum attempts reached. You cannot join this room.',
+      };
+    }
+
+    // Check if in cooldown
+    if (attemptRecord.cooldownUntil && attemptRecord.cooldownUntil > now) {
+      return {
+        success: false,
+        cooldown: true,
+        cooldownRemainingMs: attemptRecord.cooldownUntil - now,
+        message: 'Too many attempts. Please wait before trying again.',
+      };
+    }
+
+    // Verify password
+    const storedPassword = await decryptPassword(room.passwordEncrypted);
+    const isCorrect = password === storedPassword;
+
+    if (isCorrect) {
+      // Password correct - join the room
+      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      if (!userId) {
+        return { success: false, message: 'User not found' };
+      }
+
+      // Check if user is banned
+      const membership = await ctx.db
+        .query('chatRoomMembers')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+        .first();
+
+      if (membership?.isBanned) {
+        return { success: false, message: 'You are not allowed to join this room' };
+      }
+
+      // Add or update membership
+      if (membership) {
+        await ctx.db.patch(membership._id, {
+          passwordVerified: true,
+          joinedAt: now,
+        });
+      } else {
+        await ctx.db.insert('chatRoomMembers', {
+          roomId,
+          userId,
+          role: 'member',
+          joinedAt: now,
+          isBanned: false,
+          passwordVerified: true,
+        });
+        // Increment member count
+        await ctx.db.patch(roomId, { memberCount: (room.memberCount || 0) + 1 });
+      }
+
+      // Clear attempt record on success
+      await ctx.db.delete(attemptRecord._id);
+
+      return { success: true };
+    }
+
+    // Password incorrect - update attempt record
+    const stage = attemptRecord.stage;
+    const stageConfig = PASSWORD_STAGE_CONFIG[stage as keyof typeof PASSWORD_STAGE_CONFIG];
+    const newAttempts = attemptRecord.attempts + 1;
+
+    // Check if exhausted attempts in current stage
+    if (newAttempts >= stageConfig.maxAttempts) {
+      // Move to next stage
+      const nextStage = stage + 1;
+
+      if (nextStage > 3) {
+        // Stage 4 - permanently blocked
+        await ctx.db.patch(attemptRecord._id, {
+          stage: 4,
+          attempts: newAttempts,
+          lastAttemptAt: now,
+          blocked: true,
+        });
+        return {
+          success: false,
+          blocked: true,
+          message: 'Maximum attempts reached. You cannot join this room.',
+        };
+      }
+
+      // Enter cooldown for next stage
+      const nextStageConfig = PASSWORD_STAGE_CONFIG[nextStage as keyof typeof PASSWORD_STAGE_CONFIG];
+      const cooldownUntil = now + nextStageConfig.cooldownMs;
+
+      await ctx.db.patch(attemptRecord._id, {
+        stage: nextStage,
+        attempts: 0,
+        lastAttemptAt: now,
+        cooldownUntil,
+      });
+
+      return {
+        success: false,
+        cooldown: true,
+        cooldownRemainingMs: nextStageConfig.cooldownMs,
+        stage: nextStage,
+        attemptsRemaining: 0,
+        message: 'Too many attempts. Please wait before trying again.',
+      };
+    }
+
+    // Still have attempts remaining in current stage
+    await ctx.db.patch(attemptRecord._id, {
+      attempts: newAttempts,
+      lastAttemptAt: now,
+    });
+
+    const attemptsRemaining = stageConfig.maxAttempts - newAttempts;
+
+    return {
+      success: false,
+      attemptsRemaining,
+      stage,
+      message: 'Incorrect password',
+    };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROOM PRESENCE / HEARTBEAT
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Presence thresholds (milliseconds).
+ * - ONLINE_THRESHOLD: User is online if heartbeat within this window
+ * - RECENTLY_LEFT_THRESHOLD: User is "recently left" if heartbeat within this window (but > ONLINE)
+ */
+const PRESENCE_ONLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
+const PRESENCE_RECENTLY_LEFT_THRESHOLD_MS = 60 * 60 * 1000; // 60 minutes
+
+/**
+ * Send heartbeat to mark user as active in a room.
+ * Creates or updates presence record.
+ */
+export const heartbeatPresence = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Validate auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: false };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false };
+    }
+
+    // Verify room exists
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      return { success: false };
+    }
+
+    const now = Date.now();
+
+    // Find existing presence record
+    const existing = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+
+    if (existing) {
+      // Update heartbeat
+      await ctx.db.patch(existing._id, {
+        lastHeartbeatAt: now,
+      });
+    } else {
+      // Create new presence record
+      await ctx.db.insert('chatRoomPresence', {
+        roomId,
+        userId,
+        lastHeartbeatAt: now,
+        joinedAt: now,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
+/**
+ * Get presence state for a room.
+ * Returns online users and recently left users.
+ */
+export const getRoomPresence = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Validate auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { online: [], recentlyLeft: [] };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { online: [], recentlyLeft: [] };
+    }
+
+    // Get all presence records for this room
+    const presenceRecords = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    const now = Date.now();
+
+    // Partition into online and recently left
+    const online: Array<{
+      id: string;
+      displayName: string;
+      avatar: string | undefined;
+      age: number;
+      gender: string;
+      bio: string | undefined;
+      role: 'owner' | 'admin' | 'member';
+      lastHeartbeatAt: number;
+      joinedAt: number;
+    }> = [];
+
+    const recentlyLeft: typeof online = [];
+
+    // Get room members for role info
+    const members = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    const memberRoleMap = new Map<string, 'owner' | 'admin' | 'member'>();
+    for (const m of members) {
+      memberRoleMap.set(String(m.userId), m.role);
+    }
+
+    // Batch fetch user profiles (from userPrivateProfiles table)
+    const userIds = presenceRecords.map((p) => p.userId);
+    const profiles = await Promise.all(
+      userIds.map((id) =>
+        ctx.db
+          .query('userPrivateProfiles')
+          .withIndex('by_user', (q) => q.eq('userId', id))
+          .first()
+      )
+    );
+
+    for (let i = 0; i < presenceRecords.length; i++) {
+      const record = presenceRecords[i];
+      const profile = profiles[i];
+
+      const timeSinceHeartbeat = now - record.lastHeartbeatAt;
+      const role = memberRoleMap.get(String(record.userId)) || 'member';
+
+      const presenceUser = {
+        id: String(record.userId),
+        displayName: profile?.displayName ?? 'User',
+        avatar: profile?.privatePhotoUrls?.[0] ?? undefined,
+        age: profile?.age ?? 0,
+        gender: profile?.gender ?? '',
+        bio: profile?.privateBio ?? undefined,
+        role,
+        lastHeartbeatAt: record.lastHeartbeatAt,
+        joinedAt: record.joinedAt,
+      };
+
+      if (timeSinceHeartbeat <= PRESENCE_ONLINE_THRESHOLD_MS) {
+        online.push(presenceUser);
+      } else if (timeSinceHeartbeat <= PRESENCE_RECENTLY_LEFT_THRESHOLD_MS) {
+        recentlyLeft.push(presenceUser);
+      }
+      // If > RECENTLY_LEFT_THRESHOLD, don't include (too old)
+    }
+
+    return { online, recentlyLeft };
+  },
+});

@@ -11,7 +11,9 @@ const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 const RATE_LIMITS = {
   answer: { max: 10, windowMs: 60 * 1000 }, // 10 answers per minute
   reaction: { max: 30, windowMs: 60 * 1000 }, // 30 reactions per minute
+  prompt_reaction: { max: 30, windowMs: 60 * 1000 }, // 30 prompt reactions per minute
   report: { max: 10, windowMs: 24 * 60 * 60 * 1000 }, // 10 reports per day
+  prompt_report: { max: 10, windowMs: 24 * 60 * 60 * 1000 }, // 10 prompt reports per day
   claim_media: { max: 20, windowMs: 60 * 1000 }, // 20 media claims per minute
 };
 
@@ -1604,9 +1606,13 @@ export const getPromptThread = query({
           text: prompt.text,
           isTrending: prompt.isTrending,
           answerCount: prompt.answerCount,
+          visibleAnswerCount: 0, // No visible answers when expired
           createdAt: prompt.createdAt,
           expiresAt: expires,
           isPromptOwner: viewerDbId === prompt.ownerUserId,
+          // Prompt-level reactions (empty for expired)
+          reactionCounts: [],
+          myReaction: null,
           // Owner profile snapshot
           isAnonymous: prompt.isAnonymous,
           photoBlurMode: prompt.photoBlurMode, // FIX: Include blur mode for renderer
@@ -1642,6 +1648,28 @@ export const getPromptThread = query({
       if (bReactions !== aReactions) return bReactions - aReactions;
       return b.createdAt - a.createdAt;
     });
+
+    // Get prompt-level reactions
+    const promptReactions = await ctx.db
+      .query('todPromptReactions')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+
+    // Group by emoji for prompt reactions
+    const promptEmojiCountMap: Map<string, number> = new Map();
+    for (const r of promptReactions) {
+      promptEmojiCountMap.set(r.emoji, (promptEmojiCountMap.get(r.emoji) || 0) + 1);
+    }
+    const promptReactionCounts = Array.from(promptEmojiCountMap.entries()).map(
+      ([emoji, count]) => ({ emoji, count })
+    );
+
+    // Get viewer's prompt reaction
+    let promptMyReaction: string | null = null;
+    if (viewerDbId) {
+      const myR = promptReactions.find((r) => r.userId === viewerDbId);
+      if (myR) promptMyReaction = myR.emoji;
+    }
 
     // Enrich with reactions
     const enrichedAnswers = await Promise.all(
@@ -1760,9 +1788,13 @@ export const getPromptThread = query({
         text: prompt.text,
         isTrending: prompt.isTrending,
         answerCount: prompt.answerCount,
+        visibleAnswerCount: enrichedAnswers.length, // FIX: Count of visible answers for UI
         createdAt: prompt.createdAt,
         expiresAt: expires,
         isPromptOwner: viewerDbId === prompt.ownerUserId,
+        // Prompt-level reactions
+        reactionCounts: promptReactionCounts,
+        myReaction: promptMyReaction,
         // Owner profile snapshot
         isAnonymous: prompt.isAnonymous,
         photoBlurMode: prompt.photoBlurMode, // FIX: Include blur mode for renderer
@@ -1789,7 +1821,7 @@ export const getPromptThread = query({
 async function checkRateLimit(
   ctx: any,
   userId: string,
-  actionType: 'answer' | 'reaction' | 'report' | 'claim_media'
+  actionType: 'answer' | 'reaction' | 'prompt_reaction' | 'report' | 'prompt_report' | 'claim_media'
 ): Promise<{ allowed: boolean; remaining: number }> {
   const now = Date.now();
   const limit = RATE_LIMITS[actionType];
@@ -2242,6 +2274,162 @@ export const reportAnswer = mutation({
     // Increment report count
     const newReportCount = (answer.reportCount ?? 0) + 1;
     await ctx.db.patch(answer._id, { reportCount: newReportCount });
+
+    // Check if threshold reached
+    const isNowHidden = newReportCount >= REPORT_HIDE_THRESHOLD;
+
+    return {
+      success: true,
+      reportCount: newReportCount,
+      isNowHidden,
+    };
+  },
+});
+
+/**
+ * Set/change/remove a reaction on a prompt.
+ * One reaction per user per prompt. Changing updates counts.
+ */
+export const setPromptReaction = mutation({
+  args: {
+    promptId: v.string(),
+    userId: v.string(),
+    emoji: v.string(), // pass empty string to remove reaction
+  },
+  handler: async (ctx, { promptId, userId: argsUserId, emoji }) => {
+    const userId = await resolveRequiredTodUserId(ctx, argsUserId, 'Unauthorized');
+
+    // Validate prompt exists
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
+      .first();
+
+    if (!prompt) {
+      throw new Error('Prompt not found');
+    }
+
+    // Check rate limit
+    const rateCheck = await checkRateLimit(ctx, userId, 'prompt_reaction');
+    if (!rateCheck.allowed) {
+      throw new Error('Rate limit exceeded. Please wait a moment.');
+    }
+
+    const now = Date.now();
+
+    // Check for existing reaction
+    const existing = await ctx.db
+      .query('todPromptReactions')
+      .withIndex('by_prompt_user', (q) =>
+        q.eq('promptId', promptId).eq('userId', userId)
+      )
+      .first();
+
+    if (emoji === '' || !emoji) {
+      // Remove reaction
+      if (existing) {
+        await ctx.db.delete(existing._id);
+        // Decrement count
+        const newCount = Math.max(0, (prompt.totalReactionCount ?? 0) - 1);
+        await ctx.db.patch(prompt._id, { totalReactionCount: newCount });
+      }
+      return { ok: true, action: 'removed' };
+    }
+
+    if (existing) {
+      // Update reaction
+      if (existing.emoji !== emoji) {
+        await ctx.db.patch(existing._id, {
+          emoji,
+          updatedAt: now,
+        });
+        return { ok: true, action: 'changed', oldEmoji: existing.emoji, newEmoji: emoji };
+      }
+      return { ok: true, action: 'unchanged' };
+    } else {
+      // Create new reaction
+      await ctx.db.insert('todPromptReactions', {
+        promptId,
+        userId,
+        emoji,
+        createdAt: now,
+      });
+      // Increment count
+      await ctx.db.patch(prompt._id, {
+        totalReactionCount: (prompt.totalReactionCount ?? 0) + 1,
+      });
+      return { ok: true, action: 'added', emoji };
+    }
+  },
+});
+
+/**
+ * Report a prompt.
+ * Rate limited per day. Same user can't report same prompt twice.
+ * If prompt reaches 5 unique reports, it's hidden from feeds.
+ */
+export const reportPrompt = mutation({
+  args: {
+    promptId: v.string(),
+    reporterId: v.string(),
+    reasonCode: v.union(
+      v.literal('harassment'),
+      v.literal('sexual'),
+      v.literal('spam'),
+      v.literal('hate'),
+      v.literal('violence'),
+      v.literal('other')
+    ),
+    reasonText: v.optional(v.string()),
+  },
+  handler: async (ctx, { promptId, reporterId: argsReporterId, reasonCode, reasonText }) => {
+    const reporterId = await resolveRequiredTodUserId(ctx, argsReporterId, 'Unauthorized');
+
+    // Validate prompt exists
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
+      .first();
+
+    if (!prompt) {
+      throw new Error('Prompt not found');
+    }
+
+    // Can't report own prompt
+    if (prompt.ownerUserId === reporterId) {
+      throw new Error("Cannot report your own prompt");
+    }
+
+    // Check if already reported by this user
+    const existingReport = await ctx.db
+      .query('todPromptReports')
+      .withIndex('by_prompt_reporter', (q) =>
+        q.eq('promptId', promptId).eq('reporterId', reporterId)
+      )
+      .first();
+
+    if (existingReport) {
+      throw new Error('You have already reported this prompt');
+    }
+
+    // Check rate limit (daily)
+    const rateCheck = await checkRateLimit(ctx, reporterId, 'prompt_report');
+    if (!rateCheck.allowed) {
+      throw new Error('You have reached your daily report limit');
+    }
+
+    // Create report
+    await ctx.db.insert('todPromptReports', {
+      promptId,
+      reporterId,
+      reasonCode,
+      reasonText,
+      createdAt: Date.now(),
+    });
+
+    // Increment report count
+    const newReportCount = (prompt.reportCount ?? 0) + 1;
+    await ctx.db.patch(prompt._id, { reportCount: newReportCount });
 
     // Check if threshold reached
     const isNowHidden = newReportCount >= REPORT_HIDE_THRESHOLD;

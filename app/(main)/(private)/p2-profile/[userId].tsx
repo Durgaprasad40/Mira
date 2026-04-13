@@ -289,7 +289,7 @@ export default function Phase2FullProfileScreen() {
   const swipeMutation = useMutation(api.privateSwipes.swipe);
 
   useEffect(() => {
-    if (!standOutResult || !profileUserId || !token) return;
+    if (!standOutResult || !profileUserId || !currentUserId) return;
     // Only handle if this is for our profile
     if (standOutResult.profileId !== profileUserId) return;
 
@@ -306,7 +306,7 @@ export default function Phase2FullProfileScreen() {
         }
 
         const result = await swipeMutation({
-          token,
+          authUserId: currentUserId,
           toUserId: profileUserId as any,
           action: 'super_like',
           message: standOutResult.message || undefined,
@@ -330,7 +330,7 @@ export default function Phase2FullProfileScreen() {
     };
 
     sendStandOut();
-  }, [standOutResult, profileUserId, token, router, incrementStandOuts, swipeMutation]);
+  }, [standOutResult, profileUserId, currentUserId, router, incrementStandOuts, swipeMutation]);
 
   // Phase-2 profile query
   const profile = useQuery(
@@ -515,7 +515,7 @@ export default function Phase2FullProfileScreen() {
 
   // Handle like action
   const handleLike = async () => {
-    if (!token || !profileUserId) return;
+    if (!currentUserId || !profileUserId) return;
 
     if (__DEV__) {
       console.log('[P2_FULL_PROFILE_ACTION] action=like userId=' + profileUserId?.slice?.(-8));
@@ -523,7 +523,7 @@ export default function Phase2FullProfileScreen() {
 
     try {
       const result = await swipeMutation({
-        token,
+        authUserId: currentUserId,
         toUserId: profileUserId as any,
         action: 'like',
       });
@@ -545,7 +545,7 @@ export default function Phase2FullProfileScreen() {
 
   // Handle pass action
   const handlePass = async () => {
-    if (!token || !profileUserId) return;
+    if (!currentUserId || !profileUserId) return;
 
     if (__DEV__) {
       console.log('[P2_FULL_PROFILE_ACTION] action=pass userId=' + profileUserId?.slice?.(-8));
@@ -553,7 +553,7 @@ export default function Phase2FullProfileScreen() {
 
     try {
       await swipeMutation({
-        token,
+        authUserId: currentUserId,
         toUserId: profileUserId as any,
         action: 'pass',
       });

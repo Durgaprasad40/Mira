@@ -1335,6 +1335,9 @@ export default defineSchema({
     activeCount: v.number(),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()),
+    // Reaction and report counts for prompt-level interactions
+    totalReactionCount: v.optional(v.number()), // total reactions on this prompt
+    reportCount: v.optional(v.number()), // for hiding prompts with 5+ reports
     // Owner profile snapshot (immutable at creation time)
     isAnonymous: v.optional(v.boolean()), // true = hide photo/name, show only age+gender
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))), // 'blur' = show blurred photo
@@ -1445,6 +1448,37 @@ export default defineSchema({
     .index('by_reporter', ['reporterId'])
     .index('by_answer_reporter', ['answerId', 'reporterId']),
 
+  // Truth & Dare Prompt Reactions (for reacting to prompts themselves)
+  todPromptReactions: defineTable({
+    promptId: v.string(),
+    userId: v.string(),
+    emoji: v.string(), // any emoji: "😂", "🔥", "❤️", "😮", "👏"
+    createdAt: v.number(),
+    updatedAt: v.optional(v.number()),
+  })
+    .index('by_prompt', ['promptId'])
+    .index('by_user', ['userId'])
+    .index('by_prompt_user', ['promptId', 'userId']),
+
+  // Truth & Dare Prompt Reports (for hiding prompts with 5+ reports)
+  todPromptReports: defineTable({
+    promptId: v.string(),
+    reporterId: v.string(),
+    reasonCode: v.optional(v.union(
+      v.literal('harassment'),
+      v.literal('sexual'),
+      v.literal('spam'),
+      v.literal('hate'),
+      v.literal('violence'),
+      v.literal('other')
+    )),
+    reasonText: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_prompt', ['promptId'])
+    .index('by_reporter', ['reporterId'])
+    .index('by_prompt_reporter', ['promptId', 'reporterId']),
+
   // Truth & Dare Rate Limiting (tracks user action counts per day)
   todRateLimits: defineTable({
     userId: v.string(),
@@ -1453,7 +1487,9 @@ export default defineSchema({
       v.literal('connect'), // legacy connect-request rate limit action
       v.literal('answer'),
       v.literal('reaction'),
+      v.literal('prompt_reaction'), // reactions on prompts
       v.literal('report'),
+      v.literal('prompt_report'), // reports on prompts
       v.literal('claim_media') // active secure-media claim rate limit action
     ),
     windowStart: v.number(), // Start of the rate limit window (day start)
@@ -1647,6 +1683,8 @@ export default defineSchema({
     // - member: basic (send messages, view room)
     role: v.union(v.literal('owner'), v.literal('admin'), v.literal('member')),
     lastMessageAt: v.optional(v.number()), // For rate limiting
+    isBanned: v.optional(v.boolean()), // For banning users from room
+    passwordVerified: v.optional(v.boolean()), // For password-protected rooms
   })
     .index('by_room', ['roomId'])
     .index('by_user', ['userId'])
@@ -1704,6 +1742,19 @@ export default defineSchema({
   })
     .index('by_room_user', ['roomId', 'userId'])
     .index('by_user', ['userId']),
+
+  // Chat Room Password Attempts table (tracks failed password attempts)
+  // 5-attempt system: 3 immediate, then cooldowns, then blocked
+  chatRoomPasswordAttempts: defineTable({
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(), // auth ID (not user ID, since user may not be in DB yet)
+    stage: v.number(), // 1=initial (3 attempts), 2=cooldown1 (1 attempt), 3=cooldown2 (1 attempt), 4=blocked
+    attempts: v.number(), // attempts within current stage
+    lastAttemptAt: v.number(),
+    cooldownUntil: v.optional(v.number()), // if in cooldown, when it ends
+    blocked: v.boolean(), // true if permanently blocked for this room
+  })
+    .index('by_room_user', ['roomId', 'authUserId']),
 
   // Chat Room Profiles (separate identity for chat rooms)
   chatRoomProfiles: defineTable({
