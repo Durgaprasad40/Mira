@@ -77,7 +77,7 @@ export default function MainTabsLayout() {
   // Convex mode: query unread count from server
   const convexUnreadCount = useQuery(
     api.messages.getUnreadCount,
-    !isDemoMode && userId && token ? { token, authUserId: userId } : 'skip'
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   const unreadChats = isDemoMode ? demoUnreadCount : (convexUnreadCount ?? 0);
@@ -150,13 +150,6 @@ export default function MainTabsLayout() {
     // Prevent default tab navigation (we handle it manually)
     e.preventDefault();
 
-    // P2-001 FIX: Wait for store hydration before routing
-    // Prevents mis-routing to onboarding when store hasn't loaded persisted state yet
-    if (!privateStoreHydrated) {
-      if (__DEV__) console.log('[PRIVATE TAP] ignored: not hydrated');
-      return;
-    }
-
     // N-001/C-004 FIX: Prevent duplicate navigation during same component lifecycle
     // This guards against rapid state changes triggering multiple router.replace calls
     if (didRouteToPrivateRef.current) {
@@ -164,6 +157,20 @@ export default function MainTabsLayout() {
       return;
     }
     didRouteToPrivateRef.current = true;
+
+    // FIX: Do not silently ignore tap when not hydrated - proceed with best-effort routing
+    // If not hydrated, proceed with onboarding as default safe destination
+    if (!privateStoreHydrated) {
+      if (__DEV__) console.log('[PRIVATE TAP] pressed -> onboarding (not hydrated, safe default)');
+      router.replace('/(main)/phase2-onboarding' as any);
+      // Reset guard after navigation settles
+      if (privateTabTimeoutRef.current) clearTimeout(privateTabTimeoutRef.current);
+      privateTabTimeoutRef.current = setTimeout(() => {
+        didRouteToPrivateRef.current = false;
+        privateTabTimeoutRef.current = null;
+      }, 1000);
+      return;
+    }
 
     // Determine effective deletion status (server in non-demo, local in demo)
     const effectiveDeletionStatus = isDemoMode

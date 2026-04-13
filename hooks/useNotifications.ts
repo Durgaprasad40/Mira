@@ -612,9 +612,12 @@ export function useNotifications() {
 
   // ── Convex queries (skipped in legacy demo mode only) ──
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  // FIX: Pass userId to the query - the backend requires it
   const convexNotifications = useQuery(
     api.notifications.getNotifications,
-    !isDemoMode && convexUserId && authReady && hasValidToken ? {} : 'skip',
+    !isDemoMode && convexUserId && authReady && hasValidToken
+      ? { userId: convexUserId }
+      : 'skip',
   );
   const markAsReadMutation = useMutation(api.notifications.markAsRead);
   const markAllAsReadMutation = useMutation(api.notifications.markAllAsRead);
@@ -821,11 +824,11 @@ export function useNotificationBellBadge() {
   const isInPhase2 = phaseMode === 'phase2' || phaseMode === 'shared';
   const phase = isInPhase2 ? 'phase2' : 'phase1';
 
-  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  // Pass token for demo auth mode support (backend uses requireAppUserId)
+  // NOTE: isDemoAuthMode uses real Convex backend with userId-based auth
+  // FIX: Backend expects { userId }, not { token }
   const convexUnseenCount = useQuery(
     api.notifications.getBellUnreadCount,
-    !isDemoMode && convexUserId && authReady && hasValidToken ? { phase, token } : 'skip',
+    !isDemoMode && userId && authReady ? { phase, userId } : 'skip',
   );
 
   const demoNotifications = useDemoNotifStore((s) => s.notifications);

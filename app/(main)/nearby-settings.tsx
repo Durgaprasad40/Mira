@@ -66,12 +66,12 @@ const VISIBILITY_OPTIONS: { value: VisibilityMode; label: string; description: s
 
 export default function NearbySettingsScreen() {
   const router = useRouter();
-  const { token } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
 
-  // Fetch current user
+  // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUserQuery = useQuery(
-    api.users.getCurrentUserFromToken,
-    !isDemoMode && token ? { token } : 'skip'
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
@@ -228,12 +228,13 @@ export default function NearbySettingsScreen() {
         return;
       }
 
-      if (!token) return;
+      if (!userId) return;
       setIsSaving(true);
 
       try {
+        // FIX: Backend expects { authUserId }, not { token }
         await updateNearbySettingsMut({
-          token,
+          authUserId: userId,
           [field]: value,
         });
       } catch (error: any) {
@@ -251,7 +252,7 @@ export default function NearbySettingsScreen() {
         setIsSaving(false);
       }
     },
-    [token, currentUser, updateNearbySettingsMut]
+    [userId, currentUser, updateNearbySettingsMut]
   );
 
   // Toggle handlers
@@ -306,11 +307,12 @@ export default function NearbySettingsScreen() {
       return;
     }
 
-    if (!token) return;
+    if (!userId) return;
 
     try {
+      // FIX: Backend expects { authUserId }, not { token }
       await pauseNearbyMut({
-        token,
+        authUserId: userId,
         paused: !isPaused,
       });
       if (isPaused) {

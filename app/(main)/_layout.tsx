@@ -220,6 +220,7 @@ export default function MainLayout() {
       />
       <Stack.Screen name="prompt-thread" />
       <Stack.Screen name="confession-thread" />
+      <Stack.Screen name="my-confessions" />
       <Stack.Screen
         name="compose-confession"
         options={{ presentation: "fullScreenModal" }}

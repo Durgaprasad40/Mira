@@ -20,6 +20,7 @@ import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { Toast } from '@/components/ui/Toast';
 import { trackEvent } from '@/lib/analytics';
+import { useAuthStore } from '@/stores/authStore';
 
 // Report reasons matching backend schema
 const REPORT_REASONS = [
@@ -62,8 +63,10 @@ export function ReportModal({
   onReport,
   onBlock,
 }: ReportModalProps) {
+  // Get userId for backend mutations
+  const userId = useAuthStore((s) => s.userId);
   // Determine if we have full backend integration or using legacy mode
-  const hasBackendIntegration = !!(targetUserId && authToken);
+  const hasBackendIntegration = !!(targetUserId && (authToken || userId));
   const [viewState, setViewState] = useState<ViewState>('main');
   const [otherReason, setOtherReason] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -129,8 +132,13 @@ export function ReportModal({
             setIsLoading(true);
 
             try {
+              if (!userId) {
+                Alert.alert('Error', 'Please log in to block users.');
+                setIsLoading(false);
+                return;
+              }
               await blockMutation({
-                token: authToken!,
+                authUserId: userId,
                 blockedUserId: targetUserId as any,
               });
 
@@ -224,8 +232,13 @@ export function ReportModal({
     setIsLoading(true);
 
     try {
+      if (!userId) {
+        Alert.alert('Error', 'Please log in to report users.');
+        setIsLoading(false);
+        return;
+      }
       await reportMutation({
-        token: authToken!,
+        authUserId: userId,
         reportedUserId: targetUserId as any,
         reason: reasonId,
       });
@@ -258,8 +271,13 @@ export function ReportModal({
     setIsLoading(true);
 
     try {
+      if (!userId) {
+        Alert.alert('Error', 'Please log in to report users.');
+        setIsLoading(false);
+        return;
+      }
       await reportMutation({
-        token: authToken!,
+        authUserId: userId,
         reportedUserId: targetUserId as any,
         reason: 'other',
         description: trimmed,

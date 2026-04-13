@@ -17,12 +17,12 @@ import { Toast } from '@/components/ui/Toast';
 
 export default function PrivacySettingsScreen() {
   const router = useRouter();
-  const { token } = useAuthStore();
+  const { token, userId } = useAuthStore();
 
   // Query current user privacy settings (live mode only)
   const currentUser = useQuery(
-    api.users.getCurrentUserFromToken,
-    !isDemoMode && token ? { token } : 'skip'
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   // Mutations for backend sync
@@ -91,9 +91,9 @@ export default function PrivacySettingsScreen() {
     const applyChange = async () => {
       setHideFromDiscover(newValue);
       // Sync to backend in live mode
-      if (!isDemoMode && token) {
+      if (!isDemoMode && userId) {
         try {
-          await toggleDiscoveryPause({ token, paused: newValue });
+          await toggleDiscoveryPause({ authUserId: userId, paused: newValue });
           setDiscoveryPauseEndsAt(newValue ? Date.now() + 24 * 60 * 60 * 1000 : null);
         } catch {
           Toast.show("Couldn't update setting. Please try again.");

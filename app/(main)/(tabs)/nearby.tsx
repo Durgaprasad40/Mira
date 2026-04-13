@@ -515,8 +515,8 @@ export default function NearbyScreen() {
 
   const nearbyUsersQuery = useQuery(
     api.crossedPaths.getNearbyUsers,
-    shouldRunNearbyUsersQuery
-      ? { token: authToken!, refreshKey: nearbyRefreshKey }
+    shouldRunNearbyUsersQuery && userId
+      ? { userId }
       : 'skip'
   );
 
@@ -525,7 +525,7 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   const crossedPathSummaryQuery = useQuery(
     api.crossedPaths.getCrossedPathSummary,
-    shouldRunCrossedPathSummaryQuery ? { token: authToken! } : 'skip'
+    shouldRunCrossedPathSummaryQuery && userId ? { userId } : 'skip'
   );
 
   const [hasNewCrossedPaths, setHasNewCrossedPaths] = useState(false);
@@ -835,9 +835,10 @@ export default function NearbyScreen() {
 
     // Publish location (with mount guard)
     (async () => {
+      if (!userId) return;
       try {
         const result = await publishLocationMutation({
-          token,
+          userId,
           latitude: lat,
           longitude: lng,
         });
@@ -900,10 +901,10 @@ export default function NearbyScreen() {
         }
 
         // Rate limits passed - trigger crossed paths detection
-        if (!isMountedRef.current) return;
+        if (!isMountedRef.current || !userId) return;
         try {
           const result = await recordLocationMutation({
-            token,
+            userId,
             latitude: lat,
             longitude: lng,
             accuracy: bestLocation.accuracy,

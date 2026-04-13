@@ -39,7 +39,12 @@ export function NotificationPopover({
   anchorRight = 16,
   anchorTop = 56,
 }: NotificationPopoverProps) {
+  // SAFEGUARD: useNotifications returns empty array when userId is not ready
+  // This prevents crashes from undefined data
   const { notifications, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
+
+  // Additional safeguard: ensure notifications is always an array
+  const safeNotifications = notifications ?? [];
 
   // Keep expiry cleanup on open, but don't clear unread state until the user
   // opens an item or explicitly taps "Mark all read".
@@ -222,7 +227,7 @@ export function NotificationPopover({
   );
 
   // Limit to most recent 5 notifications for popover
-  const displayNotifications = notifications.slice(0, 5);
+  const displayNotifications = safeNotifications.slice(0, 5);
 
   return (
     <Modal
@@ -247,7 +252,7 @@ export function NotificationPopover({
           {/* Header */}
           <View style={styles.header}>
             <Text style={styles.headerTitle}>Notifications</Text>
-            {notifications.length > 0 && (
+            {safeNotifications.length > 0 && (
               <TouchableOpacity onPress={markAllSeen}>
                 <Text style={styles.markAllText}>Mark all read</Text>
               </TouchableOpacity>
@@ -272,7 +277,7 @@ export function NotificationPopover({
           )}
 
           {/* See all link */}
-          {notifications.length > 5 && (
+          {safeNotifications.length > 5 && (
             <TouchableOpacity
               style={styles.seeAllButton}
               onPress={() => {
@@ -281,7 +286,7 @@ export function NotificationPopover({
               }}
             >
               <Text style={styles.seeAllText}>
-                See all {notifications.length} notifications
+                See all {safeNotifications.length} notifications
               </Text>
               <Ionicons name="chevron-forward" size={16} color={COLORS.primary} />
             </TouchableOpacity>

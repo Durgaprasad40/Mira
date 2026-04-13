@@ -30,13 +30,14 @@ export default function AccountSettingsScreen() {
   const router = useRouter();
   const logout = useAuthStore((s) => s.logout);
   const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
   const softDeleteMutation = useMutation(api.auth.softDeleteAccount);
   const serverLogout = useMutation(api.auth.logout);
 
   // Query current user for email display (live mode only)
   const currentUserQuery = useQuery(
-    api.users.getCurrentUserFromToken,
-    !isDemoMode && token ? { token } : 'skip'
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
   const [timedOut, setTimedOut] = useState(false);
@@ -130,13 +131,13 @@ export default function AccountSettingsScreen() {
               }
 
               // Real mode: call soft delete mutation before logging out
-              if (!token) {
+              if (!userId) {
                 Alert.alert('Error', 'Unable to deactivate your account. Please try logging out and back in.');
                 return;
               }
 
               await softDeleteMutation({
-                token,
+                authUserId: userId,
                 reason: 'User requested account deactivation',
               });
 

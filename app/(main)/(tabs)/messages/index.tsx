@@ -173,9 +173,10 @@ export default function MessagesScreen() {
         setActiveView('likes');
         // LIFECYCLE: Mark likes as opened when arriving via deep link
         // FOCUS-GUARD: Only call once per session to avoid repeated API calls
-        if (!isDemoMode && token && !hasMarkedLikesOpenedRef.current) {
+        // FIX: Backend expects { authUserId }, not { token }
+        if (!isDemoMode && userId && !hasMarkedLikesOpenedRef.current) {
           hasMarkedLikesOpenedRef.current = true;
-          markLikesOpened({ token }).catch((err) => {
+          markLikesOpened({ authUserId: userId }).catch((err) => {
             // Reset guard on failure so retry is possible
             hasMarkedLikesOpenedRef.current = false;
             log.warn('[MESSAGES]', 'markLikesOpened (deeplink) failed', { error: err });
@@ -254,14 +255,14 @@ export default function MessagesScreen() {
 
   // HIGH #1 FIX: Memoize Convex query args to prevent re-subscriptions
   // Creating new object references on every render causes Convex to re-subscribe
-  // APP-P0-004: Split args - getConversations uses authUserId, others use userId
+  // FIX: Use correct argument names for each API endpoint
   const convexConversationsArgs = useMemo(
-    () => (!isDemoMode && userId && token ? { token, authUserId: userId } : 'skip' as const),
-    [userId, token, retryKey]
+    () => (!isDemoMode && userId ? { authUserId: userId } : 'skip' as const),
+    [userId, retryKey]
   );
   const convexUnreadArgs = useMemo(
-    () => (!isDemoMode && userId && token ? { token, authUserId: userId } : 'skip' as const),
-    [userId, token, retryKey]
+    () => (!isDemoMode && userId ? { userId } : 'skip' as const),
+    [userId, retryKey]
   );
   const convexQueryArgs = useMemo(
     () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
@@ -327,11 +328,11 @@ export default function MessagesScreen() {
   useEffect(() => {
     // Only run when we have conversation data (meaning messages have arrived)
     if (!isDemoMode && userId && convexConversations && convexConversations.length > 0) {
-      markAllAsDelivered({ token: token ?? undefined, authUserId: userId }).catch(() => {
+      markAllAsDelivered({ authUserId: userId }).catch(() => {
         // Silent fail - delivery marking is best-effort
       });
     }
-  }, [isDemoMode, userId, token, convexConversations, markAllAsDelivered]);
+  }, [isDemoMode, userId, convexConversations, markAllAsDelivered]);
 
   // Combine message threads
   const demoThreads = useMemo(() => {
@@ -422,20 +423,20 @@ export default function MessagesScreen() {
     messagesNudgeStatus === 'needs_both' && !dismissedNudges.includes('messages');
 
   const refetchLiveMessagesData = useCallback(async () => {
-    if (isDemoMode || !userId || !token || !convexUserId) {
+    if (isDemoMode || !userId || !convexUserId) {
       return;
     }
 
     setRetryKey((k) => k + 1);
 
     await Promise.all([
-      convex.query(api.messages.getConversations, { token, authUserId: userId }),
-      convex.query(api.messages.getUnreadCount, { token, authUserId: userId }),
+      convex.query(api.messages.getConversations, { authUserId: userId }),
+      convex.query(api.messages.getUnreadCount, { userId }),
       convex.query(api.users.getCurrentUser, { userId: convexUserId }),
       convex.query(api.likes.getLikesReceived, { userId: convexUserId }),
       convex.query(api.matches.getMatches, { userId: convexUserId }),
     ]);
-  }, [convex, convexUserId, isDemoMode, token, userId]);
+  }, [convex, convexUserId, isDemoMode, userId]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -915,8 +916,9 @@ export default function MessagesScreen() {
                   likesListLayoutReady.current = false;
                   setActiveView('likes');
                   // LIFECYCLE: Mark likes as opened (starts 24h expiry timer)
-                  if (!isDemoMode && token) {
-                    markLikesOpened({ token }).catch((err) => {
+                  // FIX: Backend expects { authUserId }, not { token }
+                  if (!isDemoMode && userId) {
+                    markLikesOpened({ authUserId: userId }).catch((err) => {
                       log.warn('[MESSAGES]', 'markLikesOpened failed', { error: err });
                     });
                   }

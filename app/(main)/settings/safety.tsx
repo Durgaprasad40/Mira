@@ -49,6 +49,7 @@ export default function SafetySettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
 
   // Safe back navigation - ensures return to Profile tab
   const handleGoBack = useCallback(() => {
@@ -60,13 +61,13 @@ export default function SafetySettingsScreen() {
   }, [router]);
 
   const currentUserQuery = useQuery(
-    api.users.getCurrentUserFromToken,
-    !isDemoMode && token ? { token } : 'skip'
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
   const verificationDetails = useQuery(
     api.verification.getVerificationStatus,
-    !isDemoMode && token ? { token } : 'skip'
+    !isDemoMode && userId ? { userId } : 'skip'
   );
   const [timedOut, setTimedOut] = useState(false);
 

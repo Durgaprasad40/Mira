@@ -78,8 +78,7 @@ export function ReportModal({
     setSubmitting(true);
     try {
       await reportMedia({
-        token: token ?? undefined,
-        authUserId: reporterId,
+        reporterId: reporterId as any,
         reportedUserId: reportedUserId as any,
         chatId: chatId as any,
         mediaId: mediaId ? (mediaId as any) : undefined,

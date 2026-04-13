@@ -86,32 +86,35 @@ export default function ProfileScreen() {
   // FIX D: Subscribe to hydration status to re-render when hydration completes
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
 
-  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  const profileState = useQuery(
-    api.users.getCurrentUserProfileState,
-    !isDemoMode && token ? { token, refreshKey } : 'skip'
+  // FIX: Use getCurrentUser with userId instead of getCurrentUserProfileState with token
+  const currentUserData = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
-  const convexUser = !isDemoMode ? (profileState?.user ?? undefined) : undefined;
-  const isCurrentUserLoading = !isDemoMode && !!token && profileState === undefined;
+  const convexUser = !isDemoMode ? (currentUserData ?? undefined) : undefined;
+  const isCurrentUserLoading = !isDemoMode && !!userId && currentUserData === undefined;
 
   // Admin check for showing admin menu
+  // FIX: Use checkIsAdmin with userId instead of checkCurrentUserIsAdmin with token
   const adminCheck = useQuery(
-    api.users.checkCurrentUserIsAdmin,
-    !isDemoMode && token ? { token } : 'skip'
+    api.users.checkIsAdmin,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
   const isAdmin = adminCheck?.isAdmin === true;
 
   // Query verification status for details (date, pending session)
+  // FIX: Backend expects { userId }, not { token }
   const verificationDetails = useQuery(
     api.verification.getVerificationStatus,
-    !isDemoMode && token ? { token } : 'skip'
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   // CONSISTENCY FIX: Use same photo source as Edit Profile (api.photos.getUserPhotos)
   // This ensures Profile Tab shows the SAME photos as Edit Profile grid
+  // FIX: Use getUserPhotos with userId instead of getCurrentUserPhotos with token
   const backendPhotos = useQuery(
-    api.photos.getCurrentUserPhotos,
-    !isDemoMode && token ? { token } : 'skip'
+    api.photos.getUserPhotos,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   // HYDRATION FIX: Distinguish loading vs empty to prevent flicker
@@ -251,13 +254,13 @@ export default function ProfileScreen() {
   }, []);
 
   const handleProfileRecovery = useCallback(async () => {
-    if (!token || profileState?.status === 'auth_error') {
+    if (!token || !currentUserData) {
       await logout();
       safeReplace(router, '/(auth)/welcome', 'profile->auth-recovery');
       return;
     }
     safeReplace(router, '/(main)/(tabs)/home', 'profile->load-recovery');
-  }, [logout, profileState?.status, router, token]);
+  }, [logout, currentUserData, router, token]);
 
   // MAIN PHOTO SOURCE OF TRUTH:
   // - Live mode: Use effectivePhotos (api.photos.getUserPhotos with hydration guard)
@@ -510,9 +513,9 @@ export default function ProfileScreen() {
           onPress: async () => {
             try {
               if (!isDemoMode) {
+                // FIX: Backend expects { authUserId }, not { token }
                 await deactivateAccount({
-                  token,
-                  reason: 'User requested account deactivation',
+                  authUserId: userId!,
                 });
               } else {
                 useDemoStore.getState().demoLogout();
@@ -545,7 +548,7 @@ export default function ProfileScreen() {
   }
 
   if (hasCurrentUserFailure) {
-    const needsAuthRecovery = !token || profileState?.status === 'auth_error';
+    const needsAuthRecovery = !token || !currentUserData;
 
     return (
       <SafeAreaView edges={['top']} style={styles.container}>
@@ -716,46 +719,6 @@ export default function ProfileScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Photo visibility status - based on main photo's individual blur state */}
-        <View style={styles.visibilityRow}>
-          <Ionicons
-            name={mainPhotoIsBlurred ? 'eye-off-outline' : 'eye-outline'}
-            size={16}
-            color={COLORS.textMuted}
-          />
-          <Text style={styles.visibilityText}>
-            {mainPhotoIsBlurred ? 'Photo blurred to others' : 'Photos visible to others'}
-          </Text>
-        </View>
-
-        {/* Preview toggle (only if main photo is individually blurred) */}
-        {mainPhotoIsBlurred && mainPhotoUrl && (
-          <TouchableOpacity
-            style={styles.previewToggle}
-            onPress={() => setPreviewBlur((p) => !p)}
-            activeOpacity={0.7}
-            accessibilityRole="button"
-            accessibilityLabel={previewBlur ? 'Hide blur preview' : 'Preview how others see your photo'}
-          >
-            <Text style={styles.previewToggleText}>
-              {previewBlur ? 'Hide preview' : 'See how others view you'}
-            </Text>
-          </TouchableOpacity>
-        )}
-
-        {/* Blurred preview thumbnail - only shown if main photo is individually blurred */}
-        {previewBlur && mainPhotoIsBlurred && mainPhotoUrl && (
-          <View style={styles.previewContainer}>
-            <Image
-              source={{ uri: mainPhotoUrl }}
-              style={styles.previewThumbnail}
-              contentFit="cover"
-              blurRadius={8}
-              transition={100}
-            />
-            <Text style={styles.previewHint}>How others see your photo</Text>
-          </View>
-        )}
       </View>
 
       {/* Section divider */}
@@ -1175,21 +1138,6 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontWeight: '500',
   },
-  visibilityRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    backgroundColor: COLORS.backgroundDark,
-    borderRadius: 16,
-  },
-  visibilityText: {
-    fontSize: 13,
-    color: COLORS.textMuted,
-    fontWeight: '500',
-  },
-
   // ═══════════════════════════════════════════════════════════════════════════
   // SECTION DIVIDER - Subtle separation
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1272,47 +1220,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.error,
     fontWeight: '500',
-  },
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PREVIEW TOGGLE - Blur preview
-  // ═══════════════════════════════════════════════════════════════════════════
-  previewToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    marginTop: 8,
-  },
-  previewToggleText: {
-    fontSize: 13,
-    color: COLORS.primary,
-    fontWeight: '600',
-  },
-  previewContainer: {
-    alignItems: 'center',
-    marginTop: 12,
-    marginBottom: 8,
-    padding: 16,
-    backgroundColor: COLORS.backgroundDark,
-    borderRadius: 16,
-  },
-  previewThumbnail: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    marginBottom: 10,
-  },
-  previewLabel: {
-    fontSize: 12,
-    color: COLORS.text,
-    fontWeight: '500',
-    marginBottom: 2,
-  },
-  previewHint: {
-    fontSize: 11,
-    color: COLORS.textMuted,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════

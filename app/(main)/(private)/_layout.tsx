@@ -384,19 +384,11 @@ export default function PrivateLayout() {
   // );
   const convexPrivateProfile = null; // Blocked until backend is implemented
 
-  // BLOCKED: getOnboardingStatus expects { userId } not { token } - using local store only
-  // const phase1OnboardingStatus = useQuery(
-  //   api.users.getOnboardingStatus,
-  //   !isDemoMode && token ? { token } : 'skip'
-  // );
-  // Type annotation to avoid 'never' inference
-  const phase1OnboardingStatus: {
-    phase2OnboardingCompleted?: boolean;
-    privateWelcomeConfirmed?: boolean;
-    faceVerificationStatus?: string;
-    normalPhotoCount?: number;
-    onboardingCompleted?: boolean;
-  } | null = null; // Blocked until backend args are fixed
+  // Query Phase-1 onboarding status from backend
+  const phase1OnboardingStatus = useQuery(
+    api.users.getOnboardingStatus,
+    !isDemoMode && userId ? { userId } : 'skip'
+  );
 
   // BLOCKED: T/D queries have wrong args and screen is blocked
   // const prewarmPromptsData = useQuery(...);

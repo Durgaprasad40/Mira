@@ -57,6 +57,7 @@ export function usePresenceAndLocation() {
   const getBestLocation = useLocationStore((s) => s.getBestLocation);
   const refreshLocation = useLocationStore((s) => s.refreshLocation);
   const permissionStatus = useLocationStore((s) => s.permissionStatus);
+  const city = useLocationStore((s) => s.city);
 
   const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastSyncTimeRef = useRef<number>(0);
@@ -111,7 +112,7 @@ export function usePresenceAndLocation() {
   // Sync location to backend (movement-based + time-based)
   // This updates latitude/longitude for server-side distance calculation
   const syncLocationToBackendIfNeeded = useCallback(async (force = false) => {
-    if (isDemoMode || !userId || !token) return;
+    if (isDemoMode || !userId) return;
     if (permissionStatus !== 'granted') {
       // LOG_NOISE_FIX: Gated behind DEBUG_LOCATION
       if (__DEV__ && DEBUG_LOCATION) {
@@ -172,9 +173,10 @@ export function usePresenceAndLocation() {
 
     try {
       await updateLocationMutation({
-        token,
+        authUserId: userId,
         latitude: coords.latitude,
         longitude: coords.longitude,
+        ...(city ? { city } : {}),
       });
 
       // Update refs on success
@@ -191,7 +193,7 @@ export function usePresenceAndLocation() {
         console.warn('[LOCATION] sync failed:', String(err).slice(0, 50));
       }
     }
-  }, [userId, token, permissionStatus, getBestLocation, updateLocationMutation]);
+  }, [city, userId, permissionStatus, getBestLocation, updateLocationMutation]);
 
   // Handle app state changes
   useEffect(() => {

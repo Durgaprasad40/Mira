@@ -34,12 +34,13 @@ type BlockedUserListItem = {
 export default function BlockedUsersScreen() {
   const router = useRouter();
   const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
   const isDemo = isDemoMode;
 
   const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
   const blockedUsersQuery = useQuery(
-    api.users.getCurrentUserBlockedUsers,
-    !isDemo && token ? { token } : 'skip'
+    api.users.getMyBlockedUsers,
+    !isDemo && userId ? { authUserId: userId } : 'skip'
   );
 
   const unblockUserMutation = useMutation(api.users.unblockUser);
@@ -55,12 +56,12 @@ export default function BlockedUsersScreen() {
         isVerified: false,
         unavailable: false,
       }))
-    : (blockedUsersQuery ?? []).map((user: any) => ({
+    : (blockedUsersQuery?.blockedUsers ?? []).map((user: any) => ({
         blockedUserId: String(user.blockedUserId),
         blockedAt: user.blockedAt,
-        displayName: user.displayName,
-        isVerified: !!user.isVerified,
-        unavailable: !!user.unavailable,
+        displayName: user.displayName || 'Unknown',
+        isVerified: false,
+        unavailable: false,
       }));
 
   const isLoading = !isDemo && token ? blockedUsersQuery === undefined : false;
@@ -71,7 +72,7 @@ export default function BlockedUsersScreen() {
       return;
     }
 
-    if (!token) {
+    if (!userId) {
       Toast.show('Please log in to report users');
       return;
     }
@@ -79,7 +80,7 @@ export default function BlockedUsersScreen() {
     setPendingActionKey(`report:${reportedUserId}`);
     try {
       const result = await reportUserMutation({
-        token,
+        authUserId: userId,
         reportedUserId: reportedUserId as Id<'users'>,
         reason,
       });
@@ -146,13 +147,13 @@ export default function BlockedUsersScreen() {
                 return;
               }
 
-              if (!token) {
+              if (!userId) {
                 Toast.show('Please log in to manage blocked users');
                 return;
               }
 
               const result = await unblockUserMutation({
-                token,
+                authUserId: userId,
                 blockedUserId: blockedUserId as Id<'users'>,
               });
 

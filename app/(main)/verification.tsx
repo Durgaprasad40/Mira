@@ -23,25 +23,27 @@ type VerificationState = "unverified" | "camera" | "pending" | "verified";
 export default function VerificationScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { token } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
   const [state, setState] = useState<VerificationState>("unverified");
   const [capturedUri, setCapturedUri] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
 
+  // FIX: Backend expects { userId }, not { token }
   const verificationStatus = useQuery(
     api.verification.getVerificationStatus,
-    !isDemoMode && token ? { token } : "skip"
+    !isDemoMode && userId ? { userId } : "skip"
   );
 
   const createSession = useMutation(api.verification.createVerificationSession);
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
 
   // Determine if the user is locked (security_only) — hide dismiss/close in that case
+  // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUser = useQuery(
-    api.users.getCurrentUserFromToken,
-    !isDemoMode && token ? { token } : "skip"
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId } : "skip"
   );
   const isLocked = !isDemoMode && currentUser
     ? (currentUser.verificationEnforcementLevel === "security_only" ||

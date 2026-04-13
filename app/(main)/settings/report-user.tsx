@@ -51,12 +51,14 @@ type ReportCandidate = {
 export default function ReportUserScreen() {
   const router = useRouter();
   const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
   const isDemo = isDemoMode;
 
   const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
+  // Use blocked users as report candidates (blocked users can be reported)
   const reportCandidatesQuery = useQuery(
-    api.users.getCurrentUserReportCandidates,
-    !isDemo && token ? { token } : 'skip'
+    api.users.getMyBlockedUsers,
+    !isDemo && userId ? { authUserId: userId } : 'skip'
   );
 
   const reportUserMutation = useMutation(api.users.reportUser);
@@ -70,16 +72,16 @@ export default function ReportUserScreen() {
         isVerified: false,
         unavailable: false,
       }))
-    : (reportCandidatesQuery ?? []).map((candidate: any) => ({
-        userId: String(candidate.userId),
-        displayName: candidate.displayName,
+    : (reportCandidatesQuery?.blockedUsers ?? []).map((candidate: any) => ({
+        userId: String(candidate.blockedUserId),
+        displayName: candidate.displayName || 'Unknown',
         blockedAt: candidate.blockedAt ?? null,
-        lastInteractionAt: candidate.lastInteractionAt ?? null,
-        contexts: Array.isArray(candidate.contexts) ? candidate.contexts : [],
-        isVerified: !!candidate.isVerified,
-        unavailable: !!candidate.unavailable,
+        lastInteractionAt: candidate.blockedAt ?? null,
+        contexts: ['blocked'],
+        isVerified: false,
+        unavailable: false,
       }));
-  const isLoading = !isDemo && token ? reportCandidatesQuery === undefined : false;
+  const isLoading = !isDemo && userId ? reportCandidatesQuery === undefined : false;
 
   // Modal state for reason selection
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
@@ -141,12 +143,12 @@ export default function ReportUserScreen() {
     try {
       let result: { success?: boolean; error?: string } = { success: true };
       if (!isDemo) {
-        if (!token) {
+        if (!userId) {
           Alert.alert('Error', 'Please log in to report users.');
           return;
         }
         result = await reportUserMutation({
-          token,
+          authUserId: userId,
           reportedUserId: selectedUserId as Id<'users'>,
           reason: backendReason,
         });

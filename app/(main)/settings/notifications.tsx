@@ -24,12 +24,12 @@ import { Toast } from '@/components/ui/Toast';
  */
 export default function NotificationsSettingsScreen() {
   const router = useRouter();
-  const { token } = useAuthStore();
+  const { token, userId } = useAuthStore();
 
   // Query current user to get notification setting (backend source of truth)
   const currentUser = useQuery(
-    api.users.getCurrentUserFromToken,
-    !isDemoMode && token ? { token } : 'skip'
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   // Mutation to update notification setting
@@ -80,7 +80,7 @@ export default function NotificationsSettingsScreen() {
       return;
     }
 
-    if (!token) {
+    if (!token || !userId) {
       setNotificationsEnabled(previousValue);
       return;
     }
@@ -91,7 +91,7 @@ export default function NotificationsSettingsScreen() {
       }
 
       await updateNotificationSettings({
-        token,
+        authUserId: userId,
         notificationsEnabled: enabled,
       });
 
