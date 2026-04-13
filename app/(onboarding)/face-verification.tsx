@@ -75,9 +75,10 @@ export default function FaceVerificationScreen() {
 
   // Query backend onboarding status for reference photo check (source of truth)
   // M6 FIX: Include queryEnabled in skip condition to allow forced re-subscription
+  // FIX: Backend expects { userId }, not { token }
   const onboardingStatusLive = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && !isDemoAuthMode && token && queryEnabled ? { token } : 'skip'
+    !isDemoMode && !isDemoAuthMode && userId && queryEnabled ? { userId } : 'skip'
   );
 
   // Demo auth mode: Use demo onboarding status query

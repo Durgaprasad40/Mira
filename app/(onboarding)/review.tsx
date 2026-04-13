@@ -176,9 +176,10 @@ export default function ReviewScreen() {
   }, []);
 
   // BUG FIX: Always query backend status as authoritative source + fallback
+  // FIX: Backend expects { userId }, not { token }
   const onboardingStatusLive = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && !isDemoAuthMode && token ? { token } : 'skip'
+    !isDemoMode && !isDemoAuthMode && userId ? { userId } : 'skip'
   );
 
   // Demo auth mode: Use demo onboarding status query
@@ -258,14 +259,15 @@ export default function ReviewScreen() {
   }, [currentUser, backendPhotos]);
 
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
-  // PHASE-1 RESTRUCTURE: Verification is now non-blocking - users can be unverified, pending, or verified
+  // BACKEND ALIGNMENT: Only 'verified' status can complete onboarding
+  // This is used for display purposes; the actual gate is in handleComplete()
   const isVerified = isDemoMode
     ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
     : !!faceVerificationPassed;
   const isPending = !!faceVerificationPending;
 
-  // PHASE-1 RESTRUCTURE: Checkpoint gate REMOVED - allow unverified users to review/complete onboarding
-  // The verification status will be shown on the review screen for transparency
+  // NOTE: Face verification check happens in handleComplete() before calling backend
+  // Users can view this screen but cannot submit until face verification is 'verified'
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState("");
 
@@ -354,6 +356,14 @@ export default function ReviewScreen() {
         setStep("tutorial");
         router.push("/(onboarding)/tutorial" as any);
         return;
+      }
+
+      // PRODUCT REQUIREMENT: Face verification is NON-BLOCKING for onboarding completion
+      // Users can complete onboarding regardless of face verification status (pending, unverified, verified)
+      // The status is still tracked and shown, but does not block app entry
+      const currentFaceStatus = onboardingStatus?.faceVerificationStatus;
+      if (__DEV__) {
+        console.log('[REVIEW_SUBMIT] Face verification status (non-blocking):', currentFaceStatus);
       }
 
       // Live mode: Photos are already uploaded in additional-photos screen

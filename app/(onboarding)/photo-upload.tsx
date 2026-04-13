@@ -102,7 +102,7 @@ async function persistPhoto(cacheUri: string): Promise<string | null> {
 
 export default function PhotoUploadScreen() {
   useScreenTrace("ONB_PHOTO_UPLOAD");
-  const { photos, setPhotoAtIndex, setStep, setVerificationPhoto, clearAllPhotos } = useOnboardingStore();
+  const { photos, setPhotoAtIndex, setStep, setVerificationPhoto, clearAllPhotos, verificationPhotoUri } = useOnboardingStore();
   const { userId, token, faceVerificationPassed } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
@@ -124,9 +124,10 @@ export default function PhotoUploadScreen() {
 
   // BUG FIX: Query onboarding status to check if reference photo already exists
   // C4 FIX: Include queryEnabled in skip condition to allow forced re-subscription
+  // FIX: Backend expects { userId }, not { token }
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && token && queryEnabled ? { token } : 'skip'
+    !isDemoMode && userId && queryEnabled ? { userId } : 'skip'
   );
 
   // Local state for immediate preview update
@@ -238,15 +239,15 @@ export default function PhotoUploadScreen() {
 
   // Debug: Log photo gate status on mount
   React.useEffect(() => {
-    const referenceSet = !!(previewUri || photos[0]);
-    console.log(`[PHOTO_GATE] referenceSet=${referenceSet} previewUri=${!!previewUri} photos[0]=${!!photos[0]} userId=${userId}`);
-  }, [previewUri, photos, userId]);
+    const referenceSet = !!(previewUri || verificationPhotoUri);
+    console.log(`[PHOTO_GATE] referenceSet=${referenceSet} previewUri=${!!previewUri} verificationPhotoUri=${!!verificationPhotoUri} userId=${userId}`);
+  }, [previewUri, verificationPhotoUri, userId]);
 
   // TASK 2: Check file existence when displayUri changes
   // This runs proactively BEFORE rendering to detect missing files
   // CRITICAL: We only FLAG missing files - we NEVER delete the URI from AsyncStorage
   React.useEffect(() => {
-    const currentUri = previewUri || photos[0];
+    const currentUri = previewUri || verificationPhotoUri;
 
     async function checkFileState() {
       const state = await getPhotoFileState(currentUri);
@@ -260,7 +261,7 @@ export default function PhotoUploadScreen() {
     }
 
     checkFileState();
-  }, [previewUri, photos]);
+  }, [previewUri, verificationPhotoUri]);
 
   const requestPermissions = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -330,8 +331,12 @@ export default function PhotoUploadScreen() {
     }
 
     // Store local URI as cache ONLY (NOT source of truth)
+    // FIX: Use setVerificationPhoto instead of setPhotoAtIndex(0, ...) to avoid
+    // polluting the photos[] array which causes "still syncing" false positive
+    // in additional-photos.tsx when backendNormalCount < localFilledCount
     setPreviewUri(persistentUri);
-    setPhotoAtIndex(0, persistentUri);
+    setVerificationPhoto(persistentUri);
+    console.log('[PHOTO_GATE] DEBUG: Photo cached locally, verificationPhotoUri set');
   };
 
   const pickImage = async () => {
@@ -384,7 +389,7 @@ export default function PhotoUploadScreen() {
       return;
     }
 
-    const currentPhoto = previewUri || photos[0];
+    const currentPhoto = previewUri || verificationPhotoUri;
     if (!currentPhoto) {
       console.log('[PHOTO_GATE] BLOCKED: No photo uploaded');
       Alert.alert(
@@ -411,10 +416,10 @@ export default function PhotoUploadScreen() {
           console.log('[DEMO_AUTH] PHOTO: Ensuring consent is set...');
           const consentOk = await ensureDemoUserConsent(token);
           if (!consentOk) {
-            console.warn('[DEMO_AUTH] PHOTO: Could not verify consent, proceeding anyway');
-          } else {
-            console.log('[DEMO_AUTH] PHOTO: Consent confirmed');
+            console.error('[DEMO_AUTH] PHOTO: Consent verification FAILED - aborting upload');
+            throw new Error('Could not verify user consent. Please restart the app and try again.');
           }
+          console.log('[DEMO_AUTH] PHOTO: Consent confirmed');
         }
 
         // Step 1: Upload photo to Convex storage (same as live mode)
@@ -560,8 +565,9 @@ export default function PhotoUploadScreen() {
     }
   };
 
-  // Use local previewUri for immediate updates, fallback to store
-  const displayUri = previewUri || photos[0];
+  // Use local previewUri for immediate updates, fallback to verificationPhotoUri
+  // FIX: Use verificationPhotoUri instead of photos[0] to avoid syncing bug
+  const displayUri = previewUri || verificationPhotoUri;
 
   // DEV: Reset all photos (for testing stale cache migration)
   const handleResetPhotos = () => {

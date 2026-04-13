@@ -93,14 +93,20 @@ export function decideNextOnboardingRoute(status: OnboardingStatus): string {
     return '/(onboarding)/photo-upload';
   }
 
-  // Step 3: Face Verification (if not verified AND not pending)
-  // PHASE-1 RESTRUCTURE: Allow continuation when pending (non-blocking)
+  // Step 3: Face Verification (route to face-verification only if NOT yet attempted)
+  // PRODUCT REQUIREMENT: Face verification is NON-BLOCKING for onboarding completion
+  // - unverified/failed => route to face-verification so they can attempt it
+  // - pending => allow continue (they've already submitted, waiting for review)
+  // - verified => allow continue
   if (status.faceVerificationStatus === 'unverified' || status.faceVerificationStatus === 'failed') {
-    console.log('[ONB_ROUTE] status=face_verification_needed -> route=/(onboarding)/face-verification');
+    console.log('[ONB_ROUTE] status=face_verification_not_attempted -> route=/(onboarding)/face-verification', {
+      currentStatus: status.faceVerificationStatus,
+      note: 'User should attempt face verification (but can continue from there even if pending)',
+    });
     return '/(onboarding)/face-verification';
   }
 
-  // Step 4: Additional Photos + Bio (if face verification passed OR pending)
+  // Step 4: Additional Photos + Bio (reachable once face verification is attempted - pending, verified, or after visiting)
   if (!status.hasMinPhotos) {
     console.log('[ONB_ROUTE] status=need_more_photos -> route=/(onboarding)/additional-photos');
     return '/(onboarding)/additional-photos';

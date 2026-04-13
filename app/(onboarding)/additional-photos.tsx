@@ -118,9 +118,10 @@ export default function AdditionalPhotosScreen() {
   );
 
   // Query onboarding status for reference photo existence check (source of truth)
+  // FIX: Backend expects { userId }, not { token }
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && token ? { token } : 'skip'
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   // Backend mutations
@@ -344,7 +345,7 @@ export default function AdditionalPhotosScreen() {
     }
   }, [demoHydrated, demoProfile, photos, setPhotoAtIndex]);
 
-  // PHASE-1 RESTRUCTURE: Bio prefill from demoProfile
+  // PHASE-1 RESTRUCTURE: Bio prefill from demoProfile (demo mode)
   const didPrefillBio = React.useRef(false);
   useEffect(() => {
     if (didPrefillBio.current || !isDemoMode || !demoHydrated) return;
@@ -355,6 +356,18 @@ export default function AdditionalPhotosScreen() {
     setBio(demoProfile.bio);
     console.log('[PHOTOS] prefilled bio from demoProfile');
   }, [demoHydrated, demoProfile, bio, setBio]);
+
+  // Bio prefill from backend draft (live mode)
+  const didPrefillBioLive = React.useRef(false);
+  useEffect(() => {
+    if (didPrefillBioLive.current || isDemoMode) return;
+    if (!onboardingStatus?.onboardingDraft?.profileDetails?.bio) return;
+    if (bio && bio.length > 0) return; // Already has a bio
+
+    didPrefillBioLive.current = true;
+    setBio(onboardingStatus.onboardingDraft.profileDetails.bio);
+    console.log('[PHOTOS] prefilled bio from backend draft');
+  }, [onboardingStatus, bio, setBio]);
 
   // FIX 2: Removed redundant syncPhotosFromBackend on mount
   // The useQuery(api.photos.getUserPhotos) subscription at line 151-154 already provides
@@ -409,6 +422,55 @@ export default function AdditionalPhotosScreen() {
     if (__DEV__) {
       console.log('[PHOTO_UPLOAD] slotStatus update', { index, state });
     }
+  };
+
+  // RETRY UPLOAD: Re-upload existing preview URI without opening image picker
+  // FIX: "Failed, tap to retry" should retry the same asset, not open gallery
+  const retryUploadForIndex = async (targetIndex: number) => {
+    const existingPreviewUri = slotPreviewUriByIndex[targetIndex];
+    if (!existingPreviewUri) {
+      console.warn(`[PHOTO_RETRY] No preview URI found for slot ${targetIndex}, falling back to picker`);
+      // Fallback: if no preview exists, open picker (shouldn't happen normally)
+      return;
+    }
+
+    if (isDemoMode || !userId) {
+      console.log('[PHOTO_RETRY] Demo mode or no userId, skipping retry');
+      return;
+    }
+
+    console.log(`[PHOTO_RETRY] Retrying upload for slot ${targetIndex} with existing URI`);
+
+    // Check for existing backend photo (for REPLACE vs ADD logic)
+    const existingPhoto = targetIndex === 0
+      ? backendPhotos?.find((p) => p.isPrimary)
+      : backendPhotos?.find((p) => p.order === targetIndex);
+    const isReplace = !!existingPhoto;
+
+    setUploadState(targetIndex, 'uploading');
+
+    const uploadResult = await uploadPhotoToBackend(
+      userId,
+      existingPreviewUri,
+      targetIndex === 0, // isPrimary
+      targetIndex,
+      token || undefined,
+      isReplace ? existingPhoto._id : undefined
+    );
+
+    if (!uploadResult.success) {
+      setUploadState(targetIndex, 'failed');
+      Alert.alert(
+        'Retry Failed',
+        'Failed to upload photo. Please check your connection and try again.',
+        [{ text: 'OK' }]
+      );
+      console.error('[PHOTO_RETRY] Retry upload failed:', uploadResult.message);
+      return;
+    }
+
+    setUploadState(targetIndex, 'uploaded');
+    console.log(`[PHOTO_RETRY] ✅ Retry successful for slot ${targetIndex}`);
   };
 
   // TASK 2: Proactively check file existence for all photo slots
@@ -894,7 +956,7 @@ export default function AdditionalPhotosScreen() {
     );
   };
 
-  const handleNext = () => {
+  const handleNext = async () => {
     // Check upload state gates
     const uploadingCount = Object.values(uploadStateByIndex).filter(state => state === 'uploading').length;
     const failedCount = Object.values(uploadStateByIndex).filter(state => state === 'failed').length;
@@ -962,23 +1024,23 @@ export default function AdditionalPhotosScreen() {
     }
 
     // Gate: minimum photos required
-    // PRODUCT RULE FIX: Reference photo is for verification, NOT for profile display
-    // Users need at least 1 NORMAL/additional photo for their profile
-    // The reference photo does NOT count toward the minimum profile photo requirement
-    const MIN_NORMAL_PHOTOS_REQUIRED = 1; // At least 1 additional profile photo
+    // PRODUCT RULE FIX (2026-04-12): Reference photo ALONE is sufficient to continue
+    // Additional normal photos are OPTIONAL, not mandatory
+    // Check if user has at least a reference photo OR at least 1 normal photo
+    const hasRefPhoto = onboardingStatus?.referencePhotoExists ?? false;
+    const hasAnyPhoto = hasRefPhoto || photoCount > 0;
 
-    if (photoCount < MIN_NORMAL_PHOTOS_REQUIRED) {
-      console.warn(`[PHOTO_GATE] Blocked: normalPhotoCount=${photoCount} < MIN_NORMAL_PHOTOS_REQUIRED=${MIN_NORMAL_PHOTOS_REQUIRED}`);
-      console.warn('[PHOTO_GATE] Reference photo does NOT count toward profile minimum');
+    if (!hasAnyPhoto) {
+      console.warn(`[PHOTO_GATE] Blocked: No photos at all (no reference, no normal photos)`);
       setShowPhotoWarning(true);
       return;
     }
 
     if (__DEV__) {
-      console.log(`[PHOTO_GATE] Passed: normalPhotoCount=${photoCount} >= MIN_NORMAL_PHOTOS_REQUIRED=${MIN_NORMAL_PHOTOS_REQUIRED}`, {
+      console.log(`[PHOTO_GATE] Passed: hasReferencePhoto=${hasRefPhoto}, normalPhotoCount=${photoCount}`, {
         normalPhotos: photoCount,
-        hasReferencePhoto,
-        note: 'Reference photo is separate from profile photos',
+        hasReferencePhoto: hasRefPhoto,
+        note: 'Reference photo alone is sufficient, additional photos are optional',
       });
     }
 
@@ -999,8 +1061,9 @@ export default function AdditionalPhotosScreen() {
     setShowPhotoWarning(false);
     setShowBioError(false);
 
-    // SAVE-AS-YOU-GO: Persist photos and bio to demoProfiles immediately
+    // SAVE-AS-YOU-GO: Persist photos and bio
     if (isDemoMode && userId) {
+      // Demo mode: save to local demoProfile
       const validPhotos = photos.filter((p): p is string => typeof p === 'string' && p.length > 0);
       const demoStore = useDemoStore.getState();
       demoStore.saveDemoProfile(userId, {
@@ -1008,6 +1071,21 @@ export default function AdditionalPhotosScreen() {
         bio: trimmedBio,
       });
       console.log(`[PHOTOS] saved ${validPhotos.length} photos and bio to demoProfile`);
+    } else if (userId) {
+      // Live mode: save bio to backend draft (photos are already uploaded)
+      try {
+        await upsertDraft({
+          userId: userId as any,
+          patch: {
+            profileDetails: { bio: trimmedBio },
+            progress: { lastStepKey: 'additional_photos' },
+          },
+        });
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved bio (${trimmedBio.length} chars) to backend draft`);
+      } catch (error) {
+        if (__DEV__) console.error('[PHOTOS] Failed to save bio to draft:', error);
+        // Non-blocking - continue even if draft save fails
+      }
     }
 
     // CENTRAL EDIT HUB: Return to Review if editing from there
@@ -1085,8 +1163,9 @@ export default function AdditionalPhotosScreen() {
       const isFailed = uploadState === 'failed';
 
       // Determine press behavior - allow retry on failed
+      // FIX: Retry uses existing preview URI, not image picker
       const handlePress = isFailed
-        ? () => pickImageForIndex(i) // Retry upload
+        ? () => retryUploadForIndex(i) // Retry upload with existing asset
         : showPhoto
         ? () => handlePhotoPress(i)
         : () => pickImageForIndex(i);
@@ -1300,7 +1379,7 @@ export default function AdditionalPhotosScreen() {
 
         {/* PHASE-1 RESTRUCTURE: Bio section added back - MANDATORY */}
         <View style={styles.bioSection}>
-          <Text style={styles.sectionTitle}>About You</Text>
+          <Text style={styles.sectionTitle}>Bio</Text>
           <Text style={styles.bioSubtitle}>
             Write a short bio to help others get to know you
           </Text>
@@ -1414,24 +1493,28 @@ export default function AdditionalPhotosScreen() {
             </View>
           )}
 
-          {/* Action buttons at bottom - hidden entirely for slot 0 (primary) */}
-          {/* Primary photo (slot 0): NO bottom actions, close via top X only */}
-          {/* Additional photos (slots 1-8): normal Replace/Remove/Cancel actions */}
-          {viewerIndex !== 0 && (
+          {/* Action buttons at bottom */}
+          {/* PRODUCT RULE FIX (2026-04-12): */}
+          {/* - Primary photo (slot 0): Replace + Back only (no Delete for primary/reference) */}
+          {/* - Additional photos (slots 1-8): Replace + Delete + Back */}
+          {viewerIndex !== null && (
             <View style={styles.viewerActions}>
               <TouchableOpacity style={styles.viewerActionButton} onPress={handleReplace}>
                 <Ionicons name="swap-horizontal" size={24} color={COLORS.white} />
                 <Text style={styles.viewerActionText}>Replace</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.viewerActionButton} onPress={handleRemove}>
-                <Ionicons name="trash-outline" size={24} color={COLORS.error} />
-                <Text style={[styles.viewerActionText, { color: COLORS.error }]}>Remove</Text>
-              </TouchableOpacity>
+              {/* Delete button: Only show for additional photos (slots 1-8), NOT for primary (slot 0) */}
+              {viewerIndex !== 0 && (
+                <TouchableOpacity style={styles.viewerActionButton} onPress={handleRemove}>
+                  <Ionicons name="trash-outline" size={24} color={COLORS.error} />
+                  <Text style={[styles.viewerActionText, { color: COLORS.error }]}>Remove</Text>
+                </TouchableOpacity>
+              )}
 
               <TouchableOpacity style={styles.viewerActionButton} onPress={handleCloseViewer}>
                 <Ionicons name="close-circle-outline" size={24} color={COLORS.white} />
-                <Text style={styles.viewerActionText}>Cancel</Text>
+                <Text style={styles.viewerActionText}>Back</Text>
               </TouchableOpacity>
             </View>
           )}
