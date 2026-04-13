@@ -605,12 +605,16 @@ export const getMyConfessions = query({
       .order('desc')
       .collect();
 
-    return confessions.map((confession) =>
-      serializeConfession(confession, {
-        includeTaggedUserId: true,
-        isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
-      })
-    );
+    // Filter out manually deleted confessions (isDeleted: true)
+    // Expired confessions are kept but marked as expired for the owner to see
+    return confessions
+      .filter((confession) => !confession.isDeleted)
+      .map((confession) =>
+        serializeConfession(confession, {
+          includeTaggedUserId: true,
+          isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
+        })
+      );
   },
 });
 
@@ -867,6 +871,55 @@ export const deleteConfession = mutation({
     await ctx.db.patch(args.confessionId, {
       isDeleted: true,
       deletedAt: Date.now(),
+    });
+
+    return { success: true };
+  },
+});
+
+// Update own confession (text and mood only)
+// Only the author can edit their own confession, and only if not deleted
+export const updateConfession = mutation({
+  args: {
+    confessionId: v.id('confessions'),
+    userId: v.union(v.id('users'), v.string()),
+    text: v.string(),
+    mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found.');
+    }
+    if (confession.userId !== userId) {
+      throw new Error('You can only edit your own confessions.');
+    }
+    if (confession.isDeleted) {
+      throw new Error('Cannot edit a deleted confession.');
+    }
+
+    // Validate text
+    const trimmedText = args.text.trim();
+    if (trimmedText.length < 1) {
+      throw new Error('Confession cannot be empty.');
+    }
+    if (trimmedText.length > 500) {
+      throw new Error('Confession exceeds 500 character limit.');
+    }
+    if (PHONE_PATTERN.test(trimmedText)) {
+      throw new Error('Do not include phone numbers.');
+    }
+    if (EMAIL_PATTERN.test(trimmedText)) {
+      throw new Error('Do not include email addresses.');
+    }
+
+    // Update only text and mood (preserves original author info, anonymity, etc.)
+    await ctx.db.patch(args.confessionId, {
+      text: trimmedText,
+      mood: args.mood,
     });
 
     return { success: true };
