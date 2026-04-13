@@ -80,7 +80,7 @@ interface ConfessionThreads {
 const threadCreationInProgress = new Set<string>();
 
 // Rate limiting constants
-const CONFESSION_RATE_LIMIT = 5; // Max confessions per 24 hours
+const CONFESSION_RATE_LIMIT = 1; // Max confessions per 24 hours
 const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours in ms
 const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours in ms
 
@@ -139,6 +139,8 @@ interface ConfessionState {
   removeConfessionThreads: (conversationIds: string[]) => void;
   /** Delete a confession by ID (author manual delete) */
   deleteConfession: (confessionId: string) => void;
+  /** Update a confession's text and mood (author edit) */
+  updateConfession: (confessionId: string, newText: string, newMood?: 'romantic' | 'spicy' | 'emotional' | 'funny') => void;
   /** Connect to a confession (tagged user starts chat with author) */
   connectToConfession: (confessionId: string, currentUserId: string) => boolean;
   /** Check if a confession is connected */
@@ -163,6 +165,10 @@ interface ConfessionState {
   getConfessionCountToday: () => number;
   /** Record a confession timestamp (called when posting) */
   recordConfessionTimestamp: () => void;
+  /** Get milliseconds until next confession is allowed (0 if can post now) */
+  getTimeUntilNextConfession: () => number;
+  /** Get user's most recent confession */
+  getMyLatestConfession: (userId: string) => Confession | null;
 
   // Block author (hide their confessions from me)
   /** Block an author - hide their confessions from current user */
@@ -788,6 +794,16 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     }
   },
 
+  updateConfession: (confessionId, newText, newMood) => {
+    set((state) => ({
+      confessions: state.confessions.map((c) =>
+        c.id === confessionId
+          ? { ...c, text: newText, ...(newMood ? { mood: newMood } : {}) }
+          : c
+      ),
+    }));
+  },
+
   isConfessionConnected: (confessionId) => {
     return get().connectedConfessionIds.includes(confessionId);
   },
@@ -1002,6 +1018,32 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     set({
       confessionTimestamps: [...recentTimestamps, now],
     });
+  },
+
+  getTimeUntilNextConfession: () => {
+    const state = get();
+    const now = Date.now();
+    // Filter timestamps within the 24h window
+    const recentTimestamps = state.confessionTimestamps.filter(
+      (ts) => now - ts < RATE_LIMIT_WINDOW_MS
+    );
+    // If under limit, can post now
+    if (recentTimestamps.length < CONFESSION_RATE_LIMIT) {
+      return 0;
+    }
+    // Find the oldest timestamp in the window - that's when the next slot opens
+    const oldestTimestamp = Math.min(...recentTimestamps);
+    const timeUntilExpiry = (oldestTimestamp + RATE_LIMIT_WINDOW_MS) - now;
+    return Math.max(0, timeUntilExpiry);
+  },
+
+  getMyLatestConfession: (userId) => {
+    const state = get();
+    // Get all confessions by this user, sorted by createdAt descending
+    const myConfessions = state.confessions
+      .filter((c) => c.userId === userId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return myConfessions[0] || null;
   },
 
   // ── Block Author (delegates to shared blockStore) ──

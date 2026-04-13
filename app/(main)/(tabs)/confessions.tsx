@@ -1,102 +1,2130 @@
-/**
- * CONFESSIONS - BLOCKED
- *
- * This feature is temporarily blocked due to missing backend functions:
- * - api.confessions.getEligibleTagTargets
- * - api.confessions.listConfessionsPage
- * - api.confessions.consumePreview
- * - Wrong argument types: missing userId in multiple calls
- *
- * DO NOT REMOVE this blocking code until backend is implemented.
- */
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActionSheetIOS,
+  ActivityIndicator,
+  Alert,
+  Animated,
+  FlatList,
+  Keyboard,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+} from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useMutation, useQuery } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
+import EmojiPicker from 'rn-emoji-keyboard';
+
+import { safePush } from '@/lib/safeRouter';
+import { api } from '@/convex/_generated/api';
+import { asUserId } from '@/convex/id';
 import { COLORS } from '@/lib/constants';
+import { isContentClean } from '@/lib/contentFilter';
+import { isProbablyEmoji } from '@/lib/utils';
+import { isDemoMode } from '@/hooks/useConvex';
+import { useScreenTrace } from '@/lib/devTrace';
+import { useAuthStore } from '@/stores/authStore';
+import { useBlockStore } from '@/stores/blockStore';
+import { useConfessionStore } from '@/stores/confessionStore';
+import { useDemoStore } from '@/stores/demoStore';
+import ConfessionCard from '@/components/confessions/ConfessionCard';
+import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
+
+type FeedConfession = {
+  id: string;
+  userId: string;
+  text: string;
+  isAnonymous: boolean;
+  mood: 'romantic' | 'spicy' | 'emotional' | 'funny';
+  authorName?: string;
+  authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
+  targetUserId?: string;
+  targetUserName?: string;
+  topEmojis: { emoji: string; count: number }[];
+  replyPreviews: Array<{ text: string; isAnonymous: boolean; type: string; createdAt: number }>;
+  replyCount: number;
+  reactionCount: number;
+  createdAt: number;
+};
+
+type TaggedConfessionItem = {
+  notificationId: string;
+  confessionId: string;
+  seen: boolean;
+  notificationCreatedAt: number;
+  confessionText: string;
+  confessionMood: string;
+  confessionCreatedAt: number;
+  confessionExpiresAt?: number;
+  isExpired: boolean;
+  replyCount: number;
+  reactionCount: number;
+};
+
+type LikedUser = {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+  age?: number;
+  disambiguator: string;
+};
+
+const DEMO_LIKED_USERS: LikedUser[] = [
+  { id: 'demo_profile_2', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=5', age: 24, disambiguator: 'Loves coffee' },
+  { id: 'demo_profile_3', name: 'Rahul', avatarUrl: 'https://i.pravatar.cc/150?img=12', age: 27, disambiguator: 'Tech enthusiast' },
+  { id: 'demo_profile_4', name: 'Ananya', avatarUrl: 'https://i.pravatar.cc/150?img=9', age: 25, disambiguator: 'Mumbai' },
+  { id: 'demo_profile_5', name: 'Vikram', avatarUrl: 'https://i.pravatar.cc/150?img=11', age: 29, disambiguator: 'Photographer' },
+  { id: 'demo_profile_6', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=16', age: 22, disambiguator: 'Yoga instructor' },
+];
+
+function computeAge(dateOfBirth: string | undefined): number | undefined {
+  if (!dateOfBirth) return undefined;
+  const birthDate = new Date(dateOfBirth);
+  if (Number.isNaN(birthDate.getTime())) return undefined;
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return age > 0 && age < 120 ? age : undefined;
+}
+
+function getTimeAgoSimple(timestamp: number): string {
+  const diff = Date.now() - timestamp;
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
 
 export default function ConfessionsScreen() {
-  const insets = useSafeAreaInsets();
-  const router = useRouter();
+  useScreenTrace('CONFESSIONS');
 
-  if (__DEV__) {
-    console.log('[BLOCKED FEATURE]', 'confessions');
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { openTagged, openComposer } = useLocalSearchParams<{ openTagged?: string; openComposer?: string }>();
+  const userId = useAuthStore((s) => s.userId);
+  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : userId;
+
+  const demoConfessions = useConfessionStore((s) => s.confessions);
+  const demoUserReactions = useConfessionStore((s) => s.userReactions);
+  const demoToggleReaction = useConfessionStore((s) => s.toggleReaction);
+  const demoAddConfession = useConfessionStore((s) => s.addConfession);
+  const demoDeleteConfession = useConfessionStore((s) => s.deleteConfession);
+  const demoReportConfession = useConfessionStore((s) => s.reportConfession);
+  const demoCanPostConfession = useConfessionStore((s) => s.canPostConfession);
+  const demoRecordConfessionTimestamp = useConfessionStore((s) => s.recordConfessionTimestamp);
+  const getTimeUntilNextConfession = useConfessionStore((s) => s.getTimeUntilNextConfession);
+  const getMyLatestConfession = useConfessionStore((s) => s.getMyLatestConfession);
+  const seenTaggedConfessionIds = useConfessionStore((s) => s.seenTaggedConfessionIds);
+  const markTaggedConfessionSeen = useConfessionStore((s) => s.markTaggedConfessionSeen);
+  const markAllTaggedConfessionsSeen = useConfessionStore((s) => s.markAllTaggedConfessionsSeen);
+
+  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
+  const blockUserLocal = useBlockStore((s) => s.blockUser);
+
+  const demoCurrentUserId = useDemoStore((s) => s.currentDemoUserId);
+  const demoProfiles = useDemoStore((s) => s.demoProfiles);
+  const demoCurrentUser = demoCurrentUserId ? demoProfiles[demoCurrentUserId] : null;
+
+  const convexCurrentUser = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && currentUserId ? { userId: asUserId(currentUserId) ?? currentUserId } : 'skip'
+  );
+  const convexCurrentUserId = !isDemoMode ? (convexCurrentUser?._id ?? asUserId(currentUserId ?? '')) : undefined;
+
+  const liveConfessions = useQuery(
+    api.confessions.listConfessions,
+    !isDemoMode ? { sortBy: 'latest' } : 'skip'
+  );
+  const liveTrending = useQuery(
+    api.confessions.getTrendingConfessions,
+    !isDemoMode ? {} : 'skip'
+  );
+  const liveTaggedConfessions = useQuery(
+    api.confessions.listTaggedConfessionsForUser,
+    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+  );
+  const liveTaggedCount = useQuery(
+    api.confessions.getTaggedConfessionBadgeCount,
+    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+  );
+  const likedUsersQuery = useQuery(
+    api.likes.getLikedUsers,
+    !isDemoMode && convexCurrentUserId ? { userId: convexCurrentUserId } : 'skip'
+  );
+
+  const createConfessionMutation = useMutation(api.confessions.createConfession);
+  const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
+  const reportConfessionMutation = useMutation(api.confessions.reportConfession);
+  const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
+  const markTaggedSeenMutation = useMutation(api.confessions.markTaggedConfessionsSeen);
+  const blockUserMutation = useMutation(api.users.blockUser);
+
+  const [hiddenConfessionIds, setHiddenConfessionIds] = useState<string[]>([]);
+  const [showTaggedSection, setShowTaggedSection] = useState(false);
+  const [showComposer, setShowComposer] = useState(false);
+  const [composerText, setComposerText] = useState('');
+  const [composerAnonymous, setComposerAnonymous] = useState(true);
+  const [composerSubmitting, setComposerSubmitting] = useState(false);
+  const [showComposerEmoji, setShowComposerEmoji] = useState(false);
+  const [showReactionEmoji, setShowReactionEmoji] = useState(false);
+  const [emojiTargetConfessionId, setEmojiTargetConfessionId] = useState<string | null>(null);
+  const [tagInput, setTagInput] = useState('');
+  const [taggedUser, setTaggedUser] = useState<LikedUser | null>(null);
+  const [showDuplicatePicker, setShowDuplicatePicker] = useState(false);
+  const [duplicateCandidates, setDuplicateCandidates] = useState<LikedUser[]>([]);
+  const [liveUserReactions, setLiveUserReactions] = useState<Record<string, string | null>>({});
+  const [showToast, setShowToast] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
+  const [showMenuSheet, setShowMenuSheet] = useState(false);
+  const [menuTargetConfession, setMenuTargetConfession] = useState<{ id: string; authorId: string } | null>(null);
+  const [countdownMs, setCountdownMs] = useState(0);
+  const toastOpacity = useRef(new Animated.Value(0)).current;
+  const composerInputRef = useRef<TextInput>(null);
+  const pendingBlockAuthorsRef = useRef<Set<string>>(new Set());
+
+  const effectiveViewerId = isDemoMode ? currentUserId : convexCurrentUser?._id;
+
+  const likedUsers = useMemo<LikedUser[]>(
+    () => (isDemoMode ? DEMO_LIKED_USERS : (likedUsersQuery ?? [])),
+    [isDemoMode, likedUsersQuery]
+  );
+
+  const showToastMessage = useCallback((message: string) => {
+    setToastMessage(message);
+    setShowToast(true);
+    Animated.sequence([
+      Animated.timing(toastOpacity, { toValue: 1, duration: 180, useNativeDriver: true }),
+      Animated.delay(1800),
+      Animated.timing(toastOpacity, { toValue: 0, duration: 180, useNativeDriver: true }),
+    ]).start(() => setShowToast(false));
+  }, [toastOpacity]);
+
+  useEffect(() => {
+    if (openTagged === 'true') {
+      setShowTaggedSection(true);
+    }
+  }, [openTagged]);
+
+  useEffect(() => {
+    if (openComposer === 'true') {
+      safePush(router, '/(main)/compose-confession' as any, 'confessions->compose');
+    }
+  }, [openComposer, router]);
+
+  // Update countdown timer every second
+  useEffect(() => {
+    const updateCountdown = () => {
+      if (isDemoMode) {
+        setCountdownMs(getTimeUntilNextConfession());
+      }
+    };
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [getTimeUntilNextConfession]);
+
+  const getAuthorInfo = useCallback(() => {
+    if (isDemoMode && demoCurrentUser) {
+      return {
+        authorName: demoCurrentUser.name,
+        authorPhotoUrl: demoCurrentUser.photos?.[0]?.url,
+        authorAge: (demoCurrentUser as any).age,
+        authorGender: (demoCurrentUser as any).gender,
+      };
+    }
+
+    if (!isDemoMode && convexCurrentUser) {
+      const primaryPhoto = convexCurrentUser.photos?.find((photo: any) => photo.isPrimary) ?? convexCurrentUser.photos?.[0];
+      return {
+        authorName: (convexCurrentUser as any).name,
+        authorPhotoUrl: primaryPhoto?.url,
+        authorAge: computeAge((convexCurrentUser as any).dateOfBirth),
+        authorGender: (convexCurrentUser as any).gender,
+      };
+    }
+
+    return {};
+  }, [convexCurrentUser, demoCurrentUser]);
+
+  const confessions = useMemo<FeedConfession[]>(() => {
+    const hiddenSet = new Set(hiddenConfessionIds);
+
+    if (!isDemoMode) {
+      if (!liveConfessions) return [];
+      return liveConfessions
+        .map((confession: any) => ({
+          id: confession._id,
+          userId: confession.userId,
+          text: confession.text,
+          isAnonymous: confession.isAnonymous,
+          mood: confession.mood,
+          authorName: confession.authorName,
+          authorPhotoUrl: confession.authorPhotoUrl,
+          authorAge: confession.authorAge,
+          authorGender: confession.authorGender,
+          targetUserId: confession.taggedUserId,
+          topEmojis: confession.topEmojis ?? [],
+          replyPreviews: confession.replyPreviews ?? [],
+          replyCount: confession.replyCount ?? 0,
+          reactionCount: confession.reactionCount ?? 0,
+          createdAt: confession.createdAt,
+        }))
+        .filter((confession: FeedConfession) => !blockedUserIds.includes(confession.userId))
+        .filter((confession: FeedConfession) => !hiddenSet.has(confession.id));
+    }
+
+    const now = Date.now();
+    return demoConfessions
+      .filter((confession: any) => !confession.isDeleted)
+      .filter((confession: any) => (confession.expiresAt ?? confession.createdAt + 24 * 60 * 60 * 1000) > now)
+      .filter((confession: any) => !blockedUserIds.includes(confession.userId))
+      .filter((confession: any) => !hiddenSet.has(confession.id))
+      .sort((a: any, b: any) => b.createdAt - a.createdAt)
+      .map((confession: any) => ({
+        id: confession.id,
+        userId: confession.userId,
+        text: confession.text,
+        isAnonymous: confession.isAnonymous,
+        mood: confession.mood,
+        authorName: confession.authorName,
+        authorPhotoUrl: confession.authorPhotoUrl,
+        authorAge: confession.authorAge,
+        authorGender: confession.authorGender,
+        targetUserId: confession.targetUserId,
+        targetUserName: confession.targetUserName,
+        topEmojis: confession.topEmojis ?? [],
+        replyPreviews: confession.replyPreviews ?? [],
+        replyCount: confession.replyCount ?? 0,
+        reactionCount: confession.reactionCount ?? 0,
+        createdAt: confession.createdAt,
+      }));
+  }, [blockedUserIds, demoConfessions, hiddenConfessionIds, liveConfessions]);
+
+  const taggedConfessions = useMemo<TaggedConfessionItem[]>(() => {
+    if (!currentUserId) return [];
+
+    if (!isDemoMode) {
+      return (liveTaggedConfessions ?? []).map((item: any) => ({
+        notificationId: item.notificationId,
+        confessionId: item.confessionId,
+        seen: item.seen,
+        notificationCreatedAt: item.notificationCreatedAt,
+        confessionText: item.confessionText,
+        confessionMood: item.confessionMood,
+        confessionCreatedAt: item.confessionCreatedAt,
+        confessionExpiresAt: item.confessionExpiresAt,
+        isExpired: item.isExpired,
+        replyCount: item.replyCount ?? 0,
+        reactionCount: item.reactionCount ?? 0,
+      }));
+    }
+
+    return demoConfessions
+      .filter((confession: any) => confession.targetUserId === currentUserId)
+      .sort((a: any, b: any) => b.createdAt - a.createdAt)
+      .map((confession: any) => {
+        const expiresAt = confession.expiresAt ?? confession.createdAt + 24 * 60 * 60 * 1000;
+        return {
+          notificationId: confession.id,
+          confessionId: confession.id,
+          seen: seenTaggedConfessionIds.includes(confession.id),
+          notificationCreatedAt: confession.createdAt,
+          confessionText: confession.text,
+          confessionMood: confession.mood,
+          confessionCreatedAt: confession.createdAt,
+          confessionExpiresAt: expiresAt,
+          isExpired: expiresAt <= Date.now(),
+          replyCount: confession.replyCount ?? 0,
+          reactionCount: confession.reactionCount ?? 0,
+        };
+      });
+  }, [currentUserId, demoConfessions, liveTaggedConfessions, seenTaggedConfessionIds]);
+
+  const taggedBadgeCount = useMemo(() => {
+    if (!isDemoMode) return liveTaggedCount ?? 0;
+    return taggedConfessions.filter((item) => !item.seen && !item.isExpired).length;
+  }, [isDemoMode, liveTaggedCount, taggedConfessions]);
+
+  const trendingHero = useMemo(() => {
+    if (!isDemoMode) {
+      const item = liveTrending?.[0];
+      if (!item) return null;
+      return {
+        id: item._id,
+        userId: item.userId,
+        text: item.text,
+        isAnonymous: item.isAnonymous,
+        authorName: item.authorName,
+        authorPhotoUrl: item.authorPhotoUrl,
+        authorAge: item.authorAge,
+        authorGender: item.authorGender,
+        createdAt: item.createdAt,
+        replyCount: item.replyCount ?? 0,
+        reactionCount: item.reactionCount ?? 0,
+      };
+    }
+
+    if (confessions.length === 0) return null;
+    const now = Date.now();
+    return [...confessions]
+      .map((confession) => {
+        const hoursSince = (now - confession.createdAt) / (1000 * 60 * 60);
+        const score = (confession.replyCount * 5 + confession.reactionCount * 2) / (hoursSince + 2);
+        return { ...confession, trendingScore: score };
+      })
+      .sort((a, b) => b.trendingScore - a.trendingScore)[0] ?? null;
+  }, [confessions, isDemoMode, liveTrending]);
+
+  const tagSuggestions = useMemo(() => {
+    if (!tagInput || tagInput.length < 3 || taggedUser) return [];
+    const input = tagInput.toLowerCase().trim();
+    return likedUsers
+      .filter((user) => user.name.length > 7)
+      .filter((user) => user.name.toLowerCase().startsWith(input))
+      .slice(0, 5);
+  }, [likedUsers, tagInput, taggedUser]);
+
+  // Get user's most recent confession (for "Your confession" section)
+  const myLatestConfession = useMemo(() => {
+    if (!currentUserId) return null;
+    if (isDemoMode) {
+      return getMyLatestConfession(currentUserId);
+    }
+    // For live mode, find from liveConfessions
+    if (!liveConfessions) return null;
+    const myConfessions = liveConfessions
+      .filter((c: any) => c.userId === currentUserId)
+      .sort((a: any, b: any) => b.createdAt - a.createdAt);
+    return myConfessions[0] || null;
+  }, [currentUserId, getMyLatestConfession, liveConfessions]);
+
+  // Format countdown time
+  const formatCountdown = useCallback((ms: number): string => {
+    if (ms <= 0) return '';
+    const hours = Math.floor(ms / (1000 * 60 * 60));
+    const minutes = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${minutes}m`;
+  }, []);
+
+  const canPostNow = isDemoMode ? demoCanPostConfession() : true;
+
+  // Get IDs to exclude from normal feed (prevent duplicates)
+  const myConfessionId = myLatestConfession
+    ? ((myLatestConfession as any).id || (myLatestConfession as any)._id)
+    : null;
+  const trendingConfessionId = trendingHero?.id || null;
+
+  // Filter confessions to exclude trending and my confession (avoid duplicates)
+  const filteredConfessions = useMemo(() => {
+    const excludeIds = new Set<string>();
+    if (myConfessionId) excludeIds.add(myConfessionId);
+    if (trendingConfessionId) excludeIds.add(trendingConfessionId);
+    return confessions.filter((c) => !excludeIds.has(c.id));
+  }, [confessions, myConfessionId, trendingConfessionId]);
+
+  const isLoading = !isDemoMode && (
+    liveConfessions === undefined ||
+    liveTrending === undefined ||
+    (!!currentUserId && (liveTaggedConfessions === undefined || liveTaggedCount === undefined))
+  );
+
+  const handleOpenComposer = useCallback(() => {
+    // Check if user can post (1 confession per 24h limit)
+    if (!canPostNow && countdownMs > 0) {
+      showToastMessage(`You've already shared today. Try again in ${formatCountdown(countdownMs)}`);
+      return;
+    }
+
+    setComposerText('');
+    setComposerAnonymous(true);
+    setTagInput('');
+    setTaggedUser(null);
+    setShowDuplicatePicker(false);
+    setDuplicateCandidates([]);
+    safePush(router, '/(main)/compose-confession' as any, 'confessions->compose');
+  }, [canPostNow, countdownMs, formatCountdown, router, showToastMessage]);
+
+  const handleCloseComposer = useCallback(() => {
+    Keyboard.dismiss();
+    setShowComposer(false);
+  }, []);
+
+  const handleTagInputChange = useCallback((text: string) => {
+    setTagInput(text);
+    setTaggedUser(null);
+
+    const normalized = text.toLowerCase().trim();
+    if (!normalized) return;
+
+    const exactMatches = likedUsers.filter((user) => user.name.toLowerCase() === normalized);
+    if (exactMatches.length === 1 && exactMatches[0].name.length <= 7) {
+      setTaggedUser(exactMatches[0]);
+      setTagInput(exactMatches[0].name);
+      return;
+    }
+
+    if (exactMatches.length > 1) {
+      setDuplicateCandidates(exactMatches);
+      setShowDuplicatePicker(true);
+    }
+  }, [likedUsers]);
+
+  const handleSubmitComposer = useCallback(async () => {
+    if (!currentUserId || composerSubmitting) return;
+
+    const trimmed = composerText.trim();
+    if (trimmed.length < 10) {
+      Alert.alert('Too Short', 'Confessions must be at least 10 characters.');
+      return;
+    }
+
+    if (tagInput.trim() && !taggedUser) {
+      Alert.alert('Select a Person', 'Pick a valid person from the suggestions, or clear the tag field.');
+      return;
+    }
+
+    const phonePattern = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
+    const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
+    if (phonePattern.test(trimmed) || emailPattern.test(trimmed)) {
+      Alert.alert('Safety Warning', "Don't include phone numbers or personal details.");
+      return;
+    }
+
+    if (!isContentClean(trimmed)) {
+      Alert.alert('Content Warning', 'Your confession contains inappropriate content. Please revise it.');
+      return;
+    }
+
+    if (isDemoMode && !demoCanPostConfession()) {
+      Alert.alert('Limit Reached', "You've reached today's confession limit. Try again later.");
+      return;
+    }
+
+    const authorInfo = !composerAnonymous ? getAuthorInfo() : {};
+    if (!composerAnonymous && !authorInfo.authorName) {
+      Alert.alert('Profile Not Ready', 'Your profile is still loading. Please try again in a moment, or post anonymously.');
+      return;
+    }
+
+    setComposerSubmitting(true);
+
+    try {
+      if (isDemoMode) {
+        const createdAt = Date.now();
+        demoAddConfession({
+          id: `conf_new_${createdAt}`,
+          userId: currentUserId,
+          text: trimmed,
+          isAnonymous: composerAnonymous,
+          mood: 'emotional',
+          topEmojis: [],
+          replyPreviews: [],
+          visibility: 'global',
+          replyCount: 0,
+          reactionCount: 0,
+          createdAt,
+          expiresAt: createdAt + 24 * 60 * 60 * 1000,
+          revealPolicy: 'never',
+          targetUserId: taggedUser?.id,
+          targetUserName: taggedUser?.name,
+          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+        } as any);
+        demoRecordConfessionTimestamp();
+      } else {
+        await createConfessionMutation({
+          userId: currentUserId,
+          text: trimmed,
+          isAnonymous: composerAnonymous,
+          mood: 'emotional',
+          visibility: 'global',
+          taggedUserId: taggedUser?.id as any,
+          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+        });
+      }
+
+      handleCloseComposer();
+      setComposerText('');
+      setTagInput('');
+      setTaggedUser(null);
+      showToastMessage('Confession posted');
+    } catch (error: any) {
+      Alert.alert('Error', error?.message || 'Failed to post confession');
+    } finally {
+      setComposerSubmitting(false);
+    }
+  }, [
+    composerAnonymous,
+    composerSubmitting,
+    composerText,
+    currentUserId,
+    createConfessionMutation,
+    demoAddConfession,
+    demoCanPostConfession,
+    demoRecordConfessionTimestamp,
+    getAuthorInfo,
+    handleCloseComposer,
+    showToastMessage,
+    tagInput,
+    taggedUser,
+  ]);
+
+  const handleOpenTaggedSection = useCallback(() => {
+    setShowTaggedSection(true);
+    if (!currentUserId) return;
+
+    if (isDemoMode) {
+      const unseenIds = taggedConfessions.filter((item) => !item.seen && !item.isExpired).map((item) => item.confessionId);
+      if (unseenIds.length > 0) {
+        markAllTaggedConfessionsSeen(unseenIds);
+      }
+      return;
+    }
+
+    markTaggedSeenMutation({ userId: currentUserId }).catch(() => {
+      // Keep the feed usable even if badge clearing fails.
+    });
+  }, [currentUserId, isDemoMode, markAllTaggedConfessionsSeen, markTaggedSeenMutation, taggedConfessions]);
+
+  const handleOpenThread = useCallback((confessionId: string) => {
+    safePush(
+      router,
+      {
+        pathname: '/(main)/confession-thread',
+        params: { confessionId },
+      } as any,
+      'confessions->thread'
+    );
+  }, [router]);
+
+  const handleOpenMyConfessions = useCallback(() => {
+    safePush(router, '/(main)/my-confessions' as any, 'confessions->myConfessions');
+  }, [router]);
+
+  const handleSelectTaggedConfession = useCallback((item: TaggedConfessionItem) => {
+    if (item.isExpired) {
+      Alert.alert('Expired', 'This confession has expired.');
+      return;
+    }
+
+    if (isDemoMode && !item.seen) {
+      markTaggedConfessionSeen(item.confessionId);
+    }
+
+    setShowTaggedSection(false);
+    handleOpenThread(item.confessionId);
+  }, [handleOpenThread, isDemoMode, markTaggedConfessionSeen]);
+
+  const toggleReaction = useCallback(async (confessionId: string, emoji: string) => {
+    if (!currentUserId) return;
+
+    if (isDemoMode) {
+      demoToggleReaction(confessionId, emoji, currentUserId);
+      return;
+    }
+
+    setLiveUserReactions((current) => {
+      const next = { ...current };
+      next[confessionId] = next[confessionId] === emoji ? null : emoji;
+      return next;
+    });
+
+    try {
+      await toggleReactionMutation({
+        confessionId: confessionId as any,
+        userId: currentUserId,
+        type: emoji,
+      });
+    } catch {
+      setLiveUserReactions((current) => {
+        const next = { ...current };
+        delete next[confessionId];
+        return next;
+      });
+      Alert.alert('Unable to react right now');
+    }
+  }, [currentUserId, demoToggleReaction, isDemoMode, toggleReactionMutation]);
+
+  const handleOpenReactionPicker = useCallback((confessionId: string) => {
+    setEmojiTargetConfessionId(confessionId);
+    setShowReactionEmoji(true);
+  }, []);
+
+  const handleReactionEmojiSelected = useCallback((emoji: any) => {
+    if (!emojiTargetConfessionId) return;
+    void toggleReaction(emojiTargetConfessionId, emoji.emoji);
+  }, [emojiTargetConfessionId, toggleReaction]);
+
+  const handleDeleteConfession = useCallback((confessionId: string, authorId: string) => {
+    if (!effectiveViewerId || authorId !== effectiveViewerId) {
+      return;
+    }
+
+    Alert.alert('Delete Confession', 'This action cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          if (isDemoMode) {
+            demoDeleteConfession(confessionId);
+            setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
+            return;
+          }
+
+          if (!currentUserId) return;
+
+          setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
+          try {
+            await deleteConfessionMutation({
+              confessionId: confessionId as any,
+              userId: currentUserId,
+            });
+          } catch {
+            setHiddenConfessionIds((current) => current.filter((id) => id !== confessionId));
+            Alert.alert('Unable to delete right now');
+          }
+        },
+      },
+    ]);
+  }, [currentUserId, deleteConfessionMutation, demoDeleteConfession, effectiveViewerId, isDemoMode]);
+
+  const handleSubmitReport = useCallback(async (
+    confessionId: string,
+    reason: 'spam' | 'harassment' | 'hate' | 'sexual' | 'other'
+  ) => {
+    if (isDemoMode) {
+      demoReportConfession(confessionId);
+      setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
+      return;
+    }
+
+    if (!currentUserId) return;
+
+    try {
+      await reportConfessionMutation({
+        confessionId: confessionId as any,
+        reporterId: currentUserId,
+        reason,
+      });
+      setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
+    } catch {
+      Alert.alert('Unable to report right now');
+    }
+  }, [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation]);
+
+  const showReportReasonPicker = useCallback((confessionId: string) => {
+    const reasons = [
+      { key: 'spam', label: 'Spam' },
+      { key: 'harassment', label: 'Harassment' },
+      { key: 'hate', label: 'Hate Speech' },
+      { key: 'sexual', label: 'Sexual/Inappropriate' },
+      { key: 'other', label: 'Other' },
+    ] as const;
+
+    const submit = (reason: typeof reasons[number]['key']) => {
+      void handleSubmitReport(confessionId, reason);
+    };
+
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          title: 'Why are you reporting this?',
+          options: ['Cancel', ...reasons.map((reason) => reason.label)],
+          cancelButtonIndex: 0,
+        },
+        (buttonIndex) => {
+          if (buttonIndex > 0) {
+            submit(reasons[buttonIndex - 1].key);
+          }
+        }
+      );
+      return;
+    }
+
+    Alert.alert('Report Confession', 'Select a reason:', [
+      { text: 'Cancel', style: 'cancel' },
+      ...reasons.map((reason) => ({
+        text: reason.label,
+        onPress: () => submit(reason.key),
+      })),
+    ]);
+  }, [handleSubmitReport]);
+
+  const handleBlockAuthor = useCallback(async (authorId: string) => {
+    if (!currentUserId || !authorId) return;
+
+    if (isDemoMode) {
+      blockUserLocal(authorId);
+      return;
+    }
+
+    if (pendingBlockAuthorsRef.current.has(authorId)) return;
+    pendingBlockAuthorsRef.current.add(authorId);
+
+    try {
+      await blockUserMutation({
+        authUserId: currentUserId,
+        blockedUserId: authorId as any,
+      });
+      blockUserLocal(authorId);
+    } catch {
+      Alert.alert('Unable to block user right now');
+    } finally {
+      pendingBlockAuthorsRef.current.delete(authorId);
+    }
+  }, [blockUserLocal, blockUserMutation, currentUserId, isDemoMode]);
+
+  // Open the premium menu sheet instead of alert
+  const handleOpenMenuSheet = useCallback((confessionId: string, authorId: string) => {
+    const isOwner = authorId === effectiveViewerId;
+    if (__DEV__) {
+      console.log('[CONFESS_LONG_PRESS] menu opening', {
+        confessionId: confessionId.slice(-6),
+        isOwner,
+        menuType: isOwner ? 'owner (Edit/Delete/Cancel)' : 'non-owner (Report/Cancel)',
+      });
+    }
+    setMenuTargetConfession({ id: confessionId, authorId });
+    setShowMenuSheet(true);
+  }, [effectiveViewerId]);
+
+  const handleCloseMenuSheet = useCallback(() => {
+    setShowMenuSheet(false);
+    setMenuTargetConfession(null);
+  }, []);
+
+  const handleMenuDelete = useCallback(() => {
+    if (!menuTargetConfession) return;
+    handleDeleteConfession(menuTargetConfession.id, menuTargetConfession.authorId);
+  }, [handleDeleteConfession, menuTargetConfession]);
+
+  const handleMenuReport = useCallback(() => {
+    if (!menuTargetConfession) return;
+    showReportReasonPicker(menuTargetConfession.id);
+  }, [menuTargetConfession, showReportReasonPicker]);
+
+  const handleMenuEdit = useCallback(() => {
+    console.log('[EDIT_HANDLER] handleMenuEdit called, menuTargetConfession:', menuTargetConfession);
+    if (!menuTargetConfession) {
+      console.log('[EDIT_HANDLER] ABORT: menuTargetConfession is null');
+      return;
+    }
+    // Navigate to compose-confession in edit mode
+    // The compose-confession screen handles all edit logic including:
+    // - fetching existing confession data
+    // - prefilling form fields
+    // - update mutation
+    console.log('[EDIT_NAVIGATE] Opening compose-confession for edit:', menuTargetConfession.id);
+    safePush(
+      router,
+      {
+        pathname: '/(main)/compose-confession',
+        params: {
+          editId: menuTargetConfession.id,
+          mode: 'edit',
+        },
+      } as any,
+      'confessions->editConfession'
+    );
+  }, [menuTargetConfession, router]);
+
+  // Helper to get gender symbol
+  const getGenderSymbol = (gender?: string) => {
+    if (!gender) return null;
+    const g = gender.toLowerCase();
+    if (g === 'male' || g === 'm') return { symbol: '♂', color: '#4A90D9' };
+    if (g === 'female' || g === 'f') return { symbol: '♀', color: COLORS.primary };
+    return null;
+  };
+
+  const renderHeader = useCallback(() => (
+    <View>
+      {/* 1. TRENDING SECTION (always first) - Premium card with full border */}
+      {trendingHero && (
+        <TouchableOpacity
+          style={styles.trendingCard}
+          activeOpacity={0.88}
+          onPress={() => handleOpenThread(trendingHero.id)}
+          onLongPress={() => handleOpenMenuSheet(trendingHero.id, trendingHero.userId)}
+          delayLongPress={300}
+        >
+          {/* Trending badge */}
+          <View style={styles.trendingBadge}>
+            <Ionicons name="trending-up" size={12} color="#3B82F6" />
+            <Text style={styles.trendingBadgeText}>Trending</Text>
+          </View>
+
+          {/* Author row - shows identity with gender symbol */}
+          <View style={styles.trendingAuthorRow}>
+            {trendingHero.isAnonymous ? (
+              <View style={[styles.trendingAvatar, styles.trendingAvatarAnonymous]}>
+                <Ionicons name="eye-off" size={10} color={COLORS.textMuted} />
+              </View>
+            ) : trendingHero.authorPhotoUrl ? (
+              <Image
+                source={{ uri: trendingHero.authorPhotoUrl }}
+                style={styles.trendingAvatarImage}
+                contentFit="cover"
+              />
+            ) : (
+              <View style={styles.trendingAvatar}>
+                <Ionicons name="person" size={10} color={COLORS.primary} />
+              </View>
+            )}
+            <Text style={[styles.trendingAuthorName, !trendingHero.isAnonymous && styles.trendingAuthorNamePublic]}>
+              {trendingHero.isAnonymous ? 'Anonymous' : (
+                <>
+                  {trendingHero.authorName || 'Someone'}
+                  {trendingHero.authorAge ? `, ${trendingHero.authorAge}` : ''}
+                  {getGenderSymbol(trendingHero.authorGender) && (
+                    <Text style={{ color: getGenderSymbol(trendingHero.authorGender)!.color }}> {getGenderSymbol(trendingHero.authorGender)!.symbol}</Text>
+                  )}
+                </>
+              )}
+            </Text>
+            <View style={{ flex: 1 }} />
+            <Text style={styles.trendingTime}>{getTimeAgoSimple(trendingHero.createdAt)}</Text>
+          </View>
+
+          {/* Confession text */}
+          <Text style={styles.trendingText} numberOfLines={3}>{trendingHero.text}</Text>
+
+          {/* Meta row */}
+          <View style={styles.trendingMeta}>
+            <View style={styles.trendingMetaItem}>
+              <Ionicons name="chatbubble-outline" size={12} color={COLORS.textMuted} />
+              <Text style={styles.trendingMetaText}>{trendingHero.replyCount}</Text>
+            </View>
+            <View style={styles.trendingMetaItem}>
+              <Ionicons name="heart-outline" size={12} color={COLORS.textMuted} />
+              <Text style={styles.trendingMetaText}>{trendingHero.reactionCount}</Text>
+            </View>
+          </View>
+        </TouchableOpacity>
+      )}
+
+      {/* 2. MY CONFESSION SECTION (second, owner only) - Border highlight only */}
+      {myLatestConfession && (
+        <TouchableOpacity
+          style={styles.myConfessionCard}
+          activeOpacity={0.88}
+          onPress={() => handleOpenThread((myLatestConfession as any).id || (myLatestConfession as any)._id)}
+          onLongPress={() => handleOpenMenuSheet(
+            (myLatestConfession as any).id || (myLatestConfession as any)._id,
+            (myLatestConfession as any).userId
+          )}
+          delayLongPress={300}
+        >
+          {/* Author row - same as normal cards */}
+          <View style={styles.myConfessionAuthorRow}>
+            {(myLatestConfession as any).isAnonymous ? (
+              <View style={[styles.myConfessionAvatar, styles.myConfessionAvatarAnonymous]}>
+                <Ionicons name="eye-off" size={10} color={COLORS.textMuted} />
+              </View>
+            ) : (myLatestConfession as any).authorPhotoUrl ? (
+              <Image
+                source={{ uri: (myLatestConfession as any).authorPhotoUrl }}
+                style={styles.myConfessionAvatarImage}
+                contentFit="cover"
+              />
+            ) : (
+              <View style={styles.myConfessionAvatar}>
+                <Ionicons name="person" size={10} color={COLORS.primary} />
+              </View>
+            )}
+            <Text style={[styles.myConfessionAuthorName, !(myLatestConfession as any).isAnonymous && styles.myConfessionAuthorNamePublic]}>
+              {(myLatestConfession as any).isAnonymous ? 'Anonymous' : (
+                <>
+                  {(myLatestConfession as any).authorName || 'You'}
+                  {(myLatestConfession as any).authorAge ? `, ${(myLatestConfession as any).authorAge}` : ''}
+                  {getGenderSymbol((myLatestConfession as any).authorGender) && (
+                    <Text style={{ color: getGenderSymbol((myLatestConfession as any).authorGender)!.color }}> {getGenderSymbol((myLatestConfession as any).authorGender)!.symbol}</Text>
+                  )}
+                </>
+              )}
+            </Text>
+            <View style={{ flex: 1 }} />
+            <Text style={styles.myConfessionTime}>{getTimeAgoSimple(myLatestConfession.createdAt)}</Text>
+          </View>
+
+          {/* Confession text */}
+          <Text style={styles.myConfessionText} numberOfLines={2}>
+            {myLatestConfession.text}
+          </Text>
+
+          {/* Meta row */}
+          <View style={styles.myConfessionMeta}>
+            <View style={styles.myConfessionMetaItem}>
+              <Ionicons name="chatbubble-outline" size={12} color={COLORS.textMuted} />
+              <Text style={styles.myConfessionMetaText}>{myLatestConfession.replyCount ?? 0}</Text>
+            </View>
+            <View style={styles.myConfessionMetaItem}>
+              <Ionicons name="heart-outline" size={12} color={COLORS.textMuted} />
+              <Text style={styles.myConfessionMetaText}>{myLatestConfession.reactionCount ?? 0}</Text>
+            </View>
+          </View>
+        </TouchableOpacity>
+      )}
+
+      {/* Countdown notice when limit is reached */}
+      {!canPostNow && countdownMs > 0 && (
+        <View style={styles.countdownNotice}>
+          <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
+          <Text style={styles.countdownText}>
+            Next confession in {formatCountdown(countdownMs)}
+          </Text>
+        </View>
+      )}
+
+      {/* Tagged for you section */}
+      {taggedConfessions.length > 0 && (
+        <TouchableOpacity style={styles.taggedRow} onPress={handleOpenTaggedSection} activeOpacity={0.8}>
+          <View style={styles.taggedRowLeft}>
+            <Ionicons name="heart" size={18} color={COLORS.primary} />
+            <Text style={styles.taggedRowText}>Tagged for you</Text>
+            {taggedBadgeCount > 0 && (
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>{taggedBadgeCount}</Text>
+              </View>
+            )}
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+        </TouchableOpacity>
+      )}
+    </View>
+  ), [canPostNow, countdownMs, formatCountdown, handleOpenTaggedSection, handleOpenThread, myLatestConfession, taggedBadgeCount, taggedConfessions.length, trendingHero]);
+
+  if (isLoading && confessions.length === 0) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.header}>
+          <Ionicons name="megaphone" size={16} color={COLORS.primary} />
+          <Text style={styles.headerTitle}>Confess</Text>
+        </View>
+        <View style={styles.loadingState}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading confessions...</Text>
+        </View>
+      </SafeAreaView>
+    );
   }
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      <View style={styles.content}>
-        <View style={styles.iconContainer}>
-          <Ionicons name="chatbox-ellipses-outline" size={64} color={COLORS.primary} />
-        </View>
-
-        <Text style={styles.title}>Confessions</Text>
-        <Text style={styles.subtitle}>Coming Soon</Text>
-        <Text style={styles.description}>
-          Anonymous confessions are being enhanced with new features. Check back soon!
-        </Text>
-
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <View style={styles.header}>
+        <Ionicons name="megaphone" size={16} color={COLORS.primary} />
+        <Text style={styles.headerTitle}>Confess</Text>
+        <View style={{ flex: 1 }} />
         <TouchableOpacity
-          style={styles.goBackBtn}
-          onPress={() => router.back()}
+          onPress={handleOpenMyConfessions}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={styles.headerButton}
         >
-          <Text style={styles.goBackText}>Go Back</Text>
+          <Ionicons name="document-text-outline" size={18} color={COLORS.text} />
         </TouchableOpacity>
       </View>
-    </View>
+
+      <Text style={styles.topHint}>Choose how you want to be seen</Text>
+
+      <FlatList
+        data={filteredConfessions}
+        keyExtractor={(item) => item.id}
+        ListHeaderComponent={renderHeader}
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        renderItem={({ item }) => {
+          const userEmoji = isDemoMode
+            ? (demoUserReactions[item.id] && isProbablyEmoji(demoUserReactions[item.id]!) ? demoUserReactions[item.id]! : null)
+            : (liveUserReactions[item.id] ?? null);
+          const isTaggedForMe = item.targetUserId != null && item.targetUserId === effectiveViewerId;
+
+          return (
+            <ConfessionCard
+              id={item.id}
+              text={item.text}
+              isAnonymous={item.isAnonymous}
+              mood={item.mood}
+              topEmojis={item.topEmojis}
+              userEmoji={userEmoji}
+              replyPreviews={item.replyPreviews}
+              replyCount={item.replyCount}
+              reactionCount={item.reactionCount}
+              authorName={item.authorName}
+              authorPhotoUrl={item.authorPhotoUrl}
+              authorAge={item.authorAge}
+              authorGender={item.authorGender}
+              createdAt={item.createdAt}
+              isTaggedForMe={isTaggedForMe}
+              taggedUserId={item.targetUserId}
+              taggedUserName={item.targetUserName}
+              authorId={item.userId}
+              viewerId={effectiveViewerId ?? undefined}
+              // EXPLICIT INTERACTION CONTRACT for main feed (/confessions)
+              screenContext="confessions"
+              enableTapToOpenThread={true}
+              enableLongPressMenu={true}
+              onCardPress={() => handleOpenThread(item.id)}
+              onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
+              onReact={() => handleOpenReactionPicker(item.id)}
+              onToggleEmoji={(emoji) => void toggleReaction(item.id, emoji)}
+            />
+          );
+        }}
+        ListEmptyComponent={
+          // Only show empty state if NO confessions exist at all (not just filtered list)
+          confessions.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyEmoji}>💬</Text>
+              <Text style={styles.emptyTitle}>No confessions yet</Text>
+              <Text style={styles.emptySubtitle}>Be the first to share something</Text>
+              <TouchableOpacity style={styles.emptyButton} onPress={handleOpenComposer}>
+                <Text style={styles.emptyButtonText}>Post a Confession</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null
+        }
+      />
+
+      {showToast && (
+        <Animated.View style={[styles.toast, { opacity: toastOpacity }]}>
+          <Ionicons name="checkmark-circle" size={18} color="#34C759" />
+          <Text style={styles.toastText}>{toastMessage}</Text>
+        </Animated.View>
+      )}
+
+      <TouchableOpacity
+        style={[
+          styles.fab,
+          { bottom: Math.max(insets.bottom, 16) + 8 },
+          !canPostNow && styles.fabDisabled,
+        ]}
+        onPress={handleOpenComposer}
+        activeOpacity={canPostNow ? 0.8 : 0.9}
+      >
+        <Ionicons name="add" size={24} color={COLORS.white} />
+      </TouchableOpacity>
+
+      {/* Premium menu sheet for confession actions */}
+      <ConfessionMenuSheet
+        visible={showMenuSheet}
+        isOwner={menuTargetConfession?.authorId === effectiveViewerId}
+        onClose={handleCloseMenuSheet}
+        onEdit={handleMenuEdit}
+        onDelete={handleMenuDelete}
+        onReport={handleMenuReport}
+      />
+
+      <EmojiPicker
+        open={showReactionEmoji}
+        onClose={() => {
+          setShowReactionEmoji(false);
+          setEmojiTargetConfessionId(null);
+        }}
+        onEmojiSelected={handleReactionEmojiSelected}
+      />
+
+      <Modal visible={showComposer} animationType="slide" transparent onRequestClose={handleCloseComposer}>
+        <TouchableWithoutFeedback onPress={handleCloseComposer}>
+          <View style={styles.modalOverlay}>
+            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+              <KeyboardAvoidingView
+                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                style={styles.sheet}
+              >
+                <View style={styles.sheetHandle} />
+
+                <View style={styles.sheetHeader}>
+                  <TouchableOpacity onPress={handleCloseComposer}>
+                    <Ionicons name="close" size={24} color={COLORS.text} />
+                  </TouchableOpacity>
+                  <Text style={styles.sheetTitle}>New Confession</Text>
+                  <TouchableOpacity
+                    onPress={handleSubmitComposer}
+                    disabled={composerSubmitting || composerText.trim().length < 10}
+                    style={[
+                      styles.postButton,
+                      (composerSubmitting || composerText.trim().length < 10) && styles.postButtonDisabled,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.postButtonText,
+                        (composerSubmitting || composerText.trim().length < 10) && styles.postButtonTextDisabled,
+                      ]}
+                    >
+                      {composerSubmitting ? 'Posting...' : 'Post'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.sheetBanner}>
+                  <Ionicons name="shield-checkmark" size={14} color={COLORS.primary} />
+                  <Text style={styles.sheetBannerText}>Don&apos;t include phone numbers or personal details.</Text>
+                </View>
+
+                <TextInput
+                  ref={composerInputRef}
+                  style={styles.composerInput}
+                  placeholder="What's on your mind? Share your confession..."
+                  placeholderTextColor={COLORS.textMuted}
+                  multiline
+                  maxLength={500}
+                  textAlignVertical="top"
+                  value={composerText}
+                  onChangeText={setComposerText}
+                />
+
+                <View style={styles.composerToolbar}>
+                  <TouchableOpacity onPress={() => setShowComposerEmoji(true)}>
+                    <Text style={styles.toolbarEmoji}>🙂</Text>
+                  </TouchableOpacity>
+                  <View style={{ flex: 1 }} />
+                  <Text style={styles.charCount}>{composerText.length}/500</Text>
+                </View>
+
+                <View style={styles.tagSection}>
+                  <View style={styles.tagHeader}>
+                    <Ionicons name="heart-outline" size={18} color={COLORS.primary} />
+                    <Text style={styles.tagTitle}>Mention username (optional)</Text>
+                  </View>
+
+                  {taggedUser ? (
+                    <View style={styles.selectedTagRow}>
+                      {taggedUser.avatarUrl ? (
+                        <Image source={{ uri: taggedUser.avatarUrl }} style={styles.tagAvatar} contentFit="cover" />
+                      ) : (
+                        <View style={styles.tagAvatarFallback}>
+                          <Ionicons name="person" size={16} color={COLORS.white} />
+                        </View>
+                      )}
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.tagName}>
+                          {taggedUser.name}{taggedUser.age ? `, ${taggedUser.age}` : ''}
+                        </Text>
+                        <Text style={styles.tagHint}>{taggedUser.disambiguator}</Text>
+                      </View>
+                      <TouchableOpacity onPress={() => {
+                        setTaggedUser(null);
+                        setTagInput('');
+                      }}>
+                        <Ionicons name="close-circle" size={20} color={COLORS.textMuted} />
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <>
+                      <TextInput
+                        style={styles.tagInput}
+                        placeholder="Type a name from people you've liked..."
+                        placeholderTextColor={COLORS.textMuted}
+                        value={tagInput}
+                        onChangeText={handleTagInputChange}
+                      />
+                      <Text style={styles.tagHint}>
+                        {likedUsers.length > 0 ? 'You can only tag people you liked.' : 'Like someone first to confess to them.'}
+                      </Text>
+                    </>
+                  )}
+
+                  {tagSuggestions.length > 0 && !taggedUser && (
+                    <View style={styles.suggestionList}>
+                      {tagSuggestions.map((user) => (
+                        <TouchableOpacity
+                          key={user.id}
+                          style={styles.suggestionRow}
+                          onPress={() => {
+                            setTaggedUser(user);
+                            setTagInput(user.name);
+                          }}
+                        >
+                          <View style={styles.suggestionAvatar}>
+                            <Ionicons name="person" size={14} color={COLORS.white} />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.suggestionName}>{user.name}</Text>
+                            <Text style={styles.suggestionHint}>{user.disambiguator}</Text>
+                          </View>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
+                </View>
+
+                <View style={styles.visibilityRow}>
+                  <View style={styles.visibilityInfo}>
+                    <Ionicons
+                      name={composerAnonymous ? 'eye-off' : 'person'}
+                      size={20}
+                      color={composerAnonymous ? COLORS.textMuted : COLORS.primary}
+                    />
+                    <View>
+                      <Text style={styles.visibilityTitle}>{composerAnonymous ? 'Anonymous' : 'Open to all'}</Text>
+                      <Text style={styles.visibilitySubtitle}>
+                        {composerAnonymous ? 'Your identity stays hidden' : 'Your profile will be visible'}
+                      </Text>
+                    </View>
+                  </View>
+                  <Switch
+                    value={!composerAnonymous}
+                    onValueChange={(value) => setComposerAnonymous(!value)}
+                    trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+                    thumbColor={!composerAnonymous ? COLORS.primary : '#f4f3f4'}
+                  />
+                </View>
+
+                <View style={{ height: Math.max(insets.bottom, 16) }} />
+              </KeyboardAvoidingView>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
+      <EmojiPicker
+        open={showComposerEmoji}
+        onClose={() => setShowComposerEmoji(false)}
+        onEmojiSelected={(emoji: any) => setComposerText((current) => current + emoji.emoji)}
+      />
+
+      <Modal visible={showDuplicatePicker} transparent animationType="fade" onRequestClose={() => setShowDuplicatePicker(false)}>
+        <TouchableWithoutFeedback onPress={() => setShowDuplicatePicker(false)}>
+          <View style={styles.duplicateOverlay}>
+            <TouchableWithoutFeedback>
+              <View style={styles.duplicateSheet}>
+                <Text style={styles.duplicateTitle}>Multiple people named &quot;{tagInput}&quot;</Text>
+                <Text style={styles.duplicateSubtitle}>Choose who you want to confess to.</Text>
+                {duplicateCandidates.map((user) => (
+                  <TouchableOpacity
+                    key={user.id}
+                    style={styles.duplicateRow}
+                    onPress={() => {
+                      setTaggedUser(user);
+                      setTagInput(user.name);
+                      setShowDuplicatePicker(false);
+                    }}
+                  >
+                    {user.avatarUrl ? (
+                      <Image source={{ uri: user.avatarUrl }} style={styles.duplicateAvatar} contentFit="cover" />
+                    ) : (
+                      <View style={styles.duplicateAvatarFallback}>
+                        <Ionicons name="person" size={18} color={COLORS.white} />
+                      </View>
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.duplicateName}>
+                        {user.name}{user.age ? `, ${user.age}` : ''}
+                      </Text>
+                      <Text style={styles.duplicateHint}>{user.disambiguator}</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
+      <Modal visible={showTaggedSection} transparent animationType="slide" onRequestClose={() => setShowTaggedSection(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.taggedSheet}>
+            <View style={styles.taggedSheetHeader}>
+              <TouchableOpacity onPress={() => setShowTaggedSection(false)}>
+                <Ionicons name="chevron-back" size={24} color={COLORS.text} />
+              </TouchableOpacity>
+              <Text style={styles.taggedSheetTitle}>Tagged for you</Text>
+              <View style={{ width: 24 }} />
+            </View>
+
+            <Text style={styles.taggedSheetHint}>Someone confessed their feelings to you 💌</Text>
+
+            <FlatList
+              data={taggedConfessions}
+              keyExtractor={(item) => item.notificationId}
+              contentContainerStyle={styles.taggedList}
+              showsVerticalScrollIndicator={false}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={[styles.taggedCard, item.isExpired && styles.taggedCardExpired]}
+                  activeOpacity={item.isExpired ? 1 : 0.82}
+                  onPress={() => handleSelectTaggedConfession(item)}
+                >
+                  <View style={styles.taggedCardHeader}>
+                    <Text style={styles.taggedCardAuthor}>Anonymous</Text>
+                    <Text style={styles.taggedCardTime}>{getTimeAgoSimple(item.confessionCreatedAt)}</Text>
+                    {!item.seen && !item.isExpired && <View style={styles.unseenDot} />}
+                    {item.isExpired && (
+                      <View style={styles.expiredPill}>
+                        <Text style={styles.expiredPillText}>Expired</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={[styles.taggedCardText, item.isExpired && styles.taggedCardTextExpired]} numberOfLines={4}>
+                    {item.confessionText}
+                  </Text>
+                  <View style={styles.taggedMetaRow}>
+                    <View style={styles.taggedMetaItem}>
+                      <Ionicons name="heart" size={12} color={COLORS.primary} />
+                      <Text style={styles.taggedMetaText}>Confess-to: You</Text>
+                    </View>
+                    <View style={styles.taggedMetaItem}>
+                      <Ionicons name="chatbubble-outline" size={12} color={COLORS.textMuted} />
+                      <Text style={styles.taggedMetaCount}>{item.replyCount}</Text>
+                    </View>
+                  </View>
+                </TouchableOpacity>
+              )}
+              ListEmptyComponent={
+                <View style={styles.taggedEmptyState}>
+                  <Text style={styles.taggedEmptyText}>No tagged confessions yet</Text>
+                </View>
+              }
+            />
+          </View>
+        </View>
+      </Modal>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: COLORS.background,
+    backgroundColor: COLORS.backgroundDark,
   },
-  content: {
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
+  },
+  headerTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  headerButton: {
+    padding: 4,
+  },
+  topHint: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 6,
+  },
+  listContent: {
+    paddingBottom: 96,
+  },
+  loadingState: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 32,
+    gap: 12,
   },
-  iconContainer: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: COLORS.primary + '20',
+  loadingText: {
+    fontSize: 16,
+    color: COLORS.textLight,
+  },
+  taggedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginHorizontal: 10,
+    marginTop: 8,
+    marginBottom: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,107,107,0.08)',
+  },
+  taggedRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  taggedRowText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  badge: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+  },
+  badgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  // Trending card - Premium with deep blue accent
+  trendingCard: {
+    marginHorizontal: 10,
+    marginTop: 8,
+    marginBottom: 8,
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 12,
+    backgroundColor: COLORS.background,
+    borderWidth: 1.5,
+    borderColor: 'rgba(59, 130, 246, 0.3)',
+    shadowColor: '#3B82F6',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  genderSymbol: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  trendingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 4,
+    backgroundColor: 'rgba(59, 130, 246, 0.08)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  trendingBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#3B82F6',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  trendingAuthorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  trendingAvatar: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,107,107,0.12)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 24,
   },
-  title: {
-    fontSize: 24,
+  trendingAvatarAnonymous: {
+    backgroundColor: 'rgba(153,153,153,0.12)',
+  },
+  trendingAvatarImage: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+  },
+  trendingAuthorName: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textLight,
+    flex: 1,
+  },
+  trendingAuthorNamePublic: {
+    color: COLORS.primary,
+  },
+  trendingTime: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+  },
+  trendingText: {
+    fontSize: 15,
+    lineHeight: 22,
+    fontWeight: '500',
+    color: COLORS.text,
+    marginBottom: 10,
+  },
+  trendingMeta: {
+    flexDirection: 'row',
+    gap: 14,
+  },
+  trendingMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  trendingMetaText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: COLORS.textMuted,
+  },
+  emptyState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 40,
+    paddingTop: 84,
+  },
+  emptyEmoji: {
+    fontSize: 56,
+    marginBottom: 16,
+  },
+  emptyTitle: {
+    fontSize: 22,
     fontWeight: '700',
     color: COLORS.text,
     marginBottom: 8,
     textAlign: 'center',
   },
-  subtitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: COLORS.primary,
-    marginBottom: 16,
-  },
-  description: {
-    fontSize: 14,
+  emptySubtitle: {
+    fontSize: 15,
+    lineHeight: 22,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 22,
-    marginBottom: 32,
+    marginBottom: 24,
   },
-  goBackBtn: {
+  emptyButton: {
+    borderRadius: 24,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 32,
-    paddingVertical: 14,
-    borderRadius: 12,
   },
-  goBackText: {
-    fontSize: 16,
+  emptyButtonText: {
+    fontSize: 15,
     fontWeight: '600',
-    color: '#FFFFFF',
+    color: COLORS.white,
+  },
+  fab: {
+    position: 'absolute',
+    right: 16,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  fabDisabled: {
+    opacity: 0.65,
+  },
+  // My Confession card - Same style as normal cards, with subtle border highlight
+  myConfessionCard: {
+    marginHorizontal: 10,
+    marginTop: 4,
+    marginBottom: 8,
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 12,
+    backgroundColor: COLORS.background,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,107,107,0.25)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  myConfessionAuthorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  myConfessionAvatar: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,107,107,0.12)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  myConfessionAvatarAnonymous: {
+    backgroundColor: 'rgba(153,153,153,0.12)',
+  },
+  myConfessionAvatarImage: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+  },
+  myConfessionAuthorName: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textLight,
+  },
+  myConfessionAuthorNamePublic: {
+    color: COLORS.primary,
+  },
+  myConfessionTime: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+  },
+  myConfessionText: {
+    fontSize: 15,
+    lineHeight: 22,
+    fontWeight: '500',
+    color: COLORS.text,
+    marginBottom: 10,
+  },
+  myConfessionMeta: {
+    flexDirection: 'row',
+    gap: 14,
+  },
+  myConfessionMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  myConfessionMetaText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: COLORS.textMuted,
+  },
+  // Countdown notice
+  countdownNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginHorizontal: 10,
+    marginBottom: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: 'rgba(153,153,153,0.08)',
+  },
+  countdownText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+  toast: {
+    position: 'absolute',
+    top: 56,
+    left: 24,
+    right: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: COLORS.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 4,
+    zIndex: 20,
+  },
+  toastText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+  },
+  sheet: {
+    backgroundColor: COLORS.white,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '88%',
+  },
+  sheetHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginTop: 10,
+    marginBottom: 6,
+    backgroundColor: COLORS.border,
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
+  },
+  sheetTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  postButton: {
+    borderRadius: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+    backgroundColor: COLORS.primary,
+  },
+  postButtonDisabled: {
+    backgroundColor: COLORS.border,
+  },
+  postButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  postButtonTextDisabled: {
+    color: COLORS.textMuted,
+  },
+  sheetBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(255,107,107,0.06)',
+  },
+  sheetBannerText: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+  composerInput: {
+    minHeight: 110,
+    maxHeight: 180,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    fontSize: 16,
+    lineHeight: 24,
+    color: COLORS.text,
+  },
+  composerToolbar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
+  },
+  toolbarEmoji: {
+    fontSize: 20,
+  },
+  charCount: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+  },
+  tagSection: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
+  },
+  tagHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  tagTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  tagInput: {
+    fontSize: 14,
+    color: COLORS.text,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  tagHint: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 6,
+  },
+  selectedTagRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,107,107,0.08)',
+  },
+  tagAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+  },
+  tagAvatarFallback: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+  },
+  tagName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  suggestionList: {
+    marginTop: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.white,
+    overflow: 'hidden',
+  },
+  suggestionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
+  },
+  suggestionAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+  },
+  suggestionName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  suggestionHint: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+  visibilityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  visibilityInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  visibilityTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  visibilitySubtitle: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  duplicateOverlay: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  duplicateSheet: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: 16,
+    padding: 20,
+    backgroundColor: COLORS.white,
+  },
+  duplicateTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: COLORS.text,
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  duplicateSubtitle: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  duplicateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  duplicateAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
+  duplicateAvatarFallback: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+  },
+  duplicateName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  duplicateHint: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  taggedSheet: {
+    flex: 1,
+    marginTop: 96,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    backgroundColor: COLORS.white,
+  },
+  taggedSheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
+  },
+  taggedSheetTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  taggedSheetHint: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    paddingHorizontal: 24,
+    paddingTop: 10,
+    paddingBottom: 12,
+  },
+  taggedList: {
+    paddingHorizontal: 12,
+    paddingBottom: 24,
+  },
+  taggedCard: {
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 10,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  taggedCardExpired: {
+    opacity: 0.65,
+  },
+  taggedCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  taggedCardAuthor: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  taggedCardTime: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+  },
+  unseenDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.primary,
+  },
+  expiredPill: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: 'rgba(153,153,153,0.15)',
+  },
+  expiredPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+  },
+  taggedCardText: {
+    fontSize: 15,
+    lineHeight: 22,
+    color: COLORS.text,
+    marginBottom: 10,
+  },
+  taggedCardTextExpired: {
+    color: COLORS.textLight,
+  },
+  taggedMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  taggedMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  taggedMetaText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  taggedMetaCount: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  taggedEmptyState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 80,
+  },
+  taggedEmptyText: {
+    fontSize: 15,
+    color: COLORS.textLight,
   },
 });
