@@ -7,7 +7,6 @@
  * DM-ID-FIX: Now includes threadId for Convex backend sync.
  */
 import { create } from 'zustand';
-import type { Id } from '@/convex/_generated/dataModel';
 
 // DM info for display (peer details)
 interface DmInfo {
@@ -23,13 +22,13 @@ interface ChatRoomDmState {
   activeDm: DmInfo | null;
 
   /** Convex thread ID for backend sync */
-  activeThreadId: Id<'chatRoomDmThreads'> | null;
+  activeThreadId: string | null;
 
   /** The source room ID (for back navigation context) */
   sourceRoomId: string | null;
 
   /** Set the active DM before navigating to DM screen */
-  setActiveDm: (dm: DmInfo, threadId: Id<'chatRoomDmThreads'>, roomId: string) => void;
+  setActiveDm: (dm: DmInfo, threadId: string | null, roomId: string) => void;
 
   /** Clear the active DM (called on back/close) */
   clearActiveDm: () => void;

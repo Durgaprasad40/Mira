@@ -444,14 +444,14 @@ export default function ChatsScreen() {
 
   // Handle accept T&D connect request
   const handleAcceptConnect = useCallback(async (requestId: string) => {
-    if (!currentUserId || !token) return;
+    if (!currentUserId) return;
 
     setRespondingTo(requestId);
     try {
       const result = await respondToConnect({
         requestId: requestId as any,
         action: 'connect',
-        token: token as string,
+        authUserId: currentUserId,
       });
 
       if (result?.success && result.action === 'connected') {
@@ -503,25 +503,25 @@ export default function ChatsScreen() {
     } finally {
       setRespondingTo(null);
     }
-  }, [currentUserId, token, respondToConnect, conversations, unlockUser, createConversation, router]);
+  }, [currentUserId, respondToConnect, conversations, unlockUser, createConversation, router]);
 
   // Handle reject T&D connect request
   const handleRejectConnect = useCallback(async (requestId: string) => {
-    if (!currentUserId || !token) return;
+    if (!currentUserId) return;
 
     setRespondingTo(requestId);
     try {
       await respondToConnect({
         requestId: requestId as any,
         action: 'remove',
-        token: token as string,
+        authUserId: currentUserId,
       });
     } catch (error) {
       Alert.alert('Error', 'Failed to decline connection. Please try again.');
     } finally {
       setRespondingTo(null);
     }
-  }, [currentUserId, token, respondToConnect]);
+  }, [currentUserId, respondToConnect]);
 
   // Separate conversations into "new matches" (no real messages) and "message threads" (has real messages)
   // FIX: Use backend lastMessage field instead of local messages store for consistent cross-device state

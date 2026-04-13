@@ -382,10 +382,10 @@ export default function ChatRoomsScreen() {
       name: r.name,
       slug: r.slug,
       category: r.category,
-      activeUserCount: r.activeUserCount ?? 0, // LIVE: Real-time presence count
+      activeUserCount: r.memberCount ?? 0,
       iconKey: r.slug,
       isPrivate: true, // Flag for compact rendering
-      hasPassword: r.hasPassword ?? false, // LOCKED-ROOM-FIX
+      hasPassword: false,
       isMember: r.isMember ?? false, // LOCKED-ROOM-FIX
     }));
   }, [myPrivateRooms]);
@@ -416,7 +416,7 @@ export default function ChatRoomsScreen() {
       name: r.name,
       slug: r.slug,
       category: r.category,
-      activeUserCount: r.activeUserCount ?? 0, // LIVE: Real-time presence count
+      activeUserCount: r.memberCount ?? 0,
       lastMessageText: r.lastMessageText,
       iconKey: r.slug,
     })).filter((r) => r.name.toLowerCase() !== 'english');
@@ -519,16 +519,6 @@ export default function ChatRoomsScreen() {
       // UNMOUNT-GUARD: Check mounted before setState after async
       if (!mountedRef.current) return;
 
-      if (result.requiresPassword) {
-        setJoinCode('');
-        setPasswordModalRoom({
-          id: result.roomId,
-          name: result.roomName ?? 'Private Room',
-        });
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        return;
-      }
-
       setJoinCode('');
       // P2-015: Success haptic feedback
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -538,7 +528,7 @@ export default function ChatRoomsScreen() {
       // ISSUE B: Navigate with route params for instant render (private room)
       router.push({
         pathname: `/(main)/(private)/(tabs)/chat-rooms/${result.roomId}`,
-        params: { roomName: result.roomName ?? '', isPrivate: '1' },
+        params: { roomName: 'Private Room', isPrivate: '1' },
       } as any);
       markRoomVisited(result.roomId);
     } catch (error: any) {

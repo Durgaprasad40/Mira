@@ -15,18 +15,17 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { Id } from '@/convex/_generated/dataModel';
 
 const C = INCOGNITO_COLORS;
 
 /** Mention item from the backend */
 export interface MentionItem {
-  id: Id<'chatRoomMentions'>;
-  senderUserId: Id<'users'>;
+  id: string;
+  senderUserId: string;
   senderNickname: string;
-  roomId: Id<'chatRooms'>;
+  roomId: string;
   roomName: string;
-  messageId: Id<'chatRoomMessages'>;
+  messageId: string;
   messagePreview: string;
   createdAt: number;
   isRead: boolean;
