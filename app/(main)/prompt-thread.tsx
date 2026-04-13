@@ -1,8 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput, Animated, Pressable,
+  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput, Animated, Pressable, Platform,
 } from 'react-native';
 import { Image } from 'expo-image';
+import { BlurView } from 'expo-blur';
 import { Video, ResizeMode } from 'expo-av';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -159,6 +160,7 @@ export default function PromptThreadScreen() {
   const reportPromptMutation = useMutation(api.truthDare.reportPrompt); // P0-002: Report prompt
   const deleteAnswer = useMutation(api.truthDare.deleteMyAnswer);
   const deletePrompt = useMutation(api.truthDare.deleteMyPrompt); // Prompt owner delete
+  const editPrompt = useMutation(api.truthDare.editMyPrompt); // Prompt owner edit
   // Secure media APIs (for future viewer implementation)
   const claimAnswerMediaView = useMutation(api.truthDare.claimAnswerMediaView);
   const finalizeAnswerMediaView = useMutation(api.truthDare.finalizeAnswerMediaView);
@@ -304,12 +306,17 @@ export default function PromptThreadScreen() {
   const [showPromptActionPopup, setShowPromptActionPopup] = useState(false);
   const [isDeletingPrompt, setIsDeletingPrompt] = useState(false);
 
+  // Inline prompt edit state
+  const [isEditingPrompt, setIsEditingPrompt] = useState(false);
+  const [editPromptText, setEditPromptText] = useState('');
+  const [isSavingPromptEdit, setIsSavingPromptEdit] = useState(false);
+
   // Selected answer state - for tap-to-reveal Connect (prompt owner only)
   const [selectedAnswerId, setSelectedAnswerId] = useState<string | null>(null);
 
   // Check if current user is the prompt owner
-  // CONNECT FIX: Use backend-computed flag (resolves ID format mismatch)
-  const isPromptOwner = threadData?.isViewerPromptOwner ?? false;
+  // FIX: Backend returns isPromptOwner inside prompt object, not at threadData root
+  const isPromptOwner = threadData?.prompt?.isPromptOwner ?? false;
 
   // CONNECT DEBUG: Log thread ownership state
   useEffect(() => {
@@ -318,12 +325,12 @@ export default function PromptThreadScreen() {
         promptId: promptId?.slice(-8),
         viewerUserId: userId?.slice(-8),
         promptOwnerUserId: prompt?.ownerUserId?.slice(-8),
-        isViewerPromptOwner: threadData?.isViewerPromptOwner,
+        backendIsPromptOwner: threadData?.prompt?.isPromptOwner, // FIX: Correct path
         isPromptOwner,
         answerCount: visibleAnswerCount,
       });
     }
-  }, [promptId, userId, prompt?.ownerUserId, threadData?.isViewerPromptOwner, isPromptOwner, visibleAnswerCount]);
+  }, [promptId, userId, prompt?.ownerUserId, threadData?.prompt?.isPromptOwner, isPromptOwner, visibleAnswerCount]);
 
   const listRef = useRef<FlatList>(null);
 
@@ -554,22 +561,66 @@ export default function PromptThreadScreen() {
   }, []);
 
   // Handle delete own prompt
-  // P0-006 FIX: Use finally block to always clear loading state
+  // FIX: Use authUserId instead of token for backend mutation
   const handleDeletePrompt = useCallback(async () => {
-    if (!token || !promptId || !isPromptOwner) return;
+    if (!userId || !promptId || !isPromptOwner) return;
     if (isDeletingPrompt) return; // Prevent double-tap
 
     setIsDeletingPrompt(true);
     try {
-      await deletePrompt({ promptId, token });
+      await deletePrompt({ promptId, authUserId: userId });
       setShowPromptActionPopup(false);
       router.back(); // Navigate back after successful delete
     } catch (error: any) {
-      Alert.alert('Error', 'Failed to delete prompt. Please try again.');
+      console.error('[T/D] Delete prompt failed:', error);
+      Alert.alert('Error', error?.message || 'Failed to delete prompt. Please try again.');
     } finally {
       setIsDeletingPrompt(false);
     }
-  }, [token, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, router]);
+  }, [userId, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, router]);
+
+  // Handle inline edit - start editing
+  const handleStartEditPrompt = useCallback(() => {
+    if (!prompt?.text) return;
+    setEditPromptText(prompt.text);
+    setIsEditingPrompt(true);
+    setShowPromptActionPopup(false);
+  }, [prompt?.text]);
+
+  // Handle inline edit - cancel
+  const handleCancelEditPrompt = useCallback(() => {
+    setIsEditingPrompt(false);
+    setEditPromptText('');
+  }, []);
+
+  // Handle inline edit - save
+  const handleSaveEditPrompt = useCallback(async () => {
+    if (!userId || !promptId || !editPromptText.trim()) return;
+    if (isSavingPromptEdit) return;
+
+    const trimmedText = editPromptText.trim();
+    if (trimmedText.length < 10) {
+      Alert.alert('Too Short', 'Prompt must be at least 10 characters.');
+      return;
+    }
+    if (trimmedText.length > 280) {
+      Alert.alert('Too Long', 'Prompt cannot exceed 280 characters.');
+      return;
+    }
+
+    setIsSavingPromptEdit(true);
+    try {
+      await editPrompt({ promptId, authUserId: userId, newText: trimmedText });
+      setIsEditingPrompt(false);
+      setEditPromptText('');
+      // Query will auto-refresh with new text
+    } catch (error: any) {
+      console.error('[T/D] Edit prompt failed:', error);
+      Alert.alert('Error', error?.message || 'Failed to save changes. Please try again.');
+    } finally {
+      setIsSavingPromptEdit(false);
+    }
+  }, [userId, promptId, editPromptText, isSavingPromptEdit, editPrompt]);
 
   // Handle delete own comment
   const handleDeleteAnswer = useCallback(async (answerId: string) => {
@@ -1407,6 +1458,7 @@ export default function PromptThreadScreen() {
   const ownerGender = prompt.ownerGender;
   const ownerName = prompt.ownerName;
   const ownerPhotoUrl = prompt.ownerPhotoUrl;
+  const ownerPhotoBlurMode = prompt.photoBlurMode; // FIX: Extract blur mode for header photo
   const genderIcon = getGenderIcon(ownerGender);
   const genderColor = getGenderColor(ownerGender);
 
@@ -1449,34 +1501,47 @@ export default function PromptThreadScreen() {
           { borderColor: isTruth ? `${PREMIUM.truthPurple}40` : `${PREMIUM.dareOrange}40` }
         ]}
       >
-        {/* Owner Identity Row */}
+        {/* Owner Identity Row - matches homepage/feed layout */}
         <View style={styles.ownerIdentityRow}>
-          {/* Left: Photo or Anonymous icon */}
+          {/* Left: Photo (clear/blurred) or Anonymous icon or placeholder */}
           {ownerIsAnonymous ? (
             <View style={styles.ownerAvatarAnon}>
               <Ionicons name="eye-off" size={16} color={PREMIUM.textMuted} />
             </View>
           ) : ownerPhotoUrl ? (
-            <Image source={{ uri: ownerPhotoUrl }} style={styles.ownerAvatar} />
+            ownerPhotoBlurMode === 'blur' ? (
+              // Blurred photo treatment - EXACT MATCH with homepage BlurredOwnerPhoto
+              <View style={styles.ownerAvatarBlurContainer}>
+                <Image source={{ uri: ownerPhotoUrl }} style={styles.ownerAvatar} />
+                <BlurView
+                  intensity={Platform.OS === 'ios' ? 80 : 100}
+                  tint="dark"
+                  style={StyleSheet.absoluteFill}
+                />
+                <View style={styles.ownerAvatarBlurOverlay} />
+              </View>
+            ) : (
+              <Image source={{ uri: ownerPhotoUrl }} style={styles.ownerAvatar} />
+            )
           ) : (
             <View style={styles.ownerAvatarPlaceholder}>
               <Ionicons name="person" size={16} color={PREMIUM.textMuted} />
             </View>
           )}
 
-          {/* Owner info: name/anonymous + age + gender (premium styling) */}
-          <View style={styles.ownerInfo}>
+          {/* Owner info: name + age/gender on SAME ROW (matches homepage layout) */}
+          <View style={styles.ownerInfoRow}>
             <Text style={styles.ownerNamePremium} numberOfLines={1}>
               {ownerIsAnonymous ? 'Anonymous' : (ownerName || 'User')}
             </Text>
             {!ownerIsAnonymous && (ownerAge || ownerGender) && (
-              <View style={styles.ownerMeta}>
+              <View style={styles.ownerMetaInline}>
                 {ownerAge && (
-                  <Text style={styles.ownerAge}>{ownerAge}</Text>
+                  <Text style={styles.ownerAgeInline}>{ownerAge}</Text>
                 )}
                 {ownerGender && genderIcon && (
                   <>
-                    <View style={[styles.genderDot, { backgroundColor: genderColor }]} />
+                    <View style={[styles.genderDotInline, { backgroundColor: genderColor }]} />
                     <Ionicons name={genderIcon} size={11} color={genderColor} />
                   </>
                 )}
@@ -1493,8 +1558,49 @@ export default function PromptThreadScreen() {
           )}
         </View>
 
-        {/* Hero Prompt Text */}
-        <Text style={styles.promptText}>{prompt.text}</Text>
+        {/* Hero Prompt Text - with inline edit support */}
+        {isEditingPrompt ? (
+          <View style={styles.inlineEditContainer}>
+            <TextInput
+              style={styles.inlineEditInput}
+              value={editPromptText}
+              onChangeText={setEditPromptText}
+              multiline
+              maxLength={280}
+              autoFocus
+              placeholder="Edit your prompt..."
+              placeholderTextColor={PREMIUM.textMuted}
+            />
+            <Text style={styles.inlineEditCharCount}>
+              {editPromptText.length}/280
+            </Text>
+            <View style={styles.inlineEditActions}>
+              <TouchableOpacity
+                style={styles.inlineEditCancelBtn}
+                onPress={handleCancelEditPrompt}
+                disabled={isSavingPromptEdit}
+              >
+                <Text style={styles.inlineEditCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.inlineEditSaveBtn,
+                  (editPromptText.trim().length < 10 || isSavingPromptEdit) && styles.inlineEditSaveBtnDisabled,
+                ]}
+                onPress={handleSaveEditPrompt}
+                disabled={editPromptText.trim().length < 10 || isSavingPromptEdit}
+              >
+                {isSavingPromptEdit ? (
+                  <ActivityIndicator size="small" color="#FFF" />
+                ) : (
+                  <Text style={styles.inlineEditSaveText}>Save</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : (
+          <Text style={styles.promptText}>{prompt.text}</Text>
+        )}
 
         {/* Prompt Reactions Row */}
         <View style={styles.promptReactionRow}>
@@ -1726,20 +1832,10 @@ export default function PromptThreadScreen() {
 
               {isPromptOwner ? (
                 <>
-                  {/* Edit button - navigate to create screen with edit params */}
+                  {/* Edit button - inline edit in thread */}
                   <TouchableOpacity
                     style={styles.menuItem}
-                    onPress={() => {
-                      handleClosePromptActionPopup();
-                      router.push({
-                        pathname: '/(main)/incognito-create-tod',
-                        params: {
-                          editPromptId: prompt._id as string,
-                          editType: prompt.type,
-                          editText: prompt.text,
-                        },
-                      } as any);
-                    }}
+                    onPress={handleStartEditPrompt}
                   >
                     <Ionicons name="pencil-outline" size={16} color={PREMIUM.textSecondary} />
                     <Text style={styles.menuItemText}>Edit</Text>
@@ -2171,6 +2267,42 @@ const styles = StyleSheet.create({
     borderRadius: 1.5,
     opacity: 0.7,
   },
+  // Row layout for name + age/gender inline (matches homepage)
+  ownerInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+    marginLeft: 12,
+  },
+  ownerMetaInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  ownerAgeInline: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: PREMIUM.textMuted,
+  },
+  genderDotInline: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    opacity: 0.7,
+  },
+  // Blur container for prompt owner photo
+  ownerAvatarBlurContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: PREMIUM.bgHighlight,
+  },
+  ownerAvatarBlurOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+  },
   answerCountBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2190,6 +2322,63 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: PREMIUM.textPrimary,
     lineHeight: 26,
+  },
+  // Inline Edit Styles
+  inlineEditContainer: {
+    marginBottom: 8,
+  },
+  inlineEditInput: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: PREMIUM.textPrimary,
+    lineHeight: 26,
+    backgroundColor: PREMIUM.bgHighlight,
+    borderRadius: 12,
+    padding: 14,
+    minHeight: 100,
+    textAlignVertical: 'top',
+    borderWidth: 1,
+    borderColor: PREMIUM.coral,
+  },
+  inlineEditCharCount: {
+    fontSize: 12,
+    color: PREMIUM.textMuted,
+    textAlign: 'right',
+    marginTop: 4,
+    marginRight: 4,
+  },
+  inlineEditActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    marginTop: 10,
+  },
+  inlineEditCancelBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    backgroundColor: PREMIUM.bgHighlight,
+  },
+  inlineEditCancelText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: PREMIUM.textSecondary,
+  },
+  inlineEditSaveBtn: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    backgroundColor: PREMIUM.coral,
+    minWidth: 70,
+    alignItems: 'center',
+  },
+  inlineEditSaveBtnDisabled: {
+    backgroundColor: PREMIUM.bgHighlight,
+  },
+  inlineEditSaveText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FFF',
   },
   // Prompt Reaction Styles - Compact
   promptReactionRow: {
