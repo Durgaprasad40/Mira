@@ -1834,13 +1834,23 @@ export const checkIsAdmin = query({
 
 /**
  * Get the user's preferred chat room ID.
+ * Accepts authUserId string and resolves internally.
  */
 export const getPreferredChatRoom = query({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(),
   },
-  handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
+  handler: async (ctx, { authUserId }) => {
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { preferredChatRoomId: null };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { preferredChatRoomId: null };
+    }
+
+    const user = await ctx.db.get(userId);
     return { preferredChatRoomId: user?.preferredChatRoomId ?? null };
   },
 });

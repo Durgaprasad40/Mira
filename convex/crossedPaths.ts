@@ -1010,8 +1010,14 @@ export const getNearbyUsers = query({
 // ---------------------------------------------------------------------------
 
 export const getCrossPathHistory = query({
-  args: { userId: v.id('users') },
-  handler: async (ctx, { userId }) => {
+  args: { authUserId: v.string() }, // CONTRACT FIX: Changed from userId: v.id('users')
+  handler: async (ctx, { authUserId }) => {
+    // Resolve authUserId to Convex user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return []; // Graceful fallback
+    }
+
     const now = Date.now();
 
     // Get current user for distance calculation
@@ -1391,11 +1397,17 @@ export const getDelayedCrossedPathEntries = query({
 
 export const getCrossedPaths = query({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(), // CONTRACT FIX: Changed from userId: v.id('users') to authUserId
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 15 } = args;
+    const { authUserId, limit = 15 } = args;
+
+    // Resolve authUserId to Convex user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return []; // Graceful fallback for missing user
+    }
     const now = Date.now();
 
     // Get current user for distance calculation

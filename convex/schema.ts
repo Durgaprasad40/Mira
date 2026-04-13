@@ -685,6 +685,124 @@ export default defineSchema({
     // BUGFIX #3: Index for idempotency lookup by clientMessageId
     .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-2 PRIVATE CONVERSATIONS (Deep Connect)
+  // Isolated from Phase-1 tables for strict privacy separation
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  privateConversations: defineTable({
+    participants: v.array(v.id('users')),
+    connectionSource: v.optional(v.union(
+      v.literal('tod'),
+      v.literal('room'),
+      v.literal('desire'),
+      v.literal('desire_match'),
+      v.literal('desire_super_like'),
+      v.literal('friend')
+    )),
+    matchId: v.optional(v.string()),
+    isPreMatch: v.optional(v.boolean()),
+    lastMessageAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index('by_connection_source', ['connectionSource'])
+    .index('by_last_message', ['lastMessageAt']),
+
+  privateConversationParticipants: defineTable({
+    conversationId: v.id('privateConversations'),
+    userId: v.id('users'),
+    unreadCount: v.number(),
+    isHidden: v.optional(v.boolean()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
+
+  privateMessages: defineTable({
+    conversationId: v.id('privateConversations'),
+    senderId: v.id('users'),
+    type: v.union(
+      v.literal('text'),
+      v.literal('image'),
+      v.literal('video'),
+      v.literal('voice'),
+      v.literal('system')
+    ),
+    content: v.string(),
+    imageStorageId: v.optional(v.id('_storage')),
+    audioStorageId: v.optional(v.id('_storage')),
+    audioDurationMs: v.optional(v.number()),
+    isProtected: v.optional(v.boolean()),
+    protectedMediaTimer: v.optional(v.number()),
+    protectedMediaViewingMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
+    protectedMediaIsMirrored: v.optional(v.boolean()),
+    viewedAt: v.optional(v.number()),
+    timerEndsAt: v.optional(v.number()),
+    isExpired: v.optional(v.boolean()),
+    deliveredAt: v.optional(v.number()),
+    readAt: v.optional(v.number()),
+    createdAt: v.number(),
+    clientMessageId: v.optional(v.string()),
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_conversation_created', ['conversationId', 'createdAt'])
+    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
+
+  privateTypingStatus: defineTable({
+    conversationId: v.id('privateConversations'),
+    userId: v.id('users'),
+    isTyping: v.boolean(),
+    updatedAt: v.number(),
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
+
+  privateUserPresence: defineTable({
+    userId: v.id('users'),
+    lastActiveAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId']),
+
+  privatePhotoAccessRequests: defineTable({
+    ownerUserId: v.id('users'),
+    viewerUserId: v.id('users'),
+    status: v.union(v.literal('pending'), v.literal('approved'), v.literal('declined')),
+    requestSource: v.union(v.literal('phase2_messages'), v.literal('phase2_profile')),
+    conversationId: v.optional(v.id('privateConversations')),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    respondedAt: v.optional(v.number()),
+  })
+    .index('by_owner_viewer', ['ownerUserId', 'viewerUserId'])
+    .index('by_owner_status', ['ownerUserId', 'status']),
+
+  // Phase-2 Likes table (Desire Land swipes)
+  // STRICT ISOLATION: Separate from Phase-1 'likes' table
+  privateLikes: defineTable({
+    fromUserId: v.id('users'),
+    toUserId: v.id('users'),
+    action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like')),
+    message: v.optional(v.string()), // For super_like messages
+    createdAt: v.number(),
+  })
+    .index('by_from_to', ['fromUserId', 'toUserId'])
+    .index('by_from_user', ['fromUserId'])
+    .index('by_to_user', ['toUserId']),
+
+  // Phase-2 Matches table (Desire Land matches)
+  // STRICT ISOLATION: Separate from Phase-1 'matches' table
+  privateMatches: defineTable({
+    user1Id: v.id('users'), // Sorted pair: user1Id < user2Id
+    user2Id: v.id('users'),
+    matchedAt: v.number(),
+    isActive: v.boolean(),
+    matchSource: v.union(v.literal('like'), v.literal('super_like')),
+  })
+    .index('by_users', ['user1Id', 'user2Id'])
+    .index('by_user1', ['user1Id'])
+    .index('by_user2', ['user2Id']),
+
   // Protected Media table (private storage references — never expose URLs)
   media: defineTable({
     chatId: v.id('conversations'),
@@ -767,7 +885,10 @@ export default defineSchema({
       v.literal('crossed_paths'),
       v.literal('subscription'),
       v.literal('weekly_refresh'),
-      v.literal('profile_nudge')
+      v.literal('profile_nudge'),
+      // Phase-2 notification types (isolated from Phase-1)
+      v.literal('phase2_match'),
+      v.literal('phase2_like')
     ),
     title: v.string(),
     body: v.string(),
@@ -777,6 +898,9 @@ export default defineSchema({
       userId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
       likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
+      // Phase-2 specific fields
+      phase: v.optional(v.string()), // 'phase2' to distinguish P2 notifications
+      otherUserId: v.optional(v.string()), // For P2 likes - who sent the like
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
@@ -1580,6 +1704,28 @@ export default defineSchema({
   })
     .index('by_room_user', ['roomId', 'userId'])
     .index('by_user', ['userId']),
+
+  // Chat Room Profiles (separate identity for chat rooms)
+  chatRoomProfiles: defineTable({
+    userId: v.id('users'),
+    nickname: v.string(),
+    avatarUrl: v.optional(v.string()),
+    bio: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_userId', ['userId']),
+
+  // Chat Room Presence (online status in rooms)
+  chatRoomPresence: defineTable({
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    lastHeartbeatAt: v.number(),
+    joinedAt: v.number(),
+  })
+    .index('by_room', ['roomId'])
+    .index('by_user', ['userId'])
+    .index('by_room_user', ['roomId', 'userId']),
 
   // Filter Presets table
   filterPresets: defineTable({

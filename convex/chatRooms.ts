@@ -2864,3 +2864,294 @@ export const clearRoomMemberships = mutation({
     };
   },
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHAT ROOM PROFILE FUNCTIONS
+// Separate identity for chat rooms (nickname-based, not real name)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get the current user's chat room profile.
+ * Returns null if profile doesn't exist (user needs to create one).
+ */
+export const getChatRoomProfile = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      return null;
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return null;
+    }
+
+    // Get profile
+    const profile = await ctx.db
+      .query('chatRoomProfiles')
+      .withIndex('by_userId', (q) => q.eq('userId', userId))
+      .first();
+
+    if (!profile) {
+      return null;
+    }
+
+    return {
+      id: profile._id,
+      nickname: profile.nickname,
+      avatarUrl: profile.avatarUrl ?? null,
+      avatarVersion: profile.updatedAt,
+      bio: profile.bio ?? null,
+      createdAt: profile.createdAt,
+      updatedAt: profile.updatedAt,
+    };
+  },
+});
+
+/**
+ * Create or update the current user's chat room profile.
+ * Upsert behavior: creates if not exists, updates if exists.
+ */
+export const createOrUpdateChatRoomProfile = mutation({
+  args: {
+    authUserId: v.string(),
+    nickname: v.string(),
+    avatarUrl: v.optional(v.string()),
+    bio: v.optional(v.string()),
+  },
+  handler: async (ctx, { authUserId, nickname, avatarUrl, bio }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Validate nickname
+    const trimmedNickname = nickname.trim();
+    if (trimmedNickname.length === 0) {
+      throw new Error('Nickname is required');
+    }
+    if (trimmedNickname.length > 30) {
+      throw new Error('Nickname must be 30 characters or less');
+    }
+    if (trimmedNickname.length < 2) {
+      throw new Error('Nickname must be at least 2 characters');
+    }
+    if (!/^[a-zA-Z]/.test(trimmedNickname)) {
+      throw new Error('Nickname must start with a letter');
+    }
+    if (/^\d+$/.test(trimmedNickname)) {
+      throw new Error('Nickname cannot be purely numeric');
+    }
+
+    // Validate bio
+    const trimmedBio = bio?.trim();
+    if (trimmedBio && trimmedBio.length > 150) {
+      throw new Error('Bio must be 150 characters or less');
+    }
+
+    // Validate avatarUrl - reject local file paths
+    let validatedAvatarUrl = avatarUrl;
+    if (avatarUrl) {
+      const isLocalFile = avatarUrl.startsWith('file://') || avatarUrl.startsWith('content://');
+      if (isLocalFile) {
+        validatedAvatarUrl = undefined;
+      }
+    }
+
+    const now = Date.now();
+
+    // Check if profile exists
+    const existingProfile = await ctx.db
+      .query('chatRoomProfiles')
+      .withIndex('by_userId', (q) => q.eq('userId', userId))
+      .first();
+
+    if (existingProfile) {
+      // Update existing profile
+      const finalAvatarUrl = validatedAvatarUrl ?? existingProfile.avatarUrl;
+      await ctx.db.patch(existingProfile._id, {
+        nickname: trimmedNickname,
+        avatarUrl: finalAvatarUrl,
+        bio: trimmedBio ?? existingProfile.bio,
+        updatedAt: now,
+      });
+
+      return {
+        id: existingProfile._id,
+        nickname: trimmedNickname,
+        avatarUrl: finalAvatarUrl ?? null,
+        bio: trimmedBio ?? existingProfile.bio ?? null,
+        created: false,
+      };
+    } else {
+      // Create new profile
+      const profileId = await ctx.db.insert('chatRoomProfiles', {
+        userId,
+        nickname: trimmedNickname,
+        avatarUrl: validatedAvatarUrl,
+        bio: trimmedBio,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      return {
+        id: profileId,
+        nickname: trimmedNickname,
+        avatarUrl: validatedAvatarUrl ?? null,
+        bio: trimmedBio ?? null,
+        created: true,
+      };
+    }
+  },
+});
+
+/**
+ * Get chat room profiles for multiple users at once.
+ */
+export const getChatRoomProfilesByUserIds = query({
+  args: {
+    userIds: v.array(v.id('users')),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { userIds, authUserId }) => {
+    if (!authUserId || authUserId.trim().length === 0) {
+      return {};
+    }
+    const currentUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!currentUserId) {
+      return {};
+    }
+
+    const profiles = await Promise.all(
+      userIds.map(async (uid) => {
+        const profile = await ctx.db
+          .query('chatRoomProfiles')
+          .withIndex('by_userId', (q) => q.eq('userId', uid))
+          .first();
+        return { userId: uid, profile };
+      })
+    );
+
+    const profileMap: Record<string, {
+      nickname: string;
+      avatarUrl: string | null;
+      bio: string | null;
+    }> = {};
+
+    for (const { userId, profile } of profiles) {
+      if (profile) {
+        profileMap[userId.toString()] = {
+          nickname: profile.nickname,
+          avatarUrl: profile.avatarUrl ?? null,
+          bio: profile.bio ?? null,
+        };
+      }
+    }
+
+    return profileMap;
+  },
+});
+
+/**
+ * Generate upload URL for chat room avatar.
+ */
+export const generateChatRoomAvatarUploadUrl = mutation({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    return await ctx.storage.generateUploadUrl();
+  },
+});
+
+/**
+ * Get storage URL for a chat room avatar.
+ */
+export const getChatRoomAvatarUrl = mutation({
+  args: {
+    storageId: v.id('_storage'),
+  },
+  handler: async (ctx, { storageId }) => {
+    return await ctx.storage.getUrl(storageId);
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UNREAD DM COUNTS BY ROOM
+// Returns unread DM counts grouped by chat room for badge display
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get unread DM counts grouped by source room.
+ * Used for Chat Rooms tab badges.
+ * Accepts authUserId and resolves internally.
+ */
+export const getUnreadDmCountsByRoom = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { byRoomId: {}, totalUnread: 0, hasAnyUnread: false };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { byRoomId: {}, totalUnread: 0, hasAnyUnread: false };
+    }
+
+    // Get all participant rows for this user
+    const participantRows = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    if (participantRows.length === 0) {
+      return { byRoomId: {}, totalUnread: 0, hasAnyUnread: false };
+    }
+
+    // Batch-fetch conversations
+    const conversations = await Promise.all(
+      participantRows.map((row) => ctx.db.get(row.conversationId))
+    );
+
+    // Build unread counts by room
+    const byRoomId: Record<string, number> = {};
+    let totalUnread = 0;
+
+    for (let i = 0; i < conversations.length; i++) {
+      const conversation = conversations[i];
+      if (!conversation) continue;
+      if (!conversation.sourceRoomId) continue;
+
+      const roomIdStr = conversation.sourceRoomId as string;
+      const unreadCount = participantRows[i].unreadCount || 0;
+
+      if (unreadCount > 0) {
+        byRoomId[roomIdStr] = (byRoomId[roomIdStr] || 0) + unreadCount;
+        totalUnread += unreadCount;
+      }
+    }
+
+    return {
+      byRoomId,
+      totalUnread,
+      hasAnyUnread: totalUnread > 0,
+    };
+  },
+});

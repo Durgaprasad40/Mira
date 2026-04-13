@@ -309,3 +309,33 @@ export async function validateSessionToken(
 
   return session.userId;
 }
+
+/**
+ * Get Phase-2 display name for a user.
+ *
+ * Phase-2 privacy rules:
+ * - Use displayName from userPrivateProfiles table (NOT the real name from users table)
+ * - This prevents leaking real names into Phase-2/private surfaces
+ * - Falls back to "Anonymous" if no private profile exists
+ *
+ * @param ctx - Convex query or mutation context
+ * @param userId - The Convex user ID
+ * @returns Phase-2 display name (from private profile) or "Anonymous"
+ */
+export async function getPhase2DisplayName(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<"users">
+): Promise<string> {
+  // Look up private profile for Phase-2 display name
+  const privateProfile = await ctx.db
+    .query('userPrivateProfiles')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .first();
+
+  if (privateProfile?.displayName) {
+    return privateProfile.displayName;
+  }
+
+  // Fallback: return "Anonymous" to never leak real name
+  return 'Anonymous';
+}
