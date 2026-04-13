@@ -33,31 +33,32 @@ export default function MatchCelebrationScreen() {
     matchId: string;
     userId: string;
   }>();
-  const { userId, token } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
 
   const isDemo = isDemoMode || matchId?.startsWith("demo_") || userId?.startsWith("demo_");
-  const viewerId = userId ? (userId as Id<"users">) : null;
   const matchIdValue = matchId ? (matchId as unknown as Id<"matches">) : null;
   const otherUserIdValue = otherUserId
     ? (otherUserId as unknown as Id<"users">)
     : null;
 
-  // Fetch match and other user data (skip in demo mode)
+  // FIX: Backend expects { matchId, userId }, not { token, authUserId }
   const matchQuery = useQuery(
     api.matches.getMatch as any,
-    !isDemo && matchIdValue && userId && token
-      ? { matchId: matchIdValue, token, authUserId: userId }
+    !isDemo && matchIdValue && userId
+      ? { matchId: matchIdValue, userId }
       : "skip",
   );
+  // FIX: Backend expects { userId, viewerId }, not { token, authUserId }
   const otherUserQuery = useQuery(
     api.users.getUserById as any,
-    !isDemo && otherUserIdValue && viewerId && token
-      ? { userId: otherUserIdValue, token, authUserId: userId }
+    !isDemo && otherUserIdValue && userId
+      ? { userId: otherUserIdValue, viewerId: userId }
       : "skip",
   );
+  // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUserQuery = useQuery(
-    api.users.getCurrentUserFromToken,
-    !isDemo && token ? { token } : "skip",
+    api.users.getCurrentUser,
+    !isDemo && userId ? { userId } : "skip",
   );
 
   // In demo mode, use demo data directly; in live mode, use Convex queries
@@ -257,7 +258,7 @@ export default function MatchCelebrationScreen() {
       return;
     }
 
-    if (!matchIdValue || !viewerId) {
+    if (!matchIdValue || !userId) {
       Toast.show("Something went wrong. Please go back and try again.");
       sendingRef.current = false;
       return;
@@ -271,7 +272,7 @@ export default function MatchCelebrationScreen() {
       // MSG-005 FIX: Use authUserId for server-side verification
       const { conversationId: conversationIdFinal } = await ensureConversation({
         matchId: matchIdValue,
-        authUserId: viewerId,
+        authUserId: userId,
       });
       if (__DEV__) console.log("[SayHi] conversationId(after)", conversationIdFinal);
 
@@ -279,10 +280,10 @@ export default function MatchCelebrationScreen() {
       // Must happen BEFORE navigation — otherwise the chat screen opens empty
       // and the message appears with a visible delay.
       // MSG-001 FIX: Use authUserId for server-side verification
+      // FIX: Backend expects { authUserId }, not { token }
       await sendMessageMut({
         conversationId: conversationIdFinal,
-        token: token ?? undefined,
-        authUserId: viewerId,
+        authUserId: userId ?? '',
         type: "text",
         content: "Hi 👋",
       });

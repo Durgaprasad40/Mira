@@ -583,10 +583,11 @@ function OnboardingDraftHydrator() {
 
   // BUG FIX: Use getOnboardingStatus to get comprehensive data including basicInfo from user document
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  // FIX: Backend expects { userId }, not { token }
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && token && authHydrated && onboardingHydrated
-      ? { token }
+    !isDemoMode && userId && authHydrated && onboardingHydrated
+      ? { userId }
       : 'skip'
   );
 
@@ -794,7 +795,7 @@ const TOAST_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
 function CrossedPathToastManager() {
   const router = useRouter();
   const segments = useSegments();
-  const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
   const authHydrated = useAuthStore((s) => s._hasHydrated);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const lastToastTimeRef = useRef<number>(0);
@@ -808,10 +809,10 @@ function CrossedPathToastManager() {
   }, []);
 
   // Query crossed-path history (live mode only)
-  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
+  // FIX: Use userId instead of token for API call
   const crossedPathsSummary = useQuery(
     api.crossedPaths.getCrossedPathSummary,
-    !isDemoMode && token ? { token } : 'skip'
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   // Check for new crossed paths and show toast
@@ -865,18 +866,18 @@ function CrossedPathToastManager() {
 
   // Check on initial data load (after mount)
   useEffect(() => {
-    if (!authHydrated || !token) return;
+    if (!authHydrated || !userId) return;
     if (hasCheckedOnMountRef.current) return;
     if (!crossedPathsSummary || crossedPathsSummary.count === 0) return;
 
     hasCheckedOnMountRef.current = true;
     checkAndShowToast();
-  }, [authHydrated, token, crossedPathsSummary, checkAndShowToast]);
+  }, [authHydrated, userId, crossedPathsSummary, checkAndShowToast]);
 
   // Check on app resume (foreground)
   useEffect(() => {
     if (isDemoMode) return;
-    if (!authHydrated || !token) return;
+    if (!authHydrated || !userId) return;
 
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       // If app was in background and is now active
@@ -896,7 +897,7 @@ function CrossedPathToastManager() {
 
     const subscription = AppState.addEventListener('change', handleAppStateChange);
     return () => subscription.remove();
-  }, [authHydrated, token, checkAndShowToast]);
+  }, [authHydrated, userId, checkAndShowToast]);
 
   return null;
 }

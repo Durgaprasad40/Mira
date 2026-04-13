@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -29,7 +30,7 @@ export default function PrivateDataRecoveryScreen() {
   // Query server deletion state (source of truth in non-demo mode)
   const serverDeletionState = useQuery(
     api.privateDeletion.getPrivateDeletionState,
-    !isDemoMode && userId ? {} : 'skip'
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   const [daysRemaining, setDaysRemaining] = useState(0);
@@ -191,7 +192,7 @@ export default function PrivateDataRecoveryScreen() {
 
               // Call server-side mutation (skip in demo mode)
               if (!isDemoMode && userId) {
-                await recoverDeletionMutation({});
+                await recoverDeletionMutation({ userId: userId as Id<'users'> });
               }
 
               Alert.alert(
