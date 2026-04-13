@@ -2,25 +2,27 @@
  * INCOGNITO CHAT - BLOCKED
  *
  * This feature is temporarily blocked due to missing backend modules:
- * - api.privateConversations (entire module doesn't exist)
  * - api.privatePhotoAccess (entire module doesn't exist)
- * - Missing table: privateConversations
+ * - api.games.startBottleSpinGame (function not exported)
  *
- * DO NOT REMOVE this blocking code until backend is implemented.
+ * Note: api.privateConversations DOES exist and can be used for basic chat.
+ * The photo access and bottle spin game features need backend implementation.
+ *
+ * DO NOT REMOVE this blocking code until backend APIs are implemented.
  */
 import React from 'react';
 import FeatureComingSoon from '@/components/FeatureComingSoon';
 
 export default function IncognitoChatScreen() {
   if (__DEV__) {
-    console.log('[BLOCKED FEATURE]', 'incognito_chat');
+    console.log('[BLOCKED FEATURE]', 'incognito_chat - missing: privatePhotoAccess, startBottleSpinGame');
   }
 
   return (
     <FeatureComingSoon
       featureName="Private Chat"
       featureKey="incognito_chat"
-      description="Private messaging is coming soon. Start a conversation with your matches!"
+      description="Private messaging is coming soon. Backend APIs for photo access and games need to be implemented first."
       showBackButton={true}
       iconName="chatbubble-outline"
     />

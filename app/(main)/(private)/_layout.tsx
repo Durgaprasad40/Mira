@@ -503,14 +503,27 @@ export default function PrivateLayout() {
     // (local store is in-memory only, so phase2OnboardingCompleted resets to false on app restart)
     if (!isDemoMode && !phase1OnboardingStatus) return;
 
+    if (__DEV__) {
+      console.log('[P2_GATE] private layout check', {
+        onboardingComplete,
+        phase2OnboardingCompleted_local: phase2OnboardingCompleted,
+        phase2OnboardingCompleted_backend: phase1OnboardingStatus?.phase2OnboardingCompleted,
+        isDemoMode,
+        willRedirect: !onboardingComplete,
+      });
+    }
+
     if (!onboardingComplete) {
+      if (__DEV__) {
+        console.log('[P2_GATE] redirect reason: onboardingComplete is false, bouncing to onboarding');
+      }
       didRedirectRef.current = true;
       requestAnimationFrame(() => {
         if (!mountedRef.current) return; // Guard against unmount during frame delay
         router.replace('/(main)/phase2-onboarding' as any);
       });
     }
-  }, [onboardingComplete, hasHydrated, router, phase1OnboardingStatus, isInPhase2]);
+  }, [onboardingComplete, hasHydrated, router, phase1OnboardingStatus, isInPhase2, phase2OnboardingCompleted]);
 
   if (!hasHydrated) {
     return (

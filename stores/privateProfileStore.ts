@@ -556,12 +556,23 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     }
   },
   completeSetup: () => {
+    if (__DEV__) {
+      console.log('[P2_STEP5] completeSetup() called - setting phase2OnboardingCompleted=true');
+    }
     set({
       isSetupComplete: true,
       phase2OnboardingCompleted: true, // Permanent flag - never shows onboarding again
       phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
       _hasHydrated: true,
     });
+    if (__DEV__) {
+      // Verify the store actually updated
+      const newState = usePrivateProfileStore.getState();
+      console.log('[P2_STEP5] completeSetup() done - verifying store', {
+        phase2OnboardingCompleted: newState.phase2OnboardingCompleted,
+        isSetupComplete: newState.isSetupComplete,
+      });
+    }
     // P0-002 FIX: Clear saved onboarding progress when setup completes
     usePrivateProfileStore.getState().clearOnboardingProgress();
   },
@@ -647,6 +658,16 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   // ST-001 FIX: Hydrate store from Convex profile on app restart
   // This ensures Phase-2 profile state survives app restarts
   hydrateFromConvex: (convexProfile) => {
+    // CRITICAL: phase2OnboardingCompleted is a PERMANENT flag - once true, NEVER reset it
+    // This prevents the bug where navigating to private area after finalize
+    // would reset the flag and bounce users back to onboarding
+    const currentState = usePrivateProfileStore.getState();
+    const preserveOnboardingComplete = currentState.phase2OnboardingCompleted === true;
+
+    if (__DEV__ && preserveOnboardingComplete) {
+      console.log('[P2_HYDRATE] preserving phase2OnboardingCompleted=true (permanent flag)');
+    }
+
     if (!convexProfile) {
       set({
         displayName: '',
@@ -671,9 +692,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         education: null,
         religion: null,
         acceptedTermsAt: null,
-        isSetupComplete: false,
-        phase2OnboardingCompleted: false,
-        phase2SetupVersion: null,
+        // CRITICAL FIX: Preserve these flags if already true
+        isSetupComplete: preserveOnboardingComplete ? true : false,
+        phase2OnboardingCompleted: preserveOnboardingComplete ? true : false,
+        phase2SetupVersion: preserveOnboardingComplete ? currentState.phase2SetupVersion : null,
         convexProfileId: null,
         isPrivateEnabled: true,
         blurMyPhoto: true,
@@ -742,9 +764,9 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       hobbies: convexProfile.hobbies || [],
       isVerified: convexProfile.isVerified || false,
 
-      // Completion flags
-      isSetupComplete: convexProfile.isSetupComplete,
-      phase2OnboardingCompleted: convexProfile.isSetupComplete === true,
+      // Completion flags - CRITICAL: preserve if already true (permanent flag)
+      isSetupComplete: preserveOnboardingComplete ? true : convexProfile.isSetupComplete,
+      phase2OnboardingCompleted: preserveOnboardingComplete ? true : (convexProfile.isSetupComplete === true),
       convexProfileId: convexProfile._id,
 
       // Profile visibility (Pause Profile)
@@ -798,5 +820,5 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
 export const PHASE2_MIN_PHOTOS = 2;
 export const PHASE2_MIN_INTENTS = 1;
 export const PHASE2_MAX_INTENTS = 3;
-export const PHASE2_DESIRE_MIN_LENGTH = 30;
+export const PHASE2_DESIRE_MIN_LENGTH = 20;
 export const PHASE2_DESIRE_MAX_LENGTH = 300;
