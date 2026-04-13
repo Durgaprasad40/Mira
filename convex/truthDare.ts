@@ -165,6 +165,49 @@ export const createPrompt = mutation({
       }
     }
 
+    // SERVER-SIDE IDENTITY FIX: When isAnonymous=false and frontend didn't provide identity,
+    // fetch from the user's canonical profile. This ensures "Everyone" posts always show real identity.
+    let finalOwnerName = args.ownerName;
+    let finalOwnerAge = args.ownerAge;
+    let finalOwnerGender = args.ownerGender;
+    let finalOwnerPhotoUrl = resolvedPhotoUrl;
+
+    const isPublicPost = args.isAnonymous === false;
+    const needsIdentityFallback = isPublicPost && (!finalOwnerName || finalOwnerName.trim() === '');
+
+    if (needsIdentityFallback) {
+      // Fetch user's canonical profile for identity
+      const userProfile = await ctx.db.get(ownerUserId);
+      if (userProfile) {
+        // Use handle (nickname) if available, otherwise use real name
+        finalOwnerName = userProfile.handle || userProfile.name || undefined;
+
+        // Calculate age from dateOfBirth if not provided
+        if (!finalOwnerAge && userProfile.dateOfBirth) {
+          const birthDate = new Date(userProfile.dateOfBirth);
+          const today = new Date();
+          let age = today.getFullYear() - birthDate.getFullYear();
+          const monthDiff = today.getMonth() - birthDate.getMonth();
+          if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+            age--;
+          }
+          finalOwnerAge = age > 0 ? age : undefined;
+        }
+
+        // Use gender if not provided
+        if (!finalOwnerGender && userProfile.gender) {
+          finalOwnerGender = userProfile.gender;
+        }
+
+        // Use primary photo if no photo provided
+        if (!finalOwnerPhotoUrl && userProfile.primaryPhotoUrl) {
+          finalOwnerPhotoUrl = userProfile.primaryPhotoUrl;
+        }
+
+        console.log(`[T/D] Server-side identity fallback: name=${finalOwnerName}, age=${finalOwnerAge}, gender=${finalOwnerGender}, hasPhoto=${!!finalOwnerPhotoUrl}`);
+      }
+    }
+
     const promptId = await ctx.db.insert('todPrompts', {
       type: args.type,
       text: promptText,
@@ -177,17 +220,151 @@ export const createPrompt = mutation({
       // Owner profile snapshot (default anonymous)
       isAnonymous: args.isAnonymous ?? true,
       photoBlurMode: args.photoBlurMode ?? 'none',
-      ownerName: args.ownerName,
-      ownerPhotoUrl: resolvedPhotoUrl,
-      ownerAge: args.ownerAge,
-      ownerGender: args.ownerGender,
+      ownerName: finalOwnerName,
+      ownerPhotoUrl: finalOwnerPhotoUrl,
+      ownerAge: finalOwnerAge,
+      ownerGender: finalOwnerGender,
     });
 
     // Debug log for post creation
-    const urlPrefix = resolvedPhotoUrl ? (resolvedPhotoUrl.startsWith('https://') ? 'https' : resolvedPhotoUrl.startsWith('http://') ? 'http' : 'other') : 'none';
-    console.log(`[T/D] Created prompt: id=${promptId}, type=${args.type}, isAnon=${args.isAnonymous ?? true}, photoBlurMode=${args.photoBlurMode ?? 'none'}, photoUrlPrefix=${urlPrefix}`);
+    const urlPrefix = finalOwnerPhotoUrl ? (finalOwnerPhotoUrl.startsWith('https://') ? 'https' : finalOwnerPhotoUrl.startsWith('http://') ? 'http' : 'other') : 'none';
+    console.log(`[T/D] Created prompt: id=${promptId}, type=${args.type}, isAnon=${args.isAnonymous ?? true}, photoBlurMode=${args.photoBlurMode ?? 'none'}, photoUrlPrefix=${urlPrefix}, identityFallback=${needsIdentityFallback}`);
 
     return { promptId, expiresAt };
+  },
+});
+
+// Edit own prompt (text only - type cannot be changed)
+export const editMyPrompt = mutation({
+  args: {
+    promptId: v.string(),
+    authUserId: v.string(),
+    newText: v.string(),
+  },
+  handler: async (ctx, { promptId, authUserId, newText }) => {
+    // Verify caller identity
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Get the prompt
+    const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
+    if (!prompt) {
+      throw new Error('Prompt not found');
+    }
+
+    // Verify ownership
+    if (prompt.ownerUserId !== userId) {
+      throw new Error('Unauthorized: you can only edit your own prompts');
+    }
+
+    // Check if expired
+    const now = Date.now();
+    const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
+    if (expires <= now) {
+      throw new Error('Cannot edit expired prompts');
+    }
+
+    // Validate new text
+    const validatedText = validatePromptText(newText);
+
+    // Update prompt
+    await ctx.db.patch(prompt._id, {
+      text: validatedText,
+    });
+
+    console.log(`[T/D] Edited prompt: id=${promptId}, newTextLength=${validatedText.length}`);
+
+    return { success: true };
+  },
+});
+
+// Delete own prompt (and all associated answers, reactions, reports)
+export const deleteMyPrompt = mutation({
+  args: {
+    promptId: v.string(),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { promptId, authUserId }) => {
+    // Verify caller identity
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Get the prompt
+    const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
+    if (!prompt) {
+      throw new Error('Prompt not found');
+    }
+
+    // Verify ownership
+    if (prompt.ownerUserId !== userId) {
+      throw new Error('Unauthorized: you can only delete your own prompts');
+    }
+
+    // Delete all answers for this prompt
+    const answers = await ctx.db
+      .query('todAnswers')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+
+    for (const answer of answers) {
+      const answerId = answer._id as unknown as string;
+
+      // Delete all reactions for this answer
+      const reactions = await ctx.db
+        .query('todAnswerReactions')
+        .withIndex('by_answer', (q) => q.eq('answerId', answerId))
+        .collect();
+      for (const reaction of reactions) {
+        await ctx.db.delete(reaction._id);
+      }
+
+      // Delete all reports for this answer
+      const reports = await ctx.db
+        .query('todAnswerReports')
+        .withIndex('by_answer', (q) => q.eq('answerId', answerId))
+        .collect();
+      for (const report of reports) {
+        await ctx.db.delete(report._id);
+      }
+
+      // Delete all views for this answer
+      const views = await ctx.db
+        .query('todAnswerViews')
+        .withIndex('by_answer', (q) => q.eq('answerId', answerId))
+        .collect();
+      for (const view of views) {
+        await ctx.db.delete(view._id);
+      }
+
+      // Delete the answer itself
+      await ctx.db.delete(answer._id);
+    }
+
+    // Delete all connect requests for this prompt
+    const connectRequests = await ctx.db
+      .query('todConnectRequests')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+    for (const req of connectRequests) {
+      await ctx.db.delete(req._id);
+    }
+
+    // Delete the prompt itself
+    await ctx.db.delete(prompt._id);
+
+    console.log(`[T/D] Deleted prompt: id=${promptId}, deletedAnswers=${answers.length}, deletedConnectRequests=${connectRequests.length}`);
+
+    return { success: true };
   },
 });
 
@@ -1284,10 +1461,12 @@ export const listActivePromptsWithTop2Answers = query({
           expiresAt: prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS,
           // Owner profile fields for feed display
           isAnonymous: prompt.isAnonymous,
+          photoBlurMode: prompt.photoBlurMode, // FIX: Include blur mode for renderer
           ownerName: prompt.ownerName,
           ownerPhotoUrl: prompt.ownerPhotoUrl,
           ownerAge: prompt.ownerAge,
           ownerGender: prompt.ownerGender,
+          ownerUserId: prompt.ownerUserId, // FIX: Include for owner detection in feed
           // Engagement metrics
           totalReactionCount: promptReactionCounts[promptIdStr] ?? 0,
           // Answers and viewer state
@@ -1374,10 +1553,12 @@ export const getTrendingTruthAndDare = query({
         expiresAt: prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS,
         // Owner profile fields
         isAnonymous: prompt.isAnonymous,
+        photoBlurMode: prompt.photoBlurMode, // FIX: Include blur mode for renderer
         ownerName: prompt.ownerName,
         ownerPhotoUrl: prompt.ownerPhotoUrl,
         ownerAge: prompt.ownerAge,
         ownerGender: prompt.ownerGender,
+        ownerUserId: prompt.ownerUserId, // FIX: Include for owner detection
         // Engagement metrics
         totalReactionCount: promptReactionCounts[promptId] ?? 0,
       };
@@ -1428,10 +1609,12 @@ export const getPromptThread = query({
           isPromptOwner: viewerDbId === prompt.ownerUserId,
           // Owner profile snapshot
           isAnonymous: prompt.isAnonymous,
+          photoBlurMode: prompt.photoBlurMode, // FIX: Include blur mode for renderer
           ownerName: prompt.ownerName,
           ownerPhotoUrl: prompt.ownerPhotoUrl,
           ownerAge: prompt.ownerAge,
           ownerGender: prompt.ownerGender,
+          ownerUserId: prompt.ownerUserId, // FIX: Include for owner checks
         },
         answers: [],
         isExpired: true,
@@ -1582,10 +1765,12 @@ export const getPromptThread = query({
         isPromptOwner: viewerDbId === prompt.ownerUserId,
         // Owner profile snapshot
         isAnonymous: prompt.isAnonymous,
+        photoBlurMode: prompt.photoBlurMode, // FIX: Include blur mode for renderer
         ownerName: prompt.ownerName,
         ownerPhotoUrl: prompt.ownerPhotoUrl,
         ownerAge: prompt.ownerAge,
         ownerGender: prompt.ownerGender,
+        ownerUserId: prompt.ownerUserId, // FIX: Include for owner checks
       },
       answers: enrichedAnswers,
       isExpired: false,
