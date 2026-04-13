@@ -7,7 +7,6 @@
 export { PhotoGridEditor } from './PhotoGridEditor';
 export { BasicInfoSection } from './BasicInfoSection';
 export { AboutSection } from './AboutSection';
-export { PhotoVisibilitySection } from './PhotoVisibilitySection';
 export { PromptsSection } from './PromptsSection';
 export { DetailsSection, DETAILS_VALIDATION } from './DetailsSection';
 export { LifestyleSection } from './LifestyleSection';

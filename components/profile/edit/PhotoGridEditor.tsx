@@ -2,7 +2,7 @@
  * PhotoGridEditor Component
  *
  * Extracted from edit-profile.tsx for maintainability.
- * Handles 9-slot photo grid with reordering, blur toggle, and main photo badge.
+ * Handles 9-slot photo grid with reordering and main photo badge.
  *
  * NO LOGIC CHANGES - Structure refactor only.
  */
@@ -27,20 +27,6 @@ const SCREEN_PADDING = 16;
 const screenWidth = Dimensions.get('window').width;
 const slotSize = (screenWidth - SCREEN_PADDING * 2 - GRID_GAP * (COLUMNS - 1)) / COLUMNS;
 
-// Detect if a photo URL is a cartoon/avatar (should never be blurred)
-function isCartoonPhoto(url: string): boolean {
-  const lowerUrl = url.toLowerCase();
-  return (
-    lowerUrl.includes('cartoon') ||
-    lowerUrl.includes('avatar') ||
-    lowerUrl.includes('illustrated') ||
-    lowerUrl.includes('anime') ||
-    lowerUrl.includes('robohash') ||
-    lowerUrl.includes('dicebear') ||
-    lowerUrl.includes('ui-avatars')
-  );
-}
-
 function isValidPhotoUrl(url: unknown): url is string {
   return typeof url === 'string' && url.length > 0 && url !== 'undefined' && url !== 'null';
 }
@@ -48,13 +34,10 @@ function isValidPhotoUrl(url: unknown): url is string {
 interface PhotoGridEditorProps {
   photoSlots: PhotoSlots9;
   failedSlots: Set<number>;
-  blurEnabled: boolean;
-  blurredPhotos: Record<number, boolean>;
   validPhotoCount: number;
   onUploadPhoto: (slotIndex: number) => void;
   onRemovePhoto: (slotIndex: number) => void;
   onSetMainPhoto: (fromSlot: number) => void;
-  onTogglePhotoBlur: (index: number) => void;
   onPreviewPhoto: (photo: { url: string; index: number }) => void;
   onImageError: (slotIndex: number) => void;
   onPhotoLoad: (slotIndex: number) => void;
@@ -63,13 +46,10 @@ interface PhotoGridEditorProps {
 export function PhotoGridEditor({
   photoSlots,
   failedSlots,
-  blurEnabled,
-  blurredPhotos,
   validPhotoCount,
   onUploadPhoto,
   onRemovePhoto,
   onSetMainPhoto,
-  onTogglePhotoBlur,
   onPreviewPhoto,
   onImageError,
   onPhotoLoad,
@@ -80,8 +60,6 @@ export function PhotoGridEditor({
 
     if (hasValidPhoto) {
       const isMain = slotIndex === 0;
-      const isCartoon = isCartoonPhoto(url!);
-      const isPhotoBlurred = blurEnabled && !isCartoon && blurredPhotos[slotIndex];
 
       return (
         <View key={slotIndex} style={styles.photoSlot}>
@@ -91,25 +69,11 @@ export function PhotoGridEditor({
               source={{ uri: url }}
               style={styles.photoImage}
               contentFit="cover"
-              blurRadius={isPhotoBlurred ? 8 : 0}
               transition={200}
               onError={() => onImageError(slotIndex)}
               onLoadEnd={() => onPhotoLoad(slotIndex)}
             />
           </Pressable>
-          {/* Per-photo blur toggle - only show when blur mode enabled and not a cartoon */}
-          {blurEnabled && !isCartoon && (
-            <TouchableOpacity
-              style={[styles.photoBlurButton, blurredPhotos[slotIndex] && styles.photoBlurButtonActive]}
-              onPress={() => onTogglePhotoBlur(slotIndex)}
-            >
-              <Ionicons
-                name={blurredPhotos[slotIndex] ? 'eye-off' : 'eye'}
-                size={14}
-                color={COLORS.white}
-              />
-            </TouchableOpacity>
-          )}
           <TouchableOpacity style={styles.photoRemoveButton} onPress={() => onRemovePhoto(slotIndex)}>
             <Ionicons name="close" size={14} color={COLORS.white} />
           </TouchableOpacity>
@@ -153,20 +117,6 @@ const styles = StyleSheet.create({
   photoSlot: { width: slotSize, height: slotSize * 1.25, borderRadius: 10, overflow: 'hidden', backgroundColor: COLORS.backgroundDark },
   photoSlotEmpty: { alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: COLORS.border, borderStyle: 'dashed' },
   photoImage: { width: '100%', height: '100%' },
-  photoBlurButton: {
-    position: 'absolute',
-    bottom: 6,
-    right: 6,
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  photoBlurButtonActive: {
-    backgroundColor: COLORS.primary,
-  },
   photoRemoveButton: { position: 'absolute', top: 6, right: 6, width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   uploadText: { fontSize: 11, color: COLORS.primary, marginTop: 4, fontWeight: '500' },
   photoCount: { fontSize: 12, color: COLORS.textLight, textAlign: 'center', marginTop: 12 },

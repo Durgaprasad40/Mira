@@ -80,7 +80,6 @@ import {
   PhotoGridEditor,
   BasicInfoSection,
   AboutSection,
-  PhotoVisibilitySection,
   PromptsSection,
   DetailsSection,
   DETAILS_VALIDATION,
@@ -126,16 +125,18 @@ export default function EditProfileScreen() {
   const loadedPhotosRef = useRef<Set<number>>(new Set());
   const hasLoggedGridLoad = useRef(false);
 
+  // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken with token
   const currentUserQuery = useQuery(
-    api.users.getCurrentUserFromToken,
-    !isDemoMode && token ? { token } : 'skip'
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
   // Query backend photos to get photo IDs for replacement logic (live mode only)
+  // FIX: Use getUserPhotos with userId instead of getCurrentUserPhotos with token
   const backendPhotos = useQuery(
-    api.photos.getCurrentUserPhotos,
-    !isDemoMode && token ? { token } : 'skip'
+    api.photos.getUserPhotos,
+    !isDemoMode && userId ? { userId } : 'skip'
   );
 
   const [timedOut, setTimedOut] = useState(false);
@@ -164,11 +165,13 @@ export default function EditProfileScreen() {
 
   const updateProfile = useMutation(api.users.updateProfile);
   const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
-  const upsertOnboardingDraft = useMutation(api.users.upsertCurrentUserOnboardingDraft);
-  const reorderPhotos = useMutation(api.photos.reorderPhotosWithToken);
+  // FIX: Use upsertOnboardingDraft instead of upsertCurrentUserOnboardingDraft
+  const upsertOnboardingDraft = useMutation(api.users.upsertOnboardingDraft);
+  // FIX: Use reorderPhotos instead of reorderPhotosWithToken
+  const reorderPhotosMutation = useMutation(api.photos.reorderPhotos);
   const deletePhotoMutation = useMutation(api.photos.deletePhoto);
-  // Per-photo blur mutation - backend is source of truth
-  const setPhotosBlurMutation = isDemoMode ? null : useMutation(api.photos.setPhotosBlur);
+  // FIX: Use togglePhotoBlur from users instead of setPhotosBlur from photos
+  const togglePhotoBlurMutation = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
 
   // Subscribe to currentDemoUserId to prevent stale closures on account switch
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
@@ -489,23 +492,19 @@ export default function EditProfileScreen() {
   }, [currentUser?._id, currentUser?.id, currentDemoUserId]);
 
   // LIVE MODE: Sync photo slots AND blur state from currentUser.photos (source of truth)
-  // BUGFIX: Filter out verification_reference photos from the editable grid
-  // Only show regular profile photos in the user-editable photo grid
+  // Backend handles photo ordering based on verification status:
+  // - NOT verified: reference photo is first (locked)
+  // - Verified: user's chosen primary photo is first
   useEffect(() => {
     if (isDemoMode || !currentUser?.photos) return;
 
-    // BUGFIX: Filter out verification_reference photos - they should NOT appear in the editable grid
-    // verification_reference photos are internal photos used for face verification, not user profile photos
-    const editablePhotos = currentUser.photos.filter(
-      (photo: any) => photo.photoType !== 'verification_reference'
-    );
-
-    // Map photos to slots by array index (photos are already sorted by order from getCurrentUser)
+    // Map photos to slots in the order provided by backend
+    // Backend already handles verification-aware ordering
     const slotsFromBackend: PhotoSlots9 = createEmptyPhotoSlots();
     // Initialize blur state from backend photos.isBlurred field
     const blurFromBackend: Record<number, boolean> = {};
 
-    editablePhotos.forEach((photo: any, index: number) => {
+    currentUser.photos.forEach((photo: any, index: number) => {
       if (index >= 0 && index < 9 && photo.url) {
         slotsFromBackend[index] = photo.url;
         // Read isBlurred from backend photo record
@@ -520,14 +519,15 @@ export default function EditProfileScreen() {
     if (hasPhotos) {
       if (__DEV__) {
         const filledSlots = slotsFromBackend.map((s, i) => s ? i : -1).filter(i => i >= 0);
+        const firstPhoto = currentUser.photos[0];
         // PHOTO_SOURCE_AUDIT: Log photo source for debugging consistency
-        // NOTE: currentUser.photos is now pre-filtered by backend (excludes verification_reference)
         console.log('[PHOTO_SOURCE_AUDIT] [EDIT_PROFILE_PHOTOS] Grid loaded:', {
-          source: 'api.users.getCurrentUser (pre-filtered)',
-          totalRegularPhotos: currentUser.photos.length,
+          source: 'api.users.getCurrentUser',
+          totalPhotos: currentUser.photos.length,
+          isVerified: currentUser.isVerified,
           filledSlots,
-          mainPhotoId: editablePhotos[0]?._id?.slice(-6) || null,
-          photoIds: editablePhotos.map((p: any) => p._id?.slice(-6)).join(','),
+          firstPhotoType: firstPhoto?.photoType || 'regular',
+          firstPhotoId: firstPhoto?._id?.slice(-6) || null,
         });
       }
       setPhotoSlots(slotsFromBackend);
@@ -746,7 +746,22 @@ export default function EditProfileScreen() {
   };
 
   // SLOT-BASED: Remove photo by setting slot to null AND deleting from backend
+  // Reference/verification photo is protected and cannot be deleted (keeps it in the system)
   const handleRemovePhoto = (slotIndex: number) => {
+    // Check if this photo is the reference/verification photo
+    const photoUrl = photoSlots[slotIndex];
+    const photoToCheck = currentUser?.photos?.find((p: any) => p.url === photoUrl);
+    const isReferencePhoto = photoToCheck?.photoType === 'verification_reference';
+
+    // Reference photo cannot be deleted - it must stay in the system
+    if (isReferencePhoto) {
+      Alert.alert(
+        'Cannot Remove',
+        'Your verification photo must stay in your profile. You can choose another photo as your main profile photo.',
+      );
+      return;
+    }
+
     if (validPhotoCount <= MIN_PROFILE_PHOTOS) {
       Alert.alert('Photos Required', `Keep at least ${MIN_PROFILE_PHOTOS} photos on your profile.`);
       return;
@@ -820,9 +835,23 @@ export default function EditProfileScreen() {
 
   // SLOT-BASED: Swap photo to slot 0 (main position) AND persist to backend immediately
   // SAFE REORDER: Uses order-only for primary, validates no photo loss, never deletes photos
+  // Verification-aware: locked before verification, unlocked after
   const handleSetMainPhoto = async (fromSlot: number) => {
     if (fromSlot === 0) return; // Already main
 
+    // Check verification status
+    const isVerified = currentUser?.isVerified === true;
+
+    // If NOT verified: block the swap with explanation
+    if (!isVerified) {
+      Alert.alert(
+        'Almost There',
+        'Your profile photo can be changed after verification is complete.\n\nComplete verification to unlock full control.',
+      );
+      return;
+    }
+
+    // Verified user: proceed with setting new primary photo
     // Get current slots before swap for revert on failure
     const previousSlots = [...photoSlots] as PhotoSlots9;
 
@@ -953,9 +982,9 @@ export default function EditProfileScreen() {
               allPhotoIds: orderedPhotoIds.map((id: string) => id?.slice(-6)).join(','),
             });
           }
-          await reorderPhotos({
+          // FIX: Use reorderPhotosMutation without token (server derives auth)
+          await reorderPhotosMutation({
             photoIds: orderedPhotoIds as any,
-            token,
           });
           if (__DEV__) {
             console.log('[PHOTO_REORDER_AFTER] ✅ Reorder persisted successfully');
@@ -1222,25 +1251,29 @@ export default function EditProfileScreen() {
         });
       }
 
-      await updateProfile({
-        token: sessionToken,
-        name: fullName || undefined,
-        bio: bio.trim() || null,
-        height: height ? parseInt(height) : undefined,
-        weight: weight ? parseInt(weight) : undefined,
-        smoking: (smoking || undefined) as any,
-        drinking: (drinking || undefined) as any,
-        kids: (kids || undefined) as any,
-        education: (education || undefined) as any,
-        religion: (religion || undefined) as any,
-        jobTitle: jobTitle.trim() || null,
-        company: company.trim() || null,
-        school: school.trim() || null,
-        exercise: (exercise || undefined) as any,
-        pets: pets.length > 0 ? (pets as any) : null,
-        insect: (insect || undefined) as any,
-        activities: activitiesPayload,
-      });
+      if (!userId) {
+        console.warn('[EDIT_PROFILE] Cannot update profile - no userId');
+      } else {
+        await updateProfile({
+          authUserId: userId,
+          name: fullName || undefined,
+          bio: bio.trim() || undefined,
+          height: height ? parseInt(height) : undefined,
+          weight: weight ? parseInt(weight) : undefined,
+          smoking: (smoking || undefined) as any,
+          drinking: (drinking || undefined) as any,
+          kids: (kids || undefined) as any,
+          education: (education || undefined) as any,
+          religion: (religion || undefined) as any,
+          jobTitle: jobTitle.trim() || undefined,
+          company: company.trim() || undefined,
+          school: school.trim() || undefined,
+          exercise: (exercise || undefined) as any,
+          pets: pets.length > 0 ? (pets as any) : undefined,
+          insect: (insect || undefined) as any,
+          activities: activitiesPayload,
+        });
+      }
       coreProfileSaved = true;
 
       // SURGICAL FIX: Only save prompts if hydrated or edited
@@ -1273,19 +1306,23 @@ export default function EditProfileScreen() {
       }
 
       // Save Life Rhythm to onboardingDraft
-      await upsertOnboardingDraft({
-        token: sessionToken,
-        patch: {
-          lifeRhythm: {
-            city: lifeRhythmCity || null,
-            socialRhythm: socialRhythm || null,
-            sleepSchedule: sleepSchedule || null,
-            travelStyle: travelStyle || null,
-            workStyle: workStyle || null,
-            coreValues: coreValues.length > 0 ? coreValues : null,
+      if (!userId) {
+        console.warn('[EDIT_PROFILE] Cannot save Life Rhythm - no userId');
+      } else {
+        await upsertOnboardingDraft({
+          userId,
+          patch: {
+            lifeRhythm: {
+              city: lifeRhythmCity || undefined,
+              socialRhythm: socialRhythm || undefined,
+              sleepSchedule: sleepSchedule || undefined,
+              travelStyle: travelStyle || undefined,
+              workStyle: workStyle || undefined,
+              coreValues: coreValues.length > 0 ? coreValues : undefined,
+            },
           },
-        },
-      });
+        });
+      }
 
       // CRITICAL FIX: Persist photo ordering to backend
       // Map current photoSlots (URLs) to photo IDs using backendPhotos
@@ -1315,40 +1352,24 @@ export default function EditProfileScreen() {
               firstPhotoId: orderedPhotoIds[0],
             });
           }
-          await reorderPhotos({
+          // FIX: Use reorderPhotosMutation without token (server derives auth)
+          await reorderPhotosMutation({
             photoIds: orderedPhotoIds as any, // Cast to Id<'photos'>[]
-            token: sessionToken,
           });
         }
       }
 
-      // PERSIST PER-PHOTO BLUR: Save blur states to backend
-      // Backend photos.isBlurred is the source of truth
-      if (setPhotosBlurMutation) {
-        // Build blur states array for all photos with explicit blur state
-        const blurStates: { order: number; isBlurred: boolean }[] = [];
-        photoSlots.forEach((url, slotIndex) => {
-          if (url) {
-            // Include all photos - set isBlurred to true or false explicitly
-            blurStates.push({
-              order: slotIndex,
-              isBlurred: blurredPhotos[slotIndex] === true,
-            });
-          }
-        });
-
-        if (blurStates.length > 0) {
-          if (__DEV__) {
-            console.log('[EditProfile] 🔒 Persisting blur states:', {
-              blurStates,
-              blurEnabled,
-            });
-          }
-          await setPhotosBlurMutation({
-            token: sessionToken,
-            blurStates,
-          });
+      // PERSIST BLUR: Save global blur state to backend
+      // FIX: Backend only supports user-level blur via togglePhotoBlur, not per-photo blur
+      if (togglePhotoBlurMutation && userId) {
+        const shouldBlur = Object.values(blurredPhotos).some(b => b === true) || blurEnabled;
+        if (__DEV__) {
+          console.log('[EditProfile] 🔒 Persisting blur state:', { shouldBlur, blurEnabled });
         }
+        await togglePhotoBlurMutation({
+          authUserId: userId,
+          blurred: shouldBlur,
+        });
       }
 
       Alert.alert('Success', 'Profile updated!');
@@ -1490,26 +1511,17 @@ export default function EditProfileScreen() {
         <PhotoGridEditor
           photoSlots={photoSlots}
           failedSlots={failedSlots}
-          blurEnabled={blurEnabled}
-          blurredPhotos={blurredPhotos}
           validPhotoCount={validPhotoCount}
           onUploadPhoto={handleUploadPhoto}
           onRemovePhoto={handleRemovePhoto}
           onSetMainPhoto={handleSetMainPhoto}
-          onTogglePhotoBlur={handleTogglePhotoBlur}
           onPreviewPhoto={setPreviewPhoto}
           onImageError={handleImageError}
           onPhotoLoad={handlePhotoLoad}
         />
       </View>
 
-      {/* Photo Visibility Section */}
-      <PhotoVisibilitySection
-        blurEnabled={blurEnabled}
-        onToggleBlur={handleBlurToggle}
-      />
-
-      {/* About Section - PROFILE COMPLETION: about */}
+      {/* Bio Section - PROFILE COMPLETION: about */}
       <View onLayout={(e) => registerSectionPosition('about', e.nativeEvent.layout.y)}>
         <AboutSection
           bio={bio}

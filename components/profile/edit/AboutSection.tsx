@@ -2,7 +2,7 @@
  * AboutSection Component
  *
  * Extracted from edit-profile.tsx for maintainability.
- * Handles Bio/About text input with tap-to-focus.
+ * Handles bio text input with tap-to-focus.
  *
  * NO LOGIC CHANGES - Structure refactor only.
  */
@@ -26,12 +26,12 @@ export function AboutSection({ bio, onChangeBio }: AboutSectionProps) {
 
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>About</Text>
+      <Text style={styles.sectionTitle}>Bio</Text>
       <Pressable style={styles.bioContainer} onPress={() => bioInputRef.current?.focus()}>
         <TextInput
           ref={bioInputRef}
           style={styles.bioInput}
-          placeholder="Tell us about yourself..."
+          placeholder="Write your bio..."
           placeholderTextColor={COLORS.textMuted}
           value={bio}
           onChangeText={onChangeBio}
