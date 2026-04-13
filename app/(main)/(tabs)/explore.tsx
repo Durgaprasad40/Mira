@@ -195,11 +195,12 @@ const ExploreTile = React.memo(function ExploreTile({
               <View style={[styles.tileBadge, styles.tileStatusBadge]}>
                 <Text style={[styles.tileBadgeText, styles.tileStatusBadgeText]}>{statusLabel}</Text>
               </View>
-            ) : count > 0 && (
+            ) : typeof count === "number" && count > 0 ? (
               <View style={styles.tileBadge}>
                 <Text style={styles.tileBadgeText}>{count}</Text>
               </View>
-            )}
+            ) : null
+            }
 
             {/* Title at bottom with proper spacing */}
             <View style={styles.tileTitleContainer}>
@@ -343,13 +344,6 @@ export default function ExploreScreen() {
 
     return counts;
   }, [backendCounts]);
-  const allCountsZero = useMemo(
-    () =>
-      countsStatus === "ok" &&
-      EXPLORE_CATEGORIES.length > 0 &&
-      EXPLORE_CATEGORIES.every((category) => (categoryCounts[category.id] ?? 0) === 0),
-    [categoryCounts, countsStatus]
-  );
 
   // Navigate to category detail
   const handleCategoryPress = useCallback(
@@ -590,8 +584,6 @@ export default function ExploreScreen() {
         // Only show error state if we've never loaded data
         // If we have stale data, keep showing it
         renderErrorState()
-      ) : allCountsZero ? (
-        renderZeroProfilesState()
       ) : !hasAnyItems ? (
         renderEmptyState()
       ) : (
