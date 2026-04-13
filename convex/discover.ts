@@ -695,12 +695,17 @@ const EXTRA_EXPLORE_CATEGORY_IDS = [
   'active_today',
   'free_tonight',
   'coffee_date',
+  'sports',
   'nature_lovers',
   'binge_watchers',
+  'foodie',
   'travel',
+  'art_culture',
   'gaming',
   'fitness',
   'music',
+  'nightlife',
+  'brunch',
 ] as const;
 
 const EXPLORE_CATEGORY_IDS = [
@@ -814,18 +819,28 @@ function matchesExploreCategory(candidate: ExploreCandidateBase, categoryId: Exp
       return candidate.activities.includes('free_tonight');
     case 'coffee_date':
       return candidateMatchesAnyActivity(candidate, ['coffee']);
+    case 'sports':
+      return candidateMatchesAnyActivity(candidate, ['sports']);
     case 'nature_lovers':
       return candidateMatchesAnyActivity(candidate, ['outdoors']);
     case 'binge_watchers':
       return candidateMatchesAnyActivity(candidate, ['movies']);
+    case 'foodie':
+      return candidateMatchesAnyActivity(candidate, ['foodie']);
     case 'travel':
       return candidateMatchesAnyActivity(candidate, ['travel']);
+    case 'art_culture':
+      return candidateMatchesAnyActivity(candidate, ['art_culture']);
     case 'gaming':
       return candidateMatchesAnyActivity(candidate, ['gaming']);
     case 'fitness':
       return candidateMatchesAnyActivity(candidate, ['gym_partner', 'gym']);
     case 'music':
       return candidateMatchesAnyActivity(candidate, ['concerts', 'music_lover']);
+    case 'nightlife':
+      return candidateMatchesAnyActivity(candidate, ['nightlife']);
+    case 'brunch':
+      return candidateMatchesAnyActivity(candidate, ['brunch']);
     default:
       return false;
   }
@@ -1294,16 +1309,19 @@ export const getExploreCategoryCounts = query({
     });
 
     if (built.status !== 'ready') {
+      const emptyCounts = createEmptyExploreCounts();
       return {
-        counts: createEmptyExploreCounts(),
+        counts: emptyCounts,
         totalCount: 0,
         status: built.status === 'viewer_not_found' ? 'viewer_missing' : built.status,
         nearbyStatus: 'ok' as const,
       };
     }
 
+    const counts = countExploreCategories(built.candidates);
+
     return {
-      counts: countExploreCategories(built.candidates),
+      counts,
       totalCount: built.candidates.length,
       status: 'ok' as const,
       nearbyStatus: 'ok' as const,

@@ -9,7 +9,9 @@ import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
 /**
  * Validate session token and return the authenticated user ID.
- * Uses the same session validation logic as auth.validateSessionFull.
+ * Handles both:
+ * - Regular session tokens (from sessions table)
+ * - Demo tokens (format: demo_<userId>)
  *
  * @returns userId if valid, null if invalid/expired/revoked
  */
@@ -19,6 +21,40 @@ async function validateSessionToken(
 ): Promise<Id<'users'> | null> {
   const now = Date.now();
 
+  // Handle demo tokens (format: demo_<userId>)
+  if (token.startsWith('demo_')) {
+    const userIdPart = token.substring(5);
+    try {
+      // Demo token contains the Convex user._id directly
+      const user = await ctx.db.get(userIdPart as Id<'users'>);
+      if (user && user.isActive && !user.deletedAt && !user.isBanned) {
+        return user._id;
+      }
+    } catch {
+      // Not a valid Convex ID format, fall through to session lookup
+    }
+
+    // Fallback: try by demoUserId or authUserId field
+    const usersByDemo = await ctx.db
+      .query('users')
+      .withIndex('by_demo_user_id', (q) => q.eq('demoUserId', userIdPart))
+      .first();
+    if (usersByDemo && usersByDemo.isActive && !usersByDemo.deletedAt && !usersByDemo.isBanned) {
+      return usersByDemo._id;
+    }
+
+    const usersByAuth = await ctx.db
+      .query('users')
+      .withIndex('by_auth_user_id', (q) => q.eq('authUserId', userIdPart))
+      .first();
+    if (usersByAuth && usersByAuth.isActive && !usersByAuth.deletedAt && !usersByAuth.isBanned) {
+      return usersByAuth._id;
+    }
+
+    return null;
+  }
+
+  // Regular session token validation
   const session = await ctx.db
     .query('sessions')
     .withIndex('by_token', (q) => q.eq('token', token))
@@ -569,7 +605,9 @@ export const reorderPhotos = mutation({
   },
 });
 
-// Get user photos (excludes verification_reference photos)
+// Get user photos - ordering depends on verification status
+// NOT verified: reference photo locked as first
+// Verified: user's chosen primary photo is first
 export const getUserPhotos = query({
   args: {
     userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
@@ -582,15 +620,36 @@ export const getUserPhotos = query({
       return [];
     }
 
+    // Get user to check verification status
+    const user = await ctx.db.get(convexUserId);
+    if (!user) {
+      return [];
+    }
+
     const photos = await ctx.db
       .query('photos')
       .withIndex('by_user_order', (q) => q.eq('userId', convexUserId))
       .collect();
 
-    // BUG FIX: Filter out verification_reference photos (those are private, not for profile display)
-    const normalPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
+    // Photo ordering depends on verification status:
+    // - NOT verified: force reference photo first (locked until verification complete)
+    // - Verified: respect user's chosen order (isPrimary determines main photo)
+    let orderedPhotos;
+    if (!user.isVerified) {
+      // Not verified: reference photo must be first
+      const referencePhoto = photos.find(photo => photo.photoType === 'verification_reference');
+      const otherPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
+      otherPhotos.sort((a, b) => a.order - b.order);
+      orderedPhotos = referencePhoto ? [referencePhoto, ...otherPhotos] : otherPhotos;
+    } else {
+      // Verified: respect order field, isPrimary photo comes first
+      const primaryPhoto = photos.find(photo => photo.isPrimary === true);
+      const otherPhotos = photos.filter(photo => photo.isPrimary !== true);
+      otherPhotos.sort((a, b) => a.order - b.order);
+      orderedPhotos = primaryPhoto ? [primaryPhoto, ...otherPhotos] : photos.sort((a, b) => a.order - b.order);
+    }
 
-    return normalPhotos.sort((a, b) => a.order - b.order);
+    return orderedPhotos;
   },
 });
 
@@ -774,8 +833,12 @@ export const uploadVerificationReferencePhoto = mutation({
       console.log(`[PHOTO_GATE] FAIL: User not found`);
       throw new Error('User not found');
     }
+
+    // DEBUG LOG: Consent check details (temporary for diagnosing flow)
+    console.log(`[PHOTO_GATE] DEBUG: userId=${userId}, inputUserId=${args.userId}, consentAcceptedAt=${user.consentAcceptedAt ?? 'NOT_SET'}, authUserId=${user.authUserId ?? 'N/A'}, demoUserId=${user.demoUserId ?? 'N/A'}`);
+
     if (!user.consentAcceptedAt) {
-      console.log(`[PHOTO_GATE] FAIL: No consent`);
+      console.log(`[PHOTO_GATE] FAIL: No consent - user.consentAcceptedAt is undefined/null`);
       throw new Error('Please accept the data consent agreement before uploading photos.');
     }
 

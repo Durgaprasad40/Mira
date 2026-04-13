@@ -89,10 +89,28 @@ export const getCurrentUser = query({
       .withIndex("by_user_order", (q) => q.eq("userId", convexUserId))
       .collect();
 
+    // Photo ordering depends on verification status:
+    // - NOT verified: force reference photo first (locked until verification complete)
+    // - Verified: respect user's chosen order (isPrimary determines main photo)
+    let orderedPhotos;
+    if (!user.isVerified) {
+      // Not verified: reference photo must be first
+      const referencePhoto = photos.find(photo => photo.photoType === 'verification_reference');
+      const otherPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
+      otherPhotos.sort((a, b) => a.order - b.order);
+      orderedPhotos = referencePhoto ? [referencePhoto, ...otherPhotos] : otherPhotos;
+    } else {
+      // Verified: respect order field, isPrimary photo comes first
+      const primaryPhoto = photos.find(photo => photo.isPrimary === true);
+      const otherPhotos = photos.filter(photo => photo.isPrimary !== true);
+      otherPhotos.sort((a, b) => a.order - b.order);
+      orderedPhotos = primaryPhoto ? [primaryPhoto, ...otherPhotos] : photos.sort((a, b) => a.order - b.order);
+    }
+
     return {
       ...user,
       relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
-      photos: photos.sort((a, b) => a.order - b.order),
+      photos: orderedPhotos,
     };
   },
 });
@@ -113,18 +131,23 @@ export const ensureCurrentUser = mutation({
 // Get user by ID (for viewing profiles)
 export const getUserById = query({
   args: {
-    userId: v.id("users"),
-    viewerId: v.id("users"),
+    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
+    viewerId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
+    // Map authUserId -> Convex Id<"users"> if needed
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const viewerId = await resolveUserIdByAuthId(ctx, args.viewerId as string);
+    if (!userId || !viewerId) return null;
+
+    const user = await ctx.db.get(userId);
     if (!user || !user.isActive || user.isBanned) return null;
 
     // Check if blocked
     const blocked = await ctx.db
       .query("blocks")
       .withIndex("by_blocker_blocked", (q) =>
-        q.eq("blockerId", args.userId).eq("blockedUserId", args.viewerId),
+        q.eq("blockerId", userId).eq("blockedUserId", viewerId),
       )
       .first();
 
@@ -133,7 +156,7 @@ export const getUserById = query({
     const reverseBlocked = await ctx.db
       .query("blocks")
       .withIndex("by_blocker_blocked", (q) =>
-        q.eq("blockerId", args.viewerId).eq("blockedUserId", args.userId),
+        q.eq("blockerId", viewerId).eq("blockedUserId", userId),
       )
       .first();
 
@@ -142,11 +165,29 @@ export const getUserById = query({
     // Get photos
     const photos = await ctx.db
       .query("photos")
-      .withIndex("by_user_order", (q) => q.eq("userId", args.userId))
+      .withIndex("by_user_order", (q) => q.eq("userId", userId))
       .collect();
 
+    // Photo ordering depends on verification status:
+    // - NOT verified: force reference photo first (locked until verification complete)
+    // - Verified: respect user's chosen order (isPrimary determines main photo)
+    let orderedPhotos;
+    if (!user.isVerified) {
+      // Not verified: reference photo must be first
+      const referencePhoto = photos.find(photo => photo.photoType === 'verification_reference');
+      const otherPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
+      otherPhotos.sort((a, b) => a.order - b.order);
+      orderedPhotos = referencePhoto ? [referencePhoto, ...otherPhotos] : otherPhotos;
+    } else {
+      // Verified: respect order field, isPrimary photo comes first
+      const primaryPhoto = photos.find(photo => photo.isPrimary === true);
+      const otherPhotos = photos.filter(photo => photo.isPrimary !== true);
+      otherPhotos.sort((a, b) => a.order - b.order);
+      orderedPhotos = primaryPhoto ? [primaryPhoto, ...otherPhotos] : photos.sort((a, b) => a.order - b.order);
+    }
+
     // Calculate distance if both have location
-    const viewer = await ctx.db.get(args.viewerId);
+    const viewer = await ctx.db.get(viewerId);
     let distance: number | undefined;
     if (
       user.latitude &&
@@ -187,7 +228,7 @@ export const getUserById = query({
       relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
       activities: user.activities,
       profilePrompts: user.profilePrompts ?? [],
-      photos: photos.sort((a, b) => a.order - b.order),
+      photos: orderedPhotos,
       photoBlurred: user.photoBlurred === true,
     };
   },
@@ -1375,11 +1416,11 @@ export const completeOnboarding = mutation({
       throw new Error("Consent required: please accept the data consent agreement before completing onboarding");
     }
 
-    // ONB-P0-002 FIX: Enforce face verification before onboarding completion
-    // Only verified users can complete onboarding - PENDING status is not allowed
-    if (user.faceVerificationStatus !== 'verified') {
-      throw new Error("Face verification required: please complete face verification before continuing");
-    }
+    // PRODUCT REQUIREMENT: Face verification is NON-BLOCKING for onboarding completion
+    // Users can complete onboarding regardless of face verification status (pending, unverified, verified)
+    // The status is still stored and shown, but does not block app entry
+    // Log the current status for monitoring purposes
+    console.log(`[ONBOARDING] User ${userId} completing onboarding with faceVerificationStatus: ${user.faceVerificationStatus || 'unverified'}`);
 
     // Server-side validation: pets max 3
     if (pets !== undefined && pets.length > 3) {
@@ -1775,10 +1816,13 @@ export const setAdminStatus = mutation({
  */
 export const checkIsAdmin = query({
   args: {
-    userId: v.id("users"),
+    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
+    // Map authUserId -> Convex Id<"users"> if needed
+    const convexUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!convexUserId) return { isAdmin: false };
+    const user = await ctx.db.get(convexUserId);
     return { isAdmin: user?.isAdmin === true };
   },
 });

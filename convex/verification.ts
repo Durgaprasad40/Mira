@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query, internalMutation, QueryCtx, MutationCtx } from "./_generated/server";
 import { logAdminAction } from "./adminLog";
+import { resolveUserIdByAuthId } from "./helpers";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const SESSION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -200,10 +201,13 @@ export const retryVerification = mutation({
 // Get verification status for a user
 export const getVerificationStatus = query({
   args: {
-    userId: v.id("users"),
+    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
+    // Map authUserId -> Convex Id<"users"> if needed
+    const convexUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!convexUserId) return null;
+    const user = await ctx.db.get(convexUserId);
     if (!user) return null;
 
     const status = user.verificationStatus || "unverified";
@@ -212,7 +216,7 @@ export const getVerificationStatus = query({
     const pendingSession = await ctx.db
       .query("verificationSessions")
       .withIndex("by_user_status", (q) =>
-        q.eq("userId", args.userId).eq("status", "pending")
+        q.eq("userId", convexUserId).eq("status", "pending")
       )
       .first();
 

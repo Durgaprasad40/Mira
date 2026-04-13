@@ -188,10 +188,13 @@ export const getMatches = query({
 export const getMatch = query({
   args: {
     matchId: v.id('matches'),
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
-    const { matchId, userId } = args;
+    const { matchId } = args;
+    // Map authUserId -> Convex Id<"users"> if needed
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) return null;
 
     const match = await ctx.db.get(matchId);
     if (!match || !match.isActive) return null;

@@ -924,16 +924,16 @@ export const resetSwipeBetweenUsers = mutation({
 // =============================================================================
 export const markLikesOpened = mutation({
   args: {
-    token: v.string(),
+    authUserId: v.string(), // FIX: Use authUserId instead of token
   },
   handler: async (ctx, args) => {
-    const { token } = args;
+    const { authUserId } = args;
     const now = Date.now();
 
-    // Validate session and derive current user
-    const userId = await validateSessionToken(ctx, token);
+    // FIX: Use resolveUserIdByAuthId instead of validateSessionToken
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
-      throw new Error('Unauthorized: invalid or expired session');
+      throw new Error('Unauthorized: user not found');
     }
 
     // Get all unopened likes for this user

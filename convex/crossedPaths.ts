@@ -193,12 +193,17 @@ function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>, now: 
 
 export const publishLocation = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId
     latitude: v.number(),
     longitude: v.number(),
   },
   handler: async (ctx, args) => {
-    const { userId, latitude, longitude } = args;
+    // Resolve authUserId to Convex ID if needed
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      return { published: false, publishedAt: null, reason: 'user_not_found' };
+    }
+    const { latitude, longitude } = args;
     const now = Date.now();
 
     const user = await ctx.db.get(userId);
@@ -376,13 +381,18 @@ export const cleanupExpiredCrossedEvents = internalMutation({
 
 export const recordLocation = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId
     latitude: v.number(),
     longitude: v.number(),
     accuracy: v.optional(v.number()), // GPS accuracy in meters (for jitter protection)
   },
   handler: async (ctx, args) => {
-    const { userId, latitude, longitude, accuracy } = args;
+    // Resolve authUserId to Convex ID if needed
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      return { nearbyCount: 0, reason: 'user_not_found' };
+    }
+    const { latitude, longitude, accuracy } = args;
     const now = Date.now();
 
     const currentUser = await ctx.db.get(userId);
@@ -839,9 +849,13 @@ export const recordLocation = mutation({
 // ---------------------------------------------------------------------------
 
 export const getNearbyUsers = query({
-  args: { userId: v.id('users') },
-  handler: async (ctx, { userId }) => {
+  args: { userId: v.union(v.id('users'), v.string()) }, // Accept both Convex ID and authUserId
+  handler: async (ctx, args) => {
     const now = Date.now();
+
+    // Resolve authUserId to Convex ID if needed
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) return [];
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];
@@ -1555,6 +1569,50 @@ export const getCrossedPathsCount = query({
       .collect();
 
     return asUser1.length + asUser2.length;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// getCrossedPathSummary — get count and latest timestamp for badge display
+// FIX: Use userId (authUserId) instead of token for consistency
+// ---------------------------------------------------------------------------
+
+export const getCrossedPathSummary = query({
+  args: {
+    userId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    // Resolve authUserId to Convex ID
+    const userId = await resolveUserIdByAuthId(ctx, args.userId);
+    if (!userId) {
+      return { count: 0, latestCreatedAt: null };
+    }
+
+    // Get all crossed paths for this user
+    const [asUser1, asUser2] = await Promise.all([
+      ctx.db
+        .query('crossedPaths')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .collect(),
+      ctx.db
+        .query('crossedPaths')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .collect(),
+    ]);
+
+    const allCrossedPaths = [...asUser1, ...asUser2];
+    const count = allCrossedPaths.length;
+
+    // Find the latest createdAt timestamp
+    let latestCreatedAt: number | null = null;
+    for (const path of allCrossedPaths) {
+      const ts = path.lastCrossedAt ?? path._creationTime;
+      if (latestCreatedAt === null || ts > latestCreatedAt) {
+        latestCreatedAt = ts;
+      }
+    }
+
+    return { count, latestCreatedAt };
   },
 });
 

@@ -80,6 +80,40 @@ export const getUnreadCount = query({
   },
 });
 
+// Get bell notification unread count (for tab badge)
+// Accepts userId (authUserId string) and phase for filtering
+export const getBellUnreadCount = query({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+    phase: v.optional(v.union(v.literal('phase1'), v.literal('phase2'))),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      return 0;
+    }
+
+    const now = Date.now();
+    const notifications = await ctx.db
+      .query('notifications')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field('readAt'), undefined),
+          // Only count non-expired notifications
+          q.or(
+            q.eq(q.field('expiresAt'), undefined),
+            q.gt(q.field('expiresAt'), now)
+          )
+        )
+      )
+      .collect();
+
+    return notifications.length;
+  },
+});
+
 // Mark notification as read
 // P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markAsRead = mutation({
