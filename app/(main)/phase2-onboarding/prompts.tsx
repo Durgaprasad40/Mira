@@ -1,20 +1,24 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Keyboard,
   KeyboardAvoidingView,
+  LayoutAnimation,
   Platform,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
+  UIManager,
   View,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation } from 'convex/react';
+import { LinearGradient } from 'expo-linear-gradient';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import {
@@ -29,27 +33,20 @@ import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useScreenTrace } from '@/lib/devTrace';
 
+// Enable LayoutAnimation on Android
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
 const C = INCOGNITO_COLORS;
 
-type SectionKey = 'section1' | 'section2' | 'section3';
-
-const SECTION1_PROMPT_IDS = new Set<string>(PHASE2_SECTION1_PROMPTS.map((prompt) => prompt.id));
-const SECTION2_PROMPT_IDS = new Set<string>(PHASE2_SECTION2_PROMPTS.map((prompt) => prompt.id));
-const SECTION3_PROMPT_IDS = new Set<string>(PHASE2_SECTION3_PROMPTS.map((prompt) => prompt.id));
+// Card backgrounds
+const CARD_BG = '#1E2128';
+const CARD_BG_ACTIVE = '#252932';
 
 function isValidTextAnswer(answer: string) {
   const length = answer.trim().length;
   return length >= PHASE2_PROMPT_MIN_TEXT_LENGTH && length <= PHASE2_PROMPT_MAX_TEXT_LENGTH;
-}
-
-function getInitialDraftPromptAnswers(promptAnswers: Phase2PromptAnswer[]) {
-  return promptAnswers
-    .filter((answer) =>
-      SECTION1_PROMPT_IDS.has(answer.promptId) ||
-      SECTION2_PROMPT_IDS.has(answer.promptId) ||
-      SECTION3_PROMPT_IDS.has(answer.promptId)
-    )
-    .map((answer) => ({ ...answer }));
 }
 
 export default function Phase2PromptsScreen() {
@@ -57,123 +54,128 @@ export default function Phase2PromptsScreen() {
 
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const questionRefs = useRef<Record<string, View | null>>({});
 
   const promptAnswers = usePrivateProfileStore((s) => s.promptAnswers);
   const setPromptAnswers = usePrivateProfileStore((s) => s.setPromptAnswers);
-  const saveOnboardingPrompts = useMutation(api.privateProfiles.saveOnboardingPrompts);
+  const saveOnboardingPrompts = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
-  const [expandedSection, setExpandedSection] = useState<SectionKey>('section1');
-  const [activeTextPromptId, setActiveTextPromptId] = useState<string | null>(null);
-  const [draftPromptAnswers, setDraftPromptAnswers] = useState<Phase2PromptAnswer[]>(
-    () => getInitialDraftPromptAnswers(promptAnswers)
-  );
+  const [draftAnswers, setDraftAnswers] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    promptAnswers.forEach((a) => {
+      initial[a.promptId] = a.answer;
+    });
+    return initial;
+  });
+
   const [isSaving, setIsSaving] = useState(false);
 
+  // Track which text prompt is currently expanded (for Section 2 & 3)
+  const [expandedPromptId, setExpandedPromptId] = useState<string | null>(null);
+
   const getAnswer = useCallback(
-    (promptId: string) => draftPromptAnswers.find((answer) => answer.promptId === promptId)?.answer || '',
-    [draftPromptAnswers]
+    (promptId: string) => draftAnswers[promptId] || '',
+    [draftAnswers]
   );
 
-  const updateDraftPromptAnswer = useCallback((promptId: string, question: string, answer: string) => {
-    setDraftPromptAnswers((current) => {
-      const nextAnswer = answer;
-      const existingIndex = current.findIndex((item) => item.promptId === promptId);
+  const setAnswer = useCallback((promptId: string, answer: string) => {
+    setDraftAnswers((prev) => ({ ...prev, [promptId]: answer }));
+  }, []);
 
-      if (nextAnswer.trim().length === 0) {
-        if (existingIndex === -1) {
-          return current;
-        }
-        return current.filter((item) => item.promptId !== promptId);
+  // Toggle option for Section 1 (multiple choice)
+  const toggleOption = useCallback((promptId: string, option: string) => {
+    const current = draftAnswers[promptId];
+    if (current === option) {
+      // Deselect
+      setDraftAnswers((prev) => {
+        const next = { ...prev };
+        delete next[promptId];
+        return next;
+      });
+    } else {
+      setAnswer(promptId, option);
+    }
+  }, [draftAnswers, setAnswer]);
+
+  // Expand/collapse text prompt (Section 2 & 3)
+  const toggleTextPrompt = useCallback((promptId: string) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpandedPromptId((current) => {
+      if (current === promptId) {
+        // Collapsing - dismiss keyboard
+        Keyboard.dismiss();
+        return null;
       }
-
-      const nextEntry: Phase2PromptAnswer = { promptId, question, answer: nextAnswer };
-      if (existingIndex === -1) {
-        return [...current, nextEntry];
-      }
-
-      const next = [...current];
-      next[existingIndex] = nextEntry;
-      return next;
+      return promptId;
     });
   }, []);
 
-  const removeDraftPromptAnswer = useCallback((promptId: string) => {
-    setDraftPromptAnswers((current) => current.filter((item) => item.promptId !== promptId));
-  }, []);
-
-  const toggleSection = useCallback((section: SectionKey) => {
-    setExpandedSection((current) => (current === section ? current : section));
-  }, []);
-
-  const selectMultipleChoiceAnswer = useCallback(
-    (promptId: string, question: string, option: string) => {
-      const currentAnswer = getAnswer(promptId);
-      if (currentAnswer === option) {
-        removeDraftPromptAnswer(promptId);
-        return;
-      }
-      updateDraftPromptAnswer(promptId, question, option);
-    },
-    [getAnswer, removeDraftPromptAnswer, updateDraftPromptAnswer]
-  );
-
-  const toggleTextPrompt = useCallback((promptId: string) => {
-    setActiveTextPromptId((current) => (current === promptId ? null : promptId));
-  }, []);
-
-  const buildPayload = useCallback(() => {
-    const payload: Phase2PromptAnswer[] = [];
-
-    for (const prompt of PHASE2_SECTION1_PROMPTS) {
-      const answer = getAnswer(prompt.id).trim();
-      if (!answer) continue;
-      payload.push({
-        promptId: prompt.id,
-        question: prompt.question,
-        answer,
-      });
+  // Auto-scroll to active input when expanded
+  useEffect(() => {
+    if (expandedPromptId) {
+      // Small delay to let layout animation complete
+      const timer = setTimeout(() => {
+        const ref = questionRefs.current[expandedPromptId];
+        if (ref && scrollViewRef.current) {
+          ref.measureLayout(
+            scrollViewRef.current as any,
+            (_x, y) => {
+              // Scroll to position with some offset from top
+              scrollViewRef.current?.scrollTo({
+                y: Math.max(0, y - 100),
+                animated: true,
+              });
+            },
+            () => {} // Error callback
+          );
+        }
+      }, 150);
+      return () => clearTimeout(timer);
     }
+  }, [expandedPromptId]);
 
-    for (const prompt of [...PHASE2_SECTION2_PROMPTS, ...PHASE2_SECTION3_PROMPTS]) {
-      const answer = getAnswer(prompt.id).trim();
-      if (!isValidTextAnswer(answer)) continue;
-      payload.push({
-        promptId: prompt.id,
-        question: prompt.question,
-        answer,
-      });
-    }
+  // Progress calculations
+  const section1Answered = PHASE2_SECTION1_PROMPTS.filter((p) => getAnswer(p.id).length > 0).length;
+  const section2Answered = PHASE2_SECTION2_PROMPTS.filter((p) => isValidTextAnswer(getAnswer(p.id))).length;
+  const section3Answered = PHASE2_SECTION3_PROMPTS.filter((p) => isValidTextAnswer(getAnswer(p.id))).length;
 
-    return payload;
-  }, [getAnswer]);
+  // STRICT COMPLETION RULES:
+  // - Section 1: ALL 3 questions required
+  // - Section 2: At least 1 question required
+  // - Section 3: At least 1 question required
+  const section1Complete = section1Answered === 3;
+  const section2Complete = section2Answered >= 1;
+  const section3Complete = section3Answered >= 1;
 
-  const section1AnsweredCount = useMemo(
-    () => PHASE2_SECTION1_PROMPTS.filter((prompt) => getAnswer(prompt.id).trim().length > 0).length,
-    [getAnswer]
-  );
-  const section2AnsweredCount = useMemo(
-    () => PHASE2_SECTION2_PROMPTS.filter((prompt) => isValidTextAnswer(getAnswer(prompt.id))).length,
-    [getAnswer]
-  );
-  const section3AnsweredCount = useMemo(
-    () => PHASE2_SECTION3_PROMPTS.filter((prompt) => isValidTextAnswer(getAnswer(prompt.id))).length,
-    [getAnswer]
-  );
-
-  const section1Complete = section1AnsweredCount > 0;
-  const section2Complete = section2AnsweredCount > 0;
-  const section3Complete = section3AnsweredCount > 0;
-  const canContinue = !!token && section1Complete && section2Complete && section3Complete && !isSaving;
+  const canContinue = !!userId && section1Complete && section2Complete && section3Complete && !isSaving;
 
   const handleContinue = useCallback(async () => {
-    if (!token || !canContinue) return;
+    if (!userId || !canContinue) return;
 
-    const payload = buildPayload();
+    const payload: Phase2PromptAnswer[] = [];
+
+    // Section 1 - multiple choice
+    PHASE2_SECTION1_PROMPTS.forEach((p) => {
+      const answer = getAnswer(p.id).trim();
+      if (answer) {
+        payload.push({ promptId: p.id, question: p.question, answer });
+      }
+    });
+
+    // Section 2 & 3 - text
+    [...PHASE2_SECTION2_PROMPTS, ...PHASE2_SECTION3_PROMPTS].forEach((p) => {
+      const answer = getAnswer(p.id).trim();
+      if (isValidTextAnswer(answer)) {
+        payload.push({ promptId: p.id, question: p.question, answer });
+      }
+    });
+
     setIsSaving(true);
     try {
       const result = await saveOnboardingPrompts({
-        token,
+        authUserId: userId,
         promptAnswers: payload,
       });
 
@@ -186,242 +188,359 @@ export default function Phase2PromptsScreen() {
     } catch (error) {
       Alert.alert(
         'Unable to continue',
-        'We could not save your prompt answers. Please try again.'
+        'We could not save your answers. Please try again.'
       );
     } finally {
       setIsSaving(false);
     }
-  }, [buildPayload, canContinue, router, saveOnboardingPrompts, setPromptAnswers, token]);
+  }, [userId, canContinue, getAnswer, saveOnboardingPrompts, setPromptAnswers, router]);
 
+  // ============================================================
+  // SECTION 1: Inline Multiple Choice
+  // All 3 questions visible with options directly below each
+  // ============================================================
+  const renderSection1Question = (prompt: typeof PHASE2_SECTION1_PROMPTS[number]) => {
+    const selectedOption = getAnswer(prompt.id);
+    const hasAnswer = selectedOption.length > 0;
+
+    return (
+      <View key={prompt.id} style={styles.s1QuestionCard}>
+        <View style={styles.s1QuestionHeader}>
+          <Text style={styles.s1QuestionText}>{prompt.question}</Text>
+          {hasAnswer && (
+            <View style={styles.miniCheckBadge}>
+              <Ionicons name="checkmark" size={12} color="#FFFFFF" />
+            </View>
+          )}
+        </View>
+        <View style={styles.s1OptionsContainer}>
+          {prompt.options.map((option) => {
+            const isSelected = selectedOption === option;
+            return (
+              <TouchableOpacity
+                key={option}
+                style={[
+                  styles.s1OptionChip,
+                  isSelected && styles.s1OptionChipSelected,
+                ]}
+                onPress={() => toggleOption(prompt.id, option)}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.s1OptionText,
+                    isSelected && styles.s1OptionTextSelected,
+                  ]}
+                  numberOfLines={2}
+                >
+                  {option}
+                </Text>
+                {isSelected && (
+                  <View style={styles.s1CheckCircle}>
+                    <Ionicons name="checkmark" size={12} color="#FFFFFF" />
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+    );
+  };
+
+  // ============================================================
+  // SECTION 2 & 3: Inline Text Input (Expandable)
+  // Tap question -> inline text box expands below it
+  // ============================================================
+  const renderTextQuestion = (prompt: { id: string; question: string }) => {
+    const answer = getAnswer(prompt.id);
+    const isExpanded = expandedPromptId === prompt.id;
+    const hasValidAnswer = isValidTextAnswer(answer);
+    const charCount = answer.trim().length;
+
+    return (
+      <View
+        key={prompt.id}
+        ref={(ref) => { questionRefs.current[prompt.id] = ref; }}
+        style={styles.textQuestionWrapper}
+      >
+        {/* Question Card (Tap to expand) */}
+        <TouchableOpacity
+          style={[
+            styles.textQuestionCard,
+            isExpanded && styles.textQuestionCardExpanded,
+            hasValidAnswer && !isExpanded && styles.textQuestionCardAnswered,
+          ]}
+          onPress={() => toggleTextPrompt(prompt.id)}
+          activeOpacity={0.7}
+        >
+          <View style={styles.textQuestionContent}>
+            <Text style={styles.textQuestionText}>{prompt.question}</Text>
+            {!isExpanded && hasValidAnswer && (
+              <Text style={styles.textAnswerPreview} numberOfLines={1}>
+                {answer}
+              </Text>
+            )}
+            {!isExpanded && !hasValidAnswer && (
+              <Text style={styles.textPlaceholder}>Tap to answer</Text>
+            )}
+          </View>
+          <View style={styles.textQuestionRight}>
+            {hasValidAnswer && !isExpanded ? (
+              <View style={styles.checkBadge}>
+                <Ionicons name="checkmark" size={14} color="#FFFFFF" />
+              </View>
+            ) : (
+              <Ionicons
+                name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                color={isExpanded ? C.primary : C.textLight}
+              />
+            )}
+          </View>
+        </TouchableOpacity>
+
+        {/* Inline Text Input (Only visible when expanded) */}
+        {isExpanded && (
+          <View style={styles.inlineInputContainer}>
+            <TextInput
+              style={styles.inlineTextInput}
+              value={answer}
+              onChangeText={(text) => setAnswer(prompt.id, text)}
+              placeholder="Type your answer here..."
+              placeholderTextColor={C.textLight}
+              multiline
+              maxLength={PHASE2_PROMPT_MAX_TEXT_LENGTH}
+              textAlignVertical="top"
+              autoFocus
+              blurOnSubmit={false}
+            />
+            <View style={styles.inputFooter}>
+              <Text
+                style={[
+                  styles.charCount,
+                  charCount >= PHASE2_PROMPT_MIN_TEXT_LENGTH && styles.charCountValid,
+                ]}
+              >
+                {charCount}/{PHASE2_PROMPT_MAX_TEXT_LENGTH}
+              </Text>
+              {charCount > 0 && charCount < PHASE2_PROMPT_MIN_TEXT_LENGTH && (
+                <Text style={styles.minHint}>
+                  {PHASE2_PROMPT_MIN_TEXT_LENGTH - charCount} more
+                </Text>
+              )}
+              {hasValidAnswer && (
+                <View style={styles.validIndicator}>
+                  <Ionicons name="checkmark-circle" size={14} color={C.primary} />
+                  <Text style={styles.validText}>Ready</Text>
+                </View>
+              )}
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  // ============================================================
+  // Section Header Component
+  // ============================================================
   const renderSectionHeader = (
-    sectionKey: SectionKey,
     title: string,
     subtitle: string,
+    answered: number,
+    total: number,
     complete: boolean
-  ) => {
-    const isExpanded = expandedSection === sectionKey;
-    return (
-      <TouchableOpacity
-        style={styles.sectionHeader}
-        onPress={() => toggleSection(sectionKey)}
-        activeOpacity={0.75}
-      >
-        <View style={styles.sectionHeaderLeft}>
-          <View style={styles.sectionTitleRow}>
-            <Text style={styles.sectionTitle}>{title}</Text>
-            {complete ? (
-              <Ionicons name="checkmark-circle" size={18} color={C.primary} />
-            ) : null}
+  ) => (
+    <View style={styles.sectionHeader}>
+      <View style={styles.sectionTitleRow}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        {complete && (
+          <View style={styles.sectionCheckBadge}>
+            <Ionicons name="checkmark" size={14} color="#FFFFFF" />
           </View>
-          <Text style={styles.sectionSubtitle}>{subtitle}</Text>
+        )}
+      </View>
+      <View style={styles.sectionMeta}>
+        <Text style={styles.sectionSubtitle}>{subtitle}</Text>
+        <View style={[styles.progressBadge, complete && styles.progressBadgeComplete]}>
+          <Text style={[styles.progressText, complete && styles.progressTextComplete]}>
+            {answered}/{total}
+          </Text>
         </View>
-        <Ionicons
-          name={isExpanded ? 'chevron-up' : 'chevron-down'}
-          size={20}
-          color={C.textLight}
-        />
-      </TouchableOpacity>
-    );
-  };
-
-  const renderQuickQuestions = () => {
-    const isExpanded = expandedSection === 'section1';
-    return (
-      <View style={styles.sectionCard}>
-        {renderSectionHeader(
-          'section1',
-          'Quick Questions',
-          `${section1AnsweredCount}/3 answered`,
-          section1Complete
-        )}
-        {isExpanded ? (
-          <View style={styles.sectionContent}>
-            {PHASE2_SECTION1_PROMPTS.map((prompt) => {
-              const currentAnswer = getAnswer(prompt.id);
-              return (
-                <View key={prompt.id} style={styles.promptBlock}>
-                  <View style={styles.promptHeaderRow}>
-                    <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                    {currentAnswer ? (
-                      <Ionicons name="checkmark-circle" size={18} color={C.primary} />
-                    ) : null}
-                  </View>
-                  <View style={styles.optionsGrid}>
-                    {prompt.options.map((option) => {
-                      const selected = currentAnswer === option;
-                      return (
-                        <TouchableOpacity
-                          key={option}
-                          style={[styles.optionChip, selected && styles.optionChipSelected]}
-                          onPress={() => selectMultipleChoiceAnswer(prompt.id, prompt.question, option)}
-                          activeOpacity={0.75}
-                        >
-                          <Text style={[styles.optionText, selected && styles.optionTextSelected]}>
-                            {option}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                </View>
-              );
-            })}
-          </View>
-        ) : null}
       </View>
-    );
-  };
-
-  const renderTextSection = (
-    sectionKey: 'section2' | 'section3',
-    title: string,
-    prompts: ReadonlyArray<{ readonly id: string; readonly question: string }>,
-    answeredCount: number,
-    complete: boolean
-  ) => {
-    const isExpanded = expandedSection === sectionKey;
-
-    return (
-      <View style={styles.sectionCard}>
-        {renderSectionHeader(
-          sectionKey,
-          title,
-          `${answeredCount}/3 answered`,
-          complete
-        )}
-        {isExpanded ? (
-          <View style={styles.sectionContent}>
-            {prompts.map((prompt) => {
-              const answer = getAnswer(prompt.id);
-              const isOpen = activeTextPromptId === prompt.id;
-              const valid = isValidTextAnswer(answer);
-              const answerLength = answer.trim().length;
-
-              return (
-                <View key={prompt.id} style={styles.promptBlock}>
-                  <TouchableOpacity
-                    style={styles.textPromptHeader}
-                    onPress={() => toggleTextPrompt(prompt.id)}
-                    activeOpacity={0.75}
-                  >
-                    <View style={styles.promptHeaderCopy}>
-                      <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                      {!isOpen && answer.trim().length > 0 ? (
-                        <Text style={styles.answerPreview} numberOfLines={2}>
-                          {answer.trim()}
-                        </Text>
-                      ) : (
-                        <Text style={styles.answerPlaceholder}>
-                          Tap to answer
-                        </Text>
-                      )}
-                    </View>
-                    <View style={styles.promptHeaderIcons}>
-                      {valid ? (
-                        <Ionicons name="checkmark-circle" size={18} color={C.primary} />
-                      ) : null}
-                      <Ionicons
-                        name={isOpen ? 'chevron-up' : 'chevron-down'}
-                        size={18}
-                        color={C.textLight}
-                      />
-                    </View>
-                  </TouchableOpacity>
-
-                  {isOpen ? (
-                    <View style={styles.textAnswerCard}>
-                      <TextInput
-                        style={styles.textInput}
-                        value={answer}
-                        onChangeText={(text) => updateDraftPromptAnswer(prompt.id, prompt.question, text)}
-                        placeholder="Type your answer..."
-                        placeholderTextColor={C.textLight}
-                        multiline
-                        maxLength={PHASE2_PROMPT_MAX_TEXT_LENGTH}
-                        textAlignVertical="top"
-                      />
-                      <View style={styles.inputFooter}>
-                        <Text style={styles.charCount}>
-                          {answerLength}/{PHASE2_PROMPT_MAX_TEXT_LENGTH}
-                        </Text>
-                        {valid ? (
-                          <View style={styles.validBadge}>
-                            <Ionicons name="checkmark-circle" size={16} color={C.primary} />
-                            <Text style={styles.validBadgeText}>Ready</Text>
-                          </View>
-                        ) : null}
-                      </View>
-                    </View>
-                  ) : null}
-                </View>
-              );
-            })}
-          </View>
-        ) : null}
-      </View>
-    );
-  };
-
-  const bottomHint = useMemo(() => {
-    if (canContinue) {
-      return 'Continue saves this entire prompt step at once.';
-    }
-
-    const missing: string[] = [];
-    if (!section1Complete) missing.push('Quick Questions');
-    if (!section2Complete) missing.push('Your Values');
-    if (!section3Complete) missing.push('Your Personality');
-    return `Finish: ${missing.join(', ')}`;
-  }, [canContinue, section1Complete, section2Complete, section3Complete]);
+    </View>
+  );
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
+      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          style={styles.backButton}
+        >
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Prompt answers</Text>
-        <Text style={styles.stepLabel}>Step 4 of 5</Text>
+        <View style={styles.headerCenter}>
+          <Text style={styles.headerTitle}>Your Answers</Text>
+          <Text style={styles.stepLabel}>Step 4 of 5</Text>
+        </View>
+        <View style={styles.headerRight}>
+          {section1Complete && section2Complete && section3Complete ? (
+            <View style={[styles.totalBadge, styles.totalBadgeComplete]}>
+              <Ionicons name="checkmark" size={14} color="#FFFFFF" />
+            </View>
+          ) : (
+            <View style={styles.totalBadge}>
+              <Text style={styles.totalBadgeText}>
+                {(section1Complete ? 1 : 0) + (section2Complete ? 1 : 0) + (section3Complete ? 1 : 0)}/3
+              </Text>
+            </View>
+          )}
+        </View>
       </View>
 
       <KeyboardAvoidingView
         style={styles.keyboard}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 10 : 0}
       >
         <ScrollView
+          ref={scrollViewRef}
           style={styles.scrollView}
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[styles.content, { paddingBottom: 140 }]}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
         >
+          {/* Intro */}
           <View style={styles.introCard}>
-            <Text style={styles.introTitle}>Answer a few questions before review</Text>
-            <Text style={styles.introText}>
-              Pick at least one answer in each section. We will save this whole step only when you continue.
-            </Text>
+            <Ionicons name="chatbubbles-outline" size={24} color={C.primary} />
+            <View style={styles.introContent}>
+              <Text style={styles.introTitle}>Complete all sections to continue</Text>
+              <Text style={styles.introText}>
+                Quick Questions: all 3 required{'\n'}
+                Values & Personality: at least 1 each
+              </Text>
+            </View>
           </View>
 
-          {renderQuickQuestions()}
-          {renderTextSection('section2', 'Your Values', PHASE2_SECTION2_PROMPTS, section2AnsweredCount, section2Complete)}
-          {renderTextSection('section3', 'Your Personality', PHASE2_SECTION3_PROMPTS, section3AnsweredCount, section3Complete)}
+          {/* ============================================================ */}
+          {/* SECTION 1: Quick Questions (Multiple Choice - Inline Options) */}
+          {/* ============================================================ */}
+          <View style={styles.section}>
+            {renderSectionHeader(
+              'Quick Questions',
+              'Answer all 3 questions',
+              section1Answered,
+              3,
+              section1Complete
+            )}
+            <View style={styles.sectionContent}>
+              {PHASE2_SECTION1_PROMPTS.map(renderSection1Question)}
+            </View>
+          </View>
+
+          {/* ============================================================ */}
+          {/* SECTION 2: Your Values (Text Input - Inline Expandable) */}
+          {/* ============================================================ */}
+          <View style={styles.section}>
+            {renderSectionHeader(
+              'Your Values',
+              'Answer at least 1 question',
+              section2Answered,
+              3,
+              section2Complete
+            )}
+            <View style={styles.sectionContent}>
+              {PHASE2_SECTION2_PROMPTS.map(renderTextQuestion)}
+            </View>
+          </View>
+
+          {/* ============================================================ */}
+          {/* SECTION 3: Your Personality (Text Input - Inline Expandable) */}
+          {/* ============================================================ */}
+          <View style={styles.section}>
+            {renderSectionHeader(
+              'Your Personality',
+              'Answer at least 1 question',
+              section3Answered,
+              3,
+              section3Complete
+            )}
+            <View style={styles.sectionContent}>
+              {PHASE2_SECTION3_PROMPTS.map(renderTextQuestion)}
+            </View>
+          </View>
         </ScrollView>
       </KeyboardAvoidingView>
 
+      {/* Bottom CTA */}
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}>
-        <Text style={styles.bottomHint}>{bottomHint}</Text>
+        <View style={styles.progressRow}>
+          <View style={styles.progressItem}>
+            <Ionicons
+              name={section1Complete ? 'checkmark-circle' : 'ellipse-outline'}
+              size={16}
+              color={section1Complete ? C.primary : C.textLight}
+            />
+            <Text style={[styles.progressLabel, section1Complete && styles.progressLabelDone]}>
+              Quick
+            </Text>
+          </View>
+          <View style={styles.progressDot} />
+          <View style={styles.progressItem}>
+            <Ionicons
+              name={section2Complete ? 'checkmark-circle' : 'ellipse-outline'}
+              size={16}
+              color={section2Complete ? C.primary : C.textLight}
+            />
+            <Text style={[styles.progressLabel, section2Complete && styles.progressLabelDone]}>
+              Values
+            </Text>
+          </View>
+          <View style={styles.progressDot} />
+          <View style={styles.progressItem}>
+            <Ionicons
+              name={section3Complete ? 'checkmark-circle' : 'ellipse-outline'}
+              size={16}
+              color={section3Complete ? C.primary : C.textLight}
+            />
+            <Text style={[styles.progressLabel, section3Complete && styles.progressLabelDone]}>
+              Personality
+            </Text>
+          </View>
+        </View>
+
         <TouchableOpacity
           style={[styles.continueButton, !canContinue && styles.continueButtonDisabled]}
           onPress={handleContinue}
           disabled={!canContinue || isSaving}
-          activeOpacity={0.8}
+          activeOpacity={0.85}
         >
-          {isSaving ? (
-            <ActivityIndicator size="small" color="#FFFFFF" />
+          {canContinue ? (
+            <LinearGradient
+              colors={[C.primary, '#9333EA']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.buttonGradient}
+            >
+              {isSaving ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <>
+                  <Text style={styles.continueButtonText}>Continue to review</Text>
+                  <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
+                </>
+              )}
+            </LinearGradient>
           ) : (
-            <>
-              <Text style={styles.continueButtonText}>Continue to review</Text>
-              <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
-            </>
+            <View style={styles.buttonDisabledInner}>
+              <Text style={styles.continueButtonTextDisabled}>Continue to review</Text>
+              <Ionicons name="arrow-forward" size={18} color={C.textLight} />
+            </View>
           )}
         </TouchableOpacity>
       </View>
@@ -439,7 +558,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 14,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 20,
+    backgroundColor: C.surface,
+  },
+  headerCenter: {
+    alignItems: 'center',
   },
   headerTitle: {
     fontSize: 18,
@@ -449,6 +579,28 @@ const styles = StyleSheet.create({
   stepLabel: {
     fontSize: 12,
     color: C.textLight,
+    marginTop: 2,
+  },
+  headerRight: {
+    width: 40,
+    alignItems: 'flex-end',
+  },
+  totalBadge: {
+    backgroundColor: C.primary + '25',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    minWidth: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  totalBadgeComplete: {
+    backgroundColor: C.primary,
+  },
+  totalBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.primary,
   },
   keyboard: {
     flex: 1,
@@ -458,188 +610,337 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: 16,
-    paddingBottom: 32,
+    paddingTop: 8,
   },
   introCard: {
-    backgroundColor: C.surface,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-  },
-  introTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: C.text,
-    marginBottom: 6,
-  },
-  introText: {
-    fontSize: 14,
-    lineHeight: 20,
-    color: C.textLight,
-  },
-  sectionCard: {
-    backgroundColor: C.surface,
-    borderRadius: 16,
-    marginBottom: 16,
-    overflow: 'hidden',
-  },
-  sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
+    gap: 12,
+    backgroundColor: C.primary + '12',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: C.primary + '25',
   },
-  sectionHeaderLeft: {
+  introContent: {
     flex: 1,
-    marginRight: 12,
+  },
+  introTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 2,
+  },
+  introText: {
+    fontSize: 13,
+    color: C.textLight,
+    lineHeight: 18,
+  },
+
+  // Section Styles
+  section: {
+    marginBottom: 28,
+  },
+  sectionHeader: {
+    marginBottom: 14,
   },
   sectionTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 10,
+    marginBottom: 4,
   },
   sectionTitle: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '700',
     color: C.text,
+  },
+  sectionCheckBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sectionMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   sectionSubtitle: {
     fontSize: 13,
     color: C.textLight,
-    marginTop: 4,
+  },
+  progressBadge: {
+    backgroundColor: C.surface,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 10,
+  },
+  progressBadgeComplete: {
+    backgroundColor: C.primary + '20',
+  },
+  progressText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: C.textLight,
+  },
+  progressTextComplete: {
+    color: C.primary,
   },
   sectionContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 18,
+    gap: 12,
   },
-  promptBlock: {
-    marginBottom: 18,
+
+  // ============================================================
+  // Section 1: Multiple Choice Styles
+  // ============================================================
+  s1QuestionCard: {
+    backgroundColor: CARD_BG,
+    borderRadius: 16,
+    padding: 16,
   },
-  promptHeaderRow: {
+  s1QuestionHeader: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
-    gap: 12,
-    marginBottom: 10,
+    marginBottom: 14,
   },
-  promptQuestion: {
+  s1QuestionText: {
     flex: 1,
-    fontSize: 14,
-    lineHeight: 20,
-    color: C.text,
+    fontSize: 15,
     fontWeight: '600',
+    color: C.text,
+    lineHeight: 22,
+    marginRight: 8,
   },
-  optionsGrid: {
+  miniCheckBadge: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  s1OptionsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
   },
-  optionChip: {
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    backgroundColor: C.background,
+  s1OptionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: C.surface,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
   },
-  optionChipSelected: {
+  s1OptionChipSelected: {
+    backgroundColor: C.primary + '18',
     borderColor: C.primary,
-    backgroundColor: `${C.primary}14`,
   },
-  optionText: {
+  s1OptionText: {
+    fontSize: 13,
+    color: C.textLight,
+    fontWeight: '500',
+    flexShrink: 1,
+  },
+  s1OptionTextSelected: {
     color: C.text,
-    fontSize: 14,
-    lineHeight: 19,
-  },
-  optionTextSelected: {
-    color: C.primary,
     fontWeight: '600',
   },
-  textPromptHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: 12,
+  s1CheckCircle: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  promptHeaderCopy: {
-    flex: 1,
+
+  // ============================================================
+  // Section 2 & 3: Text Input Styles
+  // ============================================================
+  textQuestionWrapper: {
+    marginBottom: 2,
   },
-  promptHeaderIcons: {
+  textQuestionCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-  },
-  answerPreview: {
-    fontSize: 13,
-    lineHeight: 19,
-    color: C.textLight,
-    marginTop: 6,
-  },
-  answerPlaceholder: {
-    fontSize: 13,
-    lineHeight: 19,
-    color: C.textLight,
-    marginTop: 6,
-  },
-  textAnswerCard: {
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: C.border,
+    backgroundColor: CARD_BG,
     borderRadius: 12,
-    backgroundColor: C.background,
-    padding: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
-  textInput: {
-    minHeight: 112,
-    fontSize: 14,
-    lineHeight: 20,
-    color: C.text,
+  textQuestionCardExpanded: {
+    borderColor: C.primary + '60',
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+    borderBottomWidth: 0,
   },
-  inputFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 10,
+  textQuestionCardAnswered: {
+    borderColor: C.primary + '40',
   },
-  charCount: {
-    fontSize: 12,
-    color: C.textLight,
+  textQuestionContent: {
+    flex: 1,
+    marginRight: 12,
   },
-  validBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  validBadgeText: {
-    fontSize: 12,
+  textQuestionText: {
+    fontSize: 15,
     fontWeight: '600',
+    color: C.text,
+    lineHeight: 20,
+    marginBottom: 4,
+  },
+  textAnswerPreview: {
+    fontSize: 13,
     color: C.primary,
+    fontWeight: '500',
   },
-  bottomBar: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: C.border,
-    backgroundColor: C.background,
-  },
-  bottomHint: {
+  textPlaceholder: {
     fontSize: 13,
     color: C.textLight,
-    marginBottom: 10,
   },
-  continueButton: {
-    height: 50,
+  textQuestionRight: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkBadge: {
+    width: 24,
+    height: 24,
     borderRadius: 12,
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+
+  // Inline Input Container - Compact WhatsApp-style
+  inlineInputContainer: {
+    backgroundColor: CARD_BG_ACTIVE,
+    borderWidth: 1,
+    borderColor: C.primary + '60',
+    borderTopWidth: 0,
+    borderBottomLeftRadius: 12,
+    borderBottomRightRadius: 12,
+    padding: 12,
+  },
+  inlineTextInput: {
+    fontSize: 15,
+    color: C.text,
+    lineHeight: 20,
+    minHeight: 80,
+    maxHeight: 140,
+    textAlignVertical: 'top',
+    paddingTop: 0,
+    paddingBottom: 0,
+  },
+  inputFooter: {
     flexDirection: 'row',
-    gap: 8,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: C.surface,
+  },
+  charCount: {
+    fontSize: 12,
+    color: C.textLight,
+    fontWeight: '500',
+  },
+  charCountValid: {
+    color: C.primary,
+  },
+  minHint: {
+    fontSize: 12,
+    color: C.textLight,
+  },
+  validIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  validText: {
+    fontSize: 12,
+    color: C.primary,
+    fontWeight: '600',
+  },
+
+  // Bottom Bar
+  bottomBar: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    backgroundColor: C.background,
+    borderTopWidth: 1,
+    borderTopColor: C.surface,
+  },
+  progressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 14,
+    gap: 10,
+  },
+  progressItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  progressLabel: {
+    fontSize: 13,
+    color: C.textLight,
+    fontWeight: '500',
+  },
+  progressLabelDone: {
+    color: C.text,
+  },
+  progressDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: C.surface,
+  },
+  continueButton: {
+    borderRadius: 14,
+    overflow: 'hidden',
   },
   continueButtonDisabled: {
-    opacity: 0.55,
+    backgroundColor: C.surface,
+  },
+  buttonGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    gap: 8,
+  },
+  buttonDisabledInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    gap: 8,
+    backgroundColor: C.surface,
+    borderRadius: 14,
   },
   continueButtonText: {
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '700',
     color: '#FFFFFF',
+  },
+  continueButtonTextDisabled: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: C.textLight,
   },
 });

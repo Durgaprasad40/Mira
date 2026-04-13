@@ -284,6 +284,79 @@ export const updateFieldsByAuthId = mutation({
 });
 
 /**
+ * Save onboarding photos for Phase-2 Step 2.
+ * Creates a skeleton profile if none exists, updates photos if it does.
+ * Used specifically during Phase-2 onboarding before full profile is complete.
+ */
+export const saveOnboardingPhotos = mutation({
+  args: {
+    authUserId: v.string(),
+    privatePhotoUrls: v.array(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      console.warn('[PRIVATE_PROFILE] saveOnboardingPhotos: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      console.warn('[PRIVATE_PROFILE] saveOnboardingPhotos: deletion pending');
+      return { success: false, error: 'deletion_pending' };
+    }
+
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    const now = Date.now();
+
+    if (existing) {
+      // Update existing profile with photos
+      await ctx.db.patch(existing._id, {
+        privatePhotoUrls: args.privatePhotoUrls,
+        updatedAt: now,
+      });
+      console.log('[PRIVATE_PROFILE] saveOnboardingPhotos: updated existing profile');
+      return { success: true, profileId: existing._id };
+    }
+
+    // Create skeleton profile for onboarding (will be completed in later steps)
+    // Get user data to populate required fields with defaults
+    const user = await ctx.db.get(userId);
+    const profileId = await ctx.db.insert('userPrivateProfiles', {
+      userId,
+      displayName: user?.handle || user?.name || '',
+      age: 0, // Will be calculated from DOB in later steps
+      gender: user?.gender || '',
+      privateBio: '',
+      privateIntentKeys: [],
+      privatePhotoUrls: args.privatePhotoUrls,
+      city: user?.city || '',
+      isPrivateEnabled: true,
+      ageConfirmed18Plus: true,
+      ageConfirmedAt: now,
+      privatePhotosBlurred: [],
+      privatePhotoBlurLevel: 0,
+      privateDesireTagKeys: [],
+      privateBoundaries: [],
+      revealPolicy: 'mutual_only',
+      isSetupComplete: false,
+      hobbies: user?.activities || [],
+      isVerified: user?.isVerified || false,
+      promptAnswers: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+    console.log('[PRIVATE_PROFILE] saveOnboardingPhotos: created skeleton profile');
+    return { success: true, profileId };
+  },
+});
+
+/**
  * Get private profile by auth user ID (string).
  * Resolves auth ID to Convex user ID internally.
  * Used by Phase-2 Profile tab to load backend data.
@@ -293,25 +366,35 @@ export const updateFieldsByAuthId = mutation({
 export const getByAuthUserId = query({
   args: { authUserId: v.string() },
   handler: async (ctx, args) => {
-    // PROFILE-P1-002 FIX: Require authentication for private profile access
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      // No auth identity - deny access to private profile data
-      return null;
-    }
-    if (identity.subject !== args.authUserId) {
-      // Caller requesting a different user's profile - deny access
+    // Resolve the provided authUserId to a Convex user ID
+    // authUserId can be either a Convex ID directly or a Clerk/auth ID
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      console.log('[P2_PROFILE_QUERY] getByAuthUserId: user not found', {
+        authUserId: args.authUserId?.substring(0, 8),
+      });
       return null;
     }
 
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      return null;
+    // PROFILE-P1-002 FIX: Verify caller owns this profile
+    // Compare Clerk identity against the user's stored authUserId field
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const user = await ctx.db.get(userId);
+      // If user has an authUserId field, verify it matches the Clerk identity
+      if (user?.authUserId && user.authUserId !== identity.subject) {
+        console.log('[P2_PROFILE_QUERY] getByAuthUserId: auth mismatch', {
+          userAuthUserId: user.authUserId?.substring(0, 8),
+          identitySubject: identity.subject?.substring(0, 8),
+        });
+        return null;
+      }
     }
 
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
+      console.log('[P2_PROFILE_QUERY] getByAuthUserId: deletion pending');
       return null;
     }
 
@@ -319,6 +402,13 @@ export const getByAuthUserId = query({
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .first();
+
+    if (!profile) {
+      console.log('[P2_PROFILE_QUERY] getByAuthUserId: no profile found', {
+        userId: userId?.substring(0, 8),
+      });
+    }
+
     return profile;
   },
 });

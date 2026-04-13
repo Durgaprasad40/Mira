@@ -53,23 +53,27 @@ export default function Phase2ReviewScreen() {
 
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
 
+  // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken with token
   const currentUser = useQuery(
-    api.users.getCurrentUserFromToken,
-    token ? { token } : 'skip'
+    api.users.getCurrentUser,
+    userId ? { userId } : 'skip'
   );
+  // FIX: Use getByAuthUserId with authUserId instead of getCurrentOnboardingProfile with token
   const currentPrivateProfile = useQuery(
-    api.privateProfiles.getCurrentOnboardingProfile,
-    token ? { token } : 'skip'
+    api.privateProfiles.getByAuthUserId,
+    userId ? { authUserId: userId } : 'skip'
   );
+  // FIX: Use getOnboardingStatus with userId instead of getPhase2OnboardingState with token
   const onboardingState = useQuery(
-    api.privateProfiles.getPhase2OnboardingState,
-    token ? { token } : 'skip'
+    api.users.getOnboardingStatus,
+    userId ? { userId } : 'skip'
   );
 
-  const finalizeOnboardingProfile = useMutation(api.privateProfiles.finalizeOnboardingProfile);
+  // FIX: Use setPhase2OnboardingCompleted with userId instead of finalizeOnboardingProfile with token
+  const finalizeOnboardingProfile = useMutation(api.users.setPhase2OnboardingCompleted);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
@@ -109,10 +113,15 @@ export default function Phase2ReviewScreen() {
       }),
     [promptAnswers]
   );
-  const hasSection1Prompt = useMemo(
-    () => validPromptAnswers.some((prompt) => SECTION1_PROMPT_IDS.has(prompt.promptId)),
+  // STRICT VALIDATION RULES:
+  // - Section 1: ALL 3 prompts required
+  // - Section 2: At least 1 prompt required
+  // - Section 3: At least 1 prompt required
+  const section1Count = useMemo(
+    () => validPromptAnswers.filter((prompt) => SECTION1_PROMPT_IDS.has(prompt.promptId)).length,
     [validPromptAnswers]
   );
+  const hasSection1Complete = section1Count === 3; // ALL 3 required
   const hasSection2Prompt = useMemo(
     () => validPromptAnswers.some((prompt) => SECTION2_PROMPT_IDS.has(prompt.promptId)),
     [validPromptAnswers]
@@ -123,17 +132,24 @@ export default function Phase2ReviewScreen() {
   );
 
   const bioLength = privateBio.trim().length;
+  // STRICT COMPLETION RULES:
+  // - Photos: at least PHASE2_MIN_PHOTOS
+  // - Intents: between PHASE2_MIN_INTENTS and PHASE2_MAX_INTENTS
+  // - Bio: between PHASE2_DESIRE_MIN_LENGTH and PHASE2_DESIRE_MAX_LENGTH
+  // - Section 1: ALL 3 prompts
+  // - Section 2: At least 1 prompt
+  // - Section 3: At least 1 prompt
   const canComplete =
-    !!token &&
+    !!userId &&
     validPhotoUrls.length >= PHASE2_MIN_PHOTOS &&
     intentKeys.length >= PHASE2_MIN_INTENTS &&
     intentKeys.length <= PHASE2_MAX_INTENTS &&
     bioLength >= PHASE2_DESIRE_MIN_LENGTH &&
     bioLength <= PHASE2_DESIRE_MAX_LENGTH &&
-    hasSection1Prompt &&
+    hasSection1Complete &&
     hasSection2Prompt &&
     hasSection3Prompt &&
-    onboardingState?.nextStep === 'profile-setup';
+    !onboardingState?.phase2OnboardingCompleted;
 
   const missingItems = useMemo(() => {
     const missing: string[] = [];
@@ -146,27 +162,58 @@ export default function Phase2ReviewScreen() {
     if (bioLength < PHASE2_DESIRE_MIN_LENGTH || bioLength > PHASE2_DESIRE_MAX_LENGTH) {
       missing.push('private bio');
     }
-    if (!hasSection1Prompt || !hasSection2Prompt || !hasSection3Prompt) {
-      missing.push('prompts');
+    if (!hasSection1Complete) {
+      missing.push('all 3 quick questions');
+    }
+    if (!hasSection2Prompt) {
+      missing.push('at least 1 values question');
+    }
+    if (!hasSection3Prompt) {
+      missing.push('at least 1 personality question');
     }
     return missing;
-  }, [bioLength, hasSection1Prompt, hasSection2Prompt, hasSection3Prompt, intentKeys.length, validPhotoUrls.length]);
+  }, [bioLength, hasSection1Complete, hasSection2Prompt, hasSection3Prompt, intentKeys.length, validPhotoUrls.length]);
 
   const handleComplete = async () => {
-    if (!token || !canComplete || isFinalizingRef.current) return;
+    if (__DEV__) {
+      console.log('[P2_STEP5] continue pressed', {
+        userId: userId?.substring(0, 8),
+        canComplete,
+        isFinalizingRef: isFinalizingRef.current,
+      });
+    }
+
+    if (!userId || !canComplete || isFinalizingRef.current) {
+      if (__DEV__) {
+        console.log('[P2_STEP5] early exit', {
+          noUserId: !userId,
+          cannotComplete: !canComplete,
+          alreadyFinalizing: isFinalizingRef.current,
+          missingItems,
+        });
+      }
+      return;
+    }
 
     isFinalizingRef.current = true;
     setIsSubmitting(true);
 
     try {
-      const profileResult = await finalizeOnboardingProfile({ token });
+      if (__DEV__) console.log('[P2_STEP5] finalize start');
+      const profileResult = await finalizeOnboardingProfile({ userId });
+      if (__DEV__) console.log('[P2_STEP5] finalize result', profileResult);
+
       if (!profileResult?.success) {
         throw new Error('Profile save did not succeed');
       }
 
+      if (__DEV__) console.log('[P2_STEP5] calling completeSetup()');
       completeSetup();
+
+      if (__DEV__) console.log('[P2_STEP5] routing to desire-land');
       router.replace('/(main)/(private)/(tabs)/desire-land' as any);
     } catch (error) {
+      if (__DEV__) console.error('[P2_STEP5] finalize error', error);
       Alert.alert(
         'Unable to finish setup',
         'Your Private Mode profile was not created. Please try again.'
@@ -176,7 +223,7 @@ export default function Phase2ReviewScreen() {
     }
   };
 
-  if (!token) {
+  if (!userId) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.centerState}>
@@ -200,6 +247,16 @@ export default function Phase2ReviewScreen() {
   }
 
   if (!currentUser || !currentPrivateProfile) {
+    if (__DEV__) {
+      console.log('[P2_REVIEW_GATE] blocked because data missing', {
+        userId: userId?.substring(0, 8),
+        hasCurrentUser: !!currentUser,
+        currentUserUndefined: currentUser === undefined,
+        hasCurrentPrivateProfile: !!currentPrivateProfile,
+        currentPrivateProfileUndefined: currentPrivateProfile === undefined,
+        reason: !currentUser ? 'currentUser is falsy' : 'currentPrivateProfile is falsy',
+      });
+    }
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.centerState}>
@@ -208,7 +265,8 @@ export default function Phase2ReviewScreen() {
           <Text style={styles.stateText}>We need your saved Private Mode draft before you can review it.</Text>
           <TouchableOpacity
             style={styles.recoveryButton}
-            onPress={() => router.replace(PHASE2_ONBOARDING_ROUTE_MAP[onboardingState?.nextStep === 'complete' ? 'profile-setup' : onboardingState?.nextStep || 'index'] as any)}
+            // FIX: Use phase2OnboardingCompleted instead of nextStep
+            onPress={() => router.replace(onboardingState?.phase2OnboardingCompleted ? '/(main)/(private)/(tabs)/desire-land' as any : PHASE2_ONBOARDING_ROUTE_MAP['index'] as any)}
             activeOpacity={0.8}
           >
             <Text style={styles.recoveryButtonText}>Go back to your next step</Text>

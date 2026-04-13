@@ -46,14 +46,16 @@ export default function Phase2OnboardingConsentScreen() {
 
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
 
+  // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken with token
   const currentUser = useQuery(
-    api.users.getCurrentUserFromToken,
-    token ? { token } : 'skip'
+    api.users.getCurrentUser,
+    userId ? { userId } : 'skip'
   );
 
-  const acceptConsent = useMutation(api.users.acceptPrivateOnboardingConsent);
+  // FIX: Use setPrivateWelcomeConfirmed with userId instead of acceptPrivateOnboardingConsent with token
+  const acceptConsent = useMutation(api.users.setPrivateWelcomeConfirmed);
 
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
   const acceptPrivateTerms = useIncognitoStore((s) => s.acceptPrivateTerms);
@@ -92,28 +94,25 @@ export default function Phase2OnboardingConsentScreen() {
   }, [currentUser]);
 
   const isLoading = currentUser === undefined;
-  const canContinue = !!token && !!currentUser && rulesChecked && noSharingChecked && !isSubmitting;
+  const canContinue = !!userId && !!currentUser && rulesChecked && noSharingChecked && !isSubmitting;
 
   const handleExit = () => {
     router.replace(PHASE1_DISCOVER_ROUTE as any);
   };
 
   const handleContinue = async () => {
-    if (!canContinue || !token) return;
+    if (!canContinue || !userId) return;
 
     setIsSubmitting(true);
     try {
-      const result = await acceptConsent({
-        token,
-        confirmAdult: true,
-        confirmNoSharing: true,
-      });
+      // FIX: setPrivateWelcomeConfirmed takes { userId } only
+      const result = await acceptConsent({ userId });
 
       if (!result?.success) {
         throw new Error('Consent could not be saved');
       }
 
-      setAcceptedTermsAt(result.consentAcceptedAt);
+      setAcceptedTermsAt(Date.now());
       acceptPrivateTerms();
       router.push(PHASE2_ONBOARDING_ROUTE_MAP['select-photos'] as any);
     } catch (error) {
@@ -126,7 +125,7 @@ export default function Phase2OnboardingConsentScreen() {
     }
   };
 
-  if (!token) {
+  if (!userId) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.centerState}>

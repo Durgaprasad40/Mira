@@ -68,33 +68,32 @@ class Phase2ErrorBoundary extends Component<{ children: ReactNode }, { error: Er
 function Phase2OnboardingNavigator() {
   const router = useRouter();
   const pathname = usePathname();
-  const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
 
+  // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken with token
   const currentUser = useQuery(
-    api.users.getCurrentUserFromToken,
-    token ? { token } : 'skip'
+    api.users.getCurrentUser,
+    userId ? { userId } : 'skip'
   );
+  // FIX: Use getByAuthUserId with authUserId instead of getCurrentOnboardingProfile with token
   const currentPrivateProfile = useQuery(
-    api.privateProfiles.getCurrentOnboardingProfile,
-    token ? { token } : 'skip'
+    api.privateProfiles.getByAuthUserId,
+    userId ? { authUserId: userId } : 'skip'
   );
+  // FIX: Use users.getOnboardingStatus with userId for Phase-2 routing state
   const onboardingState = useQuery(
-    api.privateProfiles.getPhase2OnboardingState,
-    token ? { token } : 'skip'
+    api.users.getOnboardingStatus,
+    userId ? { userId } : 'skip'
   );
 
   const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
   const hydrateFromConvex = usePrivateProfileStore((s) => s.hydrateFromConvex);
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
-  const clearOnboardingProgress = usePrivateProfileStore((s) => s.clearOnboardingProgress);
   const hydrationKeyRef = useRef<string | null>(null);
   const routeCorrectionKeyRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    clearOnboardingProgress().catch(() => {
-      // Legacy AsyncStorage progress is no longer authoritative for Phase-2 onboarding.
-    });
-  }, [clearOnboardingProgress]);
+  // NOTE: Removed clearOnboardingProgress() on mount - it was wiping valid progress
+  // and causing the flow to restart from Step 1. Backend state is now authoritative.
 
   useEffect(() => {
     if (!currentUser || currentPrivateProfile === undefined) {
@@ -110,6 +109,13 @@ function Phase2OnboardingNavigator() {
 
     if (hydrationKeyRef.current === hydrationKey) {
       return;
+    }
+
+    if (__DEV__) {
+      console.log('[P2_ONB_LAYOUT] hydrating from backend (this should NOT happen after finalize)', {
+        userId: currentUser._id?.substring(0, 8),
+        hasPrivateProfile: !!currentPrivateProfile,
+      });
     }
 
     importPhase1Data(buildPhase1ImportData(currentUser));
@@ -132,26 +138,21 @@ function Phase2OnboardingNavigator() {
       return null;
     }
 
-    if (onboardingState.nextStep === 'complete') {
+    // FIX: getOnboardingStatus returns phase2OnboardingCompleted, not nextStep
+    // If Phase-2 onboarding is completed, redirect to Private Mode main screen
+    if (onboardingState.phase2OnboardingCompleted) {
       return pathname === '/(main)/(private)/(tabs)/desire-land'
         ? null
         : '/(main)/(private)/(tabs)/desire-land';
     }
 
-    const nextStep = onboardingState.nextStep as Exclude<Phase2OnboardingStep, 'complete'>;
-    const nextRoute = PHASE2_ONBOARDING_ROUTE_MAP[nextStep];
-    const currentOrder = PHASE2_ONBOARDING_STEP_ORDER[currentStep];
-    const nextOrder = PHASE2_ONBOARDING_STEP_ORDER[nextStep];
-    const shouldRedirect =
-      currentStep === 'index'
-        ? nextStep !== 'index'
-        : currentOrder > nextOrder;
-
-    return shouldRedirect && pathname !== nextRoute ? nextRoute : null;
-  }, [currentStep, onboardingState, pathname]);
+    // Phase-2 onboarding not completed - allow current flow without redirect
+    // The individual screens handle their own navigation progression
+    return null;
+  }, [onboardingState, pathname]);
 
   useEffect(() => {
-    if (!token || !pendingRoute) {
+    if (!userId || !pendingRoute) {
       return;
     }
 
@@ -162,9 +163,9 @@ function Phase2OnboardingNavigator() {
 
     routeCorrectionKeyRef.current = correctionKey;
     router.replace(pendingRoute as any);
-  }, [pathname, pendingRoute, router, token]);
+  }, [pathname, pendingRoute, router, userId]);
 
-  const isLoading = !!token && (
+  const isLoading = !!userId && (
     currentUser === undefined ||
     currentPrivateProfile === undefined ||
     onboardingState === undefined
