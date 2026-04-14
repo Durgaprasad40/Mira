@@ -31,8 +31,8 @@ export const skipDemoOnboarding = false;
 // =============================================================================
 //
 // When enabled (EXPO_PUBLIC_DEMO_AUTH_MODE=true in .env.local):
-// - Any email + any password accepted for login/signup
-// - Stable demo user identity created/reused in backend
+// - Password is not verified (dev convenience)
+// - Identity is per normalized email: register creates once; login only finds existing
 // - Email verification bypassed (demo user is pre-verified)
 // - Face verification bypassed (demo user is pre-verified)
 // - Onboarding progress saved against stable demo user
@@ -54,8 +54,7 @@ export const isDemoAuthMode = __DEV__
   : false;
 
 /**
- * Stable demo user identifier - same user across all demo sessions.
- * This ensures onboarding progress is preserved between app restarts.
+ * Legacy stable id (pre per-email demo auth). Kept for any old tooling; routing uses email.
  */
 export const DEMO_USER_STABLE_ID = 'demo_user_stable_001';
 
@@ -69,6 +68,7 @@ export const DEMO_TOKEN_STABLE = 'demo_token_stable_001';
  * Log demo auth mode status on startup (dev only)
  */
 if (__DEV__ && isDemoAuthMode) {
-  console.log('[DEMO_AUTH] Demo Auth Mode ENABLED - any email/password will work');
-  console.log('[DEMO_AUTH] Stable user ID:', DEMO_USER_STABLE_ID);
+  console.log(
+    '[DEMO_AUTH] Demo Auth Mode ENABLED — passwords not checked; login requires existing email; register creates per email'
+  );
 }

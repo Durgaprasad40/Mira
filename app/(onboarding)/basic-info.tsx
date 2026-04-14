@@ -32,8 +32,8 @@ import DateTimePicker from "@react-native-community/datetimepicker";
 import { Gender } from "@/types";
 import { isDemoMode, convex } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
-import { isDemoAuthMode, DEMO_USER_STABLE_ID } from "@/config/demo";
-import { loginDemoUser } from "@/lib/demoAuth";
+import { isDemoAuthMode } from "@/config/demo";
+import { registerDemoUser } from "@/lib/demoAuth";
 import { useAuthSubmit } from "@/hooks/useAuthSubmit";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -590,7 +590,7 @@ export default function BasicInfoScreen() {
 
         try {
           // Step 1: Login/create demo user in Convex backend
-          const demoResult = await loginDemoUser(email, password);
+          const demoResult = await registerDemoUser(email, password);
 
           if (!demoResult.success) {
             throw new Error('Demo auth failed');

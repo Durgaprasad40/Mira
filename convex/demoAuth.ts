@@ -10,103 +10,92 @@
  * - getDemoOnboardingStatus: Get onboarding status
  * - ensureDemoUserConsent: Ensure consent is set
  */
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type MutationCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { Doc, Id } from "./_generated/dataModel";
 
+/** Normalize email for demo-auth identity (index lookups). */
+function normalizeDemoEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
 /**
- * Login or create a demo user.
- * Called from lib/demoAuth.ts loginDemoUser().
+ * Deterministic per-email demo auth key (replaces single global stable id).
+ * Keeps `by_auth_user_id` / `by_demo_user_id` unique per registered email.
+ */
+function deriveDemoAuthIdForEmail(normalizedEmail: string): string {
+  let h = 5381;
+  for (let i = 0; i < normalizedEmail.length; i++) {
+    h = ((h << 5) + h) ^ normalizedEmail.charCodeAt(i);
+  }
+  const hex = (h >>> 0).toString(16);
+  return `demo_auth_${hex}_${normalizedEmail.length}`;
+}
+
+/**
+ * Find user by email for demo auth (normalized + legacy casing + legacy stable row).
+ */
+async function findDemoUserByEmail(
+  ctx: MutationCtx,
+  rawEmail: string,
+): Promise<Doc<"users"> | null> {
+  const normalized = normalizeDemoEmail(rawEmail);
+  if (!normalized.includes("@")) {
+    return null;
+  }
+
+  let user: Doc<"users"> | null = await ctx.db
+    .query("users")
+    .withIndex("by_email", (q: any) => q.eq("email", normalized))
+    .first();
+
+  if (!user) {
+    const trimmed = rawEmail.trim();
+    user = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q: any) => q.eq("email", trimmed))
+      .first();
+  }
+
+  if (!user) {
+    const legacy = await ctx.db
+      .query("users")
+      .withIndex("by_auth_user_id", (q: any) => q.eq("authUserId", "demo_user_stable_001"))
+      .first();
+    if (
+      legacy &&
+      legacy.email &&
+      normalizeDemoEmail(legacy.email) === normalized
+    ) {
+      user = legacy;
+    }
+  }
+
+  return user;
+}
+
+/**
+ * Demo auth: login (existing email only) OR register (new email only).
+ * - mode "login": NEVER creates a user; fails if no account for this email.
+ * - mode "register": NEVER logs in; fails if email already exists; creates user.
+ *
+ * Called from lib/demoAuth.ts — replaces global stable demoUserId for identity.
  */
 export const loginOrCreateDemoUser = mutation({
   args: {
     email: v.string(),
-    demoUserId: v.string(),
+    mode: v.union(v.literal("login"), v.literal("register")),
   },
   handler: async (ctx, args) => {
-    const { email, demoUserId } = args;
+    const rawEmail = args.email;
+    const normalized = normalizeDemoEmail(rawEmail);
     const now = Date.now();
-    let isNewUser = false;
 
-    // Check if demo user already exists by authUserId
-    let user: Doc<"users"> | null = await ctx.db
-      .query("users")
-      .withIndex("by_auth_user_id", (q) => q.eq("authUserId", demoUserId))
-      .first();
-
-    if (!user) {
-      isNewUser = true;
-      // Create demo user using the same pattern as helpers.ts ensureUserByAuthId
-      const userId = await ctx.db.insert("users", {
-        // Auth identifiers
-        demoUserId: demoUserId,  // Legacy field (backward compatibility)
-        authUserId: demoUserId,  // New dedicated field
-        authProvider: "email",
-        email: email,
-
-        // Profile (minimal required)
-        name: "Demo User",
-        dateOfBirth: "1995-01-15",
-        gender: "male",
-        bio: "Demo account for testing Mira features.",
-
-        // Verification
-        isVerified: true,
-        emailVerified: true,
-
-        // Preferences
-        lookingFor: ["female"],
-        relationshipIntent: [],
-        activities: [],
-        minAge: 18,
-        maxAge: 50,
-        maxDistance: 50,
-
-        // Subscription
-        subscriptionTier: "free",
-        trialEndsAt: undefined,
-
-        // Privacy
-        incognitoMode: false,
-
-        // Counters (free tier defaults)
-        likesRemaining: 50,
-        superLikesRemaining: 1,
-        messagesRemaining: 5,
-        rewindsRemaining: 0,
-        boostsRemaining: 0,
-
-        // Reset timestamps
-        likesResetAt: now,
-        superLikesResetAt: now,
-        messagesResetAt: now,
-
-        // Activity
-        lastActive: now,
-        createdAt: now,
-
-        // Notifications
-        notificationsEnabled: true,
-
-        // Onboarding - NOT completed for new demo users
-        // They should go through onboarding flow
-        onboardingCompleted: false,
-
-        // Account status
-        isActive: true,
-        isBanned: false,
-      });
-
-      user = await ctx.db.get(userId);
-    } else {
-      // Update lastActive for existing user
-      await ctx.db.patch(user._id, { lastActive: now });
-    }
-
-    if (!user) {
+    if (!normalized.includes("@")) {
       return {
         success: false,
-        message: "Failed to create demo user",
+        message: "Please enter a valid email address.",
+        code: "INVALID_EMAIL" as const,
         userId: "",
         token: "",
         onboardingCompleted: false,
@@ -114,15 +103,132 @@ export const loginOrCreateDemoUser = mutation({
       };
     }
 
-    // Generate a demo token (format: demo_<userId>)
-    const token = `demo_${user._id}`;
+    const existing = await findDemoUserByEmail(ctx, rawEmail);
 
+    if (args.mode === "login") {
+      if (!existing) {
+        return {
+          success: false,
+          message:
+            "No account found for this email. Create an account first or check the address.",
+          code: "NO_ACCOUNT" as const,
+          userId: "",
+          token: "",
+          onboardingCompleted: false,
+          isNewUser: false,
+        };
+      }
+
+      if (!existing.isActive || existing.isBanned || existing.deletedAt) {
+        return {
+          success: false,
+          message: "This account cannot be used. Please contact support.",
+          code: "ACCOUNT_BLOCKED" as const,
+          userId: "",
+          token: "",
+          onboardingCompleted: false,
+          isNewUser: false,
+        };
+      }
+
+      await ctx.db.patch(existing._id, { lastActive: now });
+      const token = `demo_${existing._id}`;
+      return {
+        success: true,
+        message: "",
+        code: undefined,
+        userId: existing._id,
+        token,
+        onboardingCompleted: existing.onboardingCompleted ?? false,
+        isNewUser: false,
+      };
+    }
+
+    // register
+    if (existing) {
+      return {
+        success: false,
+        message:
+          "An account with this email already exists. Sign in with “I already have an account”.",
+        code: "EMAIL_EXISTS" as const,
+        userId: "",
+        token: "",
+        onboardingCompleted: false,
+        isNewUser: false,
+      };
+    }
+
+    const authKey = deriveDemoAuthIdForEmail(normalized);
+
+    const userId = await ctx.db.insert("users", {
+      demoUserId: authKey,
+      authUserId: authKey,
+      authProvider: "email",
+      email: normalized,
+
+      name: "Demo User",
+      dateOfBirth: "1995-01-15",
+      gender: "male",
+      bio: "Demo account for testing Mira features.",
+
+      isVerified: true,
+      emailVerified: true,
+
+      lookingFor: ["female"],
+      relationshipIntent: [],
+      activities: [],
+      minAge: 18,
+      maxAge: 50,
+      maxDistance: 50,
+
+      subscriptionTier: "free",
+      trialEndsAt: undefined,
+
+      incognitoMode: false,
+
+      likesRemaining: 50,
+      superLikesRemaining: 1,
+      messagesRemaining: 5,
+      rewindsRemaining: 0,
+      boostsRemaining: 0,
+
+      likesResetAt: now,
+      superLikesResetAt: now,
+      messagesResetAt: now,
+
+      lastActive: now,
+      createdAt: now,
+
+      notificationsEnabled: true,
+
+      onboardingCompleted: false,
+
+      isActive: true,
+      isBanned: false,
+    });
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return {
+        success: false,
+        message: "Failed to create demo user",
+        code: "CREATE_FAILED" as const,
+        userId: "",
+        token: "",
+        onboardingCompleted: false,
+        isNewUser: false,
+      };
+    }
+
+    const token = `demo_${user._id}`;
     return {
       success: true,
+      message: "",
+      code: undefined,
       userId: user._id,
       token,
       onboardingCompleted: user.onboardingCompleted ?? false,
-      isNewUser,
+      isNewUser: true,
     };
   },
 });

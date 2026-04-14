@@ -85,7 +85,7 @@ export async function loginDemoUser(
     // Call backend to create/get demo user
     const result = await convex.mutation(api.demoAuth.loginOrCreateDemoUser, {
       email: email.toLowerCase().trim(),
-      demoUserId: DEMO_USER_STABLE_ID,
+      mode: 'login',
     });
 
     if (!result.success) {
@@ -134,8 +134,7 @@ export async function loginDemoUser(
 }
 
 /**
- * Register a demo user (same as login in demo mode).
- * In demo mode, signup and login are essentially the same operation.
+ * Register a demo user (create-only). Fails if `users` already has this email on the active Convex deployment.
  */
 export async function registerDemoUser(
   email: string,
@@ -148,8 +147,68 @@ export async function registerDemoUser(
   onboardingCompleted: boolean;
   isNewUser: boolean;
 }> {
-  // In demo mode, register is the same as login
-  return loginDemoUser(email, password);
+  if (!isDemoAuthMode) {
+    throw new Error('Demo auth mode is not enabled');
+  }
+
+  if (__DEV__) {
+    console.log('[DEMO_AUTH] registerDemoUser (create-only) for:', email);
+  }
+
+  try {
+    const result = await convex.mutation(api.demoAuth.loginOrCreateDemoUser, {
+      email: email.toLowerCase().trim(),
+      mode: 'register',
+    });
+
+    if (!result.success) {
+      if (__DEV__) {
+        console.warn(
+          '[DEMO_AUTH] registerDemoUser: server rejected registration. ' +
+            'If you wiped the DB, ensure EXPO_PUBLIC_CONVEX_URL matches the deployment you wiped (prod vs dev).',
+          { message: result.message, convexUrl: process.env.EXPO_PUBLIC_CONVEX_URL }
+        );
+      }
+      throw new Error(result.message || 'Demo registration failed');
+    }
+
+    const saved = await saveAuthBootCache(result.token, result.userId, {
+      onboardingCompleted: result.onboardingCompleted,
+    });
+
+    if (!saved && __DEV__) {
+      console.warn('[DEMO_AUTH] Failed to save demo auth to SecureStore');
+    }
+
+    const authVersion = useAuthStore.getState().authVersion;
+    useAuthStore.getState().setAuthenticatedSession(
+      result.userId,
+      result.token,
+      result.onboardingCompleted,
+      authVersion
+    );
+
+    if (__DEV__) {
+      console.log('[DEMO_AUTH] Demo user registered:', {
+        userId: result.userId.substring(0, 8),
+        onboardingCompleted: result.onboardingCompleted,
+        isNewUser: result.isNewUser,
+      });
+    }
+
+    return {
+      success: true,
+      userId: result.userId,
+      token: result.token,
+      onboardingCompleted: result.onboardingCompleted,
+      isNewUser: result.isNewUser,
+    };
+  } catch (error) {
+    if (__DEV__) {
+      console.error('[DEMO_AUTH] registerDemoUser error:', error);
+    }
+    throw error;
+  }
 }
 
 /**
