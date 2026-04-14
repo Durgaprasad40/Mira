@@ -3,6 +3,7 @@ import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
+import { validateAccess } from "./devReset";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
 import {
   FRONTEND_RELATIONSHIP_INTENT_IDS,
@@ -2532,11 +2533,12 @@ export const getMyReports = query({
  * - purchases
  * - subscriptionRecords
  *
- * HOW TO RUN FROM CONVEX DASHBOARD:
- * 1. Go to your Convex dashboard
- * 2. Navigate to Functions → users → devWipeAllUserData
- * 3. Click "Run" (no arguments needed)
- * 4. Check the logs for deletion report
+ * HOW TO RUN (must target the SAME deployment as EXPO_PUBLIC_CONVEX_URL in the app):
+ * - Dashboard: Functions → users → devWipeAllUserData — pass JSON args (see mutation args).
+ * - CLI: npx convex run --url 'YOUR_DEPLOYMENT_URL' users:devWipeAllUserData '{"token":"…","confirm":"WIPE_ALL"}'
+ *
+ * Requires Convex dashboard env: DEV_RESET_ENABLED=true and DEV_RESET_TOKEN (same as devReset:devWipeAllUserData).
+ * NOTE: A previous NODE_ENV check blocked this on all Convex Cloud deployments; use token gate instead.
  *
  * AFTER WIPE:
  * - All app data is gone
@@ -2544,12 +2546,12 @@ export const getMyReports = query({
  * - Fresh start for testing
  */
 export const devWipeAllUserData = mutation({
-  args: {},
-  handler: async (ctx) => {
-    // STRICT PRODUCTION GUARD: Only allow in development environment
-    if (process.env.NODE_ENV !== 'development') {
-      throw new Error('devWipeAllUserData is disabled in production');
-    }
+  args: {
+    token: v.string(),
+    confirm: v.literal("WIPE_ALL"),
+  },
+  handler: async (ctx, args) => {
+    validateAccess(args.token);
 
     console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
     console.log('[DEV_WIPE_ALL] === STARTING FULL DATABASE WIPE ===');
