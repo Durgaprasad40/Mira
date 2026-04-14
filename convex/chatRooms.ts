@@ -74,7 +74,7 @@ const DEFAULT_ROOMS = [
 // ═══════════════════════════════════════════════════════════════════════════
 // DEMO MODE HELPER: Resolve userId from auth or demo args
 // ═══════════════════════════════════════════════════════════════════════════
-import { Id } from './_generated/dataModel';
+import { Doc, Id } from './_generated/dataModel';
 import { QueryCtx, MutationCtx } from './_generated/server';
 import { api } from './_generated/api';
 
@@ -311,17 +311,65 @@ async function requireAuthenticatedUser(
   ctx: QueryCtx | MutationCtx,
   authUserId: string | undefined
 ): Promise<Id<'users'>> {
+  console.log('REQUIRE_AUTH_USER_START', { authUserId: authUserId?.slice(0, 20) });
   if (!authUserId || authUserId.trim().length === 0) {
+    console.error('REQUIRE_AUTH_USER_FAIL', { reason: 'empty_authUserId' });
     throw new Error('Unauthorized: authentication required');
   }
 
   // Use the app's standard auth resolution pattern
   const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  console.log('REQUIRE_AUTH_USER_RESOLVED', { authUserId: authUserId.slice(0, 20), resolvedUserId: userId?.slice?.(0, 20) ?? 'NULL' });
   if (!userId) {
-    throw new Error('Unauthorized: user not found');
+    console.error('REQUIRE_AUTH_USER_FAIL', { reason: 'user_not_found', authUserId: authUserId.slice(0, 20) });
+    throw new Error(`Unauthorized: user not found for authId=${authUserId.slice(0, 12)}...`);
   }
 
   return userId;
+}
+
+/** D1: Block check for DM creation from chat rooms (same pattern as messages.ts). */
+async function isBlockedBidirectional(
+  ctx: QueryCtx | MutationCtx,
+  userId1: Id<'users'>,
+  userId2: Id<'users'>
+): Promise<boolean> {
+  const block1 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId1).eq('blockedUserId', userId2)
+    )
+    .first();
+  if (block1) return true;
+
+  const block2 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId2).eq('blockedUserId', userId1)
+    )
+    .first();
+  return !!block2;
+}
+
+/** Ensure a conversationParticipants row exists (repair path for getOrCreateDmThread). */
+async function upsertConversationParticipant(
+  ctx: MutationCtx,
+  conversationId: Id<'conversations'>,
+  uid: Id<'users'>
+): Promise<void> {
+  const existing = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user_conversation', (q) =>
+      q.eq('userId', uid).eq('conversationId', conversationId)
+    )
+    .first();
+  if (!existing) {
+    await ctx.db.insert('conversationParticipants', {
+      conversationId,
+      userId: uid,
+      unreadCount: 0,
+    });
+  }
 }
 
 /**
@@ -372,10 +420,30 @@ async function requireRoomReadAccess(
   }
 
   // 5. Check user has active membership
-  const membership = await ctx.db
+  let membership = await ctx.db
     .query('chatRoomMembers')
     .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
     .first();
+
+  // PUBLIC-ROOM-FIX: For public rooms, auto-create membership if not exists
+  // This ensures consistent behavior between checkRoomAccess (which returns 'member' for public rooms)
+  // and requireRoomReadAccess (which requires membership record)
+  if (!membership && room.isPublic) {
+    console.log('PUBLIC_ROOM_AUTO_JOIN', { roomId, userId: userId.slice(0, 12) });
+    // Create membership for public room
+    const membershipId = await (ctx as MutationCtx).db.insert('chatRoomMembers', {
+      roomId,
+      userId,
+      role: 'member',
+      joinedAt: Date.now(),
+    });
+    membership = await ctx.db.get(membershipId);
+    // Update room member count
+    await (ctx as MutationCtx).db.patch(roomId, {
+      memberCount: (room.memberCount ?? 0) + 1,
+    });
+  }
+
   if (!membership) {
     throw new Error('Access denied: you must join this room first');
   }
@@ -516,17 +584,19 @@ export const listRooms = query({
     // Private rooms should only appear in getMyPrivateRooms query results
     rooms = rooms.filter((r) => r.isPublic === true);
 
-    // MEMBER-COUNT-SYNC FIX: Compute live member counts from chatRoomMembers table
-    // This ensures homepage count matches in-room panel (same source of truth)
+    // BACKEND COUNT ONLY: Compute live online count from chatRoomPresence table.
+    // This is the ONLY source of truth for "active users" count in the rooms list.
+    const ONLINE_WINDOW_MS = 2 * 60 * 1000; // must align with presence expiry window
     const roomsWithLiveCounts = await Promise.all(
       rooms.map(async (room) => {
-        const members = await ctx.db
-          .query('chatRoomMembers')
+        const presenceRecords = await ctx.db
+          .query('chatRoomPresence')
           .withIndex('by_room', (q) => q.eq('roomId', room._id))
           .collect();
+        const onlineCount = presenceRecords.filter((p) => now - p.lastHeartbeatAt < ONLINE_WINDOW_MS).length;
         return {
           ...room,
-          memberCount: members.length,
+          onlineCount,
         };
       })
     );
@@ -587,56 +657,290 @@ export const getRoomBySlug = query({
 });
 
 // Get a single room by ID
-// Phase-2: Returns null if room is expired
+//
+// CRITICAL: This query must never throw from the handler. Convex also validates `v.id()`
+// BEFORE the handler — invalid id strings become "Server Error" with no handler logs.
+// So we use `v.string()` for roomId and validate inside (same runtime shape as Id<'chatRooms'>).
+//
+// Logic aligns with checkRoomAccess:
+// - Public rooms: readable without a chatRoomMembers row
+// - Private rooms: membership + not banned, else null
 export const getRoom = query({
   args: {
-    roomId: v.id('chatRooms'),
+    roomId: v.string(),
     authUserId: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // SECURITY: Require read access (auth + membership + not banned)
-    const { room } = await requireRoomReadAccess(ctx, roomId, authUserId);
-    return room;
+  handler: async (ctx, args) => {
+    console.log('GET ROOM HIT', args);
+    try {
+      const { roomId: roomIdRaw, authUserId } = args;
+
+      if (
+        authUserId === undefined ||
+        authUserId === null ||
+        typeof authUserId !== 'string' ||
+        authUserId.trim().length === 0
+      ) {
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+
+      if (
+        roomIdRaw === undefined ||
+        roomIdRaw === null ||
+        typeof roomIdRaw !== 'string' ||
+        roomIdRaw.trim().length === 0
+      ) {
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+
+      const roomId = roomIdRaw.trim() as Id<'chatRooms'>;
+
+      let userId: Id<'users'> | null = null;
+      try {
+        userId = await resolveUserIdByAuthId(ctx, authUserId);
+      } catch (err) {
+        console.log('GET ROOM ERROR', err);
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+      if (!userId) {
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+
+      let room: Doc<'chatRooms'> | null = null;
+      try {
+        room = await ctx.db.get(roomId);
+      } catch (err) {
+        console.log('GET ROOM ERROR', err);
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+      if (!room) {
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+
+      const now = Date.now();
+      const expiresAt = room.expiresAt;
+      if (typeof expiresAt === 'number' && expiresAt <= now) {
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+
+      const isPublic = room.isPublic === true;
+      if (isPublic) {
+        console.log('GET ROOM RESULT', room._id);
+        return room;
+      }
+
+      let ban = null as Doc<'chatRoomBans'> | null;
+      try {
+        ban = await ctx.db
+          .query('chatRoomBans')
+          .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+          .first();
+      } catch (err) {
+        console.log('GET ROOM ERROR', err);
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+      if (ban) {
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+
+      let membership = null as Doc<'chatRoomMembers'> | null;
+      try {
+        membership = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+          .first();
+      } catch (err) {
+        console.log('GET ROOM ERROR', err);
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+      if (!membership) {
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+
+      console.log('GET ROOM RESULT', room._id);
+      return room;
+    } catch (err) {
+      console.error('getRoom crash', err);
+      console.log('GET ROOM ERROR', err);
+      console.log('GET ROOM RESULT', null);
+      return null;
+    }
   },
 });
 
 // List messages for a room (with pagination)
+// Must align with checkRoomAccess / getRoom: public rooms do not require chatRoomMembers;
+// private rooms require membership (and not banned). Never throw — return empty result.
 export const listMessages = query({
   args: {
-    roomId: v.id('chatRooms'),
+    roomId: v.string(),
     authUserId: v.string(),
-    limit: v.optional(v.number()),
-    before: v.optional(v.number()), // Cursor for pagination (load older messages)
+    limit: v.number(),
   },
-  handler: async (ctx, { roomId, authUserId, limit = 50, before }) => {
-    // SECURITY: Require read access (auth + membership + not banned)
-    await requireRoomReadAccess(ctx, roomId, authUserId);
+  handler: async (ctx, args) => {
+    const empty = { messages: [] as Doc<'chatRoomMessages'>[], hasMore: false };
+    console.log('LIST_MESSAGES HIT', args);
+    console.log('LIST_MESSAGES STEP 1');
 
-    let query = ctx.db
-      .query('chatRoomMessages')
-      .withIndex('by_room_created', (q) => q.eq('roomId', roomId));
+    const { roomId: roomIdRaw, authUserId, limit } = args;
 
-    // Filter for messages before the cursor (older messages)
-    if (before) {
-      query = query.filter((q) => q.lt(q.field('createdAt'), before));
+    if (!roomIdRaw || typeof roomIdRaw !== 'string') {
+      return empty;
+    }
+    if (!authUserId || authUserId.trim().length === 0) {
+      return empty;
     }
 
-    // Filter out soft-deleted messages
-    query = query.filter((q) =>
-      q.or(
-        q.eq(q.field('deletedAt'), undefined),
-        q.eq(q.field('deletedAt'), null)
-      )
-    );
+    const roomId = roomIdRaw.trim() as Id<'chatRooms'>;
 
-    const messages = await query.order('desc').take(limit + 1);
-    const hasMore = messages.length > limit;
-    const result = hasMore ? messages.slice(0, limit) : messages;
+    console.log('LIST_MESSAGES STEP 2');
+    let userId: Id<'users'> | null = null;
+    try {
+      userId = await resolveUserIdByAuthId(ctx, authUserId);
+    } catch (err) {
+      console.error('LIST_MESSAGES FAIL AT AUTH_USER_RESOLUTION', err);
+      return empty;
+    }
+    if (!userId) {
+      return empty;
+    }
 
-    return {
-      messages: result.reverse(), // return oldest-first for display
-      hasMore,
-    };
+    console.log('LIST_MESSAGES STEP 3');
+    let room: Doc<'chatRooms'> | null = null;
+    try {
+      room = await ctx.db.get(roomId);
+    } catch (err) {
+      console.error('LIST_MESSAGES FAIL AT ROOM_LOOKUP', err);
+      return empty;
+    }
+    if (!room) {
+      return empty;
+    }
+
+    try {
+      const now = Date.now();
+      if (room.expiresAt && room.expiresAt <= now) {
+        return empty;
+      }
+    } catch (err) {
+      console.error('LIST_MESSAGES FAIL AT EXPIRY_CHECK', err);
+      return empty;
+    }
+
+    if (!room.isPublic) {
+      let ban: Doc<'chatRoomBans'> | null = null;
+      try {
+        ban = await ctx.db
+          .query('chatRoomBans')
+          .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+          .first();
+      } catch (err) {
+        console.error('LIST_MESSAGES FAIL AT BAN_QUERY', err);
+        return empty;
+      }
+      if (ban) {
+        return empty;
+      }
+
+      let membership: Doc<'chatRoomMembers'> | null = null;
+      try {
+        membership = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+          .first();
+      } catch (err) {
+        console.error('LIST_MESSAGES FAIL AT MEMBERSHIP_QUERY', err);
+        return empty;
+      }
+      if (!membership) {
+        return empty;
+      }
+    }
+
+    let messages: Doc<'chatRoomMessages'>[] = [];
+    try {
+      let q = ctx.db
+        .query('chatRoomMessages')
+        .withIndex('by_room_created', (q) => q.eq('roomId', roomId));
+
+      q = q.filter((qf) =>
+        qf.or(
+          qf.eq(qf.field('deletedAt'), undefined),
+          qf.eq(qf.field('deletedAt'), null)
+        )
+      );
+
+      messages = await q.order('desc').take(limit + 1);
+    } catch (err) {
+      console.error('LIST_MESSAGES FAIL AT MESSAGES_QUERY', err);
+      return empty;
+    }
+
+    let hasMore = false;
+    let result: Doc<'chatRoomMessages'>[] = [];
+    try {
+      hasMore = messages.length > limit;
+      result = hasMore ? messages.slice(0, limit) : messages;
+      result = result.reverse();
+    } catch (err) {
+      console.error('LIST_MESSAGES FAIL AT RESULT_SHAPING', err);
+      return empty;
+    }
+
+    // Chat Rooms identity: attach sender chat-room profile fields only.
+    // BLOCKED: do NOT use users/userPrivateProfiles for name/photo/bio.
+    try {
+      const senderIds = Array.from(new Set(result.map((m) => String(m.senderId))));
+      const profiles = await Promise.all(
+        senderIds.map(async (sid) => {
+          const uid = sid as Id<'users'>;
+          const profile = await ctx.db
+            .query('chatRoomProfiles')
+            .withIndex('by_userId', (q) => q.eq('userId', uid))
+            .first();
+          return { sid, profile };
+        })
+      );
+      const profileMap = new Map(
+        profiles.map(({ sid, profile }) => [
+          sid,
+          {
+            nickname: profile?.nickname ?? 'User',
+            avatarUrl: profile?.avatarUrl ?? null,
+            avatarVersion: profile?.updatedAt ?? 0,
+            bio: profile?.bio ?? null,
+          },
+        ])
+      );
+
+      return {
+        messages: result.map((m) => {
+          const p = profileMap.get(String(m.senderId));
+          return {
+            ...m,
+            senderNickname: p?.nickname ?? 'User',
+            senderAvatarUrl: p?.avatarUrl ?? null,
+            senderAvatarVersion: p?.avatarVersion ?? 0,
+            // Keep senderGender from message row if present elsewhere; do not infer from profile.
+          } as any;
+        }),
+        hasMore,
+      };
+    } catch (err) {
+      console.error('LIST_MESSAGES FAIL AT SENDER_IDENTITY_ENRICH', err);
+      return empty;
+    }
   },
 });
 
@@ -668,14 +972,67 @@ const ONLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes = Online
 const VISIBILITY_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours = max visibility window
 const MAX_MEMBERS_TO_FETCH = 50;
 
+function calculateAgeFromDob(dateOfBirth: string | undefined): number {
+  if (!dateOfBirth) return 0;
+  const birthDate = new Date(dateOfBirth);
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return age;
+}
+
 export const listMembersWithProfiles = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
   },
   handler: async (ctx, { roomId, authUserId }) => {
-    // SECURITY: Require read access (auth + membership + not banned)
-    await requireRoomReadAccess(ctx, roomId, authUserId);
+    console.log('LIST_MEMBERS_HIT', { roomId, authUserId: authUserId?.slice?.(0, 20) });
+    // SAFE-QUERY FIX: Return empty array instead of throwing to prevent UI crashes
+    // Access check: auth + membership + not banned
+    try {
+      if (!authUserId || authUserId.trim().length === 0) {
+        console.log('LIST_MEMBERS_FAIL', { reason: 'empty_authUserId' });
+        return [];
+      }
+      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      console.log('LIST_MEMBERS_RESOLVED', { authUserId: authUserId.slice(0, 20), resolvedUserId: userId?.slice?.(0, 20) ?? 'NULL' });
+      if (!userId) {
+        console.log('LIST_MEMBERS_FAIL', { reason: 'user_not_found' });
+        return [];
+      }
+      const room = await ctx.db.get(roomId);
+      if (!room) {
+        return [];
+      }
+      const now = Date.now();
+      if (room.expiresAt && room.expiresAt <= now) {
+        return [];
+      }
+      // Check ban
+      const ban = await ctx.db
+        .query('chatRoomBans')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+        .first();
+      if (ban) {
+        return [];
+      }
+      // Check membership for private rooms
+      if (!room.isPublic) {
+        const membership = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+          .first();
+        if (!membership) {
+          return [];
+        }
+      }
+    } catch {
+      return [];
+    }
 
     const now = Date.now();
 
@@ -685,13 +1042,13 @@ export const listMembersWithProfiles = query({
       .withIndex('by_room', (q) => q.eq('roomId', roomId))
       .take(MAX_MEMBERS_TO_FETCH);
 
-    // Fetch private profiles and user activity for all members
+    // Fetch chat-room profiles + users for age/gender ONLY.
     const membersWithProfiles = await Promise.all(
       members.map(async (member) => {
-        const [profile, user] = await Promise.all([
+        const [chatProfile, user] = await Promise.all([
           ctx.db
-            .query('userPrivateProfiles')
-            .withIndex('by_user', (q) => q.eq('userId', member.userId))
+            .query('chatRoomProfiles')
+            .withIndex('by_userId', (q) => q.eq('userId', member.userId))
             .first(),
           ctx.db.get(member.userId),
         ]);
@@ -708,13 +1065,28 @@ export const listMembersWithProfiles = query({
 
         const isOnline = timeSinceActive <= ONLINE_THRESHOLD_MS;
 
+        // CHATROOM_MEMBER_AGE_FIX: Ensure age is extracted from user details
+        // Priority: calculated from user.dateOfBirth
+        const dobAge = calculateAgeFromDob(user?.dateOfBirth);
+        const finalAge = dobAge;
+
+        // CHATROOM_MEMBER_AGE_BACKEND: Log age data sources
+        console.log('CHATROOM_MEMBER_AGE_BACKEND', {
+          memberId: String(member.userId).slice(0, 12),
+          userDob: user?.dateOfBirth,
+          dobAge,
+          finalAge,
+          gender: user?.gender ?? '',
+        });
+
         return {
           id: member.userId,
-          displayName: profile?.displayName ?? 'User',
-          avatar: profile?.privatePhotoUrls?.[0] ?? undefined,
-          age: profile?.age ?? 0,
-          gender: profile?.gender ?? '',
-          bio: profile?.privateBio ?? undefined,
+          // Chat Rooms identity (canonical)
+          displayName: chatProfile?.nickname ?? 'User',
+          avatar: chatProfile?.avatarUrl ?? undefined,
+          age: finalAge,
+          gender: user?.gender ?? '',
+          bio: chatProfile?.bio ?? undefined,
           joinedAt: member.joinedAt,
           role: member.role ?? 'member',
           // PRESENCE STATUS: Online if within 2 min, Offline if within 3 hours
@@ -726,7 +1098,12 @@ export const listMembersWithProfiles = query({
     );
 
     // PRESENCE-FILTER FIX: Remove null entries (members older than 3 hours)
-    return membersWithProfiles.filter((m): m is NonNullable<typeof m> => m !== null);
+    const filtered = membersWithProfiles.filter((m): m is NonNullable<typeof m> => m !== null);
+
+    // PRIVATE-ROOM-ACCESS-FIX: Instrumentation for member list count
+    console.log('CHATROOM_MEMBER_LIST_COUNT', { roomId, count: filtered.length });
+
+    return filtered;
   },
 });
 
@@ -816,22 +1193,61 @@ export const leaveRoom = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    // Collect ALL matching membership rows (handles edge case of duplicates)
+    // Check room type for different leave behaviors
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      // Room was ended/deleted - nothing to update, return safely
+      console.log('PRIVATE_ROOM_LEAVE_SUCCESS', { roomId, userId: userId.slice(0, 12), note: 'room_already_deleted' });
+      return;
+    }
+
+    const isPrivate = !room.isPublic;
+
+    // PRESENCE HARD-DELETE: Always remove presence row immediately on leave,
+    // for BOTH public and private rooms.
+    const presenceRows = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .collect();
+    for (const row of presenceRows) {
+      await ctx.db.delete(row._id);
+    }
+    console.log('CHATROOM_BACKEND_LEAVE_DELETE', {
+      roomId,
+      userId: String(userId).slice(0, 12),
+      deletedRows: presenceRows.length,
+    });
+    console.log('CHATROOM_BACKEND_PRESENCE_ROWS', {
+      roomId,
+      userId: String(userId).slice(0, 12),
+      remainingRowsInRoom: (await ctx.db.query('chatRoomPresence').withIndex('by_room', (q) => q.eq('roomId', roomId)).collect()).length,
+    });
+
+    if (isPrivate) {
+      console.log('PRIVATE_ROOM_LEAVE_TRIGGERED', { roomId, userId: userId.slice(0, 12) });
+
+      // PRIVATE-ROOM-MEMBERSHIP-FIX: For private rooms, do NOT delete membership
+      // "Leave Room" only exits the UI/presence, membership persists for re-entry without password
+      // The membership record stays so isMember remains true for approved users
+      // Presence system handles "currently in room" vs "left room" state
+
+      // Just log success - no membership deletion for private rooms
+      console.log('PRIVATE_ROOM_LEAVE_SUCCESS', {
+        roomId,
+        userId: userId.slice(0, 12),
+        note: 'membership_preserved_for_reentry',
+      });
+      return;
+    }
+
+    // PUBLIC ROOMS: Delete membership (user can freely rejoin public rooms)
     const memberships = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
       .collect();
 
-    // Delete ALL matching rows (idempotent - OK if none exist)
     for (const membership of memberships) {
       await ctx.db.delete(membership._id);
-    }
-
-    // RACE CONDITION FIX: Room may have been deleted by closeRoom before we get here
-    const room = await ctx.db.get(roomId);
-    if (!room) {
-      // Room was ended/deleted - nothing to update, return safely
-      return;
     }
 
     // CONSISTENCY FIX B6: Always recompute memberCount from source of truth
@@ -848,7 +1264,9 @@ export const sendMessage = mutation({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
-    senderId: v.id('users'),
+    // SEND-FIX: senderId is now optional - we use resolved userId from authUserId
+    // Frontend was passing authUserId as senderId which caused mismatch
+    senderId: v.optional(v.id('users')),
     text: v.optional(v.string()),
     // CR-009 FIX: Accept either URL (demo mode/legacy) or storage ID (real upload)
     imageUrl: v.optional(v.string()),
@@ -857,15 +1275,54 @@ export const sendMessage = mutation({
     audioStorageId: v.optional(v.id('_storage')), // CR-009: For uploaded audio
     mediaType: v.optional(v.union(v.literal('image'), v.literal('video'), v.literal('doodle'), v.literal('audio'))),
     clientId: v.optional(v.string()),
+    replyToMessageId: v.optional(v.id('chatRoomMessages')),
+    mentions: v.optional(
+      v.array(
+        v.object({
+          userId: v.id('users'),
+          nickname: v.string(),
+          startIndex: v.number(),
+          endIndex: v.number(),
+        })
+      )
+    ),
   },
-  handler: async (ctx, { roomId, authUserId, senderId, text, imageUrl, audioUrl, imageStorageId, audioStorageId, mediaType, clientId }) => {
-    // 0. SECURITY: Require send access (auth + membership + not banned + no send-blocking penalty)
-    const { userId, room, membership } = await requireRoomSendAccess(ctx, roomId, authUserId);
-
-    // SECURITY: Verify authenticated user matches senderId parameter
-    if (userId !== senderId) {
-      throw new Error('Unauthorized: cannot send messages as another user');
+  handler: async (
+    ctx,
+    {
+      roomId,
+      authUserId,
+      senderId: _senderIdLegacy, // SEND-FIX: Ignored - use resolved userId instead
+      text,
+      imageUrl,
+      audioUrl,
+      imageStorageId,
+      audioStorageId,
+      mediaType,
+      clientId,
+      replyToMessageId,
+      mentions,
     }
+  ) => {
+    console.log('SEND_MESSAGE HIT', { roomId, authUserId, text: text?.slice(0, 50) });
+
+    // 0. SECURITY: Require send access (auth + membership + not banned + no send-blocking penalty)
+    let userId: Id<'users'>;
+    let room: any;
+    let membership: any;
+    try {
+      const access = await requireRoomSendAccess(ctx, roomId, authUserId);
+      userId = access.userId;
+      room = access.room;
+      membership = access.membership;
+    } catch (err: any) {
+      console.error('SEND_MESSAGE FAIL AT ACCESS_CHECK', err?.message, { roomId, authUserId });
+      throw err;
+    }
+
+    // SEND-FIX: Use resolved userId as senderId (removed mismatch check)
+    // The authenticated user IS the sender - no need for separate senderId param
+    const senderId = userId;
 
     // 1. Idempotency check via clientId
     if (clientId) {
@@ -925,6 +1382,45 @@ export const sendMessage = mutation({
     // Soft-mask sensitive words in text messages
     const maskedText = text ? softMaskText(text) : undefined;
 
+    // Reply target (same room, not deleted)
+    let replyToSenderNickname: string | undefined;
+    let replyToSnippet: string | undefined;
+    let replyToType:
+      | 'text'
+      | 'image'
+      | 'video'
+      | 'doodle'
+      | 'audio'
+      | 'system'
+      | undefined;
+    if (replyToMessageId) {
+      const replyMsg = await ctx.db.get(replyToMessageId);
+      if (!replyMsg || replyMsg.roomId !== roomId || replyMsg.deletedAt) {
+        throw new Error('Invalid reply target');
+      }
+      const replySender = await ctx.db.get(replyMsg.senderId);
+      const replyProfile = await ctx.db
+        .query('chatRoomProfiles')
+        .withIndex('by_userId', (q) => q.eq('userId', replyMsg.senderId))
+        .first();
+      replyToSenderNickname = replyProfile?.nickname ?? replySender?.name ?? 'User';
+      if (replyMsg.type === 'text' && replyMsg.text) {
+        replyToSnippet =
+          replyMsg.text.length > 50 ? replyMsg.text.slice(0, 47) + '...' : replyMsg.text;
+      } else if (replyMsg.type === 'image') {
+        replyToSnippet = '📷 Photo';
+      } else if (replyMsg.type === 'video') {
+        replyToSnippet = '🎬 Video';
+      } else if (replyMsg.type === 'doodle') {
+        replyToSnippet = '🎨 Doodle';
+      } else if (replyMsg.type === 'audio') {
+        replyToSnippet = '🎤 Voice message';
+      } else {
+        replyToSnippet = 'Message';
+      }
+      replyToType = replyMsg.type;
+    }
+
     // 4. Insert message with resolved URLs
     const messageId = await ctx.db.insert('chatRoomMessages', {
       roomId,
@@ -936,7 +1432,62 @@ export const sendMessage = mutation({
       createdAt: now,
       clientId,
       status: 'sent',
+      ...(replyToMessageId
+        ? {
+            replyToMessageId,
+            replyToSenderNickname,
+            replyToSnippet,
+            replyToType,
+          }
+        : {}),
+      ...(mentions && mentions.length > 0 ? { mentions } : {}),
     });
+
+    // 4b. Mention inbox notifications (best-effort; never fails the send)
+    if (mentions && mentions.length > 0) {
+      const roomName = (room as { name?: string }).name ?? 'Chat';
+      const previewBase =
+        maskedText && maskedText.length > 0
+          ? maskedText.length > 120
+            ? maskedText.slice(0, 117) + '...'
+            : maskedText
+          : type === 'image'
+            ? '📷 Photo'
+            : type === 'video'
+              ? '🎬 Video'
+              : type === 'audio'
+                ? '🎤 Voice message'
+                : type === 'doodle'
+                  ? '🎨 Doodle'
+                  : 'Message';
+
+      const deduped = new Set<string>();
+      for (const men of mentions) {
+        if (men.userId === senderId) continue;
+        const uid = men.userId as string;
+        if (deduped.has(uid)) continue;
+        deduped.add(uid);
+        const isMember = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', men.userId))
+          .first();
+        if (!isMember) continue;
+
+        try {
+          await ctx.db.insert('chatRoomMentionNotifications', {
+            mentionedUserId: men.userId,
+            senderId,
+            roomId,
+            messageId,
+            messagePreview: previewBase,
+            roomName,
+            createdAt: now,
+          });
+        } catch {
+          // keep send success even if inbox row fails
+        }
+      }
+    }
 
     // 5. Update room's last message info
     await ctx.db.patch(roomId, {
@@ -949,10 +1500,15 @@ export const sendMessage = mutation({
 
     // 7. REWARD: Add +1 coin to sender's wallet for successful message send
     // This only fires for NEW messages (dedup returns early at line 670)
-    const senderUser = await ctx.db.get(senderId);
-    if (senderUser) {
-      const currentCoins = senderUser.walletCoins ?? 0;
-      await ctx.db.patch(senderId, { walletCoins: currentCoins + 1 });
+    // PRIVATE-ROOM-COIN-FIX: Skip coin reward for private room messages (zero coin effect)
+    if (room.isPublic) {
+      const senderUser = await ctx.db.get(senderId);
+      if (senderUser) {
+        const currentCoins = senderUser.walletCoins ?? 0;
+        await ctx.db.patch(senderId, { walletCoins: currentCoins + 1 });
+      }
+    } else {
+      console.log('PRIVATE_ROOM_NO_COIN_DEBIT_ON_MESSAGE', { roomId, senderId: senderId.slice(0, 12), isPublic: room.isPublic });
     }
 
     // 8. DETERMINISTIC RETENTION: Delete exactly (newCount - 900) oldest when >= 1000
@@ -997,6 +1553,11 @@ export const sendMessage = mutation({
 
     // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
     await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
+
+    // Instrumentation for private room message send (no coin effect)
+    if (!room.isPublic) {
+      console.log('PRIVATE_ROOM_MESSAGE_SEND', { roomId, messageId, senderId: senderId.slice(0, 12), coinEffect: 'none' });
+    }
 
     return messageId;
   },
@@ -1091,16 +1652,22 @@ export const createPrivateRoom = mutation({
     demoUserId: v.optional(v.string()),
   },
   handler: async (ctx, { name, password, authUserId, isDemo, demoUserId }) => {
+    console.log('CREATE_PRIVATE_ROOM_START', { name, authUserId: authUserId?.slice(0, 20), isDemo, demoUserId: demoUserId?.slice(0, 20) });
+
     // 1. Auth guard - use app's custom session-based auth
     const authId = authUserId || demoUserId;
     if (!authId || authId.trim().length === 0) {
+      console.log('CREATE_PRIVATE_ROOM_FAIL', { reason: 'no_auth_id' });
       throw new Error('Unauthorized: authentication required');
     }
 
+    console.log('CREATE_PRIVATE_ROOM_RESOLVING_USER', { authId: authId.slice(0, 20) });
     const createdBy = await resolveUserIdByAuthId(ctx, authId);
     if (!createdBy) {
+      console.log('CREATE_PRIVATE_ROOM_FAIL', { reason: 'user_not_found', authId: authId.slice(0, 20) });
       throw new Error('Unauthorized: user not found');
     }
+    console.log('CREATE_PRIVATE_ROOM_USER_RESOLVED', { createdBy: createdBy.slice(0, 12) });
 
     // Check if demo user (for coin bypass)
     const isDemoUser = isDemo === true && !!demoUserId;
@@ -1108,14 +1675,20 @@ export const createPrivateRoom = mutation({
     // 2. Check wallet balance (skip for demo users)
     let currentCoins = 0;
     if (!isDemoUser) {
+      console.log('CREATE_PRIVATE_ROOM_COIN_CHECK', { isDemoUser, createdBy: createdBy.slice(0, 12) });
       const user = await ctx.db.get(createdBy);
       if (!user) {
+        console.log('CREATE_PRIVATE_ROOM_FAIL', { reason: 'user_lookup_failed', createdBy: createdBy.slice(0, 12) });
         throw new Error('User not found');
       }
       currentCoins = user.walletCoins ?? 0;
+      console.log('CREATE_PRIVATE_ROOM_COINS', { currentCoins });
       if (currentCoins < 1) {
+        console.log('CREATE_PRIVATE_ROOM_FAIL', { reason: 'insufficient_coins', currentCoins });
         throw new Error('Insufficient coins. You need at least 1 coin to create a private room.');
       }
+    } else {
+      console.log('CREATE_PRIVATE_ROOM_DEMO_USER_SKIP_COINS', { isDemoUser });
     }
 
     // 4. Generate unique join code (max 10 retries)
@@ -1181,6 +1754,7 @@ export const createPrivateRoom = mutation({
 
     // 9. Deduct 1 coin AFTER successful room creation (skip for demo users)
     if (!isDemoUser) {
+      console.log('PRIVATE_ROOM_COIN_DEBIT_ON_CREATE', { roomId, userId: createdBy.slice(0, 12), previousCoins: currentCoins, newCoins: currentCoins - 1 });
       await ctx.db.patch(createdBy, {
         walletCoins: currentCoins - 1,
       });
@@ -1190,6 +1764,7 @@ export const createPrivateRoom = mutation({
     const expiresAt = now + ROOM_LIFETIME_MS;
     await ctx.scheduler.runAt(expiresAt, internal.chatRooms.deleteExpiredRoom, { roomId });
 
+    console.log('CREATE_PRIVATE_ROOM_SUCCESS', { roomId, joinCode });
     return { roomId, joinCode };
   },
 });
@@ -1314,6 +1889,7 @@ export const getMyPrivateRooms = query({
     }
 
     const now = Date.now();
+    const ONLINE_WINDOW_MS = 2 * 60 * 1000;
 
     // LEAVE-VS-END FIX: Private rooms should appear if user is:
     // 1. A current member, OR
@@ -1374,11 +1950,12 @@ export const getMyPrivateRooms = query({
         // Filter out expired rooms
         if (room.expiresAt && room.expiresAt <= now) return null;
 
-        // MEMBER-COUNT-SYNC FIX: Compute live member count from chatRoomMembers table
-        const roomMembers = await ctx.db
-          .query('chatRoomMembers')
+        // BACKEND COUNT ONLY: Compute live online count from chatRoomPresence table.
+        const presenceRecords = await ctx.db
+          .query('chatRoomPresence')
           .withIndex('by_room', (q) => q.eq('roomId', room._id))
           .collect();
+        const onlineCount = presenceRecords.filter((p) => now - p.lastHeartbeatAt < ONLINE_WINDOW_MS).length;
 
         // Determine if current user is a member
         const isMember = memberRoomIds.has(room._id.toString());
@@ -1389,7 +1966,7 @@ export const getMyPrivateRooms = query({
           slug: room.slug,
           category: room.category,
           isPublic: room.isPublic,
-          memberCount: roomMembers.length,
+          onlineCount,
           lastMessageAt: room.lastMessageAt,
           lastMessageText: room.lastMessageText,
           createdAt: room.createdAt,
@@ -1652,6 +2229,11 @@ export const closeRoom = mutation({
     // Only creator can close the room
     if (room.createdBy !== userId) {
       throw new Error('Only the room creator can close this room');
+    }
+
+    // Instrumentation for private room end
+    if (!room.isPublic) {
+      console.log('PRIVATE_ROOM_END_TRIGGERED', { roomId, userId: userId.slice(0, 12), roomName: room.name });
     }
 
     // Delete room and all related data
@@ -1983,18 +2565,34 @@ export const checkRoomAccess = query({
       return { status: 'member' as const, role: 'member' as const };
     }
 
-    // Check if expired
+    // PRIVATE-ROOM-LIFETIME-FIX: Log room existence with lifetime info
     const now = Date.now();
+    const remainingMs = room.expiresAt ? room.expiresAt - now : null;
+    const remainingHours = remainingMs ? Math.round(remainingMs / (1000 * 60 * 60) * 10) / 10 : null;
+    console.log('PRIVATE_ROOM_ROOM_EXISTS', {
+      roomId,
+      name: room.name,
+      expiresAt: room.expiresAt,
+      remainingHours,
+      isExpired: room.expiresAt ? room.expiresAt <= now : false,
+    });
+
+    // Check if expired
     if (room.expiresAt && room.expiresAt <= now) {
       return { status: 'expired' as const };
     }
 
-    // Check if banned
+    // Check if banned/kicked
     const ban = await ctx.db
       .query('chatRoomBans')
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
       .first();
     if (ban) {
+      // PRIVATE-ROOM-ACCESS-FIX: Kicked user denied access
+      console.log('PRIVATE_ROOM_KICKED_DENY', {
+        roomId,
+        userId: userId.slice(0, 12),
+      });
       return { status: 'banned' as const };
     }
 
@@ -2004,6 +2602,12 @@ export const checkRoomAccess = query({
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
       .first();
     if (membership) {
+      // PRIVATE-ROOM-ACCESS-FIX: Approved member re-entry (no password needed)
+      console.log('PRIVATE_ROOM_APPROVED_MEMBER_REENTRY', {
+        roomId,
+        userId: userId.slice(0, 12),
+        role: membership.role ?? 'member',
+      });
       return { status: 'member' as const, role: membership.role ?? 'member' };
     }
 
@@ -2025,8 +2629,33 @@ export const checkRoomAccess = query({
       }
     }
 
-    // Not a member, no request
-    return { status: 'none' as const };
+    // PRIVATE-ROOM-ACCESS-FIX: Return 'none' with room info for password modal decision
+    // Also check if user is the room creator (owner bypass)
+    const isCreator = room.createdBy === userId;
+    const hasPassword = !!room.passwordHash || !!room.passwordEncrypted;
+
+    console.log('PRIVATE_ROOM_ACCESS_CHECK', {
+      roomId,
+      userId: userId.slice(0, 12),
+      status: 'none',
+      isCreator,
+      hasPassword,
+    });
+
+    // Owner bypass: creator always gets access (will auto-join on room load)
+    if (isCreator) {
+      console.log('PRIVATE_ROOM_OWNER_BYPASS', { roomId, userId: userId.slice(0, 12) });
+      return { status: 'owner_bypass' as const, role: 'owner' as const, isCreator: true };
+    }
+
+    // First-time entrant: needs password if room has one
+    if (hasPassword) {
+      console.log('PRIVATE_ROOM_FIRST_TIME_PASSWORD_REQUIRED', { roomId, userId: userId.slice(0, 12) });
+      return { status: 'none' as const, hasPassword: true };
+    }
+
+    // No password required - can join freely
+    return { status: 'none' as const, hasPassword: false };
   },
 });
 
@@ -3059,6 +3688,105 @@ export const getChatRoomProfilesByUserIds = query({
 });
 
 /**
+ * Canonical Chat Rooms identity for all users in a room.
+ *
+ * Product rules:
+ * - name/photo/bio come ONLY from `chatRoomProfiles` (or placeholders)
+ * - age/gender may come from main user/basic info (users table)
+ * - NEVER use userPrivateProfiles or main profile name/photo/bio inside Chat Rooms identity.
+ */
+export const getRoomUserIdentities = query({
+  args: {
+    roomId: v.string(),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { roomId: roomIdRaw, authUserId } = args;
+
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { selfUserId: null as string | null, byUserId: {} as Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> };
+    }
+    if (!roomIdRaw || typeof roomIdRaw !== 'string') {
+      return { selfUserId: null as string | null, byUserId: {} as Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> };
+    }
+
+    const roomId = roomIdRaw.trim() as Id<'chatRooms'>;
+
+    // Auth + access (aligns with getRoom/checkRoomAccess)
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { selfUserId: null as string | null, byUserId: {} as Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> };
+    }
+
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      return { selfUserId: null as string | null, byUserId: {} as Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> };
+    }
+    const now = Date.now();
+    if (room.expiresAt && room.expiresAt <= now) {
+      return { selfUserId: null as string | null, byUserId: {} as Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> };
+    }
+
+    if (!room.isPublic) {
+      const ban = await ctx.db
+        .query('chatRoomBans')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+        .first();
+      if (ban) {
+        return { selfUserId: null as string | null, byUserId: {} as Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> };
+      }
+
+      const membership = await ctx.db
+        .query('chatRoomMembers')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+        .first();
+      if (!membership) {
+        return { selfUserId: null as string | null, byUserId: {} as Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> };
+      }
+    }
+
+    const members = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    const memberUserIds = members.map((m) => m.userId);
+
+    const [profiles, users] = await Promise.all([
+      Promise.all(
+        memberUserIds.map((uid) =>
+          ctx.db
+            .query('chatRoomProfiles')
+            .withIndex('by_userId', (q) => q.eq('userId', uid))
+            .first()
+        )
+      ),
+      Promise.all(memberUserIds.map((uid) => ctx.db.get(uid))),
+    ]);
+
+    const byUserId: Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> = {};
+
+    for (let i = 0; i < memberUserIds.length; i++) {
+      const uid = memberUserIds[i];
+      const profile = profiles[i];
+      const user = users[i];
+
+      // BLOCKED FALLBACKS: do NOT use user.name/user.bio/photos for chat-room identity.
+      const nickname = profile?.nickname?.trim() || 'User';
+      const avatarUrl = profile?.avatarUrl ?? null;
+      const bio = profile?.bio ?? null;
+
+      const age = calculateAgeFromDob(user?.dateOfBirth);
+      const gender = user?.gender ?? undefined;
+
+      byUserId[String(uid)] = { nickname, avatarUrl, bio, age: age > 0 ? age : undefined, gender };
+    }
+
+    return { selfUserId: String(userId), byUserId };
+  },
+});
+
+/**
  * Generate upload URL for chat room avatar.
  */
 export const generateChatRoomAvatarUploadUrl = mutation({
@@ -3153,6 +3881,574 @@ export const getUnreadDmCountsByRoom = query({
       totalUnread,
       hasAnyUnread: totalUnread > 0,
     };
+  },
+});
+
+/**
+ * List DM threads originated from chat rooms (conversations with sourceRoomId).
+ * Used by Chat Rooms room screen — Messages popover + unread badge.
+ * Never throws: returns [] if auth cannot be resolved or on any per-thread error.
+ */
+export const getDmThreads = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    if (!authUserId || authUserId.trim().length === 0) {
+      return [];
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return [];
+    }
+
+    const hiddenRows = await ctx.db
+      .query('chatRoomHiddenDmConversations')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+    const hiddenConversationIds = new Set(hiddenRows.map((h) => h.conversationId as string));
+
+    const participantRows = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    type ThreadRow = {
+      id: string;
+      peerId: string;
+      peerName: string;
+      peerAvatar?: string;
+      peerGender?: 'male' | 'female' | 'other';
+      lastMessage: string;
+      lastMessageAt: number;
+      unreadCount: number;
+    };
+
+    const threads: ThreadRow[] = [];
+
+    for (const row of participantRows) {
+      try {
+        const conversation = await ctx.db.get(row.conversationId);
+        if (!conversation) continue;
+        if (!conversation.sourceRoomId) continue;
+        if (hiddenConversationIds.has(conversation._id as string)) continue;
+
+        const peerId = conversation.participants.find((p) => p !== userId);
+        if (!peerId) continue;
+
+        const peer = await ctx.db.get(peerId);
+        if (!peer) continue;
+
+        // CHATROOM_IDENTITY_NONCANONICAL_PATH_FOUND:
+        // DMs are not allowed to use userPrivateProfiles for identity.
+        // Use chat-room profile only for name/photo/bio, and main user gender for ring color.
+        const chatProfile = await ctx.db
+          .query('chatRoomProfiles')
+          .withIndex('by_userId', (q) => q.eq('userId', peerId))
+          .first();
+
+        const peerName = chatProfile?.nickname ?? 'User';
+        const peerAvatar = chatProfile?.avatarUrl ?? undefined;
+        const g = (peer.gender ?? 'other').toLowerCase();
+        const peerGender: 'male' | 'female' | 'other' =
+          g === 'male' || g === 'female' ? g : 'other';
+
+        const lastMsg = await ctx.db
+          .query('messages')
+          .withIndex('by_conversation_created', (q) =>
+            q.eq('conversationId', conversation._id)
+          )
+          .order('desc')
+          .first();
+
+        let lastMessage = '';
+        if (lastMsg) {
+          if (lastMsg.type === 'text') {
+            lastMessage = lastMsg.content ?? '';
+          } else if (lastMsg.type === 'image') {
+            lastMessage = '📷 Photo';
+          } else if (lastMsg.type === 'video') {
+            lastMessage = '🎬 Video';
+          } else if (lastMsg.type === 'voice') {
+            lastMessage = '🎤 Voice message';
+          } else {
+            lastMessage = 'Message';
+          }
+        }
+
+        const lastMessageAt =
+          lastMsg?.createdAt ?? conversation.lastMessageAt ?? conversation.createdAt;
+
+        threads.push({
+          id: conversation._id as string,
+          peerId: peerId as string,
+          peerName,
+          peerAvatar,
+          peerGender,
+          lastMessage,
+          lastMessageAt,
+          unreadCount: row.unreadCount ?? 0,
+        });
+      } catch {
+        // Skip malformed thread; keep popover + screen alive
+        continue;
+      }
+    }
+
+    threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+    return threads;
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROOM SCREEN: MENTIONS, REACTIONS, DM THREAD, PER-USER MUTES
+// Safe defaults; queries never throw to the client for expected gaps.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * User's @mention inbox (cross-room). Empty when unauthenticated.
+ */
+export const getUserMentions = query({
+  args: {
+    authUserId: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, { authUserId, limit }) => {
+    try {
+      if (!authUserId || authUserId.trim().length === 0) {
+        return [];
+      }
+      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      if (!userId) {
+        return [];
+      }
+      const lim = Math.min(Math.max(limit ?? 50, 1), 100);
+      const rows = await ctx.db
+        .query('chatRoomMentionNotifications')
+        .withIndex('by_mentioned_user_created', (q) => q.eq('mentionedUserId', userId))
+        .order('desc')
+        .take(lim);
+
+      const out: Array<{
+        id: string;
+        senderUserId: string;
+        senderNickname: string;
+        roomId: string;
+        roomName: string;
+        messageId: string;
+        messagePreview: string;
+        createdAt: number;
+        isRead: boolean;
+        readAt?: number;
+      }> = [];
+
+      for (const row of rows) {
+        try {
+          const sender = await ctx.db.get(row.senderId);
+          const profile = await ctx.db
+            .query('chatRoomProfiles')
+            .withIndex('by_userId', (q) => q.eq('userId', row.senderId))
+            .first();
+          const senderNickname = profile?.nickname ?? sender?.name ?? 'User';
+          out.push({
+            id: row._id as string,
+            senderUserId: row.senderId as string,
+            senderNickname,
+            roomId: row.roomId as string,
+            roomName: row.roomName,
+            messageId: row.messageId as string,
+            messagePreview: row.messagePreview,
+            createdAt: row.createdAt,
+            isRead: row.readAt !== undefined && row.readAt !== null,
+            ...(row.readAt !== undefined && row.readAt !== null ? { readAt: row.readAt } : {}),
+          });
+        } catch {
+          continue;
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  },
+});
+
+export const markMentionRead = mutation({
+  args: {
+    authUserId: v.string(),
+    mentionId: v.id('chatRoomMentionNotifications'),
+  },
+  handler: async (ctx, { authUserId, mentionId }) => {
+    try {
+      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      if (!userId) {
+        return { success: false as const };
+      }
+      const row = await ctx.db.get(mentionId);
+      if (!row || row.mentionedUserId !== userId) {
+        return { success: false as const };
+      }
+      await ctx.db.patch(mentionId, { readAt: Date.now() });
+      return { success: true as const };
+    } catch {
+      return { success: false as const };
+    }
+  },
+});
+
+export const markAllMentionsRead = mutation({
+  args: { authUserId: v.string() },
+  handler: async (ctx, { authUserId }) => {
+    try {
+      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      if (!userId) {
+        return { success: false as const };
+      }
+      const rows = await ctx.db
+        .query('chatRoomMentionNotifications')
+        .withIndex('by_mentioned_user_created', (q) => q.eq('mentionedUserId', userId))
+        .collect();
+      const now = Date.now();
+      for (const row of rows) {
+        if (row.readAt === undefined || row.readAt === null) {
+          await ctx.db.patch(row._id, { readAt: now });
+        }
+      }
+      return { success: true as const };
+    } catch {
+      return { success: false as const };
+    }
+  },
+});
+
+/**
+ * Aggregated emoji reactions for a batch of messages (Record<messageId, groups>).
+ */
+export const getReactionsForMessages = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    messageIds: v.array(v.id('chatRoomMessages')),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, messageIds, authUserId }) => {
+    try {
+      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      if (!userId) {
+        return {};
+      }
+      await requireRoomReadAccess(ctx, roomId, authUserId);
+      const maxIds = messageIds.slice(0, 200);
+      const result: Record<string, Array<{ emoji: string; count: number; userIds: string[] }>> = {};
+      for (const mid of maxIds) {
+        result[mid as string] = [];
+      }
+      for (const mid of maxIds) {
+        try {
+          const msg = await ctx.db.get(mid);
+          if (!msg || msg.roomId !== roomId) {
+            continue;
+          }
+          const reactions = await ctx.db
+            .query('chatRoomMessageReactions')
+            .withIndex('by_room_message', (q) =>
+              q.eq('roomId', roomId).eq('messageId', mid)
+            )
+            .collect();
+          const byEmoji = new Map<string, Set<string>>();
+          for (const r of reactions) {
+            if (!byEmoji.has(r.emoji)) {
+              byEmoji.set(r.emoji, new Set());
+            }
+            byEmoji.get(r.emoji)!.add(r.userId as string);
+          }
+          const arr: Array<{ emoji: string; count: number; userIds: string[] }> = [];
+          for (const [emoji, users] of byEmoji) {
+            arr.push({
+              emoji,
+              count: users.size,
+              userIds: Array.from(users),
+            });
+          }
+          result[mid as string] = arr;
+        } catch {
+          result[mid as string] = [];
+        }
+      }
+      return result;
+    } catch {
+      return {};
+    }
+  },
+});
+
+export const addReaction = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    messageId: v.id('chatRoomMessages'),
+    emoji: v.string(),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, messageId, emoji, authUserId }) => {
+    const { userId } = await requireRoomReadAccess(ctx, roomId, authUserId);
+    const msg = await ctx.db.get(messageId);
+    if (!msg || msg.roomId !== roomId || msg.deletedAt) {
+      throw new Error('Message not found');
+    }
+    const existingSame = await ctx.db
+      .query('chatRoomMessageReactions')
+      .withIndex('by_message_user', (q) => q.eq('messageId', messageId).eq('userId', userId))
+      .collect();
+    if (existingSame.some((r) => r.emoji === emoji)) {
+      return { success: true as const };
+    }
+    await ctx.db.insert('chatRoomMessageReactions', {
+      roomId,
+      messageId,
+      userId,
+      emoji,
+      createdAt: Date.now(),
+    });
+    return { success: true as const };
+  },
+});
+
+export const removeReaction = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    messageId: v.id('chatRoomMessages'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, messageId, authUserId }) => {
+    const { userId } = await requireRoomReadAccess(ctx, roomId, authUserId);
+    const msg = await ctx.db.get(messageId);
+    if (!msg || msg.roomId !== roomId) {
+      throw new Error('Message not found');
+    }
+    const rows = await ctx.db
+      .query('chatRoomMessageReactions')
+      .withIndex('by_message_user', (q) => q.eq('messageId', messageId).eq('userId', userId))
+      .collect();
+    for (const row of rows) {
+      await ctx.db.delete(row._id);
+    }
+    return { success: true as const };
+  },
+});
+
+/**
+ * Convex user IDs the current viewer has muted in this room (message visibility).
+ */
+export const getMutedUsersInRoom = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    try {
+      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      if (!userId) {
+        return { mutedUserIds: [] as string[] };
+      }
+      const membership = await ctx.db
+        .query('chatRoomMembers')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+        .first();
+      if (!membership) {
+        return { mutedUserIds: [] as string[] };
+      }
+      const rows = await ctx.db
+        .query('chatRoomPerUserMutes')
+        .withIndex('by_room_muter', (q) => q.eq('roomId', roomId).eq('muterId', userId))
+        .collect();
+      return { mutedUserIds: rows.map((r) => r.targetUserId as string) };
+    } catch {
+      return { mutedUserIds: [] as string[] };
+    }
+  },
+});
+
+export const toggleMuteUserInRoom = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    targetUserId: v.id('users'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
+    const userId = await requireAuthenticatedUser(ctx, authUserId);
+    if (userId === targetUserId) {
+      throw new Error('Cannot mute yourself');
+    }
+    await requireRoomReadAccess(ctx, roomId, authUserId);
+    const targetMembership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) =>
+        q.eq('roomId', roomId).eq('userId', targetUserId)
+      )
+      .first();
+    if (!targetMembership) {
+      throw new Error('User is not in this room');
+    }
+    const rows = await ctx.db
+      .query('chatRoomPerUserMutes')
+      .withIndex('by_room_muter', (q) => q.eq('roomId', roomId).eq('muterId', userId))
+      .collect();
+    const existing = rows.find((r) => r.targetUserId === targetUserId);
+    if (existing) {
+      await ctx.db.delete(existing._id);
+      return { success: true as const, muted: false as const };
+    }
+    await ctx.db.insert('chatRoomPerUserMutes', {
+      roomId,
+      muterId: userId,
+      targetUserId,
+      createdAt: Date.now(),
+    });
+    return { success: true as const, muted: true as const };
+  },
+});
+
+/**
+ * Create or return a DM conversation (Phase-1 `conversations` table) tied to a chat room when given.
+ */
+export const getOrCreateDmThread = mutation({
+  args: {
+    authUserId: v.string(),
+    peerUserId: v.id('users'),
+    sourceRoomId: v.optional(v.id('chatRooms')),
+  },
+  handler: async (ctx, { authUserId, peerUserId, sourceRoomId }) => {
+    const userId = await requireAuthenticatedUser(ctx, authUserId);
+    if (userId === peerUserId) {
+      throw new Error('Invalid recipient');
+    }
+    const peer = await ctx.db.get(peerUserId);
+    if (!peer) {
+      throw new Error('User not found');
+    }
+    if (await isBlockedBidirectional(ctx, userId, peerUserId)) {
+      throw new Error('Cannot start conversation');
+    }
+
+    if (sourceRoomId) {
+      const r = await ctx.db.get(sourceRoomId);
+      if (!r || (r.expiresAt && r.expiresAt <= Date.now())) {
+        throw new Error('Room not found');
+      }
+      const m1 = await ctx.db
+        .query('chatRoomMembers')
+        .withIndex('by_room_user', (q) => q.eq('roomId', sourceRoomId).eq('userId', userId))
+        .first();
+      const m2 = await ctx.db
+        .query('chatRoomMembers')
+        .withIndex('by_room_user', (q) => q.eq('roomId', sourceRoomId).eq('userId', peerUserId))
+        .first();
+      if (!m1 || !m2) {
+        throw new Error('Both users must be in this room');
+      }
+    }
+
+    const sortedParticipants: [Id<'users'>, Id<'users'>] =
+      (userId as string) < (peerUserId as string)
+        ? [userId, peerUserId]
+        : [peerUserId, userId];
+
+    let found: Id<'conversations'> | null = null;
+
+    if (sourceRoomId) {
+      const candidates = await ctx.db
+        .query('conversations')
+        .withIndex('by_source_room', (q) => q.eq('sourceRoomId', sourceRoomId))
+        .collect();
+      for (const c of candidates) {
+        if (c.participants.length !== 2) continue;
+        if (!c.participants.includes(userId) || !c.participants.includes(peerUserId)) {
+          continue;
+        }
+        found = c._id;
+        break;
+      }
+    } else {
+      const mine = await ctx.db
+        .query('conversationParticipants')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect();
+      for (const row of mine) {
+        const c = await ctx.db.get(row.conversationId);
+        if (!c || c.participants.length !== 2) continue;
+        if (!c.participants.includes(peerUserId)) continue;
+        found = c._id;
+        break;
+      }
+    }
+
+    const now = Date.now();
+
+    if (!found) {
+      const conversationId = await ctx.db.insert('conversations', {
+        participants: sortedParticipants,
+        isPreMatch: false,
+        connectionSource: 'room',
+        ...(sourceRoomId ? { sourceRoomId } : {}),
+        createdAt: now,
+        lastMessageAt: now,
+      });
+
+      await ctx.db.insert('conversationParticipants', {
+        conversationId,
+        userId,
+        unreadCount: 0,
+      });
+      await ctx.db.insert('conversationParticipants', {
+        conversationId,
+        userId: peerUserId,
+        unreadCount: 0,
+      });
+
+      return { threadId: conversationId };
+    }
+
+    await upsertConversationParticipant(ctx, found, userId);
+    await upsertConversationParticipant(ctx, found, peerUserId);
+
+    return { threadId: found };
+  },
+});
+
+/** Hide a DM thread from the inbox list (per user; does not delete messages). */
+export const hideDmThread = mutation({
+  args: {
+    authUserId: v.string(),
+    threadId: v.id('conversations'),
+  },
+  handler: async (ctx, { authUserId, threadId }) => {
+    try {
+      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      if (!userId) {
+        return { success: false as const };
+      }
+      const conv = await ctx.db.get(threadId);
+      if (!conv || !conv.participants.includes(userId)) {
+        return { success: false as const };
+      }
+      const existing = await ctx.db
+        .query('chatRoomHiddenDmConversations')
+        .withIndex('by_user_conversation', (q) =>
+          q.eq('userId', userId).eq('conversationId', threadId)
+        )
+        .first();
+      if (existing) {
+        return { success: true as const };
+      }
+      await ctx.db.insert('chatRoomHiddenDmConversations', {
+        userId,
+        conversationId: threadId,
+        hiddenAt: Date.now(),
+      });
+      return { success: true as const };
+    } catch {
+      return { success: false as const };
+    }
   },
 });
 
@@ -3458,6 +4754,20 @@ export const heartbeatPresence = mutation({
 
     const now = Date.now();
 
+    // SINGLE-ROOM PRESENCE: ensure user exists in only one room at a time.
+    // Delete any other presence rows for this user in other rooms.
+    const otherPresence = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+    let deletedOther = 0;
+    for (const row of otherPresence) {
+      if (row.roomId !== roomId) {
+        await ctx.db.delete(row._id);
+        deletedOther++;
+      }
+    }
+
     // Find existing presence record
     const existing = await ctx.db
       .query('chatRoomPresence')
@@ -3478,6 +4788,12 @@ export const heartbeatPresence = mutation({
         joinedAt: now,
       });
     }
+
+    console.log('CHATROOM_BACKEND_ONLINE_COUNT', {
+      roomId,
+      userId: String(userId).slice(0, 12),
+      deletedOtherRooms: deletedOther,
+    });
 
     return { success: true };
   },
@@ -3537,31 +4853,40 @@ export const getRoomPresence = query({
       memberRoleMap.set(String(m.userId), m.role);
     }
 
-    // Batch fetch user profiles (from userPrivateProfiles table)
+    // Chat Rooms identity: fetch chat-room profiles + users for age/gender ONLY.
     const userIds = presenceRecords.map((p) => p.userId);
-    const profiles = await Promise.all(
-      userIds.map((id) =>
-        ctx.db
-          .query('userPrivateProfiles')
-          .withIndex('by_user', (q) => q.eq('userId', id))
-          .first()
-      )
-    );
+    const [chatProfiles, users] = await Promise.all([
+      Promise.all(
+        userIds.map((id) =>
+          ctx.db
+            .query('chatRoomProfiles')
+            .withIndex('by_userId', (q) => q.eq('userId', id))
+            .first()
+        )
+      ),
+      Promise.all(userIds.map((id) => ctx.db.get(id))),
+    ]);
 
     for (let i = 0; i < presenceRecords.length; i++) {
       const record = presenceRecords[i];
-      const profile = profiles[i];
+        const chatProfile = chatProfiles[i];
+      const user = users[i];
 
       const timeSinceHeartbeat = now - record.lastHeartbeatAt;
       const role = memberRoleMap.get(String(record.userId)) || 'member';
 
+      // CHATROOM_MEMBER_AGE_FIX: Extract age from profile or calculate from user.dateOfBirth
+      const dobAge = calculateAgeFromDob(user?.dateOfBirth);
+        const finalAge = dobAge;
+
       const presenceUser = {
         id: String(record.userId),
-        displayName: profile?.displayName ?? 'User',
-        avatar: profile?.privatePhotoUrls?.[0] ?? undefined,
-        age: profile?.age ?? 0,
-        gender: profile?.gender ?? '',
-        bio: profile?.privateBio ?? undefined,
+          // Chat Rooms identity (canonical)
+          displayName: chatProfile?.nickname ?? 'User',
+          avatar: chatProfile?.avatarUrl ?? undefined,
+        age: finalAge,
+          gender: user?.gender ?? '',
+          bio: chatProfile?.bio ?? undefined,
         role,
         lastHeartbeatAt: record.lastHeartbeatAt,
         joinedAt: record.joinedAt,

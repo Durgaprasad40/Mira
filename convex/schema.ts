@@ -1755,10 +1755,77 @@ export default defineSchema({
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
     deletedAt: v.optional(v.number()), // Soft delete
     expiresAt: v.optional(v.float64()), // For ephemeral/expiring messages
+    // Reply threading (optional)
+    replyToMessageId: v.optional(v.id('chatRoomMessages')),
+    replyToSenderNickname: v.optional(v.string()),
+    replyToSnippet: v.optional(v.string()),
+    replyToType: v.optional(
+      v.union(
+        v.literal('text'),
+        v.literal('image'),
+        v.literal('video'),
+        v.literal('doodle'),
+        v.literal('audio'),
+        v.literal('system')
+      )
+    ),
+    // @mention metadata stored on the message (for listMessages)
+    mentions: v.optional(
+      v.array(
+        v.object({
+          userId: v.id('users'),
+          nickname: v.string(),
+          startIndex: v.number(),
+          endIndex: v.number(),
+        })
+      )
+    ),
   })
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
     .index('by_room_clientId', ['roomId', 'clientId']), // For idempotency check
+
+  // Emoji reactions on chat room messages (Phase-2)
+  chatRoomMessageReactions: defineTable({
+    roomId: v.id('chatRooms'),
+    messageId: v.id('chatRoomMessages'),
+    userId: v.id('users'),
+    emoji: v.string(),
+    createdAt: v.number(),
+  })
+    .index('by_room_message', ['roomId', 'messageId'])
+    .index('by_message_user', ['messageId', 'userId']),
+
+  // @mention inbox notifications (who was mentioned in which room/message)
+  chatRoomMentionNotifications: defineTable({
+    mentionedUserId: v.id('users'),
+    senderId: v.id('users'),
+    roomId: v.id('chatRooms'),
+    messageId: v.id('chatRoomMessages'),
+    messagePreview: v.string(),
+    roomName: v.string(),
+    createdAt: v.number(),
+    readAt: v.optional(v.number()),
+  }).index('by_mentioned_user_created', ['mentionedUserId', 'createdAt']),
+
+  // Per-room mute of another member's messages (viewer-specific)
+  chatRoomPerUserMutes: defineTable({
+    roomId: v.id('chatRooms'),
+    muterId: v.id('users'),
+    targetUserId: v.id('users'),
+    createdAt: v.number(),
+  })
+    .index('by_room_muter', ['roomId', 'muterId'])
+    .index('by_room_target', ['roomId', 'targetUserId']),
+
+  // DM threads hidden from inbox (per user; conversation id)
+  chatRoomHiddenDmConversations: defineTable({
+    userId: v.id('users'),
+    conversationId: v.id('conversations'),
+    hiddenAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
 
   // Chat Room Penalties table (Phase-2: kicked users read-only for 24h)
   chatRoomPenalties: defineTable({

@@ -397,6 +397,135 @@ export async function uploadMediaToConvex(
 }
 
 /**
+ * Upload a media file from a local URI to Convex storage, with real progress updates.
+ * Uses FileSystem.createUploadTask (when available) to receive byte progress callbacks.
+ *
+ * Safety:
+ * - Keeps `uploadMediaToConvex` untouched as a fallback.
+ * - If task creation/progress path fails unexpectedly, falls back to `uploadMediaToConvex` (no progress).
+ */
+export async function uploadMediaToConvexWithProgress(
+  uri: string,
+  generateUploadUrl: () => Promise<string>,
+  mediaType?: 'photo' | 'video' | 'audio' | 'doodle',
+  onProgress?: (progress: number) => void
+): Promise<Id<'_storage'>> {
+  // Guard: skip upload for remote URLs (http/https)
+  if (uri.startsWith('http://') || uri.startsWith('https://')) {
+    throw new UploadError(
+      'Cannot upload remote URL. Only local files are supported.',
+      'INVALID_FILE',
+      false
+    );
+  }
+
+  let stableUri: string | null = null;
+  try {
+    // Step 1: Validate file size
+    await validateFileSize(uri, mediaType);
+
+    // Step 2: Stable file path
+    stableUri = await ensureStableFile(uri, mediaType);
+
+    // Step 3: Upload URL
+    let uploadUrl: string;
+    try {
+      uploadUrl = await generateUploadUrl();
+    } catch (urlError) {
+      throw mapConvexUploadUrlError(urlError);
+    }
+
+    // Step 4: Content type
+    const contentType = getContentTypeFromUri(stableUri, mediaType as 'photo' | 'video' | 'audio');
+
+    // Step 5: createUploadTask path (progress-capable)
+    let task: FileSystem.UploadTask | null = null;
+    try {
+      task = FileSystem.createUploadTask(
+        uploadUrl,
+        stableUri,
+        {
+          httpMethod: 'POST',
+          uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+          headers: {
+            'Content-Type': contentType,
+          },
+        },
+        ({ totalBytesSent, totalBytesExpectedToSend }) => {
+          if (!onProgress) return;
+          if (!totalBytesExpectedToSend || totalBytesExpectedToSend <= 0) return;
+          const pct = Math.max(
+            0,
+            Math.min(100, (totalBytesSent / totalBytesExpectedToSend) * 100)
+          );
+          onProgress(pct);
+        }
+      );
+    } catch (err) {
+      // Fallback: if task creation fails, use existing uploadAsync path (no progress)
+      return await uploadMediaToConvex(uri, generateUploadUrl, mediaType);
+    }
+
+    // Start at 0 for UI
+    onProgress?.(0);
+
+    const uploadResult = await task.uploadAsync();
+    if (!uploadResult) {
+      throw new UploadError('Upload was interrupted. Please try again.', 'UPLOAD_FAILED', true);
+    }
+
+    // Status check
+    if (uploadResult.status < 200 || uploadResult.status >= 300) {
+      if (uploadResult.status >= 500) {
+        throw new UploadError(
+          'Server is temporarily unavailable. Please try again in a moment.',
+          'UPLOAD_FAILED',
+          true
+        );
+      }
+      throw new UploadError(
+        `Upload failed (${uploadResult.status}). Please try again.`,
+        'UPLOAD_FAILED',
+        true
+      );
+    }
+
+    // Parse response
+    let result: { storageId: string };
+    try {
+      result = JSON.parse(uploadResult.body);
+    } catch {
+      throw new UploadError(
+        'Upload completed but response was invalid. Please try again.',
+        'UPLOAD_FAILED',
+        true
+      );
+    }
+
+    onProgress?.(100);
+
+    // Cleanup stable copy if we made one
+    if (stableUri !== uri && stableUri.startsWith(FileSystem.documentDirectory || '')) {
+      FileSystem.deleteAsync(stableUri, { idempotent: true }).catch(() => {});
+    }
+
+    return result.storageId as Id<'_storage'>;
+  } catch (error) {
+    // Cleanup stable copy on error
+    if (stableUri && stableUri !== uri && stableUri.startsWith(FileSystem.documentDirectory || '')) {
+      FileSystem.deleteAsync(stableUri, { idempotent: true }).catch(() => {});
+    }
+
+    if (error instanceof UploadError) throw error;
+    throw new UploadError(
+      error instanceof Error ? error.message : 'Failed to upload media',
+      'UNKNOWN',
+      true
+    );
+  }
+}
+
+/**
  * Upload a photo from a local URI to Convex storage (backward compat)
  */
 export async function uploadPhotoToConvex(

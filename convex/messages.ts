@@ -642,6 +642,125 @@ export const markAsRead = mutation({
   },
 });
 
+/**
+ * Paginated DM messages for PrivateChatView (chat room modal).
+ * Cursor: JSON.stringify({ before: createdAt }) for strictly older pages.
+ */
+export const getDmMessages = query({
+  args: {
+    authUserId: v.string(),
+    threadId: v.id('conversations'),
+    paginationOpts: v.object({
+      numItems: v.number(),
+      cursor: v.union(v.string(), v.null()),
+    }),
+  },
+  handler: async (ctx, { authUserId, threadId, paginationOpts }) => {
+    try {
+      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      if (!userId) {
+        return { page: [], isDone: true, continueCursor: null };
+      }
+
+      const conversation = await ctx.db.get(threadId);
+      if (!conversation || !conversation.participants.includes(userId)) {
+        return { page: [], isDone: true, continueCursor: null };
+      }
+
+      const numItems = Math.min(Math.max(paginationOpts.numItems, 1), 100);
+
+      let q = ctx.db
+        .query('messages')
+        .withIndex('by_conversation_created', (q) => q.eq('conversationId', threadId))
+        .order('desc');
+
+      if (paginationOpts.cursor) {
+        try {
+          const parsed = JSON.parse(paginationOpts.cursor) as { before: number };
+          q = q.filter((qf) => qf.lt(qf.field('createdAt'), parsed.before));
+        } catch {
+          return { page: [], isDone: true, continueCursor: null };
+        }
+      }
+
+      const batch = await q.take(numItems + 1);
+      const hasMore = batch.length > numItems;
+      const slice = hasMore ? batch.slice(0, numItems) : batch;
+
+      type DmRow = {
+        id: string;
+        threadId: string;
+        senderId: string;
+        senderName: string;
+        senderAvatar?: string;
+        text?: string;
+        type: string;
+        mediaUrl?: string;
+        readAt?: number;
+        createdAt: number;
+        isMe: boolean;
+      };
+
+      const dmPage: DmRow[] = [];
+
+      for (const m of slice.slice().reverse()) {
+        try {
+          const sender = await ctx.db.get(m.senderId);
+          const profile = await ctx.db
+            .query('userPrivateProfiles')
+            .withIndex('by_user', (q) => q.eq('userId', m.senderId))
+            .first();
+          const senderName = profile?.displayName ?? sender?.name ?? 'User';
+
+          let mediaUrl: string | undefined;
+          if ((m.type === 'image' || m.type === 'video') && m.imageStorageId) {
+            mediaUrl = (await ctx.storage.getUrl(m.imageStorageId)) ?? undefined;
+          } else if (m.type === 'voice' && m.audioStorageId) {
+            mediaUrl = (await ctx.storage.getUrl(m.audioStorageId)) ?? undefined;
+          }
+
+          let uiType = m.type as string;
+          if (m.type === 'voice') {
+            uiType = 'audio';
+          }
+          if (m.type === 'template') {
+            uiType = 'text';
+          }
+
+          dmPage.push({
+            id: m._id as string,
+            threadId: threadId as string,
+            senderId: m.senderId as string,
+            senderName,
+            senderAvatar: profile?.privatePhotoUrls?.[0] ?? sender?.primaryPhotoUrl ?? undefined,
+            text:
+              m.type === 'text' || m.type === 'template' ? m.content : undefined,
+            type: uiType,
+            mediaUrl,
+            readAt: m.readAt,
+            createdAt: m.createdAt,
+            isMe: m.senderId === userId,
+          });
+        } catch {
+          continue;
+        }
+      }
+
+      const oldest = slice.length > 0 ? slice[slice.length - 1] : null;
+      const continueCursor =
+        hasMore && oldest ? JSON.stringify({ before: oldest.createdAt }) : null;
+
+      return {
+        page: dmPage,
+        isDone: !hasMore,
+        continueCursor,
+      };
+    } catch {
+      return { page: [], isDone: true, continueCursor: null };
+    }
+  },
+});
+
 // MESSAGE-TICKS-FIX: Mark messages as delivered
 // Called when recipient's app receives/loads messages
 export const markAsDelivered = mutation({

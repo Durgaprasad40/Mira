@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useConvex, useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -62,13 +62,12 @@ import { useDemoChatRoomStore } from '@/stores/demoChatRoomStore';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useChatRoomDmStore } from '@/stores/chatRoomDmStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
-import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
 import { useVoiceRecorder, VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 // DATA-SOURCE FIX: Import privateProfileStore for real user identity (age, gender, name)
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import PrivateChatView from '@/components/chatroom/PrivateChatView';
 import ChatSheet from '@/components/chatroom/ChatSheet';
-import { ensureStableFile, uploadMediaToConvex, UploadError, validateFileSize, FILE_SIZE_LIMITS_DISPLAY } from '@/lib/uploadUtils';
+import { ensureStableFile, uploadMediaToConvex, uploadMediaToConvexWithProgress, UploadError, validateFileSize, FILE_SIZE_LIMITS_DISPLAY } from '@/lib/uploadUtils';
 import * as Sentry from '@sentry/react-native';
 import { setCurrentFeature, SENTRY_FEATURES } from '@/lib/sentry';
 import { preloadVideos } from '@/lib/videoCache';
@@ -162,7 +161,7 @@ interface ConvexRoomListMessage {
   replyToMessageId?: string;
   replyToSenderNickname?: string;
   replyToSnippet?: string;
-  replyToType?: DemoChatMessage['replyToType'];
+  replyToType?: DemoChatMessage['replyToType'] | 'system';
   mentions?: Array<{
     userId: string;
     nickname: string;
@@ -189,7 +188,8 @@ function toUiChatMessage(message: ConvexRoomListMessage): DemoChatMessage {
     replyToMessageId: message.replyToMessageId,
     replyToSenderNickname: message.replyToSenderNickname,
     replyToSnippet: message.replyToSnippet,
-    replyToType: message.replyToType,
+    replyToType:
+      message.replyToType === 'system' ? undefined : message.replyToType,
     mentions: message.mentions?.map((mention) => ({
       userId: mention.userId,
       nickname: mention.nickname,
@@ -276,8 +276,7 @@ export default function ChatRoomScreen() {
   const uploadingMediaUriRef = useRef<string | null>(null);
   // MEDIA-RELIABILITY: Synchronous guard against double-tap voice send
   const isSendingVoiceRef = useRef(false);
-  // ACTIVITY-BASED PRESENCE: Ref to hold activity heartbeat function (defined later)
-  const sendActivityHeartbeatRef = useRef<() => void>(() => {});
+  // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity-based heartbeat removed, using timer-based only
 
   // ISSUE B: Read route params for instant render fallback
   // MENTION-NAV: Added targetMessageId for navigating to specific message from mention tap
@@ -296,6 +295,14 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // Normalize: useLocalSearchParams can return string | string[] | undefined
   const roomIdStr = typeof roomId === 'string' ? roomId : Array.isArray(roomId) ? roomId[0] : undefined;
+
+  if (__DEV__) console.log('ROOM ID SENT', roomIdStr);
+
+  /** Basic sanity for getRoom — avoids calling Convex with garbage / too-short strings */
+  const isValidRoomId =
+    typeof roomIdStr === 'string' &&
+    roomIdStr.length > 10;
+
   // For demo mode: any non-empty string is valid (demo rooms use simple IDs like "room_global")
   // For Convex mode: must pass isValidConvexId check
   const hasValidRoomId = !!roomIdStr && (isDemoMode || isValidConvexId(roomIdStr));
@@ -304,6 +311,12 @@ export default function ChatRoomScreen() {
   // AUTH & SESSION
   // ─────────────────────────────────────────────────────────────────────────
   const authUserId = useAuthStore((s) => s.userId);
+
+  /** listMessages only — same sanity as getRoom; independent of membership gate */
+  const canLoadMessages =
+    typeof roomIdStr === 'string' &&
+    roomIdStr.length > 10 &&
+    !!authUserId;
 
   // THEME: Get current chat theme colors
   const themeColors = useChatThemeColors();
@@ -328,18 +341,34 @@ export default function ChatRoomScreen() {
   ) ?? null;
   const myBio = chatRoomProfile?.bio ?? null;
 
-  // Legacy store references (kept for backwards compatibility during transition)
-  const persistedDisplayName = useChatRoomProfileStore((s) => s.displayName);
-  const persistedAvatarUri = useChatRoomProfileStore((s) => s.avatarUri);
-  const persistedBio = useChatRoomProfileStore((s) => s.bio);
+  // CHATROOM_IDENTITY_STORE_RENDER_BLOCKED:
+  // Local store persistence is disabled for strict canonical identity.
+
+  // (store rehydrate disabled)
+
+  // CHATROOM_IDENTITY_CACHE: Stable identity values (prefer Convex, fallback to store)
+  // This is the single source of truth for current user's chat-room identity
+  // CHATROOM_IDENTITY_FALLBACK_BLOCKED: No store fallback for name/photo/bio rendering.
+  // Convex chatRoomProfile is canonical for self; placeholders are used until it loads.
+  const stableNickname = chatRoomProfile?.nickname || null;
+  const stableAvatarUrl = myAvatarUrl || null;
+  const stableBio = chatRoomProfile?.bio || null;
+
+  // Canonical surface check.
+  useEffect(() => {
+    if (__DEV__) console.log('CHATROOM_IDENTITY_CANONICAL_SURFACE_CHECK', {
+      surface: '[roomId]_self_identity',
+      nicknameSource: chatRoomProfile?.nickname ? 'convex_chatRoomProfile' : 'placeholder',
+      avatarSource: chatRoomProfile?.avatarUrl ? 'convex_chatRoomProfile' : 'placeholder',
+      bioSource: chatRoomProfile?.bio ? 'convex_chatRoomProfile' : 'none',
+    });
+  }, [chatRoomProfile]);
 
   // DATA-SOURCE FIX: Get real user identity from privateProfileStore (for age/gender only)
   // NOTE: We NO LONGER use realDisplayName, realPhotoUrls, realBio in Chat Rooms!
-  const realDisplayName = usePrivateProfileStore((s) => s.displayName);
   const realAge = usePrivateProfileStore((s) => s.age);
   const realGender = usePrivateProfileStore((s) => s.gender);
-  const realPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
-  const realBio = usePrivateProfileStore((s) => s.privateBio);
+  // CHATROOM_IDENTITY_FALLBACK_BLOCKED: Main profile name/photo/bio must never be used in Chat Rooms.
 
   // DM store - for Modal-based private chat (no navigation, just state)
   // DM-ID-FIX: Now includes threadId for Convex backend sync
@@ -374,20 +403,45 @@ export default function ChatRoomScreen() {
     api.chatRooms.checkRoomAccess,
     shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
-  // Membership confirmed when checkRoomAccess returns 'member' status
-  const hasMemberAccess = accessStatusQuery?.status === 'member';
+  // Phase-2: Route param is the earliest reliable public/private hint (set by the list screen).
+  const isPublicFromRoute = routeIsPrivate === '0';
+  const isPublicFromQuery = !!convexRoom && convexRoom.isPublic === true;
+  const isPublicRoom = isPublicFromQuery || isPublicFromRoute;
+
+  // PUBLIC ROOM BOOTSTRAP: allow access/presence earlier for known-public rooms.
+  const optimisticPublicAccess = !isDemoMode && isPublicRoom && !!authUserId && hasValidRoomId;
+
+  if (__DEV__) console.log('CHATROOM_PUBLIC_PRIVATE_BOOTSTRAP_DIFF', {
+    roomId: roomIdStr,
+    isPublicRoom,
+    optimisticPublicAccess,
+    accessStatus: accessStatusQuery?.status ?? null,
+  });
+
+  // Membership confirmed when checkRoomAccess returns 'member'/'owner_bypass'
+  // OR optimistically for public rooms (public rooms don't require membership to read presence).
+  const hasMemberAccess =
+    accessStatusQuery?.status === 'member' ||
+    accessStatusQuery?.status === 'owner_bypass' ||
+    optimisticPublicAccess;
 
   // Protected queries require membership - skip until access confirmed
   // This prevents "must join first" errors during the join race condition
   const shouldSkipProtectedQueries = shouldSkipConvex || !hasMemberAccess;
 
+  // Core room doc: only call getRoom with sane id + auth (never rely on membership gate here;
+  // backend returns null for no access — avoids invalid id reaching Convex)
   const convexRoom = useQuery(
     api.chatRooms.getRoom,
-    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
+    isValidRoomId && authUserId
+      ? { roomId: roomIdStr, authUserId }
+      : 'skip'
   );
   const convexMessagesResult = useQuery(
     api.chatRooms.listMessages,
-    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId!, limit: 50 }
+    canLoadMessages
+      ? { roomId: roomIdStr, authUserId, limit: 50 }
+      : 'skip'
   );
 
   // Convex mutations
@@ -413,10 +467,24 @@ export default function ChatRoomScreen() {
   // HIDE-VS-DELETE-FIX: Mutation to hide DM thread from list (not delete)
   const hideDmThreadMutation = useMutation(api.chatRooms.hideDmThread);
 
+  // FIX 1 — PUBLIC ROOM INSTANT PRESENCE
+  // Presence can start immediately for known-public rooms (route param), without waiting for hasMemberAccess.
+  const canFetchPresenceEarly = !isDemoMode && hasValidRoomId && !!authUserId && isPublicFromRoute;
+  const shouldSkipPresence = shouldSkipConvex || (!canFetchPresenceEarly && !hasMemberAccess);
+
+  if (__DEV__) console.log('CHATROOM_BOOTSTRAP_PARALLEL', {
+    roomId: roomIdStr,
+    isPublicFromRoute,
+    isPublicFromQuery,
+    canFetchPresenceEarly,
+    hasMemberAccess,
+    shouldSkipPresence,
+  });
+
   // Query room presence state (for member list Online/Recently Left sections)
   const roomPresenceQuery = useQuery(
     api.chatRooms.getRoomPresence,
-    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
+    shouldSkipPresence ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
   const roomOnlineCount = roomPresenceQuery?.onlineCount ?? roomPresenceQuery?.online.length ?? 0;
 
@@ -450,6 +518,40 @@ export default function ChatRoomScreen() {
     api.chatRooms.listMembersWithProfiles,
     shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
+
+  const canonicalRoomIdentities = useQuery(
+    api.chatRooms.getRoomUserIdentities,
+    !isDemoMode && authUserId && hasValidRoomId
+      ? { roomId: roomIdStr, authUserId }
+      : 'skip'
+  );
+
+  const selfUserIdFromCanonical = !isDemoMode
+    ? ((canonicalRoomIdentities as any)?.selfUserId as string | null | undefined) ?? null
+    : null;
+
+  useEffect(() => {
+    if (!isDemoMode && isPublicRoom) {
+      if (__DEV__) console.log('CHATROOM_PUBLIC_ROOM_SELF_BOOTSTRAP', {
+        roomId: roomIdStr,
+        canonicalSelfUserId: selfUserIdFromCanonical ? selfUserIdFromCanonical.slice(0, 12) : null,
+        hasCurrentUserChatProfile: !!chatRoomProfile,
+        currentUserHasAvatar: !!myAvatarUrl,
+      });
+    }
+  }, [chatRoomProfile, isDemoMode, isPublicRoom, myAvatarUrl, roomIdStr, selfUserIdFromCanonical]);
+
+  useEffect(() => {
+    if (__DEV__) console.log('CHATROOM_EFFECTIVE_USER_ID_REASON', {
+      roomId: roomIdStr,
+      authUserIdPresent: !!authUserId,
+      effectiveUserId: effectiveUserId ? String(effectiveUserId).slice(0, 12) : null,
+      canonicalSelfUserId: selfUserIdFromCanonical ? selfUserIdFromCanonical.slice(0, 12) : null,
+      hasCurrentUserChatProfile: !!chatRoomProfile,
+      currentUserNickname: myNickname,
+      currentUserHasAvatar: !!myAvatarUrl,
+    });
+  }, [authUserId, chatRoomProfile, effectiveUserId, myAvatarUrl, myNickname, roomIdStr, selfUserIdFromCanonical]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // PER-USER MUTING: Query muted users from Convex (persistent, per-room)
@@ -621,9 +723,13 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // ENTER ROOM SESSION + SAVE AS PREFERRED
   // ─────────────────────────────────────────────────────────────────────────
+  const enteredRoomRef = useRef<string | null>(null);
   useEffect(() => {
     const canEnterRoom = isDemoMode || hasMemberAccess;
     if (roomIdStr && canEnterRoom) {
+      if (enteredRoomRef.current === roomIdStr) return;
+      enteredRoomRef.current = roomIdStr;
+
       // CHAT ROOM IDENTITY: Use myNickname/myAvatarUrl from Convex chatRoomProfiles
       // NOT main profile data (realDisplayName, realPhotoUrls, etc.)
       const identity = isDemoMode
@@ -679,21 +785,9 @@ export default function ChatRoomScreen() {
     return () => subscription.remove();
   }, [router]);
 
-  // iOS swipe-back / header back → go to Desire Land
-  useEffect(() => {
-    const unsubscribe = navigation.addListener('beforeRemove', (e: any) => {
-      // Only intercept GO_BACK and POP actions (not NAVIGATE, REPLACE, etc.)
-      const actionType = e.data?.action?.type;
-      if (actionType !== 'GO_BACK' && actionType !== 'POP') return;
-
-      // Prevent default back behavior
-      e.preventDefault();
-
-      // Navigate to Desire Land instead
-      router.replace(PHASE2_HOME_ROUTE);
-    });
-    return unsubscribe;
-  }, [navigation, router]);
+  // iOS swipe-back / header back:
+  // Minimal-risk perf fix: do NOT intercept native back. Interception can add latency.
+  // Unmount lifecycle already stops heartbeat; leave mutation is fire-and-forget.
 
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -749,9 +843,7 @@ export default function ChatRoomScreen() {
     // In inverted list, offset near 0 means we're at the "bottom" (latest messages)
     const wasNearBottom = isNearBottomRef.current;
     isNearBottomRef.current = contentOffset.y < SCROLL_THRESHOLD;
-
-    // ACTIVITY-BASED PRESENCE: Scroll counts as user activity
-    sendActivityHeartbeatRef.current();
+    // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity heartbeat on scroll removed, using timer-based only
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -765,6 +857,9 @@ export default function ChatRoomScreen() {
   const storeHasHydrated = useDemoChatRoomStore((s) => s._hasHydrated);
 
   const [pendingMessages, setPendingMessages] = useState<DemoChatMessage[]>([]);
+  const [pendingMediaMessages, setPendingMediaMessages] = useState<DemoChatMessage[]>([]);
+  const lastProgressUpdateAtRef = useRef<Map<string, number>>(new Map());
+  const PROGRESS_UPDATE_INTERVAL_MS = 100;
   const [olderMessages, setOlderMessages] = useState<DemoChatMessage[]>([]);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
@@ -824,8 +919,10 @@ export default function ChatRoomScreen() {
     if (isDemoMode) return demoMessages;
     const convexMsgs = convexMessagesResult?.messages ?? [];
 
-    // Build set of pending clientIds for dedup
-    const pendingClientIds = new Set(pendingMessages.map((m) => m.id.replace('pending_', '')));
+    // Build set of pending clientIds for dedup (text + media)
+    const pendingClientIds = new Set(
+      [...pendingMessages, ...pendingMediaMessages].map((m) => m.id.replace('pending_', ''))
+    );
 
     // SEND-FLICKER-FIX: Check which pending messages now have server equivalents
     // Remove pending messages whose server message has arrived
@@ -854,7 +951,7 @@ export default function ChatRoomScreen() {
     });
 
     return deduped.map((message) => toUiChatMessage(message));
-  }, [isDemoMode, demoMessages, convexMessagesResult, pendingMessages]);
+  }, [isDemoMode, demoMessages, convexMessagesResult, pendingMessages, pendingMediaMessages]);
 
   useEffect(() => {
     liveMessagesRef.current = liveMessages;
@@ -869,13 +966,18 @@ export default function ChatRoomScreen() {
       const clientId = message.id.replace('pending_', '');
       return !pendingSentClientIdsRef.current.has(clientId);
     });
+    const filteredPendingMedia = pendingMediaMessages.filter((message) => {
+      const clientId = message.id.replace('pending_', '');
+      return !pendingSentClientIdsRef.current.has(clientId);
+    });
 
     return mergeMessagesById([
       ...olderMessages,
       ...liveMessages,
       ...filteredPending,
+      ...filteredPendingMedia,
     ]);
-  }, [isDemoMode, demoMessages, olderMessages, liveMessages, pendingMessages]);
+  }, [isDemoMode, demoMessages, olderMessages, liveMessages, pendingMessages, pendingMediaMessages]);
 
   const messageIdsForReactions = useMemo(() => {
     if (isDemoMode) return [];
@@ -926,25 +1028,26 @@ export default function ChatRoomScreen() {
         });
         return cleaned;
       });
+      setPendingMediaMessages(prev => {
+        const cleaned = prev.filter(m => {
+          const clientId = m.id.replace('pending_', '');
+          return !toCleanup.includes(clientId);
+        });
+        return cleaned;
+      });
     });
   }, [convexMessagesResult]);
 
   const fetchOlderMessagesPage = useCallback(
     async (before: number) => {
-      if (
-        isDemoMode ||
-        !authUserId ||
-        !hasValidRoomId ||
-        !hasMemberAccess
-      ) {
+      if (isDemoMode || !canLoadMessages || !hasValidRoomId) {
         return null;
       }
 
       const page = await convex.query(api.chatRooms.listMessages, {
-        roomId: roomIdStr as Id<'chatRooms'>,
+        roomId: roomIdStr,
         authUserId,
         limit: 50,
-        before,
       });
 
       const converted = page.messages.map((message) =>
@@ -967,7 +1070,7 @@ export default function ChatRoomScreen() {
         hasMore: page.hasMore,
       };
     },
-    [authUserId, convex, hasMemberAccess, hasValidRoomId, isDemoMode, roomIdStr]
+    [authUserId, convex, canLoadMessages, hasValidRoomId, isDemoMode, roomIdStr]
   );
 
   const handleLoadOlderMessages = useCallback(async () => {
@@ -1189,11 +1292,26 @@ export default function ChatRoomScreen() {
   // SECURITY: Track join attempt status for access denied detection
   const [joinAttempted, setJoinAttempted] = useState(false);
   const [joinFailed, setJoinFailed] = useState(false);
+  const joinTriggeredRef = useRef<string | null>(null);
 
   // Auto-join Convex room (skip if invalid ID)
   useEffect(() => {
     if (isDemoMode || !hasValidRoomId || !authUserId) return;
-    if (accessStatusQuery?.status !== 'public_joinable') return;
+    if (!convexRoom || convexRoom.isPublic !== true) return;
+    if (joinTriggeredRef.current === roomIdStr) return;
+    joinTriggeredRef.current = roomIdStr;
+
+    if (__DEV__) console.log('CHATROOM_PUBLIC_ROOM_BOOTSTRAP_START', {
+      roomId: roomIdStr,
+      authReady: true,
+      hasCurrentUserChatProfile: !!chatRoomProfile,
+    });
+
+    if (__DEV__) console.log('CHATROOM_PUBLIC_ROOM_JOIN_DECISION', {
+      roomId: roomIdStr,
+      decision: 'joinRoom_idempotent',
+      reason: 'ensure_membership_row_for_public_room_bootstrap',
+    });
 
     joinRoomMutation({
       roomId: roomIdStr as Id<'chatRooms'>,
@@ -1213,67 +1331,125 @@ export default function ChatRoomScreen() {
           setJoinFailed(true);
         }
       });
-  }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation, accessStatusQuery?.status]);
+  }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation, convexRoom]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ACTIVITY-BASED PRESENCE: Heartbeat ONLY on real user activity
-  // User becomes offline after 2 minutes of NO activity (no blind timer)
+  // PRESENCE: Heartbeat timer while mounted (NOT activity-based)
+  // Product rule: if user is inside the room screen, they must remain Online even when idle.
   // ─────────────────────────────────────────────────────────────────────────
-  const lastActivityHeartbeatRef = useRef<number>(0);
-  const ACTIVITY_HEARTBEAT_THROTTLE_MS = 15 * 1000; // Throttle heartbeats to max 1 per 15s
+  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const firstHeartbeatAckAtRef = useRef<number | null>(null);
+  const HEARTBEAT_INTERVAL_MS = 30 * 1000; // must be < backend online threshold (2 min)
 
-  // Throttled heartbeat function - call on any user activity
-  const sendActivityHeartbeat = useCallback(() => {
-    if (isDemoMode || !hasValidRoomId || !authUserId || !hasMemberAccess) return;
+  if (__DEV__) console.log('CHATROOM_PUBLIC_ROOM_MEMBER_ACCESS', {
+    roomId: roomIdStr,
+    accessStatus: accessStatusQuery?.status ?? null,
+    hasMemberAccess,
+  });
+
+  // Heartbeat should run for public rooms immediately once isPublic is known (optimisticPublicAccess),
+  // and for private rooms only after membership access is confirmed.
+  const isPublicForHeartbeat = !!authUserId && hasValidRoomId && !isDemoMode && (
+    (convexRoom ? convexRoom.isPublic === true : routeIsPrivate === '0')
+  );
+  const canHeartbeat = !isDemoMode && hasValidRoomId && !!authUserId && (isPublicForHeartbeat ? true : !!hasMemberAccess);
+
+  const sendHeartbeatNow = useCallback((reason: string) => {
+    if (!canHeartbeat) return;
     if (!mountedRef.current) return;
-
-    const now = Date.now();
-    // Throttle: only send if 15+ seconds since last heartbeat
-    if (now - lastActivityHeartbeatRef.current < ACTIVITY_HEARTBEAT_THROTTLE_MS) return;
-
-    lastActivityHeartbeatRef.current = now;
+    if (__DEV__) console.log('CHATROOM_HEARTBEAT_SENT', { roomId: roomIdStr, reason });
+    if (__DEV__) console.log('CHATROOM_PRESENCE_HEARTBEAT_TICK', {
+      roomId: roomIdStr,
+      reason,
+      ts: Date.now(),
+    });
     heartbeatPresenceMutation({
       roomId: roomIdStr as Id<'chatRooms'>,
-      authUserId,
-    }).catch(() => {
-      // Silently ignore heartbeat errors
+      authUserId: authUserId!,
+    }).then(() => {
+      // Presence propagation gap fix: track the FIRST successful heartbeat ack
+      // so we can avoid a hard-empty top-strip flash for a very short window.
+      if (!firstHeartbeatAckAtRef.current) {
+        firstHeartbeatAckAtRef.current = Date.now();
+      }
+    }).catch((err) => {
+      console.log('CHATROOM_OFFLINE_REASON', {
+        roomId: roomIdStr,
+        reason: 'heartbeat_failed',
+        message: err?.message ?? String(err),
+      });
     });
-  }, [isDemoMode, hasValidRoomId, authUserId, hasMemberAccess, roomIdStr, heartbeatPresenceMutation]);
+  }, [authUserId, canHeartbeat, heartbeatPresenceMutation, hasMemberAccess, hasValidRoomId, isDemoMode, roomIdStr]);
 
-  // Keep ref updated for use in callbacks defined before this
-  sendActivityHeartbeatRef.current = sendActivityHeartbeat;
+  const startHeartbeatTimer = useCallback((reason: string) => {
+    if (!canHeartbeat) return;
+    if (heartbeatIntervalRef.current) return;
+    if (__DEV__) console.log('CHATROOM_PRESENCE_HEARTBEAT_START', { roomId: roomIdStr, reason, intervalMs: HEARTBEAT_INTERVAL_MS });
+    sendHeartbeatNow('start_immediate');
+    heartbeatIntervalRef.current = setInterval(() => {
+      sendHeartbeatNow('interval');
+    }, HEARTBEAT_INTERVAL_MS);
+  }, [canHeartbeat, roomIdStr, sendHeartbeatNow]);
 
-  // Send initial heartbeat on room entry (marks user as ONLINE)
+  const stopHeartbeatTimer = useCallback((reason: string) => {
+    if (!heartbeatIntervalRef.current) return;
+    clearInterval(heartbeatIntervalRef.current);
+    heartbeatIntervalRef.current = null;
+    if (__DEV__) console.log('CHATROOM_PRESENCE_HEARTBEAT_STOP', { roomId: roomIdStr, reason });
+  }, [roomIdStr]);
+
+  // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity-based ref assignment removed, using timer-based only
+
+  // Public rooms: start heartbeat as early as possible (do not wait for access query).
   useEffect(() => {
-    if (isDemoMode || !hasValidRoomId || !authUserId || !hasMemberAccess) return;
+    if (!isPublicForHeartbeat) return;
+    if (!canHeartbeat) return;
+    if (__DEV__) console.log('CHATROOM_BOOTSTRAP_PARALLEL', { roomId: roomIdStr, isPublicForHeartbeat, hasMemberAccess });
+    if (__DEV__) console.log('CHATROOM_HEARTBEAT_STARTED_EARLY_PUBLIC', { roomId: roomIdStr });
+    startHeartbeatTimer('early_public_mount');
+  }, [canHeartbeat, hasMemberAccess, isPublicForHeartbeat, roomIdStr, startHeartbeatTimer]);
 
-    // Initial heartbeat - user entered the room
-    lastActivityHeartbeatRef.current = Date.now();
-    heartbeatPresenceMutation({
-      roomId: roomIdStr as Id<'chatRooms'>,
-      authUserId,
-    }).catch(() => {
-      // Silently ignore heartbeat errors
+  // Room mount/unmount lifecycle
+  useEffect(() => {
+    if (__DEV__) console.log('CHATROOM_ROOM_MOUNT_PRESENCE', {
+      roomId: roomIdStr,
+      canHeartbeat,
+      hasMemberAccess,
+      hasValidRoomId,
+      hasAuth: !!authUserId,
     });
-
-    // NOTE: No interval timer - heartbeats are activity-based only
-    // User becomes offline after 2 minutes of no activity (backend handles this)
-  }, [roomIdStr, hasValidRoomId, authUserId, hasMemberAccess, heartbeatPresenceMutation]);
+    startHeartbeatTimer('room_mount');
+    return () => {
+      if (__DEV__) console.log('CHATROOM_ROOM_UNMOUNT_PRESENCE', { roomId: roomIdStr });
+      stopHeartbeatTimer('room_unmount');
+    };
+  }, [authUserId, canHeartbeat, hasMemberAccess, hasValidRoomId, roomIdStr, startHeartbeatTimer, stopHeartbeatTimer]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // APP STATE HANDLING: Send heartbeat on foreground return (counts as activity)
+  // APP STATE HANDLING
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (isDemoMode || !hasValidRoomId || !authUserId) return;
-
     const appStateRef = { current: AppState.currentState };
 
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       if (!mountedRef.current) return;
 
-      // App coming to foreground → counts as activity
+      console.log('CHATROOM_APPSTATE_PRESENCE', {
+        roomId: roomIdStr,
+        from: appStateRef.current,
+        to: nextAppState,
+      });
+
+      // Foreground: resume heartbeats immediately
       if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
-        sendActivityHeartbeat();
+        startHeartbeatTimer('app_foreground');
+        sendHeartbeatNow('app_foreground_tick');
+      }
+
+      // Background/inactive: stop timer (backend will transition to recently-left after expiry)
+      if (nextAppState.match(/inactive|background/)) {
+        stopHeartbeatTimer('app_background');
+        console.log('CHATROOM_OFFLINE_REASON', { roomId: roomIdStr, reason: 'app_background_timer_stopped' });
       }
 
       appStateRef.current = nextAppState;
@@ -1284,7 +1460,21 @@ export default function ChatRoomScreen() {
     return () => {
       subscription.remove();
     };
-  }, [roomIdStr, hasValidRoomId, authUserId, sendActivityHeartbeat]);
+  }, [roomIdStr, sendHeartbeatNow, startHeartbeatTimer, stopHeartbeatTimer]);
+
+  // TAB / FOCUS transitions: log only (we keep heartbeat while mounted+foreground)
+  useFocusEffect(
+    useCallback(() => {
+      console.log('CHATROOM_TAB_SWITCH_PRESENCE', { roomId: roomIdStr, event: 'focus' });
+      console.log('CHATROOM_ONLINE_REASON', { roomId: roomIdStr, reason: 'screen_focused' });
+      // Ensure timer is running (idempotent)
+      startHeartbeatTimer('screen_focus');
+      return () => {
+        console.log('CHATROOM_TAB_SWITCH_PRESENCE', { roomId: roomIdStr, event: 'blur' });
+        // Do NOT stop timer here; screen remains mounted in tab flows.
+      };
+    }, [roomIdStr, startHeartbeatTimer])
+  );
 
   // ─────────────────────────────────────────────────────────────────────────
   // INPUT STATE
@@ -1344,30 +1534,117 @@ export default function ChatRoomScreen() {
     if (isDemoMode) {
       return DEMO_ONLINE_USERS;
     }
-    // Real mode: transform Convex data to DemoOnlineUser shape
+    // Real mode: transform Convex data to DemoOnlineUser shape (CANONICAL identity)
     if (!convexMembersWithProfiles) {
       return []; // Still loading or no members
     }
-    return convexMembersWithProfiles.map((m) => ({
-      id: m.id,
-      username: m.displayName,
-      // CACHE-BUST-FIX: Use cache-busted avatar URL
-      avatar: buildCacheBustedAvatarUrl(m.avatar, m.avatarVersion),
-      isOnline: presenceStateByUserId.get(String(m.id))?.isOnline ?? false,
-      gender: m.gender as 'male' | 'female' | undefined,
-      age: m.age,
-      chatBio: m.bio,
-      lastSeen: presenceStateByUserId.get(String(m.id))?.lastSeen,
-    }));
-  }, [convexMembersWithProfiles, isDemoMode, presenceStateByUserId]);
+    const byUserId = (canonicalRoomIdentities as any)?.byUserId ?? {};
+
+    console.log('CHATROOM_IDENTITY_CANONICAL_BUILD', {
+      roomId: roomIdStr,
+      memberCount: convexMembersWithProfiles.length,
+      canonicalCount: Object.keys(byUserId).length,
+      hasCanonical: !!canonicalRoomIdentities,
+    });
+
+    return convexMembersWithProfiles.map((m) => {
+      const uid = String(m.id);
+      const canon = byUserId[uid];
+
+      if (!canon) {
+        console.log('CHATROOM_IDENTITY_FALLBACK_BLOCKED', {
+          userId: uid.slice(0, 12),
+          reason: 'missing_canonical_identity',
+          blocked: ['member.displayName', 'member.avatar', 'member.bio'],
+        });
+      }
+
+      console.log('CHATROOM_IDENTITY_SOURCE_DECISION', {
+        userId: uid.slice(0, 12),
+        nicknameSource: canon?.nickname ? 'canonical' : 'placeholder',
+        avatarSource: canon?.avatarUrl ? 'canonical' : 'placeholder',
+        bioSource: canon?.bio ? 'canonical' : 'none',
+        ageSource: typeof canon?.age === 'number' ? 'main_user' : 'none',
+        genderSource: typeof canon?.gender === 'string' ? 'main_user' : 'none',
+      });
+
+      const username = canon?.nickname || 'User';
+      const avatar = canon?.avatarUrl
+        ? (buildCacheBustedAvatarUrl(canon.avatarUrl, m.avatarVersion) ?? undefined)
+        : undefined;
+
+      return {
+        id: m.id,
+        username,
+        avatar,
+        isOnline: presenceStateByUserId.get(uid)?.isOnline ?? false,
+        age: typeof canon?.age === 'number' && canon.age > 0 ? canon.age : undefined,
+        gender: (typeof canon?.gender === 'string' ? (canon.gender as any) : undefined),
+        chatBio: canon?.bio ?? null,
+        lastSeen: presenceStateByUserId.get(uid)?.lastSeen,
+      };
+    });
+  }, [canonicalRoomIdentities, convexMembersWithProfiles, isDemoMode, presenceStateByUserId, roomIdStr]);
+
+  const roomIdentityByUserId = useMemo(() => {
+    const map = new Map<string, { nickname: string; avatar?: string; age?: number; gender?: 'male' | 'female' | 'other'; bio?: string }>();
+    for (const m of roomMembers ?? []) {
+      map.set(String(m.id), {
+        nickname: m.username,
+        avatar: m.avatar,
+        age: m.age,
+        gender: m.gender as any,
+        bio: (m as any).chatBio,
+      });
+    }
+    return map;
+  }, [roomMembers]);
+
+  // TEMP DEBUG: Trace age end-to-end for a single member (raw -> normalized -> map).
+  const didLogAgeTraceRef = useRef(false);
+  useEffect(() => {
+    if (didLogAgeTraceRef.current) return;
+    if (isDemoMode) return;
+    if (!convexMembersWithProfiles || convexMembersWithProfiles.length === 0) return;
+    if (!roomMembers || roomMembers.length === 0) return;
+
+    const raw = convexMembersWithProfiles[0];
+    const normalized = roomMembers.find((m) => String(m.id) === String(raw.id));
+    const mapped = roomIdentityByUserId.get(String(raw.id));
+
+    // PRIVATE-ROOM-ACCESS-FIX: Instrumentation for age flow
+    console.log('CHATROOM_AGE_RAW', { age: raw?.age, gender: raw?.gender, id: String(raw?.id) });
+    console.log('CHATROOM_AGE_NORMALIZED', { age: normalized?.age, gender: normalized?.gender, id: String(normalized?.id) });
+    console.log('CHATROOM_MEMBER_LIST_COUNT', { count: roomMembers.length });
+
+    didLogAgeTraceRef.current = true;
+  }, [convexMembersWithProfiles, isDemoMode, roomIdentityByUserId, roomMembers]);
 
   const presenceUsers = useMemo(() => {
-    if (isDemoMode || !convexMembersWithProfiles) {
+    // CHATROOM_IMMEDIATE_USER_BOOTSTRAP: Use presence data directly for immediate render
+    // Don't wait for convexMembersWithProfiles to load - presence entries have complete data
+    if (isDemoMode) {
       return { online: [], recentlyLeft: [] };
     }
 
+    const hasPresenceData = (roomPresenceQuery?.online?.length ?? 0) > 0 || (roomPresenceQuery?.recentlyLeft?.length ?? 0) > 0;
+    const hasMemberData = convexMembersWithProfiles && convexMembersWithProfiles.length > 0;
+
+    // CHATROOM_IDENTITY_SOURCE_SHARED: Log shared identity sources
+    console.log('CHATROOM_IDENTITY_SOURCE_SHARED', {
+      presenceOnlineCount: roomPresenceQuery?.online?.length ?? 0,
+      presenceRecentlyLeftCount: roomPresenceQuery?.recentlyLeft?.length ?? 0,
+      membersWithProfilesCount: convexMembersWithProfiles?.length ?? 0,
+      hasCanonicalRoomIdentities: !!canonicalRoomIdentities,
+      hasCurrentUserChatProfile: !!chatRoomProfile,
+      currentUserNickname: myNickname,
+      currentUserHasAvatar: !!myAvatarUrl,
+      effectiveUserId: effectiveUserId?.slice(0, 12) ?? null,
+    });
+
+    // Build member lookup map (may be empty if not loaded yet)
     const memberByUserId = new Map(
-      convexMembersWithProfiles.map((member) => [String(member.id), member])
+      (convexMembersWithProfiles ?? []).map((member) => [String(member.id), member])
     );
 
     const enrichPresence = (
@@ -1376,30 +1653,221 @@ export default function ChatRoomScreen() {
         | NonNullable<typeof roomPresenceQuery>['recentlyLeft']
         | undefined
     ) =>
-      (entries ?? []).flatMap((entry) => {
+      (entries ?? []).map((entry) => {
         const member = memberByUserId.get(String(entry.id));
-        if (!member) {
-          return [];
+        const entryIdStr = String(entry.id);
+        const selfUserIdStr = selfUserIdFromCanonical ?? (effectiveUserId ? String(effectiveUserId) : null);
+        const isCurrentUser = !!selfUserIdStr && entryIdStr === selfUserIdStr;
+
+        const canon = (canonicalRoomIdentities as any)?.byUserId?.[entryIdStr];
+
+        // Hard guarantee: canonical identity wins for name/photo/bio whenever present.
+        // If backend presence payload contains identity, we explicitly ignore it.
+        if (canon) {
+          const backendDisplayName = (entry as any).displayName;
+          const backendAvatar = (entry as any).avatar;
+          const backendBio = (entry as any).bio;
+          const wouldOverride =
+            (typeof backendDisplayName === 'string' && backendDisplayName && backendDisplayName !== canon.nickname) ||
+            (typeof backendAvatar === 'string' && backendAvatar && backendAvatar !== canon.avatarUrl) ||
+            (typeof backendBio === 'string' && backendBio && backendBio !== canon.bio);
+
+          if (wouldOverride) {
+            console.log('CHATROOM_PRESENCE_IDENTITY_OVERRIDE_BLOCKED', {
+              userId: entryIdStr.slice(0, 12),
+              blockedFields: {
+                displayName: backendDisplayName ?? null,
+                avatar: backendAvatar ?? null,
+                bio: backendBio ?? null,
+              },
+            });
+          }
+
+          console.log('CHATROOM_CANONICAL_IDENTITY_WIN', {
+            userId: entryIdStr.slice(0, 12),
+            hasAvatar: !!canon.avatarUrl,
+            hasBio: !!canon.bio,
+          });
+        } else {
+          console.log('CHATROOM_CANONICAL_IDENTITY_MISSING', {
+            userId: entryIdStr.slice(0, 12),
+            reason: 'no_canonicalRoomIdentities_entry',
+          });
         }
 
-        return [{
-          id: member.id,
-          displayName: member.displayName,
-          avatar: buildCacheBustedAvatarUrl(member.avatar, member.avatarVersion) ?? undefined,
-          age: member.age,
-          gender: member.gender as 'male' | 'female' | 'other' | undefined,
-          bio: member.bio,
-          role: member.role,
+        // CHATROOM_FALLBACK_REASON: Log why fallback might occur
+        console.log('CHATROOM_SELF_ID_MATCH_INPUTS', {
+          userId: entryIdStr.slice(0, 12),
+          selfUserIdStr: selfUserIdStr?.slice(0, 12) ?? 'NULL',
+          entryIdStr: entryIdStr.slice(0, 12),
+          isCurrentUser: !!isCurrentUser,
+          authUserIdPresent: !!authUserId,
+          hasCurrentUserChatProfile: !!chatRoomProfile,
+          canonicalLoaded: !!canon,
+          canonicalNickname: canon?.nickname ?? 'UNDEFINED',
+          canonicalAvatarUrl: canon?.avatarUrl ? 'SET' : 'UNDEFINED',
+        });
+
+        console.log('CHATROOM_SELF_ID_MATCH_RESULT', {
+          entryId: entryIdStr.slice(0, 12),
+          selfUserId: selfUserIdStr?.slice(0, 12) ?? 'NULL',
+          isCurrentUser: !!isCurrentUser,
+        });
+
+        // Canonical identity: name/photo/bio ONLY from chat-room profile (canonicalRoomIdentities).
+        const chatRoomNickname = canon?.nickname ?? null;
+        const chatRoomAvatar = canon?.avatarUrl ?? null;
+        const chatRoomBioValue = canon?.bio ?? null;
+
+        // hasChatProfile = true if we have identity from any source (Convex or store)
+        const hasChatProfile = !!canon;
+
+        // CHATROOM_PROFILE_CARD_IDENTITY: Log profile card identity source (current user)
+        if (isCurrentUser) {
+          console.log('CHATROOM_PROFILE_CARD_IDENTITY', {
+            userId: String(entry.id).slice(0, 12),
+            source: canon ? 'canonical' : 'none',
+            nickname: chatRoomNickname,
+            hasAvatar: !!chatRoomAvatar,
+            hasBio: !!chatRoomBioValue,
+          });
+        }
+
+        // CHATROOM_IDENTITY_SOURCE_FIX: Strict data source rules
+        // - Name: ONLY from chat-room profile (Convex or store), placeholder "Member" if truly not set
+        // - Photo: ONLY from chat-room profile (Convex or store), placeholder if truly not set
+        // - Bio: ONLY from chat-room profile (Convex or store)
+        // - Age/Gender: From main user data (allowed) or presence entry (fallback)
+        // NEVER use main profile name/photo/bio!
+
+        // CHATROOM_TOP_ROW_IDENTITY_SOURCE / CHATROOM_USERS_PANEL_IDENTITY_SOURCE: Log identity source
+        const identitySource = canon ? 'canonical' : 'placeholder';
+
+        console.log('CHATROOM_TOP_ROW_IDENTITY_SOURCE', {
+          userId: entryIdStr.slice(0, 12),
+          isCurrentUser: !!isCurrentUser,
+          source: identitySource,
+          nickname: chatRoomNickname ?? 'NULL',
+          hasAvatar: !!chatRoomAvatar,
+        });
+        console.log('CHATROOM_USERS_PANEL_IDENTITY_SOURCE', {
+          userId: entryIdStr.slice(0, 12),
+          isCurrentUser: !!isCurrentUser,
+          source: identitySource,
+          nickname: chatRoomNickname ?? 'NULL',
+          hasAvatar: !!chatRoomAvatar,
+        });
+
+        // Name: Use chat-room nickname from stable source, fallback to "Member" only if truly not set
+        let finalDisplayName: string;
+        let nameSource: string;
+        if (chatRoomNickname) {
+          finalDisplayName = chatRoomNickname;
+          nameSource = identitySource;
+        } else {
+          finalDisplayName = 'User';
+          nameSource = 'placeholder';
+          console.log('CHATROOM_IDENTITY_FALLBACK_BLOCKED', {
+            userId: entryIdStr.slice(0, 12),
+            reason: 'missing_chat_room_nickname',
+            blocked: ['users.name', 'userPrivateProfiles.displayName'],
+          });
+        }
+
+        // Avatar: Use stable chat-room avatar (chatRoomAvatar already includes store fallback for current user)
+        // chatRoomAvatar = stableAvatarUrl for current user, chatProfileFromBulk?.avatarUrl for others
+        let finalAvatar: string | undefined;
+        let avatarSource: string;
+        if (chatRoomAvatar) {
+          finalAvatar = buildCacheBustedAvatarUrl(chatRoomAvatar, (member as any)?.avatarVersion) ?? undefined;
+          avatarSource = identitySource;
+        } else {
+          finalAvatar = undefined;
+          avatarSource = 'placeholder';
+          console.log('CHATROOM_IDENTITY_FALLBACK_BLOCKED', {
+            userId: entryIdStr.slice(0, 12),
+            reason: 'missing_chat_room_avatar',
+            blocked: ['users.photo', 'userPrivateProfiles.privatePhotoUrls[0]'],
+          });
+        }
+
+        // CHATROOM_TOP_ROW_IDENTITY_APPLY: Log identity applied to top row
+        console.log('CHATROOM_TOP_ROW_IDENTITY_APPLY', {
+          userId: entryIdStr.slice(0, 12),
+          isCurrentUser: !!isCurrentUser,
+          nameSource,
+          displayName: finalDisplayName,
+          avatarSource,
+          hasAvatar: !!finalAvatar,
+        });
+
+        // CHATROOM_USERS_PANEL_IDENTITY_APPLY: Log identity applied to users panel
+        console.log('CHATROOM_USERS_PANEL_IDENTITY_APPLY', {
+          userId: entryIdStr.slice(0, 12),
+          isCurrentUser: !!isCurrentUser,
+          nameSource,
+          displayName: finalDisplayName,
+          avatarSource,
+          hasAvatar: !!finalAvatar,
+        });
+
+        // Age: From main user data (allowed per rules) or presence entry for immediate render
+        const rawAge = canon?.age ?? 0;
+        const finalAge = rawAge > 0 ? rawAge : undefined;
+
+        // Gender: From main user data (allowed per rules) or presence entry for immediate render
+        const rawGender = canon?.gender ?? '';
+        const gender = rawGender ? (rawGender as 'male' | 'female' | 'other') : undefined;
+
+        // Role: prefer member data, fallback to presence entry data
+        const role = member?.role ?? (entry as any).role ?? 'member';
+
+        // CHATROOM_IDENTITY_SYNC_RESULT: Log sync result
+        console.log('CHATROOM_IDENTITY_SYNC_RESULT', {
+          userId: entryIdStr.slice(0, 12),
+          isCurrentUser: !!isCurrentUser,
+          displayName: finalDisplayName,
+          hasAvatar: !!finalAvatar,
+          hasBio: !!chatRoomBioValue,
+          ageFromMainProfile: finalAge,
+          genderFromMainProfile: gender,
+          identitySynced: hasChatProfile,
+          nameSource,
+          avatarSource,
+          identitySource,
+        });
+
+        return {
+          id: entryIdStr,
+          displayName: finalDisplayName,
+          avatar: finalAvatar,
+          age: finalAge,
+          gender,
+          bio: chatRoomBioValue, // ONLY from chat-room profile (Convex or store)
+          role,
           lastHeartbeatAt: entry.lastHeartbeatAt,
           joinedAt: entry.joinedAt,
-        }];
+        };
       });
 
-    return {
-      online: enrichPresence(roomPresenceQuery?.online),
-      recentlyLeft: enrichPresence(roomPresenceQuery?.recentlyLeft),
-    };
-  }, [convexMembersWithProfiles, isDemoMode, roomPresenceQuery?.online, roomPresenceQuery?.recentlyLeft]);
+    let online = enrichPresence(roomPresenceQuery?.online);
+    const recentlyLeft = enrichPresence(roomPresenceQuery?.recentlyLeft);
+
+    return { online, recentlyLeft };
+  }, [canonicalRoomIdentities, chatRoomProfile, convexMembersWithProfiles, effectiveUserId, isDemoMode, myAvatarUrl, myNickname, roomIdStr, roomPresenceQuery?.online, roomPresenceQuery?.recentlyLeft, selfUserIdFromCanonical, stableAvatarUrl, stableBio, stableNickname]);
+
+  useEffect(() => {
+    if (isDemoMode) return;
+    console.log('CHATROOM_BACKEND_COUNT_ONLY', {
+      roomId: roomIdStr,
+      backendOnlineCount: roomPresenceQuery?.onlineCount ?? (roomPresenceQuery?.online?.length ?? 0),
+    });
+  }, [
+    isDemoMode,
+    roomIdStr,
+    roomPresenceQuery?.onlineCount,
+    roomPresenceQuery?.online?.length,
+  ]);
 
   // @Mention members for ChatComposer suggestions
   // Transform room members to MentionMember shape
@@ -1421,9 +1889,11 @@ export default function ChatRoomScreen() {
   // DM / NOTIFICATIONS STATE
   // DM-ID-FIX: Now uses Convex query for real DM threads
   // ─────────────────────────────────────────────────────────────────────────
+  // DM threads: only after membership is confirmed (same gate as room queries) so we
+  // never hit Convex with a half-ready session; backend getDmThreads also returns [] on errors.
   const dmThreadsQuery = useQuery(
     api.chatRooms.getDmThreads,
-    authUserId ? { authUserId } : 'skip'
+    authUserId && hasMemberAccess ? { authUserId } : 'skip'
   );
   const dmThreads = dmThreadsQuery ?? [];
   const unreadDMs = dmThreads.filter((dm) => dm.unreadCount > 0).length;
@@ -1450,7 +1920,7 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   const mentionsQuery = useQuery(
     api.chatRooms.getUserMentions,
-    authUserId ? { authUserId, limit: 50 } : 'skip'
+    authUserId && hasMemberAccess ? { authUserId, limit: 50 } : 'skip'
   );
   const mentions = (mentionsQuery ?? []) as MentionItem[];
 
@@ -1466,6 +1936,40 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   const [overlay, setOverlay] = useState<Overlay>('none');
   const closeOverlay = useCallback(() => setOverlay('none'), []);
+
+  // Required logs: Users panel final render + sync check (no UI impact)
+  useEffect(() => {
+    if (overlay !== 'onlineUsers') return;
+    if (isDemoMode) return;
+
+    console.log('CHATROOM_USERS_PANEL_RENDER_FINAL', {
+      roomId: roomIdStr,
+      onlineCount: presenceUsers.online.length,
+      recentlyLeftCount: presenceUsers.recentlyLeft.length,
+    });
+
+    console.log('CHATROOM_USERS_PANEL_SYNC_CHECK', {
+      roomId: roomIdStr,
+      sample: presenceUsers.online.slice(0, 8).map((u) => {
+        const canon = (canonicalRoomIdentities as any)?.byUserId?.[String(u.id)];
+        return {
+          id: String(u.id).slice(0, 12),
+          displayName: u.displayName,
+          canonNickname: canon?.nickname ?? null,
+          hasAvatar: !!u.avatar,
+          canonHasAvatar: !!canon?.avatarUrl,
+          age: u.age,
+        };
+      }),
+    });
+
+    if (presenceUsers.online.length === 0 && presenceUsers.recentlyLeft.length === 0) {
+      console.log('CHATROOM_USERS_PANEL_FALLBACK_REASON', {
+        roomId: roomIdStr,
+        reason: 'no_presence_data',
+      });
+    }
+  }, [canonicalRoomIdentities, isDemoMode, overlay, presenceUsers.online, presenceUsers.recentlyLeft, roomIdStr]);
 
   const [selectedMessage, setSelectedMessage] = useState<DemoChatMessage | null>(null);
   // Position for anchored message actions popup
@@ -1552,23 +2056,25 @@ export default function ChatRoomScreen() {
   // NAVIGATION HANDLERS
   // ─────────────────────────────────────────────────────────────────────────
 
-  const performLeaveRoom = useCallback(async () => {
+  const performLeaveRoom = useCallback(() => {
     closeOverlay();
 
     if (!isDemoMode) {
       if (!authUserId || !roomIdStr || !hasValidRoomId) {
-        Alert.alert('Error', 'Unable to leave this room right now.');
-        return;
-      }
-
-      try {
-        await leaveRoomMutation({
+        // Do not block navigation on leave errors; unmount stops heartbeat and backend expiry cleans up.
+        console.log('CHATROOM_LEAVE_SENT', { roomId: roomIdStr ?? null, reason: 'missing_auth_or_room' });
+      } else {
+        console.log('CHATROOM_LEAVE_SENT', { roomId: roomIdStr });
+        leaveRoomMutation({
           roomId: roomIdStr as Id<'chatRooms'>,
           authUserId,
+        }).catch((err: any) => {
+          console.log('CHATROOM_OFFLINE_REASON', {
+            roomId: roomIdStr,
+            reason: 'leave_mutation_failed',
+            message: err?.message ?? String(err),
+          });
         });
-      } catch (err: any) {
-        Alert.alert('Error', err?.message || 'Failed to leave room');
-        return;
       }
     }
 
@@ -1657,19 +2163,25 @@ export default function ChatRoomScreen() {
   // P1 CR-003: Use try/finally to guarantee pending message cleanup
   // ─────────────────────────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
+    console.log('SEND_HANDLER_START', { inputTextLen: inputText.length, roomIdStr, isSendingRef: isSendingRef.current, isDemoMode, authUserId, hasValidRoomId });
     const trimmed = inputText.trim();
-    if (!trimmed || !roomIdStr) return;
+    if (!trimmed || !roomIdStr) {
+      console.log('SEND_HANDLER_GUARD_BLOCKED', { reason: 'empty_text_or_no_roomId', trimmedLen: trimmed.length, roomIdStr });
+      return;
+    }
     // Synchronous double-tap guard (ChatComposer's isSending state is async)
-    if (isSendingRef.current) return;
+    if (isSendingRef.current) {
+      console.log('SEND_HANDLER_GUARD_BLOCKED', { reason: 'isSendingRef_true' });
+      return;
+    }
     isSendingRef.current = true;
-
-    // ACTIVITY-BASED PRESENCE: Sending message counts as user activity
-    sendActivityHeartbeat();
+    // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity heartbeat on send removed, using timer-based only
 
     // AUTO-SCROLL: Mark that user just sent a message (will trigger scroll after render)
     justSentMessageRef.current = true;
 
     if (isDemoMode) {
+      console.log('SEND_HANDLER_DEMO_MODE_PATH');
       const newMessage: DemoChatMessage = {
         id: `cm_me_${Date.now()}`,
         roomId: roomIdStr,
@@ -1687,6 +2199,7 @@ export default function ChatRoomScreen() {
       isSendingRef.current = false;
     } else {
       if (!authUserId || !hasValidRoomId) {
+        console.log('SEND_HANDLER_GUARD_BLOCKED', { reason: 'no_authUserId_or_invalid_roomId', authUserId, hasValidRoomId });
         isSendingRef.current = false;
         return;
       }
@@ -1716,23 +2229,26 @@ export default function ChatRoomScreen() {
 
       // WALLET-FIX: Coin increment is handled atomically in Convex mutation
       // UI reads from reactive getUserWalletCoins query (auto-updates)
+      const mutationPayload = {
+        roomId: roomIdStr as Id<'chatRooms'>,
+        authUserId: authUserId!,
+        senderId: authUserId as Id<'users'>,
+        text: trimmed,
+        clientId,
+        // Reply-to-message support
+        replyToMessageId: replyToId ? (replyToId as Id<'chatRoomMessages'>) : undefined,
+        // @mentions support
+        mentions: currentMentions.length > 0 ? currentMentions.map(m => ({
+          userId: m.userId as Id<'users'>,
+          nickname: m.nickname,
+          startIndex: m.startIndex,
+          endIndex: m.endIndex,
+        })) : undefined,
+      };
+      console.log('SEND_MUTATION_CALL_START', { mutation: 'api.chatRooms.sendMessage', roomId: mutationPayload.roomId, authUserId: mutationPayload.authUserId, senderId: mutationPayload.senderId, textLen: trimmed.length });
       try {
-        await sendMessageMutation({
-          roomId: roomIdStr as Id<'chatRooms'>,
-          authUserId: authUserId!,
-          senderId: authUserId as Id<'users'>,
-          text: trimmed,
-          clientId,
-          // Reply-to-message support
-          replyToMessageId: replyToId ? (replyToId as Id<'chatRoomMessages'>) : undefined,
-          // @mentions support
-          mentions: currentMentions.length > 0 ? currentMentions.map(m => ({
-            userId: m.userId as Id<'users'>,
-            nickname: m.nickname,
-            startIndex: m.startIndex,
-            endIndex: m.endIndex,
-          })) : undefined,
-        });
+        await sendMessageMutation(mutationPayload);
+        console.log('SEND_MUTATION_CALL_SUCCESS');
         // SEND-FLICKER-FIX: Don't remove pending message here - let the cleanup effect handle it
         // when the server message arrives. This prevents the ghost/flicker frame.
         if (mountedRef.current) {
@@ -1741,6 +2257,7 @@ export default function ChatRoomScreen() {
           setCurrentMentions([]);
         }
       } catch (error: any) {
+        console.log('SEND_MUTATION_CALL_FAIL', { errorMessage: error?.message, errorStack: error?.stack?.slice?.(0, 500) });
         // P0-005 FINAL FIX: Mark message as failed instead of removing
         // Message stays visible with failed state; user can retry via tap
         if (mountedRef.current) {
@@ -1755,7 +2272,7 @@ export default function ChatRoomScreen() {
         isSendingRef.current = false;
       }
     }
-  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight, sendActivityHeartbeat]);
+  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // P0-005 FINAL FIX: Retry handler for failed messages
@@ -1802,6 +2319,120 @@ export default function ChatRoomScreen() {
     [roomIdStr, authUserId, sendMessageMutation]
   );
 
+  const handleRetryMediaMessage = useCallback(
+    async (msg: DemoChatMessage) => {
+      if (isDemoMode) return;
+      if (!roomIdStr || !authUserId || !hasValidRoomId) return;
+      const uploadStatus = (msg as any).uploadStatus as
+        | 'uploading'
+        | 'sending'
+        | 'upload_failed'
+        | 'send_failed'
+        | undefined;
+      const clientId = (msg as any)._clientId as string | undefined;
+      const localUri = (msg as any).localUri as string | undefined;
+      const mediaType = (msg as any)._mediaType as 'image' | 'video' | 'doodle' | undefined;
+      const storageId = (msg as any)._storageId as Id<'_storage'> | undefined;
+
+      if (!clientId || !localUri || !mediaType) return;
+      if (uploadStatus !== 'upload_failed' && uploadStatus !== 'send_failed') return;
+
+      // upload_failed -> re-upload then send
+      if (uploadStatus === 'upload_failed') {
+        setPendingMediaMessages((prev) =>
+          prev.map((m) =>
+            m.id === msg.id ? ({ ...(m as any), uploadStatus: 'uploading' as const } as any) : m
+          )
+        );
+        try {
+          const uploadTypeMap = { image: 'photo' as const, video: 'video' as const, doodle: 'doodle' as const };
+          const newStorageId = await uploadMediaToConvexWithProgress(
+            localUri,
+            generateUploadUrlMutation,
+            uploadTypeMap[mediaType],
+            (progressPct) => {
+              const now = Date.now();
+              const last = lastProgressUpdateAtRef.current.get(msg.id) ?? 0;
+              const p = Math.max(0, Math.min(100, progressPct));
+              const shouldUpdate =
+                p === 0 ||
+                p === 100 ||
+                now - last >= PROGRESS_UPDATE_INTERVAL_MS;
+              if (!shouldUpdate) return;
+              lastProgressUpdateAtRef.current.set(msg.id, now);
+              if (!mountedRef.current) return;
+              setPendingMediaMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msg.id
+                    ? ({ ...(m as any), uploadProgress: p } as any)
+                    : m
+                )
+              );
+            }
+          );
+          if (!mountedRef.current) return;
+          setPendingMediaMessages((prev) =>
+            prev.map((m) =>
+              m.id === msg.id
+                ? ({ ...(m as any), uploadStatus: 'sending' as const, _storageId: newStorageId } as any)
+                : m
+            )
+          );
+          await sendMessageMutation({
+            roomId: roomIdStr as Id<'chatRooms'>,
+            authUserId: authUserId!,
+            senderId: authUserId as Id<'users'>,
+            imageStorageId: newStorageId,
+            mediaType,
+            clientId,
+          });
+          if (mountedRef.current) {
+            setPendingMediaMessages((prev) => prev.filter((m) => m.id !== msg.id));
+          }
+        } catch {
+          if (mountedRef.current) {
+            setPendingMediaMessages((prev) =>
+              prev.map((m) =>
+                m.id === msg.id ? ({ ...(m as any), uploadStatus: 'upload_failed' as const } as any) : m
+              )
+            );
+          }
+        }
+      }
+
+      // send_failed -> resend using existing storageId (no re-upload)
+      if (uploadStatus === 'send_failed' && storageId) {
+        setPendingMediaMessages((prev) =>
+          prev.map((m) =>
+            m.id === msg.id ? ({ ...(m as any), uploadStatus: 'sending' as const } as any) : m
+          )
+        );
+        try {
+          await sendMessageMutation({
+            roomId: roomIdStr as Id<'chatRooms'>,
+            authUserId: authUserId!,
+            senderId: authUserId as Id<'users'>,
+            imageStorageId: storageId,
+            mediaType,
+            clientId,
+          });
+          if (mountedRef.current) {
+            setPendingMediaMessages((prev) => prev.filter((m) => m.id !== msg.id));
+          }
+        } catch {
+          if (mountedRef.current) {
+            setPendingMediaMessages((prev) =>
+              prev.map((m) =>
+                m.id === msg.id ? ({ ...(m as any), uploadStatus: 'send_failed' as const } as any) : m
+              )
+            );
+          }
+        }
+      }
+    },
+    [authUserId, generateUploadUrlMutation, hasValidRoomId, isDemoMode, roomIdStr, sendMessageMutation]
+  );
+
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1822,9 +2453,7 @@ export default function ChatRoomScreen() {
       }
 
       isSendingMediaRef.current = true;
-
-      // ACTIVITY-BASED PRESENCE: Sending media counts as user activity
-      sendActivityHeartbeat();
+      // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity heartbeat on media send removed, using timer-based only
       uploadingMediaUriRef.current = uri;
 
       const labelMap = { image: 'Photo', video: 'Video', doodle: 'Doodle' };
@@ -1861,6 +2490,27 @@ export default function ChatRoomScreen() {
           // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
           if (!authUserId || !hasValidRoomId) return;
           const clientId = generateUUID();
+          const pendingId = `pending_${clientId}`;
+          const createdAtLocal = Date.now();
+
+          // PHASE 1: Insert pending media message immediately (shows upload state)
+          const pendingMedia: DemoChatMessage = {
+            id: pendingId,
+            roomId: roomIdStr,
+            senderId: authUserId,
+            senderName: 'You',
+            type: mediaType,
+            text: `[${labelMap[mediaType]}]`,
+            createdAt: createdAtLocal,
+            ...( {
+              uploadStatus: 'uploading',
+              uploadProgress: 0,
+              localUri: uri,
+              _clientId: clientId,
+              _mediaType: mediaType,
+            } as any ),
+          };
+          setPendingMediaMessages((prev) => [...prev, pendingMedia]);
 
           // MEDIA-RELIABILITY: Validate file size before upload attempt
           // This provides immediate feedback without starting the upload
@@ -1868,7 +2518,13 @@ export default function ChatRoomScreen() {
             await validateFileSize(uri, uploadTypeMap[mediaType]);
           } catch (sizeError) {
             if (sizeError instanceof UploadError) {
-              Alert.alert('File Too Large', sizeError.message);
+              if (mountedRef.current) {
+                setPendingMediaMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === pendingId ? ({ ...(m as any), uploadStatus: 'upload_failed' as const } as any) : m
+                  )
+                );
+              }
               return;
             }
             throw sizeError;
@@ -1876,11 +2532,40 @@ export default function ChatRoomScreen() {
 
           // Step 1: Upload media to Convex storage
           const uploadHint = uploadTypeMap[mediaType];
-          const storageId = await uploadMediaToConvex(
+          const storageId = await uploadMediaToConvexWithProgress(
             uri,
             generateUploadUrlMutation,
-            uploadHint
+            uploadHint,
+            (progressPct) => {
+              const now = Date.now();
+              const last = lastProgressUpdateAtRef.current.get(pendingId) ?? 0;
+              const p = Math.max(0, Math.min(100, progressPct));
+              const shouldUpdate =
+                p === 0 ||
+                p === 100 ||
+                now - last >= PROGRESS_UPDATE_INTERVAL_MS;
+              if (!shouldUpdate) return;
+              lastProgressUpdateAtRef.current.set(pendingId, now);
+              if (!mountedRef.current) return;
+              setPendingMediaMessages((prev) =>
+                prev.map((m) =>
+                  m.id === pendingId
+                    ? ({ ...(m as any), uploadProgress: p } as any)
+                    : m
+                )
+              );
+            }
           );
+
+          if (mountedRef.current) {
+            setPendingMediaMessages((prev) =>
+              prev.map((m) =>
+                m.id === pendingId
+                  ? ({ ...(m as any), uploadStatus: 'sending' as const, _storageId: storageId } as any)
+                  : m
+              )
+            );
+          }
 
           // Step 2: Send message with storage ID (backend resolves to URL)
           await sendMessageMutation({
@@ -1891,6 +2576,11 @@ export default function ChatRoomScreen() {
             mediaType: mediaType,
             clientId,
           });
+
+          // Success: remove pending media message (server message will appear)
+          if (mountedRef.current) {
+            setPendingMediaMessages((prev) => prev.filter((m) => m.id !== pendingId));
+          }
         }
       } catch (err: any) {
         console.error('[ChatRoom] Media upload/send failed:', err);
@@ -1902,9 +2592,24 @@ export default function ChatRoomScreen() {
                         err.type === 'FILE_NOT_FOUND' ? 'File Not Found' :
                         'Upload Failed';
           const retryHint = err.retryable ? '\n\nPlease try again.' : '';
-          Alert.alert(title, err.message + retryHint);
+          // Keep message visible for retry
+          if (mountedRef.current) {
+            setPendingMediaMessages((prev) =>
+              prev.map((m) => {
+                const cid = (m as any)._clientId as string | undefined;
+                return cid === clientId ? ({ ...(m as any), uploadStatus: 'upload_failed' as const } as any) : m;
+              })
+            );
+          }
         } else {
-          Alert.alert('Error', err.message || 'Failed to send media. Please try again.');
+          if (mountedRef.current) {
+            setPendingMediaMessages((prev) =>
+              prev.map((m) => {
+                const cid = (m as any)._clientId as string | undefined;
+                return cid === clientId ? ({ ...(m as any), uploadStatus: 'send_failed' as const } as any) : m;
+              })
+            );
+          }
         }
       } finally {
         // MEDIA-RELIABILITY: Always reset guards
@@ -1912,7 +2617,7 @@ export default function ChatRoomScreen() {
         uploadingMediaUriRef.current = null;
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, sendActivityHeartbeat]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1927,9 +2632,7 @@ export default function ChatRoomScreen() {
       if (isSendingVoiceRef.current) {
         return;
       }
-
-      // ACTIVITY-BASED PRESENCE: Sending voice message counts as user activity
-      sendActivityHeartbeat();
+      // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity heartbeat on voice send removed, using timer-based only
 
       if (isDemoMode) {
         // Demo mode: add voice message to local store (local URI OK for demo)
@@ -1998,7 +2701,7 @@ export default function ChatRoomScreen() {
         }
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, sendActivityHeartbeat]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins]
   );
 
   const { toggleRecording, isRecording, elapsedMs } = useVoiceRecorder({
@@ -2037,9 +2740,9 @@ export default function ChatRoomScreen() {
 
     if (currentRoomId === mentionRoomId) {
       // Same room - just scroll to message and highlight
-      setTargetMessageId(mention.messageId);
+      setTargetMessageId(mention.messageId as Id<'chatRoomMessages'>);
     } else {
-      // Different room - navigate to that room with the message target
+      // mention.roomId is Convex chatRooms _id from server — must match dynamic segment
       router.push({
         pathname: '/(main)/(private)/(tabs)/chat-rooms/[roomId]',
         params: {
@@ -2053,7 +2756,7 @@ export default function ChatRoomScreen() {
     if (!mention.isRead && authUserId) {
       markMentionReadMutation({
         authUserId,
-        mentionId: mention.id,
+        mentionId: mention.id as Id<'chatRoomMentionNotifications'>,
       }).catch((err) => {
         console.warn('[CHAT_MENTION_READ] Failed to mark mention as read:', err);
       });
@@ -2066,7 +2769,7 @@ export default function ChatRoomScreen() {
     try {
       await hideDmThreadMutation({
         authUserId,
-        threadId: threadId as Id<'chatRoomDmThreads'>,
+        threadId: threadId as Id<'conversations'>,
       });
     } catch (err) {
       if (__DEV__) console.error('[DM] Hide thread failed:', err);
@@ -2154,7 +2857,7 @@ export default function ChatRoomScreen() {
       avatar: user.avatar,
       isOnline: user.isOnline ?? false,
       age: user.age,
-      gender: user.gender as 'male' | 'female' | undefined,
+      gender: user.gender as 'male' | 'female' | 'other' | undefined,
       lastSeen: user.lastSeen,
     };
 
@@ -2204,7 +2907,7 @@ export default function ChatRoomScreen() {
       // userId from presence is already the canonical Convex ID
       const { threadId } = await getOrCreateDmThread({
         authUserId,
-        peerUserId: userId,
+        peerUserId: userId as Id<'users'>,
         sourceRoomId: resolvedRoomId,
       });
 
@@ -2595,9 +3298,26 @@ export default function ChatRoomScreen() {
 
       const isMuted = mutedUserIds.has(msg.senderId);
       const isMe = (isDemoMode ? DEMO_CURRENT_USER.id : authUserId) === msg.senderId;
-      // CHAT ROOM IDENTITY: Use myAvatarUrl for outgoing messages (self)
-      // For other users, use senderAvatar from message (fetched from chatRoomProfiles)
-      const avatarUri = isMe ? (myAvatarUrl ?? '') : msg.senderAvatar;
+      const senderIdentity = roomIdentityByUserId.get(String(msg.senderId));
+
+      // CHAT ROOM IDENTITY: Use myAvatarUrl for outgoing messages (self).
+      // For others: prefer normalized chat-room avatar from member identity, fall back to message payload.
+      const avatarUri = isMe ? (myAvatarUrl ?? '') : (senderIdentity?.avatar ?? msg.senderAvatar);
+      const senderAge = msg.senderAge ?? senderIdentity?.age;
+      const senderGender = msg.senderGender ?? senderIdentity?.gender;
+      const uploadStatus = (msg as any).uploadStatus as
+        | 'uploading'
+        | 'sending'
+        | 'upload_failed'
+        | 'send_failed'
+        | undefined;
+      const localUri = (msg as any).localUri as string | undefined;
+      const uploadProgress = (msg as any).uploadProgress as number | undefined;
+
+      // PRIVATE-ROOM-ACCESS-FIX: Instrumentation for age render (only log first message to avoid spam)
+      if (index === 0 && senderAge) {
+        console.log('CHATROOM_AGE_RENDER', { senderId: msg.senderId.slice(0, 12), age: senderAge, source: msg.senderAge ? 'message' : 'identity' });
+      }
 
       // ─── CONSECUTIVE MESSAGE GROUPING ───
       // AVATAR-STABILITY: Use pre-computed showAvatar from ListItem for deterministic grouping
@@ -2657,14 +3377,18 @@ export default function ChatRoomScreen() {
           senderName={msg.senderName}
           senderId={msg.senderId}
           senderAvatar={avatarUri}
-          senderAge={msg.senderAge}
-          senderGender={msg.senderGender}
+          senderAge={senderAge}
+          senderGender={senderGender}
           text={msg.text || ''}
           timestamp={msg.createdAt}
           isMe={isMe}
           dimmed={isMuted || isSending}
           messageType={(msg.type || 'text') as 'text' | 'image' | 'video' | 'audio'}
           mediaUrl={msg.mediaUrl}
+          localUri={localUri}
+          uploadStatus={uploadStatus}
+          uploadProgress={uploadProgress}
+          onUploadStatusPress={() => handleRetryMediaMessage(msg)}
           audioUrl={msg.audioUrl}
           onLongPress={isFailed ? undefined : (pageX, pageY) => handleMessageLongPress(msg, pageX, pageY)}
           onAvatarPress={() => handleAvatarPress(msg.senderId)}
@@ -2699,7 +3423,7 @@ export default function ChatRoomScreen() {
       return messageElement;
     },
     // PERF-FIX: Removed invertedListItems, highlightedMessageId, reactionsMap from deps (using refs)
-    [mutedUserIds, authUserId, myAvatarUrl, handleMessageLongPress, handleAvatarPress, handleMediaPress, handleScrollToMessage, handleReactionChipTap, handleRetryMessage]
+    [mutedUserIds, authUserId, myAvatarUrl, roomIdentityByUserId, handleMessageLongPress, handleAvatarPress, handleMediaPress, handleScrollToMessage, handleReactionChipTap, handleRetryMessage]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
@@ -2745,9 +3469,28 @@ export default function ChatRoomScreen() {
     );
   }
 
+  // Core room doc (getRoom): while query is in flight (skipped when !isValidRoomId)
+  if (
+    !isDemoMode &&
+    isValidRoomId &&
+    !!authUserId &&
+    convexRoom === undefined
+  ) {
+    const loadingTitle =
+      typeof routeRoomName === 'string' ? routeRoomName : 'Chat Room';
+    return (
+      <View style={styles.container}>
+        <ChatRoomsHeader title={loadingTitle} hideLeftButton topInset={insets.top} />
+        <View style={[styles.notFound, { flex: 1, justifyContent: 'center' }]}>
+          <ActivityIndicator size="large" color={C.primary} />
+        </View>
+      </View>
+    );
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // P2 CR-009: NOT FOUND / ACCESS DENIED CHECK
-  // - convexRoom === null → room doesn't exist or expired
+  // - convexRoom === null → room doesn't exist, expired, or no read access (getRoom returns null)
   // - joinAttempted && joinFailed → user banned or cannot access
   // SECURITY: Show error screen and navigate back safely
   // ─────────────────────────────────────────────────────────────────────────
@@ -2755,15 +3498,14 @@ export default function ChatRoomScreen() {
   const isRoomNotFound =
     !isDemoMode &&
     (convexRoom === null || accessStatus === 'not_found' || accessStatus === 'expired');
-  // SECURITY: Access denied if join was attempted but failed
+  // PRIVATE-ROOM-ACCESS-FIX: Access denied check uses actual backend statuses
+  // Backend returns: unauthenticated, not_found, member, expired, banned, pending, rejected, approved_pending_entry, none
   const isAccessDenied =
     !isDemoMode &&
     (
       (joinAttempted && joinFailed) ||
       accessStatus === 'banned' ||
-      accessStatus === 'suspended' ||
-      accessStatus === 'private_room' ||
-      accessStatus === 'password_required' ||
+      accessStatus === 'rejected' ||
       accessStatus === 'unauthenticated'
     );
 
@@ -2783,18 +3525,17 @@ export default function ChatRoomScreen() {
       router.replace('/(main)/(private)/(tabs)/chat-rooms');
     };
 
-    // Determine error title and message
+    // PRIVATE-ROOM-ACCESS-FIX: Determine error title and message
+    // Removed invite code references - password-only flow
     const errorTitle = isAccessDenied ? 'Access Denied' : 'Room Not Found';
     const errorMessage = isAccessDenied
-      ? accessStatus === 'password_required'
-        ? 'Use the room invite code first, then enter the room password.'
-        : accessStatus === 'private_room'
-          ? 'You do not have access to this private room.'
-          : accessStatus === 'suspended'
-            ? 'You are suspended from this room right now.'
-            : accessStatus === 'banned'
-              ? 'You are banned from this room.'
-              : 'You do not have access to this room'
+      ? accessStatus === 'banned'
+        ? 'You are banned from this room.'
+        : accessStatus === 'rejected'
+          ? 'Your join request was rejected.'
+          : accessStatus === 'unauthenticated'
+            ? 'Please sign in to access this room.'
+            : 'You do not have access to this room.'
       : 'Room not found';
 
     return (
@@ -2841,31 +3582,128 @@ export default function ChatRoomScreen() {
       />
 
       {/* ─── ACTIVE USERS STRIP ─── */}
-      {/* Room screen strip: ONLY show currently online users, no offline/recently-left */}
-      {/* Hide label - room header already shows online count */}
-      <ActiveUsersStrip
-        users={
-          isDemoMode
-            ? (roomMembers ?? []).filter((u) => u.isOnline).map((u) => ({
-                id: u.id,
-                avatar: u.avatar,
-                isOnline: true,
-                joinedAt: (u as any).joinedAt ?? Date.now(), // Demo fallback
-                // AVATAR-BORDER-FIX: Include gender for consistent border color
-                gender: (u as any).gender as 'male' | 'female' | 'other' | undefined,
-              }))
-            : presenceUsers.online.map((u) => ({
-                id: u.id,
-                avatar: u.avatar,
-                isOnline: true,
-                joinedAt: u.joinedAt,
-                gender: u.gender,
-              }))
+      {/* CHATROOM_IDENTITY_FIX: Top strip shows ONLY chat-room photo, gender ring, online dot */}
+      {/* NO age per rule 7 */}
+      {(() => {
+        // CHATROOM_IDENTITY_FIX: Top strip type - NO age field
+        let stripUsers: Array<{
+          id: string;
+          avatar?: string;
+          isOnline: boolean;
+          joinedAt: number;
+          gender?: 'male' | 'female' | 'other';
+        }> = [];
+
+        if (isDemoMode) {
+          stripUsers = (roomMembers ?? []).filter((u) => u.isOnline).map((u) => ({
+            id: u.id,
+            avatar: u.avatar, // Demo mode uses demo avatar
+            isOnline: true,
+            joinedAt: (u as any).joinedAt ?? Date.now(),
+            gender: (u as any).gender as 'male' | 'female' | 'other' | undefined,
+            // NO age - removed per rule 7
+          }));
+        } else if (presenceUsers.online.length > 0) {
+          // Use presence data if available - avatar comes from chat-room profile
+          stripUsers = presenceUsers.online.map((u) => ({
+            id: u.id,
+            avatar: u.avatar, // This is chat-room avatar (fixed in presenceUsers computation)
+            isOnline: true,
+            joinedAt: u.joinedAt,
+            gender: u.gender,
+            // NO age - removed per rule 7
+          }));
+        } else if (convexMembersWithProfiles && convexMembersWithProfiles.length > 0) {
+          // Fallback to all members when no presence data
+          // CHATROOM_IDENTITY_FIX: Do NOT use main profile avatar in fallback
+          // Use chat-room profiles if available
+          stripUsers = convexMembersWithProfiles.map((m) => {
+            const canon = (canonicalRoomIdentities as any)?.byUserId?.[String(m.id)];
+            const chatRoomAvatar = canon?.avatarUrl ?? null;
+            return {
+              id: m.id,
+              // CHATROOM_IDENTITY_FIX: Only use chat-room avatar, NO main profile fallback
+              avatar: chatRoomAvatar ? (buildCacheBustedAvatarUrl(chatRoomAvatar, (m as any).avatarVersion) ?? undefined) : undefined,
+              isOnline: false, // Unknown online status
+              joinedAt: Date.now(), // Fallback timestamp
+              gender: m.gender as 'male' | 'female' | 'other' | undefined,
+              // NO age - removed per rule 7
+            };
+          });
         }
-        theme="dark"
-        hideLabel
-        onPress={() => setOverlay('onlineUsers')}
-      />
+
+        // Presence propagation gap fallback (public rooms only, short window, visual-only):
+        // If heartbeat was ACKed but query hasn't reflected it yet, show ONLY self to avoid flashing empty.
+        if (
+          !isDemoMode &&
+          stripUsers.length === 0 &&
+          isPublicFromRoute === true &&
+          presenceUsers.online.length === 0 &&
+          !(convexMembersWithProfiles && convexMembersWithProfiles.length > 0) &&
+          firstHeartbeatAckAtRef.current &&
+          Date.now() - firstHeartbeatAckAtRef.current < 500
+        ) {
+          const selfId = selfUserIdFromCanonical ?? (effectiveUserId ? String(effectiveUserId) : null);
+          if (selfId) {
+            if (__DEV__) console.log('CHATROOM_TOP_STRIP_PROPAGATION_GAP_FALLBACK', {
+              roomId: roomIdStr,
+              reason: 'self_during_gap',
+            });
+            stripUsers = [
+              {
+                id: selfId,
+                avatar: myAvatarUrl ?? undefined,
+                isOnline: true,
+                joinedAt: Date.now(),
+                // gender intentionally omitted here; canonical presence will fill it on next update
+              },
+            ];
+          }
+        }
+
+        // Required debug logs: final strip + sync check against canonical identity.
+        if (__DEV__) console.log('CHATROOM_TOP_STRIP_RENDER_FINAL', {
+          roomId: roomIdStr,
+          count: stripUsers.length,
+          source: isDemoMode ? 'demo' : presenceUsers.online.length > 0 ? 'presence' : (convexMembersWithProfiles?.length ? 'members_fallback' : 'empty'),
+        });
+        if (__DEV__) console.log('CHATROOM_TOP_STRIP_SYNC_CHECK', {
+          roomId: roomIdStr,
+          users: stripUsers.slice(0, 8).map((u) => {
+            const canon = (canonicalRoomIdentities as any)?.byUserId?.[String(u.id)];
+            return {
+              id: String(u.id).slice(0, 12),
+              hasAvatar: !!u.avatar,
+              canonHasAvatar: !!canon?.avatarUrl,
+              canonNickname: canon?.nickname ?? null,
+              gender: u.gender ?? null,
+              isOnline: u.isOnline,
+            };
+          }),
+        });
+
+        if (!isDemoMode && stripUsers.length === 0) {
+          if (__DEV__) console.log('CHATROOM_TOP_STRIP_FALLBACK_REASON', {
+            roomId: roomIdStr,
+            reason: 'no_presence_and_no_members',
+            presenceOnlineCount: presenceUsers.online.length,
+            memberCount: convexMembersWithProfiles?.length ?? 0,
+          });
+        }
+
+        return (
+          <ActiveUsersStrip
+            users={stripUsers}
+            theme="dark"
+            hideLabel
+            onPress={() => {
+              if (__DEV__) console.log('CHATROOM_TOP_MEMBER_ROW_TAP', { count: stripUsers.length });
+              if (__DEV__) console.log('CHATROOM_MEMBER_LIST_OPEN', { roomId: roomIdStr });
+              setOverlay('onlineUsers');
+            }}
+          />
+        );
+      })()}
 
       {/* ─── KEYBOARD AVOIDING VIEW ─── */}
       {/* P1-003 FIX: Use "padding" on iOS, "height" on Android for better keyboard handling */}
@@ -2989,8 +3827,7 @@ export default function ChatRoomScreen() {
                   value={inputText}
                   onChangeText={(text) => {
                     setInputText(text);
-                    // ACTIVITY-BASED PRESENCE: Typing counts as user activity
-                    sendActivityHeartbeat();
+                    // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity heartbeat on typing removed, using timer-based only
                   }}
                   onSend={handleSend}
                   onPlusPress={() => setOverlay('attachment')}
@@ -3025,7 +3862,7 @@ export default function ChatRoomScreen() {
         onOpenChat={(dm) => {
           closeOverlay();
           // DM-ID-FIX: dm.id is the threadId from Convex
-          const threadId = dm.id as Id<'chatRoomDmThreads'>;
+          const threadId = dm.id as Id<'conversations'>;
           const dmInfo = {
             id: dm.id,
             peerId: dm.peerId,
@@ -3046,7 +3883,9 @@ export default function ChatRoomScreen() {
         visible={overlay === 'mentions'}
         onClose={closeOverlay}
         mentions={mentions}
-        isLoading={mentionsQuery === undefined}
+        isLoading={
+          mentionsQuery === undefined && !!(authUserId && hasMemberAccess)
+        }
         onOpenMention={handleOpenMention}
         onMarkAllRead={handleMarkAllMentionsRead}
       />
@@ -3167,7 +4006,11 @@ export default function ChatRoomScreen() {
         {activeDm && (
           <PrivateChatView
             dm={activeDm}
-            threadId={activeThreadId ?? undefined}
+            threadId={
+              activeThreadId
+                ? (activeThreadId as Id<'conversations'>)
+                : undefined
+            }
             onBack={clearActiveDm}
             topInset={0}
             isModal={true}

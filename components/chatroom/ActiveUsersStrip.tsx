@@ -18,6 +18,8 @@ interface ActiveUser {
   joinedAt?: number;
   /** User's gender for avatar border color */
   gender?: 'male' | 'female' | 'other';
+  // CHATROOM_IDENTITY_FIX: Age removed from top strip per rule 7
+  // Age is only shown in the Users Panel, not in the top member strip
 }
 
 interface ActiveUsersStripProps {
@@ -31,6 +33,7 @@ interface ActiveUsersStripProps {
 
 const MAX_VISIBLE = 6;
 const AVATAR_SIZE = CHAT_SIZES.stripAvatar;
+// CHATROOM_IDENTITY_FIX: AGE_BADGE_SIZE removed - age not shown in top strip
 
 export default function ActiveUsersStrip({
   users,
@@ -75,10 +78,19 @@ export default function ActiveUsersStrip({
       )}
 
       {/* Avatars row */}
+      {/* CHATROOM_IDENTITY_FIX: Top strip shows ONLY chat-room photo, gender ring, online dot */}
+      {/* NO age badge per rule 7 */}
       <View style={styles.avatarsRow}>
         {visible.map((user) => {
           // AVATAR-BORDER-FIX: Use gender-based colors for consistency across all surfaces
           const ringColor = GENDER_COLORS[user.gender || 'default'];
+          // CHATROOM_TOP_ROW_RENDER: Log what's being rendered
+          console.log('CHATROOM_TOP_ROW_RENDER', {
+            userId: user.id.slice(0, 12),
+            hasAvatar: !!user.avatar,
+            gender: user.gender || 'default',
+            isOnline: user.isOnline,
+          });
           return (
           <View key={user.id} style={styles.avatarWrapper}>
             {user.avatar ? (
@@ -103,6 +115,7 @@ export default function ActiveUsersStrip({
                 <Ionicons name="person" size={12} color={isDark ? C.textLight : C.textMuted} />
               </View>
             )}
+            {/* CHATROOM_IDENTITY_FIX: Only show online dot, NO age badge */}
             {user.isOnline && <View style={[styles.onlineDot, { borderColor: isDark ? '#1F1F2E' : '#FFFFFF' }]} />}
           </View>
         );
@@ -162,6 +175,7 @@ const styles = StyleSheet.create({
   avatarWrapper: {
     position: 'relative',
   },
+  // CHATROOM_IDENTITY_FIX: ageBadge and ageText styles removed - age not shown in top strip
   avatar: {
     width: AVATAR_SIZE,
     height: AVATAR_SIZE,

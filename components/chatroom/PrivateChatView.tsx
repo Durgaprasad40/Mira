@@ -59,7 +59,7 @@ interface DmInfo {
 interface PrivateChatViewProps {
   dm: DmInfo;
   /** Convex thread ID for backend sync */
-  threadId?: Id<'chatRoomDmThreads'>;
+  threadId?: Id<'conversations'>;
   onBack: () => void;
   topInset?: number;
   /** When true, rendered inside a modal/sheet - simple flex layout (no internal keyboard handling) */
@@ -186,9 +186,9 @@ export default function PrivateChatView({
   // Threshold: how close to bottom counts as "at bottom" (in pixels)
   const NEAR_BOTTOM_THRESHOLD = 50;
 
-  // DM-ID-FIX: Use Convex query for real-time messages
+  // DM-ID-FIX: Use Convex query for real-time messages (Phase-1 messages table)
   const messagesResult = useQuery(
-    api.chatRooms.getDmMessages,
+    api.messages.getDmMessages,
     threadId && authUserId
       ? { authUserId, threadId, paginationOpts: { numItems: DM_PAGE_SIZE, cursor: null } }
       : 'skip'
@@ -199,9 +199,9 @@ export default function PrivateChatView({
     [liveMessages, olderMessages]
   );
 
-  // DM-ID-FIX: Mutations for sending and marking read
-  const sendDmMessage = useMutation(api.chatRooms.sendDmMessage);
-  const markDmMessagesRead = useMutation(api.chatRooms.markDmMessagesRead);
+  // DM-ID-FIX: Mutations for sending and marking read (messages module)
+  const sendConversationMessage = useMutation(api.messages.sendMessage);
+  const markConversationRead = useMutation(api.messages.markAsRead);
   // DM-MEDIA-FIX: Mutation for generating upload URL for media messages
   const generateUploadUrl = useMutation(api.chatRooms.generateUploadUrl);
 
@@ -217,11 +217,11 @@ export default function PrivateChatView({
   // Mark messages as read when opening DM and when new incoming messages arrive
   useEffect(() => {
     if (threadId && authUserId && unreadIncomingMessageIds.length > 0) {
-      markDmMessagesRead({ authUserId, threadId }).catch((err) => {
+      markConversationRead({ authUserId, conversationId: threadId }).catch((err) => {
         if (__DEV__) console.warn('[DM] Failed to mark messages read:', err);
       });
     }
-  }, [threadId, authUserId, unreadIncomingMessageIds, markDmMessagesRead]);
+  }, [threadId, authUserId, unreadIncomingMessageIds, markConversationRead]);
 
   useEffect(() => {
     setOlderMessages([]);
@@ -263,7 +263,7 @@ export default function PrivateChatView({
     setLoadOlderError(null);
 
     try {
-      const nextPage = await convex.query(api.chatRooms.getDmMessages, {
+      const nextPage = await convex.query(api.messages.getDmMessages, {
         authUserId,
         threadId,
         paginationOpts: {
@@ -508,11 +508,11 @@ export default function PrivateChatView({
     setInputText('');
 
     try {
-      await sendDmMessage({
+      await sendConversationMessage({
+        conversationId: threadId,
         authUserId,
-        threadId,
-        text: trimmed,
         type: 'text',
+        content: trimmed,
       });
 
       // CHAT_SHEET: Notify parent that send is complete
@@ -537,7 +537,7 @@ export default function PrivateChatView({
       // Restore input on error
       setInputText(trimmed);
     }
-  }, [inputText, threadId, authUserId, sendDmMessage, onSendComplete, scrollToLatest]);
+  }, [inputText, threadId, authUserId, sendConversationMessage, onSendComplete, scrollToLatest]);
 
   // DM-MEDIA-FIX: Full media upload implementation for DMs
   const handleSendMedia = useCallback(
@@ -555,12 +555,23 @@ export default function PrivateChatView({
 
         // Step 2: Send DM message with storage ID
         // Backend will resolve storageId to mediaUrl
-        await sendDmMessage({
-          authUserId,
-          threadId,
-          type: mediaType,
-          mediaStorageId: storageId,
-        });
+        await sendConversationMessage(
+          mediaType === 'audio'
+            ? {
+                conversationId: threadId,
+                authUserId,
+                type: 'voice',
+                content: '',
+                audioStorageId: storageId,
+              }
+            : {
+                conversationId: threadId,
+                authUserId,
+                type: mediaType === 'video' ? 'video' : 'image',
+                content: '',
+                imageStorageId: storageId,
+              }
+        );
 
         // Scroll to show the new message
         scrollToLatest(true, true);
@@ -571,7 +582,7 @@ export default function PrivateChatView({
         if (__DEV__) console.error('[DM] Media send failed:', error);
       }
     },
-    [threadId, authUserId, generateUploadUrl, sendDmMessage, scrollToLatest, onSendComplete]
+    [threadId, authUserId, generateUploadUrl, sendConversationMessage, scrollToLatest, onSendComplete]
   );
 
   // ─────────────────────────────────────────────────────────────────────────

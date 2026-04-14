@@ -13,7 +13,6 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { DemoOnlineUser, DEMO_CURRENT_USER } from '@/lib/demoData';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
-import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
 
 const C = INCOGNITO_COLORS;
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -33,7 +32,6 @@ export default function ViewProfileModal({
 }: ViewProfileModalProps) {
   const [bioExpanded, setBioExpanded] = useState(false);
   const authUserId = useAuthStore((s) => s.userId);
-  const storeBio = useChatRoomProfileStore((s) => s.bio);
 
   if (!visible || !user) return null;
 
@@ -41,14 +39,20 @@ export default function ViewProfileModal({
   const currentUserId = isDemoMode ? DEMO_CURRENT_USER.id : authUserId;
   const isCurrentUser = user.id === currentUserId;
 
-  // Use store bio for current user, user.chatBio for others
-  const rawBio = isCurrentUser ? storeBio : user.chatBio;
+  // CHATROOM_IDENTITY_STORE_RENDER_BLOCKED: never render bio from store.
+  // Bio must come from canonical chat-room identity resolution (user.chatBio passed from room screen).
+  const rawBio = user.chatBio;
   const hasBio = !!rawBio?.trim();
   const bioText = hasBio ? rawBio!.trim() : 'No bio yet';
   // Show "Read more" if bio exceeds ~3 lines (~120 chars)
   const needsReadMore = hasBio && bioText.length > 120;
 
-  if (__DEV__) console.log('[PROFILE] bio_source', { isCurrentUser, source: isCurrentUser ? 'store' : 'user', length: bioText.length });
+  console.log('CHATROOM_IDENTITY_CANONICAL_SURFACE_CHECK', {
+    surface: 'ViewProfileModal',
+    isCurrentUser,
+    bioSource: 'user.chatBio',
+    hasBio,
+  });
 
   return (
     <Modal

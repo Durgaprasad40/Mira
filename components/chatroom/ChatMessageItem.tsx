@@ -19,6 +19,7 @@ import MediaMessage from '@/components/chat/MediaMessage';
 import ReactionChips, { ReactionGroup } from './ReactionChips';
 import { formatTime } from '@/utils/chatTime';
 import { useAudioPlayerStore } from '@/stores/audioPlayerStore';
+import UploadProgressRing from '@/components/chatroom/UploadProgressRing';
 
 const C = INCOGNITO_COLORS;
 
@@ -77,6 +78,14 @@ interface ChatMessageItemProps {
   messageType?: 'text' | 'image' | 'video' | 'doodle' | 'audio';
   /** Media URL for image/video/doodle messages */
   mediaUrl?: string;
+  /** Local media URI for pending uploads (Phase-1 UX) */
+  localUri?: string;
+  /** Upload status for pending media (Phase-1 UX) */
+  uploadStatus?: 'uploading' | 'sending' | 'upload_failed' | 'send_failed';
+  /** Real upload progress (0-100) for pending media */
+  uploadProgress?: number;
+  /** Called when user taps failed pending media to retry */
+  onUploadStatusPress?: () => void;
   /** Audio URL for audio messages */
   audioUrl?: string;
   /** TAP-TO-VIEW-FIX: Called when user taps media (opens viewer) - for image/video */
@@ -118,6 +127,10 @@ function ChatMessageItem({
   dimmed = false,
   messageType = 'text',
   mediaUrl,
+  localUri,
+  uploadStatus,
+  uploadProgress,
+  onUploadStatusPress,
   audioUrl,
   onMediaPress,
   showTimestamp = true,
@@ -131,7 +144,8 @@ function ChatMessageItem({
   reactions = [],
   onReactionTap,
 }: ChatMessageItemProps) {
-  const isMedia = (messageType === 'image' || messageType === 'video' || messageType === 'doodle') && mediaUrl;
+  const effectiveMediaUrl = uploadStatus && localUri ? localUri : mediaUrl;
+  const isMedia = (messageType === 'image' || messageType === 'video' || messageType === 'doodle') && !!effectiveMediaUrl;
   const isSecureMedia = messageType === 'image' || messageType === 'video';
   const isAudio = messageType === 'audio' && audioUrl;
 
@@ -234,10 +248,12 @@ function ChatMessageItem({
 
   // TAP-TO-VIEW-FIX: Handle media tap to open viewer (replaces hold-to-view)
   const handleMediaTap = useCallback(() => {
-    if (isSecureMedia && mediaUrl) {
-      onMediaPress?.(messageId, mediaUrl, messageType as 'image' | 'video');
+    if (isSecureMedia && effectiveMediaUrl) {
+      // For pending media, disable secure viewer until upload completes.
+      if (uploadStatus) return;
+      onMediaPress?.(messageId, effectiveMediaUrl, messageType as 'image' | 'video');
     }
-  }, [messageId, mediaUrl, messageType, isSecureMedia, onMediaPress]);
+  }, [messageId, effectiveMediaUrl, messageType, isSecureMedia, onMediaPress, uploadStatus]);
 
   const handleLongPress = useCallback((event: GestureResponderEvent) => {
     // P2-014: Haptic feedback on long press for tactile confirmation
@@ -424,21 +440,50 @@ function ChatMessageItem({
                 </View>
               </TouchableOpacity>
             )}
-            <View style={styles.mediaContainer}>
+            <Pressable
+              style={styles.mediaContainer}
+              onPress={() => {
+                if (uploadStatus === 'upload_failed' || uploadStatus === 'send_failed') {
+                  onUploadStatusPress?.();
+                }
+              }}
+            >
               {/* TAP-TO-VIEW-FIX: Use onPress for tap-to-view instead of onHoldStart/End */}
               <MediaMessage
                 messageId={messageId}
-                mediaUrl={mediaUrl!}
+                mediaUrl={effectiveMediaUrl!}
                 type={messageType as 'image' | 'video' | 'doodle'}
                 onPress={isSecureMedia ? handleMediaTap : undefined}
               />
+              {!!uploadStatus && (
+                <View style={styles.pendingOverlay}>
+                  {uploadStatus === 'uploading' ? (
+                    <View style={styles.pendingCol}>
+                      <UploadProgressRing progress={typeof uploadProgress === 'number' ? uploadProgress : 0} />
+                      <Text style={styles.pendingSubtext}>Uploading…</Text>
+                    </View>
+                  ) : uploadStatus === 'sending' ? (
+                    <View style={styles.pendingRow}>
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                      <Text style={styles.pendingText}>
+                        Sending…
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={styles.pendingRow}>
+                      <Ionicons name="alert-circle" size={16} color="#FCA5A5" />
+                      <Text style={styles.pendingText}>Tap to retry</Text>
+                    </View>
+                  )}
+                </View>
+              )}
               {/* GROUP-TIMESTAMP: Timestamp overlay on media, bottom-right */}
               {showTimestamp && timestamp && (
                 <View style={styles.mediaTimestampOverlay}>
                   <Text style={styles.mediaTimestampText}>{formatTime(timestamp)}</Text>
                 </View>
               )}
-            </View>
+            </Pressable>
           </View>
         ) : isAudio ? (
           <View style={[styles.bubble, styles.audioBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
@@ -774,6 +819,33 @@ const styles = StyleSheet.create({
   mediaContainer: {
     borderRadius: 12,
     overflow: 'hidden',
+  },
+  pendingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  pendingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pendingCol: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  pendingText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  pendingSubtext: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 12,
+    fontWeight: '600',
   },
   // AUDIO-UX-FIX: Wider audio bubble with proper layout
   audioBubble: {

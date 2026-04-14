@@ -133,16 +133,36 @@ interface ChatRoom {
   hasPassword?: boolean;  // Room requires password to join
   isMember?: boolean;     // Current user is already a member (can skip password)
   wasAuthorized?: boolean; // RE-ENTRY-FIX: User was previously authorized (can rejoin without password)
+  role?: 'owner' | 'admin' | 'member'; // PRIVATE-ROOM-ACCESS-FIX: User's role in room
+}
+
+function AccessPrefetcher({ roomId, authUserId }: { roomId: string; authUserId: string | null }) {
+  const access = useQuery(
+    api.chatRooms.checkRoomAccess,
+    authUserId ? { roomId: roomId as Id<'chatRooms'>, authUserId } : 'skip'
+  );
+
+  useEffect(() => {
+    if (!authUserId) return;
+    if (access === undefined) return;
+    console.log('CHATROOM_ACCESS_PREFETCH_USED', { roomId, status: (access as any)?.status ?? null });
+  }, [access, authUserId, roomId]);
+
+  return null;
 }
 
 export default function ChatRoomsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
+  const [countSmoothing, setCountSmoothing] = useState<{
+    fromRoomId: string | null;
+    toRoomId: string;
+    expiresAt: number;
+  } | null>(null);
+  const smoothingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Phase-2: Private rooms state
-  const [joinCode, setJoinCode] = useState('');
-  const [isJoining, setIsJoining] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [showCreateInput, setShowCreateInput] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
@@ -184,6 +204,8 @@ export default function ChatRoomsScreen() {
 
   // Current user ID for filtering out own messages
   const userId = useAuthStore((s) => s.userId);
+  const currentRoomId = usePreferredChatRoomStore((s) => s.currentRoomId);
+  const leaveRoomMutation = useMutation(api.chatRooms.leaveRoom);
 
   // ─────────────────────────────────────────────────────────────────────────────
   // CHAT ROOM IDENTITY CHECK
@@ -263,8 +285,54 @@ export default function ChatRoomsScreen() {
         clearTimeout(refreshTimeoutRef.current);
         refreshTimeoutRef.current = null;
       }
+
+      if (smoothingTimerRef.current) {
+        clearTimeout(smoothingTimerRef.current);
+        smoothingTimerRef.current = null;
+      }
     };
   }, []);
+
+  // UX smoothing: expire visual-only smoothing window
+  useEffect(() => {
+    if (!countSmoothing) return;
+    const ms = Math.max(0, countSmoothing.expiresAt - Date.now());
+    if (smoothingTimerRef.current) {
+      clearTimeout(smoothingTimerRef.current);
+      smoothingTimerRef.current = null;
+    }
+    smoothingTimerRef.current = setTimeout(() => {
+      if (!mountedRef.current) return;
+      console.log('CHATROOM_UI_SMOOTHING_EXPIRED', {
+        fromRoomId: countSmoothing.fromRoomId,
+        toRoomId: countSmoothing.toRoomId,
+      });
+      setCountSmoothing(null);
+    }, ms);
+    return () => {
+      if (smoothingTimerRef.current) {
+        clearTimeout(smoothingTimerRef.current);
+        smoothingTimerRef.current = null;
+      }
+    };
+  }, [countSmoothing]);
+
+  const getSmoothedCount = useCallback(
+    (roomId: string, backendCount: number) => {
+      // Backend remains the ONLY source of truth; this is a short-lived visual-only adjustment.
+      if (!countSmoothing) return backendCount;
+      if (Date.now() >= countSmoothing.expiresAt) return backendCount;
+
+      if (roomId === countSmoothing.toRoomId) {
+        return Math.max(0, backendCount + 1);
+      }
+      if (countSmoothing.fromRoomId && roomId === countSmoothing.fromRoomId) {
+        return Math.max(0, backendCount - 1);
+      }
+      return backendCount;
+    },
+    [countSmoothing]
+  );
 
   // SENTRY-FILTER: Set feature tag on mount, clear on unmount
   useEffect(() => {
@@ -335,7 +403,6 @@ export default function ChatRoomsScreen() {
   );
 
   // Phase-2: Mutations for private rooms
-  const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
   const resetMyPrivateRoomsMut = useMutation(api.chatRooms.resetMyPrivateRooms);
 
@@ -375,6 +442,7 @@ export default function ChatRoomsScreen() {
   // ISSUE 2 FIX: Mark as private so renderRoom skips message preview
   // LIVE PRESENCE: Use activeUserCount for display
   // LOCKED-ROOM-FIX: Include hasPassword and isMember for password validation
+  // PRIVATE-ROOM-ACCESS-FIX: Include role for owner bypass
   const privateRooms: ChatRoom[] = useMemo(() => {
     if (!myPrivateRooms) return [];
     return myPrivateRooms.map((r) => ({
@@ -382,13 +450,15 @@ export default function ChatRoomsScreen() {
       name: r.name,
       slug: r.slug,
       category: r.category,
-      activeUserCount: r.memberCount ?? 0,
+      activeUserCount: getSmoothedCount(r._id, r.onlineCount ?? 0),
       iconKey: r.slug,
       isPrivate: true, // Flag for compact rendering
       hasPassword: false,
       isMember: r.isMember ?? false, // LOCKED-ROOM-FIX
+      // PRIVATE-ROOM-ACCESS-FIX: Track role for owner bypass
+      role: r.role,
     }));
-  }, [myPrivateRooms]);
+  }, [getSmoothedCount, myPrivateRooms]);
 
   // Track loading state for Convex queries
   const isConvexLoading = convexRooms === undefined;
@@ -416,7 +486,7 @@ export default function ChatRoomsScreen() {
       name: r.name,
       slug: r.slug,
       category: r.category,
-      activeUserCount: r.memberCount ?? 0,
+      activeUserCount: getSmoothedCount(r._id, r.onlineCount ?? 0),
       lastMessageText: r.lastMessageText,
       iconKey: r.slug,
     })).filter((r) => r.name.toLowerCase() !== 'english');
@@ -428,7 +498,7 @@ export default function ChatRoomsScreen() {
     }
 
     return backendRooms;
-  }, [convexRooms, isSeedingRooms]);
+  }, [convexRooms, getSmoothedCount, isSeedingRooms]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -443,7 +513,7 @@ export default function ChatRoomsScreen() {
   }, []);
 
   const handleOpenRoom = useCallback(
-    (roomId: string) => {
+    async (roomId: string) => {
       // NAV-RACE FIX: Prevent double-tap duplicate navigation (synchronous guard)
       if (isNavigatingToRoomRef.current) {
         return;
@@ -469,12 +539,45 @@ export default function ChatRoomsScreen() {
       const roomName = foundRoom?.name ?? foundPrivateRoom?.name ?? '';
       const isPrivate = !!foundPrivateRoom ? '1' : '0';
 
-      if (foundPrivateRoom && !foundPrivateRoom.isMember) {
-        Alert.alert(
-          'Invite Required',
-          'Use the room invite code first. Password-protected private rooms also require the room password after the code is verified.'
-        );
-        return; // Don't navigate yet - wait for password validation
+      // UX smoothing (visual only): make counts feel instant for a single transition.
+      // This does NOT modify backend counts and cannot drift (auto-expires, never accumulates).
+      const SMOOTHING_MS = 400;
+      if (userId) {
+        console.log('CHATROOM_UI_SMOOTHING_APPLIED', {
+          fromRoomId: currentRoomId,
+          toRoomId: roomId,
+          durationMs: SMOOTHING_MS,
+        });
+        setCountSmoothing({
+          fromRoomId: currentRoomId,
+          toRoomId: roomId,
+          expiresAt: Date.now() + SMOOTHING_MS,
+        });
+      }
+
+      // BACKEND COUNT ONLY: Explicitly leave the previous room before switching.
+      if (userId && currentRoomId && currentRoomId !== roomId) {
+        console.log('CHATROOM_LEAVE_SENT', { roomId: currentRoomId, nextRoomId: roomId });
+        leaveRoomMutation({ roomId: currentRoomId as Id<'chatRooms'>, authUserId: userId }).catch(() => {
+          // Best-effort; backend expiry still cleans up eventually.
+        });
+      }
+
+      // PRIVATE-ROOM-ACCESS-FIX: No invite-code flow for private rooms
+      // Navigation is always allowed - room screen handles access checks
+      if (foundPrivateRoom) {
+        const isOwner = foundPrivateRoom.role === 'owner';
+        const isApprovedMember = foundPrivateRoom.isMember;
+
+        if (isOwner) {
+          console.log('PRIVATE_ROOM_OWNER_BYPASS', { roomId, role: 'owner' });
+        } else if (isApprovedMember) {
+          console.log('PRIVATE_ROOM_APPROVED_MEMBER_REENTRY', { roomId, isMember: true });
+        } else {
+          // First-time entrant - room screen will handle password
+          console.log('PRIVATE_ROOM_FIRST_TIME_PASSWORD_REQUIRED', { roomId, isMember: false, isOwner: false });
+        }
+        // Always allow navigation - no blocking
       }
 
       // NAV-RACE FIX: Set synchronous lock before navigation
@@ -483,7 +586,7 @@ export default function ChatRoomsScreen() {
       // Mark user navigated to cancel any pending preferred room redirect
       userNavigatedRef.current = true;
 
-      // Navigate FIRST (instant) with route params for instant render
+      // Path segment must be Convex chatRooms document id (ChatRoom.id from listRooms._id), never slug/name
       router.push({
         pathname: `/(main)/(private)/(tabs)/chat-rooms/${roomId}`,
         params: { roomName, isPrivate },
@@ -496,52 +599,12 @@ export default function ChatRoomsScreen() {
         isNavigatingToRoomRef.current = false;
       }, NAV_SETTLE_DELAY_MS);
     },
-    [router, markRoomVisited, rooms, privateRooms, isSeedingRooms]
+    [router, markRoomVisited, rooms, privateRooms, isSeedingRooms, userId, currentRoomId, leaveRoomMutation]
   );
 
   const handleCreateRoom = useCallback(() => {
     router.push('/(main)/create-room' as any);
   }, [router]);
-
-  // Phase-2: Handle join by code
-  const handleJoinByCode = useCallback(async () => {
-    if (!joinCode.trim() || isJoining) return;
-    if (!userId) {
-      Alert.alert('Sign in required', 'Please sign in to join a private room.');
-      return;
-    }
-    // P2-015: Light haptic feedback on join attempt
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setIsJoining(true);
-    try {
-      const normalizedCode = joinCode.trim().toUpperCase();
-      const result = await joinRoomByCodeMut({ joinCode: normalizedCode, authUserId: userId });
-      // UNMOUNT-GUARD: Check mounted before setState after async
-      if (!mountedRef.current) return;
-
-      setJoinCode('');
-      // P2-015: Success haptic feedback
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      if (result.alreadyMember) {
-        Alert.alert('Already a Member', 'You are already a member of this room.');
-      }
-      // ISSUE B: Navigate with route params for instant render (private room)
-      router.push({
-        pathname: `/(main)/(private)/(tabs)/chat-rooms/${result.roomId}`,
-        params: { roomName: 'Private Room', isPrivate: '1' },
-      } as any);
-      markRoomVisited(result.roomId);
-    } catch (error: any) {
-      // P2-015: Error haptic feedback for invalid/failed join
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      Alert.alert('Error', error.message || 'Failed to join room');
-    } finally {
-      // UNMOUNT-GUARD: Check mounted before setState in finally
-      if (mountedRef.current) {
-        setIsJoining(false);
-      }
-    }
-  }, [joinCode, isJoining, joinRoomByCodeMut, router, userId, markRoomVisited]);
 
   // Phase-2: Handle create private room
   const handleCreatePrivateRoom = useCallback(async () => {
@@ -620,7 +683,7 @@ export default function ChatRoomsScreen() {
     // Mark user navigated to cancel any pending preferred room redirect
     userNavigatedRef.current = true;
 
-    // Navigate to room (password already validated, user is now a member)
+    // passwordModalRoom.id is Convex room _id (set when opening password modal for that room)
     router.push({
       pathname: `/(main)/(private)/(tabs)/chat-rooms/${roomId}`,
       params: { roomName, isPrivate: '1' },
@@ -912,7 +975,10 @@ export default function ChatRoomsScreen() {
                   <Text style={styles.sectionTitle}>Featured</Text>
                 </View>
                 {generalRooms.map((room) => (
-                  <RoomCard key={room.id} item={room} isGeneral={true} />
+                  <React.Fragment key={room.id}>
+                    <AccessPrefetcher roomId={room.id} authUserId={userId} />
+                    <RoomCard item={room} isGeneral={true} />
+                  </React.Fragment>
                 ))}
               </>
             )}
@@ -925,7 +991,10 @@ export default function ChatRoomsScreen() {
                   <Text style={styles.sectionTitle}>Languages</Text>
                 </View>
                 {languageRooms.map((room) => (
-                  <RoomCard key={room.id} item={room} isGeneral={false} />
+                  <React.Fragment key={room.id}>
+                    <AccessPrefetcher roomId={room.id} authUserId={userId} />
+                    <RoomCard item={room} isGeneral={false} />
+                  </React.Fragment>
                 ))}
               </>
             )}
@@ -954,38 +1023,6 @@ export default function ChatRoomsScreen() {
               </View>
             )}
 
-            {!isSearchActive && (
-              <View style={styles.joinCodeRow}>
-                <TextInput
-                  style={styles.joinCodeInput}
-                  placeholder="Enter invite code"
-                  placeholderTextColor="rgba(255,255,255,0.35)"
-                  value={joinCode}
-                  onChangeText={(text) => setJoinCode(text.toUpperCase())}
-                  autoCapitalize="characters"
-                  autoCorrect={false}
-                  maxLength={6}
-                  returnKeyType="done"
-                  onSubmitEditing={handleJoinByCode}
-                />
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.joinCodeButton,
-                    (!joinCode.trim() || isJoining || !userId) && styles.joinCodeButtonDisabled,
-                    pressed && joinCode.trim() && !isJoining && userId && { opacity: 0.88 },
-                  ]}
-                  onPress={handleJoinByCode}
-                  disabled={!joinCode.trim() || isJoining || !userId}
-                >
-                  {isJoining ? (
-                    <ActivityIndicator size="small" color="#0F0F14" />
-                  ) : (
-                    <Text style={styles.joinCodeButtonText}>Join</Text>
-                  )}
-                </Pressable>
-              </View>
-            )}
-
             {/* Section 4: Private Rooms - show if any exist (filtered by search) */}
             {filteredPrivateRooms.length > 0 && (
               <>
@@ -994,7 +1031,10 @@ export default function ChatRoomsScreen() {
                   <Text style={styles.sectionTitle}>Your Private Rooms</Text>
                 </View>
                 {filteredPrivateRooms.map((room) => (
-                  <RoomCard key={room.id} item={room} />
+                  <React.Fragment key={room.id}>
+                    <AccessPrefetcher roomId={room.id} authUserId={userId} />
+                    <RoomCard item={room} />
+                  </React.Fragment>
                 ))}
               </>
             )}
@@ -1343,39 +1383,6 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.5)',
   },
   // Phase-2: Private rooms styles
-  joinCodeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginHorizontal: 12,
-    marginBottom: 12,
-    gap: 8,
-  },
-  joinCodeInput: {
-    flex: 1,
-    height: 44,
-    backgroundColor: C.surface,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    fontSize: 15,
-    color: C.text,
-    letterSpacing: 2,
-  },
-  joinCodeButton: {
-    height: 44,
-    paddingHorizontal: 20,
-    backgroundColor: C.primary,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  joinCodeButtonDisabled: {
-    opacity: 0.5,
-  },
-  joinCodeButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#FFF',
-  },
   emptyPrivateRooms: {
     flexDirection: 'row',
     alignItems: 'center',

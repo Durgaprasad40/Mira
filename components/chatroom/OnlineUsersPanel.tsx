@@ -142,6 +142,12 @@ export default function OnlineUsersPanel({
     if (usePresenceMode) {
       const result: SectionData[] = [];
 
+      // CHATROOM_PRESENCE_STATE: Log presence state
+      console.log('CHATROOM_PRESENCE_STATE', {
+        onlineCount: presenceOnline?.length ?? 0,
+        recentlyLeftCount: presenceRecentlyLeft?.length ?? 0,
+      });
+
       if (presenceOnline && presenceOnline.length > 0) {
         const online: UnifiedUser[] = presenceOnline.map((u) => ({
           id: u.id,
@@ -149,7 +155,7 @@ export default function OnlineUsersPanel({
           avatar: u.avatar,
           age: u.age,
           gender: u.gender || undefined,
-          isOnline: true,
+          isOnline: true, // CHATROOM_PRESENCE_FIX: Online users show green dot, NO lastSeen
           lastHeartbeatAt: u.lastHeartbeatAt,
           role: u.role,
         }));
@@ -166,7 +172,7 @@ export default function OnlineUsersPanel({
           avatar: u.avatar,
           age: u.age,
           gender: u.gender || undefined,
-          isOnline: false,
+          isOnline: false, // CHATROOM_PRESENCE_FIX: Recently left users show lastSeen, NO green dot
           lastHeartbeatAt: u.lastHeartbeatAt,
           role: u.role,
         }));
@@ -243,14 +249,24 @@ export default function OnlineUsersPanel({
     }).length;
   }, [users, presenceOnline, usePresenceMode]);
 
-  const renderUser = ({ item }: { item: UnifiedUser }) => {
+  const renderUser = useCallback(({ item }: { item: UnifiedUser }) => {
     // Get gender-based ring color
     const ringColor = GENDER_COLORS[item.gender || 'default'] || GENDER_COLORS.default;
 
-    // Format display: "Anonymous, 25" or just display name
+    // CHATROOM_IDENTITY_FIX: Age shown as inline plain text "name, age"
+    // NO badge/chip per rules 11-13
     const displayWithAge = item.age && item.age > 0
       ? `${item.displayName}, ${item.age}`
       : item.displayName;
+
+    // CHATROOM_USERS_PANEL_RENDER: Log what's being rendered
+    console.log('CHATROOM_USERS_PANEL_RENDER', {
+      userId: item.id.slice(0, 12),
+      displayName: item.displayName,
+      age: item.age,
+      isOnline: item.isOnline,
+      hasAvatar: !!item.avatar,
+    });
 
     return (
       <Pressable
@@ -286,7 +302,9 @@ export default function OnlineUsersPanel({
           </View>
         )}
         <View style={styles.userInfo}>
-          <Text style={styles.userName}>{displayWithAge}</Text>
+          {/* CHATROOM_IDENTITY_FIX: Age as plain inline text "name, age" - NO badge */}
+          <Text style={styles.userName} numberOfLines={1}>{displayWithAge}</Text>
+          {/* CHATROOM_PRESENCE_FIX: Only show lastSeen if user is NOT online (in Recently Left section) */}
           {!item.isOnline && item.lastHeartbeatAt && (
             <Text style={styles.lastSeen}>{formatLastSeen(item.lastHeartbeatAt)}</Text>
           )}
@@ -310,7 +328,7 @@ export default function OnlineUsersPanel({
         ) : null}
       </Pressable>
     );
-  };
+  }, [onUserPress]);
 
   const renderSectionHeader = ({ section }: { section: SectionData }) => (
     <View style={styles.sectionHeader}>
@@ -473,6 +491,7 @@ const styles = StyleSheet.create({
   userInfo: {
     flex: 1,
   },
+  // CHATROOM_IDENTITY_FIX: Age shown inline as "name, age" - no separate badge styles needed
   userName: {
     // P2-001: Use responsive typography
     fontSize: CHAT_FONTS.userName,

@@ -18,7 +18,6 @@ import * as ImagePicker from 'expo-image-picker';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import type { Id } from '@/convex/_generated/dataModel';
 import ChatThemeSelector from './ChatThemeSelector';
@@ -79,8 +78,9 @@ export default function ProfilePopover({
   const generateUploadUrl = useMutation(api.chatRooms.generateChatRoomAvatarUploadUrl);
   const getAvatarUrl = useMutation(api.chatRooms.getChatRoomAvatarUrl);
 
-  // Persisted profile store (for backwards compatibility)
-  const { setProfile: persistProfile } = useChatRoomProfileStore();
+  // CHATROOM_IDENTITY_STORE_RENDER_BLOCKED:
+  // We intentionally do not persist identity to local store.
+  // Convex chatRoomProfiles is the sole source of truth.
 
   // Edit Profile modal state
   const [editModalVisible, setEditModalVisible] = useState(false);
@@ -88,7 +88,9 @@ export default function ProfilePopover({
   const [themeModalVisible, setThemeModalVisible] = useState(false);
   const [editName, setEditName] = useState(username);
   const [editAvatar, setEditAvatar] = useState(avatar);
-  const canLeaveRoom = !(isPrivateRoom && isRoomOwner);
+  // LEAVE-ROOM-FIX: All users can leave a room (including private room owners)
+  // Leave = exit room, can re-enter later. End Room = owner-only destructive delete.
+  const canLeaveRoom = true;
   // AVATAR-UPLOAD-FIX: Track if avatar was changed (to trigger upload on save)
   const [pendingAvatarLocalUri, setPendingAvatarLocalUri] = useState<string | null>(null);
   // PROFILE-EDIT-FIX: Use bio prop from Convex as source of truth, not local store
@@ -247,14 +249,6 @@ export default function ProfilePopover({
         nickname: trimmedName,
         avatarUrl: avatarUrlToSave,
         bio: trimmedBio || undefined,
-      });
-
-      // Also persist to local store for immediate UI feedback
-      // Use cloud URL for local store too (so it works across app restarts)
-      persistProfile({
-        displayName: trimmedName,
-        avatarUri: cloudAvatarUrl ?? avatar ?? null,
-        bio: trimmedBio || null,
       });
 
       // Notify parent about the update
