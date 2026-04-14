@@ -155,7 +155,7 @@ export default function Phase2LookingForScreen() {
               </View>
             </View>
             <Text style={styles.sectionSubtitle}>
-              What kind of connection are you open to in Private Mode?
+              What are you looking for in Private Mode?
             </Text>
 
             {/* Intent Chips - Fluid Wrap */}
