@@ -301,7 +301,7 @@ export default function PrivateSupportScreen() {
             {/* Support Requests */}
             <TouchableOpacity
               style={styles.actionCard}
-              onPress={() => router.push('/(main)/(private)/settings/support-history' as any)}
+              onPress={() => router.push('/(main)/(private)/settings/private-support-history' as any)}
               activeOpacity={0.7}
             >
               <View style={[styles.actionIconBox, styles.actionIconBoxPrimary]}>

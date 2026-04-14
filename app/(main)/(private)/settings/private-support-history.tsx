@@ -1,6 +1,9 @@
 /**
  * Phase-2 Support History Screen
  *
+ * Route file MUST be named `private-support-history` (not `support-history`) so the URL
+ * does not collide with Phase-1 `app/(main)/settings/support-history.tsx`.
+ *
  * Shows the user's support tickets/requests with:
  * - Clean empty state when no requests
  * - Ticket list with status badges

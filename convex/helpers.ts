@@ -274,17 +274,51 @@ export async function ensureUserByAuthId(
 
 /**
  * Validate session token and return the authenticated user ID.
- * Uses session table to verify token is valid, not expired, and not revoked.
+ * Supports:
+ * - Regular session tokens (rows in `sessions` table)
+ * - Demo auth tokens (`demo_<userId>`) from `convex/demoAuth.ts` — these are NOT
+ *   inserted into `sessions`; same contract as `photos.ts` validateSessionToken.
  *
- * @param ctx - Convex mutation context
- * @param token - Session token to validate
+ * @param ctx - Convex query or mutation context
+ * @param token - Session or demo token from the client auth store
  * @returns userId if valid, null if invalid/expired/revoked
  */
 export async function validateSessionToken(
-  ctx: MutationCtx,
+  ctx: QueryCtx | MutationCtx,
   token: string
 ): Promise<Id<"users"> | null> {
   const now = Date.now();
+
+  // Demo auth (EXPO_PUBLIC_DEMO_AUTH_MODE): token is demo_<users._id>, no sessions row
+  if (token.startsWith('demo_')) {
+    const userIdPart = token.substring(5);
+    try {
+      const user = await ctx.db.get(userIdPart as Id<'users'>);
+      if (user && user.isActive && !user.deletedAt && !user.isBanned) {
+        return user._id;
+      }
+    } catch {
+      // Not a valid Convex id string — try legacy lookups below
+    }
+
+    const usersByDemo = await ctx.db
+      .query('users')
+      .withIndex('by_demo_user_id', (q) => q.eq('demoUserId', userIdPart))
+      .first();
+    if (usersByDemo && usersByDemo.isActive && !usersByDemo.deletedAt && !usersByDemo.isBanned) {
+      return usersByDemo._id;
+    }
+
+    const usersByAuth = await ctx.db
+      .query('users')
+      .withIndex('by_auth_user_id', (q) => q.eq('authUserId', userIdPart))
+      .first();
+    if (usersByAuth && usersByAuth.isActive && !usersByAuth.deletedAt && !usersByAuth.isBanned) {
+      return usersByAuth._id;
+    }
+
+    return null;
+  }
 
   const session = await ctx.db
     .query('sessions')

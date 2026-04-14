@@ -4,7 +4,7 @@
  * Displays the message thread for a support case.
  * Allows user to send text, image, video, and voice messages.
  */
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
 import {
   View,
   Text,
@@ -19,6 +19,7 @@ import {
   Image,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
@@ -30,7 +31,7 @@ import { Id } from '@/convex/_generated/dataModel';
 import { uploadMediaToConvex } from '@/lib/uploadUtils';
 import { useVoiceRecorder } from '@/hooks/useVoiceRecorder';
 import * as ImagePicker from 'expo-image-picker';
-import { Video, ResizeMode, Audio } from 'expo-av';
+import { Video, ResizeMode, Audio, AVPlaybackStatus } from 'expo-av';
 
 const C = INCOGNITO_COLORS;
 
@@ -60,33 +61,34 @@ interface MessageItem {
   createdAt: number;
 }
 
-// Global audio singleton to ensure only one plays at a time
+// Global singleton — only one support-case voice plays at a time (mirrors VoiceMessageBubble pattern)
 let currentAudioSound: Audio.Sound | null = null;
 let currentAudioId: string | null = null;
 
 /**
- * Inline voice player for support messages
+ * Voice player aligned with `VoiceMessageBubble` lifecycle:
+ * - isPlayingRef / hasFinishedRef (React state is stale in async callbacks)
+ * - setPositionAsync(0) before replay after natural finish (fixes double / garbled replay)
+ * - createAsync({ shouldPlay: false }) then playAsync (avoids overlapping start)
+ * - loading guard; re-attach status callback on each play for preloaded sound
  */
-function SupportVoicePlayer({ messageId, audioUrl, isUser }: { messageId: string; audioUrl: string; isUser: boolean }) {
+const SupportVoicePlayer = memo(function SupportVoicePlayer({
+  messageId,
+  audioUrl,
+  isUser,
+}: {
+  messageId: string;
+  audioUrl: string;
+  isUser: boolean;
+}) {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [playbackPositionMillis, setPlaybackPositionMillis] = useState(0);
+  const [durationMillis, setDurationMillis] = useState(0);
   const soundRef = useRef<Audio.Sound | null>(null);
   const isMountedRef = useRef(true);
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-      if (soundRef.current) {
-        soundRef.current.unloadAsync().catch(() => {});
-        if (currentAudioId === messageId) {
-          currentAudioSound = null;
-          currentAudioId = null;
-        }
-      }
-    };
-  }, [messageId]);
+  const isPlayingRef = useRef(false);
+  const hasFinishedRef = useRef(false);
+  const isLoadingRef = useRef(false);
 
   const formatTime = (ms: number) => {
     const totalSec = Math.floor(ms / 1000);
@@ -95,62 +97,157 @@ function SupportVoicePlayer({ messageId, audioUrl, isUser }: { messageId: string
     return `${min}:${sec.toString().padStart(2, '0')}`;
   };
 
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        void (async () => {
+          if (soundRef.current) {
+            try {
+              await soundRef.current.stopAsync();
+            } catch {}
+            try {
+              await soundRef.current.unloadAsync();
+            } catch {}
+            soundRef.current = null;
+          }
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          hasFinishedRef.current = false;
+          setPlaybackPositionMillis(0);
+          if (currentAudioId === messageId) {
+            currentAudioSound = null;
+            currentAudioId = null;
+          }
+        })();
+      };
+    }, [messageId]),
+  );
+
+  const onPlaybackStatusUpdate = useCallback(
+    (status: AVPlaybackStatus) => {
+      if (!isMountedRef.current) return;
+      if (!status.isLoaded) return;
+
+      const dur = status.durationMillis ?? 0;
+      setDurationMillis(dur);
+
+      if (!status.didJustFinish) {
+        setPlaybackPositionMillis(status.positionMillis ?? 0);
+      }
+
+      if (status.didJustFinish) {
+        hasFinishedRef.current = true;
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        setPlaybackPositionMillis(0);
+        if (currentAudioId === messageId) {
+          currentAudioSound = null;
+          currentAudioId = null;
+        }
+      }
+    },
+    [messageId],
+  );
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      void (async () => {
+        if (soundRef.current) {
+          try {
+            await soundRef.current.stopAsync();
+          } catch {}
+          try {
+            await soundRef.current.unloadAsync();
+          } catch {}
+          if (currentAudioId === messageId) {
+            currentAudioSound = null;
+            currentAudioId = null;
+          }
+          soundRef.current = null;
+        }
+      })();
+    };
+  }, [messageId]);
+
+  const stopOtherSupportVoices = async () => {
+    if (currentAudioSound && currentAudioId !== messageId) {
+      try {
+        await currentAudioSound.stopAsync();
+        await currentAudioSound.unloadAsync();
+      } catch {}
+      currentAudioSound = null;
+      currentAudioId = null;
+    }
+  };
+
   const handlePlayPause = async () => {
+    if (!audioUrl?.trim() || isLoadingRef.current) return;
+
     try {
-      if (isPlaying && soundRef.current) {
+      if (isPlayingRef.current && soundRef.current) {
         await soundRef.current.pauseAsync();
+        isPlayingRef.current = false;
         setIsPlaying(false);
         return;
       }
 
-      // Stop any other playing audio
-      if (currentAudioSound && currentAudioId !== messageId) {
-        await currentAudioSound.stopAsync();
-        await currentAudioSound.unloadAsync();
-        currentAudioSound = null;
-        currentAudioId = null;
-      }
+      await stopOtherSupportVoices();
 
+      isLoadingRef.current = true;
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
       });
 
+      if (soundRef.current && hasFinishedRef.current) {
+        await soundRef.current.setPositionAsync(0);
+        hasFinishedRef.current = false;
+      }
+
       if (soundRef.current) {
+        soundRef.current.setOnPlaybackStatusUpdate(onPlaybackStatusUpdate);
         await soundRef.current.playAsync();
+        isPlayingRef.current = true;
         setIsPlaying(true);
         currentAudioSound = soundRef.current;
         currentAudioId = messageId;
       } else {
+        hasFinishedRef.current = false;
         const { sound } = await Audio.Sound.createAsync(
           { uri: audioUrl },
-          { shouldPlay: true },
-          (status) => {
-            if (!isMountedRef.current) return;
-            if (status.isLoaded) {
-              const pos = status.positionMillis || 0;
-              const dur = status.durationMillis || 0;
-              setDuration(dur);
-              setProgress(dur > 0 ? pos / dur : 0);
-              if (status.didJustFinish) {
-                setIsPlaying(false);
-                setProgress(0);
-                currentAudioSound = null;
-                currentAudioId = null;
-              }
-            }
-          }
+          { shouldPlay: false },
+          onPlaybackStatusUpdate,
         );
         soundRef.current = sound;
+        await sound.playAsync();
+        isPlayingRef.current = true;
+        setIsPlaying(true);
         currentAudioSound = sound;
         currentAudioId = messageId;
-        setIsPlaying(true);
       }
     } catch (error) {
       if (__DEV__) console.error('[SupportVoicePlayer] Error:', error);
+      if (soundRef.current) {
+        try {
+          await soundRef.current.unloadAsync();
+        } catch {}
+        soundRef.current = null;
+      }
+      if (currentAudioId === messageId) {
+        currentAudioSound = null;
+        currentAudioId = null;
+      }
+      isPlayingRef.current = false;
       setIsPlaying(false);
+    } finally {
+      isLoadingRef.current = false;
     }
   };
+
+  const progress =
+    durationMillis > 0 ? playbackPositionMillis / durationMillis : 0;
 
   return (
     <TouchableOpacity onPress={handlePlayPause} style={styles.audioPlayer} activeOpacity={0.7}>
@@ -167,13 +264,15 @@ function SupportVoicePlayer({ messageId, audioUrl, isUser }: { messageId: string
           />
         </View>
         <Text style={[styles.audioDuration, { color: isUser ? 'rgba(255,255,255,0.7)' : C.textLight }]}>
-          {duration > 0 ? formatTime(isPlaying ? progress * duration : duration) : '0:00'}
+          {durationMillis > 0
+            ? formatTime(isPlaying ? playbackPositionMillis : durationMillis)
+            : '0:00'}
         </Text>
       </View>
       <Ionicons name="mic" size={14} color={isUser ? 'rgba(255,255,255,0.6)' : C.textLight} />
     </TouchableOpacity>
   );
-}
+});
 
 export default function SupportCaseThreadScreen() {
   const router = useRouter();

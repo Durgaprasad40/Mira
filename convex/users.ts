@@ -2526,6 +2526,8 @@ export const getMyReports = query({
  * - confessionNotifications
  * - chatRoomMembers
  * - filterPresets
+ * - supportTicketMessages
+ * - supportTickets
  * - supportRequests
  * - purchases
  * - subscriptionRecords
@@ -2623,6 +2625,8 @@ export const devWipeAllUserData = mutation({
     await wipeTable('filterPresets');
 
     // 12. Support and purchases
+    await wipeTable('supportTicketMessages');
+    await wipeTable('supportTickets');
     await wipeTable('supportRequests');
     await wipeTable('purchases');
     await wipeTable('subscriptionRecords');

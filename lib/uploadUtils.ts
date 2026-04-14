@@ -28,6 +28,7 @@ export type UploadErrorType =
   | 'TIMEOUT'
   | 'INVALID_FILE'
   | 'UPLOAD_FAILED'
+  | 'SERVER_CONTRACT_ERROR'
   | 'UNKNOWN';
 
 export class UploadError extends Error {
@@ -210,6 +211,49 @@ export interface UploadResult {
 }
 
 /**
+ * Map failures from Convex `generateUploadUrl()` so missing endpoints are not
+ * misreported as generic network outages.
+ */
+function mapConvexUploadUrlError(err: unknown): UploadError {
+  const msg = err instanceof Error ? err.message : String(err);
+  const m = msg.toLowerCase();
+
+  if (
+    m.includes('could not find public function') ||
+    m.includes('could not find function')
+  ) {
+    return new UploadError(
+      'Support upload is unavailable because the app and server are out of sync. Update the app or try again later.',
+      'SERVER_CONTRACT_ERROR',
+      false
+    );
+  }
+
+  if (
+    m.includes('network request failed') ||
+    m.includes('failed to fetch') ||
+    m.includes('networkerror') ||
+    m.includes('econnrefused') ||
+    m.includes('enotfound') ||
+    m.includes('timed out') ||
+    m.includes('timeout') ||
+    m.includes('etimedout')
+  ) {
+    return new UploadError(
+      'Unable to connect to server. Please check your connection and try again.',
+      'NETWORK_ERROR',
+      true
+    );
+  }
+
+  return new UploadError(
+    'Could not start the upload. Please try again.',
+    'UPLOAD_FAILED',
+    true
+  );
+}
+
+/**
  * Upload a media file from a local URI to Convex storage
  * Works on real Android/iOS devices using expo-file-system uploadAsync
  * Includes file size validation and improved error handling
@@ -255,11 +299,7 @@ export async function uploadMediaToConvex(
       console.log(`[UPLOAD] got uploadUrl`);
     } catch (urlError) {
       console.error(`[UPLOAD] failed to get upload URL:`, urlError);
-      throw new UploadError(
-        'Unable to connect to server. Please check your connection and try again.',
-        'NETWORK_ERROR',
-        true
-      );
+      throw mapConvexUploadUrlError(urlError);
     }
 
     // Step 4: Detect content type from URI

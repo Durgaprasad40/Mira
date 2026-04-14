@@ -12,6 +12,7 @@ import {
   Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
+import { Video, ResizeMode } from 'expo-av';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -76,7 +77,7 @@ interface MessageItem {
   senderType: 'user' | 'admin';
   senderName?: string;
   message: string;
-  attachments?: { storageId: Id<'_storage'>; type: 'photo' | 'video' }[];
+  attachments?: { storageId: Id<'_storage'>; type: 'photo' | 'video'; url: string | null }[];
   createdAt: number;
 }
 
@@ -350,15 +351,36 @@ export default function SupportTicketScreen() {
             {item.message}
           </Text>
 
-          {/* Attachments */}
+          {/* Attachments: server resolves storage URLs in getTicketById / getTicketMessages */}
           {item.attachments && item.attachments.length > 0 && (
             <View style={styles.attachmentGrid}>
               {item.attachments.map((att, idx) => (
-                <View key={idx} style={styles.attachmentThumb}>
-                  {att.type === 'photo' ? (
-                    <Ionicons name="image" size={24} color={isUser ? COLORS.white : COLORS.primary} />
+                <View key={`${att.storageId}-${idx}`} style={styles.attachmentMediaWrap}>
+                  {att.type === 'photo' && att.url ? (
+                    <Image
+                      source={{ uri: att.url }}
+                      style={styles.attachmentImage}
+                      contentFit="cover"
+                      accessibilityLabel="Attached photo"
+                    />
+                  ) : att.type === 'video' && att.url ? (
+                    <View style={styles.attachmentVideoWrap}>
+                      <Video
+                        source={{ uri: att.url }}
+                        style={styles.attachmentVideo}
+                        resizeMode={ResizeMode.CONTAIN}
+                        useNativeControls
+                        shouldPlay={false}
+                      />
+                    </View>
                   ) : (
-                    <Ionicons name="videocam" size={24} color={isUser ? COLORS.white : COLORS.primary} />
+                    <View style={styles.attachmentThumb}>
+                      {att.type === 'photo' ? (
+                        <Ionicons name="image" size={24} color={isUser ? COLORS.white : COLORS.primary} />
+                      ) : (
+                        <Ionicons name="videocam" size={24} color={isUser ? COLORS.white : COLORS.primary} />
+                      )}
+                    </View>
                   )}
                 </View>
               ))}
@@ -703,8 +725,28 @@ const styles = StyleSheet.create({
   attachmentGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 8,
     marginTop: 8,
+  },
+  attachmentMediaWrap: {
+    maxWidth: '100%',
+  },
+  attachmentImage: {
+    width: 200,
+    height: 160,
+    borderRadius: 10,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  attachmentVideoWrap: {
+    width: 220,
+    maxWidth: '100%',
+    borderRadius: 10,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+  },
+  attachmentVideo: {
+    width: 220,
+    height: 160,
   },
   attachmentThumb: {
     width: 40,

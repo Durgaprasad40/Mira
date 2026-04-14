@@ -7,6 +7,7 @@ import {
   FlatList,
   ActivityIndicator,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -51,6 +52,9 @@ type TicketWithPreview = {
   } | null;
   messageCount: number;
   hasAdminReply: boolean;
+  hasAttachments: boolean;
+  listPreviewUrl: string | null;
+  firstAttachmentType: 'photo' | 'video' | null;
 };
 
 export default function SupportHistoryScreen() {
@@ -148,6 +152,28 @@ export default function SupportHistoryScreen() {
         <Text style={styles.ticketPreview} numberOfLines={2}>
           {previewText}
         </Text>
+
+        {item.hasAttachments && (
+          <View style={styles.attachmentRow}>
+            {item.listPreviewUrl && item.firstAttachmentType === 'photo' ? (
+              <Image
+                source={{ uri: item.listPreviewUrl }}
+                style={styles.listThumb}
+                contentFit="cover"
+                accessibilityLabel="Attachment preview"
+              />
+            ) : item.listPreviewUrl && item.firstAttachmentType === 'video' ? (
+              <View style={styles.listVideoBadge}>
+                <Ionicons name="videocam" size={18} color={COLORS.primary} />
+              </View>
+            ) : (
+              <View style={styles.attachChip}>
+                <Ionicons name="attach" size={14} color={COLORS.textMuted} />
+                <Text style={styles.attachChipText}>Media attached</Text>
+              </View>
+            )}
+          </View>
+        )}
 
         <View style={styles.ticketFooter}>
           <Text style={styles.ticketDate}>{formatDate(displayDate)}</Text>
@@ -312,6 +338,34 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     lineHeight: 20,
     marginBottom: 8,
+  },
+  attachmentRow: {
+    marginBottom: 8,
+  },
+  listThumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    backgroundColor: COLORS.background,
+  },
+  listVideoBadge: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundDark,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  attachChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  attachChipText: {
+    fontSize: 12,
+    color: COLORS.textMuted,
   },
   ticketFooter: {
     flexDirection: 'row',

@@ -1098,6 +1098,58 @@ export default defineSchema({
     createdAt: v.number(),
   }).index('by_support_request', ['supportRequestId']),
 
+  // Phase-1 general support (Help & FAQ / Contact Support) — distinct from Phase-2 safety `supportRequests`
+  supportTickets: defineTable({
+    userId: v.id('users'),
+    category: v.union(
+      v.literal('payment'),
+      v.literal('subscription'),
+      v.literal('account'),
+      v.literal('bug'),
+      v.literal('safety'),
+      v.literal('verification'),
+      v.literal('other'),
+    ),
+    message: v.string(),
+    status: v.union(
+      v.literal('open'),
+      v.literal('in_review'),
+      v.literal('replied'),
+      v.literal('closed'),
+    ),
+    attachments: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id('_storage'),
+          type: v.union(v.literal('photo'), v.literal('video')),
+        }),
+      ),
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    lastMessageAt: v.optional(v.number()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_created', ['userId', 'createdAt']),
+
+  supportTicketMessages: defineTable({
+    ticketId: v.id('supportTickets'),
+    senderType: v.union(v.literal('user'), v.literal('admin')),
+    senderName: v.optional(v.string()),
+    message: v.string(),
+    attachments: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id('_storage'),
+          type: v.union(v.literal('photo'), v.literal('video')),
+        }),
+      ),
+    ),
+    createdAt: v.number(),
+  })
+    .index('by_ticket', ['ticketId'])
+    .index('by_ticket_created', ['ticketId', 'createdAt']),
+
   // OTP table for verification
   otpCodes: defineTable({
     identifier: v.string(), // email or phone
