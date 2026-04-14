@@ -74,7 +74,7 @@ const isPhase2Source = (source: string): boolean => {
 const getIntentLabelFromKey = (intentKey: string | null | undefined): string | null => {
   if (!intentKey) return null;
   const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === intentKey);
-  return category?.label ?? null;
+  return category?.label ?? (intentKey ? 'Other' : null);
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

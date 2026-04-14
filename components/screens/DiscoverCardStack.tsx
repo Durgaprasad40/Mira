@@ -898,7 +898,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           .map((p) => {
             // Resolve intent keys: privateIntentKeys > privateIntentKey > default
             const intentKeys = p.privateIntentKeys ??
-              (p.privateIntentKey && p.privateIntentKey !== 'undefined' ? [p.privateIntentKey] : DEFAULT_INTENT_KEYS);
+              (p.privateIntentKey && String(p.privateIntentKey) !== 'undefined' ? [p.privateIntentKey] : DEFAULT_INTENT_KEYS);
             // DEV assertion: warn if profile has no valid intent keys
             if (__DEV__ && (!intentKeys || intentKeys.length === 0)) {
               console.warn('[demo] Missing privateIntentKeys for', p.id);
@@ -1696,7 +1696,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     const intentKeys: string[] =
       current.privateIntentKeys ??
       (current as any).intentKeys ??
-      (current.privateIntentKey && current.privateIntentKey !== 'undefined' ? [current.privateIntentKey] : [DEFAULT_INTENT_KEY]);
+      (current.privateIntentKey && String(current.privateIntentKey) !== 'undefined' ? [current.privateIntentKey] : [DEFAULT_INTENT_KEY]);
     trackEvent({
       name: 'phase2_profile_viewed',
       profileId: current.id,

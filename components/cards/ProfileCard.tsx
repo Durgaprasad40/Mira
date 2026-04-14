@@ -1274,7 +1274,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       return null;
     }
     const category = PRIVATE_INTENT_CATEGORIES.find(c => c.key === privateIntentKeys[0]);
-    const label = category?.label ?? null;
+    const label = category?.label ?? (privateIntentKeys[0] ? 'Other' : null);
 
     // LOG_NOISE_FIX: Gated behind DEBUG_P2_UI
     if (__DEV__ && DEBUG_P2_UI) {
