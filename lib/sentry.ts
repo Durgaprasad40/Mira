@@ -246,8 +246,17 @@ export function initSentry(): void {
         // In verbose mode, keep all breadcrumbs for maximum visibility
         if (!DEBUG_SENTRY_VERBOSE) {
           // LOG_NOISE_FIX: Filter out low-value debug console breadcrumbs
-          if (breadcrumb.category === 'console' && breadcrumb.message) {
-            const msg = breadcrumb.message;
+          if (breadcrumb?.category === 'console') {
+            const message = breadcrumb?.message || '';
+
+            if (
+              message.includes('CHATROOM_') ||
+              message.includes('[VideoCache]') ||
+              message.includes('[PHASE2_DISCOVER_FE]') ||
+              message.includes('[DISCOVER_READY]')
+            ) {
+              return null;
+            }
             const debugTags = [
               '[PRESENCE]',
               '[LOCATION]',

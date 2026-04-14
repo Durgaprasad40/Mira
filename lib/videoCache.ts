@@ -17,11 +17,9 @@
  *   preloadVideos([url1, url2, url3]);
  */
 
-import * as FileSystem from 'expo-file-system';
-import { Paths } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
-// Cache directory for videos - use new Paths API
-const VIDEO_CACHE_DIR = `${Paths.cache.uri}video-cache/`;
+const VIDEO_CACHE_DIR = `${FileSystem.cacheDirectory}video-cache/`;
 
 // In-memory map: remoteUrl -> localUri (for instant cache hits)
 const memoryCache = new Map<string, string>();
