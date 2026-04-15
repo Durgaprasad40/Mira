@@ -9,7 +9,7 @@
 // Rate Limiting & Quotas
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Daily like limit for Phase-2 Desire Land */
+/** Daily like limit for Phase-2 Deep Connect */
 export const PHASE2_DAILY_LIKE_LIMIT = 25;
 
 /** Daily Stand Out (super like) limit */

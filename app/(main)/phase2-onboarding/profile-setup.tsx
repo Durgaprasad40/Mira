@@ -210,8 +210,8 @@ export default function Phase2ReviewScreen() {
       if (__DEV__) console.log('[P2_STEP5] calling completeSetup()');
       completeSetup();
 
-      if (__DEV__) console.log('[P2_STEP5] routing to desire-land');
-      router.replace('/(main)/(private)/(tabs)/desire-land' as any);
+      if (__DEV__) console.log('[P2_STEP5] routing to deep-connect');
+      router.replace('/(main)/(private)/(tabs)/deep-connect' as any);
     } catch (error) {
       if (__DEV__) console.error('[P2_STEP5] finalize error', error);
       Alert.alert(
@@ -266,7 +266,7 @@ export default function Phase2ReviewScreen() {
           <TouchableOpacity
             style={styles.recoveryButton}
             // FIX: Use phase2OnboardingCompleted instead of nextStep
-            onPress={() => router.replace(onboardingState?.phase2OnboardingCompleted ? '/(main)/(private)/(tabs)/desire-land' as any : PHASE2_ONBOARDING_ROUTE_MAP['index'] as any)}
+            onPress={() => router.replace(onboardingState?.phase2OnboardingCompleted ? '/(main)/(private)/(tabs)/deep-connect' as any : PHASE2_ONBOARDING_ROUTE_MAP['index'] as any)}
             activeOpacity={0.8}
           >
             <Text style={styles.recoveryButtonText}>Go back to your next step</Text>

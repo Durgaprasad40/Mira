@@ -660,7 +660,7 @@ export default function ChatRoomScreen() {
 
     // Auth is missing - user logged out while viewing this screen
     // Navigate to a safe route (phase-2 home which doesn't require room auth)
-    router.replace('/(main)/(private)/(tabs)/desire-land');
+    router.replace('/(main)/(private)/(tabs)/deep-connect');
   }, [authUserId, router]);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -767,14 +767,14 @@ export default function ChatRoomScreen() {
   }, [roomIdStr, isDemoMode, hasMemberAccess, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation, myNickname, myAvatarUrl, setCurrentRoom]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // PHASE-2 BACK NAVIGATION: Go to Desire Land (not chat-rooms list)
+  // PHASE-2 BACK NAVIGATION: Go to Deep Connect (not chat-rooms list)
   // This prevents the "loading" flash when backing out of auto-opened room.
-  // Policy: Any Phase-2 screen → back → Desire Land → back → Phase-1 Discover
+  // Policy: Any Phase-2 screen → back → Deep Connect → back → Phase-1 Discover
   // ─────────────────────────────────────────────────────────────────────────
   const navigation = useNavigation();
-  const PHASE2_HOME_ROUTE = '/(main)/(private)/(tabs)/desire-land';
+  const PHASE2_HOME_ROUTE = '/(main)/(private)/(tabs)/deep-connect';
 
-  // Android hardware back → go to Desire Land
+  // Android hardware back → go to Deep Connect
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const onBackPress = () => {

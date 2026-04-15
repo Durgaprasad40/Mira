@@ -63,7 +63,7 @@ export function trackPhase2ProfileViewed(
   });
 }
 
-/** Track swipe actions in Desire Land */
+/** Track swipe actions in Deep Connect */
 export function trackPhase2SwipeAction(
   action: 'like' | 'pass' | 'standout',
   targetUserId: string,

@@ -1,7 +1,7 @@
 /**
  * Shared Ranking Engine
  *
- * Core ranking logic for both Phase-1 (Discover) and Phase-2 (Desire Land).
+ * Core ranking logic for both Phase-1 (Discover) and Phase-2 (Deep Connect).
  * This engine operates on normalized data provided by phase-specific adapters.
  *
  * Architecture:

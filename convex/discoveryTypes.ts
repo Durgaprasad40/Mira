@@ -2,7 +2,7 @@
  * Discovery Types
  *
  * Shared normalized types for the compatibility-based discovery engine.
- * Used by both Phase-1 (Discover) and Phase-2 (Desire Land) through adapters.
+ * Used by both Phase-1 (Discover) and Phase-2 (Deep Connect) through adapters.
  *
  * This module is ADDITIVE - it does not modify any existing ranking/discovery logic.
  */

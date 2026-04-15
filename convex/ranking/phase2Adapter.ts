@@ -220,7 +220,7 @@ export function toNormalizedCandidate(
  * Convert a Phase-2 viewer context to a NormalizedViewer.
  *
  * Note: Phase-2 viewers have minimal compatibility data because
- * Phase-2 (Desire Land) doesn't do compatibility matching the same way.
+ * Phase-2 (Deep Connect) doesn't do compatibility matching the same way.
  * The shared engine will still work, but compatibility scores will be low.
  *
  * @param viewerId - The viewer's user ID
@@ -373,7 +373,7 @@ export function isValidPhase2Profile(profile: unknown): profile is Phase2Private
  *    - Phase-2 uses blocks instead of reports
  *    - Impact: Report-based trust penalty won't apply
  *
- * These gaps are intentional and acceptable. Phase-2 (Desire Land) has
+ * These gaps are intentional and acceptable. Phase-2 (Deep Connect) has
  * different product requirements than Phase-1 (Discover). The shared
  * ranking engine handles missing data gracefully with neutral defaults.
  */

@@ -73,7 +73,7 @@ export const SCORE_DIFF_WARNING_THRESHOLD = 10;
 export const PHASE1_ROLLOUT_PERCENTAGE = 0;
 
 /**
- * Gradual rollout percentage for Phase-2 (Desire Land).
+ * Gradual rollout percentage for Phase-2 (Deep Connect).
  * 0 = all traffic uses old system
  * 100 = all traffic uses new system
  *

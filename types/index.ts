@@ -595,7 +595,7 @@ export interface IncognitoConversation {
   lastMessageAt: number;
   unreadCount: number;
   connectionSource: ConnectionSource;
-  /** Match origin for Desire Land matches: 'super_like' shows blue ring in New Matches row */
+  /** Match origin for Deep Connect matches: 'super_like' shows blue ring in New Matches row */
   matchSource?: 'super_like' | 'normal';
   /** PHOTO-BLUR-FIX: Whether participant chose to blur their photo */
   isPhotoBlurred?: boolean;

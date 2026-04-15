@@ -75,7 +75,7 @@ app/
 │   │   ├── _layout.tsx      — Age gate + setup check + back-nav intercept
 │   │   └── (tabs)/
 │   │       ├── _layout.tsx  — Private tab bar
-│   │       ├── desire-land.tsx   — Dark-themed swipe stack
+│   │       ├── deep-connect.tsx   — Dark-themed swipe stack (Deep Connect)
 │   │       ├── truth-or-dare.tsx — Trending T&D prompts
 │   │       ├── chat-rooms.tsx    — Private room list
 │   │       ├── rooms.tsx         — Available rooms to join
@@ -159,7 +159,7 @@ app/
 
 | | |
 |---|---|
-| **Entry screens** | `incognito.tsx` (redirect), `desire-land.tsx`, `truth-or-dare.tsx`, `chat-rooms.tsx`, `chats.tsx` |
+| **Entry screens** | `incognito.tsx` (redirect), `deep-connect.tsx`, `truth-or-dare.tsx`, `chat-rooms.tsx`, `chats.tsx` |
 | **Components** | Reuses `DiscoverCardStack` (dark theme) |
 | **Hooks/Stores** | `incognitoStore`, `privateProfileStore`, `privateChatStore` |
 | **Convex** | `privateProfiles.*`, `revealRequests.*`, `truthDare.*`, `chatRooms.*` |

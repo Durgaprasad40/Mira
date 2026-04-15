@@ -1,7 +1,7 @@
 /**
  * PHASE-2 LIKES SCREEN
  *
- * Dedicated likes page for Phase-2 (Desire Land) matching Phase-1 UX:
+ * Dedicated likes page for Phase-2 (Deep Connect) matching Phase-1 UX:
  * - 2-column grid layout
  * - Blurred photo cards with name/age
  * - Like-back and ignore action buttons

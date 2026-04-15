@@ -120,7 +120,7 @@
 
 ### P1-NAV-002: `beforeRemove` listener on iOS may conflict with gestures
 - **File**: `app/(main)/(private)/(tabs)/chat-rooms/[roomId].tsx:302-315`
-- **Symptom**: Intercepts `GO_BACK` and `POP` to redirect to Desire Land, but edge cases with tab switches may not be caught
+- **Symptom**: Intercepts `GO_BACK` and `POP` to redirect to Deep Connect, but edge cases with tab switches may not be caught
 - **Reproduction**: Swipe back while modal is open
 - **Log**: Navigation may complete to wrong route momentarily
 

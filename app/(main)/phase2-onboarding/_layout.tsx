@@ -141,9 +141,9 @@ function Phase2OnboardingNavigator() {
     // FIX: getOnboardingStatus returns phase2OnboardingCompleted, not nextStep
     // If Phase-2 onboarding is completed, redirect to Private Mode main screen
     if (onboardingState.phase2OnboardingCompleted) {
-      return pathname === '/(main)/(private)/(tabs)/desire-land'
+      return pathname === '/(main)/(private)/(tabs)/deep-connect'
         ? null
-        : '/(main)/(private)/(tabs)/desire-land';
+        : '/(main)/(private)/(tabs)/deep-connect';
     }
 
     // Phase-2 onboarding not completed - allow current flow without redirect

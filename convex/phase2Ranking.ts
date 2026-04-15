@@ -1,7 +1,7 @@
 /**
  * Phase-2 Ranking System
  *
- * Provides ranking metrics initialization and tracking for Desire Land discovery.
+ * Provides ranking metrics initialization and tracking for Deep Connect discovery.
  * Step 2: Initialization - metrics row created when Phase-2 onboarding completes.
  * Step 3: Activity recording - updates lastPhase2ActiveAt from TD and chat activity.
  * Step 4: Scoring helpers - pure functions for computing ranking scores.

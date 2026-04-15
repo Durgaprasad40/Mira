@@ -24,6 +24,9 @@ import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/
 import { processThreadsIntegrity } from "@/lib/threadsIntegrity";
 import { markTiming } from "@/utils/startupTiming";
 
+/** Concrete DeepConnect screen — avoids group route `/(tabs)` resolving to pathname "/" */
+const PHASE2_DEEPCONNECT_ROUTE = '/(main)/(private)/(tabs)/deep-connect';
+
 export default function MainTabsLayout() {
   // Milestone E: first tab screen mounted
   markTiming('first_tab');
@@ -159,10 +162,11 @@ export default function MainTabsLayout() {
     didRouteToPrivateRef.current = true;
 
     // FIX: Do not silently ignore tap when not hydrated - proceed with best-effort routing
-    // If not hydrated, proceed with onboarding as default safe destination
+    // If not hydrated, navigate directly to Deep Connect (deep-connect); shell still gates on hydration
     if (!privateStoreHydrated) {
-      if (__DEV__) console.log('[PRIVATE TAP] pressed -> onboarding (not hydrated, safe default)');
-      router.replace('/(main)/phase2-onboarding' as any);
+      if (__DEV__) console.log('[PRIVATE TAP] pressed -> Phase-2 tabs (hydration pending, shell will gate)');
+      if (__DEV__) console.log('[PRIVATE TAP ROUTE TARGET]', PHASE2_DEEPCONNECT_ROUTE);
+      router.replace(PHASE2_DEEPCONNECT_ROUTE as any);
       // Reset guard after navigation settles
       if (privateTabTimeoutRef.current) clearTimeout(privateTabTimeoutRef.current);
       privateTabTimeoutRef.current = setTimeout(() => {
@@ -185,7 +189,8 @@ export default function MainTabsLayout() {
     // Otherwise, navigate based on onboarding completion
     else if (phase2OnboardingCompleted) {
       if (__DEV__) console.log('[PRIVATE TAP] pressed -> Phase-2 tabs');
-      router.replace('/(main)/(private)/(tabs)' as any);
+      if (__DEV__) console.log('[PRIVATE TAP ROUTE TARGET]', PHASE2_DEEPCONNECT_ROUTE);
+      router.replace(PHASE2_DEEPCONNECT_ROUTE as any);
     } else {
       if (__DEV__) console.log('[PRIVATE TAP] pressed -> onboarding (direct)');
       router.replace('/(main)/phase2-onboarding' as any);

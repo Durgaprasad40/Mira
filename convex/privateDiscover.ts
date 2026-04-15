@@ -393,11 +393,11 @@ export const getProfileByUserId = query({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Step 6: Impression Recording for Desire Land Ranking
+// Step 6: Impression Recording for Deep Connect ranking
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Record Desire Land impressions for ranking system.
+ * Record Deep Connect impressions for ranking system.
  * Called after profiles are displayed to the viewer.
  * Updates both global metrics (totalImpressions, lastShownAt) and
  * per-viewer impressions (for suppression window).
@@ -405,7 +405,7 @@ export const getProfileByUserId = query({
  * Safe: silently returns if unauthenticated or on any error.
  * Fire-and-forget: client should not await or block on this.
  */
-export const recordDesireLandImpressions = mutation({
+export const recordDeepConnectImpressions = mutation({
   args: {
     viewedUserIds: v.array(v.id('users')),
   },

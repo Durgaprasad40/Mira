@@ -190,6 +190,7 @@ export default function PrivateTabsLayout() {
 
   return (
     <Tabs
+      initialRouteName="deep-connect"
       screenOptions={{
         headerShown: false,
         tabBarStyle: {
@@ -207,7 +208,7 @@ export default function PrivateTabsLayout() {
       }}
     >
       <Tabs.Screen
-        name="desire-land"
+        name="deep-connect"
         options={{
           title: SCREEN.isSmall ? 'Connect' : 'Deep Connect',
           tabBarIcon: ({ color, size }) => (

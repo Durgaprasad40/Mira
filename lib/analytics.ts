@@ -13,7 +13,7 @@ type AnalyticsEvent =
   | { name: 'report_user'; reportedUserId: string; reason: string }
   // Chat menu actions
   | { name: 'chat_action'; action: 'unmatch' | 'uncrush' | 'block' | 'report' | 'spam' | 'scam' | 'inappropriate' | 'other'; userId: string; conversationId?: string; timestamp: number; reason?: string }
-  // Phase-2 (Desire Land) analytics
+  // Phase-2 (Deep Connect) analytics
   | { name: 'phase2_intent_filter_selected'; intentKey: string }
   | { name: 'phase2_profile_viewed'; profileId?: string; profileUserId?: string; privateIntentKey?: string; source?: string }
   | { name: 'phase2_match_started'; conversationId: string; privateIntentKey?: string }

@@ -1,7 +1,7 @@
 /**
  * Phase 2 Match Session Tracking
  *
- * Module-scoped session tracking for Phase 2 (Desire Land) matches.
+ * Module-scoped session tracking for Phase 2 (Deep Connect) matches.
  * Prevents duplicate match events for the same user within a session.
  *
  * Used by:

@@ -2135,7 +2135,7 @@ export const setPhase2OnboardingCompleted = mutation({
       phase2OnboardingCompletedAt: Date.now(),
     });
 
-    // Initialize Phase-2 ranking metrics for Desire Land discovery
+    // Initialize Phase-2 ranking metrics for Deep Connect discovery
     await ctx.runMutation(internal.phase2Ranking.initializePhase2RankingMetrics, {
       userId: resolvedUserId,
     });

@@ -1,5 +1,5 @@
 /**
- * Phase-2 Private Mode Swipes (Desire Land)
+ * Phase-2 Private Mode Swipes (Deep Connect)
  *
  * STRICT ISOLATION: This file handles ALL Phase-2 swipe/match logic.
  * Phase-2 NEVER writes to Phase-1 tables (likes, matches, conversations).

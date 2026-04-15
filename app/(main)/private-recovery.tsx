@@ -201,7 +201,7 @@ export default function PrivateDataRecoveryScreen() {
                 [
                   {
                     text: 'OK',
-                    onPress: () => router.replace('/(main)/(private)/(tabs)/desire-land' as any),
+                    onPress: () => router.replace('/(main)/(private)/(tabs)/deep-connect' as any),
                   },
                 ]
               );

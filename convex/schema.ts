@@ -777,7 +777,7 @@ export default defineSchema({
     .index('by_owner_viewer', ['ownerUserId', 'viewerUserId'])
     .index('by_owner_status', ['ownerUserId', 'status']),
 
-  // Phase-2 Likes table (Desire Land swipes)
+  // Phase-2 Likes table (Deep Connect swipes)
   // STRICT ISOLATION: Separate from Phase-1 'likes' table
   privateLikes: defineTable({
     fromUserId: v.id('users'),
@@ -790,7 +790,7 @@ export default defineSchema({
     .index('by_from_user', ['fromUserId'])
     .index('by_to_user', ['toUserId']),
 
-  // Phase-2 Matches table (Desire Land matches)
+  // Phase-2 Matches table (Deep Connect matches)
   // STRICT ISOLATION: Separate from Phase-1 'matches' table
   privateMatches: defineTable({
     user1Id: v.id('users'), // Sorted pair: user1Id < user2Id
@@ -2103,11 +2103,11 @@ export default defineSchema({
   // Phase-2 Ranking System Tables
   // ─────────────────────────────────────────────────────────────────────────
 
-  // Phase-2 Ranking Metrics (per-user ranking signals for Desire Land)
+  // Phase-2 Ranking Metrics (per-user ranking signals for Deep Connect)
   phase2RankingMetrics: defineTable({
     userId: v.id('users'),
     phase2OnboardedAt: v.number(),      // When Phase-2 onboarding completed
-    lastPhase2ActiveAt: v.number(),     // Last activity in Phase-2 (TD, chat, Desire Land)
+    lastPhase2ActiveAt: v.number(),     // Last activity in Phase-2 (TD, chat, Deep Connect)
     totalImpressions: v.number(),       // Total times shown to any viewer
     lastShownAt: v.number(),            // Timestamp of last impression
     createdAt: v.number(),

@@ -7,7 +7,7 @@ import { useBlockStore } from './blockStore';
 import type { IncognitoConversation, IncognitoMessage } from '@/types';
 import { isDemoMode } from '@/hooks/useConvex';
 // NOTE: Phase-2 no longer seeds demo conversations/messages.
-// Conversations are created dynamically via Desire Land matches.
+// Conversations are created dynamically via Deep Connect matches.
 // Messages are created when users actually chat.
 
 /** Tracks which users are unlocked for private chat (via accepted T&D or room interaction) */
@@ -110,7 +110,7 @@ function groupMessages(msgs: IncognitoMessage[]): Record<string, IncognitoMessag
 
 // NOTE: Phase-2 unlocked users are now created dynamically when:
 // - User accepts a Truth-or-Dare
-// - User matches via Desire Land swipe/super-like
+// - User matches via Deep Connect swipe/super-like
 // No pre-seeded unlocked users.
 
 // Pre-seed pending dares for demo
