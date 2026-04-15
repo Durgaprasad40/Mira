@@ -1359,6 +1359,21 @@ export default defineSchema({
       drinking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
       intent: v.union(v.literal('not_important'), v.literal('prefer_similar'), v.literal('important'), v.literal('must_match_exactly')),
     })),
+    // Phase-2 Privacy (Deep Connect visibility & messaging)
+    hideFromDeepConnect: v.optional(v.boolean()),
+    hideAge: v.optional(v.boolean()),
+    hideDistance: v.optional(v.boolean()),
+    disableReadReceipts: v.optional(v.boolean()),
+    // Phase-2 Safety
+    safeMode: v.optional(v.boolean()),
+    // Phase-2 Notifications (per-category toggles)
+    notificationsEnabled: v.optional(v.boolean()),
+    notificationCategories: v.optional(v.object({
+      deepConnect: v.optional(v.boolean()),
+      privateMessages: v.optional(v.boolean()),
+      chatRooms: v.optional(v.boolean()),
+      truthOrDare: v.optional(v.boolean()),
+    })),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

@@ -233,9 +233,12 @@ export const updateFieldsByAuthId = mutation({
     drinking: v.optional(v.union(v.string(), v.null())),
     education: v.optional(v.union(v.string(), v.null())),
     religion: v.optional(v.union(v.string(), v.null())),
+    hobbies: v.optional(v.array(v.string())),
     // Other optional fields
     privateBio: v.optional(v.string()),
     privateIntentKeys: v.optional(v.array(v.string())),
+    privateDesireTagKeys: v.optional(v.array(v.string())),
+    privateBoundaries: v.optional(v.array(v.string())),
     isPrivateEnabled: v.optional(v.boolean()),
     // Phase-2 Onboarding Step 3: Prompt answers
     promptAnswers: v.optional(v.array(v.object({
@@ -243,6 +246,27 @@ export const updateFieldsByAuthId = mutation({
       question: v.string(),
       answer: v.string(),
     }))),
+    // Phase-2 Preference Strength (ranking signal)
+    preferenceStrength: v.optional(v.object({
+      smoking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      drinking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      intent: v.union(v.literal('not_important'), v.literal('prefer_similar'), v.literal('important'), v.literal('must_match_exactly')),
+    })),
+    // Phase-2 Privacy
+    hideFromDeepConnect: v.optional(v.boolean()),
+    hideAge: v.optional(v.boolean()),
+    hideDistance: v.optional(v.boolean()),
+    disableReadReceipts: v.optional(v.boolean()),
+    // Phase-2 Safety
+    safeMode: v.optional(v.boolean()),
+    // Phase-2 Notifications
+    notificationsEnabled: v.optional(v.boolean()),
+    notificationCategories: v.optional(v.object({
+      deepConnect: v.optional(v.boolean()),
+      privateMessages: v.optional(v.boolean()),
+      chatRooms: v.optional(v.boolean()),
+      truthOrDare: v.optional(v.boolean()),
+    })),
   },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
