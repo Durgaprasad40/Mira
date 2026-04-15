@@ -282,6 +282,11 @@ interface PrivateProfileState {
       chatRooms?: boolean;
       truthOrDare?: boolean;
     };
+    // Phase-2 Photo & Media Privacy
+    defaultPhotoVisibility?: 'public' | 'blurred' | 'private';
+    allowUnblurRequests?: boolean;
+    defaultSecureMediaTimer?: 0 | 10 | 30;
+    defaultSecureMediaViewingMode?: 'tap' | 'hold';
   } | null) => void;
 }
 
@@ -712,6 +717,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         safeMode: false,
         notificationsEnabled: true,
         notificationCategories: {},
+        defaultPhotoVisibility: 'blurred',
+        allowUnblurRequests: true,
+        defaultSecureMediaTimer: 30,
+        defaultSecureMediaViewingMode: 'tap',
         _hasHydrated: true,
       });
       return;
@@ -810,6 +819,12 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       // P0-1 FIX: Notification settings (hydrate from backend)
       notificationsEnabled: convexProfile.notificationsEnabled ?? true,
       notificationCategories,
+
+      // Phase-2 Photo & Media Privacy (defaults match initialWizardState / UI)
+      defaultPhotoVisibility: convexProfile.defaultPhotoVisibility ?? 'blurred',
+      allowUnblurRequests: convexProfile.allowUnblurRequests ?? true,
+      defaultSecureMediaTimer: convexProfile.defaultSecureMediaTimer ?? 30,
+      defaultSecureMediaViewingMode: convexProfile.defaultSecureMediaViewingMode ?? 'tap',
 
       // Mark as hydrated
       _hasHydrated: true,
