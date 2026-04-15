@@ -113,6 +113,12 @@ function isValidPhotoUrl(url: unknown): url is string {
   return url.startsWith('http') || url.startsWith('file://');
 }
 
+/** Same-length URL list equality (order-sensitive), for Convex vs optimistic lists */
+function photoUrlListsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((u, i) => u === b[i]);
+}
+
 // Gender options
 const GENDER_OPTIONS = [
   { value: 'male', label: 'Male' },
@@ -201,6 +207,10 @@ export default function EditProfileScreen() {
   const storeEducation = usePrivateProfileStore((s) => s.education);
   const storeReligion = usePrivateProfileStore((s) => s.religion);
   const storeHobbies = usePrivateProfileStore((s) => s.hobbies);
+
+  // Optimistic overlay: after a successful photo mutation, Convex may lag one tick behind the row we just wrote.
+  const [pendingPhotoUrls, setPendingPhotoUrls] = useState<string[] | null>(null);
+
   const resolvedPrivateBio = useMemo(() => {
     if (!isDemoMode && backendProfile !== undefined) {
       return backendProfile?.privateBio || '';
@@ -213,8 +223,30 @@ export default function EditProfileScreen() {
     }
     return promptAnswers;
   }, [backendProfile, promptAnswers]);
-  const activeSelectedPhotoUrls = selectedPhotoUrls;
-  const activePhotoBlurSlots = photoBlurSlots;
+
+  // Photo URLs: Convex `privatePhotoUrls` is authoritative (same as Profile tab). While query is loading, fall back
+  // to the store (often hydrated by Private layout). During a brief post-save window, prefer `pendingPhotoUrls`.
+  const mergedPhotoUrls = useMemo(() => {
+    if (isDemoMode) {
+      return selectedPhotoUrls;
+    }
+    if (backendProfile === undefined) {
+      return selectedPhotoUrls;
+    }
+    if (pendingPhotoUrls !== null) {
+      return pendingPhotoUrls;
+    }
+    return backendProfile.privatePhotoUrls ?? [];
+  }, [isDemoMode, backendProfile, selectedPhotoUrls, pendingPhotoUrls]);
+
+  useEffect(() => {
+    if (pendingPhotoUrls === null) return;
+    if (backendProfile === undefined || backendProfile === null) return;
+    const server = backendProfile.privatePhotoUrls ?? [];
+    if (photoUrlListsEqual(server, pendingPhotoUrls)) {
+      setPendingPhotoUrls(null);
+    }
+  }, [backendProfile, pendingPhotoUrls]);
 
   // Resolve display values from backend or store (backend takes priority)
   const displayName = useMemo(() => {
@@ -352,7 +384,7 @@ export default function EditProfileScreen() {
 
   // Check for missing photos
   const checkPhotosExist = useCallback(async () => {
-    const photos = Array.isArray(activeSelectedPhotoUrls) ? activeSelectedPhotoUrls : [];
+    const photos = Array.isArray(mergedPhotoUrls) ? mergedPhotoUrls : [];
     const photosKey = photos.join('|');
     if (photosKey === lastCheckedRef.current) return;
     lastCheckedRef.current = photosKey;
@@ -377,7 +409,7 @@ export default function EditProfileScreen() {
     }
 
     if (mountedRef.current) setMissingPhotos(missing);
-  }, [activeSelectedPhotoUrls]);
+  }, [mergedPhotoUrls]);
 
   useEffect(() => {
     checkPhotosExist();
@@ -463,9 +495,9 @@ export default function EditProfileScreen() {
 
   // Valid photos
   const validPhotos = useMemo(() => {
-    const photos = Array.isArray(activeSelectedPhotoUrls) ? activeSelectedPhotoUrls : [];
+    const photos = Array.isArray(mergedPhotoUrls) ? mergedPhotoUrls : [];
     return photos.filter((url) => isValidPhotoUrl(url) && !missingPhotos.has(url));
-  }, [activeSelectedPhotoUrls, missingPhotos]);
+  }, [mergedPhotoUrls, missingPhotos]);
 
   // Create 9-slot array
   const photoSlots = useMemo(() => {
@@ -525,7 +557,7 @@ export default function EditProfileScreen() {
       if (!mountedRef.current) return;
 
       if (backendUrl) {
-        const currentPhotos = activeSelectedPhotoUrls.filter(isValidPhotoUrl);
+        const currentPhotos = mergedPhotoUrls.filter(isValidPhotoUrl);
         const newPhotos = [...currentPhotos];
 
         if (slotIndex >= newPhotos.length) {
@@ -538,7 +570,10 @@ export default function EditProfileScreen() {
         const saved = await persistProfileUpdate(
           { privatePhotoUrls: finalPhotos },
           {
-            onSuccess: () => setSelectedPhotos([], finalPhotos),
+            onSuccess: () => {
+              setPendingPhotoUrls(finalPhotos);
+              setSelectedPhotos([], finalPhotos);
+            },
             failureMessage: 'Failed to add photo. Please try again.',
           }
         );
@@ -563,13 +598,13 @@ export default function EditProfileScreen() {
 
   // Remove photo
   const handleRemovePhoto = async (index: number) => {
-    const currentPhotos = activeSelectedPhotoUrls.filter(isValidPhotoUrl);
+    const currentPhotos = mergedPhotoUrls.filter(isValidPhotoUrl);
     if (index < 0 || index >= currentPhotos.length) return;
 
     const removedUrl = currentPhotos[index];
     const newPhotos = currentPhotos.filter((_, i) => i !== index);
     const nextBlurSlots = [
-      ...activePhotoBlurSlots.filter((_, i) => i !== index),
+      ...photoBlurSlots.filter((_, i) => i !== index),
       blurMyPhoto,
     ].slice(0, 9);
     const saved = await persistProfileUpdate(
@@ -579,6 +614,7 @@ export default function EditProfileScreen() {
       },
       {
         onSuccess: () => {
+          setPendingPhotoUrls(newPhotos);
           setSelectedPhotos([], newPhotos);
           setPhotoBlurSlots(nextBlurSlots);
 
@@ -606,7 +642,7 @@ export default function EditProfileScreen() {
   const handleSetMainPhoto = async (fromIndex: number) => {
     if (fromIndex === 0) return; // Already main
 
-    const currentPhotos = activeSelectedPhotoUrls.filter(isValidPhotoUrl);
+    const currentPhotos = mergedPhotoUrls.filter(isValidPhotoUrl);
     if (fromIndex < 0 || fromIndex >= currentPhotos.length) return;
 
     // Swap: move selected photo to index 0, shift others down
@@ -614,7 +650,7 @@ export default function EditProfileScreen() {
     const selectedPhoto = newPhotos[fromIndex];
     newPhotos.splice(fromIndex, 1); // Remove from current position
     newPhotos.unshift(selectedPhoto); // Add to beginning
-    const nextBlurSlots = [...activePhotoBlurSlots];
+    const nextBlurSlots = [...photoBlurSlots];
     const selectedBlur = nextBlurSlots[fromIndex] ?? blurMyPhoto;
     nextBlurSlots.splice(fromIndex, 1);
     nextBlurSlots.unshift(selectedBlur);
@@ -626,6 +662,7 @@ export default function EditProfileScreen() {
       },
       {
         onSuccess: () => {
+          setPendingPhotoUrls(newPhotos);
           setSelectedPhotos([], newPhotos);
           setPhotoBlurSlots(nextBlurSlots);
           if (__DEV__) {
@@ -643,7 +680,7 @@ export default function EditProfileScreen() {
 
   // Toggle photo blur
   const handleTogglePhotoBlur = async (slotIndex: number) => {
-    const newSlots = [...activePhotoBlurSlots];
+    const newSlots = [...photoBlurSlots];
     newSlots[slotIndex] = !newSlots[slotIndex];
     await persistPhotoBlurSlots(newSlots, {
       onSuccess: () => setPhotoBlurSlots(newSlots),
@@ -909,7 +946,7 @@ export default function EditProfileScreen() {
 
                 if (hasPhoto) {
                   // Per-photo blur: apply blur radius when blurMyPhoto is ON and this slot is marked blurred
-                  const isPhotoBlurred = blurMyPhoto && activePhotoBlurSlots[slotIndex];
+                  const isPhotoBlurred = blurMyPhoto && photoBlurSlots[slotIndex];
 
                   return (
                     <View key={`slot-${slotIndex}`} style={styles.photoSlot}>
@@ -938,12 +975,12 @@ export default function EditProfileScreen() {
 
                       {blurMyPhoto && (
                         <TouchableOpacity
-                          style={[styles.blurBtn, activePhotoBlurSlots[slotIndex] && styles.blurBtnActive]}
+                          style={[styles.blurBtn, photoBlurSlots[slotIndex] && styles.blurBtnActive]}
                           onPress={() => handleTogglePhotoBlur(slotIndex)}
                           activeOpacity={0.7}
                         >
                           <Ionicons
-                            name={activePhotoBlurSlots[slotIndex] ? 'eye-off' : 'eye'}
+                            name={photoBlurSlots[slotIndex] ? 'eye-off' : 'eye'}
                             size={14}
                             color="#FFFFFF"
                           />
