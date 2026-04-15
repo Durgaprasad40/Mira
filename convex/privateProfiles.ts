@@ -268,6 +268,17 @@ export const updateFieldsByAuthId = mutation({
       chatRooms: v.optional(v.boolean()),
       truthOrDare: v.optional(v.boolean()),
     })),
+    // Phase-2 Photo & Media Privacy
+    defaultPhotoVisibility: v.optional(
+      v.union(v.literal('public'), v.literal('blurred'), v.literal('private'))
+    ),
+    allowUnblurRequests: v.optional(v.boolean()),
+    defaultSecureMediaTimer: v.optional(
+      v.union(v.literal(0), v.literal(10), v.literal(30))
+    ),
+    defaultSecureMediaViewingMode: v.optional(
+      v.union(v.literal('tap'), v.literal('hold'))
+    ),
   },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);

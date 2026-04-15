@@ -1374,6 +1374,17 @@ export default defineSchema({
       chatRooms: v.optional(v.boolean()),
       truthOrDare: v.optional(v.boolean()),
     })),
+    // Phase-2 Photo & Media Privacy (defaults align with privateProfileStore)
+    defaultPhotoVisibility: v.optional(
+      v.union(v.literal('public'), v.literal('blurred'), v.literal('private'))
+    ),
+    allowUnblurRequests: v.optional(v.boolean()),
+    defaultSecureMediaTimer: v.optional(
+      v.union(v.literal(0), v.literal(10), v.literal(30))
+    ),
+    defaultSecureMediaViewingMode: v.optional(
+      v.union(v.literal('tap'), v.literal('hold'))
+    ),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
