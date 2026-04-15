@@ -226,6 +226,7 @@ export const updateFieldsByAuthId = mutation({
     authUserId: v.string(),
     // Photos
     privatePhotoUrls: v.optional(v.array(v.string())),
+    photoBlurSlots: v.optional(v.array(v.boolean())),
     // Profile details
     height: v.optional(v.union(v.number(), v.null())),
     weight: v.optional(v.union(v.number(), v.null())),
