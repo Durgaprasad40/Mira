@@ -407,18 +407,18 @@ export const getByAuthUserId = query({
     }
 
     // PROFILE-P1-002 FIX: Verify caller owns this profile
-    // Compare Clerk identity against the user's stored authUserId field
+    // Require authenticated identity; compare Clerk subject to stored authUserId when present
     const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      const user = await ctx.db.get(userId);
-      // If user has an authUserId field, verify it matches the Clerk identity
-      if (user?.authUserId && user.authUserId !== identity.subject) {
-        console.log('[P2_PROFILE_QUERY] getByAuthUserId: auth mismatch', {
-          userAuthUserId: user.authUserId?.substring(0, 8),
-          identitySubject: identity.subject?.substring(0, 8),
-        });
-        return null;
-      }
+    if (!identity?.subject) {
+      return null;
+    }
+    const user = await ctx.db.get(userId);
+    if (user?.authUserId && user.authUserId !== identity.subject) {
+      console.log('[P2_PROFILE_QUERY] getByAuthUserId: auth mismatch', {
+        userAuthUserId: user.authUserId?.substring(0, 8),
+        identitySubject: identity.subject?.substring(0, 8),
+      });
+      return null;
     }
 
     // Check if private data is in pending_deletion state
