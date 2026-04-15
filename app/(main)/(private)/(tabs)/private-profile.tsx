@@ -27,10 +27,11 @@ import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
+import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useScreenTrace } from '@/lib/devTrace';
@@ -79,6 +80,9 @@ export default function PrivateProfileScreen() {
   );
   const backendProfileLoaded = backendProfile !== undefined;
 
+  // Store data (used for non-canonical fields). Do NOT use store as canonical for identity/completion.
+  const storeGender = usePrivateProfileStore((s) => s.gender);
+
   // Loading and error states
   const [hasLoadError, setHasLoadError] = useState(false);
   const isLoading = !isDemoMode && userId && backendProfile === undefined && !hasLoadError;
@@ -93,6 +97,34 @@ export default function PrivateProfileScreen() {
       mountedRef.current = false;
     };
   }, []);
+
+  // Self-healing: fix invalid age from backend (runs at most once per screen lifecycle)
+  const healProfile = useMutation(api.privateProfiles.getAndHealByAuthUserId);
+  const hasHealedRef = useRef(false);
+
+  useEffect(() => {
+    if (!backendProfile) return; // wait for data
+    if (isDemoMode) return; // skip demo
+
+    const age = backendProfile.age;
+
+    const needsHealing =
+      typeof age !== 'number' ||
+      age <= 0 ||
+      age >= 120;
+
+    if (needsHealing && !hasHealedRef.current && userId) {
+      hasHealedRef.current = true;
+
+      healProfile({ authUserId: userId })
+        .then(() => {
+          console.log('[P2_PROFILE] Age healing triggered');
+        })
+        .catch((err) => {
+          console.warn('[P2_PROFILE] Age healing failed', err);
+        });
+    }
+  }, [backendProfile?.age, isDemoMode, userId, healProfile]);
 
   // Error timeout
   useEffect(() => {
@@ -132,6 +164,7 @@ export default function PrivateProfileScreen() {
     if (isDemoMode) {
       return demoUser?.dateOfBirth ? calculateAgeFromDOB(demoUser.dateOfBirth) : 0;
     }
+    // Backend source of truth only
     return backendProfile?.age || 0;
   }, [backendProfile?.age, demoUser, isDemoMode]);
 
@@ -189,33 +222,164 @@ export default function PrivateProfileScreen() {
     return (backendProfile?.privateIntentKeys?.length || 0) > 0;
   }, [backendProfile?.privateIntentKeys, isDemoMode]);
 
+  // Resolve gender with fallback chain: backend query → store → empty
+  const gender = useMemo(() => {
+    if (isDemoMode) return '';
+    // Fallback chain: backend query → store → empty
+    return (backendProfile as any)?.gender || storeGender || '';
+  }, [(backendProfile as any)?.gender, storeGender, isDemoMode]);
+
+  // Cast to access optional schema fields
+  const profileWithDetails = backendProfile as typeof backendProfile & {
+    height?: number;
+    weight?: number;
+    smoking?: string;
+    drinking?: string;
+    education?: string;
+    religion?: string;
+    hobbies?: string[];
+    gender?: string;
+  };
+
+  // Full completion items (14 total) - weight & religion are hidden from display but count toward %
   const completionItems = useMemo(() => ([
+    // Core identity (always complete after onboarding)
+    {
+      label: 'Nickname',
+      complete: !!displayName?.trim() && displayName !== 'Anonymous',
+      detail: displayName?.trim() ? 'Set' : 'Add a nickname',
+      hidden: false,
+    },
+    {
+      label: 'Age',
+      complete: age > 0,
+      detail: age > 0 ? `${age} years` : 'Add your age',
+      hidden: false,
+    },
+    {
+      label: 'Gender',
+      complete: !!gender?.trim(),
+      detail: gender ? 'Set' : 'Add your gender',
+      hidden: false,
+    },
+    // Photos & Content
     {
       label: 'Photos',
       complete: photoCount >= 2,
       detail: photoCount >= 2 ? `${photoCount} added` : `Add at least 2 photos (${photoCount}/2)`,
+      hidden: false,
     },
     {
       label: 'Bio',
       complete: hasBio,
       detail: hasBio ? 'Added' : 'Add a short bio',
+      hidden: false,
     },
     {
       label: 'Prompts',
       complete: promptCount > 0,
       detail: promptCount > 0 ? `${promptCount} answered` : 'Add at least 1 answer',
+      hidden: false,
     },
     {
       label: 'Looking for',
       complete: hasIntentSelection,
       detail: hasIntentSelection ? 'Selected' : 'Choose what you are looking for',
+      hidden: false,
     },
-  ]), [hasBio, hasIntentSelection, photoCount, promptCount]);
+    // Visible details (shown in DeepConnect profile)
+    {
+      label: 'Height',
+      complete: typeof profileWithDetails?.height === 'number' && profileWithDetails.height > 0,
+      detail: profileWithDetails?.height ? `${profileWithDetails.height} cm` : 'Add your height',
+      hidden: false,
+    },
+    {
+      label: 'Smoking',
+      complete: typeof profileWithDetails?.smoking === 'string' && profileWithDetails.smoking.length > 0,
+      detail: profileWithDetails?.smoking ? 'Set' : 'Add smoking preference',
+      hidden: false,
+    },
+    {
+      label: 'Drinking',
+      complete: typeof profileWithDetails?.drinking === 'string' && profileWithDetails.drinking.length > 0,
+      detail: profileWithDetails?.drinking ? 'Set' : 'Add drinking preference',
+      hidden: false,
+    },
+    {
+      label: 'Education',
+      complete: typeof profileWithDetails?.education === 'string' && profileWithDetails.education.length > 0,
+      detail: profileWithDetails?.education ? 'Set' : 'Add your education',
+      hidden: false,
+    },
+    {
+      label: 'Interests',
+      complete: (profileWithDetails?.hobbies?.length ?? 0) > 0,
+      detail: (profileWithDetails?.hobbies?.length ?? 0) > 0 ? `${profileWithDetails?.hobbies?.length} selected` : 'Add your interests',
+      hidden: false,
+    },
+    // Hidden details (count toward % but NOT shown in DeepConnect profile)
+    {
+      label: 'Weight',
+      complete: typeof profileWithDetails?.weight === 'number' && profileWithDetails.weight > 0,
+      detail: profileWithDetails?.weight ? `${profileWithDetails.weight} kg` : 'Add your weight',
+      hidden: true,
+    },
+    {
+      label: 'Religion',
+      complete: typeof profileWithDetails?.religion === 'string' && profileWithDetails.religion.length > 0,
+      detail: profileWithDetails?.religion ? 'Set' : 'Add your religion',
+      hidden: true,
+    },
+  ]), [displayName, age, gender, profileWithDetails, hasBio, hasIntentSelection, photoCount, promptCount]);
 
+  // Visible missing items (for nudge display)
+  const visibleMissingItems = useMemo(
+    () => completionItems.filter((item) => !item.complete && !item.hidden),
+    [completionItems]
+  );
+
+  // All missing items (for edit checklist)
   const missingCompletionItems = useMemo(
     () => completionItems.filter((item) => !item.complete),
     [completionItems]
   );
+
+  const completionPercentage = useMemo(() => {
+    const total = completionItems.length || 1;
+    const completed = completionItems.filter((i) => i.complete).length;
+    return Math.round((completed / total) * 100);
+  }, [completionItems]);
+
+  const completionNudge = useMemo(() => {
+    // One concise improvement message (premium-style) - only show visible items
+    const next = visibleMissingItems[0]?.label;
+    switch (next) {
+      case 'Photos':
+        return photoCount > 0 ? 'Add more photos to improve your profile' : 'Add photos to improve your profile';
+      case 'Bio':
+        return 'Add a bio to improve your profile';
+      case 'Prompts':
+        return 'Answer a prompt to strengthen your profile';
+      case 'Looking for':
+        return "Choose what you're looking for";
+      case 'Height':
+      case 'Smoking':
+      case 'Drinking':
+      case 'Education':
+        return 'Complete your details for better matches';
+      case 'Interests':
+        return 'Add interests to find like-minded people';
+      case 'Nickname':
+        return 'Add a nickname to personalize your profile';
+      default:
+        // Hidden fields (weight, religion) - show generic message
+        if (missingCompletionItems.length > 0) {
+          return 'Complete your profile for better matches';
+        }
+        return 'Your private profile is ready';
+    }
+  }, [visibleMissingItems, missingCompletionItems.length, photoCount]);
 
   const isProfileReady = useMemo(() => {
     if (isDemoMode) {
@@ -362,81 +526,47 @@ export default function PrivateProfileScreen() {
           </View>
         </View>
 
-        <View style={styles.statusCard}>
-          <View style={styles.statusHeader}>
-            <View style={[styles.statusIcon, isProfileReady ? styles.statusIconReady : styles.statusIconNeedsWork]}>
-              <Ionicons
-                name={isProfileReady ? 'checkmark-circle' : 'construct-outline'}
-                size={16}
-                color="#FFFFFF"
-              />
+        <TouchableOpacity
+          style={styles.completionCard}
+          onPress={handleEditProfile}
+          activeOpacity={0.8}
+        >
+          <View style={styles.completionTopRow}>
+            <View style={styles.completionIcon}>
+              <Ionicons name="sparkles" size={18} color={C.primary} />
             </View>
-            <View style={styles.statusCopy}>
-              <Text style={styles.statusTitle}>
-                {isProfileReady ? 'Profile ready' : 'Keep building your profile'}
-              </Text>
-              <Text style={styles.statusText}>
-                {isProfileReady
-                  ? 'Your photos, bio, prompts, and intent are ready for Deep Connect.'
-                  : missingCompletionItems.length === 1
-                    ? `One thing still needs attention: ${missingCompletionItems[0]?.label.toLowerCase()}.`
-                    : `${missingCompletionItems.length} areas still need attention before your profile feels complete.`}
+            <View style={styles.completionCopy}>
+              <Text style={styles.completionTitle}>{completionPercentage}% complete</Text>
+              <Text style={styles.completionSubtitle} numberOfLines={1}>
+                {completionPercentage >= 100 ? 'Your private profile is ready.' : completionNudge}
               </Text>
             </View>
+            <Ionicons name="chevron-forward" size={18} color={C.textLight} />
           </View>
 
-          <View style={styles.checklist}>
-            {completionItems.map((item) => {
-              const openLookingFor =
-                !isDemoMode && item.label === 'Looking for' && !item.complete;
-              if (openLookingFor) {
-                return (
-                  <TouchableOpacity
-                    key={item.label}
-                    style={[styles.checklistRow, styles.checklistRowTappable]}
-                    onPress={handleOpenPhase2DiscoveryPreferences}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons
-                      name={item.complete ? 'checkmark-circle' : 'ellipse-outline'}
-                      size={18}
-                      color={item.complete ? C.primary : C.textLight}
-                    />
-                    <View style={styles.checklistCopy}>
-                      <Text style={styles.checklistLabel}>{item.label}</Text>
-                      <Text style={styles.checklistDetail}>{item.detail}</Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={16} color={C.primary} />
-                  </TouchableOpacity>
-                );
-              }
-              return (
-                <View key={item.label} style={styles.checklistRow}>
-                  <Ionicons
-                    name={item.complete ? 'checkmark-circle' : 'ellipse-outline'}
-                    size={18}
-                    color={item.complete ? C.primary : C.textLight}
-                  />
-                  <View style={styles.checklistCopy}>
-                    <Text style={styles.checklistLabel}>{item.label}</Text>
-                    <Text style={styles.checklistDetail}>{item.detail}</Text>
-                  </View>
-                </View>
-              );
-            })}
+          <View style={styles.completionProgressOuter}>
+            <View
+              style={[
+                styles.completionProgressInner,
+                { width: `${Math.max(0, Math.min(100, completionPercentage))}%` },
+              ]}
+            />
           </View>
 
-          {!isProfileReady && (
-            <TouchableOpacity
-              style={styles.statusAction}
-              onPress={handleEditProfile}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.statusActionText}>Continue editing</Text>
-              <Ionicons name="chevron-forward" size={16} color={C.primary} />
-            </TouchableOpacity>
-          )}
-        </View>
+          {!isProfileReady && missingCompletionItems.length > 0 ? (
+            <View>
+              <Text style={styles.completionHint} numberOfLines={1}>
+                Tap to edit your private profile
+              </Text>
+              {/* Show what's still needed (including hidden items like weight/religion) */}
+              {missingCompletionItems.length <= 4 && (
+                <Text style={styles.completionMissingList} numberOfLines={2}>
+                  Missing: {missingCompletionItems.map((i) => i.label).join(', ')}
+                </Text>
+              )}
+            </View>
+          ) : null}
+        </TouchableOpacity>
 
         {/* Settings Menu */}
         <View style={styles.menuSection}>
@@ -593,6 +723,69 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: C.primary,
+  },
+
+  // Premium completion card (Phase-1 quality, Phase-2 theme)
+  completionCard: {
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  completionTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  completionIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: C.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  completionCopy: {
+    flex: 1,
+  },
+  completionTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: C.text,
+    letterSpacing: -0.2,
+  },
+  completionSubtitle: {
+    marginTop: 2,
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.textLight,
+  },
+  completionProgressOuter: {
+    marginTop: 12,
+    height: 8,
+    backgroundColor: C.accent,
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  completionProgressInner: {
+    height: '100%',
+    backgroundColor: C.primary,
+    borderRadius: 4,
+  },
+  completionHint: {
+    marginTop: 10,
+    fontSize: 12,
+    fontWeight: '600',
+    color: C.textLight,
+  },
+  completionMissingList: {
+    marginTop: 4,
+    fontSize: 11,
+    fontWeight: '500',
+    color: C.primary,
+    fontStyle: 'italic',
   },
   statusCard: {
     backgroundColor: C.surface,

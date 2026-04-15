@@ -1332,6 +1332,10 @@ export default defineSchema({
     privateBoundaries: v.array(v.string()),
     privateBio: v.optional(v.string()),
     displayName: v.string(),
+    // Nickname edit limit (Phase-2)
+    // Optional for backward compatibility; treat missing as 0 in code.
+    displayNameEditCount: v.optional(v.number()),
+    lastDisplayNameEditedAt: v.optional(v.number()),
     age: v.number(),
     city: v.optional(v.string()),
     gender: v.string(),

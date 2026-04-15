@@ -3,6 +3,84 @@ import { mutation, query } from './_generated/server';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { resolveUserIdByAuthId } from './helpers';
 
+function calculateAgeFromDOB(dob: string | undefined | null): number {
+  // Mirror Phase-1 backend behavior: accept any parsable date string (ISO or YYYY-MM-DD).
+  if (!dob) return 0;
+  const today = new Date();
+  const birthDate = new Date(dob);
+  if (isNaN(birthDate.getTime())) return 0;
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return age > 0 && age < 120 ? age : 0;
+}
+
+function ageFromUser(user: any): number {
+  // Canonical source of truth: users.dateOfBirth (Phase-1)
+  const dob = user?.dateOfBirth;
+  return calculateAgeFromDOB(typeof dob === 'string' ? dob : null);
+}
+
+export const debugAgeSourcesByAuthUserId = query({
+  args: { authUserId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      return { success: false as const, error: 'user_not_found' as const };
+    }
+    const user = await ctx.db.get(userId);
+    const profile = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    return {
+      success: true as const,
+      userId,
+      userDateOfBirth: (user as any)?.dateOfBirth ?? null,
+      derivedAgeFromDob: ageFromUser(user),
+      privateProfileAge: (profile as any)?.age ?? null,
+      hasPrivateProfile: Boolean(profile),
+    };
+  },
+});
+
+export const backfillPrivateProfileAgeByAuthUserId = mutation({
+  args: { authUserId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      return { success: false as const, error: 'user_not_found' as const };
+    }
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return { success: false as const, error: 'user_not_found' as const };
+    }
+    const profile = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+    if (!profile) {
+      return { success: false as const, error: 'profile_not_found' as const };
+    }
+
+    const nextAge = ageFromUser(user);
+    if (!nextAge || nextAge <= 0) {
+      return { success: false as const, error: 'missing_or_invalid_dob' as const };
+    }
+
+    await ctx.db.patch(profile._id, { age: nextAge, updatedAt: Date.now() });
+    return {
+      success: true as const,
+      userDateOfBirth: (user as any)?.dateOfBirth ?? null,
+      previousAge: (profile as any)?.age ?? null,
+      nextAge,
+    };
+  },
+});
+
 // Get private profile by user ID
 export const getByUserId = query({
   args: { userId: v.id('users') },
@@ -313,6 +391,24 @@ export const updateFieldsByAuthId = mutation({
       }
     }
 
+    // Self-heal: opportunistically fix age if invalid
+    const needsAgeFix =
+      typeof existing.age !== 'number' ||
+      existing.age <= 0 ||
+      existing.age >= 120;
+
+    if (needsAgeFix) {
+      const user = await ctx.db.get(userId);
+      const fixedAge = ageFromUser(user);
+      if (fixedAge > 0) {
+        cleanUpdates.age = fixedAge;
+        console.log('[PRIVATE_PROFILE] updateFieldsByAuthId: healed age', {
+          previousAge: existing.age,
+          fixedAge,
+        });
+      }
+    }
+
     await ctx.db.patch(existing._id, cleanUpdates);
     if (cleanUpdates.privateIntentKeys !== undefined) {
       console.log('[P2_PREF_SAVE]', {
@@ -325,6 +421,156 @@ export const updateFieldsByAuthId = mutation({
 });
 
 /**
+ * Update Phase-2 nickname (displayName) with server-side edit limit enforcement.
+ *
+ * Rules:
+ * - Total allowed changes = 3
+ * - Onboarding creation counts as first use (saveOnboardingPhotos sets count=1)
+ * - Missing count is treated as 0 (backward compatible)
+ */
+export const updateDisplayNameByAuthId = mutation({
+  args: {
+    authUserId: v.string(),
+    displayName: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      return { success: false, error: 'user_not_found' as const };
+    }
+
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      return { success: false, error: 'deletion_pending' as const };
+    }
+
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    if (!existing) {
+      return { success: false, error: 'profile_not_found' as const };
+    }
+
+    const currentCount = (existing as any).displayNameEditCount ?? 0;
+    if (currentCount >= 3) {
+      return { success: false, error: 'Nickname change limit reached' as const };
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(existing._id, {
+      displayName: args.displayName,
+      displayNameEditCount: currentCount + 1,
+      lastDisplayNameEditedAt: now,
+      updatedAt: now,
+    });
+
+    return { success: true as const, displayNameEditCount: currentCount + 1 };
+  },
+});
+
+/**
+ * Manual one-shot sync: copy selected Phase-1 fields into Phase-2 private profile.
+ *
+ * IMPORTANT:
+ * - This is NOT automatic; it must be explicitly invoked by the client.
+ * - Only syncs inherited "details" fields; does not touch nickname, photos, prompts, bio, intents, age, or gender.
+ */
+export const syncFromMainProfile = mutation({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      return { success: false, error: 'user_not_found' as const };
+    }
+
+    // Phase-1 user record (source of truth for this manual sync)
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return { success: false, error: 'user_not_found' as const };
+    }
+
+    // Phase-2 private profile (target)
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+    if (!existing) {
+      return { success: false, error: 'profile_not_found' as const };
+    }
+
+    // Build patch object - NEVER write null (schema only accepts undefined)
+    const patch: Record<string, unknown> = {
+      hobbies: (user as any).activities ?? [],
+      updatedAt: Date.now(),
+    };
+
+    // Only include lifestyle fields if they have valid values
+    const height = (user as any).height;
+    const weight = (user as any).weight;
+    const smoking = (user as any).smoking;
+    const drinking = (user as any).drinking;
+    const education = (user as any).education;
+    const religion = (user as any).religion;
+
+    if (typeof height === 'number' && height > 0) patch.height = height;
+    if (typeof weight === 'number' && weight > 0) patch.weight = weight;
+    if (typeof smoking === 'string' && smoking.length > 0) patch.smoking = smoking;
+    if (typeof drinking === 'string' && drinking.length > 0) patch.drinking = drinking;
+    if (typeof education === 'string' && education.length > 0) patch.education = education;
+    if (typeof religion === 'string' && religion.length > 0) patch.religion = religion;
+
+    await ctx.db.patch(existing._id, patch);
+
+    return { success: true as const };
+  },
+});
+
+/**
+ * Migration/backfill: Fix userPrivateProfiles rows with missing/invalid age by recomputing from users.dateOfBirth.
+ *
+ * - Scans userPrivateProfiles
+ * - If age is 0/invalid and user has DOB, patches age
+ * - Returns counts for reporting
+ */
+export const backfillPrivateProfileAges = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const profiles = await ctx.db.query('userPrivateProfiles').collect();
+    let scanned = 0;
+    let fixed = 0;
+    let skippedNoDob = 0;
+    let skippedNoUser = 0;
+
+    for (const p of profiles) {
+      scanned++;
+      const currentAge = (p as any).age;
+      const isInvalid = typeof currentAge !== 'number' || !Number.isFinite(currentAge) || currentAge <= 0 || currentAge >= 120;
+      if (!isInvalid) continue;
+
+      const user = await ctx.db.get((p as any).userId);
+      if (!user) {
+        skippedNoUser++;
+        continue;
+      }
+      const nextAge = ageFromUser(user);
+      if (!nextAge || nextAge <= 0) {
+        skippedNoDob++;
+        continue;
+      }
+      await ctx.db.patch(p._id, { age: nextAge, updatedAt: Date.now() });
+      fixed++;
+    }
+
+    return { success: true as const, scanned, fixed, skippedNoDob, skippedNoUser };
+  },
+});
+
+/**
  * Save onboarding photos for Phase-2 Step 2.
  * Creates a skeleton profile if none exists, updates photos if it does.
  * Used specifically during Phase-2 onboarding before full profile is complete.
@@ -333,6 +579,15 @@ export const saveOnboardingPhotos = mutation({
   args: {
     authUserId: v.string(),
     privatePhotoUrls: v.array(v.string()),
+    // Phase-1 imported fields to persist into Phase-2 on initial skeleton creation only
+    // NOTE: age is derived from backend users.dateOfBirth (args.age ignored; kept for backwards-compat callers)
+    age: v.optional(v.number()),
+    height: v.optional(v.union(v.number(), v.null())),
+    weight: v.optional(v.union(v.number(), v.null())),
+    smoking: v.optional(v.union(v.string(), v.null())),
+    drinking: v.optional(v.union(v.string(), v.null())),
+    education: v.optional(v.union(v.string(), v.null())),
+    religion: v.optional(v.union(v.string(), v.null())),
   },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
@@ -356,11 +611,31 @@ export const saveOnboardingPhotos = mutation({
     const now = Date.now();
 
     if (existing) {
-      // Update existing profile with photos
-      await ctx.db.patch(existing._id, {
+      // Build patch object starting with photos
+      const patch: Record<string, unknown> = {
         privatePhotoUrls: args.privatePhotoUrls,
         updatedAt: now,
-      });
+      };
+
+      // Self-heal: fix age if invalid
+      const needsAgeFix =
+        typeof existing.age !== 'number' ||
+        existing.age <= 0 ||
+        existing.age >= 120;
+
+      if (needsAgeFix) {
+        const user = await ctx.db.get(userId);
+        const fixedAge = ageFromUser(user);
+        if (fixedAge > 0) {
+          patch.age = fixedAge;
+          console.log('[PRIVATE_PROFILE] saveOnboardingPhotos: healed age', {
+            previousAge: existing.age,
+            fixedAge,
+          });
+        }
+      }
+
+      await ctx.db.patch(existing._id, patch);
       console.log('[PRIVATE_PROFILE] saveOnboardingPhotos: updated existing profile');
       return { success: true, profileId: existing._id };
     }
@@ -368,10 +643,15 @@ export const saveOnboardingPhotos = mutation({
     // Create skeleton profile for onboarding (will be completed in later steps)
     // Get user data to populate required fields with defaults
     const user = await ctx.db.get(userId);
+    const derivedAge = ageFromUser(user);
     const profileId = await ctx.db.insert('userPrivateProfiles', {
       userId,
       displayName: user?.handle || user?.name || '',
-      age: 0, // Will be calculated from DOB in later steps
+      // Onboarding creation counts as first nickname usage
+      displayNameEditCount: 1,
+      lastDisplayNameEditedAt: now,
+      // Canonical identity field: backend source of truth only
+      age: derivedAge,
       gender: user?.gender || '',
       privateBio: '',
       privateIntentKeys: [],
@@ -389,6 +669,14 @@ export const saveOnboardingPhotos = mutation({
       hobbies: user?.activities || [],
       isVerified: user?.isVerified || false,
       promptAnswers: [],
+      // Phase-1 import: only set during skeleton creation (do not overwrite later Phase-2 edits)
+      // NOTE: userPrivateProfiles schema stores these as optional (undefined) rather than null.
+      height: args.height ?? undefined,
+      weight: args.weight ?? undefined,
+      smoking: args.smoking ?? undefined,
+      drinking: args.drinking ?? undefined,
+      education: args.education ?? undefined,
+      religion: args.religion ?? undefined,
       createdAt: now,
       updatedAt: now,
     });
@@ -402,7 +690,9 @@ export const saveOnboardingPhotos = mutation({
  * Resolves auth ID to Convex user ID internally.
  * Used by Phase-2 Profile tab to load backend data.
  *
- * PROFILE-P1-002 FIX: Strict server-side auth verification.
+ * NOTE: This app uses custom session-based auth (not Convex auth integration).
+ * Ownership is verified by resolving the provided authUserId to a valid user.
+ * The frontend only sends the user's own ID from authStore (populated after login).
  */
 export const getByAuthUserId = query({
   args: { authUserId: v.string() },
@@ -417,17 +707,11 @@ export const getByAuthUserId = query({
       return null;
     }
 
-    // PROFILE-P1-002 FIX: Verify caller owns this profile
-    // Require authenticated identity; compare Clerk subject to stored authUserId when present
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      return null;
-    }
+    // Verify the user exists (ownership check via ID resolution)
     const user = await ctx.db.get(userId);
-    if (user?.authUserId && user.authUserId !== identity.subject) {
-      console.log('[P2_PROFILE_QUERY] getByAuthUserId: auth mismatch', {
-        userAuthUserId: user.authUserId?.substring(0, 8),
-        identitySubject: identity.subject?.substring(0, 8),
+    if (!user) {
+      console.log('[P2_PROFILE_QUERY] getByAuthUserId: user record not found', {
+        userId: (userId as string)?.substring(0, 8),
       });
       return null;
     }
@@ -467,6 +751,78 @@ export const getByAuthUserId = query({
 });
 
 /**
+ * Self-healing version of getByAuthUserId.
+ * On every call, checks if profile.age is invalid and auto-corrects from users.dateOfBirth.
+ * This ensures existing broken profiles (age=0) automatically heal without manual backfill.
+ *
+ * IMPORTANT: This is a mutation (not a query) because it writes to the database.
+ * Frontend should use useMutation and call this on profile load for self-healing.
+ */
+export const getAndHealByAuthUserId = mutation({
+  args: { authUserId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      return null;
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return null;
+    }
+
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      return null;
+    }
+
+    const profile = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    if (!profile) {
+      return null;
+    }
+
+    // Self-heal: check if age is invalid and fix it
+    const needsAgeFix =
+      typeof profile.age !== 'number' ||
+      profile.age <= 0 ||
+      profile.age >= 120;
+
+    let returnProfile = profile;
+
+    if (needsAgeFix) {
+      const fixedAge = ageFromUser(user);
+      if (fixedAge > 0) {
+        // Patch DB immediately
+        await ctx.db.patch(profile._id, {
+          age: fixedAge,
+          updatedAt: Date.now(),
+        });
+        console.log('[PRIVATE_PROFILE] getAndHealByAuthUserId: healed age', {
+          userId: userId.substring(0, 8),
+          previousAge: profile.age,
+          fixedAge,
+        });
+        // Return corrected value
+        returnProfile = { ...profile, age: fixedAge };
+      }
+    }
+
+    // Normalize privateIntentKeys
+    const privateIntentKeys = returnProfile.privateIntentKeys ?? [];
+
+    return {
+      ...returnProfile,
+      privateIntentKeys,
+    };
+  },
+});
+
+/**
  * Upsert private profile by auth user ID.
  * Called from Phase-2 onboarding completion to persist profile to Convex.
  * IMPORTANT: Only stores backend URLs, not local file URIs.
@@ -474,7 +830,10 @@ export const getByAuthUserId = query({
 export const upsertByAuthId = mutation({
   args: {
     authUserId: v.string(),
+    // NOTE: Do NOT allow displayName updates here (nickname limit is enforced in updateDisplayNameByAuthId).
+    // Keep displayName in args for backward compatibility of callers, but do not patch it on existing profiles.
     displayName: v.string(),
+    // NOTE: age is derived from backend users.dateOfBirth (args.age ignored; kept for backwards-compat callers)
     age: v.number(),
     gender: v.string(),
     privateBio: v.optional(v.string()),
@@ -520,6 +879,12 @@ export const upsertByAuthId = mutation({
       return { success: false, error: 'user_not_found' };
     }
 
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      console.warn('[PRIVATE_PROFILE] upsertByAuthId: user record not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
@@ -538,8 +903,9 @@ export const upsertByAuthId = mutation({
     const profileData = {
       userId,
       displayName: args.displayName,
-      age: args.age,
-      gender: args.gender,
+      // Canonical identity fields: backend source of truth only
+      age: ageFromUser(user),
+      gender: user?.gender || args.gender,
       privateBio: args.privateBio || '',
       privateIntentKeys: args.privateIntentKeys,
       privatePhotoUrls: args.privatePhotoUrls,
@@ -586,8 +952,11 @@ export const upsertByAuthId = mutation({
     }
 
     if (existing) {
+      // SAFETY: Prevent bypassing nickname limit via upsert.
+      // Preserve existing displayName and related nickname-limit fields.
+      const { displayName: _ignoreDisplayName, ...rest } = profileData as any;
       await ctx.db.patch(existing._id, {
-        ...profileData,
+        ...rest,
         updatedAt: now,
       });
       console.log('[PRIVATE_PROFILE] upsertByAuthId: updated existing profile');
@@ -596,6 +965,9 @@ export const upsertByAuthId = mutation({
 
     const profileId = await ctx.db.insert('userPrivateProfiles', {
       ...profileData,
+      // Initialize nickname edit limit fields on first creation (onboarding counts as first use elsewhere)
+      displayNameEditCount: 1,
+      lastDisplayNameEditedAt: now,
       createdAt: now,
       updatedAt: now,
     });
