@@ -320,6 +320,20 @@ export default function EditProfileScreen() {
     return storeHobbies || [];
   }, [backendProfile?.hobbies, storeHobbies]);
 
+  /** Same bar as Profile tab: at least one Phase-2 intent required for completion */
+  const needsPhase2LookingForLink = useMemo(() => {
+    if (isDemoMode) return false;
+    if (backendProfile === undefined || backendProfile === null) return false;
+    return (backendProfile.privateIntentKeys?.length ?? 0) < 1;
+  }, [isDemoMode, backendProfile]);
+
+  const handleOpenPhase2DiscoveryPreferences = useCallback(() => {
+    router.push({
+      pathname: '/(main)/discovery-preferences',
+      params: { mode: 'phase2' },
+    } as any);
+  }, [router]);
+
   // Store actions
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setPhotoBlurSlots = usePrivateProfileStore((s) => s.setPhotoBlurSlots);
@@ -928,6 +942,24 @@ export default function EditProfileScreen() {
               These details are set during profile creation and cannot be changed here.
             </Text>
           </View>
+
+          {/* Deep Connect intents: edited on discovery-preferences (Phase-2), not here */}
+          {needsPhase2LookingForLink ? (
+            <TouchableOpacity
+              style={styles.lookingForLink}
+              onPress={handleOpenPhase2DiscoveryPreferences}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="compass-outline" size={22} color={C.text} />
+              <View style={styles.lookingForLinkText}>
+                <Text style={styles.lookingForLinkTitle}>Looking for (Deep Connect)</Text>
+                <Text style={styles.lookingForLinkSubtitle}>
+                  Tap to choose what you&apos;re looking for
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={C.textLight} />
+            </TouchableOpacity>
+          ) : null}
 
           {/* ────────────────────────────────────────────────────────────── */}
           {/* SECTION 2: PHOTOS */}
@@ -1549,6 +1581,30 @@ const styles = StyleSheet.create({
     marginTop: 10,
     textAlign: 'center',
     fontStyle: 'italic',
+  },
+
+  lookingForLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    marginBottom: 28,
+    gap: 12,
+  },
+  lookingForLinkText: {
+    flex: 1,
+  },
+  lookingForLinkTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: C.text,
+  },
+  lookingForLinkSubtitle: {
+    fontSize: 13,
+    color: C.textLight,
+    marginTop: 2,
   },
 
   // Info Card

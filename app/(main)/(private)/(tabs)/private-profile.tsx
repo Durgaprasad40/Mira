@@ -229,6 +229,14 @@ export default function PrivateProfileScreen() {
     router.push('/(main)/(private)/edit-profile' as any);
   };
 
+  /** Deep Connect intents live on discovery-preferences (Phase-2), not edit-profile */
+  const handleOpenPhase2DiscoveryPreferences = useCallback(() => {
+    router.push({
+      pathname: '/(main)/discovery-preferences',
+      params: { mode: 'phase2' },
+    } as any);
+  }, [router]);
+
   // Loading state
   if (isLoading) {
     return (
@@ -378,19 +386,44 @@ export default function PrivateProfileScreen() {
           </View>
 
           <View style={styles.checklist}>
-            {completionItems.map((item) => (
-              <View key={item.label} style={styles.checklistRow}>
-                <Ionicons
-                  name={item.complete ? 'checkmark-circle' : 'ellipse-outline'}
-                  size={18}
-                  color={item.complete ? C.primary : C.textLight}
-                />
-                <View style={styles.checklistCopy}>
-                  <Text style={styles.checklistLabel}>{item.label}</Text>
-                  <Text style={styles.checklistDetail}>{item.detail}</Text>
+            {completionItems.map((item) => {
+              const openLookingFor =
+                !isDemoMode && item.label === 'Looking for' && !item.complete;
+              if (openLookingFor) {
+                return (
+                  <TouchableOpacity
+                    key={item.label}
+                    style={[styles.checklistRow, styles.checklistRowTappable]}
+                    onPress={handleOpenPhase2DiscoveryPreferences}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons
+                      name={item.complete ? 'checkmark-circle' : 'ellipse-outline'}
+                      size={18}
+                      color={item.complete ? C.primary : C.textLight}
+                    />
+                    <View style={styles.checklistCopy}>
+                      <Text style={styles.checklistLabel}>{item.label}</Text>
+                      <Text style={styles.checklistDetail}>{item.detail}</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color={C.primary} />
+                  </TouchableOpacity>
+                );
+              }
+              return (
+                <View key={item.label} style={styles.checklistRow}>
+                  <Ionicons
+                    name={item.complete ? 'checkmark-circle' : 'ellipse-outline'}
+                    size={18}
+                    color={item.complete ? C.primary : C.textLight}
+                  />
+                  <View style={styles.checklistCopy}>
+                    <Text style={styles.checklistLabel}>{item.label}</Text>
+                    <Text style={styles.checklistDetail}>{item.detail}</Text>
+                  </View>
                 </View>
-              </View>
-            ))}
+              );
+            })}
           </View>
 
           {!isProfileReady && (
@@ -608,6 +641,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 10,
+  },
+  checklistRowTappable: {
+    alignItems: 'center',
   },
   checklistCopy: {
     flex: 1,
