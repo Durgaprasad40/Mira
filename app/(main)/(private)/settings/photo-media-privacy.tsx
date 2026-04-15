@@ -1,9 +1,12 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Switch } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useMutation } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 
 const C = INCOGNITO_COLORS;
@@ -11,6 +14,8 @@ const C = INCOGNITO_COLORS;
 export default function PhotoMediaPrivacyScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const authUserId = useAuthStore((s) => s.userId);
+  const updateFieldsByAuthId = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
   const defaultPhotoVisibility = usePrivateProfileStore((s) => s.defaultPhotoVisibility);
   const allowUnblurRequests = usePrivateProfileStore((s) => s.allowUnblurRequests);
@@ -19,6 +24,57 @@ export default function PhotoMediaPrivacyScreen() {
   const setDefaultPhotoVisibility = usePrivateProfileStore((s) => s.setDefaultPhotoVisibility);
   const setAllowUnblurRequests = usePrivateProfileStore((s) => s.setAllowUnblurRequests);
   const setDefaultSecureMediaTimer = usePrivateProfileStore((s) => s.setDefaultSecureMediaTimer);
+
+  const persistPhotoMediaPrivacy = useCallback(() => {
+    if (!authUserId) return;
+    const {
+      defaultPhotoVisibility,
+      allowUnblurRequests,
+      defaultSecureMediaTimer,
+      defaultSecureMediaViewingMode,
+    } = usePrivateProfileStore.getState();
+    void updateFieldsByAuthId({
+      authUserId,
+      defaultPhotoVisibility,
+      allowUnblurRequests,
+      defaultSecureMediaTimer,
+      defaultSecureMediaViewingMode,
+    })
+      .then((res) => {
+        if (res && !res.success && __DEV__) {
+          console.warn('[PhotoMediaPrivacy] updateFieldsByAuthId:', res.error);
+        }
+      })
+      .catch((err) => {
+        if (__DEV__) {
+          console.warn('[PhotoMediaPrivacy] updateFieldsByAuthId failed', err);
+        }
+      });
+  }, [authUserId, updateFieldsByAuthId]);
+
+  const onVisibilityChange = useCallback(
+    (visibility: 'public' | 'blurred' | 'private') => {
+      setDefaultPhotoVisibility(visibility);
+      persistPhotoMediaPrivacy();
+    },
+    [setDefaultPhotoVisibility, persistPhotoMediaPrivacy]
+  );
+
+  const onAllowUnblurChange = useCallback(
+    (allow: boolean) => {
+      setAllowUnblurRequests(allow);
+      persistPhotoMediaPrivacy();
+    },
+    [setAllowUnblurRequests, persistPhotoMediaPrivacy]
+  );
+
+  const onSecureMediaTimerChange = useCallback(
+    (timer: 0 | 10 | 30) => {
+      setDefaultSecureMediaTimer(timer);
+      persistPhotoMediaPrivacy();
+    },
+    [setDefaultSecureMediaTimer, persistPhotoMediaPrivacy]
+  );
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -41,7 +97,7 @@ export default function PhotoMediaPrivacyScreen() {
           <View style={styles.segmentedControl}>
             <TouchableOpacity
               style={[styles.segment, defaultPhotoVisibility === 'public' && styles.segmentActive]}
-              onPress={() => setDefaultPhotoVisibility('public')}
+              onPress={() => onVisibilityChange('public')}
             >
               <Text style={[styles.segmentText, defaultPhotoVisibility === 'public' && styles.segmentTextActive]}>
                 Public
@@ -49,7 +105,7 @@ export default function PhotoMediaPrivacyScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.segment, defaultPhotoVisibility === 'blurred' && styles.segmentActive]}
-              onPress={() => setDefaultPhotoVisibility('blurred')}
+              onPress={() => onVisibilityChange('blurred')}
             >
               <Text style={[styles.segmentText, defaultPhotoVisibility === 'blurred' && styles.segmentTextActive]}>
                 Blurred
@@ -57,7 +113,7 @@ export default function PhotoMediaPrivacyScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.segment, defaultPhotoVisibility === 'private' && styles.segmentActive]}
-              onPress={() => setDefaultPhotoVisibility('private')}
+              onPress={() => onVisibilityChange('private')}
             >
               <Text style={[styles.segmentText, defaultPhotoVisibility === 'private' && styles.segmentTextActive]}>
                 Private
@@ -77,7 +133,7 @@ export default function PhotoMediaPrivacyScreen() {
             </View>
             <Switch
               value={allowUnblurRequests}
-              onValueChange={setAllowUnblurRequests}
+              onValueChange={onAllowUnblurChange}
               trackColor={{ false: C.border, true: C.primary }}
               thumbColor="#FFF"
             />
@@ -93,7 +149,7 @@ export default function PhotoMediaPrivacyScreen() {
           <View style={styles.segmentedControl}>
             <TouchableOpacity
               style={[styles.segment, defaultSecureMediaTimer === 0 && styles.segmentActive]}
-              onPress={() => setDefaultSecureMediaTimer(0)}
+              onPress={() => onSecureMediaTimerChange(0)}
             >
               <Text style={[styles.segmentText, defaultSecureMediaTimer === 0 && styles.segmentTextActive]}>
                 Off
@@ -101,7 +157,7 @@ export default function PhotoMediaPrivacyScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.segment, defaultSecureMediaTimer === 10 && styles.segmentActive]}
-              onPress={() => setDefaultSecureMediaTimer(10)}
+              onPress={() => onSecureMediaTimerChange(10)}
             >
               <Text style={[styles.segmentText, defaultSecureMediaTimer === 10 && styles.segmentTextActive]}>
                 10s
@@ -109,7 +165,7 @@ export default function PhotoMediaPrivacyScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.segment, defaultSecureMediaTimer === 30 && styles.segmentActive]}
-              onPress={() => setDefaultSecureMediaTimer(30)}
+              onPress={() => onSecureMediaTimerChange(30)}
             >
               <Text style={[styles.segmentText, defaultSecureMediaTimer === 30 && styles.segmentTextActive]}>
                 30s
