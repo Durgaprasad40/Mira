@@ -102,7 +102,7 @@ interface PrivateProfileState {
   _hasHydrated: boolean;
 
   // Profile visibility (Pause Profile feature)
-  isPrivateEnabled: boolean; // true = visible in Desire Land, false = paused/hidden
+  isPrivateEnabled: boolean; // true = visible in Deep Connect, false = paused/hidden
 
   // Phase-2 setup tracking
   acceptedTermsAt: number | null;
@@ -130,7 +130,7 @@ interface PrivateProfileState {
   communicationStyle: 'text-first' | 'voice-friendly' | 'meet-oriented' | null;
 
   // PHASE 1 Settings — Discoverability
-  desirelandVisibility: 'active' | 'paused' | 'hidden';
+  deepConnectVisibility: 'active' | 'paused' | 'hidden';
   ageVisibility: 'exact' | 'range' | 'hide';
 
   // PHASE 1 Settings — Safety
@@ -212,7 +212,7 @@ interface PrivateProfileState {
   setDefaultSecureMediaTimer: (timer: 0 | 10 | 30) => void;
   setDefaultSecureMediaViewingMode: (mode: 'tap' | 'hold') => void;
   setCommunicationStyle: (style: 'text-first' | 'voice-friendly' | 'meet-oriented' | null) => void;
-  setDesirelandVisibility: (visibility: 'active' | 'paused' | 'hidden') => void;
+  setDeepConnectVisibility: (visibility: 'active' | 'paused' | 'hidden') => void;
   setAgeVisibility: (visibility: 'exact' | 'range' | 'hide') => void;
   setWhoCanMessageMe: (who: 'everyone' | 'matches' | 'verified') => void;
   setSafeMode: (enabled: boolean) => void;
@@ -244,7 +244,8 @@ interface PrivateProfileState {
     gender: string;
     city?: string;
     privateBio?: string;
-    privateIntentKeys: string[];
+    /** Present when Convex document includes the field; omit during partial/stale payloads */
+    privateIntentKeys?: string[];
     privateDesireTagKeys?: string[];
     privateBoundaries?: string[];
     privatePhotoUrls: string[];
@@ -312,7 +313,7 @@ const initialWizardState = {
   isSetupComplete: false,
   phase2OnboardingCompleted: false, // Permanent - never reset
   convexProfileId: null as string | null,
-  isPrivateEnabled: true, // Default: visible in Desire Land
+  isPrivateEnabled: true, // Default: visible in Deep Connect
   // Phase-2 setup tracking
   acceptedTermsAt: null as number | null,
   phase2SetupVersion: null as number | null,
@@ -328,7 +329,7 @@ const initialWizardState = {
   defaultSecureMediaTimer: 30 as const,
   defaultSecureMediaViewingMode: 'tap' as const,
   communicationStyle: null as 'text-first' | 'voice-friendly' | 'meet-oriented' | null,
-  desirelandVisibility: 'active' as const,
+  deepConnectVisibility: 'active' as const,
   ageVisibility: 'exact' as const,
   whoCanMessageMe: 'everyone' as const,
   safeMode: false,
@@ -605,7 +606,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   setDefaultSecureMediaTimer: (timer) => set({ defaultSecureMediaTimer: timer }),
   setDefaultSecureMediaViewingMode: (mode) => set({ defaultSecureMediaViewingMode: mode }),
   setCommunicationStyle: (style) => set({ communicationStyle: style }),
-  setDesirelandVisibility: (visibility) => set({ desirelandVisibility: visibility }),
+  setDeepConnectVisibility: (visibility) => set({ deepConnectVisibility: visibility }),
   setAgeVisibility: (visibility) => set({ ageVisibility: visibility }),
   setWhoCanMessageMe: (who) => set({ whoCanMessageMe: who }),
   setSafeMode: (enabled) => set({ safeMode: enabled }),
@@ -669,6 +670,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     }
 
     if (!convexProfile) {
+      // Full reset when Convex has no private profile (not a post-hydration overwrite of saved intents)
       set({
         displayName: '',
         age: 0,
@@ -715,9 +717,17 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       return;
     }
 
+    // TEMP: remove after QA — raw input from getByAuthUserId / hydrate caller
     if (__DEV__) {
-      console.log('[privateProfileStore] hydrateFromConvex:', {
+      console.log('[P2_PREF_HYDRATE_INPUT]', {
+        privateIntentKeys: convexProfile.privateIntentKeys,
+      });
+    }
+
+    if (__DEV__) {
+      console.log('[P2_PREF_HYDRATE]', {
         profileId: convexProfile._id,
+        privateIntentKeys: convexProfile.privateIntentKeys,
         displayName: convexProfile.displayName,
         isSetupComplete: convexProfile.isSetupComplete,
         convexPhotoCount: convexProfile.privatePhotoUrls?.length || 0,
@@ -744,7 +754,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       privateBio: convexProfile.privateBio || '',
 
       // Categories (cast to expected types - Convex stores as string[])
-      intentKeys: (convexProfile.privateIntentKeys || []) as any,
+      // Do not replace with [] when field is missing — preserve local state until backend sends a value
+      intentKeys: (convexProfile.privateIntentKeys !== undefined
+        ? convexProfile.privateIntentKeys
+        : state.intentKeys) as any,
       desireTags: (convexProfile.privateDesireTagKeys || []) as any,
       boundaries: (convexProfile.privateBoundaries || []) as any,
 
@@ -801,6 +814,15 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       // Mark as hydrated
       _hasHydrated: true,
     }));
+
+    if (__DEV__) {
+      const mergedIntents =
+        convexProfile.privateIntentKeys !== undefined
+          ? convexProfile.privateIntentKeys
+          : currentState.intentKeys;
+      // TEMP: remove after QA — must match backend / [P2_PREF_HYDRATE_INPUT]
+      console.log('[P2_PREF_STORE]', { intentKeys: mergedIntents });
+    }
 
     if (__DEV__) {
       console.log('[privateProfileStore] hydrateFromConvex complete:', {

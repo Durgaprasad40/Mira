@@ -8,24 +8,24 @@
  * - beforeRemove ONLY intercepts true back gestures, NOT push navigation
  * - Navigation effects are guarded with refs to prevent double-firing
  */
-import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, BackHandler, Platform } from 'react-native';
-import { Stack, useRouter, useNavigation, usePathname, useSegments, useRootNavigationState } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
+import React, { useEffect, useRef, useCallback, useMemo } from 'react';
+import { StyleSheet, BackHandler, Platform } from 'react-native';
+import { Stack, useRouter, useNavigation, usePathname, useSegments } from 'expo-router';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { useFilterStore } from '@/stores/filterStore';
+import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 // REMOVED: setPhase2Active import - no longer toggling phase via module variable
 // Notification phase is now derived directly from route in useNotifications
 // BLOCKED: prewarmTodCache removed - truth-or-dare screen is blocked
 // import { prewarmTodCache } from './(tabs)/truth-or-dare';
 import { decideNextOnboardingRoute } from '@/lib/onboardingRouting';
 import { useRouteTrace } from '@/lib/devTrace';
-import { usePhaseMode, isSharedRoute } from '@/lib/usePhaseMode';
+import { usePhaseMode } from '@/lib/usePhaseMode';
 import { AppErrorBoundary } from '@/components/safety';
 import { setFeatureAndScreen, SENTRY_FEATURES, clearFeatureContext } from '@/lib/sentry';
 
@@ -35,13 +35,13 @@ const C = INCOGNITO_COLORS;
 const MIN_PHOTOS_REQUIRED = 2;
 
 // Phase-2 Back Navigation Constants
-const PHASE2_HOME_ROUTE = '/(main)/(private)/(tabs)/desire-land';
+const PHASE2_HOME_ROUTE = '/(main)/(private)/(tabs)/deep-connect';
 const PHASE1_DISCOVER_ROUTE = '/(main)/(tabs)/home';
 
 // Phase-2 tab root screens (BackGuard ONLY intercepts on these)
 // Nested screens (chat detail, etc.) use normal back behavior
 const PHASE2_TAB_ROOTS = new Set([
-  'desire-land',
+  'deep-connect',
   'chats',
   'chat-rooms',
   'truth-or-dare',
@@ -57,10 +57,8 @@ export default function PrivateLayout() {
   const router = useRouter();
   const pathname = usePathname();
   const segments = useSegments();
-  const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
-  // B1 FIX: Need hasHydrated early for phantom "/" normalization effect
   const hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
 
   // ══════════════════════════════════════════════════════════════════════════════
@@ -80,6 +78,7 @@ export default function PrivateLayout() {
     _privateLayoutMountTime = Date.now();
     if (__DEV__) {
       console.log('[PERF] PrivateLayout mounted', { t: _privateLayoutMountTime });
+      console.log('[DEEPCONNECT_SHELL_MOUNT]');
       // P0 ISOLATION DEBUG: Log when PrivateLayout mounts - should NEVER happen from Phase-1 Discover
       console.log('[P2_LAYOUT_MOUNT] PrivateLayout mounted', {
         pathname,
@@ -103,16 +102,8 @@ export default function PrivateLayout() {
   // CRASH FIX: Proper mount lifecycle tracking
   const didRedirectRef = useRef(false);
   const mountedRef = useRef(false);
-
-  // B1 FIX: Track phantom "/" normalization state to show loading UI
-  const [isNormalizingRoot, setIsNormalizingRoot] = useState(false);
-  // PA-001 FIX: Single timeout ref for fallback (removed retryTimeoutRef to eliminate race)
-  const normalizationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // PA-001 FIX: Single navigation guard - tracks both trigger AND completion
-  const didNormalizeRef = useRef(false);
-
-  // B1.1 FIX: Add router readiness check
-  const rootNavState = useRootNavigationState();
+  /** DEV: first renders only — verify pathname no longer sticks on "/" */
+  const p2PathTraceRenderRef = useRef(0);
 
   // CRASH FIX: Track mount lifecycle
   useEffect(() => {
@@ -158,57 +149,6 @@ export default function PrivateLayout() {
 
     if (!hasHydrated) return;
   }, [userId, hasHydrated, router, isInPhase2]);
-
-  // 🚨 CRITICAL: Collapse phantom "/" route inside Phase-2
-  // Expo Router creates an implicit "/" entry before the real Phase-2 home.
-  // This causes double back gestures. Normalize immediately to desire-land.
-  // PA-001 FIX: Simplified to single deterministic path - eliminates race conditions
-  useEffect(() => {
-    // Wait for all preconditions before normalizing
-    if (!hasHydrated) return;
-    if (!mountedRef.current) return;
-    if (!rootNavState?.key) return;
-
-    const segmentStrings = segments as string[];
-    const isPhantomRoot = pathname === '/' && segmentStrings.includes('(private)');
-    if (!isPhantomRoot) return;
-
-    // PA-001 FIX: Single guard prevents all redundant triggers
-    if (didNormalizeRef.current) return;
-    didNormalizeRef.current = true;
-    setIsNormalizingRoot(true);
-
-    // PA-001 FIX: Attempt immediate navigation (synchronous within effect)
-    try {
-      router.replace(PHASE2_HOME_ROUTE);
-      setIsNormalizingRoot(false);
-      if (__DEV__) console.log('[PrivateLayout] Phantom "/" normalized to Phase-2 home');
-      return; // Success - no fallback needed
-    } catch (error) {
-      if (__DEV__) console.error('[PrivateLayout] Immediate normalization failed:', error);
-      // Fall through to timeout fallback
-    }
-
-    // PA-001 FIX: Single fallback timeout (2s) - only runs if immediate navigation threw
-    normalizationTimeoutRef.current = setTimeout(() => {
-      if (!mountedRef.current) return;
-      setIsNormalizingRoot(false);
-      if (__DEV__) console.warn('[PrivateLayout] Normalization fallback - exiting to Phase-1');
-      try {
-        router.replace(PHASE1_DISCOVER_ROUTE);
-      } catch (fallbackError) {
-        if (__DEV__) console.error('[PrivateLayout] Fallback navigation failed:', fallbackError);
-      }
-    }, 2000);
-
-    // PA-001 FIX: Guaranteed cleanup on unmount
-    return () => {
-      if (normalizationTimeoutRef.current) {
-        clearTimeout(normalizationTimeoutRef.current);
-        normalizationTimeoutRef.current = null;
-      }
-    };
-  }, [pathname, segments, router, hasHydrated, rootNavState]);
 
   // REMOVED: Phase 2 isolation toggle (setPhase2Active)
   // This was causing infinite loops when navigating to shared routes.
@@ -260,15 +200,6 @@ export default function PrivateLayout() {
     const unsub = navigation.addListener('beforeRemove', (e: any) => {
       if (isExitingRef.current) return; // prevent loop
 
-      // Allow internal normalization navigation
-      if (isNormalizingRoot) return;
-
-      // Allow phantom root normalization
-      const segmentStrings = segments as string[];
-      if (pathname === '/' && segmentStrings.includes('(private)')) {
-        return;
-      }
-
       // ═══════════════════════════════════════════════════════════════════════════
       // KEY FIX: Only intercept POP actions (back gestures/buttons)
       // Allow PUSH/REPLACE actions to proceed - these are legitimate forward navigation
@@ -288,7 +219,7 @@ export default function PrivateLayout() {
       exitToHome();
     });
     return unsub;
-  }, [navigation, router, isNormalizingRoot, pathname, segments]);
+  }, [navigation, router, pathname, segments]);
 
   // B3.2 FIX: Reset exit guard ONLY after we've actually left Private layout
   // Uses phaseMode for clean decision (not manual segment check)
@@ -310,8 +241,8 @@ export default function PrivateLayout() {
   //    Nested screens (chat detail, modals, etc.) use normal back behavior.
   //
   //    Tab root behavior:
-  //    - From any Phase-2 tab root (except desire-land) → go to desire-land
-  //    - From desire-land → go to Phase-1 Discover
+    //    - From any Phase-2 tab root (except deep-connect) → go to deep-connect
+    //    - From deep-connect → go to Phase-1 Discover
   //
   //    PHASE GUARD: Only registers handler when actually in Phase 2
   useEffect(() => {
@@ -343,7 +274,7 @@ export default function PrivateLayout() {
       }
 
       // Determine target based on current tab root
-      const isOnPhase2Home = lastSegment === 'desire-land';
+      const isOnPhase2Home = lastSegment === 'deep-connect';
       const targetRoute = isOnPhase2Home ? PHASE1_DISCOVER_ROUTE : PHASE2_HOME_ROUTE;
 
       // Prevent redundant navigation to same route
@@ -372,17 +303,15 @@ export default function PrivateLayout() {
   // B1.1 FIX: Move ALL hooks before any conditional returns to fix "Rendered fewer hooks" error
   const isSetupComplete = usePrivateProfileStore((s) => s.isSetupComplete);
   const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
-  // B1 FIX: hasHydrated moved to top of component (line 49) for use in normalization effect
-
   // NOTE: Nav lock reset is handled ONLY by explicit exit actions (X button in onboarding)
   // No automatic segment-based or focus-based reset here to prevent double-entry bugs
 
-  // BLOCKED: getCurrentOnboardingProfile doesn't exist - skip query
-  // const convexPrivateProfile = useQuery(
-  //   api.privateProfiles.getCurrentOnboardingProfile,
-  //   !isDemoMode && token ? { token } : 'skip'
-  // );
-  const convexPrivateProfile = null; // Blocked until backend is implemented
+  // ST-001 FIX: Fetch private profile for hydration (same pattern as onboarding layout)
+  // This ensures user preferences (intentKeys, etc.) persist after app restart
+  const convexPrivateProfile = useQuery(
+    api.privateProfiles.getByAuthUserId,
+    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+  );
 
   // Query Phase-1 onboarding status from backend
   const phase1OnboardingStatus = useQuery(
@@ -416,6 +345,22 @@ export default function PrivateLayout() {
     // Hydrate store with Convex profile (or null if no profile)
     hydrateFromConvex(convexPrivateProfile);
   }, [convexPrivateProfile, hydrateFromConvex, isInPhase2]);
+
+  // Mirror userPrivateProfiles.privateIntentKeys → filterStore so Deep Connect uses same source as backend
+  useEffect(() => {
+    if (!isInPhase2 || isDemoMode) return;
+    if (convexPrivateProfile === undefined || convexPrivateProfile === null) return;
+    const valid = PRIVATE_INTENT_CATEGORIES.map((c) => c.key);
+    const cleaned = (convexPrivateProfile.privateIntentKeys ?? []).filter((k) => valid.includes(k));
+    const prev = useFilterStore.getState().privateIntentKeys;
+    const isSame =
+      prev.length === cleaned.length && prev.every((v, i) => v === cleaned[i]);
+    if (isSame) return;
+    useFilterStore.getState().setPrivateIntentKeys(cleaned);
+    if (__DEV__) {
+      console.log('[P2_PREF_FILTER_SYNC]', { privateIntentKeys: cleaned });
+    }
+  }, [isInPhase2, isDemoMode, convexPrivateProfile]);
 
   // B1.1 FIX: Compute onboarding state BEFORE any returns (was after early returns before)
   // Check if Phase-2 onboarding has been completed (permanent flag)
@@ -526,23 +471,20 @@ export default function PrivateLayout() {
   }, [onboardingComplete, hasHydrated, router, phase1OnboardingStatus, isInPhase2, phase2OnboardingCompleted]);
 
   if (!hasHydrated) {
-    return (
-      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
-        <ActivityIndicator size="large" color={C.primary} />
-      </View>
-    );
+    if (__DEV__) console.log('[DEEPCONNECT_GATE_PENDING] hydration');
   }
 
-  // B3.4 FIX: For phantom "/" normalization, render null (no spinner flash)
-  // This reduces the visible loading flash during Phase-2 entry
-  if (isNormalizingRoot) {
-    return null;
-  }
-
-  // B1.1 FIX: FLASH FIX - Render null while redirecting to avoid visual flash
-  // The tab press handler routes directly to onboarding, so this is just a safety net
   if (!onboardingComplete) {
-    return null;
+    if (__DEV__) console.log('[DEEPCONNECT_GATE_PENDING] onboarding incomplete');
+  }
+
+  p2PathTraceRenderRef.current += 1;
+  if (__DEV__ && p2PathTraceRenderRef.current <= 5) {
+    console.log('[P2_LAYOUT_PATH_TRACE]', {
+      pathname,
+      segments: segmentStrings,
+      renderCount: p2PathTraceRenderRef.current,
+    });
   }
 
   return (

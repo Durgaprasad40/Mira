@@ -54,10 +54,16 @@ export default function DiscoveryPreferencesScreen() {
   const { userId } = useAuthStore();
   const convexUserId = userId ? asUserId(userId) : undefined;
 
-  // Fetch current user preferences from Convex (source of truth)
+  // Fetch current user preferences from Convex (source of truth for Phase-1 prefs on users table)
   const currentUser = useQuery(
     api.users.getCurrentUser,
     convexUserId ? { userId: convexUserId } : 'skip'
+  );
+
+  // Phase-2: "What are you looking for" lives on userPrivateProfiles.privateIntentKeys — must load separately
+  const privateProfileDoc = useQuery(
+    api.privateProfiles.getByAuthUserId,
+    !isDemoMode && userId && isPhase2 ? { authUserId: userId } : 'skip'
   );
 
   const {
@@ -84,6 +90,8 @@ export default function DiscoveryPreferencesScreen() {
     _hasHydrated,
   } = useFilterStore();
 
+  const setIntentKeysPrivateStore = usePrivateProfileStore((s) => s.setIntentKeys);
+
   // Theme colors based on phase
   const theme = isPhase2 ? INCOGNITO_COLORS : COLORS;
   const bgColor = isPhase2 ? INCOGNITO_COLORS.background : COLORS.background;
@@ -104,22 +112,45 @@ export default function DiscoveryPreferencesScreen() {
     }
   }, []); // Run once on mount
 
-  // Phase-2 ONLY: Hydrate filterStore.privateIntentKeys from privateProfileStore.intentKeys
-  // This syncs onboarding-selected intents to the Sort By / filter UI
+  // Phase-2 ONLY: If there is no private profile row yet, sync onboarding store → filter (pre-save)
   const phase2OnboardingIntents = usePrivateProfileStore((s) => s.intentKeys);
   useEffect(() => {
-    if (!isPhase2) return;
+    if (!isPhase2 || isDemoMode) return;
+    if (privateProfileDoc === undefined) return; // query still loading
+    if (privateProfileDoc !== null) return; // have a Convex row — server hydration effect owns intents
 
-    // If filterStore has no Phase-2 intents but onboarding has them, sync them
+    // privateProfileDoc === null: no row yet — optional onboarding-store fallback
     if (privateIntentKeys.length === 0 && phase2OnboardingIntents.length > 0) {
-      // Respect max limit when syncing (take first MAX_PHASE2_INTENTS)
       const toSync = phase2OnboardingIntents.slice(0, MAX_PHASE2_INTENTS);
       setPrivateIntentKeys(toSync);
       if (__DEV__) {
-        console.log('[Prefs] Phase-2 hydrated intents from onboarding:', toSync.length);
+        console.log('[Prefs] Phase-2 intents from onboarding store (no profile row yet):', toSync.length);
       }
     }
-  }, [isPhase2, phase2OnboardingIntents, privateIntentKeys.length, setPrivateIntentKeys]);
+  }, [
+    isPhase2,
+    isDemoMode,
+    privateProfileDoc,
+    phase2OnboardingIntents,
+    privateIntentKeys.length,
+    setPrivateIntentKeys,
+  ]);
+
+  // Phase-2: Hydrate filter + privateProfileStore intentKeys from private profile (same field as onboarding saves)
+  useEffect(() => {
+    if (!isPhase2 || isDemoMode) return;
+    if (!privateProfileDoc) return;
+
+    const validPhase2Keys = PRIVATE_INTENT_CATEGORIES.map((c) => c.key);
+    const cleaned = (privateProfileDoc.privateIntentKeys ?? []).filter((k) => validPhase2Keys.includes(k));
+
+    setPrivateIntentKeys(cleaned);
+    setIntentKeysPrivateStore(cleaned as any);
+
+    if (__DEV__) {
+      console.log('[P2_PREF_PREFS_UI]', { privateIntentKeysFromServer: cleaned });
+    }
+  }, [isPhase2, isDemoMode, privateProfileDoc, setPrivateIntentKeys, setIntentKeysPrivateStore]);
 
   // "Looking for" is single-select — selecting replaces previous selection
   const handleLookingForSelect = (genderValue: Gender) => {
@@ -245,6 +276,7 @@ export default function DiscoveryPreferencesScreen() {
   const insets = useSafeAreaInsets();
 
   const updatePreferences = useMutation(api.users.updatePreferences);
+  const updatePrivateProfileFields = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
   const handleSavePreferences = async () => {
     if (!userId || saving) return;
@@ -258,6 +290,12 @@ export default function DiscoveryPreferencesScreen() {
     // Phase-1: Enforce minimum intent selection before saving
     if (!isPhase2 && relationshipIntent.length < MIN_PHASE1_INTENTS) {
       Alert.alert('Selection limit', `Select at least ${MIN_PHASE1_INTENTS}.`);
+      return;
+    }
+
+    // Phase-2: Deep Connect intents live on userPrivateProfiles — same limits as onboarding
+    if (isPhase2 && privateIntentKeys.length < MIN_PHASE2_INTENTS) {
+      Alert.alert('Selection required', `Select at least ${MIN_PHASE2_INTENTS} for what you're looking for.`);
       return;
     }
 
@@ -308,6 +346,30 @@ export default function DiscoveryPreferencesScreen() {
           orientation: orientation,
           sortBy: sortBy,
         });
+
+        // Phase-2: Persist "What are you looking for" to userPrivateProfiles (not users.updatePreferences)
+        if (isPhase2) {
+          const validPhase2Keys = PRIVATE_INTENT_CATEGORIES.map((c) => c.key);
+          const cleanedPrivate = privateIntentKeys.filter((k) => validPhase2Keys.includes(k));
+          if (__DEV__) {
+            console.log('[P2_PREF_SAVE]', { payloadPrivateIntentKeys: cleanedPrivate });
+          }
+          const p2Result = await updatePrivateProfileFields({
+            authUserId: userId,
+            privateIntentKeys: cleanedPrivate,
+          });
+          if (!p2Result?.success) {
+            throw new Error(
+              p2Result?.error === 'profile_not_found'
+                ? 'Private profile not found. Complete Phase-2 setup first.'
+                : 'Could not save Deep Connect preferences.'
+            );
+          }
+          setIntentKeysPrivateStore(cleanedPrivate as any);
+          if (__DEV__) {
+            console.log('[P2_PREF_STORE]', { intentKeysAfterSave: usePrivateProfileStore.getState().intentKeys });
+          }
+        }
       }
 
       Alert.alert('Saved', 'Your preferences have been updated.');

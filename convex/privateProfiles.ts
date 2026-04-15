@@ -278,6 +278,11 @@ export const updateFieldsByAuthId = mutation({
     }
 
     await ctx.db.patch(existing._id, cleanUpdates);
+    if (cleanUpdates.privateIntentKeys !== undefined) {
+      console.log('[P2_PREF_SAVE]', {
+        privateIntentKeys: cleanUpdates.privateIntentKeys as string[],
+      });
+    }
     console.log('[PRIVATE_PROFILE] updateFieldsByAuthId: success');
     return { success: true };
   },
@@ -407,9 +412,21 @@ export const getByAuthUserId = query({
       console.log('[P2_PROFILE_QUERY] getByAuthUserId: no profile found', {
         userId: userId?.substring(0, 8),
       });
+      return null;
     }
 
-    return profile;
+    // Always expose privateIntentKeys to clients (schema-required; normalize if ever missing in a row)
+    const privateIntentKeys = profile.privateIntentKeys ?? [];
+
+    // TEMP: remove after QA — verify Phase-2 intents round-trip
+    console.log('[P2_PREF_BACKEND_READ]', {
+      privateIntentKeys,
+    });
+
+    return {
+      ...profile,
+      privateIntentKeys,
+    };
   },
 });
 
