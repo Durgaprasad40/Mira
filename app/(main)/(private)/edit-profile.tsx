@@ -22,6 +22,7 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
+  Modal,
   Dimensions,
   Alert,
   ActivityIndicator,
@@ -66,6 +67,17 @@ type PersistedProfileUpdates = {
   education?: string | null;
   religion?: string | null;
   hobbies?: string[];
+};
+
+type Phase1FallbackUser = {
+  dateOfBirth?: string;
+  height?: number;
+  weight?: number;
+  smoking?: string;
+  drinking?: string;
+  education?: string;
+  religion?: string;
+  activities?: string[];
 };
 
 function getPrivatePhotosDir(): Directory {
@@ -130,8 +142,9 @@ const GENDER_OPTIONS = [
 // Smoking options
 const SMOKING_OPTIONS = [
   { value: 'never', label: 'Non-smoker' },
-  { value: 'socially', label: 'Socially' },
+  { value: 'sometimes', label: 'Sometimes' },
   { value: 'regularly', label: 'Regularly' },
+  { value: 'trying_to_quit', label: 'Trying to quit' },
 ];
 
 // Drinking options
@@ -139,6 +152,7 @@ const DRINKING_OPTIONS = [
   { value: 'never', label: 'Never' },
   { value: 'socially', label: 'Socially' },
   { value: 'regularly', label: 'Regularly' },
+  { value: 'sober', label: 'Sober' },
 ];
 
 // Education options
@@ -149,21 +163,47 @@ const EDUCATION_OPTIONS = [
   { value: 'bachelors', label: "Bachelor's" },
   { value: 'masters', label: "Master's" },
   { value: 'doctorate', label: 'Doctorate' },
+  { value: 'other', label: 'Other' },
 ];
 
 // Religion options
 const RELIGION_OPTIONS = [
   { value: 'christian', label: 'Christian' },
-  { value: 'catholic', label: 'Catholic' },
   { value: 'muslim', label: 'Muslim' },
   { value: 'jewish', label: 'Jewish' },
   { value: 'hindu', label: 'Hindu' },
   { value: 'buddhist', label: 'Buddhist' },
+  { value: 'sikh', label: 'Sikh' },
   { value: 'spiritual', label: 'Spiritual' },
   { value: 'agnostic', label: 'Agnostic' },
   { value: 'atheist', label: 'Atheist' },
   { value: 'other', label: 'Other' },
+  { value: 'prefer_not_to_say', label: 'Prefer not to say' },
 ];
+
+function canonicalizeSmoking(value: string | null | undefined): string | null {
+  if (!value) return null;
+  // Legacy mappings
+  if (value === 'socially') return 'sometimes';
+  return value;
+}
+
+function canonicalizeDrinking(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return value;
+}
+
+function canonicalizeEducation(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return value;
+}
+
+function canonicalizeReligion(value: string | null | undefined): string | null {
+  if (!value) return null;
+  // Legacy mappings
+  if (value === 'catholic') return 'christian';
+  return value;
+}
 
 export default function EditProfileScreen() {
   const router = useRouter();
@@ -177,6 +217,12 @@ export default function EditProfileScreen() {
     api.privateProfiles.getByAuthUserId,
     !isDemoMode && userId ? { authUserId: userId } : 'skip'
   );
+  // Phase-1 fallback source for old Phase-2 profiles (read-only)
+  const currentUser = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId } : 'skip'
+  );
+  const phase1User = currentUser as unknown as Phase1FallbackUser | undefined;
   const isSignedOut = !isDemoMode && !userId;
   const isBackendLoading = !isDemoMode && !!userId && backendProfile === undefined;
   const isMissingBackendProfile = !isDemoMode && !!userId && backendProfile === null;
@@ -188,6 +234,8 @@ export default function EditProfileScreen() {
   const cleanupPendingUpload = useMutation(api.photos.cleanupPendingUpload);
   const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
   const updatePhotoBlurSlots = useMutation(api.privateProfiles.updatePhotoBlurSlots);
+  const updateDisplayName = useMutation(api.privateProfiles.updateDisplayNameByAuthId);
+  const syncFromMainProfile = useMutation(api.privateProfiles.syncFromMainProfile);
 
   // Store data
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
@@ -236,7 +284,7 @@ export default function EditProfileScreen() {
     if (pendingPhotoUrls !== null) {
       return pendingPhotoUrls;
     }
-    return backendProfile.privatePhotoUrls ?? [];
+    return (backendProfile?.privatePhotoUrls ?? []) as string[];
   }, [isDemoMode, backendProfile, selectedPhotoUrls, pendingPhotoUrls]);
 
   useEffect(() => {
@@ -256,12 +304,35 @@ export default function EditProfileScreen() {
     return storeDisplayName || 'Anonymous';
   }, [backendProfile?.displayName, storeDisplayName]);
 
-  const age = useMemo(() => {
-    if (!isDemoMode && backendProfile?.age) {
-      return backendProfile.age;
+  const displayNameEditCount = useMemo(() => {
+    if (isDemoMode) return 0;
+    // Backward compatible: treat missing as 0
+    const count = (backendProfile as any)?.displayNameEditCount;
+    return typeof count === 'number' && Number.isFinite(count) ? count : 0;
+  }, [backendProfile, isDemoMode]);
+  const remainingDisplayNameChanges = Math.max(0, 3 - displayNameEditCount);
+  const isDisplayNameLocked = remainingDisplayNameChanges <= 0;
+
+  const [isEditingNickname, setIsEditingNickname] = useState(false);
+  const [draftNickname, setDraftNickname] = useState('');
+  const [nicknameError, setNicknameError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Keep draft in sync when not actively editing.
+    if (!isEditingNickname) {
+      setDraftNickname(displayName || '');
+      setNicknameError(null);
     }
-    return storeAge || 0;
-  }, [backendProfile?.age, storeAge]);
+  }, [displayName, isEditingNickname]);
+
+  // Backend is the only source of truth for age
+  // Self-healing mutations will fix invalid ages (age=0)
+  const age = useMemo(() => {
+    if (isDemoMode) {
+      return storeAge || 0;
+    }
+    return backendProfile?.age || 0;
+  }, [isDemoMode, backendProfile?.age, storeAge]);
 
   const gender = useMemo(() => {
     if (!isDemoMode && backendProfile?.gender) {
@@ -275,43 +346,55 @@ export default function EditProfileScreen() {
     if (!isDemoMode && backendProfile?.height !== undefined) {
       return backendProfile.height;
     }
-    return storeHeight;
-  }, [backendProfile?.height, storeHeight]);
+    if (storeHeight !== null) return storeHeight;
+    const fallback = phase1User?.height;
+    return fallback ?? null;
+  }, [backendProfile?.height, storeHeight, phase1User?.height]);
 
   const weight = useMemo(() => {
     if (!isDemoMode && backendProfile?.weight !== undefined) {
       return backendProfile.weight;
     }
-    return storeWeight;
-  }, [backendProfile?.weight, storeWeight]);
+    if (storeWeight !== null) return storeWeight;
+    const fallback = phase1User?.weight;
+    return fallback ?? null;
+  }, [backendProfile?.weight, storeWeight, phase1User?.weight]);
 
   const smoking = useMemo(() => {
     if (!isDemoMode && backendProfile?.smoking !== undefined) {
-      return backendProfile.smoking ?? null;
+      return canonicalizeSmoking(backendProfile.smoking ?? null);
     }
-    return storeSmoking;
-  }, [backendProfile?.smoking, storeSmoking]);
+    if (storeSmoking !== null) return storeSmoking;
+    const fallback = phase1User?.smoking;
+    return canonicalizeSmoking(fallback ?? null);
+  }, [backendProfile?.smoking, storeSmoking, phase1User?.smoking]);
 
   const drinking = useMemo(() => {
     if (!isDemoMode && backendProfile?.drinking !== undefined) {
-      return backendProfile.drinking ?? null;
+      return canonicalizeDrinking(backendProfile.drinking ?? null);
     }
-    return storeDrinking;
-  }, [backendProfile?.drinking, storeDrinking]);
+    if (storeDrinking !== null) return storeDrinking;
+    const fallback = phase1User?.drinking;
+    return canonicalizeDrinking(fallback ?? null);
+  }, [backendProfile?.drinking, storeDrinking, phase1User?.drinking]);
 
   const education = useMemo(() => {
     if (!isDemoMode && backendProfile?.education !== undefined) {
-      return backendProfile.education ?? null;
+      return canonicalizeEducation(backendProfile.education ?? null);
     }
-    return storeEducation;
-  }, [backendProfile?.education, storeEducation]);
+    if (storeEducation !== null) return storeEducation;
+    const fallback = phase1User?.education;
+    return canonicalizeEducation(fallback ?? null);
+  }, [backendProfile?.education, storeEducation, phase1User?.education]);
 
   const religion = useMemo(() => {
     if (!isDemoMode && backendProfile?.religion !== undefined) {
-      return backendProfile.religion ?? null;
+      return canonicalizeReligion(backendProfile.religion ?? null);
     }
-    return storeReligion;
-  }, [backendProfile?.religion, storeReligion]);
+    if (storeReligion !== null) return storeReligion;
+    const fallback = phase1User?.religion;
+    return canonicalizeReligion(fallback ?? null);
+  }, [backendProfile?.religion, storeReligion, phase1User?.religion]);
 
   const hobbies = useMemo(() => {
     if (!isDemoMode && backendProfile?.hobbies) {
@@ -361,10 +444,10 @@ export default function EditProfileScreen() {
     if (!detailsInitialized && (backendProfile !== undefined || isDemoMode)) {
       setLocalHeight(height ?? null);
       setLocalWeight(weight ?? null);
-      setLocalSmoking(smoking ?? null);
-      setLocalDrinking(drinking ?? null);
-      setLocalEducation(education ?? null);
-      setLocalReligion(religion ?? null);
+      setLocalSmoking(canonicalizeSmoking(smoking ?? null));
+      setLocalDrinking(canonicalizeDrinking(drinking ?? null));
+      setLocalEducation(canonicalizeEducation(education ?? null));
+      setLocalReligion(canonicalizeReligion(religion ?? null));
       setLocalHobbies(hobbies || []);
       setDetailsInitialized(true);
     }
@@ -373,11 +456,93 @@ export default function EditProfileScreen() {
   // Local state
   const [addingSlotIndex, setAddingSlotIndex] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSyncingDetails, setIsSyncingDetails] = useState(false);
   // NOTE: saveSuccess state removed - we now navigate back on success instead
   const [promptsExpanded, setPromptsExpanded] = useState(false);
   const [editingBio, setEditingBio] = useState(false);
   const [draftBio, setDraftBio] = useState(resolvedPrivateBio);
   const [missingPhotos, setMissingPhotos] = useState<Set<string>>(new Set());
+  const [photoPreviewIndex, setPhotoPreviewIndex] = useState<number | null>(null);
+
+  const handleSyncDetails = useCallback(() => {
+    if (isDemoMode) return;
+    if (!userId) return;
+    if (isSyncingDetails) return;
+
+    Alert.alert(
+      'Sync details from main profile?',
+      "This will update your private profile details from your main profile. Your photos, nickname, bio, prompts, relationship intent, age, and gender will not change.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sync',
+          style: 'default',
+          onPress: async () => {
+            try {
+              setIsSyncingDetails(true);
+              const res = await syncFromMainProfile({ authUserId: userId });
+              if (!res?.success) {
+                const err = (res as any)?.error;
+                if (err === 'user_not_found') {
+                  Alert.alert('Could not sync details', 'We could not find your main profile. Please try again.');
+                } else if (err === 'profile_not_found') {
+                  Alert.alert('Could not sync details', 'We could not find your private profile. Please try again.');
+                } else {
+                  Alert.alert('Could not sync details', 'Please try again.');
+                }
+                return;
+              }
+
+              // Update local + store state to immediately reflect synced values (backend will also update).
+              const nextHeight = (phase1User as any)?.height ?? null;
+              const nextWeight = (phase1User as any)?.weight ?? null;
+              const nextSmoking = canonicalizeSmoking((phase1User as any)?.smoking ?? null);
+              const nextDrinking = canonicalizeDrinking((phase1User as any)?.drinking ?? null);
+              const nextEducation = canonicalizeEducation((phase1User as any)?.education ?? null);
+              const nextReligion = canonicalizeReligion((phase1User as any)?.religion ?? null);
+              const nextHobbies = ((phase1User as any)?.activities ?? []) as string[];
+
+              setLocalHeight(nextHeight);
+              setLocalWeight(nextWeight);
+              setLocalSmoking(nextSmoking);
+              setLocalDrinking(nextDrinking);
+              setLocalEducation(nextEducation);
+              setLocalReligion(nextReligion);
+              setLocalHobbies(nextHobbies);
+
+              setHeight(nextHeight);
+              setWeight(nextWeight);
+              setSmoking(nextSmoking);
+              setDrinking(nextDrinking);
+              setEducation(nextEducation);
+              setReligion(nextReligion);
+              setHobbies(nextHobbies);
+
+              setDetailsInitialized(true);
+              Alert.alert('Success', 'Details synced from your main profile.');
+            } catch {
+              Alert.alert('Could not sync details', 'Please try again.');
+            } finally {
+              setIsSyncingDetails(false);
+            }
+          },
+        },
+      ]
+    );
+  }, [
+    isDemoMode,
+    userId,
+    isSyncingDetails,
+    syncFromMainProfile,
+    phase1User,
+    setHeight,
+    setWeight,
+    setSmoking,
+    setDrinking,
+    setEducation,
+    setReligion,
+    setHobbies,
+  ]);
 
   // Track mount state
   const mountedRef = useRef(true);
@@ -609,6 +774,19 @@ export default function EditProfileScreen() {
       if (mountedRef.current) setAddingSlotIndex(null);
     }
   };
+
+  const handleOpenPhotoPreview = useCallback(
+    (slotIndex: number) => {
+      const uri = photoSlots[slotIndex];
+      if (!uri) return;
+      setPhotoPreviewIndex(slotIndex);
+    },
+    [photoSlots]
+  );
+
+  const handleClosePhotoPreview = useCallback(() => {
+    setPhotoPreviewIndex(null);
+  }, []);
 
   // Remove photo
   const handleRemovePhoto = async (index: number) => {
@@ -878,6 +1056,74 @@ export default function EditProfileScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
+      <Modal
+        visible={photoPreviewIndex !== null}
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={handleClosePhotoPreview}
+      >
+        <View style={styles.previewFullScreen}>
+          {/* Photo Container */}
+          <View style={styles.previewImageContainer}>
+            <Image
+              source={{ uri: photoPreviewIndex !== null ? (photoSlots[photoPreviewIndex] as string) : '' }}
+              style={styles.previewImage}
+              contentFit="contain"
+              transition={200}
+            />
+          </View>
+
+          {/* Floating Action Buttons - Phase-1 style */}
+          <View style={[styles.previewButtonsRow, { paddingBottom: Math.max(insets.bottom, 20) + 12 }]}>
+            {/* Delete */}
+            <TouchableOpacity
+              style={styles.previewFloatingButton}
+              onPress={async () => {
+                if (photoPreviewIndex === null) return;
+                const idx = photoPreviewIndex;
+                handleClosePhotoPreview();
+                await handleRemovePhoto(idx);
+              }}
+              activeOpacity={0.8}
+            >
+              <View style={[styles.previewButtonCircle, styles.previewButtonDanger]}>
+                <Ionicons name="trash-outline" size={26} color="#FFFFFF" />
+              </View>
+              <Text style={[styles.previewButtonLabel, styles.previewButtonLabelDanger]}>Delete</Text>
+            </TouchableOpacity>
+
+            {/* Replace */}
+            <TouchableOpacity
+              style={styles.previewFloatingButton}
+              onPress={async () => {
+                if (photoPreviewIndex === null) return;
+                const idx = photoPreviewIndex;
+                handleClosePhotoPreview();
+                await handleAddPhoto(idx);
+              }}
+              activeOpacity={0.8}
+            >
+              <View style={styles.previewButtonCircle}>
+                <Ionicons name="refresh-outline" size={26} color="#FFFFFF" />
+              </View>
+              <Text style={styles.previewButtonLabel}>Replace</Text>
+            </TouchableOpacity>
+
+            {/* Cancel */}
+            <TouchableOpacity
+              style={styles.previewFloatingButton}
+              onPress={handleClosePhotoPreview}
+              activeOpacity={0.8}
+            >
+              <View style={styles.previewButtonCircle}>
+                <Ionicons name="close" size={26} color="#FFFFFF" />
+              </View>
+              <Text style={styles.previewButtonLabel}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -902,7 +1148,7 @@ export default function EditProfileScreen() {
           keyboardShouldPersistTaps="handled"
         >
           {/* ────────────────────────────────────────────────────────────── */}
-          {/* SECTION 1: BASIC INFO (Read-only - set during onboarding) */}
+          {/* SECTION 1: BASIC INFO */}
           {/* ────────────────────────────────────────────────────────────── */}
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
@@ -917,9 +1163,125 @@ export default function EditProfileScreen() {
               <View style={styles.infoRow}>
                 <Text style={styles.infoLabel}>Nickname</Text>
                 <View style={styles.lockedValueRow}>
-                  <Text style={styles.infoValue}>{displayName || 'Anonymous'}</Text>
+                  {isEditingNickname ? (
+                    <TextInput
+                      style={[styles.nicknameInput, isDisplayNameLocked && styles.nicknameInputDisabled]}
+                      value={draftNickname}
+                      onChangeText={(t) => {
+                        setDraftNickname(t);
+                        if (nicknameError) setNicknameError(null);
+                      }}
+                      editable={!isDisplayNameLocked}
+                      placeholder="Enter a nickname"
+                      placeholderTextColor={C.textLight}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      maxLength={20}
+                      returnKeyType="done"
+                      onSubmitEditing={async () => {
+                        // Trigger save via the same handler as the Save button
+                        // (no auto-save on keystroke)
+                        if (!userId || isDemoMode || isDisplayNameLocked) return;
+                        const next = draftNickname.trim();
+                        if (next.length === 0) {
+                          setNicknameError('Nickname cannot be empty.');
+                          return;
+                        }
+                        if (next === (displayName || '').trim()) {
+                          setIsEditingNickname(false);
+                          return;
+                        }
+                        try {
+                          const res = await updateDisplayName({ authUserId: userId, displayName: next });
+                          if (!res?.success) {
+                            if ((res as any)?.error === 'Nickname change limit reached') {
+                              setNicknameError('Nickname is now locked.');
+                            } else {
+                              setNicknameError('Could not update nickname. Please try again.');
+                            }
+                            return;
+                          }
+                          // Close editor; backendProfile will refresh via query.
+                          setIsEditingNickname(false);
+                        } catch {
+                          setNicknameError('Could not update nickname. Please try again.');
+                        }
+                      }}
+                    />
+                  ) : (
+                    <Text style={styles.infoValue}>{displayName || 'Anonymous'}</Text>
+                  )}
                 </View>
               </View>
+              <View style={styles.nicknameMetaRow}>
+                <Text style={styles.nicknameMetaText}>
+                  {isDisplayNameLocked
+                    ? 'Nickname is now locked'
+                    : `${remainingDisplayNameChanges} ${remainingDisplayNameChanges === 1 ? 'change' : 'changes'} remaining`}
+                </Text>
+                {!isEditingNickname ? (
+                  <TouchableOpacity
+                    onPress={() => {
+                      if (isDisplayNameLocked) return;
+                      setIsEditingNickname(true);
+                    }}
+                    disabled={isDisplayNameLocked}
+                    activeOpacity={0.7}
+                    style={[styles.nicknameEditBtn, isDisplayNameLocked && styles.nicknameEditBtnDisabled]}
+                  >
+                    <Text style={styles.nicknameEditBtnText}>Edit</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <View style={styles.nicknameEditActions}>
+                    <TouchableOpacity
+                      onPress={() => {
+                        setIsEditingNickname(false);
+                        setDraftNickname(displayName || '');
+                        setNicknameError(null);
+                      }}
+                      activeOpacity={0.7}
+                      style={styles.nicknameActionBtn}
+                    >
+                      <Text style={styles.nicknameActionText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={async () => {
+                        if (!userId || isDemoMode || isDisplayNameLocked) return;
+                        const next = draftNickname.trim();
+                        if (next.length === 0) {
+                          setNicknameError('Nickname cannot be empty.');
+                          return;
+                        }
+                        if (next === (displayName || '').trim()) {
+                          setIsEditingNickname(false);
+                          return;
+                        }
+                        try {
+                          const res = await updateDisplayName({ authUserId: userId, displayName: next });
+                          if (!res?.success) {
+                            if ((res as any)?.error === 'Nickname change limit reached') {
+                              setNicknameError('Nickname is now locked.');
+                            } else {
+                              setNicknameError('Could not update nickname. Please try again.');
+                            }
+                            return;
+                          }
+                          setIsEditingNickname(false);
+                        } catch {
+                          setNicknameError('Could not update nickname. Please try again.');
+                        }
+                      }}
+                      activeOpacity={0.7}
+                      style={styles.nicknameActionBtnPrimary}
+                    >
+                      <Text style={styles.nicknameActionTextPrimary}>Save</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+              {nicknameError ? (
+                <Text style={styles.nicknameErrorText}>{nicknameError}</Text>
+              ) : null}
 
               <View style={styles.infoRow}>
                 <Text style={styles.infoLabel}>Age</Text>
@@ -982,17 +1344,23 @@ export default function EditProfileScreen() {
 
                   return (
                     <View key={`slot-${slotIndex}`} style={styles.photoSlot}>
-                      <Image
-                        source={{ uri }}
-                        style={styles.photoImage}
-                        contentFit="cover"
-                        blurRadius={isPhotoBlurred ? 8 : 0}
-                        transition={200}
-                      />
+                      <TouchableOpacity
+                        style={StyleSheet.absoluteFill}
+                        onPress={() => handleOpenPhotoPreview(slotIndex)}
+                        activeOpacity={0.9}
+                      >
+                        <Image
+                          source={{ uri }}
+                          style={styles.photoImage}
+                          contentFit="cover"
+                          blurRadius={isPhotoBlurred ? 8 : 0}
+                          transition={200}
+                        />
+                      </TouchableOpacity>
 
                       {/* Star indicator: filled = current main, outline = tap to make main */}
                       {isMain ? (
-                        <View style={styles.mainBadge}>
+                        <View style={styles.mainBadge} pointerEvents="none">
                           <Ionicons name="star" size={12} color="#FFD700" />
                         </View>
                       ) : (
@@ -1019,13 +1387,6 @@ export default function EditProfileScreen() {
                         </TouchableOpacity>
                       )}
 
-                      <TouchableOpacity
-                        style={styles.removeBtn}
-                        onPress={() => handleRemovePhoto(slotIndex)}
-                        activeOpacity={0.7}
-                      >
-                        <Ionicons name="close" size={14} color="#FF6B6B" />
-                      </TouchableOpacity>
                     </View>
                   );
                 }
@@ -1209,7 +1570,24 @@ export default function EditProfileScreen() {
           {/* SECTION 6: DETAILS */}
           {/* ────────────────────────────────────────────────────────────── */}
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Details</Text>
+            <View style={styles.sectionHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sectionTitle}>Details</Text>
+                <Text style={styles.detailsHelperText}>From your main profile</Text>
+              </View>
+              <TouchableOpacity
+                onPress={handleSyncDetails}
+                disabled={isDemoMode || isSyncingDetails}
+                activeOpacity={0.7}
+                style={[styles.syncDetailsBtn, (isDemoMode || isSyncingDetails) && styles.syncDetailsBtnDisabled]}
+              >
+                {isSyncingDetails ? (
+                  <ActivityIndicator size="small" color={C.primary} />
+                ) : (
+                  <Text style={styles.syncDetailsBtnText}>Sync details from main profile</Text>
+                )}
+              </TouchableOpacity>
+            </View>
 
             {/* Height */}
             <View style={styles.detailRow}>
@@ -1243,7 +1621,7 @@ export default function EditProfileScreen() {
                     );
                   }}
                   keyboardType="number-pad"
-                  placeholder="175"
+                  placeholder="cm"
                   placeholderTextColor={C.textLight}
                   maxLength={3}
                 />
@@ -1277,7 +1655,7 @@ export default function EditProfileScreen() {
                     );
                   }}
                   keyboardType="number-pad"
-                  placeholder="70"
+                  placeholder="kg"
                   placeholderTextColor={C.textLight}
                   maxLength={3}
                 />
@@ -1415,7 +1793,7 @@ export default function EditProfileScreen() {
             </View>
 
             <View style={styles.chipRow}>
-              {ACTIVITY_FILTERS.slice(0, 24).map((activity) => {
+              {ACTIVITY_FILTERS.map((activity) => {
                 const isSelected = localHobbies.includes(activity.value);
                 return (
                   <TouchableOpacity
@@ -1629,6 +2007,86 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: C.text,
   },
+  nicknameInput: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: C.text,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.background,
+    minWidth: 180,
+  },
+  nicknameInputDisabled: {
+    opacity: 0.5,
+  },
+  nicknameMetaRow: {
+    marginTop: -8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  nicknameMetaText: {
+    fontSize: 12,
+    color: C.textLight,
+    fontWeight: '600',
+  },
+  nicknameEditBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: C.accent,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  nicknameEditBtnDisabled: {
+    opacity: 0.5,
+  },
+  nicknameEditBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.text,
+  },
+  nicknameEditActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  nicknameActionBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: C.accent,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  nicknameActionBtnPrimary: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: C.primary,
+    borderWidth: 1,
+    borderColor: C.primary,
+  },
+  nicknameActionText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.text,
+  },
+  nicknameActionTextPrimary: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  nicknameErrorText: {
+    marginTop: 8,
+    fontSize: 12,
+    color: '#E25555',
+    fontWeight: '600',
+  },
   chipRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1675,8 +2133,8 @@ const styles = StyleSheet.create({
   },
   mainBadge: {
     position: 'absolute',
-    top: 6,
-    left: 6,
+    bottom: 6,
+    right: 6,
     width: 24,
     height: 24,
     borderRadius: 12,
@@ -1686,8 +2144,8 @@ const styles = StyleSheet.create({
   },
   setMainBtn: {
     position: 'absolute',
-    top: 6,
-    left: 6,
+    bottom: 6,
+    right: 6,
     width: 24,
     height: 24,
     borderRadius: 12,
@@ -1709,16 +2167,72 @@ const styles = StyleSheet.create({
   blurBtnActive: {
     backgroundColor: C.primary,
   },
-  removeBtn: {
+  previewBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  previewCard: {
+    width: '100%',
+    maxWidth: 520,
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  // Phase-1 style photo preview (full screen + floating circular actions)
+  previewFullScreen: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  previewImageContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  previewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  previewButtonsRow: {
     position: 'absolute',
-    top: 6,
-    right: 6,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,107,107,0.3)',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    gap: 32,
+  },
+  previewFloatingButton: {
+    alignItems: 'center',
+  },
+  previewButtonCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(50, 50, 50, 0.9)',
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  previewButtonDanger: {
+    backgroundColor: '#FF6B6B',
+  },
+  previewButtonLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255, 255, 255, 0.85)',
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  previewButtonLabelDanger: {
+    color: '#FF6B6B',
   },
   addSlot: {
     width: PHOTO_SIZE,
@@ -1958,6 +2472,33 @@ const styles = StyleSheet.create({
     marginTop: 10,
     fontSize: 12,
     color: C.textLight,
+  },
+  detailsHelperText: {
+    marginTop: 2,
+    fontSize: 12,
+    color: C.textLight,
+    fontWeight: '500',
+  },
+  syncDetailsBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: C.accent,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 38,
+    maxWidth: 210,
+  },
+  syncDetailsBtnDisabled: {
+    opacity: 0.6,
+  },
+  syncDetailsBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.text,
+    textAlign: 'center',
   },
 
   // Save Button

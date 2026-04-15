@@ -46,6 +46,15 @@ export default function Phase2SelectPhotosScreen() {
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
 
+  // Phase-1 imported fields (persist into Phase-2 skeleton on initial creation)
+  // NOTE: age is NOT passed - backend derives it from users.dateOfBirth
+  const height = usePrivateProfileStore((s) => s.height);
+  const weight = usePrivateProfileStore((s) => s.weight);
+  const smoking = usePrivateProfileStore((s) => s.smoking);
+  const drinking = usePrivateProfileStore((s) => s.drinking);
+  const education = usePrivateProfileStore((s) => s.education);
+  const religion = usePrivateProfileStore((s) => s.religion);
+
   // FIX: Use dedicated saveOnboardingPhotos mutation that handles upsert
   const saveOnboardingPhotos = useMutation(api.privateProfiles.saveOnboardingPhotos);
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
@@ -206,6 +215,13 @@ export default function Phase2SelectPhotosScreen() {
       const result = await saveOnboardingPhotos({
         authUserId: userId,
         privatePhotoUrls: persistedUrls,
+        // age removed - backend derives from users.dateOfBirth
+        height,
+        weight,
+        smoking,
+        drinking,
+        education,
+        religion,
       });
 
       // DEBUG: Log result (remove after verification)
