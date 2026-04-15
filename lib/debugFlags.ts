@@ -63,6 +63,9 @@ export const DEBUG_NOTIFICATIONS = false;
 /** Enable Phase-2 UI debugging (intent, distribution, slots) */
 export const DEBUG_P2_UI = false;
 
+/** Enable verbose Phase-2 Deep Connect FE logs ([PHASE2_DISCOVER_FE], [P2_DATA]) */
+export const DEBUG_PHASE2 = false;
+
 /** Enable Phase-2 profile/action debugging */
 export const DEBUG_P2_PROFILE = false;
 

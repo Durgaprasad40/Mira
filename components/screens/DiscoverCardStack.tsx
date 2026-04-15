@@ -19,14 +19,17 @@ import Animated, {
   withTiming,
   withDelay,
   withSequence,
+  withRepeat,
   interpolate,
   runOnJS,
   Extrapolation,
   FadeIn,
   FadeOut,
+  FadeInUp,
   SlideInDown,
 } from "react-native-reanimated";
 import { BlurView } from "expo-blur";
+import { LinearGradient } from "expo-linear-gradient";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery, useMutation } from "convex/react";
@@ -68,7 +71,7 @@ import { useBatchPresence } from "@/hooks/usePresence";
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
 import * as Haptics from 'expo-haptics';
 import { trackAction, setFeatureAndScreen, SENTRY_FEATURES } from '@/lib/sentry';
-import { DEBUG_DISCOVER_QUEUE, DEBUG_P2_PROFILE } from '@/lib/debugFlags';
+import { DEBUG_DISCOVER_QUEUE, DEBUG_PHASE2 } from '@/lib/debugFlags';
 
 // Type for swipe actions
 type SwipeAction = 'like' | 'pass' | 'super_like';
@@ -105,6 +108,12 @@ const EMPTY_ARRAY: any[] = [];
 const EMPTY_STRING_ARRAY: string[] = [];
 const PREFETCH_HOLD_MS = 1200;
 const PHASE1_LOCATION_FOCUS_REVISIT_GAP_MS = 30 * 1000;
+/** Deep Connect (Phase-2): minimum skeleton smoothing only — empty results show right after this window */
+const DEEP_CONNECT_MIN_SKELETON_MS = 350;
+/** Deep Connect: show “searching” copy under skeleton after this delay (zero profiles) */
+const DEEP_CONNECT_SEARCHING_LABEL_MS = 300;
+/** Deep Connect: fade between skeleton / searching / empty */
+const DEEP_CONNECT_CONTENT_FADE_MS = 250;
 
 // ── Star-burst animation for super-like ──
 const STAR_COUNT = 8;
@@ -332,7 +341,7 @@ export interface DiscoverCardStackProps {
   /**
    * Phase context for match routing:
    * - 'phase1' (default): Match goes to match-celebration → Phase 1 messages
-   * - 'phase2': Match creates Phase 2 private chat (no navigation, stays on Desire Land)
+   * - 'phase2': Match creates Phase 2 private chat (no navigation, stays on Deep Connect)
    */
   mode?: "phase1" | "phase2";
   /** When provided, skip internal Convex query and use these profiles instead (e.g. Explore category). */
@@ -405,7 +414,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }>({ visible: false, matchedProfile: null });
 
   // Read-only: existing conversations count for match reminder (no new queries)
-  const privateConversationsCount = usePrivateChatStore((s) => s.conversations.length);
+  const conversationCount = usePrivateChatStore(
+    useShallow((s) => s.conversations.length),
+  );
 
   // ══════════════════════════════════════════════════════════════════════════
   // PHASE TRANSITION OVERLAY (Phase-2 Entry Experience)
@@ -478,11 +489,28 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
   }, [isPhase2, showWelcomeOverlay, showPhaseTransition]);
 
-  // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
-  const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
-
-  // P1-7 fix: Phase-1 filter preferences (age, gender, distance, sortBy)
-  const { minAge, maxAge, maxDistance, gender: genderFilter, sortBy } = useFilterStore();
+  // Phase-2 + Phase-1: one shallow subscription — avoids full filterStore re-renders
+  const {
+    privateIntentKeys: intentFilters,
+    togglePrivateIntentKey,
+    setPrivateIntentKeys,
+    minAge,
+    maxAge,
+    maxDistance,
+    gender: genderFilter,
+    sortBy,
+  } = useFilterStore(
+    useShallow((s) => ({
+      privateIntentKeys: s.privateIntentKeys,
+      togglePrivateIntentKey: s.togglePrivateIntentKey,
+      setPrivateIntentKeys: s.setPrivateIntentKeys,
+      minAge: s.minAge,
+      maxAge: s.maxAge,
+      maxDistance: s.maxDistance,
+      gender: s.gender,
+      sortBy: s.sortBy,
+    })),
+  );
 
   // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
   const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
@@ -509,6 +537,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // ── Swipe lock: prevents re-entrant swipes while animation + processing is in flight ──
   // Acquired in animateSwipe, released after advanceCard + match logic complete.
   const swipeLockRef = useRef(false);
+  // Deep Connect (Phase-2): lock UI once first stable non-loading state is reached — no skeleton oscillation
+  const hasCommittedRef = useRef(false);
+  const prevDeepConnectContentStateRef = useRef<string | null>(null);
+  const prevDiscoverReadyLogKeyRef = useRef<string | null>(null);
   // LIVE_LOCATION: Prevent duplicate location refresh requests during focus
   const isRefreshingLocationRef = useRef(false);
 
@@ -568,6 +600,26 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       reconciledPhase2SwipeIdsRef.current.clear();
     };
   }, [isPhase2]);
+
+  // Phase-2 Deep Connect: minimum skeleton smoothing window only (no empty-result grace / no extra empty hold)
+  const [p2MinSkeletonDone, setP2MinSkeletonDone] = useState(() => !isPhase2);
+  const [p2SearchingLabelVisible, setP2SearchingLabelVisible] = useState(false);
+
+  useEffect(() => {
+    if (!isPhase2) {
+      hasCommittedRef.current = false;
+    }
+  }, [isPhase2]);
+
+  useEffect(() => {
+    if (!isPhase2 || isDemoMode) {
+      setP2MinSkeletonDone(true);
+      return;
+    }
+    setP2MinSkeletonDone(false);
+    const t = setTimeout(() => setP2MinSkeletonDone(true), DEEP_CONNECT_MIN_SKELETON_MS);
+    return () => clearTimeout(t);
+  }, [isPhase2, isDemoMode, userId]);
 
   // Overlay refs + shared values (no React re-renders during drag)
   const overlayDirectionRef = useRef<"left" | "right" | "up" | null>(null);
@@ -753,9 +805,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   const isAuthReadyForQuery = stableAuthReadyRef.current;
 
-  // FLICKER_FIX: Debug log for auth state stability
+  // FLICKER_FIX: Debug log for auth state stability (Phase-2 only; log when snapshot changes — no per-render spam)
   if (__DEV__ && isPhase2) {
-    console.log('[DISCOVER_READY]', {
+    const readyLogKey = JSON.stringify({
       authReady,
       onboardingCompleted,
       rawAuthReady,
@@ -763,6 +815,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       isAuthReadyForQuery,
       userId: userId?.slice(0, 10) ?? 'null',
     });
+    if (prevDiscoverReadyLogKeyRef.current !== readyLogKey) {
+      prevDiscoverReadyLogKeyRef.current = readyLogKey;
+      console.log('[DISCOVER_READY]', {
+        authReady,
+        onboardingCompleted,
+        rawAuthReady,
+        stableReady: stableAuthReadyRef.current,
+        isAuthReadyForQuery,
+        userId: userId?.slice(0, 10) ?? 'null',
+      });
+    }
   }
 
   // P1-002 FIX: Only pass authUserId and limit - userId was removed from validator
@@ -791,73 +854,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // PERF: For Phase-1, use prefetch-aware variable that provides data during initial query loading
   const convexProfiles = isPhase2 ? phase2Profiles : phase1ProfilesWithPrefetch;
 
-  // FIRST_LOAD_FIX: Track if Phase-2 query has ever returned profiles
-  // This prevents showing empty state when Convex returns cached empty result on first mount
-  // The query subscription will update with real data shortly after
-  const phase2HasEverHadProfilesRef = useRef(false);
-  const phase2FirstQueryTimeRef = useRef<number | null>(null);
-
-  // Track when we first start the query
-  if (isPhase2 && privateDiscoverArgs !== "skip" && phase2FirstQueryTimeRef.current === null) {
-    phase2FirstQueryTimeRef.current = Date.now();
-  }
-
-  // Mark that we've seen profiles
-  if (isPhase2 && phase2Profiles !== undefined && phase2Profiles.length > 0) {
-    phase2HasEverHadProfilesRef.current = true;
-  }
-
-  // Reset the flags when user changes (new session)
+  // Reset Deep Connect content lock when user changes (new session)
   const phase2ProfilesUserRef = useRef<string | null>(null);
   if (userId !== phase2ProfilesUserRef.current) {
     phase2ProfilesUserRef.current = userId;
-    phase2HasEverHadProfilesRef.current = false;
-    phase2FirstQueryTimeRef.current = null;
+    hasCommittedRef.current = false;
+    prevDeepConnectContentStateRef.current = null;
   }
 
-  // FIRST_LOAD_FIX: Grace period for treating empty as loading (max 5 seconds)
-  // After grace period, if still empty, show empty state (user genuinely has no profiles to see)
-  const FIRST_LOAD_GRACE_PERIOD_MS = 5000;
-  const [, forceUpdate] = useState(0);
-  const isWithinGracePeriod = phase2FirstQueryTimeRef.current !== null &&
-    (Date.now() - phase2FirstQueryTimeRef.current) < FIRST_LOAD_GRACE_PERIOD_MS;
+  // P1-003 FIX: Phase-2 — only `undefined` is loading; `[]` is resolved empty (no grace-period fake loading)
+  const isPhase2QueryLoading =
+    isPhase2 && !isDemoMode && privateDiscoverArgs !== "skip" && phase2Profiles === undefined;
 
-  // Force re-render when grace period expires to transition from loading to empty state
-  useEffect(() => {
-    if (!isPhase2 || isDemoMode) return;
-    if (phase2HasEverHadProfilesRef.current) return; // Already have profiles
-    if (phase2Profiles === undefined) return; // Still truly loading
-    if (phase2Profiles?.length > 0) return; // Have profiles now
-
-    // We have empty result and haven't seen profiles - set timeout to force re-render after grace period
-    const remaining = phase2FirstQueryTimeRef.current
-      ? FIRST_LOAD_GRACE_PERIOD_MS - (Date.now() - phase2FirstQueryTimeRef.current)
-      : FIRST_LOAD_GRACE_PERIOD_MS;
-
-    if (remaining <= 0) return; // Already past grace period
-
-    const timer = setTimeout(() => {
-      forceUpdate(n => n + 1);
-    }, remaining + 100); // Small buffer
-
-    return () => clearTimeout(timer);
-  }, [isPhase2, phase2Profiles, isDemoMode]);
-
-  // P1-003 FIX: Track explicit loading state to distinguish undefined (loading) from [] (empty results)
-  // useQuery returns: undefined = still loading, [] = loaded but empty
-  // FIRST_LOAD_FIX: Also treat empty result as "loading" if we've never seen profiles before (within grace period)
-  // This handles the case where Convex returns cached empty array on first mount
-  // EMPTY_PREFETCH_FIX: Simpler logic - if query active but no profiles ever seen, keep loading
-  const isPhase2QueryLoading = isPhase2 && !isDemoMode && privateDiscoverArgs !== "skip" && (
-    phase2Profiles === undefined ||
-    (phase2Profiles?.length === 0 && !phase2HasEverHadProfilesRef.current && isWithinGracePeriod)
-  );
-
-  // EMPTY_PREFETCH_FIX: For Phase-2, ensure convexProfiles is only used if it has data
-  // If Phase-2 query returns empty but we haven't seen profiles, treat as undefined (loading)
-  const effectiveConvexProfiles = isPhase2 && phase2Profiles?.length === 0 && !phase2HasEverHadProfilesRef.current && isWithinGracePeriod
-    ? undefined  // Treat as loading
-    : convexProfiles;
+  const effectiveConvexProfiles = convexProfiles;
 
   const profilesSafe = effectiveConvexProfiles ?? EMPTY_ARRAY;
 
@@ -978,7 +987,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       const withPhotos = profilesSafe.filter((p: any) => p.blurredPhotoUrls?.length > 0).length;
       const withoutPhotos = profilesSafe.filter((p: any) => !p.blurredPhotoUrls?.length).length;
       const incomplete = profilesSafe.filter((p: any) => !p.isSetupComplete).length;
-      if (__DEV__) {
+      if (__DEV__ && DEBUG_PHASE2) {
         console.log('[PHASE2_DISCOVER_FE] Profile stats:', { total: profilesSafe.length, withPhotos, withoutPhotos, incomplete });
       }
 
@@ -987,8 +996,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         const photoUrls = p.blurredPhotoUrls ?? [];
         const photos = photoUrls.map((url: string) => ({ url }));
 
-        // LOG_NOISE_FIX: Gated behind DEBUG_P2_PROFILE
-        if (__DEV__ && DEBUG_P2_PROFILE) {
+        if (__DEV__ && DEBUG_PHASE2) {
           console.log(`[P2_DATA] ${p.displayName}(${p.userId?.slice?.(-6)}) ${photoUrls.length}p`);
         }
 
@@ -1033,7 +1041,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       if (isPhase2) {
         // Phase-2: Allow ALL profiles - ProfileCard will show placeholder for no photos
         // This implements the 90/10 soft matching rule
-        if (__DEV__) {
+        if (__DEV__ && DEBUG_PHASE2) {
           const withPhotos = latestProfiles.filter((p) => p.photos?.length > 0).length;
           const withoutPhotos = latestProfiles.length - withPhotos;
           console.log('[PHASE2_DISCOVER_FE] Soft match: all', latestProfiles.length, 'profiles kept (', withPhotos, 'with photos,', withoutPhotos, 'without)');
@@ -1424,7 +1432,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Phase-1 swipe mutation (shared likes.ts)
   const swipeMutation = useMutation(api.likes.swipe);
   // Phase-2 only: Impression recording for ranking system
-  const recordImpressionsMutation = useMutation(api.privateDiscover.recordDesireLandImpressions);
+  const recordImpressionsMutation = useMutation(api.privateDiscover.recordDeepConnectImpressions);
 
   // Two-pan alternating approach with Reanimated shared values
   const panAX = useSharedValue(0);
@@ -1915,7 +1923,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
           if (shouldMatch) {
             if (isPhase2) {
-              // Phase 2: Create private conversation, NO navigation (stay on Desire Land)
+              // Phase 2: Create private conversation, NO navigation (stay on Deep Connect)
               const isNewMatch = handlePhase2Match({
                 id: swipedProfile.id,
                 name: swipedProfile.name,
@@ -1979,7 +1987,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
         if (isPhase2 && !isDemoMode) {
           resetPosition();
-          Toast.show("Desire Land swipes are temporarily unavailable.");
+          Toast.show("Deep Connect swipes are temporarily unavailable.");
           releaseSwipeLock(activeSwipeId);
           return;
         }
@@ -2039,7 +2047,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         // Guard: check mounted/focused before navigating on match
         if (!mountedRef.current || !isFocusedRef.current) return;
         if (result?.isMatch && !navigatingRef.current) {
-          // DL-001 FIX: Phase-2 matches stay on Desire Land, no navigation
+          // DL-001 FIX: Phase-2 matches stay on Deep Connect, no navigation
           if (isPhase2) {
             const isNewMatch = handlePhase2Match({
               id: swipedProfile.id,
@@ -2351,18 +2359,57 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [standOutResult, acquireSwipeLock, releaseSwipeLock, overlayOpacity, panAY, panBY]);
 
   // Loading state — non-demo only; skip when using external profiles
-  // P1-003 FIX: Include explicit Phase-2 query loading check to prevent false empty state
-  // FIRST_LOAD_FIX: Also show loading when auth is not ready (userId undefined in Phase-2)
-  // This prevents empty state flash on first load when auth hasn't hydrated yet
-  // EMPTY_PREFETCH_FIX: Use effectiveConvexProfiles for Phase-2 to treat empty as loading
-  // AUTH_READY_FIX: Show loading until authReady && onboardingCompleted for Phase-2
+  // P1-003 FIX: Phase-2 uses isPhase2QueryLoading only while useQuery is undefined (resolved [] is not loading)
+  // AUTH_READY_FIX: Show loading when auth is not ready (userId / stable auth gate) in Phase-2
   const isAuthPending = isPhase2 && !isDemoMode && (!userId || !isAuthReadyForQuery);
   const isDiscoverLoading = !isDemoMode && !externalProfiles && (!effectiveConvexProfiles || isPhase2QueryLoading || isAuthPending);
   const isQueueBootstrapping =
     profiles.length > 0 &&
     visibleQueueRef.current.length === 0 &&
     consumedIdsRef.current.size === 0;
-  const showCardSkeleton = (isDiscoverLoading && !usingStableCache) || isQueueBootstrapping;
+
+  // Deep Connect (Phase-2): lock first stable non-loading state — prevents repeated skeleton phases
+  if (isPhase2 && !isDemoMode && !hasCommittedRef.current && !isDiscoverLoading) {
+    hasCommittedRef.current = true;
+  }
+
+  const phase2MinHold = isPhase2 && !isDemoMode && !p2MinSkeletonDone;
+  const loadingDrivesSkeleton =
+    (!hasCommittedRef.current || !isPhase2 || isDemoMode) && (isDiscoverLoading && !usingStableCache);
+
+  const showCardSkeleton =
+    loadingDrivesSkeleton || isQueueBootstrapping || phase2MinHold;
+
+  useEffect(() => {
+    if (!isPhase2 || !showCardSkeleton || profilesSafe.length > 0) {
+      setP2SearchingLabelVisible(false);
+      return;
+    }
+    const id = setTimeout(() => setP2SearchingLabelVisible(true), DEEP_CONNECT_SEARCHING_LABEL_MS);
+    return () => clearTimeout(id);
+  }, [isPhase2, showCardSkeleton, profilesSafe.length]);
+
+  const contentState = useMemo(() => {
+    if (isPhase2) {
+      if (showCardSkeleton) {
+        if (profilesSafe.length === 0 && p2SearchingLabelVisible) return "searching";
+        return "skeleton";
+      }
+      if (profilesSafe.length > 0) return "cards";
+      return "empty";
+    }
+    if (showCardSkeleton) return "skeleton";
+    if (profilesSafe.length > 0) return "cards";
+    return "empty";
+  }, [isPhase2, showCardSkeleton, profilesSafe.length, p2SearchingLabelVisible]);
+
+  if (__DEV__ && isPhase2) {
+    if (contentState !== prevDeepConnectContentStateRef.current) {
+      prevDeepConnectContentStateRef.current = contentState;
+      console.log("[DEEPCONNECT_CONTENT_STATE]", contentState);
+    }
+  }
+
   const notificationPopover = showNotificationPopover ? (
     <NotificationPopover
       visible
@@ -2403,33 +2450,73 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           </View>
         )}
         <View style={[styles.center, { flex: 1 }]}>
-          <Text style={styles.emptyEmoji}>✨</Text>
-          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>We're finding people for you</Text>
-          <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-            {isDemoMode
-              ? "You may have swiped through the demo deck. Try adjusting your preferences."
-              : "New people are joining every day. Try adjusting your preferences to see more."}
-          </Text>
-          {isDemoMode && (
+          {/* Unified empty state for both Phase-1 and Phase-2 */}
+          {isPhase2 ? (
             <>
-              <TouchableOpacity
-                style={[styles.resetButton, { marginTop: 24 }]}
-                onPress={handleResetDemoSwipes}
+              {/* Premium gradient background for Phase-2 */}
+              <LinearGradient
+                colors={['#0F0F1A', '#141428', '#1A1A2E', '#16213E', '#1A1A2E', '#141428', '#0F0F1A']}
+                locations={[0, 0.15, 0.35, 0.5, 0.65, 0.85, 1]}
+                style={StyleSheet.absoluteFill}
+              />
+              {/* Subtle radial glow in center */}
+              <View style={styles.phase2RadialGlow} />
+
+              <Animated.View
+                entering={FadeInUp.duration(400).delay(100).springify().damping(20)}
+                style={styles.phase2EmptyContent}
               >
-                <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                <Text style={styles.resetButtonText}>Reset Demo Swipes</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.secondaryButton, { marginTop: 12 }]}
-                onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
-              >
-                <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
-                <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
-              </TouchableOpacity>
-              <Text style={[styles.tipText, dark && { color: INCOGNITO_COLORS.textLight }]}>
-                Tip: Set distance 200+ km and age 18–60 to see more.
-              </Text>
+                {/* Premium icon with multi-layer glow */}
+                <View style={styles.phase2IconOuter}>
+                  <View style={styles.phase2IconInner}>
+                    <Ionicons name="sparkles" size={36} color="rgba(233, 69, 96, 0.95)" />
+                  </View>
+                </View>
+
+                <Animated.Text
+                  entering={FadeInUp.duration(350).delay(200)}
+                  style={styles.phase2EmptyTitle}
+                >
+                  We're finding people for you
+                </Animated.Text>
+                <Animated.Text
+                  entering={FadeInUp.duration(350).delay(280)}
+                  style={styles.phase2EmptySubtitle}
+                >
+                  Try adjusting your preferences to see more profiles
+                </Animated.Text>
+
+                {isDemoMode && (
+                  <Animated.View entering={FadeIn.duration(300).delay(400)}>
+                    <TouchableOpacity
+                      style={styles.phase2ResetButton}
+                      onPress={handleResetDemoSwipes}
+                    >
+                      <Ionicons name="refresh" size={16} color="rgba(255,255,255,0.9)" style={{ marginRight: 8 }} />
+                      <Text style={styles.phase2ResetButtonText}>Reset Demo</Text>
+                    </TouchableOpacity>
+                  </Animated.View>
+                )}
+              </Animated.View>
             </>
+          ) : (
+            <View style={styles.phase1EmptyContent}>
+              {/* Star icon - light theme */}
+              <Text style={styles.emptyEmoji}>✨</Text>
+              <Text style={styles.emptyTitle}>We're finding people for you</Text>
+              <Text style={styles.emptySubtitle}>
+                Try adjusting your preferences to see more profiles
+              </Text>
+              {isDemoMode && (
+                <TouchableOpacity
+                  style={[styles.resetButton, { marginTop: 28 }]}
+                  onPress={handleResetDemoSwipes}
+                >
+                  <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                  <Text style={styles.resetButtonText}>Reset Demo</Text>
+                </TouchableOpacity>
+              )}
+            </View>
           )}
         </View>
         {notificationPopover}
@@ -2621,16 +2708,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       )}
 
       {/* Match Reminder - Phase-2 only, shows if user has existing Deep Connects */}
-      {isPhase2 && privateConversationsCount > 0 && (
+      {isPhase2 && conversationCount > 0 && (
         <TouchableOpacity
           style={[styles.matchReminderPill, { top: cardTop + 8 }]}
           onPress={() => router.push("/(main)/(private)/(tabs)/chats" as any)}
           activeOpacity={0.6}
         >
           <Text style={styles.matchReminderText}>
-            {privateConversationsCount === 1
+            {conversationCount === 1
               ? "You have a Deep Connect waiting"
-              : `${privateConversationsCount} Deep Connects waiting`}
+              : `${conversationCount} Deep Connects waiting`}
           </Text>
         </TouchableOpacity>
       )}
@@ -2638,7 +2725,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       {/* Card Area (fills between header and tab bar) */}
       <View style={[styles.cardArea, { top: cardTop, bottom: cardBottom }]} pointerEvents="box-none">
         {showCardSkeleton ? (
-          <SkeletonCard dark={dark} includeActions={false} />
+          isPhase2 ? (
+            <View style={styles.phase2SkeletonColumn} pointerEvents="box-none">
+              <SkeletonCard dark={dark} includeActions={false} />
+              {profilesSafe.length === 0 && p2SearchingLabelVisible ? (
+                <Animated.View entering={FadeIn.duration(DEEP_CONNECT_CONTENT_FADE_MS)} style={styles.phase2SearchingLabelWrap}>
+                  <Text style={[styles.phase2SearchingLabel, dark && { color: INCOGNITO_COLORS.textLight }]}>
+                    Looking for people nearby...
+                  </Text>
+                </Animated.View>
+              ) : null}
+            </View>
+          ) : (
+            <SkeletonCard dark={dark} includeActions={false} />
+          )
         ) : (
           <>
             {/* Back card */}
@@ -2999,6 +3099,134 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     paddingHorizontal: 32,
     maxWidth: 320,
+  },
+
+  // Deep Connect (Phase-2): skeleton → searching label → empty (same screen)
+  phase2SkeletonColumn: {
+    flex: 1,
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  phase2SearchingLabelWrap: {
+    marginTop: 20,
+    paddingHorizontal: 28,
+  },
+  phase2SearchingLabel: {
+    fontSize: 16,
+    fontWeight: "500",
+    textAlign: "center",
+    letterSpacing: 0.2,
+    lineHeight: 22,
+  },
+  phase2EmptyContent: {
+    alignItems: "center",
+    width: "100%",
+    maxWidth: 320,
+    paddingHorizontal: 28,
+    zIndex: 2,
+  },
+  // Subtle radial glow overlay for depth
+  phase2RadialGlow: {
+    position: 'absolute',
+    width: 400,
+    height: 400,
+    borderRadius: 200,
+    backgroundColor: 'rgba(233, 69, 96, 0.03)',
+    top: '30%',
+    alignSelf: 'center',
+    shadowColor: '#E94560',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.08,
+    shadowRadius: 120,
+  },
+  // Premium outer glow ring
+  phase2IconOuter: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(233, 69, 96, 0.04)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 32,
+    // Soft outer glow
+    shadowColor: '#E94560',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 40,
+  },
+  // Inner icon container with tighter glow
+  phase2IconInner: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: 'rgba(233, 69, 96, 0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Inner glow
+    shadowColor: '#E94560',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+  },
+  // Premium title typography
+  phase2EmptyTitle: {
+    fontSize: 21,
+    fontWeight: '600',
+    color: 'rgba(255, 255, 255, 0.95)',
+    textAlign: 'center',
+    letterSpacing: 0.3,
+    lineHeight: 28,
+  },
+  // Softer subtitle typography
+  phase2EmptySubtitle: {
+    fontSize: 15,
+    fontWeight: '400',
+    color: 'rgba(255, 255, 255, 0.5)',
+    textAlign: 'center',
+    marginTop: 10,
+    lineHeight: 22,
+    letterSpacing: 0.2,
+  },
+  // Premium reset button (demo only)
+  phase2ResetButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(233, 69, 96, 0.15)',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    marginTop: 32,
+    borderWidth: 1,
+    borderColor: 'rgba(233, 69, 96, 0.2)',
+  },
+  phase2ResetButtonText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: 'rgba(255, 255, 255, 0.85)',
+    letterSpacing: 0.3,
+  },
+  phase2EmptyPrimaryCta: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(236, 72, 153, 0.92)",
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 14,
+  },
+  phase2EmptyPrimaryCtaText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#FFFFFF",
+  },
+  // Phase-1 empty content container (mirrors Phase-2 structure)
+  phase1EmptyContent: {
+    alignItems: "center",
+    width: "100%",
+    maxWidth: 340,
+    paddingHorizontal: 24,
   },
 
   // Premium Compact Header
