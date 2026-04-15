@@ -15,8 +15,11 @@ import React, { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useMutation } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 
 const C = INCOGNITO_COLORS;
@@ -26,6 +29,16 @@ interface NotificationCategory {
   icon: keyof typeof Ionicons.glyphMap;
   title: string;
   description: string;
+}
+
+/** Maps store record to Convex `notificationCategories` object (defaults match UI: unset = on). */
+function toConvexNotificationCategories(categories: Record<string, boolean>) {
+  return {
+    deepConnect: categories.deepConnect !== false,
+    privateMessages: categories.privateMessages !== false,
+    chatRooms: categories.chatRooms !== false,
+    truthOrDare: categories.truthOrDare !== false,
+  };
 }
 
 const NOTIFICATION_CATEGORIES: NotificationCategory[] = [
@@ -58,31 +71,65 @@ const NOTIFICATION_CATEGORIES: NotificationCategory[] = [
 export default function PrivateNotificationsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const authUserId = useAuthStore((s) => s.userId);
+  const updateFieldsByAuthId = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
-  // Master toggle from store (local-only - backend doesn't have this field yet)
+  // Master toggle from store (persisted via userPrivateProfiles)
   const notificationsEnabled = usePrivateProfileStore((s) => s.notificationsEnabled);
   const setNotificationsEnabled = usePrivateProfileStore((s) => s.setNotificationsEnabled);
 
-  // Category toggles from store (local-only)
+  // Category toggles from store (persisted via userPrivateProfiles)
   const notificationCategories = usePrivateProfileStore((s) => s.notificationCategories);
   const setNotificationCategory = usePrivateProfileStore((s) => s.setNotificationCategory);
 
   // Track which field is being toggled to prevent double-toggles
   const [savingField, setSavingField] = useState<string | null>(null);
 
-  // Handle master toggle - local-only for now (backend schema doesn't have this field yet)
-  const handleMasterToggle = useCallback((enabled: boolean) => {
-    if (savingField) return; // Prevent double-toggle while saving
-    setNotificationsEnabled(enabled);
-    // Note: notificationsEnabled is stored locally only until backend adds this field
-  }, [savingField, setNotificationsEnabled]);
+  const persistNotificationSettings = useCallback(
+    (enabled: boolean, categories: Record<string, boolean>) => {
+      if (!authUserId) return;
+      void updateFieldsByAuthId({
+        authUserId,
+        notificationsEnabled: enabled,
+        notificationCategories: toConvexNotificationCategories(categories),
+      })
+        .then((res) => {
+          if (res && !res.success && __DEV__) {
+            console.warn('[PrivateNotifications] updateFieldsByAuthId:', res.error);
+          }
+        })
+        .catch((err) => {
+          if (__DEV__) {
+            console.warn('[PrivateNotifications] updateFieldsByAuthId failed', err);
+          }
+        });
+    },
+    [authUserId, updateFieldsByAuthId]
+  );
 
-  // Handle category toggle - local-only for now (backend schema doesn't have this field yet)
-  const handleCategoryToggle = useCallback((categoryKey: string, enabled: boolean) => {
-    if (savingField) return; // Prevent double-toggle while saving
-    setNotificationCategory(categoryKey, enabled);
-    // Note: notificationCategories are stored locally only until backend adds this field
-  }, [savingField, setNotificationCategory]);
+  // Handle master toggle — store first, then background persist
+  const handleMasterToggle = useCallback(
+    (enabled: boolean) => {
+      if (savingField) return; // Prevent double-toggle while saving
+      setNotificationsEnabled(enabled);
+      const { notificationsEnabled: nextEnabled, notificationCategories: nextCategories } =
+        usePrivateProfileStore.getState();
+      persistNotificationSettings(nextEnabled, nextCategories);
+    },
+    [savingField, setNotificationsEnabled, persistNotificationSettings]
+  );
+
+  // Handle category toggle — store first, then background persist
+  const handleCategoryToggle = useCallback(
+    (categoryKey: string, enabled: boolean) => {
+      if (savingField) return; // Prevent double-toggle while saving
+      setNotificationCategory(categoryKey, enabled);
+      const { notificationsEnabled: nextEnabled, notificationCategories: nextCategories } =
+        usePrivateProfileStore.getState();
+      persistNotificationSettings(nextEnabled, nextCategories);
+    },
+    [savingField, setNotificationCategory, persistNotificationSettings]
+  );
 
   // Check if category is enabled
   const isCategoryEnabled = (key: string): boolean => {
