@@ -2,8 +2,11 @@ import React, { useState, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useMutation } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 
 const C = INCOGNITO_COLORS;
@@ -33,8 +36,10 @@ const SAFETY_TIPS = {
 export default function SafetyScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const authUserId = useAuthStore((s) => s.userId);
+  const updateFieldsByAuthId = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
-  // Local safe mode state from store
+  // Safe Mode from store (persisted via userPrivateProfiles)
   const safeMode = usePrivateProfileStore((s) => s.safeMode);
   const setSafeMode = usePrivateProfileStore((s) => s.setSafeMode);
 
@@ -47,12 +52,37 @@ export default function SafetyScreen() {
     setExpandedTip(expandedTip === tipKey ? null : tipKey);
   };
 
-  // Handle Safe Mode toggle - local-only for now (backend schema doesn't have safeMode field yet)
-  const handleSafeModeChange = useCallback((enabled: boolean) => {
-    if (isSaving) return; // Prevent double-toggle while saving
-    setSafeMode(enabled);
-    // Note: safeMode is stored locally only until backend adds this field
-  }, [isSaving, setSafeMode]);
+  const persistSafeMode = useCallback(
+    (enabled: boolean) => {
+      if (!authUserId) return;
+      void updateFieldsByAuthId({
+        authUserId,
+        safeMode: enabled,
+      })
+        .then((res) => {
+          if (res && !res.success && __DEV__) {
+            console.warn('[PrivateSafety] updateFieldsByAuthId:', res.error);
+          }
+        })
+        .catch((err) => {
+          if (__DEV__) {
+            console.warn('[PrivateSafety] updateFieldsByAuthId failed', err);
+          }
+        });
+    },
+    [authUserId, updateFieldsByAuthId]
+  );
+
+  // Handle Safe Mode toggle — store first, then background persist
+  const handleSafeModeChange = useCallback(
+    (enabled: boolean) => {
+      if (isSaving) return; // Prevent double-toggle while saving
+      setSafeMode(enabled);
+      const { safeMode: nextSafeMode } = usePrivateProfileStore.getState();
+      persistSafeMode(nextSafeMode);
+    },
+    [isSaving, setSafeMode, persistSafeMode]
+  );
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
