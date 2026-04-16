@@ -106,6 +106,13 @@ export function NotificationPopover({
           router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}?${notifParams}${dedupeParam}` as any);
         }
         break;
+      case 'phase2_private_message': {
+        const p2ConvoId = notification.data?.conversationId;
+        if (p2ConvoId) {
+          router.push(`/(main)/incognito-chat?id=${encodeURIComponent(p2ConvoId)}&${notifParams}${dedupeParam}` as any);
+        }
+        break;
+      }
       case 'crossed_paths':
         router.push({
           pathname: '/(main)/(tabs)/nearby',
@@ -141,6 +148,7 @@ export function NotificationPopover({
         return 'star';
       case 'message':
       case 'new_message':
+      case 'phase2_private_message':
         return 'chatbubble';
       case 'crossed_paths':
         return 'location';
@@ -169,6 +177,7 @@ export function NotificationPopover({
         return COLORS.superLike || '#FFD700';
       case 'message':
       case 'new_message':
+      case 'phase2_private_message':
         return COLORS.secondary || '#4ECDC4';
       case 'crossed_paths':
         return '#FF9800';

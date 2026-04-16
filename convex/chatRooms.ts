@@ -5,6 +5,7 @@ import { internal } from './_generated/api';
 import { asUserId } from './id';
 import { hashPassword, verifyPassword, encryptPassword, decryptPassword } from './cryptoUtils';
 import { resolveUserIdByAuthId } from './helpers';
+import { shouldCreatePhase2ChatRoomsNotification } from './phase2NotificationPrefs';
 
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -1472,6 +1473,10 @@ export const sendMessage = mutation({
           .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', men.userId))
           .first();
         if (!isMember) continue;
+
+        if (!(await shouldCreatePhase2ChatRoomsNotification(ctx, men.userId))) {
+          continue;
+        }
 
         try {
           await ctx.db.insert('chatRoomMentionNotifications', {

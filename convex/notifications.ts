@@ -1,7 +1,36 @@
 import { v } from 'convex/values';
-import { mutation, query, internalMutation } from './_generated/server';
+import { mutation, query, internalMutation, type MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId } from './helpers';
+import { bellNotificationCountsForPhase } from './notificationBellPhase';
+
+/**
+ * Marks in-app inbox rows for a conversation using Phase-1 and Phase-2 dedupe keys.
+ * Convex IDs never collide across `conversations` vs `privateConversations`, so at most one row matches.
+ */
+export async function markInboxMessageNotificationsForConversation(
+  ctx: MutationCtx,
+  userId: Id<'users'>,
+  conversationId: string
+): Promise<number> {
+  const now = Date.now();
+  let count = 0;
+  const dedupeKeys = [
+    `message:${conversationId}:unread`,
+    `phase2_message:${conversationId}:unread`,
+  ];
+  for (const dedupeKey of dedupeKeys) {
+    const notification = await ctx.db
+      .query('notifications')
+      .withIndex('by_user_dedupe', (q) => q.eq('userId', userId).eq('dedupeKey', dedupeKey))
+      .first();
+    if (notification && !notification.readAt) {
+      await ctx.db.patch(notification._id, { readAt: now });
+      count++;
+    }
+  }
+  return count;
+}
 
 // 4-2: Notification TTL (24 hours in milliseconds)
 const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -110,7 +139,14 @@ export const getBellUnreadCount = query({
       )
       .collect();
 
-    return notifications.length;
+    const phase: 'phase1' | 'phase2' = args.phase ?? 'phase1';
+    let count = 0;
+    for (const n of notifications) {
+      if (bellNotificationCountsForPhase(n.type, phase)) {
+        count++;
+      }
+    }
+    return count;
   },
 });
 
@@ -313,7 +349,6 @@ export const markReadForConversation = mutation({
   },
   handler: async (ctx, args) => {
     const { authUserId, conversationId } = args;
-    const now = Date.now();
 
     // P1 SECURITY: Resolve auth ID server-side
     const userId = await resolveUserIdByAuthId(ctx, authUserId);
@@ -321,23 +356,10 @@ export const markReadForConversation = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    // D2/D4: Use dedupeKey format matching messages.ts: `message:${conversationId}:unread`
-    const dedupeKey = `message:${conversationId}:unread`;
+    // Phase-1 `message:` + Phase-2 `phase2_message:` (private chat); disjoint conversation IDs
+    const count = await markInboxMessageNotificationsForConversation(ctx, userId, conversationId);
 
-    // Use by_user_dedupe index for direct lookup
-    const notification = await ctx.db
-      .query('notifications')
-      .withIndex('by_user_dedupe', (q) =>
-        q.eq('userId', userId).eq('dedupeKey', dedupeKey)
-      )
-      .first();
-
-    if (notification && !notification.readAt) {
-      await ctx.db.patch(notification._id, { readAt: now });
-      return { success: true, count: 1 };
-    }
-
-    return { success: true, count: 0 };
+    return { success: true, count };
   },
 });
 

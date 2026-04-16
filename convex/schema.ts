@@ -888,7 +888,8 @@ export default defineSchema({
       v.literal('profile_nudge'),
       // Phase-2 notification types (isolated from Phase-1)
       v.literal('phase2_match'),
-      v.literal('phase2_like')
+      v.literal('phase2_like'),
+      v.literal('phase2_private_message')
     ),
     title: v.string(),
     body: v.string(),

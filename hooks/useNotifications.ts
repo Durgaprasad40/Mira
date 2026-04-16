@@ -22,6 +22,7 @@ const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
 const PHASE2_ONLY_TYPES = new Set([
   'phase2_match',
   'phase2_like',
+  'phase2_private_message',
   'tod_connect',
 ]);
 
@@ -152,6 +153,8 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
     case 'phase2_like':
       // Per-event: each Phase-2 like is unique by liker's userId
       return `phase2_like:${userId ?? 'unknown'}`;
+    case 'phase2_private_message':
+      return `phase2_message:${data?.conversationId ?? userId ?? 'unknown'}:unread`;
     case 'tod_connect':
       // Dedupe by answer/prompt context to avoid duplicate connect notifications
       return `tod_connect:${data?.answerId ?? data?.promptId ?? userId ?? 'unknown'}`;
@@ -775,11 +778,14 @@ export function useNotifications() {
       const normalizedId = String(conversationId);
       if (isDemoMode) {
         demoMarkReadForConversation(normalizedId);
-      } else if (convexUserId) {
-        markReadForConversationMutation({ conversationId: normalizedId }).catch(console.error);
+      } else if (convexUserId && userId) {
+        markReadForConversationMutation({
+          authUserId: userId,
+          conversationId: normalizedId,
+        }).catch(console.error);
       }
     },
-    [demoMarkReadForConversation, convexUserId, markReadForConversationMutation],
+    [demoMarkReadForConversation, convexUserId, userId, markReadForConversationMutation],
   );
 
   // ── Add notification (demo mode only — Convex mode uses server push) ──
