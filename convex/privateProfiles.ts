@@ -435,6 +435,11 @@ export const updateDisplayNameByAuthId = mutation({
     displayName: v.string(),
   },
   handler: async (ctx, args) => {
+    const trimmed = args.displayName.trim();
+    if (trimmed.length < 3 || trimmed.length > 20 || !/^[A-Za-z0-9]+$/.test(trimmed)) {
+      return { success: false, error: 'INVALID_DISPLAY_NAME' as const };
+    }
+
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
     if (!userId) {
       return { success: false, error: 'user_not_found' as const };
@@ -462,7 +467,7 @@ export const updateDisplayNameByAuthId = mutation({
 
     const now = Date.now();
     await ctx.db.patch(existing._id, {
-      displayName: args.displayName,
+      displayName: trimmed,
       displayNameEditCount: currentCount + 1,
       lastDisplayNameEditedAt: now,
       updatedAt: now,
@@ -580,6 +585,7 @@ export const saveOnboardingPhotos = mutation({
   args: {
     authUserId: v.string(),
     privatePhotoUrls: v.array(v.string()),
+    displayName: v.optional(v.string()),
     // Phase-1 imported fields to persist into Phase-2 on initial skeleton creation only
     // NOTE: age is derived from backend users.dateOfBirth (args.age ignored; kept for backwards-compat callers)
     age: v.optional(v.number()),
@@ -645,9 +651,15 @@ export const saveOnboardingPhotos = mutation({
     // Get user data to populate required fields with defaults
     const user = await ctx.db.get(userId);
     const derivedAge = ageFromUser(user);
+    const trimmedDisplayName =
+      typeof args.displayName === 'string' ? args.displayName.trim() : '';
+
+    if (trimmedDisplayName.length < 3 || trimmedDisplayName.length > 20 || !/^[A-Za-z0-9]+$/.test(trimmedDisplayName)) {
+      return { success: false, error: 'display_name_required' as const };
+    }
     const profileId = await ctx.db.insert('userPrivateProfiles', {
       userId,
-      displayName: user?.handle || user?.name || '',
+      displayName: trimmedDisplayName || '',
       // Onboarding creation counts as first nickname usage
       displayNameEditCount: 1,
       lastDisplayNameEditedAt: now,

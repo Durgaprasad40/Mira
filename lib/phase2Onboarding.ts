@@ -2,6 +2,7 @@ import type { Phase1ProfileData } from '@/stores/privateProfileStore';
 
 export type Phase2OnboardingStep =
   | 'index'
+  | 'nickname'
   | 'select-photos'
   | 'profile-edit'
   | 'prompts'
@@ -10,6 +11,7 @@ export type Phase2OnboardingStep =
 
 export const PHASE2_ONBOARDING_ROUTE_MAP: Record<Exclude<Phase2OnboardingStep, 'complete'>, string> = {
   index: '/(main)/phase2-onboarding',
+  nickname: '/(main)/phase2-onboarding/nickname',
   'select-photos': '/(main)/phase2-onboarding/select-photos',
   'profile-edit': '/(main)/phase2-onboarding/profile-edit',
   prompts: '/(main)/phase2-onboarding/prompts',
@@ -18,10 +20,11 @@ export const PHASE2_ONBOARDING_ROUTE_MAP: Record<Exclude<Phase2OnboardingStep, '
 
 export const PHASE2_ONBOARDING_STEP_ORDER: Record<Exclude<Phase2OnboardingStep, 'complete'>, number> = {
   index: 1,
-  'select-photos': 2,
-  'profile-edit': 3,
-  prompts: 4,
-  'profile-setup': 5,
+  nickname: 2,
+  'select-photos': 3,
+  'profile-edit': 4,
+  prompts: 5,
+  'profile-setup': 6,
 };
 
 type Phase1Photo = {

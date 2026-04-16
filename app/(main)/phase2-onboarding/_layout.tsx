@@ -30,6 +30,7 @@ function isSessionInvalidationError(msg: string) {
 }
 
 function getStepFromPathname(pathname: string): Exclude<Phase2OnboardingStep, 'complete'> {
+  if (pathname.endsWith('/nickname')) return 'nickname';
   if (pathname.endsWith('/select-photos')) return 'select-photos';
   if (pathname.endsWith('/profile-edit')) return 'profile-edit';
   if (pathname.endsWith('/prompts')) return 'prompts';
@@ -183,6 +184,7 @@ function Phase2OnboardingNavigator() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="index" />
+      <Stack.Screen name="nickname" />
       <Stack.Screen name="select-photos" />
       <Stack.Screen name="profile-edit" />
       <Stack.Screen name="prompts" />

@@ -45,6 +45,7 @@ export default function Phase2SelectPhotosScreen() {
 
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
+  const displayName = usePrivateProfileStore((s) => s.displayName);
 
   // Phase-1 imported fields (persist into Phase-2 skeleton on initial creation)
   // NOTE: age is NOT passed - backend derives it from users.dateOfBirth
@@ -215,6 +216,7 @@ export default function Phase2SelectPhotosScreen() {
       const result = await saveOnboardingPhotos({
         authUserId: userId,
         privatePhotoUrls: persistedUrls,
+        displayName: displayName || undefined,
         // age removed - backend derives from users.dateOfBirth
         height,
         weight,
@@ -267,7 +269,7 @@ export default function Phase2SelectPhotosScreen() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Select Photos</Text>
-        <Text style={styles.stepLabel}>Step 2 of 5</Text>
+        <Text style={styles.stepLabel}>Step 3 of 6</Text>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>

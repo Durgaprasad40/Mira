@@ -190,6 +190,7 @@ interface PrivateProfileState {
 
   // Actions — profile info
   setProfileInfo: (info: { displayName: string; age: number; city: string; gender: string }) => void;
+  setDisplayName: (displayName: string) => void;
   // Actions — individual profile field setters (for Phase-2 editing)
   setGender: (gender: string) => void;
   setHeight: (height: number | null) => void;
@@ -402,6 +403,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   setBoundaries: (boundaries) => set({ boundaries }),
   setPrivateBio: (bio) => set({ privateBio: bio }),
   setProfileInfo: (info) => set(info),
+  setDisplayName: (displayName) => set({ displayName }),
   // Individual profile field setters
   setGender: (gender) => set({ gender }),
   setHeight: (height) => set({ height }),
@@ -478,10 +480,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         console.log('[P2 IMPORT] skip heavy work: no photos');
       }
       // Minimal state update - no photo processing
-      // PHASE-2 IDENTITY FIX: Use Phase-1 handle (nickname) as displayName
-      // NEVER use Phase-1 real name (data.name) for displayName
+      // Phase-2-only identity: do NOT import Phase-1 handle/name into Private Mode nickname.
+      // Nickname is chosen in Phase-2 onboarding and stored on userPrivateProfiles.displayName.
       set({
-        displayName: data.handle || '',
+        displayName: '',
         gender: data.gender || '',
         phase1PhotoSlots: createEmptyPhotoSlots(),
         _hasHydrated: true,
@@ -537,9 +539,9 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     set({
       // Store Phase-1 photo slots (9 slots, preserving positions)
       phase1PhotoSlots: photoSlots,
-      // PHASE-2 IDENTITY FIX: Use Phase-1 handle (nickname) as displayName
-      // NEVER use Phase-1 real name (data.name) for displayName
-      displayName: data.handle || '',
+      // Phase-2-only identity: do NOT import Phase-1 handle/name into Private Mode nickname.
+      // Nickname is chosen in Phase-2 onboarding and stored on userPrivateProfiles.displayName.
+      displayName: '',
       age,
       city: data.city || '',
       gender: data.gender || '',

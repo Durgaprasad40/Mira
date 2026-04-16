@@ -79,7 +79,7 @@ export default function Phase2ReviewScreen() {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const isFinalizingRef = useRef(false);
 
-  const displayName = currentUser?.handle || currentPrivateProfile?.displayName || 'Anonymous';
+  const displayName = currentPrivateProfile?.displayName || 'Anonymous';
   const age = currentPrivateProfile?.age ?? 0;
   const gender = currentPrivateProfile?.gender || currentUser?.gender || '';
   const city = currentPrivateProfile?.city || currentUser?.city || '';
@@ -283,7 +283,7 @@ export default function Phase2ReviewScreen() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Review & create</Text>
-        <Text style={styles.stepLabel}>Step 5 of 5</Text>
+        <Text style={styles.stepLabel}>Step 6 of 6</Text>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>

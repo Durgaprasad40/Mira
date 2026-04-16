@@ -408,6 +408,12 @@ export default function EditProfileScreen() {
   const [draftNickname, setDraftNickname] = useState('');
   const [nicknameError, setNicknameError] = useState<string | null>(null);
 
+  const sanitizeNickname = useCallback((value: string) => value.replace(/[^a-zA-Z0-9]/g, ''), []);
+  const isValidNickname = useCallback((value: string) => {
+    const trimmed = value.trim();
+    return trimmed.length >= 3 && trimmed.length <= 20 && /^[A-Za-z0-9]+$/.test(trimmed);
+  }, []);
+
   useEffect(() => {
     // Keep draft in sync when not actively editing.
     if (!isEditingNickname) {
@@ -1292,11 +1298,11 @@ export default function EditProfileScreen() {
                       style={[styles.nicknameInput, isDisplayNameLocked && styles.nicknameInputDisabled]}
                       value={draftNickname}
                       onChangeText={(t) => {
-                        setDraftNickname(t);
+                        setDraftNickname(sanitizeNickname(t));
                         if (nicknameError) setNicknameError(null);
                       }}
                       editable={!isDisplayNameLocked}
-                      placeholder="Enter a nickname"
+                      placeholder="e.g. Mira123"
                       placeholderTextColor={C.textLight}
                       autoCapitalize="none"
                       autoCorrect={false}
@@ -1307,8 +1313,8 @@ export default function EditProfileScreen() {
                         // (no auto-save on keystroke)
                         if (!userId || isDemoMode || isDisplayNameLocked) return;
                         const next = draftNickname.trim();
-                        if (next.length === 0) {
-                          setNicknameError('Nickname cannot be empty.');
+                        if (!isValidNickname(next)) {
+                          setNicknameError('Nickname must be 3–20 characters and use letters and numbers only.');
                           return;
                         }
                         if (next === (displayName || '').trim()) {
@@ -1320,6 +1326,8 @@ export default function EditProfileScreen() {
                           if (!res?.success) {
                             if ((res as any)?.error === 'Nickname change limit reached') {
                               setNicknameError('Nickname is now locked.');
+                            } else if ((res as any)?.error === 'INVALID_DISPLAY_NAME') {
+                              setNicknameError('Nickname must use letters and numbers only.');
                             } else {
                               setNicknameError('Could not update nickname. Please try again.');
                             }
@@ -1372,8 +1380,8 @@ export default function EditProfileScreen() {
                       onPress={async () => {
                         if (!userId || isDemoMode || isDisplayNameLocked) return;
                         const next = draftNickname.trim();
-                        if (next.length === 0) {
-                          setNicknameError('Nickname cannot be empty.');
+                        if (!isValidNickname(next)) {
+                          setNicknameError('Nickname must be 3–20 characters and use letters and numbers only.');
                           return;
                         }
                         if (next === (displayName || '').trim()) {
@@ -1385,6 +1393,8 @@ export default function EditProfileScreen() {
                           if (!res?.success) {
                             if ((res as any)?.error === 'Nickname change limit reached') {
                               setNicknameError('Nickname is now locked.');
+                            } else if ((res as any)?.error === 'INVALID_DISPLAY_NAME') {
+                              setNicknameError('Nickname must use letters and numbers only.');
                             } else {
                               setNicknameError('Could not update nickname. Please try again.');
                             }

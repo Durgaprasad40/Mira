@@ -84,7 +84,6 @@ export default function Phase2OnboardingConsentScreen() {
   const importedBasics = useMemo(() => {
     if (!currentUser) return null;
     return {
-      handle: currentUser.handle || 'Not available',
       age: calculateAge(currentUser.dateOfBirth),
       gender: currentUser.gender || 'Not available',
       city: currentUser.city || null,
@@ -114,7 +113,7 @@ export default function Phase2OnboardingConsentScreen() {
 
       setAcceptedTermsAt(Date.now());
       acceptPrivateTerms();
-      router.push(PHASE2_ONBOARDING_ROUTE_MAP['select-photos'] as any);
+      router.push(PHASE2_ONBOARDING_ROUTE_MAP['nickname'] as any);
     } catch (error) {
       Alert.alert(
         'Unable to continue',
@@ -166,7 +165,7 @@ export default function Phase2OnboardingConsentScreen() {
         <TouchableOpacity onPress={handleExit} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="close" size={22} color={C.textLight} />
         </TouchableOpacity>
-        <Text style={styles.stepIndicator}>Step 1 of 5</Text>
+        <Text style={styles.stepIndicator}>Step 1 of 6</Text>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
@@ -184,10 +183,6 @@ export default function Phase2OnboardingConsentScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Imported from your main profile</Text>
           <View style={styles.summaryCard}>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Nickname</Text>
-              <Text style={styles.summaryValue}>{importedBasics.handle}</Text>
-            </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Age</Text>
               <Text style={styles.summaryValue}>{importedBasics.age > 0 ? importedBasics.age : 'Not available'}</Text>
