@@ -960,6 +960,7 @@ export const getNearbyUsers = query({
 
     // Second pass: filter by photo count and build results
     const results = [];
+    const sortDistanceByUserId = new Map<string, number>();
     for (let i = 0; i < candidateUsers.length; i++) {
       const user = candidateUsers[i];
       const photoCount = photoCountsMap.get(user._id as string) || 0;
@@ -974,6 +975,8 @@ export const getNearbyUsers = query({
         user.publishedLng!,
       );
 
+      sortDistanceByUserId.set(user._id as string, distance);
+
       results.push({
         id: user._id,
         name: user.name,
@@ -981,7 +984,7 @@ export const getNearbyUsers = query({
         publishedLat: user.publishedLat!,
         publishedLng: user.publishedLng!,
         publishedAt: user.publishedAt,
-        distance,
+        distance: user.hideDistance === true ? undefined : distance,
         freshness,
         photoUrl: user.primaryPhotoUrl ?? null,
         isVerified: user.isVerified,
@@ -996,7 +999,9 @@ export const getNearbyUsers = query({
       if (Math.abs(recencyDiff) > 60 * 60 * 1000) {
         return recencyDiff;
       }
-      return a.distance - b.distance;
+      const distA = sortDistanceByUserId.get(a.id as string) ?? Infinity;
+      const distB = sortDistanceByUserId.get(b.id as string) ?? Infinity;
+      return distA - distB;
     });
 
     return results;
@@ -1158,6 +1163,9 @@ export const getCrossPathHistory = query({
           entry.crossedLngApprox,
         );
         distanceRange = formatDistanceRange(distanceMeters);
+      }
+      if (otherUser.hideDistance === true) {
+        distanceRange = null;
       }
 
       // Calculate relative time for display
@@ -1504,6 +1512,9 @@ export const getCrossedPaths = query({
           cp.crossingLongitude,
         );
         distanceRange = formatDistanceRange(distanceMeters);
+      }
+      if (otherUser.hideDistance === true) {
+        distanceRange = null;
       }
 
       // Calculate relative time
