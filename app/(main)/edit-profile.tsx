@@ -974,18 +974,28 @@ export default function EditProfileScreen() {
         // STEP F: Persist - validation passed, safe to save
         // ═══════════════════════════════════════════════════════════════════════════
         if (orderedPhotoIds.length > 0) {
+          const backendOrderedPhotoIds = currentUser.photos
+            .map((p: any) => p?._id)
+            .filter(Boolean);
+          const orderUnchanged =
+            backendOrderedPhotoIds.length === orderedPhotoIds.length &&
+            backendOrderedPhotoIds.every((id: string, idx: number) => id === orderedPhotoIds[idx]);
+
           if (__DEV__) {
             console.log('[PHOTO_REORDER_SAVE]', {
               action: 'setMainPhoto',
               newMainPhotoId: orderedPhotoIds[0]?.slice(-6),
               totalPhotos: orderedPhotoIds.length,
               allPhotoIds: orderedPhotoIds.map((id: string) => id?.slice(-6)).join(','),
+              orderUnchanged,
             });
           }
-          // FIX: Use reorderPhotosMutation without token (server derives auth)
-          await reorderPhotosMutation({
-            photoIds: orderedPhotoIds as any,
-          });
+          if (!orderUnchanged) {
+            await reorderPhotosMutation({
+              token,
+              photoIds: orderedPhotoIds as any,
+            });
+          }
           if (__DEV__) {
             console.log('[PHOTO_REORDER_AFTER] ✅ Reorder persisted successfully');
           }
@@ -1217,6 +1227,7 @@ export default function EditProfileScreen() {
     }
 
     let coreProfileSaved = false;
+    let photoOrderSaveFailed = false;
     try {
       // Get session token from authStore for secure server-side validation
       // (needed for prompts, photo reorder, and blur mutations)
@@ -1345,17 +1356,34 @@ export default function EditProfileScreen() {
 
         // Only reorder if we have photos to reorder
         if (orderedPhotoIds.length > 0) {
+          const backendOrderedPhotoIds = [...backendPhotos]
+            .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
+            .map((p: any) => p._id);
+          const orderUnchanged =
+            backendOrderedPhotoIds.length === orderedPhotoIds.length &&
+            backendOrderedPhotoIds.every((id: string, idx: number) => id === orderedPhotoIds[idx]);
+
           if (__DEV__) {
             console.log('[EditProfile] 📸 Persisting photo order:', {
               slotCount: photoSlots.filter(Boolean).length,
               photoIdsCount: orderedPhotoIds.length,
               firstPhotoId: orderedPhotoIds[0],
+              orderUnchanged,
             });
           }
-          // FIX: Use reorderPhotosMutation without token (server derives auth)
-          await reorderPhotosMutation({
-            photoIds: orderedPhotoIds as any, // Cast to Id<'photos'>[]
-          });
+          if (!orderUnchanged) {
+            try {
+              await reorderPhotosMutation({
+                token: sessionToken,
+                photoIds: orderedPhotoIds as any, // Cast to Id<'photos'>[]
+              });
+            } catch (e) {
+              photoOrderSaveFailed = true;
+              if (__DEV__) {
+                console.warn('[EditProfile] reorderPhotos failed', e);
+              }
+            }
+          }
         }
       }
 
@@ -1372,7 +1400,11 @@ export default function EditProfileScreen() {
         });
       }
 
-      Alert.alert('Success', 'Profile updated!');
+      if (photoOrderSaveFailed) {
+        Alert.alert('Profile saved', "Photo order couldn't be saved.");
+      } else {
+        Alert.alert('Success', 'Profile updated!');
+      }
       router.back();
     } catch (error: any) {
       if (coreProfileSaved) {
