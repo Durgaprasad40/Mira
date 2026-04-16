@@ -41,12 +41,10 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { uploadPhotoToConvex } from '@/lib/uploadUtils';
-import { INCOGNITO_COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
-import { cmToFeetInches } from '@/lib/utils';
+import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { getDemoCurrentUser } from '@/lib/demoData';
 
 const C = INCOGNITO_COLORS;
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -70,7 +68,6 @@ type PersistedProfileUpdates = {
 };
 
 type Phase1FallbackUser = {
-  dateOfBirth?: string;
   height?: number;
   weight?: number;
   smoking?: string;
