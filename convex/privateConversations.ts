@@ -343,6 +343,19 @@ export const getPrivateMessages = query({
       return [];
     }
 
+    // Phase-2 privacy: sender-view-only masking for read receipts (1:1 only)
+    let hideReadReceiptsFromViewer = false;
+    if (conversation.participants.length === 2) {
+      const otherIdForPrivacy = conversation.participants.find((pid) => pid !== userId) ?? null;
+      if (otherIdForPrivacy) {
+        const otherPrivateProfile = await ctx.db
+          .query('userPrivateProfiles')
+          .withIndex('by_user', (q) => q.eq('userId', otherIdForPrivacy))
+          .first();
+        hideReadReceiptsFromViewer = otherPrivateProfile?.disableReadReceipts === true;
+      }
+    }
+
     // P0-SAFETY: Block check - blocked users cannot read message history
     const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
     if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
@@ -382,6 +395,8 @@ export const getPrivateMessages = query({
 
     // Return in chronological order with media URLs resolved
     return messages.reverse().map((m) => {
+      const shouldHideReadAt =
+        hideReadReceiptsFromViewer === true && m.senderId === userId;
       // Base message fields
       const baseMessage = {
         id: m._id,
@@ -390,7 +405,7 @@ export const getPrivateMessages = query({
         type: m.type,
         content: m.content,
         deliveredAt: m.deliveredAt,
-        readAt: m.readAt,
+        readAt: shouldHideReadAt ? undefined : m.readAt,
         createdAt: m.createdAt,
       };
 
