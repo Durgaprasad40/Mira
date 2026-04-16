@@ -122,7 +122,7 @@ export default function SafetySettingsScreen() {
   }, [router]);
 
   const handleReportUser = () => {
-    router.push('/(main)/settings/report-user' as any);
+    router.push('/(main)/settings/report-person' as any);
   };
 
   // Track layout position of each tip section
