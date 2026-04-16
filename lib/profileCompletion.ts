@@ -3,50 +3,81 @@
  *
  * PHASE-1: Lightweight, non-blocking system to encourage profile completion.
  *
- * SCORING MODEL (100 points total):
+ * SCORING MODEL (100 points total - balanced full profile):
  *
- * BASE PROFILE (50 points - from onboarding):
- * - name: 8 points
- * - dateOfBirth: 5 points
- * - gender: 5 points
- * - faceVerification: 10 points
- * - photos (min 2): 12 points
- * - lookingFor: 5 points
- * - relationshipIntent: 5 points
+ * 1. Identity & Trust = 15
+ * - name: 5
+ * - dateOfBirth: 3
+ * - gender: 2
+ * - verification: 5
  *
- * PROFILE COMPLETION (50 points - optional):
- * - bio: 10 points
- * - prompt 1: 8 points
- * - prompt 2: 8 points
- * - prompt 3: 8 points
- * - 3rd photo: 5 points
- * - 4th photo: 5 points
- * - education: 3 points
- * - job/company: 3 points
+ * 2. Photos = 20
+ * - 2+ photos: 10
+ * - 3+ photos: 4
+ * - 4+ photos: 3
+ * - 6+ photos: 3
+ *
+ * 3. Bio & Prompts = 25
+ * - bio (>= 80 chars): 10
+ * - prompts (>= 20 chars each): 1=5, 2=10, 3=15
+ *
+ * 4. Core Details = 15
+ * - college (stored as school): 5
+ * - job/company: 5
+ * - education: 5
+ *
+ * 5. Lifestyle Basics = 10
+ * - height: 2
+ * - smoking: 2
+ * - drinking: 2
+ * - kids: 2
+ * - exercise: 2
+ *
+ * 6. Interests & Depth = 5
+ * - activities (>= 3): 3
+ * - pets (>= 1): 2
+ *
+ * 7. Life Rhythm = 10
+ * - complete if >= 3 of 6 are present: city, socialRhythm, sleepSchedule, travelStyle, workStyle, coreValues>=3
  */
 
 export type ProfileFieldKey =
   | 'name'
   | 'dateOfBirth'
   | 'gender'
-  | 'faceVerification'
-  | 'photos_base'
-  | 'lookingFor'
-  | 'relationshipIntent'
+  | 'verification'
+  | 'photos_2'
+  | 'photos_3'
+  | 'photos_4'
+  | 'photos_6'
   | 'bio'
   | 'prompt_1'
   | 'prompt_2'
   | 'prompt_3'
-  | 'photo_3'
-  | 'photo_4'
+  | 'college'
+  | 'job'
   | 'education'
-  | 'job';
+  | 'height'
+  | 'smoking'
+  | 'drinking'
+  | 'kids'
+  | 'exercise'
+  | 'activities'
+  | 'pets'
+  | 'lifeRhythm';
 
 export interface ProfileField {
   key: ProfileFieldKey;
   label: string;
   points: number;
-  category: 'base' | 'optional';
+  category:
+    | 'identity'
+    | 'photos'
+    | 'bio_prompts'
+    | 'core_details'
+    | 'lifestyle'
+    | 'interests_depth'
+    | 'life_rhythm';
   editRoute: string;
   editSection?: string;
   priority: number; // Lower = higher priority for next actions
@@ -54,24 +85,42 @@ export interface ProfileField {
 
 // Field definitions with scoring weights
 export const PROFILE_FIELDS: ProfileField[] = [
-  // BASE PROFILE (50 points)
-  { key: 'name', label: 'Name', points: 8, category: 'base', editRoute: 'edit-profile', editSection: 'basic', priority: 1 },
-  { key: 'dateOfBirth', label: 'Date of Birth', points: 5, category: 'base', editRoute: 'edit-profile', editSection: 'basic', priority: 2 },
-  { key: 'gender', label: 'Gender', points: 5, category: 'base', editRoute: 'edit-profile', editSection: 'basic', priority: 3 },
-  { key: 'faceVerification', label: 'Face Verification', points: 10, category: 'base', editRoute: 'face-verification', priority: 4 },
-  { key: 'photos_base', label: 'Profile Photos', points: 12, category: 'base', editRoute: 'edit-profile', editSection: 'photos', priority: 5 },
-  { key: 'lookingFor', label: 'Looking For', points: 5, category: 'base', editRoute: 'edit-profile', editSection: 'preferences', priority: 6 },
-  { key: 'relationshipIntent', label: 'Relationship Goals', points: 5, category: 'base', editRoute: 'edit-profile', editSection: 'preferences', priority: 7 },
+  // Identity & Trust (15)
+  { key: 'name', label: 'Name', points: 5, category: 'identity', editRoute: 'edit-profile', editSection: 'basic', priority: 1 },
+  { key: 'dateOfBirth', label: 'Date of Birth', points: 3, category: 'identity', editRoute: 'edit-profile', editSection: 'basic', priority: 2 },
+  { key: 'gender', label: 'Gender', points: 2, category: 'identity', editRoute: 'edit-profile', editSection: 'basic', priority: 3 },
+  { key: 'verification', label: 'Verification', points: 5, category: 'identity', editRoute: 'face-verification', priority: 4 },
 
-  // OPTIONAL PROFILE (50 points)
-  { key: 'bio', label: 'Bio', points: 10, category: 'optional', editRoute: 'edit-profile', editSection: 'about', priority: 1 },
-  { key: 'prompt_1', label: 'First Prompt', points: 8, category: 'optional', editRoute: 'edit-profile', editSection: 'prompts', priority: 2 },
-  { key: 'prompt_2', label: 'Second Prompt', points: 8, category: 'optional', editRoute: 'edit-profile', editSection: 'prompts', priority: 3 },
-  { key: 'prompt_3', label: 'Third Prompt', points: 8, category: 'optional', editRoute: 'edit-profile', editSection: 'prompts', priority: 4 },
-  { key: 'photo_3', label: 'Add 3rd Photo', points: 5, category: 'optional', editRoute: 'edit-profile', editSection: 'photos', priority: 5 },
-  { key: 'photo_4', label: 'Add 4th Photo', points: 5, category: 'optional', editRoute: 'edit-profile', editSection: 'photos', priority: 6 },
-  { key: 'education', label: 'Education', points: 3, category: 'optional', editRoute: 'edit-profile', editSection: 'education', priority: 7 },
-  { key: 'job', label: 'Job/Company', points: 3, category: 'optional', editRoute: 'edit-profile', editSection: 'details', priority: 8 },
+  // Photos (20)
+  { key: 'photos_2', label: 'Add 2 photos', points: 10, category: 'photos', editRoute: 'edit-profile', editSection: 'photos', priority: 1 },
+  { key: 'photos_3', label: 'Add a 3rd photo', points: 4, category: 'photos', editRoute: 'edit-profile', editSection: 'photos', priority: 2 },
+  { key: 'photos_4', label: 'Add a 4th photo', points: 3, category: 'photos', editRoute: 'edit-profile', editSection: 'photos', priority: 3 },
+  { key: 'photos_6', label: 'Add more photos', points: 3, category: 'photos', editRoute: 'edit-profile', editSection: 'photos', priority: 4 },
+
+  // Bio & Prompts (25)
+  { key: 'bio', label: 'Bio', points: 10, category: 'bio_prompts', editRoute: 'edit-profile', editSection: 'about', priority: 1 },
+  { key: 'prompt_1', label: 'First prompt', points: 5, category: 'bio_prompts', editRoute: 'edit-profile', editSection: 'prompts', priority: 2 },
+  { key: 'prompt_2', label: 'Second prompt', points: 5, category: 'bio_prompts', editRoute: 'edit-profile', editSection: 'prompts', priority: 3 },
+  { key: 'prompt_3', label: 'Third prompt', points: 5, category: 'bio_prompts', editRoute: 'edit-profile', editSection: 'prompts', priority: 4 },
+
+  // Core Details (15)
+  { key: 'college', label: 'College', points: 5, category: 'core_details', editRoute: 'edit-profile', editSection: 'education', priority: 1 },
+  { key: 'job', label: 'Job / Company', points: 5, category: 'core_details', editRoute: 'edit-profile', editSection: 'details', priority: 2 },
+  { key: 'education', label: 'Education', points: 5, category: 'core_details', editRoute: 'edit-profile', editSection: 'education', priority: 3 },
+
+  // Lifestyle Basics (10)
+  { key: 'height', label: 'Height', points: 2, category: 'lifestyle', editRoute: 'edit-profile', editSection: 'details', priority: 1 },
+  { key: 'smoking', label: 'Smoking', points: 2, category: 'lifestyle', editRoute: 'edit-profile', editSection: 'lifestyle', priority: 2 },
+  { key: 'drinking', label: 'Drinking', points: 2, category: 'lifestyle', editRoute: 'edit-profile', editSection: 'lifestyle', priority: 3 },
+  { key: 'kids', label: 'Kids', points: 2, category: 'lifestyle', editRoute: 'edit-profile', editSection: 'lifestyle', priority: 4 },
+  { key: 'exercise', label: 'Exercise', points: 2, category: 'lifestyle', editRoute: 'edit-profile', editSection: 'lifestyle', priority: 5 },
+
+  // Interests & Depth (5)
+  { key: 'activities', label: 'Interests', points: 3, category: 'interests_depth', editRoute: 'edit-profile', editSection: 'interests', priority: 1 },
+  { key: 'pets', label: 'Pets', points: 2, category: 'interests_depth', editRoute: 'edit-profile', editSection: 'lifestyle', priority: 2 },
+
+  // Life Rhythm (10)
+  { key: 'lifeRhythm', label: 'Life Rhythm', points: 10, category: 'life_rhythm', editRoute: 'edit-profile', editSection: 'lifeRhythm', priority: 1 },
 ];
 
 // Action descriptions for nudges
@@ -79,18 +128,26 @@ export const ACTION_DESCRIPTIONS: Record<ProfileFieldKey, string> = {
   name: 'Add your name',
   dateOfBirth: 'Add your date of birth',
   gender: 'Select your gender',
-  faceVerification: 'Verify your face',
-  photos_base: 'Add at least 2 photos',
-  lookingFor: 'Select who you\'re looking for',
-  relationshipIntent: 'Add your relationship goals',
-  bio: 'Write a bio to get 3x more matches',
+  verification: 'Verify your profile',
+  photos_2: 'Add at least 2 photos',
+  photos_3: 'Add a 3rd photo',
+  photos_4: 'Add a 4th photo',
+  photos_6: 'Add more photos',
+  bio: 'Write a bio (80+ characters)',
   prompt_1: 'Answer your first prompt',
   prompt_2: 'Answer a second prompt',
   prompt_3: 'Answer a third prompt',
-  photo_3: 'Add a 3rd photo',
-  photo_4: 'Add a 4th photo',
-  education: 'Add your education',
+  college: 'Add your college',
   job: 'Add your job/company',
+  education: 'Add your education',
+  height: 'Add your height',
+  smoking: 'Add your smoking preference',
+  drinking: 'Add your drinking preference',
+  kids: 'Add your kids preference',
+  exercise: 'Add your exercise preference',
+  activities: 'Pick at least 3 interests',
+  pets: 'Add your pets preference',
+  lifeRhythm: 'Add your life rhythm',
 };
 
 export interface UserProfileData {
@@ -101,13 +158,27 @@ export interface UserProfileData {
   faceVerificationPassed?: boolean;
   photos?: any[] | null;
   photoUrls?: any[] | null;
-  lookingFor?: string[] | null;
-  relationshipIntent?: string[] | null;
   bio?: string | null;
   profilePrompts?: { question: string; answer: string }[] | null;
   education?: string | null;
   jobTitle?: string | null;
   company?: string | null;
+  school?: string | null;
+  height?: number | null;
+  smoking?: string | null;
+  drinking?: string | null;
+  kids?: string | null;
+  exercise?: string | null;
+  pets?: string[] | null;
+  activities?: string[] | null;
+  lifeRhythm?: {
+    city?: string | null;
+    socialRhythm?: string | null;
+    sleepSchedule?: string | null;
+    travelStyle?: string | null;
+    workStyle?: string | null;
+    coreValues?: string[] | null;
+  } | null;
 }
 
 export interface ProfileCompletionResult {
@@ -144,9 +215,26 @@ function countValidPrompts(userData: UserProfileData): number {
   if (!Array.isArray(prompts)) return 0;
 
   return prompts.filter((p: any) => {
-    if (p && p.answer && p.answer.trim().length > 0) return true;
+    if (p && p.answer && p.answer.trim().length >= 20) return true;
     return false;
   }).length;
+}
+
+function hasLifeRhythmDepth(userData: UserProfileData): boolean {
+  const lr = userData.lifeRhythm;
+  if (!lr) return false;
+
+  const coreValuesCount = Array.isArray(lr.coreValues) ? lr.coreValues.length : 0;
+  const signals = [
+    typeof lr.city === 'string' && lr.city.trim().length > 0,
+    typeof lr.socialRhythm === 'string' && lr.socialRhythm.length > 0,
+    typeof lr.sleepSchedule === 'string' && lr.sleepSchedule.length > 0,
+    typeof lr.travelStyle === 'string' && lr.travelStyle.length > 0,
+    typeof lr.workStyle === 'string' && lr.workStyle.length > 0,
+    coreValuesCount >= 3,
+  ];
+
+  return signals.filter(Boolean).length >= 3;
 }
 
 /**
@@ -163,20 +251,23 @@ function isFieldComplete(key: ProfileFieldKey, userData: UserProfileData): boole
     case 'gender':
       return !!(userData.gender && userData.gender.length > 0);
 
-    case 'faceVerification':
+    case 'verification':
       return !!(userData.isVerified || userData.faceVerificationPassed);
 
-    case 'photos_base':
+    case 'photos_2':
       return countValidPhotos(userData) >= 2;
 
-    case 'lookingFor':
-      return !!(userData.lookingFor && userData.lookingFor.length > 0);
+    case 'photos_3':
+      return countValidPhotos(userData) >= 3;
 
-    case 'relationshipIntent':
-      return !!(userData.relationshipIntent && userData.relationshipIntent.length > 0);
+    case 'photos_4':
+      return countValidPhotos(userData) >= 4;
+
+    case 'photos_6':
+      return countValidPhotos(userData) >= 6;
 
     case 'bio':
-      return !!(userData.bio && userData.bio.trim().length >= 10);
+      return !!(userData.bio && userData.bio.trim().length >= 80);
 
     case 'prompt_1':
       return countValidPrompts(userData) >= 1;
@@ -187,18 +278,41 @@ function isFieldComplete(key: ProfileFieldKey, userData: UserProfileData): boole
     case 'prompt_3':
       return countValidPrompts(userData) >= 3;
 
-    case 'photo_3':
-      return countValidPhotos(userData) >= 3;
-
-    case 'photo_4':
-      return countValidPhotos(userData) >= 4;
+    case 'college':
+      return !!(userData.school && userData.school.trim().length >= 2);
 
     case 'education':
       return !!(userData.education && userData.education.length > 0);
 
     case 'job':
-      return !!((userData.jobTitle && userData.jobTitle.trim().length > 0) ||
-                (userData.company && userData.company.trim().length > 0));
+      return !!(
+        (userData.jobTitle && userData.jobTitle.trim().length >= 2) ||
+        (userData.company && userData.company.trim().length >= 2)
+      );
+
+    case 'height':
+      return typeof userData.height === 'number' && userData.height > 0;
+
+    case 'smoking':
+      return !!(userData.smoking && userData.smoking.length > 0);
+
+    case 'drinking':
+      return !!(userData.drinking && userData.drinking.length > 0);
+
+    case 'kids':
+      return !!(userData.kids && userData.kids.length > 0);
+
+    case 'exercise':
+      return !!(userData.exercise && userData.exercise.length > 0);
+
+    case 'activities':
+      return Array.isArray(userData.activities) && userData.activities.length >= 3;
+
+    case 'pets':
+      return Array.isArray(userData.pets) && userData.pets.length >= 1;
+
+    case 'lifeRhythm':
+      return hasLifeRhythmDepth(userData);
 
     default:
       return false;
@@ -220,7 +334,7 @@ export function getProfileCompletion(userData: UserProfileData | null | undefine
       maxScore: 100,
       completedFields: [],
       missingFields: PROFILE_FIELDS.map(f => f.key),
-      nextBestActions: PROFILE_FIELDS.filter(f => f.category === 'optional').slice(0, 3),
+      nextBestActions: PROFILE_FIELDS.slice(0, 3),
       baseComplete: false,
       optionalComplete: false,
     };
@@ -229,43 +343,104 @@ export function getProfileCompletion(userData: UserProfileData | null | undefine
   const completedFields: ProfileFieldKey[] = [];
   const missingFields: ProfileFieldKey[] = [];
   let score = 0;
-  let baseScore = 0;
-  let optionalScore = 0;
-  const baseMaxScore = 50;
-  const optionalMaxScore = 50;
+  let identityScore = 0;
+  let photosScore = 0;
+  let bioPromptsScore = 0;
+  let coreDetailsScore = 0;
+  let lifestyleScore = 0;
+  let interestsDepthScore = 0;
+  let lifeRhythmScore = 0;
 
   // Calculate scores for each field
   for (const field of PROFILE_FIELDS) {
     if (isFieldComplete(field.key, userData)) {
       completedFields.push(field.key);
       score += field.points;
-      if (field.category === 'base') {
-        baseScore += field.points;
-      } else {
-        optionalScore += field.points;
-      }
+      if (field.category === 'identity') identityScore += field.points;
+      if (field.category === 'photos') photosScore += field.points;
+      if (field.category === 'bio_prompts') bioPromptsScore += field.points;
+      if (field.category === 'core_details') coreDetailsScore += field.points;
+      if (field.category === 'lifestyle') lifestyleScore += field.points;
+      if (field.category === 'interests_depth') interestsDepthScore += field.points;
+      if (field.category === 'life_rhythm') lifeRhythmScore += field.points;
     } else {
       missingFields.push(field.key);
     }
   }
 
-  // Get next best actions (top 3 missing optional fields, sorted by priority)
-  const missingOptionalFields = PROFILE_FIELDS
-    .filter(f => f.category === 'optional' && missingFields.includes(f.key))
-    .sort((a, b) => a.priority - b.priority)
-    .slice(0, 3);
+  const photoCount = countValidPhotos(userData);
+  const promptCount = countValidPrompts(userData);
+  const isBioComplete = isFieldComplete('bio', userData);
 
-  // If all optional fields are complete but base is missing, show base fields
-  const nextBestActions = missingOptionalFields.length > 0
-    ? missingOptionalFields
-    : PROFILE_FIELDS
-        .filter(f => f.category === 'base' && missingFields.includes(f.key))
-        .sort((a, b) => a.priority - b.priority)
-        .slice(0, 3);
+  const missingByKey = new Set(missingFields);
+  const missingFieldsByImpact = PROFILE_FIELDS
+    .filter((f) => missingByKey.has(f.key))
+    .sort((a, b) => b.points - a.points || a.priority - b.priority);
+
+  const shouldAllowPhotoMilestones = photoCount < 4;
+  const nextBestActions: ProfileField[] = [];
+
+  // Required suggestion behavior:
+  // 1) If fewer than 2 photos -> photos first
+  if (photoCount < 2) {
+    const photos2 = PROFILE_FIELDS.find((f) => f.key === 'photos_2');
+    if (photos2) nextBestActions.push(photos2);
+  } else if (!isBioComplete) {
+    const bio = PROFILE_FIELDS.find((f) => f.key === 'bio');
+    if (bio) nextBestActions.push(bio);
+  } else if (promptCount < 3) {
+    const nextPromptKey: ProfileFieldKey =
+      promptCount < 1 ? 'prompt_1' : promptCount < 2 ? 'prompt_2' : 'prompt_3';
+    const nextPrompt = PROFILE_FIELDS.find((f) => f.key === nextPromptKey);
+    if (nextPrompt) nextBestActions.push(nextPrompt);
+  }
+
+  // Fill remaining slots with highest-impact missing fields,
+  // preferring different categories when possible.
+  const pickedKeys = new Set(nextBestActions.map((a) => a.key));
+  const pickedCategories = new Set(nextBestActions.map((a) => a.category));
+
+  for (const candidate of missingFieldsByImpact) {
+    if (nextBestActions.length >= 3) break;
+    if (pickedKeys.has(candidate.key)) continue;
+
+    // Do not spam photos once user has 4 photos (except the 2-photo minimum handled above).
+    if (candidate.category === 'photos' && !shouldAllowPhotoMilestones) {
+      continue;
+    }
+    // Also never suggest photos_6 after 4 photos under current product rule.
+    if (candidate.key === 'photos_6' && !shouldAllowPhotoMilestones) {
+      continue;
+    }
+
+    if (!pickedCategories.has(candidate.category)) {
+      nextBestActions.push(candidate);
+      pickedKeys.add(candidate.key);
+      pickedCategories.add(candidate.category);
+      continue;
+    }
+  }
+
+  // If we still have room, allow same-category picks.
+  if (nextBestActions.length < 3) {
+    for (const candidate of missingFieldsByImpact) {
+      if (nextBestActions.length >= 3) break;
+      if (pickedKeys.has(candidate.key)) continue;
+      if (candidate.category === 'photos' && !shouldAllowPhotoMilestones) continue;
+      if (candidate.key === 'photos_6' && !shouldAllowPhotoMilestones) continue;
+      nextBestActions.push(candidate);
+      pickedKeys.add(candidate.key);
+    }
+  }
 
   const percentage = Math.round(score);
-  const baseComplete = baseScore >= baseMaxScore;
-  const optionalComplete = optionalScore >= optionalMaxScore;
+  const baseComplete = identityScore >= 15 && photosScore >= 10; // minimum viability: identity + 2 photos
+  const optionalComplete =
+    bioPromptsScore >= 25 &&
+    coreDetailsScore >= 15 &&
+    lifestyleScore >= 10 &&
+    interestsDepthScore >= 5 &&
+    lifeRhythmScore >= 10;
 
   return {
     percentage,

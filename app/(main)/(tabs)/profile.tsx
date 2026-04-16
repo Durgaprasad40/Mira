@@ -733,6 +733,7 @@ export default function ProfileScreen() {
           dateOfBirth: currentUser.dateOfBirth,
           gender: currentUser.gender,
           isVerified: currentUser.isVerified,
+          faceVerificationPassed: (currentUser as any).faceVerificationPassed,
           photos: isDemoMode ? currentUser.photos : effectivePhotos,
           lookingFor: (currentUser as any).lookingFor,
           relationshipIntent: (currentUser as any).relationshipIntent,
@@ -741,6 +742,15 @@ export default function ProfileScreen() {
           education: (currentUser as any).education,
           jobTitle: (currentUser as any).jobTitle,
           company: (currentUser as any).company,
+          school: (currentUser as any).school,
+          height: (currentUser as any).height,
+          smoking: (currentUser as any).smoking,
+          drinking: (currentUser as any).drinking,
+          kids: (currentUser as any).kids,
+          exercise: (currentUser as any).exercise,
+          pets: (currentUser as any).pets,
+          activities: (currentUser as any).activities,
+          lifeRhythm: (currentUser as any).lifeRhythm,
         }}
         compact={true}
       />
