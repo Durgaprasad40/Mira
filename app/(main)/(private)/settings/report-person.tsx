@@ -53,6 +53,21 @@ const REPORT_REASONS = [
 
 type ReportReasonKey = (typeof REPORT_REASONS)[number]['key'];
 
+// Phase-2 UI reasons -> moderation pipeline reasons (api.users.reportUser)
+const REPORT_REASON_TO_MODERATION_REASON: Record<
+  ReportReasonKey,
+  'fake_profile' | 'inappropriate_photos' | 'harassment' | 'spam' | 'underage' | 'other'
+> = {
+  harassment: 'harassment',
+  fake_profile: 'fake_profile',
+  spam: 'spam',
+  inappropriate_content: 'inappropriate_photos',
+  safety_concern: 'other',
+  impersonation: 'fake_profile',
+  underage: 'underage',
+  other: 'other',
+};
+
 // Attachment limits
 const MAX_PHOTOS = 5;
 const MAX_VIDEO_DURATION_SECONDS = 60;
@@ -95,13 +110,13 @@ export default function ReportPersonScreen() {
   const [description, setDescription] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Attachment state
+  // Evidence state
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
 
-  // Backend mutations - using api.support
-  const createSupportRequest = useMutation(api.support.createSupportRequest);
-  const generateUploadUrl = useMutation(api.support.generateUploadUrl);
+  // Backend mutation - real moderation report (NOT support ticket)
+  const reportUser = useMutation(api.users.reportUser);
+  const generateReportEvidenceUploadUrl = useMutation(api.users.generateReportEvidenceUploadUrl);
 
   // If no userId, show nothing while redirecting
   if (!reportedUserId) {
@@ -185,25 +200,14 @@ export default function ReportPersonScreen() {
           type: 'video',
           duration: durationSeconds,
         };
-        // Replace all attachments with just the video
+
+        // Either up to 5 photos OR 1 video
         setAttachments([newVideo]);
       }
     } catch (error) {
       console.error('[REPORT] Video picker error:', error);
       Toast.show('Failed to select video');
     }
-  };
-
-  // Remove attachment
-  const handleRemoveAttachment = (index: number) => {
-    setAttachments((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  // Format duration
-  const formatDuration = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.round(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   // Submit report
@@ -222,52 +226,43 @@ export default function ReportPersonScreen() {
     setIsSubmitting(true);
 
     try {
-      // Upload attachments
-      let uploadedAttachments: { storageId: Id<'_storage'>; type: 'photo' | 'video' }[] = [];
+      const moderationReason = REPORT_REASON_TO_MODERATION_REASON[selectedReason];
 
+      // Upload evidence (if any) to Convex storage and attach storage IDs to the report
+      let evidence: { storageId: Id<'_storage'>; type: 'photo' | 'video' }[] | undefined;
       if (attachments.length > 0) {
         setUploadProgress(`Uploading ${attachments.length} file(s)...`);
+        const uploaded: { storageId: Id<'_storage'>; type: 'photo' | 'video' }[] = [];
 
         for (let i = 0; i < attachments.length; i++) {
           const attachment = attachments[i];
           setUploadProgress(`Uploading ${i + 1} of ${attachments.length}...`);
 
-          // CONTRACT FIX: generateUploadUrl expects {}
           const storageId = await uploadMediaToConvex(
             attachment.uri,
-            () => generateUploadUrl(),
+            async () => {
+              const res = await generateReportEvidenceUploadUrl({ authUserId: userId });
+              if ((res as any)?.success !== true || !(res as any)?.uploadUrl) {
+                throw new Error('Failed to start upload');
+              }
+              return (res as any).uploadUrl as string;
+            },
             attachment.type
           );
 
-          uploadedAttachments.push({
-            storageId,
-            type: attachment.type,
-          });
+          uploaded.push({ storageId, type: attachment.type });
         }
 
         setUploadProgress(null);
+        evidence = uploaded;
       }
 
-      // Submit as support ticket with safety category
-      // Include reported user info in the message for tracking
-      const reasonLabel = REPORT_REASONS.find((r) => r.key === selectedReason)?.label || selectedReason;
-      const reportMessage = [
-        `[Deep Connect Report - ${reasonLabel}]`,
-        '',
-        `Reported User: ${reportedUserName}`,
-        `Reported User ID: ${reportedUserId}`,
-        '',
-        'Description:',
-        description.trim() || 'No additional details provided.',
-      ].join('\n');
-
-      // Using api.support.createSupportRequest with harassment_stalking category
-      // Note: Attachments not yet supported by backend - included in description
-      await createSupportRequest({
+      await reportUser({
         authUserId: userId,
-        category: 'harassment_stalking',
-        description: `${reportMessage}${uploadedAttachments.length > 0 ? `\n\n(${uploadedAttachments.length} attachment(s) pending)` : ''}`,
-        relatedUserId: reportedUserId as Id<'users'>,
+        reportedUserId: reportedUserId as Id<'users'>,
+        reason: moderationReason,
+        description: description.trim() ? description.trim() : undefined,
+        evidence,
       });
 
       Toast.show('Report submitted successfully');
@@ -455,7 +450,10 @@ export default function ReportPersonScreen() {
                       />
                       <TouchableOpacity
                         style={styles.removeButton}
-                        onPress={() => handleRemoveAttachment(index)}
+                        onPress={() =>
+                          setAttachments((prev) => prev.filter((_, i) => i !== index))
+                        }
+                        disabled={isSubmitting}
                       >
                         <Ionicons name="close" size={14} color="#FFF" />
                       </TouchableOpacity>
@@ -472,13 +470,17 @@ export default function ReportPersonScreen() {
                   <View style={styles.videoDetails}>
                     <Text style={styles.videoLabel}>Video attached</Text>
                     <Text style={styles.videoDuration}>
-                      Duration: {formatDuration((attachments[0] as VideoAttachment).duration)}
+                      Duration: {Math.floor((attachments[0] as VideoAttachment).duration / 60)}:
+                      {Math.round((attachments[0] as VideoAttachment).duration % 60)
+                        .toString()
+                        .padStart(2, '0')}
                     </Text>
                   </View>
                 </View>
                 <TouchableOpacity
                   style={styles.removeVideoButton}
                   onPress={() => setAttachments([])}
+                  disabled={isSubmitting}
                 >
                   <Ionicons name="trash-outline" size={18} color="#EF4444" />
                 </TouchableOpacity>
