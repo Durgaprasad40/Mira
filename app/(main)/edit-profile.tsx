@@ -1262,29 +1262,87 @@ export default function EditProfileScreen() {
         });
       }
 
+      const normalizeString = (v: any) => (typeof v === 'string' ? v.trim() : '');
+      const normalizeInt = (v: any) => {
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string' && v.trim().length > 0) {
+          const n = parseInt(v, 10);
+          return Number.isFinite(n) ? n : null;
+        }
+        return null;
+      };
+      const sameString = (a: any, b: any) => normalizeString(a) === normalizeString(b);
+      const sameNumberOrNull = (a: any, b: any) => {
+        const na = typeof a === 'number' && Number.isFinite(a) ? a : a == null ? null : a;
+        const nb = typeof b === 'number' && Number.isFinite(b) ? b : b == null ? null : b;
+        return na === nb;
+      };
+      const sameStringArray = (a: any, b: any) => {
+        const aa = Array.isArray(a) ? a : [];
+        const bb = Array.isArray(b) ? b : [];
+        if (aa.length !== bb.length) return false;
+        for (let i = 0; i < aa.length; i++) if (aa[i] !== bb[i]) return false;
+        return true;
+      };
+
+      const nextBio = normalizeString(bio) || undefined;
+      const nextJobTitle = normalizeString(jobTitle) || undefined;
+      const nextCompany = normalizeString(company) || undefined;
+      const nextSchool = normalizeString(school) || undefined;
+      const nextName = fullName || undefined;
+      const nextHeight = height ? parseInt(height, 10) : undefined;
+      const nextWeight = weight ? parseInt(weight, 10) : undefined;
+      const nextPets = pets.length > 0 ? (pets as any) : undefined;
+      const nextInsect = (insect || undefined) as any;
+
+      const shouldWriteCoreProfile =
+        !sameString(currentUser?.name, nextName ?? '') ||
+        !sameString(currentUser?.bio, nextBio ?? '') ||
+        !sameNumberOrNull((currentUser as any)?.height ?? null, nextHeight ?? null) ||
+        !sameNumberOrNull((currentUser as any)?.weight ?? null, nextWeight ?? null) ||
+        ((currentUser as any)?.smoking ?? null) !== ((smoking || undefined) as any) ||
+        ((currentUser as any)?.drinking ?? null) !== ((drinking || undefined) as any) ||
+        ((currentUser as any)?.kids ?? null) !== ((kids || undefined) as any) ||
+        ((currentUser as any)?.exercise ?? null) !== ((exercise || undefined) as any) ||
+        ((currentUser as any)?.education ?? null) !== ((education || undefined) as any) ||
+        ((currentUser as any)?.religion ?? null) !== ((religion || undefined) as any) ||
+        !sameString((currentUser as any)?.jobTitle, nextJobTitle ?? '') ||
+        !sameString((currentUser as any)?.company, nextCompany ?? '') ||
+        !sameString((currentUser as any)?.school, nextSchool ?? '') ||
+        !sameStringArray((currentUser as any)?.pets ?? [], nextPets ?? []) ||
+        ((currentUser as any)?.insect ?? null) !== (nextInsect ?? null) ||
+        // Only consider activities when we intend to save them (otherwise preserve backend state).
+        (shouldSaveInterests ? !sameStringArray((currentUser as any)?.activities ?? [], activities as any) : false);
+
       if (!userId) {
         console.warn('[EDIT_PROFILE] Cannot update profile - no userId');
-      } else {
+      } else if (shouldWriteCoreProfile) {
         await updateProfile({
           authUserId: userId,
-          name: fullName || undefined,
-          bio: bio.trim() || undefined,
-          height: height ? parseInt(height) : undefined,
-          weight: weight ? parseInt(weight) : undefined,
+          name: nextName,
+          bio: nextBio,
+          height: typeof nextHeight === 'number' && Number.isFinite(nextHeight) ? nextHeight : undefined,
+          weight: typeof nextWeight === 'number' && Number.isFinite(nextWeight) ? nextWeight : undefined,
           smoking: (smoking || undefined) as any,
           drinking: (drinking || undefined) as any,
           kids: (kids || undefined) as any,
           education: (education || undefined) as any,
           religion: (religion || undefined) as any,
-          jobTitle: jobTitle.trim() || undefined,
-          company: company.trim() || undefined,
-          school: school.trim() || undefined,
+          jobTitle: nextJobTitle,
+          company: nextCompany,
+          school: nextSchool,
           exercise: (exercise || undefined) as any,
-          pets: pets.length > 0 ? (pets as any) : undefined,
-          insect: (insect || undefined) as any,
+          pets: nextPets,
+          insect: nextInsect,
           activities: activitiesPayload,
         });
+      } else {
+        if (__DEV__) {
+          console.log('[EDIT_PROFILE_SAVE_GUARD] SKIPPED updateProfile - no core changes detected');
+        }
       }
+
+      // Whether or not updateProfile ran, subsequent ops can still run (prompts / onboardingDraft / photos / blur).
       coreProfileSaved = true;
 
       // SURGICAL FIX: Only save prompts if hydrated or edited
@@ -1301,6 +1359,8 @@ export default function EditProfileScreen() {
         });
       }
 
+      const postSaveOps: Promise<any>[] = [];
+
       if (shouldSavePrompts) {
         if (__DEV__) {
           console.log('[PROFILE_PROMPTS_SAVE] Saving to Convex:', {
@@ -1309,30 +1369,44 @@ export default function EditProfileScreen() {
             mutation: 'api.users.updateProfilePrompts',
           });
         }
-        await updateProfilePrompts({ token: sessionToken, prompts: filledPrompts });
+        postSaveOps.push(updateProfilePrompts({ token: sessionToken, prompts: filledPrompts }));
       } else {
         if (__DEV__) {
           console.log('[PROFILE_PROMPTS_SAVE] SKIPPED - not hydrated and not edited, preserving backend state');
         }
       }
 
-      // Save Life Rhythm to onboardingDraft
+      // Save Life Rhythm to onboardingDraft (skip if unchanged)
+      const existingLifeRhythm = (currentUser as any)?.onboardingDraft?.lifeRhythm ?? (currentUser as any)?.lifeRhythm ?? null;
+      const nextLifeRhythm = {
+        city: lifeRhythmCity || undefined,
+        socialRhythm: socialRhythm || undefined,
+        sleepSchedule: sleepSchedule || undefined,
+        travelStyle: travelStyle || undefined,
+        workStyle: workStyle || undefined,
+        coreValues: coreValues.length > 0 ? coreValues : undefined,
+      };
+      const lifeRhythmUnchanged =
+        sameString(existingLifeRhythm?.city, nextLifeRhythm.city ?? '') &&
+        sameString(existingLifeRhythm?.socialRhythm, nextLifeRhythm.socialRhythm ?? '') &&
+        sameString(existingLifeRhythm?.sleepSchedule, nextLifeRhythm.sleepSchedule ?? '') &&
+        sameString(existingLifeRhythm?.travelStyle, nextLifeRhythm.travelStyle ?? '') &&
+        sameString(existingLifeRhythm?.workStyle, nextLifeRhythm.workStyle ?? '') &&
+        sameStringArray(existingLifeRhythm?.coreValues ?? [], nextLifeRhythm.coreValues ?? []);
+
       if (!userId) {
         console.warn('[EDIT_PROFILE] Cannot save Life Rhythm - no userId');
+      } else if (!lifeRhythmUnchanged) {
+        postSaveOps.push(
+          upsertOnboardingDraft({
+            userId,
+            patch: { lifeRhythm: nextLifeRhythm },
+          }),
+        );
       } else {
-        await upsertOnboardingDraft({
-          userId,
-          patch: {
-            lifeRhythm: {
-              city: lifeRhythmCity || undefined,
-              socialRhythm: socialRhythm || undefined,
-              sleepSchedule: sleepSchedule || undefined,
-              travelStyle: travelStyle || undefined,
-              workStyle: workStyle || undefined,
-              coreValues: coreValues.length > 0 ? coreValues : undefined,
-            },
-          },
-        });
+        if (__DEV__) {
+          console.log('[EDIT_PROFILE_SAVE_GUARD] SKIPPED upsertOnboardingDraft - lifeRhythm unchanged');
+        }
       }
 
       // CRITICAL FIX: Persist photo ordering to backend
@@ -1372,17 +1446,18 @@ export default function EditProfileScreen() {
             });
           }
           if (!orderUnchanged) {
-            try {
-              await reorderPhotosMutation({
+            // Run in parallel with other post-save ops; swallow error and surface a specific message.
+            postSaveOps.push(
+              reorderPhotosMutation({
                 token: sessionToken,
                 photoIds: orderedPhotoIds as any, // Cast to Id<'photos'>[]
-              });
-            } catch (e) {
-              photoOrderSaveFailed = true;
-              if (__DEV__) {
-                console.warn('[EditProfile] reorderPhotos failed', e);
-              }
-            }
+              }).catch((e: any) => {
+                photoOrderSaveFailed = true;
+                if (__DEV__) {
+                  console.warn('[EditProfile] reorderPhotos failed', e);
+                }
+              }),
+            );
           }
         }
       }
@@ -1391,13 +1466,26 @@ export default function EditProfileScreen() {
       // FIX: Backend only supports user-level blur via togglePhotoBlur, not per-photo blur
       if (togglePhotoBlurMutation && userId) {
         const shouldBlur = Object.values(blurredPhotos).some(b => b === true) || blurEnabled;
+        const existingBlur = (currentUser as any)?.photoBlurred;
+        const blurUnchanged = typeof existingBlur === 'boolean' ? existingBlur === shouldBlur : false;
         if (__DEV__) {
-          console.log('[EditProfile] 🔒 Persisting blur state:', { shouldBlur, blurEnabled });
+          console.log('[EditProfile] 🔒 Persisting blur state:', { shouldBlur, blurEnabled, blurUnchanged });
         }
-        await togglePhotoBlurMutation({
-          authUserId: userId,
-          blurred: shouldBlur,
-        });
+        if (!blurUnchanged) {
+          postSaveOps.push(
+            togglePhotoBlurMutation({
+              authUserId: userId,
+              blurred: shouldBlur,
+            }),
+          );
+        } else if (__DEV__) {
+          console.log('[EDIT_PROFILE_SAVE_GUARD] SKIPPED togglePhotoBlur - blur unchanged');
+        }
+      }
+
+      // Parallelize independent post-save writes for better perceived latency.
+      if (postSaveOps.length > 0) {
+        await Promise.all(postSaveOps);
       }
 
       if (photoOrderSaveFailed) {

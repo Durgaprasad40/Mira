@@ -133,7 +133,7 @@ export const ACTION_DESCRIPTIONS: Record<ProfileFieldKey, string> = {
   photos_3: 'Add a 3rd photo',
   photos_4: 'Add a 4th photo',
   photos_6: 'Add more photos',
-  bio: 'Write a bio (80+ characters)',
+  bio: 'Add a bio',
   prompt_1: 'Answer your first prompt',
   prompt_2: 'Answer a second prompt',
   prompt_3: 'Answer a third prompt',
@@ -371,6 +371,7 @@ export function getProfileCompletion(userData: UserProfileData | null | undefine
   const photoCount = countValidPhotos(userData);
   const promptCount = countValidPrompts(userData);
   const isBioComplete = isFieldComplete('bio', userData);
+  const hasAnyBio = typeof userData.bio === 'string' && userData.bio.trim().length > 0;
 
   const missingByKey = new Set(missingFields);
   const missingFieldsByImpact = PROFILE_FIELDS
@@ -385,7 +386,7 @@ export function getProfileCompletion(userData: UserProfileData | null | undefine
   if (photoCount < 2) {
     const photos2 = PROFILE_FIELDS.find((f) => f.key === 'photos_2');
     if (photos2) nextBestActions.push(photos2);
-  } else if (!isBioComplete) {
+  } else if (!hasAnyBio) {
     const bio = PROFILE_FIELDS.find((f) => f.key === 'bio');
     if (bio) nextBestActions.push(bio);
   } else if (promptCount < 3) {
