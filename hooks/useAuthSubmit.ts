@@ -98,7 +98,7 @@ export function useAuthSubmit() {
       email: string;
       password: string;
       name: string;
-      handle: string; // Required unique nickname
+      handle?: string; // Phase-2-only nickname (Phase-1 can omit)
       dateOfBirth: string;
       gender: "male" | "female" | "non_binary" | "lesbian" | "other";
       lgbtqSelf?: ("gay" | "lesbian" | "bisexual" | "transgender" | "prefer_not_to_say")[]; // LGBTQ identity (optional)

@@ -430,7 +430,7 @@ export const registerWithEmail = mutation({
     email: v.string(),
     password: v.string(),
     name: v.string(),
-    handle: v.string(), // Required unique nickname
+    handle: v.optional(v.string()), // Optional: Phase-2-only nickname; Phase-1 can omit
     dateOfBirth: v.string(),
     gender: v.union(
       v.literal("male"),
@@ -454,37 +454,60 @@ export const registerWithEmail = mutation({
     // C8 FIX: Normalize email to lowercase to prevent case-based duplicates
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Normalize handle: lowercase and trim
-    const normalizedHandle = handle.toLowerCase().trim();
+    // Nickname/handle is Phase-2-only. Phase-1 registration omits it.
+    // If provided, validate and ensure uniqueness; otherwise generate a stable, unique handle for legacy systems.
+    const normalizeHandle = (value: string) => value.toLowerCase().trim();
+    const isValidHandle = (value: string) => /^[a-z0-9_]+$/.test(value) && value.length >= 3;
+    const generateCandidate = () => {
+      // 12 chars, always starts with a letter.
+      const suffix = generateRandomHex(6); // 12 hex chars [0-9a-f]
+      return `u${suffix}`;
+    };
 
-    // Validate handle format
-    if (normalizedHandle.length < 3) {
-      return {
-        success: false,
-        code: "INVALID_HANDLE" as const,
-        message: "Nickname must be at least 3 characters",
-      };
-    }
-    if (!/^[a-z0-9_]+$/.test(normalizedHandle)) {
-      return {
-        success: false,
-        code: "INVALID_HANDLE" as const,
-        message: "Nickname can only contain lowercase letters, numbers, and underscores",
-      };
-    }
+    let normalizedHandle: string | null = null;
 
-    // Check if handle is already taken
-    const existingByHandle = await ctx.db
-      .query("users")
-      .withIndex("by_handle", (q) => q.eq("handle", normalizedHandle))
-      .first();
+    if (typeof handle === 'string' && handle.trim().length > 0) {
+      normalizedHandle = normalizeHandle(handle);
 
-    if (existingByHandle) {
-      return {
-        success: false,
-        code: "HANDLE_TAKEN" as const,
-        message: "This nickname is already taken. Please choose another.",
-      };
+      if (!isValidHandle(normalizedHandle)) {
+        return {
+          success: false,
+          code: "INVALID_HANDLE" as const,
+          message: "Nickname must be at least 3 characters and can only contain lowercase letters, numbers, and underscores",
+        };
+      }
+
+      const safeHandle = normalizedHandle ?? undefined;
+      const existingByHandle = await ctx.db
+        .query("users")
+        .withIndex("by_handle", (q) => q.eq("handle", safeHandle as string))
+        .first();
+
+      if (existingByHandle) {
+        return {
+          success: false,
+          code: "HANDLE_TAKEN" as const,
+          message: "This nickname is already taken. Please choose another.",
+        };
+      }
+    } else {
+      // Phase-1 path: generate a unique handle so any legacy consumers remain stable.
+      // This is not user-facing and is NOT used as identity in Phase-1 UI.
+      for (let i = 0; i < 8; i++) {
+        const candidate = generateCandidate();
+        const existing = await ctx.db
+          .query("users")
+          .withIndex("by_handle", (q) => q.eq("handle", candidate))
+          .first();
+        if (!existing) {
+          normalizedHandle = candidate;
+          break;
+        }
+      }
+      if (!normalizedHandle) {
+        // Extremely unlikely; fallback to no handle.
+        normalizedHandle = null;
+      }
     }
 
     // C8 FIX: Check if user already exists by normalized email
@@ -537,7 +560,7 @@ export const registerWithEmail = mutation({
       hashVersion: CURRENT_HASH_VERSION,
       authProvider: "email",
       name,
-      handle: normalizedHandle, // Store the normalized handle
+      handle: normalizedHandle ?? undefined,
       dateOfBirth,
       gender,
       lgbtqSelf: lgbtqSelf ?? [], // LGBTQ identity (optional, max 2)

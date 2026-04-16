@@ -2110,17 +2110,29 @@ export const upsertOnboardingDraft = mutation({
  */
 export const getOnboardingStatus = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    userId: v.optional(v.union(v.id('users'), v.string())),
+    token: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    let resolvedUserId: Id<'users'> | null = null;
+    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
+    if (sessionToken.length > 0) {
+      resolvedUserId = await validateSessionToken(ctx, sessionToken);
+    }
+    if (
+      !resolvedUserId &&
+      args.userId !== undefined &&
+      String(args.userId).trim().length > 0
+    ) {
+      resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    }
 
-    if (!userId) {
+    if (!resolvedUserId) {
       console.log('[ONB_STATUS] User not found');
       return null;
     }
 
-    const user = await ctx.db.get(userId);
+    const user = await ctx.db.get(resolvedUserId);
     if (!user) {
       return null;
     }
@@ -2128,7 +2140,7 @@ export const getOnboardingStatus = query({
     // Count normal profile photos (exclude verification_reference)
     const normalPhotos = await ctx.db
       .query('photos')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .withIndex('by_user', (q) => q.eq('userId', resolvedUserId))
       .filter((q) => q.neq(q.field('photoType'), 'verification_reference'))
       .collect();
 
@@ -2174,7 +2186,7 @@ export const getOnboardingStatus = query({
     };
 
     console.log('[ONB_STATUS]', JSON.stringify({
-      userId: userId.substring(0, 8),
+      userId: resolvedUserId.substring(0, 8),
       onboardingCompleted: status.onboardingCompleted,
       phase2OnboardingCompleted: status.phase2OnboardingCompleted,
       privateWelcomeConfirmed: status.privateWelcomeConfirmed,

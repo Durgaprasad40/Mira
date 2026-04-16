@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { query, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import {
   FRONTEND_EXPLORE_CATEGORY_IDS,
   normalizeExploreCategoryId,
@@ -220,7 +220,8 @@ function rotationScore(viewerId: string, candidateId: string): number {
 
 export const getDiscoverProfiles = query({
   args: {
-    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
+    userId: v.optional(v.union(v.id('users'), v.string())), // Convex ID or authUserId; optional if token provided
+    token: v.optional(v.string()),
     sortBy: v.optional(v.union(
       v.literal('recommended'),
       v.literal('distance'),
@@ -240,10 +241,24 @@ export const getDiscoverProfiles = query({
 
     convexLog('discover.getDiscoverProfiles', { sortBy, limit, offset, status: 'started' });
 
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    // Resolve viewer: session token (preferred when present) or userId / authUserId string
+    let userId: Id<'users'> | null = null;
+    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
+    if (sessionToken.length > 0) {
+      userId = await validateSessionToken(ctx, sessionToken);
+    }
+    if (
+      !userId &&
+      args.userId !== undefined &&
+      String(args.userId).trim().length > 0
+    ) {
+      userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    }
     if (!userId) {
-      convexLog('discover.getDiscoverProfiles', { status: 'user_not_found', authUserId: String(args.userId).slice(-8) });
+      convexLog('discover.getDiscoverProfiles', {
+        status: 'user_not_found',
+        hint: args.userId !== undefined ? String(args.userId).slice(-8) : 'no_userId',
+      });
       return [];
     }
 
