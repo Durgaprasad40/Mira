@@ -977,12 +977,25 @@ export const getNearbyUsers = query({
 
       sortDistanceByUserId.set(user._id as string, distance);
 
+      // Strong Privacy Mode: fuzz returned map coordinates only.
+      // IMPORTANT: Eligibility/filtering/sorting still use real publishedLat/publishedLng.
+      let returnLat = user.publishedLat!;
+      let returnLng = user.publishedLng!;
+      if (user.strongPrivacyMode === true) {
+        const seed = simpleHash(String(user._id));
+        const bearingRad = (seed % 360) * (Math.PI / 180);
+        const distanceMeters = 200 + (seed % 201); // 200–400m
+        const fuzzed = offsetCoords(returnLat, returnLng, distanceMeters, bearingRad);
+        returnLat = fuzzed.lat;
+        returnLng = fuzzed.lng;
+      }
+
       results.push({
         id: user._id,
         name: user.name,
         age: calculateAge(user.dateOfBirth),
-        publishedLat: user.publishedLat!,
-        publishedLng: user.publishedLng!,
+        publishedLat: returnLat,
+        publishedLng: returnLng,
         publishedAt: user.publishedAt,
         distance: user.hideDistance === true ? undefined : distance,
         freshness,
