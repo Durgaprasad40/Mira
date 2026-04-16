@@ -413,6 +413,10 @@ export function getProfileCompletion(userData: UserProfileData | null | undefine
     if (candidate.key === 'photos_6' && !shouldAllowPhotoMilestones) {
       continue;
     }
+    // Never suggest bio if any non-empty bio exists (even if below scoring threshold).
+    if (candidate.key === 'bio' && hasAnyBio) {
+      continue;
+    }
 
     if (!pickedCategories.has(candidate.category)) {
       nextBestActions.push(candidate);
@@ -429,6 +433,8 @@ export function getProfileCompletion(userData: UserProfileData | null | undefine
       if (pickedKeys.has(candidate.key)) continue;
       if (candidate.category === 'photos' && !shouldAllowPhotoMilestones) continue;
       if (candidate.key === 'photos_6' && !shouldAllowPhotoMilestones) continue;
+      // Never suggest bio if any non-empty bio exists (even if below scoring threshold).
+      if (candidate.key === 'bio' && hasAnyBio) continue;
       nextBestActions.push(candidate);
       pickedKeys.add(candidate.key);
     }
