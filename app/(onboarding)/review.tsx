@@ -131,7 +131,6 @@ export default function ReviewScreen() {
 
   const {
     name, // IDENTITY SIMPLIFICATION: Single name field
-    nickname,
     dateOfBirth,
     gender,
     lgbtqSelf,
@@ -213,12 +212,6 @@ export default function ReviewScreen() {
     return '';
   };
   const displayName = getDisplayName() || "Not set";
-  // Format nickname for display: capitalize first letter
-  // Handles are stored lowercase for uniqueness, but display should look natural
-  const rawNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "";
-  const displayNickname = rawNickname
-    ? rawNickname.charAt(0).toUpperCase() + rawNickname.slice(1)
-    : "—";
   const displayDateOfBirth = dateOfBirth || onboardingStatus?.basicInfo?.dateOfBirth || demoProfile?.dateOfBirth || "";
   const displayGender = gender || onboardingStatus?.basicInfo?.gender || demoProfile?.gender || "";
 
@@ -227,18 +220,16 @@ export default function ReviewScreen() {
     if (__DEV__) {
       console.log('[REVIEW] basic info values:', {
         displayName,
-        displayNickname,
         displayDateOfBirth,
         displayGender,
       });
       console.log('[REVIEW] basic info sources:', {
         name: name ? 'store' : (demoProfile?.name ? 'demoProfile' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none')),
-        nickname: nickname ? 'store' : (onboardingStatus?.basicInfo?.nickname ? 'backend' : 'none'),
         dateOfBirth: dateOfBirth ? 'store' : (onboardingStatus?.basicInfo?.dateOfBirth ? 'backend' : 'none'),
         gender: gender ? 'store' : (onboardingStatus?.basicInfo?.gender ? 'backend' : 'none'),
       });
     }
-  }, [name, nickname, dateOfBirth, gender, onboardingStatus, demoProfile, displayName, displayNickname, displayDateOfBirth, displayGender]);
+  }, [name, dateOfBirth, gender, onboardingStatus, demoProfile, displayName, displayDateOfBirth, displayGender]);
 
   // PERFORMANCE LOG: Track photo rendering speed
   React.useEffect(() => {
@@ -344,7 +335,6 @@ export default function ReviewScreen() {
         // Only include basic fields if they have values (don't overwrite with empty)
         // IDENTITY SIMPLIFICATION: Single name field
         if (name && name.trim().length > 0) profileData.name = name.trim();
-        if (nickname && nickname.length > 0) profileData.handle = nickname;
         if (dateOfBirth && dateOfBirth.length > 0) profileData.dateOfBirth = dateOfBirth;
         if (gender) profileData.gender = gender;
         // LGBTQ fields are optional - only save if user selected any
@@ -674,10 +664,6 @@ export default function ReviewScreen() {
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Name:</Text>
           <Text style={styles.infoValue}>{displayName}</Text>
-        </View>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Nickname:</Text>
-          <Text style={styles.infoValue}>@{displayNickname}</Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Age:</Text>

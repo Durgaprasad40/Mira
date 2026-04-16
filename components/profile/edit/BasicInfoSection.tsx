@@ -21,8 +21,6 @@ interface BasicInfoSectionProps {
   name: string;
   onChangeName: (value: string) => void;
   currentUser: {
-    handle?: string;
-    nickname?: string;
     dateOfBirth?: string;
     gender?: string;
   } | null;
@@ -63,15 +61,7 @@ export function BasicInfoSection({
           autoCapitalize="words"
         />
       </View>
-      {/* Nickname full width (read-only) */}
-      <View style={styles.inputRow}>
-        <Text style={styles.label}>Nickname</Text>
-        <View style={styles.readOnlyField}>
-          <Text style={styles.readOnlyText}>@{currentUser?.handle || currentUser?.nickname || '—'}</Text>
-          <Ionicons name="lock-closed" size={14} color={COLORS.textMuted} />
-        </View>
-      </View>
-      {/* Row 3: Age + Gender compact side by side */}
+      {/* Row 2: Age + Gender compact side by side */}
       <View style={styles.compactRow}>
         <View style={styles.compactField}>
           <Text style={styles.compactLabel}>Age</Text>
@@ -88,7 +78,7 @@ export function BasicInfoSection({
           </View>
         </View>
       </View>
-      <Text style={styles.readOnlyHint}>Nickname, Age, and Gender cannot be changed.</Text>
+      <Text style={styles.readOnlyHint}>Age and Gender cannot be changed.</Text>
     </View>
   );
 }

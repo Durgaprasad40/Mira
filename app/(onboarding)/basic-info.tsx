@@ -80,11 +80,9 @@ export default function BasicInfoScreen() {
     lgbtqSelf,
     email,
     password,
-    nickname,
     setName,
     setDateOfBirth,
     setGender,
-    setNickname,
     toggleLgbtqSelf,
     setLgbtqSelf,
     setStep,
@@ -118,7 +116,6 @@ export default function BasicInfoScreen() {
 
   // Refs for scroll-to-invalid behavior
   const scrollRef = useRef<ScrollView>(null);
-  const nicknameFieldRef = useRef<View>(null);
   const dobFieldRef = useRef<View>(null);
   const genderFieldRef = useRef<View>(null);
 
@@ -126,7 +123,6 @@ export default function BasicInfoScreen() {
   const [displayName, setDisplayName] = useState("");
   const [displayDOB, setDisplayDOB] = useState("");
   const [displayGender, setDisplayGender] = useState<Gender | "">("");
-  const [displayHandle, setDisplayHandle] = useState("");
   const [lgbtqError, setLgbtqError] = useState("");
 
   // Refs for scroll-to-invalid behavior
@@ -189,7 +185,6 @@ export default function BasicInfoScreen() {
       console.log(`[BASIC]   demoProfile.gender=${profile.gender || '(empty)'}`);
     }
     console.log(`[BASIC]   onboardingStore.name=${name || '(empty)'}`);
-    console.log(`[BASIC]   onboardingStore.nickname=${nickname || '(empty)'}`);
     console.log(`[BASIC]   onboardingStore.dateOfBirth=${dateOfBirth || '(empty)'}`);
     console.log(`[BASIC]   onboardingStore.gender=${gender || '(empty)'}`);
     console.log('[BASIC] ════════════════════════════════════════');
@@ -221,7 +216,6 @@ export default function BasicInfoScreen() {
       }
       setDisplayDOB(demoProfile.dateOfBirth || "");
       setDisplayGender((demoProfile.gender as Gender) || "");
-      setDisplayHandle(demoProfile.handle || "");
       if (demoProfile.dateOfBirth) {
         setSelectedDate(parseDOBString(demoProfile.dateOfBirth));
       }
@@ -249,7 +243,6 @@ export default function BasicInfoScreen() {
       }
       setDisplayDOB(existingUserData.dateOfBirth || "");
       setDisplayGender((existingUserData.gender as Gender) || "");
-      setDisplayHandle(existingUserData.handle || "");
       if (existingUserData.dateOfBirth) {
         setSelectedDate(parseDOBString(existingUserData.dateOfBirth));
       }
@@ -260,12 +253,11 @@ export default function BasicInfoScreen() {
       if (demoProfile) {
         // Check if ALL basic fields are present (strict check)
         const hasName = !!demoProfile.name && demoProfile.name.trim().length > 0;
-        const hasHandle = !!demoProfile.handle && demoProfile.handle.trim().length > 0;
         const hasDOB = !!demoProfile.dateOfBirth && demoProfile.dateOfBirth.length > 0;
         const hasGender = !!demoProfile.gender && demoProfile.gender.length > 0;
-        const hasAllFields = hasName && hasHandle && hasDOB && hasGender;
+        const hasAllFields = hasName && hasDOB && hasGender;
 
-        console.log(`[BASIC] confirm mode check: name=${hasName}, handle=${hasHandle}, dob=${hasDOB}, gender=${hasGender}, allPresent=${hasAllFields}`);
+        console.log(`[BASIC] confirm mode check: name=${hasName}, dob=${hasDOB}, gender=${hasGender}, allPresent=${hasAllFields}`);
 
         if (hasAllFields) {
           // ALL fields present → normal confirm mode (read-only)
@@ -273,7 +265,6 @@ export default function BasicInfoScreen() {
           setDisplayName(demoProfile.name!);
           setDisplayDOB(demoProfile.dateOfBirth!);
           setDisplayGender(demoProfile.gender as Gender);
-          setDisplayHandle(demoProfile.handle!);
           setSelectedDate(parseDOBString(demoProfile.dateOfBirth!));
           // LGBTQ Self is always editable - prefill from demoProfile if available
           if (demoProfile.lgbtqSelf && demoProfile.lgbtqSelf.length > 0 && lgbtqSelf.length === 0) {
@@ -292,10 +283,6 @@ export default function BasicInfoScreen() {
           if (hasName && !name) {
             setName(demoProfile.name!);
             console.log(`[BASIC] pre-populated name="${demoProfile.name}" from demoProfile`);
-          }
-          if (hasHandle && !nickname) {
-            setNickname(demoProfile.handle!);
-            console.log(`[BASIC] pre-populated nickname="${demoProfile.handle}" from demoProfile`);
           }
           if (hasDOB && !dateOfBirth) {
             setDateOfBirth(demoProfile.dateOfBirth!);
@@ -324,7 +311,6 @@ export default function BasicInfoScreen() {
       }
       setDisplayDOB(existingUserData.dateOfBirth || "");
       setDisplayGender((existingUserData.gender as Gender) || "");
-      setDisplayHandle(existingUserData.handle || "");
       if (existingUserData.dateOfBirth) {
         setSelectedDate(parseDOBString(existingUserData.dateOfBirth));
       }
@@ -399,18 +385,6 @@ export default function BasicInfoScreen() {
       }
       return undefined;
     },
-    nickname: (value: string) => {
-      if (!value || value.length < 3) {
-        return "Nickname must be at least 3 characters";
-      }
-      // Only allow letters, numbers, underscores (no spaces, no dots)
-      // Input is normalized to lowercase in onChangeText, so check lowercase pattern
-      if (!/^[a-z0-9_]+$/.test(value)) {
-        return "Nickname can only contain letters, numbers, and underscores (no spaces or dots)";
-      }
-      // IDENTITY SIMPLIFICATION: NO uniqueness check - nickname does not need to be unique
-      return undefined;
-    },
     dateOfBirth: (value: string) => {
       if (!value) {
         return "Please select your date of birth";
@@ -481,8 +455,8 @@ export default function BasicInfoScreen() {
   const handleRecoveryContinue = () => {
     // Run validation using the helper - single name field
     const result = validateRequired(
-      { name, nickname, dateOfBirth, gender },
-      validationRules
+      { name, dateOfBirth, gender },
+      { name: validationRules.name, dateOfBirth: validationRules.dateOfBirth, gender: validationRules.gender }
     );
 
     if (!result.ok) {
@@ -491,7 +465,6 @@ export default function BasicInfoScreen() {
       // Scroll to first invalid field
       const fieldRefs = {
         name: nameFieldRef,
-        nickname: nicknameFieldRef,
         dateOfBirth: dobFieldRef,
         gender: genderFieldRef,
       };
@@ -511,7 +484,6 @@ export default function BasicInfoScreen() {
 
       // Only include non-empty values - single name field
       if (name && name.trim().length > 0) dataToSave.name = name.trim();
-      if (nickname && nickname.length > 0) dataToSave.handle = nickname;
       if (dateOfBirth && dateOfBirth.length > 0) dataToSave.dateOfBirth = dateOfBirth;
       if (gender) dataToSave.gender = gender;
       // LGBTQ Self is optional - only save if user selected any
@@ -537,8 +509,8 @@ export default function BasicInfoScreen() {
   const handleNextWithConfirmation = () => {
     // Run validation using the helper - single name field
     const result = validateRequired(
-      { name, nickname, dateOfBirth, gender },
-      validationRules
+      { name, dateOfBirth, gender },
+      { name: validationRules.name, dateOfBirth: validationRules.dateOfBirth, gender: validationRules.gender }
     );
 
     if (!result.ok) {
@@ -547,7 +519,6 @@ export default function BasicInfoScreen() {
       // Scroll to first invalid field
       const fieldRefs = {
         name: nameFieldRef,
-        nickname: nicknameFieldRef,
         dateOfBirth: dobFieldRef,
         gender: genderFieldRef,
       };
@@ -602,7 +573,6 @@ export default function BasicInfoScreen() {
             name: name.trim(),
             dateOfBirth,
             gender: gender as any,
-            handle: nickname,
           });
 
           // Step 3: Save onboarding draft to Convex
@@ -611,7 +581,6 @@ export default function BasicInfoScreen() {
             patch: {
               basicInfo: {
                 name: name.trim(),
-                handle: nickname,
                 dateOfBirth,
                 gender,
               },
@@ -719,7 +688,6 @@ export default function BasicInfoScreen() {
         email,
         password,
         name: name.trim(),
-        handle: nickname,
         dateOfBirth,
         gender: gender!, // Validated above - gender is not null here
         lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined, // LGBTQ identity (optional)
@@ -768,7 +736,6 @@ export default function BasicInfoScreen() {
           patch: {
             basicInfo: {
               name: name.trim(),
-              handle: nickname,
               dateOfBirth,
               gender,
             },
@@ -810,7 +777,7 @@ export default function BasicInfoScreen() {
   // In other modes (initial onboarding): ALL fields editable
   const isFieldLocked = (field: string): boolean => {
     if (!isEditFromReview) return false;
-    return ['nickname', 'dateOfBirth', 'gender'].includes(field);
+    return ['dateOfBirth', 'gender'].includes(field);
   };
 
   // Loading state for read-only mode
@@ -883,37 +850,6 @@ export default function BasicInfoScreen() {
           </Text>
         )}
         {errors.name ? <Text style={styles.fieldError}>{errors.name}</Text> : null}
-      </View>
-
-      {/* Nickname field - LOCKED in editFromReview mode */}
-      {/* IDENTITY SIMPLIFICATION: No uniqueness check, no "taken" indicator */}
-      <View ref={nicknameFieldRef} style={styles.field}>
-        <Input
-          label="Nickname"
-          value={isReadOnly ? (displayHandle || "—") : nickname}
-          onChangeText={(isReadOnly || isFieldLocked('nickname')) ? undefined : (text) => {
-            // Only allow alphanumeric and underscores, lowercase
-            const sanitized = text.toLowerCase().replace(/[^a-z0-9_]/g, '');
-            setNickname(sanitized);
-            clearFieldError("nickname");
-          }}
-          placeholder="Choose a nickname"
-          autoCapitalize="none"
-          autoCorrect={false}
-          maxLength={20}
-          editable={!isReadOnly && !isFieldLocked('nickname')}
-          style={[(isReadOnly || isFieldLocked('nickname')) ? styles.disabledInput : undefined, errors.nickname ? styles.inputError : undefined]}
-        />
-        <Text style={styles.fieldHelper}>Your nickname on Mira</Text>
-        {!isReadOnly && !isFieldLocked('nickname') && (
-          <Text style={styles.hint}>
-            Letters, numbers, and underscores only. {nickname.length}/20
-          </Text>
-        )}
-        {isFieldLocked('nickname') && (
-          <Text style={styles.lockedHint}>This field cannot be changed after initial setup</Text>
-        )}
-        {errors.nickname ? <Text style={styles.fieldError}>{errors.nickname}</Text> : null}
       </View>
 
       {/* Date of Birth field - LOCKED in editFromReview mode */}
@@ -1071,7 +1007,7 @@ export default function BasicInfoScreen() {
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Review your information</Text>
             <Text style={styles.modalMessage}>
-              Your Nickname, Date of Birth and Gender can't be changed later. Your Name can be edited anytime. Please make sure everything is correct.
+              Your Date of Birth and Gender can't be changed later. Your Name can be edited anytime. Please make sure everything is correct.
             </Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity
