@@ -25,6 +25,10 @@ export interface ProfileData {
   createdAt?: number;
   profilePrompts?: { question: string; answer: string }[];
   photoBlurred?: boolean;
+  /** Phase-2 only: master enable for per-photo blur. */
+  photoBlurEnabled?: boolean;
+  /** Phase-2 only: per-photo blur slots (index aligned with `photos`). */
+  photoBlurSlots?: boolean[];
   /** @deprecated Use privateIntentKeys[] instead */
   privateIntentKey?: string;
   /** Phase-2 only: Private intent category keys (multi-select, 1-5) */
@@ -102,6 +106,8 @@ export function toProfileData(p: any): ProfileData {
     createdAt: p.createdAt,
     profilePrompts: p.profilePrompts,
     photoBlurred: p.photoBlurred === true,
+    photoBlurEnabled: typeof p.photoBlurEnabled === "boolean" ? p.photoBlurEnabled : undefined,
+    photoBlurSlots: Array.isArray(p.photoBlurSlots) ? p.photoBlurSlots : undefined,
     // Phase-2 only: preserve intent keys (array preferred, single for backward compat)
     privateIntentKeys: p.privateIntentKeys ?? p.intentKeys ?? (p.privateIntentKey ? [p.privateIntentKey] : undefined),
     privateIntentKey: p.privateIntentKey ?? (p.privateIntentKeys?.[0] || p.intentKeys?.[0]),

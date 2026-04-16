@@ -585,7 +585,9 @@ export const getIncomingLikes = query({
           age: likerProfile.age,
           gender: likerProfile.gender,
           city: likerProfile.city,
-          blurredPhotoUrl: null,
+          blurredPhotoUrl: likerProfile.privatePhotoUrls?.[0] ?? null,
+          photoBlurEnabled: (likerProfile as any).photoBlurEnabled ?? undefined,
+          photoBlurSlots: likerProfile.photoBlurSlots ?? undefined,
           hasPrivatePhotos,
         },
       };

@@ -31,7 +31,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
-import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { usePrivateProfileStore, hydratePhotoBlurSettings } from '@/stores/privateProfileStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useScreenTrace } from '@/lib/devTrace';
@@ -179,8 +179,10 @@ export default function PrivateProfileScreen() {
 
   const isMainPhotoBlurred = useMemo(() => {
     if (isDemoMode) return false;
-    return Boolean(backendProfile?.photoBlurSlots?.[0]);
-  }, [backendProfile?.photoBlurSlots, isDemoMode]);
+    if (!backendProfile) return false;
+    const { photoBlurEnabled, photoBlurSlots } = hydratePhotoBlurSettings(backendProfile);
+    return Boolean(photoBlurEnabled && photoBlurSlots[0]);
+  }, [backendProfile, isDemoMode]);
 
   const resolvedName = useMemo(() => {
     if (displayName && displayName.trim().length > 0) {

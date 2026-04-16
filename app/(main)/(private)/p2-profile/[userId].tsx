@@ -340,68 +340,9 @@ export default function Phase2FullProfileScreen() {
       : 'skip'
   );
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PHOTO ACCESS: Query and mutation for privacy feature
-  // Shows request button when viewing a matched user's blurred photo
-  // ═══════════════════════════════════════════════════════════════════════════
-  const photoAccessStatus = useQuery(
-    api.privatePhotoAccess.getPrivatePhotoAccessStatus,
-    profileUserId && currentUserId
-      ? { ownerUserId: profileUserId as Id<'users'> }
-      : 'skip'
-  );
-
-  // Query whether the profile owner has blurred photos enabled
-  const photoBlurStatus = useQuery(
-    api.privatePhotoAccess.isPhotoBlurredForOwner,
-    profileUserId
-      ? { ownerUserId: profileUserId as Id<'users'> }
-      : 'skip'
-  );
-
-  const requestPhotoAccessMutation = useMutation(api.privatePhotoAccess.requestPrivatePhotoAccess);
-  const [photoAccessRequesting, setPhotoAccessRequesting] = useState(false);
-
-  const handleRequestPhotoAccess = useCallback(async () => {
-    if (!profileUserId || !currentUserId || photoAccessRequesting) return;
-
-    setPhotoAccessRequesting(true);
-    try {
-      const result = await requestPhotoAccessMutation({
-        ownerUserId: profileUserId as Id<'users'>,
-      });
-
-      if (result.success) {
-        if (__DEV__) console.log('[P2_PROFILE_PhotoAccess] Request sent:', result.status);
-        if (result.status === 'already_approved') {
-          Toast.show('You already have access to view their photo');
-        } else if (result.status === 'already_pending') {
-          Toast.show('Request already pending');
-        } else {
-          Toast.show('Photo access requested');
-        }
-      } else {
-        if (__DEV__) console.log('[P2_PROFILE_PhotoAccess] Request failed:', result.error);
-        Toast.show("Couldn't send request. Please try again.");
-      }
-    } catch (error) {
-      if (__DEV__) console.error('[P2_PROFILE_PhotoAccess] Error:', error);
-      Toast.show("Couldn't send request. Please try again.");
-    } finally {
-      setPhotoAccessRequesting(false);
-    }
-  }, [profileUserId, currentUserId, requestPhotoAccessMutation, photoAccessRequesting]);
-
-  // Determine if photo should show blurred and if request button should be visible
-  const isPhotoBlurred = photoBlurStatus?.isBlurred ?? false;
-  const canViewClearPhoto = photoAccessStatus?.canViewClear ?? !isPhotoBlurred;
-  const photoAccessRequestStatus = photoAccessStatus?.status ?? 'none';
-  const canRequestPhotoAccess = photoAccessStatus?.canRequest === true;
-  const showPhotoAccessButton =
-    isPhotoBlurred &&
-    !canViewClearPhoto &&
-    canRequestPhotoAccess &&
-    photoAccessRequestStatus !== 'approved';
+  // Phase-2 per-photo blur model (viewer-facing): blur only if enabled AND this slot is marked blurred
+  const photoBlurEnabled = profile?.photoBlurEnabled === true;
+  const photoBlurSlots: boolean[] = Array.isArray(profile?.photoBlurSlots) ? profile.photoBlurSlots : [];
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P0 HOOK ORDER FIX: ALL HOOKS MUST BE DECLARED BEFORE EARLY RETURNS
@@ -595,7 +536,7 @@ export default function Phase2FullProfileScreen() {
       source={{ uri: item.url }}
       style={styles.heroPhoto}
       contentFit="cover"
-      blurRadius={isPhotoBlurred && !canViewClearPhoto ? 15 : 0}
+      blurRadius={photoBlurEnabled && photoBlurSlots[index] ? 15 : 0}
     />
   );
 
@@ -712,43 +653,6 @@ export default function Phase2FullProfileScreen() {
 
           {/* Gradient overlay at bottom of photo */}
           <View style={styles.heroGradient} />
-
-          {/* PHOTO ACCESS: Request button overlay when photo is blurred */}
-          {showPhotoAccessButton && (
-            <View style={styles.photoAccessOverlay}>
-              <View style={styles.photoAccessContent}>
-                <Ionicons name="lock-closed" size={24} color="#FFFFFF" />
-                <Text style={styles.photoAccessTitle}>Photo is blurred</Text>
-                <Text style={styles.photoAccessSubtitle}>
-                  Request access to see the clear photo
-                </Text>
-                <TouchableOpacity
-                  style={[
-                    styles.photoAccessRequestButton,
-                    photoAccessRequestStatus === 'pending' && styles.photoAccessRequestButtonPending,
-                  ]}
-                  onPress={handleRequestPhotoAccess}
-                  disabled={photoAccessRequestStatus === 'pending' || photoAccessRequesting}
-                  activeOpacity={0.8}
-                >
-                  {photoAccessRequesting ? (
-                    <ActivityIndicator size="small" color="#FFFFFF" />
-                  ) : (
-                    <>
-                      <Ionicons
-                        name={photoAccessRequestStatus === 'pending' ? 'time-outline' : 'eye-outline'}
-                        size={18}
-                        color="#FFFFFF"
-                      />
-                      <Text style={styles.photoAccessRequestText}>
-                        {photoAccessRequestStatus === 'pending' ? 'Request pending' : 'Request access'}
-                      </Text>
-                    </>
-                  )}
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
 
           {/* Back button */}
           <TouchableOpacity

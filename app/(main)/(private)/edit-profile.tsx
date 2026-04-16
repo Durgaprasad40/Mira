@@ -58,6 +58,7 @@ const PRIVATE_PHOTOS_DIR_NAME = 'private_photos';
 type PersistedProfileUpdates = {
   privatePhotoUrls?: string[];
   photoBlurSlots?: boolean[];
+  photoBlurEnabled?: boolean;
   privateBio?: string;
   height?: number | null;
   weight?: number | null;
@@ -241,7 +242,7 @@ export default function EditProfileScreen() {
   const storeAge = usePrivateProfileStore((s) => s.age);
   const storeGender = usePrivateProfileStore((s) => s.gender);
   const privateBio = usePrivateProfileStore((s) => s.privateBio);
-  const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
+  const photoBlurEnabled = usePrivateProfileStore((s) => s.photoBlurEnabled);
   const photoBlurSlots = usePrivateProfileStore((s) => s.photoBlurSlots);
   const promptAnswers = usePrivateProfileStore((s) => s.promptAnswers);
 
@@ -418,6 +419,7 @@ export default function EditProfileScreen() {
   // Store actions
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setPhotoBlurSlots = usePrivateProfileStore((s) => s.setPhotoBlurSlots);
+  const setPhotoBlurEnabled = usePrivateProfileStore((s) => s.setPhotoBlurEnabled);
   const setPrivateBio = usePrivateProfileStore((s) => s.setPrivateBio);
   const setHeight = usePrivateProfileStore((s) => s.setHeight);
   const setWeight = usePrivateProfileStore((s) => s.setWeight);
@@ -631,9 +633,9 @@ export default function EditProfileScreen() {
     [isDemoMode, updatePrivateProfile, userId]
   );
 
-  const persistPhotoBlurSlots = useCallback(
+  const persistPhotoBlurSettings = useCallback(
     async (
-      nextSlots: boolean[],
+      updates: { photoBlurSlots?: boolean[]; photoBlurEnabled?: boolean },
       {
         onSuccess,
         onFailure,
@@ -645,6 +647,9 @@ export default function EditProfileScreen() {
       }
     ) => {
       try {
+        if (updates.photoBlurSlots === undefined && updates.photoBlurEnabled === undefined) {
+          return false;
+        }
         if (!isDemoMode) {
           if (!userId) {
             throw new Error('Please sign in to save changes.');
@@ -652,7 +657,7 @@ export default function EditProfileScreen() {
 
           await updatePhotoBlurSlots({
             authUserId: userId,
-            photoBlurSlots: nextSlots,
+            ...updates,
           });
         }
 
@@ -793,10 +798,7 @@ export default function EditProfileScreen() {
 
     const removedUrl = currentPhotos[index];
     const newPhotos = currentPhotos.filter((_, i) => i !== index);
-    const nextBlurSlots = [
-      ...photoBlurSlots.filter((_, i) => i !== index),
-      blurMyPhoto,
-    ].slice(0, 9);
+    const nextBlurSlots = [...photoBlurSlots.filter((_, i) => i !== index), false].slice(0, 9);
     const saved = await persistProfileUpdate(
       {
         privatePhotoUrls: newPhotos,
@@ -841,7 +843,7 @@ export default function EditProfileScreen() {
     newPhotos.splice(fromIndex, 1); // Remove from current position
     newPhotos.unshift(selectedPhoto); // Add to beginning
     const nextBlurSlots = [...photoBlurSlots];
-    const selectedBlur = nextBlurSlots[fromIndex] ?? blurMyPhoto;
+    const selectedBlur = nextBlurSlots[fromIndex] ?? false;
     nextBlurSlots.splice(fromIndex, 1);
     nextBlurSlots.unshift(selectedBlur);
 
@@ -872,10 +874,13 @@ export default function EditProfileScreen() {
   const handleTogglePhotoBlur = async (slotIndex: number) => {
     const newSlots = [...photoBlurSlots];
     newSlots[slotIndex] = !newSlots[slotIndex];
-    await persistPhotoBlurSlots(newSlots, {
-      onSuccess: () => setPhotoBlurSlots(newSlots),
-      failureMessage: 'Failed to update photo blur. Please try again.',
-    });
+    await persistPhotoBlurSettings(
+      { photoBlurSlots: newSlots },
+      {
+        onSuccess: () => setPhotoBlurSlots(newSlots),
+        failureMessage: 'Failed to update photo blur. Please try again.',
+      }
+    );
   };
 
   // Save bio
@@ -947,6 +952,7 @@ export default function EditProfileScreen() {
         await updatePhotoBlurSlots({
           authUserId: userId,
           photoBlurSlots: photoBlurSlots,
+          photoBlurEnabled: photoBlurEnabled,
         });
       }
 
@@ -1337,8 +1343,8 @@ export default function EditProfileScreen() {
                 const isThisSlotLoading = addingSlotIndex === slotIndex;
 
                 if (hasPhoto) {
-                  // Per-photo blur: apply blur radius when blurMyPhoto is ON and this slot is marked blurred
-                  const isPhotoBlurred = blurMyPhoto && photoBlurSlots[slotIndex];
+                  // Per-photo blur: master enables controls; slot true = blurred in Deep Connect
+                  const isPhotoBlurred = photoBlurEnabled && photoBlurSlots[slotIndex];
 
                   return (
                     <View key={`slot-${slotIndex}`} style={styles.photoSlot}>
@@ -1371,7 +1377,7 @@ export default function EditProfileScreen() {
                         </TouchableOpacity>
                       )}
 
-                      {blurMyPhoto && (
+                      {photoBlurEnabled && (
                         <TouchableOpacity
                           style={[styles.blurBtn, photoBlurSlots[slotIndex] && styles.blurBtnActive]}
                           onPress={() => handleTogglePhotoBlur(slotIndex)}
@@ -1422,28 +1428,48 @@ export default function EditProfileScreen() {
               <TouchableOpacity
                 style={styles.toggleRow}
                 onPress={async () => {
-                  const nextBlurEnabled = !blurMyPhoto;
-                  const nextSlots = Array.from({ length: 9 }, () => nextBlurEnabled);
-                  await persistPhotoBlurSlots(nextSlots, {
-                    onSuccess: () => setPhotoBlurSlots(nextSlots),
-                    failureMessage: 'Failed to update photo blur. Please try again.',
-                  });
+                  const nextEnabled = !photoBlurEnabled;
+                  if (nextEnabled) {
+                    await persistPhotoBlurSettings(
+                      { photoBlurEnabled: true },
+                      {
+                        onSuccess: () => setPhotoBlurEnabled(true),
+                        failureMessage: 'Failed to update photo blur. Please try again.',
+                      }
+                    );
+                  } else {
+                    const cleared = Array.from({ length: 9 }, () => false);
+                    await persistPhotoBlurSettings(
+                      { photoBlurEnabled: false, photoBlurSlots: cleared },
+                      {
+                        onSuccess: () => {
+                          setPhotoBlurEnabled(false);
+                          setPhotoBlurSlots(cleared);
+                        },
+                        failureMessage: 'Failed to update photo blur. Please try again.',
+                      }
+                    );
+                  }
                 }}
                 activeOpacity={0.7}
               >
                 <View style={styles.toggleInfo}>
-                  <Ionicons name="eye-off-outline" size={22} color={blurMyPhoto ? C.primary : C.textLight} />
+                  <Ionicons
+                    name="eye-off-outline"
+                    size={22}
+                    color={photoBlurEnabled ? C.primary : C.textLight}
+                  />
                   <View style={{ flex: 1 }}>
                     <Text style={styles.toggleLabel}>Enable photo blur</Text>
                     <Text style={styles.toggleHint}>
-                      {blurMyPhoto
-                        ? 'Photos start blurred. Use the eye icon on each photo to reveal specific photos.'
-                        : 'All photos visible in Deep Connect'}
+                      {photoBlurEnabled
+                        ? 'Tap the eye on each photo to blur or show it in Deep Connect.'
+                        : 'Turn on to choose which photos are blurred for others.'}
                     </Text>
                   </View>
                 </View>
-                <View style={[styles.toggle, blurMyPhoto && styles.toggleActive]}>
-                  <View style={[styles.toggleKnob, blurMyPhoto && styles.toggleKnobActive]} />
+                <View style={[styles.toggle, photoBlurEnabled && styles.toggleActive]}>
+                  <View style={[styles.toggleKnob, photoBlurEnabled && styles.toggleKnobActive]} />
                 </View>
               </TouchableOpacity>
             </View>

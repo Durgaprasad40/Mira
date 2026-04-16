@@ -1327,6 +1327,8 @@ export default defineSchema({
     // Legacy compatibility: older Phase-2 profile docs stored a per-slot blur array.
     // Active backend flows use privatePhotosBlurred/privatePhotoBlurLevel instead.
     photoBlurSlots: v.optional(v.array(v.boolean())),
+    /** When true, per-photo blur controls are available; does not imply any slot is blurred. */
+    photoBlurEnabled: v.optional(v.boolean()),
     privatePhotoBlurLevel: v.optional(v.number()),
     privateIntentKeys: v.array(v.string()),
     privateDesireTagKeys: v.array(v.string()),

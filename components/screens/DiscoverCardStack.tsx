@@ -891,7 +891,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           distance: undefined,
           lastActive: undefined,
           createdAt: undefined,
-          photoBlurred: true,
+          photoBlurred: false,
         };
       });
 
@@ -1017,7 +1017,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           privateIntentKey: p.intentKeys?.[0],
           // PHASE2_PARITY: Include gender for identity display
           gender: p.gender,
-          photoBlurred: true,
+          // Phase-2 blur is per-photo: photoBlurEnabled + photoBlurSlots
+          photoBlurEnabled: p.photoBlurEnabled,
+          photoBlurSlots: p.photoBlurSlots,
+          // Keep legacy boolean off for Phase-2 (do not force-blur all photos)
+          photoBlurred: false,
           // SOFT_MATCH_FIX: Pass through completeness flags
           isSetupComplete: p.isSetupComplete ?? false,
           hasPhotos: p.hasPhotos ?? (photoUrls.length > 0),
@@ -2758,6 +2762,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     distance={next.distance}
                     photos={next.photos}
                     photoBlurred={next.photoBlurred}
+                    photoBlurEnabled={(next as any).photoBlurEnabled}
+                    photoBlurSlots={(next as any).photoBlurSlots}
                     trustBadges={nextBadges}
                     profilePrompt={next.profilePrompts?.[0]}
                     profilePrompts={next.profilePrompts}
@@ -2803,6 +2809,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     distance={current.distance}
                     photos={current.photos}
                     photoBlurred={current.photoBlurred}
+                    photoBlurEnabled={(current as any).photoBlurEnabled}
+                    photoBlurSlots={(current as any).photoBlurSlots}
                     trustBadges={currentBadges}
                     profilePrompt={current.profilePrompts?.[0]}
                     profilePrompts={current.profilePrompts}

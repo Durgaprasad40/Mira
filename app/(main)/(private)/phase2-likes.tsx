@@ -165,6 +165,11 @@ export default function Phase2LikesScreen() {
   const renderLikeCard = ({ item: like }: { item: any }) => {
     const isSuperLike = like.action === 'super_like';
     const genderIcon = getGenderIcon(like.profile?.gender);
+    const photoBlurEnabled = like.profile?.photoBlurEnabled === true;
+    const photoBlurSlots: boolean[] | undefined = Array.isArray(like.profile?.photoBlurSlots)
+      ? like.profile.photoBlurSlots
+      : undefined;
+    const shouldBlurMainPhoto = photoBlurEnabled && Boolean(photoBlurSlots?.[0]);
 
     return (
       <View style={styles.card}>
@@ -179,7 +184,7 @@ export default function Phase2LikesScreen() {
               source={{ uri: like.profile.blurredPhotoUrl }}
               style={styles.cardImage}
               contentFit="cover"
-              blurRadius={PHASE2_BLUR_LIKE_CARD}
+              blurRadius={shouldBlurMainPhoto ? PHASE2_BLUR_LIKE_CARD : 0}
             />
           ) : (
             <View style={[styles.cardImage, styles.cardImagePlaceholder]}>

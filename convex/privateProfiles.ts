@@ -305,6 +305,7 @@ export const updateFieldsByAuthId = mutation({
     // Photos
     privatePhotoUrls: v.optional(v.array(v.string())),
     photoBlurSlots: v.optional(v.array(v.boolean())),
+    photoBlurEnabled: v.optional(v.boolean()),
     // Profile details
     height: v.optional(v.union(v.number(), v.null())),
     weight: v.optional(v.union(v.number(), v.null())),
@@ -981,15 +982,20 @@ export const upsertByAuthId = mutation({
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Update photo blur slots for user's private profile.
- * Each slot indicates whether that photo position should be blurred.
+ * Update photo blur settings for user's private profile.
+ * Pass only the fields you want to change. At least one of photoBlurSlots or photoBlurEnabled must be provided.
  */
 export const updatePhotoBlurSlots = mutation({
   args: {
     authUserId: v.string(),
-    photoBlurSlots: v.array(v.boolean()),
+    photoBlurSlots: v.optional(v.array(v.boolean())),
+    photoBlurEnabled: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    if (args.photoBlurSlots === undefined && args.photoBlurEnabled === undefined) {
+      throw new Error('photoBlurSlots or photoBlurEnabled required');
+    }
+
     // Resolve auth ID to user ID
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
     if (!userId) {
@@ -1005,11 +1011,14 @@ export const updatePhotoBlurSlots = mutation({
     const now = Date.now();
 
     if (existing) {
-      // Update existing profile
-      await ctx.db.patch(existing._id, {
-        photoBlurSlots: args.photoBlurSlots,
-        updatedAt: now,
-      });
+      const patch: Record<string, unknown> = { updatedAt: now };
+      if (args.photoBlurSlots !== undefined) {
+        patch.photoBlurSlots = args.photoBlurSlots;
+      }
+      if (args.photoBlurEnabled !== undefined) {
+        patch.photoBlurEnabled = args.photoBlurEnabled;
+      }
+      await ctx.db.patch(existing._id, patch);
       return { success: true };
     }
 

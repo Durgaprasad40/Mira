@@ -86,6 +86,10 @@ export interface ProfileCardProps {
   onOpenProfile?: () => void;
   /** When true, photos are rendered with a blur effect (user-controlled privacy) */
   photoBlurred?: boolean;
+  /** Phase-2: master enable for per-photo blur (independent of which slots are blurred). */
+  photoBlurEnabled?: boolean;
+  /** Phase-2: per-photo blur slots aligned with `photos[]` indices (true = blurred). */
+  photoBlurSlots?: boolean[];
   /** Face 2 only: intent category keys from PRIVATE_INTENT_CATEGORIES (array) */
   privateIntentKeys?: string[];
   /** Phase-2 only: desire tag keys from PRIVATE_DESIRE_TAGS */
@@ -139,6 +143,8 @@ interface PhotoStackProps {
   photos: { url: string }[];
   activeIndex: number;
   photoBlurred?: boolean;
+  photoBlurEnabled?: boolean;
+  photoBlurSlots?: boolean[];
   onError?: () => void;
   lookaheadCount: number;
   previousCount?: number;
@@ -198,11 +204,12 @@ const PhotoStack = memo(function PhotoStack({
   photos,
   activeIndex,
   photoBlurred,
+  photoBlurEnabled,
+  photoBlurSlots,
   onError,
   lookaheadCount,
   previousCount = 0,
 }: PhotoStackProps) {
-  const shouldBlurPhoto = photoBlurred === true;
   const windowStart = Math.max(0, activeIndex - previousCount);
   const windowEnd = Math.min(photos.length, activeIndex + 1 + lookaheadCount);
   const visiblePhotos = photos.slice(windowStart, windowEnd);
@@ -217,12 +224,18 @@ const PhotoStack = memo(function PhotoStack({
     <>
       {visiblePhotos.map((photo, localIdx) => {
         const globalIdx = localIdx + indexOffset;
+        const shouldBlur =
+          // Phase-2: master enable + per-slot blur
+          photoBlurEnabled === true
+            ? Boolean(photoBlurSlots?.[globalIdx])
+            // Phase-1 (and legacy): single boolean
+            : photoBlurred === true;
         return (
           <AnimatedPhoto
             key={photo.url}
             photo={photo}
             isActive={globalIdx === activeIndex}
-            shouldBlur={shouldBlurPhoto}
+            shouldBlur={shouldBlur}
             onError={globalIdx === activeIndex ? onError : undefined}
           />
         );
@@ -247,6 +260,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   theme = 'light',
   onOpenProfile,
   photoBlurred = false,
+  photoBlurEnabled,
+  photoBlurSlots,
   privateIntentKeys,
   desireTagKeys,
   lookingFor,
@@ -269,7 +284,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // PHASE-2 DETECTION: Check for non-empty privateIntentKeys array
   // IMPORTANT: Empty array [] is truthy, so we must check length > 0
   const isPhase2 = Array.isArray(privateIntentKeys) && privateIntentKeys.length > 0;
-  const shouldBlurPhoto = isPhase2 ? photoBlurred !== false : photoBlurred === true;
+  const shouldBlurPhoto = isPhase2 ? (photoBlurEnabled === true) : photoBlurred === true;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // IDENTITY SIMPLIFICATION: Single `name` field for all phases
@@ -1656,6 +1671,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             photos={displayPhotos}
             activeIndex={safeIndex}
             photoBlurred={shouldBlurPhoto}
+            photoBlurEnabled={isPhase2 ? photoBlurEnabled : undefined}
+            photoBlurSlots={isPhase2 ? photoBlurSlots : undefined}
             onError={handleImageError}
             lookaheadCount={isPhase2 ? PHASE2_ACTIVE_CARD_LOOKAHEAD : PHASE1_ACTIVE_CARD_LOOKAHEAD}
             previousCount={isPhase2 ? PHASE2_ACTIVE_CARD_PREVIOUS : 0}

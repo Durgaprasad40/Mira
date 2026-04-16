@@ -24,6 +24,27 @@ function parseDOBString(dobString: string): Date {
 // Version constant - bump this to force re-setup
 export const CURRENT_PHASE2_SETUP_VERSION = 1;
 
+const PHOTO_BLUR_SLOT_COUNT = 9;
+
+/** Pad/truncate to 9 booleans; missing indices = false (not blurred). */
+export function normalizePhotoBlurSlots(slots: boolean[] | undefined | null): boolean[] {
+  return Array.from({ length: PHOTO_BLUR_SLOT_COUNT }, (_, i) => Boolean(slots?.[i]));
+}
+
+/**
+ * Hydrate blur feature flag + per-slot state from Convex.
+ * Legacy documents may omit `photoBlurEnabled`; then infer true iff any slot was blurred (old coupling).
+ */
+export function hydratePhotoBlurSettings(convexProfile: {
+  photoBlurEnabled?: boolean;
+  photoBlurSlots?: boolean[] | null;
+}): { photoBlurEnabled: boolean; photoBlurSlots: boolean[] } {
+  const photoBlurSlots = normalizePhotoBlurSlots(convexProfile.photoBlurSlots ?? undefined);
+  const hasExplicit = typeof convexProfile.photoBlurEnabled === 'boolean';
+  const photoBlurEnabled = hasExplicit ? convexProfile.photoBlurEnabled! : photoBlurSlots.some(Boolean);
+  return { photoBlurEnabled, photoBlurSlots };
+}
+
 // Maximum Phase-1 photos that can be imported to Phase-2
 export const MAX_PHASE1_PHOTO_IMPORTS = 3;
 
@@ -107,7 +128,8 @@ interface PrivateProfileState {
   // Phase-2 setup tracking
   acceptedTermsAt: number | null;
   phase2SetupVersion: number | null;
-  blurMyPhoto: boolean;
+  /** Master: blur controls (eye buttons) are available; independent of which slots are blurred. */
+  photoBlurEnabled: boolean;
   photoBlurSlots: boolean[];  // Per-slot blur state (9 slots, true=blurred)
   phase1PhotoSlots: PhotoSlots9;  // Slot-preserving photos from Phase-1 (9 slots)
 
@@ -191,7 +213,7 @@ interface PrivateProfileState {
 
   // Phase-2 setup actions
   setAcceptedTermsAt: (timestamp: number) => void;
-  setBlurMyPhoto: (blur: boolean) => void;
+  setPhotoBlurEnabled: (enabled: boolean) => void;
   setPhotoBlurSlots: (slots: boolean[]) => void;
   togglePhotoBlurSlot: (slotIndex: number) => void;
   importPhase1Data: (data: Phase1ProfileData) => void;
@@ -265,6 +287,7 @@ interface PrivateProfileState {
     promptAnswers?: Phase2PromptAnswer[];
     // Phase-2 Preference Strength
     preferenceStrength?: PreferenceStrength;
+    photoBlurEnabled?: boolean;
     // Per-photo blur slots (9 slots, true = blurred)
     photoBlurSlots?: boolean[];
     // P0-1 FIX: Privacy settings
@@ -322,8 +345,8 @@ const initialWizardState = {
   // Phase-2 setup tracking
   acceptedTermsAt: null as number | null,
   phase2SetupVersion: null as number | null,
-  blurMyPhoto: true, // Default blur ON
-  photoBlurSlots: [true, true, true, true, true, true, true, true, true] as boolean[], // Per-slot blur (default all blurred)
+  photoBlurEnabled: false,
+  photoBlurSlots: Array.from({ length: PHOTO_BLUR_SLOT_COUNT }, () => false),
   phase1PhotoSlots: createEmptyPhotoSlots(),
   promptAnswers: [] as Phase2PromptAnswer[], // Phase-2 Step 4 prompt answers
   preferenceStrength: { smoking: null, drinking: null, intent: null } as PreferenceStrength,
@@ -430,38 +453,17 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
 
   // Phase-2 setup actions
   setAcceptedTermsAt: (timestamp) => set({ acceptedTermsAt: timestamp }),
-  setBlurMyPhoto: (blur) => set((state) => {
-    if (!blur) {
-      return {
-        blurMyPhoto: false,
-        photoBlurSlots: Array.from({ length: 9 }, () => false),
-      };
-    }
-
-    const nextSlots = state.photoBlurSlots.some(Boolean)
-      ? state.photoBlurSlots
-      : Array.from({ length: 9 }, () => true);
-
-    return {
-      blurMyPhoto: nextSlots.some(Boolean),
-      photoBlurSlots: nextSlots,
-    };
-  }),
+  setPhotoBlurEnabled: (enabled) => set({ photoBlurEnabled: enabled }),
   setPhotoBlurSlots: (slots) => {
-    const normalizedSlots = Array.from({ length: 9 }, (_, index) => slots[index] ?? false);
-    set({
-      photoBlurSlots: normalizedSlots,
-      blurMyPhoto: normalizedSlots.some(Boolean),
-    });
+    const normalizedSlots = normalizePhotoBlurSlots(slots);
+    set({ photoBlurSlots: normalizedSlots });
   },
-  togglePhotoBlurSlot: (slotIndex) => set((state) => {
-    const next = [...state.photoBlurSlots];
-    next[slotIndex] = !next[slotIndex];
-    return {
-      photoBlurSlots: next,
-      blurMyPhoto: next.some(Boolean),
-    };
-  }),
+  togglePhotoBlurSlot: (slotIndex) =>
+    set((state) => {
+      const next = [...normalizePhotoBlurSlots(state.photoBlurSlots)];
+      next[slotIndex] = !next[slotIndex];
+      return { photoBlurSlots: next };
+    }),
   importPhase1Data: (data) => {
     const startTime = __DEV__ ? Date.now() : 0;
     if (__DEV__) console.log('[P2 IMPORT] start');
@@ -705,10 +707,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         phase2SetupVersion: preserveOnboardingComplete ? currentState.phase2SetupVersion : null,
         convexProfileId: null,
         isPrivateEnabled: true,
-        blurMyPhoto: true,
+        photoBlurEnabled: false,
         promptAnswers: [],
         preferenceStrength: { smoking: null, drinking: null, intent: null },
-        photoBlurSlots: [true, true, true, true, true, true, true, true, true],
+        photoBlurSlots: Array.from({ length: PHOTO_BLUR_SLOT_COUNT }, () => false),
         phase1PhotoSlots: createEmptyPhotoSlots(),
         hideFromDeepConnect: false,
         hideAge: false,
@@ -800,12 +802,8 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       // Phase-2 Preference Strength
       preferenceStrength: convexProfile.preferenceStrength || { smoking: null, drinking: null, intent: null },
 
-      // Per-photo blur slots (9 slots, true = blurred)
-      // Hydrate from backend or keep default (all blurred for privacy)
-      blurMyPhoto: convexProfile.photoBlurSlots
-        ? convexProfile.photoBlurSlots.some(Boolean)
-        : true,
-      photoBlurSlots: convexProfile.photoBlurSlots || [true, true, true, true, true, true, true, true, true],
+      // Per-photo blur: master flag is independent of which slots are blurred
+      ...hydratePhotoBlurSettings(convexProfile),
 
       // P0-1 FIX: Privacy settings (hydrate from backend)
       hideFromDeepConnect: convexProfile.hideFromDeepConnect ?? false,
