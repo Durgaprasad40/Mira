@@ -444,6 +444,7 @@ export default defineSchema({
 
     // Privacy
     showLastSeen: v.optional(v.boolean()),
+    hideFromDiscover: v.optional(v.boolean()),      // true = don't appear in Phase-1 Discover (persistent)
     hideDistance: v.optional(v.boolean()),         // true = don't show distance info to others
     hideAge: v.optional(v.boolean()),              // true = don't show age on profile
     disableReadReceipts: v.optional(v.boolean()), // true = others can't see when user read messages

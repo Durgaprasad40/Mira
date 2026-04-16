@@ -204,11 +204,13 @@ export const getUserById = query({
       );
     }
 
+    const computedAge = calculateAge(user.dateOfBirth);
+
     // Return public profile data
     return {
       id: user._id,
       name: user.name,
-      age: calculateAge(user.dateOfBirth),
+      age: user.hideAge === true ? undefined : computedAge,
       gender: user.gender,
       bio: user.bio,
       height: user.height,
@@ -223,7 +225,7 @@ export const getUserById = query({
       isVerified: user.isVerified,
       verificationStatus: user.verificationStatus || "unverified",
       city: user.city,
-      distance,
+      distance: user.hideDistance === true ? undefined : distance,
       lastActive: user.lastActive,
       lookingFor: user.lookingFor,
       relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
@@ -795,11 +797,13 @@ export const toggleShowLastSeen = mutation({
 export const updatePrivacySettings = mutation({
   args: {
     authUserId: v.string(),
+    hideFromDiscover: v.optional(v.boolean()),
     hideAge: v.optional(v.boolean()),
+    hideDistance: v.optional(v.boolean()),
     disableReadReceipts: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, hideAge, disableReadReceipts } = args;
+    const { authUserId, hideFromDiscover, hideAge, hideDistance, disableReadReceipts } = args;
 
     // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
     const userId = await resolveUserIdByAuthId(ctx, authUserId);
@@ -812,11 +816,22 @@ export const updatePrivacySettings = mutation({
 
     // Build update object with only provided fields
     const updates: Record<string, boolean> = {};
+    if (hideFromDiscover !== undefined) updates.hideFromDiscover = hideFromDiscover;
     if (hideAge !== undefined) updates.hideAge = hideAge;
+    if (hideDistance !== undefined) updates.hideDistance = hideDistance;
     if (disableReadReceipts !== undefined) updates.disableReadReceipts = disableReadReceipts;
 
     if (Object.keys(updates).length > 0) {
       await ctx.db.patch(userId, updates);
+    }
+
+    // Backward-compat: if user turns OFF persistent Hide from Discover,
+    // also clear any active legacy 24h discovery pause so they become visible immediately.
+    if (hideFromDiscover === false) {
+      await ctx.db.patch(userId, {
+        isDiscoveryPaused: false,
+        discoveryPausedUntil: undefined,
+      });
     }
 
     return { success: true };

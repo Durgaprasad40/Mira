@@ -26,12 +26,18 @@ export default function PrivacySettingsScreen() {
   );
 
   // Mutations for backend sync
-  const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
+  const updatePrivacySettings = useMutation(api.users.updatePrivacySettings);
 
   // Privacy toggles from persisted store
   const hideFromDiscover = usePrivacyStore((s) => s.hideFromDiscover);
+  const hideAge = usePrivacyStore((s) => s.hideAge);
+  const hideDistance = usePrivacyStore((s) => s.hideDistance);
+  const disableReadReceipts = usePrivacyStore((s) => s.disableReadReceipts);
 
   const setHideFromDiscover = usePrivacyStore((s) => s.setHideFromDiscover);
+  const setHideAge = usePrivacyStore((s) => s.setHideAge);
+  const setHideDistance = usePrivacyStore((s) => s.setHideDistance);
+  const setDisableReadReceipts = usePrivacyStore((s) => s.setDisableReadReceipts);
   const [isHydrated, setIsHydrated] = useState(isDemoMode);
   const [timedOut, setTimedOut] = useState(false);
   const [discoveryPauseEndsAt, setDiscoveryPauseEndsAt] = useState<number | null>(null);
@@ -50,10 +56,21 @@ export default function PrivacySettingsScreen() {
           ? currentUser.discoveryPausedUntil
           : null;
       setDiscoveryPauseEndsAt(pauseUntil);
-      setHideFromDiscover(!!pauseUntil);
+      const isHiddenFromDiscover =
+        currentUser.hideFromDiscover === true || !!pauseUntil;
+      setHideFromDiscover(isHiddenFromDiscover);
+      setHideAge(currentUser.hideAge === true);
+      setHideDistance(currentUser.hideDistance === true);
+      setDisableReadReceipts(currentUser.disableReadReceipts === true);
       setIsHydrated(true);
     }
-  }, [currentUser, setHideFromDiscover]);
+  }, [
+    currentUser,
+    setDisableReadReceipts,
+    setHideAge,
+    setHideDistance,
+    setHideFromDiscover,
+  ]);
 
   useEffect(() => {
     if (isDemoMode || isHydrated || !token) return;
@@ -68,17 +85,22 @@ export default function PrivacySettingsScreen() {
     const remainingMs = discoveryPauseEndsAt - Date.now();
     if (remainingMs <= 0) {
       setDiscoveryPauseEndsAt(null);
-      setHideFromDiscover(false);
+      // Only reflect legacy pause expiry here; persistent hideFromDiscover stays on.
+      if (currentUser?.hideFromDiscover !== true) {
+        setHideFromDiscover(false);
+      }
       return;
     }
 
     const timeout = setTimeout(() => {
       setDiscoveryPauseEndsAt(null);
-      setHideFromDiscover(false);
+      if (currentUser?.hideFromDiscover !== true) {
+        setHideFromDiscover(false);
+      }
     }, remainingMs + 250);
 
     return () => clearTimeout(timeout);
-  }, [discoveryPauseEndsAt, setHideFromDiscover]);
+  }, [currentUser?.hideFromDiscover, discoveryPauseEndsAt, setHideFromDiscover]);
 
   // Track if warning has been shown this session (session-only, no persistence needed)
   const [warningShownThisSession, setWarningShownThisSession] = useState(false);
@@ -93,12 +115,13 @@ export default function PrivacySettingsScreen() {
       // Sync to backend in live mode
       if (!isDemoMode && userId) {
         try {
-          await toggleDiscoveryPause({ authUserId: userId, paused: newValue });
-          setDiscoveryPauseEndsAt(newValue ? Date.now() + 24 * 60 * 60 * 1000 : null);
+          await updatePrivacySettings({ authUserId: userId, hideFromDiscover: newValue });
+          // Keep any existing legacy pause countdown if present. When turning OFF, clear countdown.
+          setDiscoveryPauseEndsAt(newValue ? discoveryPauseEndsAt : null);
         } catch {
           Toast.show("Couldn't update setting. Please try again.");
           setHideFromDiscover(!newValue); // Revert on error
-          setDiscoveryPauseEndsAt(newValue ? null : discoveryPauseEndsAt);
+          setDiscoveryPauseEndsAt(discoveryPauseEndsAt);
         }
       }
     };
@@ -106,8 +129,8 @@ export default function PrivacySettingsScreen() {
     if (newValue && !warningShownThisSession) {
       // Show one-time warning (session-scoped, no AsyncStorage needed)
       Alert.alert(
-        'Pause Discovery for 24 hours',
-        'While paused, your profile won\'t appear in Discover for 24 hours. Existing matches can still chat with you.',
+        'Hide from Discover',
+        'While hidden, your profile won\'t appear in Discover. Existing matches can still chat with you.',
         [
           {
             text: 'Cancel',
@@ -126,7 +149,43 @@ export default function PrivacySettingsScreen() {
       return; // Don't toggle yet, wait for user confirmation
     }
     applyChange();
-  }, [warningShownThisSession, setHideFromDiscover, toggleDiscoveryPause, token, discoveryPauseEndsAt]);
+  }, [warningShownThisSession, setHideFromDiscover, updatePrivacySettings, userId, discoveryPauseEndsAt]);
+
+  const handleHideAgeChange = useCallback(async (newValue: boolean) => {
+    setHideAge(newValue);
+    if (!isDemoMode && userId) {
+      try {
+        await updatePrivacySettings({ authUserId: userId, hideAge: newValue });
+      } catch {
+        Toast.show("Couldn't update setting. Please try again.");
+        setHideAge(!newValue);
+      }
+    }
+  }, [setHideAge, updatePrivacySettings, userId]);
+
+  const handleHideDistanceChange = useCallback(async (newValue: boolean) => {
+    setHideDistance(newValue);
+    if (!isDemoMode && userId) {
+      try {
+        await updatePrivacySettings({ authUserId: userId, hideDistance: newValue });
+      } catch {
+        Toast.show("Couldn't update setting. Please try again.");
+        setHideDistance(!newValue);
+      }
+    }
+  }, [setHideDistance, updatePrivacySettings, userId]);
+
+  const handleDisableReadReceiptsChange = useCallback(async (newValue: boolean) => {
+    setDisableReadReceipts(newValue);
+    if (!isDemoMode && userId) {
+      try {
+        await updatePrivacySettings({ authUserId: userId, disableReadReceipts: newValue });
+      } catch {
+        Toast.show("Couldn't update setting. Please try again.");
+        setDisableReadReceipts(!newValue);
+      }
+    }
+  }, [setDisableReadReceipts, updatePrivacySettings, userId]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -163,9 +222,9 @@ export default function PrivacySettingsScreen() {
           {/* Hide from Discover */}
           <View style={styles.toggleRow}>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Pause Discovery for 24 hours</Text>
+              <Text style={styles.toggleTitle}>Hide from Discover</Text>
               <Text style={styles.toggleDescription}>
-                Your profile stays out of Discover for 24 hours, then turns back on automatically.
+                Your profile won't appear in Discover while this is on.
               </Text>
             </View>
             <Switch
@@ -176,6 +235,64 @@ export default function PrivacySettingsScreen() {
             />
           </View>
 
+        </View>
+
+        {/* Messaging */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Messaging</Text>
+
+          {/* Disable read receipts */}
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <Text style={styles.toggleTitle}>Disable read receipts</Text>
+              <Text style={styles.toggleDescription}>
+                Others won't see when you've read their Phase-1 messages.
+              </Text>
+            </View>
+            <Switch
+              value={disableReadReceipts}
+              onValueChange={handleDisableReadReceiptsChange}
+              trackColor={{ false: COLORS.border, true: COLORS.primary }}
+              thumbColor={COLORS.white}
+            />
+          </View>
+        </View>
+
+        {/* Profile */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Profile</Text>
+
+          {/* Hide my age */}
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <Text style={styles.toggleTitle}>Hide my age</Text>
+              <Text style={styles.toggleDescription}>
+                Your age won't be shown on your Phase-1 profile.
+              </Text>
+            </View>
+            <Switch
+              value={hideAge}
+              onValueChange={handleHideAgeChange}
+              trackColor={{ false: COLORS.border, true: COLORS.primary }}
+              thumbColor={COLORS.white}
+            />
+          </View>
+
+          {/* Hide my distance */}
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <Text style={styles.toggleTitle}>Hide my distance</Text>
+              <Text style={styles.toggleDescription}>
+                Others won't see how far away you are in Phase-1.
+              </Text>
+            </View>
+            <Switch
+              value={hideDistance}
+              onValueChange={handleHideDistanceChange}
+              trackColor={{ false: COLORS.border, true: COLORS.primary }}
+              thumbColor={COLORS.white}
+            />
+          </View>
         </View>
 
         {/* Location & Nearby */}

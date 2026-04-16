@@ -35,6 +35,14 @@ function isUserPaused(user: { isDiscoveryPaused?: boolean; discoveryPausedUntil?
   );
 }
 
+function isEffectivelyHiddenFromDiscover(user: {
+  hideFromDiscover?: boolean;
+  isDiscoveryPaused?: boolean;
+  discoveryPausedUntil?: number;
+}): boolean {
+  return user.hideFromDiscover === true || isUserPaused(user);
+}
+
 // BUGFIX #21: Safe date parsing with NaN guard
 function calculateAge(dateOfBirth: string): number {
   if (!dateOfBirth) return 0;
@@ -242,7 +250,7 @@ export const getDiscoverProfiles = query({
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];
 
-    if (isUserPaused(currentUser)) return [];
+    if (isEffectivelyHiddenFromDiscover(currentUser)) return [];
 
     // PERF #8: Pre-fetch all swipes, matches, blocks, and incoming likes upfront
     // This converts O(6*N) queries into O(6) queries
@@ -382,7 +390,7 @@ export const getDiscoverProfiles = query({
     for (const user of allUsers) {
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
-      if (isUserPaused(user)) continue;
+      if (isEffectivelyHiddenFromDiscover(user)) continue;
 
       // NOTE: Verification is NOT a hard filter - it's a ranking boost
       // Unverified users appear lower in ranking, not excluded
@@ -456,6 +464,7 @@ export const getDiscoverProfiles = query({
         id: user._id,
         name: user.name,
         age: userAge,
+        ageHidden: user.hideAge === true,
         gender: user.gender,
         bio: user.bio,
         height: user.height,
@@ -471,6 +480,7 @@ export const getDiscoverProfiles = query({
         verificationStatus: user.verificationStatus || 'unverified',
         city: user.city,
         distance,
+        distanceHidden: user.hideDistance === true,
         lastActive: user.lastActive,
         createdAt: user.createdAt,
         lookingFor: user.lookingFor,
@@ -665,7 +675,12 @@ export const getDiscoverProfiles = query({
         }
       }
 
-      return result.slice(offset, offset + limit);
+      const window = result.slice(offset, offset + limit);
+      return window.map((c: any) => ({
+        ...c,
+        age: c.ageHidden ? undefined : c.age,
+        distance: c.distanceHidden ? undefined : c.distance,
+      }));
     } else {
       candidates.sort((a, b) => {
         // Boosted first
@@ -682,7 +697,12 @@ export const getDiscoverProfiles = query({
       });
     }
 
-    return candidates.slice(offset, offset + limit);
+    const window = candidates.slice(offset, offset + limit);
+    return window.map((c: any) => ({
+      ...c,
+      age: c.ageHidden ? undefined : c.age,
+      distance: c.distanceHidden ? undefined : c.distance,
+    }));
   },
 });
 
@@ -869,7 +889,7 @@ async function resolveExploreViewer(
   const userId = await resolveUserIdByAuthId(ctx, rawUserId as string);
   if (!userId) return null;
   const currentUser = await ctx.db.get(userId);
-  if (!currentUser || !currentUser.isActive || currentUser.isBanned || isUserPaused(currentUser)) return null;
+  if (!currentUser || !currentUser.isActive || currentUser.isBanned || isEffectivelyHiddenFromDiscover(currentUser)) return null;
   return { userId, currentUser };
 }
 
@@ -1083,7 +1103,7 @@ async function buildExploreCandidates(
 
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
-      if (isUserPaused(user)) continue;
+      if (isEffectivelyHiddenFromDiscover(user)) continue;
       if (user.verificationEnforcementLevel === 'security_only') continue;
       if (exclusions.swipedUserIds.has(candidateId)) continue;
       if (exclusions.matchedUserIds.has(candidateId)) continue;
