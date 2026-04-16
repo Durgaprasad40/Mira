@@ -30,6 +30,7 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Platform,
+  InteractionManager,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -54,6 +55,97 @@ const PHOTO_PADDING = 16;
 const PHOTO_SIZE = (SCREEN_WIDTH - PHOTO_PADDING * 2 - PHOTO_GAP * 2) / 3;
 const MAX_PHOTOS = 9;
 const PRIVATE_PHOTOS_DIR_NAME = 'private_photos';
+
+type PhotoSlotItemProps = {
+  slotIndex: number;
+  uri: string;
+  isMain: boolean;
+  isThisSlotLoading: boolean;
+  photoBlurEnabled: boolean;
+  isSlotBlurred: boolean;
+  shouldRenderImage: boolean;
+  didFirstPaint: boolean;
+  onOpenPreview: (slotIndex: number) => void;
+  onSetMain: (slotIndex: number) => void;
+  onToggleBlur: (slotIndex: number) => void;
+};
+
+const PhotoSlotItem = React.memo(function PhotoSlotItem({
+  slotIndex,
+  uri,
+  isMain,
+  isThisSlotLoading,
+  photoBlurEnabled,
+  isSlotBlurred,
+  shouldRenderImage,
+  didFirstPaint,
+  onOpenPreview,
+  onSetMain,
+  onToggleBlur,
+}: PhotoSlotItemProps) {
+  const handleOpen = useCallback(() => onOpenPreview(slotIndex), [onOpenPreview, slotIndex]);
+  const handleSetMain = useCallback(() => onSetMain(slotIndex), [onSetMain, slotIndex]);
+  const handleToggle = useCallback(() => onToggleBlur(slotIndex), [onToggleBlur, slotIndex]);
+
+  // Avoid blur cost on initial paint; apply only after first paint.
+  const blurRadius = didFirstPaint && photoBlurEnabled && isSlotBlurred ? 8 : 0;
+
+  return (
+    <View style={styles.photoSlot}>
+      <TouchableOpacity
+        style={StyleSheet.absoluteFill}
+        onPress={handleOpen}
+        activeOpacity={0.9}
+        disabled={isThisSlotLoading}
+      >
+        {shouldRenderImage ? (
+          <Image
+            source={{ uri }}
+            style={styles.photoImage}
+            contentFit="cover"
+            blurRadius={blurRadius}
+            transition={200}
+          />
+        ) : (
+          <View style={[styles.photoImage, styles.photoImageDeferred]}>
+            <Ionicons name="image-outline" size={22} color="rgba(255,255,255,0.55)" />
+          </View>
+        )}
+      </TouchableOpacity>
+
+      {/* Star indicator: filled = current main, outline = tap to make main */}
+      {isMain ? (
+        <View style={styles.mainBadge} pointerEvents="none">
+          <Ionicons name="star" size={12} color="#FFD700" />
+        </View>
+      ) : (
+        <TouchableOpacity
+          style={styles.setMainBtn}
+          onPress={handleSetMain}
+          activeOpacity={0.7}
+          disabled={isThisSlotLoading}
+        >
+          <Ionicons name="star-outline" size={12} color="#FFFFFF" />
+        </TouchableOpacity>
+      )}
+
+      {photoBlurEnabled && (
+        <TouchableOpacity
+          style={[styles.blurBtn, isSlotBlurred && styles.blurBtnActive]}
+          onPress={handleToggle}
+          activeOpacity={0.7}
+          disabled={isThisSlotLoading}
+        >
+          <Ionicons
+            name={isSlotBlurred ? 'eye-off' : 'eye'}
+            size={14}
+            color="#FFFFFF"
+          />
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+});
 
 type PersistedProfileUpdates = {
   privatePhotoUrls?: string[];
@@ -547,11 +639,32 @@ export default function EditProfileScreen() {
   // Track mount state
   const mountedRef = useRef(true);
   const lastCheckedRef = useRef<string>('');
+  const [didFirstPaint, setDidFirstPaint] = useState(false);
+  const [renderAllPhotos, setRenderAllPhotos] = useState(false);
 
   useEffect(() => {
     return () => {
       mountedRef.current = false;
     };
+  }, []);
+
+  // Mark after-first-paint to avoid heavy visual work on initial render (e.g., blur).
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (mountedRef.current) setDidFirstPaint(true);
+      });
+    });
+  }, []);
+
+  // PERF: Defer non-critical work (like extra images) until after interactions settle.
+  useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(() => {
+      if (mountedRef.current) {
+        setRenderAllPhotos(true);
+      }
+    });
+    return () => task.cancel();
   }, []);
 
   // Sync draft bio with store
@@ -591,7 +704,11 @@ export default function EditProfileScreen() {
   }, [mergedPhotoUrls]);
 
   useEffect(() => {
-    checkPhotosExist();
+    // Defer filesystem existence checks to avoid blocking first paint.
+    const task = InteractionManager.runAfterInteractions(() => {
+      void checkPhotosExist();
+    });
+    return () => task.cancel();
   }, [checkPhotosExist]);
 
   const persistProfileUpdate = useCallback(
@@ -872,12 +989,20 @@ export default function EditProfileScreen() {
 
   // Toggle photo blur
   const handleTogglePhotoBlur = async (slotIndex: number) => {
+    const prevSlots = [...photoBlurSlots];
     const newSlots = [...photoBlurSlots];
     newSlots[slotIndex] = !newSlots[slotIndex];
-    await persistPhotoBlurSettings(
+
+    // Optimistic UI: update immediately, backend sync in background.
+    setPhotoBlurSlots(newSlots);
+
+    void persistPhotoBlurSettings(
       { photoBlurSlots: newSlots },
       {
-        onSuccess: () => setPhotoBlurSlots(newSlots),
+        onFailure: () => {
+          // Roll back optimistic update on failure
+          setPhotoBlurSlots(prevSlots);
+        },
         failureMessage: 'Failed to update photo blur. Please try again.',
       }
     );
@@ -929,58 +1054,53 @@ export default function EditProfileScreen() {
     setIsSaving(true);
     Keyboard.dismiss();
 
-    try {
+    void (async () => {
       const nextBio = editingBio ? draftBio.trim() : resolvedPrivateBio;
 
-      if (!isDemoMode) {
-        if (!userId) {
-          throw new Error('Please sign in to save changes.');
+      try {
+        if (!isDemoMode) {
+          if (!userId) {
+            throw new Error('Please sign in to save changes.');
+          }
+
+          // Single backend write: merge profile fields + blur settings.
+          await updatePrivateProfile({
+            authUserId: userId,
+            privateBio: nextBio,
+            height: localHeight,
+            weight: localWeight,
+            smoking: localSmoking,
+            drinking: localDrinking,
+            education: localEducation,
+            religion: localReligion,
+            photoBlurSlots,
+            photoBlurEnabled,
+          });
         }
 
-        await updatePrivateProfile({
-          authUserId: userId,
-          privateBio: nextBio,
-          height: localHeight,
-          weight: localWeight,
-          smoking: localSmoking,
-          drinking: localDrinking,
-          education: localEducation,
-          religion: localReligion,
-        });
+        setHeight(localHeight);
+        setWeight(localWeight);
+        setSmoking(localSmoking);
+        setDrinking(localDrinking);
+        setEducation(localEducation);
+        setReligion(localReligion);
+        if (editingBio || nextBio !== resolvedPrivateBio) {
+          setPrivateBio(nextBio);
+          setEditingBio(false);
+        }
 
-        // Also save photo blur slots
-        await updatePhotoBlurSlots({
-          authUserId: userId,
-          photoBlurSlots: photoBlurSlots,
-          photoBlurEnabled: photoBlurEnabled,
-        });
+        router.back();
+      } catch (error) {
+        if (__DEV__) {
+          console.error('[EditProfile] Save failed:', error);
+        }
+        Alert.alert('Error', 'Failed to save changes. Please try again.');
+      } finally {
+        if (mountedRef.current) {
+          setIsSaving(false);
+        }
       }
-
-      setHeight(localHeight);
-      setWeight(localWeight);
-      setSmoking(localSmoking);
-      setDrinking(localDrinking);
-      setEducation(localEducation);
-      setReligion(localReligion);
-      if (editingBio || nextBio !== resolvedPrivateBio) {
-        setPrivateBio(nextBio);
-        setEditingBio(false);
-      }
-
-      // SUCCESS: Navigate back to profile tab (clean UX, no "Saved" button state)
-      // Using router.back() to return to the Phase-2 profile tab the user came from
-      router.back();
-
-    } catch (error) {
-      if (__DEV__) {
-        console.error('[EditProfile] Save failed:', error);
-      }
-      Alert.alert('Error', 'Failed to save changes. Please try again.');
-    } finally {
-      if (mountedRef.current) {
-        setIsSaving(false);
-      }
-    }
+    })();
   };
 
   // Go back
@@ -1343,55 +1463,23 @@ export default function EditProfileScreen() {
                 const isThisSlotLoading = addingSlotIndex === slotIndex;
 
                 if (hasPhoto) {
-                  // Per-photo blur: master enables controls; slot true = blurred in Deep Connect
-                  const isPhotoBlurred = photoBlurEnabled && photoBlurSlots[slotIndex];
-
+                  const shouldRenderImage = renderAllPhotos || slotIndex < 2;
+                  const isSlotBlurred = Boolean(photoBlurSlots[slotIndex]);
                   return (
-                    <View key={`slot-${slotIndex}`} style={styles.photoSlot}>
-                      <TouchableOpacity
-                        style={StyleSheet.absoluteFill}
-                        onPress={() => handleOpenPhotoPreview(slotIndex)}
-                        activeOpacity={0.9}
-                      >
-                        <Image
-                          source={{ uri }}
-                          style={styles.photoImage}
-                          contentFit="cover"
-                          blurRadius={isPhotoBlurred ? 8 : 0}
-                          transition={200}
-                        />
-                      </TouchableOpacity>
-
-                      {/* Star indicator: filled = current main, outline = tap to make main */}
-                      {isMain ? (
-                        <View style={styles.mainBadge} pointerEvents="none">
-                          <Ionicons name="star" size={12} color="#FFD700" />
-                        </View>
-                      ) : (
-                        <TouchableOpacity
-                          style={styles.setMainBtn}
-                          onPress={() => handleSetMainPhoto(slotIndex)}
-                          activeOpacity={0.7}
-                        >
-                          <Ionicons name="star-outline" size={12} color="#FFFFFF" />
-                        </TouchableOpacity>
-                      )}
-
-                      {photoBlurEnabled && (
-                        <TouchableOpacity
-                          style={[styles.blurBtn, photoBlurSlots[slotIndex] && styles.blurBtnActive]}
-                          onPress={() => handleTogglePhotoBlur(slotIndex)}
-                          activeOpacity={0.7}
-                        >
-                          <Ionicons
-                            name={photoBlurSlots[slotIndex] ? 'eye-off' : 'eye'}
-                            size={14}
-                            color="#FFFFFF"
-                          />
-                        </TouchableOpacity>
-                      )}
-
-                    </View>
+                    <PhotoSlotItem
+                      key={`slot-${slotIndex}`}
+                      slotIndex={slotIndex}
+                      uri={uri}
+                      isMain={isMain}
+                      isThisSlotLoading={isThisSlotLoading}
+                      photoBlurEnabled={photoBlurEnabled}
+                      isSlotBlurred={isSlotBlurred}
+                      shouldRenderImage={shouldRenderImage}
+                      didFirstPaint={didFirstPaint}
+                      onOpenPreview={handleOpenPhotoPreview}
+                      onSetMain={handleSetMainPhoto}
+                      onToggleBlur={handleTogglePhotoBlur}
+                    />
                   );
                 }
 
@@ -1427,29 +1515,36 @@ export default function EditProfileScreen() {
             <View style={styles.visibilityCard}>
               <TouchableOpacity
                 style={styles.toggleRow}
-                onPress={async () => {
+                onPress={() => {
                   const nextEnabled = !photoBlurEnabled;
+
+                  // Optimistic UI first
                   if (nextEnabled) {
-                    await persistPhotoBlurSettings(
+                    setPhotoBlurEnabled(true);
+                    void persistPhotoBlurSettings(
                       { photoBlurEnabled: true },
                       {
-                        onSuccess: () => setPhotoBlurEnabled(true),
+                        onFailure: () => setPhotoBlurEnabled(false),
                         failureMessage: 'Failed to update photo blur. Please try again.',
                       }
                     );
-                  } else {
-                    const cleared = Array.from({ length: 9 }, () => false);
-                    await persistPhotoBlurSettings(
-                      { photoBlurEnabled: false, photoBlurSlots: cleared },
-                      {
-                        onSuccess: () => {
-                          setPhotoBlurEnabled(false);
-                          setPhotoBlurSlots(cleared);
-                        },
-                        failureMessage: 'Failed to update photo blur. Please try again.',
-                      }
-                    );
+                    return;
                   }
+
+                  const prevSlots = [...photoBlurSlots];
+                  const cleared = Array.from({ length: 9 }, () => false);
+                  setPhotoBlurEnabled(false);
+                  setPhotoBlurSlots(cleared);
+                  void persistPhotoBlurSettings(
+                    { photoBlurEnabled: false, photoBlurSlots: cleared },
+                    {
+                      onFailure: () => {
+                        setPhotoBlurEnabled(true);
+                        setPhotoBlurSlots(prevSlots);
+                      },
+                      failureMessage: 'Failed to update photo blur. Please try again.',
+                    }
+                  );
                 }}
                 activeOpacity={0.7}
               >
@@ -2154,6 +2249,11 @@ const styles = StyleSheet.create({
   photoImage: {
     width: '100%',
     height: '100%',
+  },
+  photoImageDeferred: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
   },
   mainBadge: {
     position: 'absolute',
