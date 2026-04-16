@@ -336,7 +336,7 @@ export default function Phase2FullProfileScreen() {
   const profile = useQuery(
     api.privateDiscover.getProfileByUserId,
     !isDemoMode && profileUserId && currentUserId
-      ? { userId: profileUserId as any }
+      ? { userId: profileUserId as any, viewerId: currentUserId as any }
       : 'skip'
   );
 
@@ -512,6 +512,8 @@ export default function Phase2FullProfileScreen() {
       </View>
     );
   }
+
+  const profileDistanceKm = (profile as { distanceKm?: number }).distanceKm;
 
   // Handle like action
   const handleLike = async () => {
@@ -766,7 +768,9 @@ export default function Phase2FullProfileScreen() {
           {/* P0-002 FIX: Use displayName only */}
           <View style={styles.nameRow}>
             <Text style={styles.nameText}>{profile.displayName}</Text>
-            <Text style={styles.ageText}>, {profile.age}</Text>
+            {typeof profile.age === 'number' && profile.age > 0 ? (
+              <Text style={styles.ageText}>, {profile.age}</Text>
+            ) : null}
             <Ionicons
               name={getGenderIcon(profile.gender) as any}
               size={20}
@@ -781,6 +785,13 @@ export default function Phase2FullProfileScreen() {
             <View style={styles.locationRow}>
               <Ionicons name="location-outline" size={16} color={C.textLight} />
               <Text style={styles.locationText}>{profile.city}</Text>
+            </View>
+          )}
+          {typeof profileDistanceKm === 'number' && profileDistanceKm >= 0 && (
+            <View style={styles.locationRow}>
+              <Text style={styles.locationText}>
+                {profileDistanceKm < 1 ? '< 1 km away' : `${profileDistanceKm} km away`}
+              </Text>
             </View>
           )}
         </View>

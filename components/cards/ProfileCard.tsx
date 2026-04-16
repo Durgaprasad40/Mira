@@ -1826,6 +1826,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                     <Text style={styles.phase2CityText}>{city}</Text>
                   </View>
                 )}
+                {distance !== undefined && distance >= 0 && (
+                  <View style={styles.phase2CityBadge}>
+                    <Text style={styles.phase2CityText}>
+                      {distance < 1 ? '< 1 km away' : `${distance.toFixed(0)} km away`}
+                    </Text>
+                  </View>
+                )}
               </View>
             )}
           </View>

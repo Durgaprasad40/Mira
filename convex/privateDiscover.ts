@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { query, mutation } from './_generated/server';
+import type { Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
 import { resolveUserIdByAuthId } from './helpers';
@@ -10,6 +11,19 @@ import { computeRankScore, logBatchRankingComparison, DEFAULT_RANKING_CONFIG } f
 
 // Suppression window: 4 hours in milliseconds
 const SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
+
+/** Haversine distance in km (rounded), matches users.getUserById / discover helpers */
+function distanceKmBetween(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
 
 // Get private discovery profiles (blurred photos only) with Phase-2 ranking
 // Filters out:
@@ -120,6 +134,7 @@ export const getProfiles = query({
     // - Incomplete profiles
     // - Blocked users (either direction)
     // - Users with pending deletion
+    // - Users who opted out of Deep Connect discovery (hideFromDeepConnect === true; missing = visible)
     // NOTE: Profiles without ranking metrics are still eligible (use fallback defaults)
     const eligible = profiles.filter(
       (p) =>
@@ -128,7 +143,8 @@ export const getProfiles = query({
         !blockedUserIds.has(p.userId as string) &&
         !deletedUserIds.has(p.userId as string) &&
         // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
-        !conversationPartnerIds.has(p.userId as string)
+        !conversationPartnerIds.has(p.userId as string) &&
+        p.hideFromDeepConnect !== true
     );
 
     // Compute scores and separate suppressed vs unsuppressed profiles
@@ -162,6 +178,11 @@ export const getProfiles = query({
 
     const limit = args.limit ?? 50;
     const limited = ranked.slice(0, limit);
+
+    const viewerUserDoc = await ctx.db.get(viewerUserId);
+    const ownerIds = [...new Set(limited.map(({ profile: p }) => p.userId as string))];
+    const ownerDocs = await Promise.all(ownerIds.map((id) => ctx.db.get(id as Id<'users'>)));
+    const ownerById = new Map(ownerIds.map((id, i) => [id, ownerDocs[i]]));
 
     // Phase 3: Shadow mode rank comparison (no production impact)
     // Legacy result is finalized above - this only logs for analysis
@@ -245,11 +266,29 @@ export const getProfiles = query({
       const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
       // Backward compat: older records may only have privateIntentKey (single)
       const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
+      // Privacy: hide age from others in Deep Connect (viewer is never self here — excluded above)
+      const age = profile.hideAge === true ? undefined : p.age;
+      const ownerUser = ownerById.get(p.userId as string);
+      let distanceKm: number | undefined;
+      if (
+        profile.hideDistance !== true &&
+        viewerUserDoc?.latitude != null &&
+        viewerUserDoc?.longitude != null &&
+        ownerUser?.latitude != null &&
+        ownerUser?.longitude != null
+      ) {
+        distanceKm = distanceKmBetween(
+          viewerUserDoc.latitude,
+          viewerUserDoc.longitude,
+          ownerUser.latitude,
+          ownerUser.longitude
+        );
+      }
       return {
         _id: p._id,
         userId: p.userId,
         displayNameInitial: p.displayName.charAt(0).toUpperCase(),
-        age: p.age,
+        age,
         city: p.city,
         gender: p.gender,
         blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
@@ -261,6 +300,7 @@ export const getProfiles = query({
         // Include hobbies and verification status if available
         hobbies: profile.hobbies ?? [],
         isVerified: profile.isVerified ?? false,
+        ...(distanceKm !== undefined ? { distanceKm } : {}),
       };
     });
   },
@@ -301,11 +341,31 @@ export const getProfileCard = query({
     // Backward compat: older records may only have privateIntentKey (single)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
+    const hideAgeFromViewer = profile.hideAge === true && args.viewerId !== p.userId;
+
+    let distanceKm: number | undefined;
+    if (args.viewerId !== p.userId && profile.hideDistance !== true) {
+      const [viewerU, ownerU] = await Promise.all([ctx.db.get(args.viewerId), ctx.db.get(p.userId)]);
+      if (
+        viewerU?.latitude != null &&
+        viewerU?.longitude != null &&
+        ownerU?.latitude != null &&
+        ownerU?.longitude != null
+      ) {
+        distanceKm = distanceKmBetween(
+          viewerU.latitude,
+          viewerU.longitude,
+          ownerU.latitude,
+          ownerU.longitude
+        );
+      }
+    }
+
     return {
       _id: p._id,
       userId: p.userId,
       displayNameInitial: p.displayName.charAt(0).toUpperCase(),
-      age: p.age,
+      age: hideAgeFromViewer ? undefined : p.age,
       city: p.city,
       gender: p.gender,
       blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
@@ -317,6 +377,7 @@ export const getProfileCard = query({
       // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
+      ...(distanceKm !== undefined ? { distanceKm } : {}),
     };
   },
 });
@@ -362,12 +423,32 @@ export const getProfileByUserId = query({
     // Backward compat: older records may only have privateIntentKey (single), not privateIntentKeys (array)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
+    const hideAgeFromViewer = profile.hideAge === true && args.viewerId !== args.userId;
+
+    let distanceKm: number | undefined;
+    if (args.viewerId !== args.userId && profile.hideDistance !== true) {
+      const [viewerU, ownerU] = await Promise.all([ctx.db.get(args.viewerId), ctx.db.get(args.userId)]);
+      if (
+        viewerU?.latitude != null &&
+        viewerU?.longitude != null &&
+        ownerU?.latitude != null &&
+        ownerU?.longitude != null
+      ) {
+        distanceKm = distanceKmBetween(
+          viewerU.latitude,
+          viewerU.longitude,
+          ownerU.latitude,
+          ownerU.longitude
+        );
+      }
+    }
+
     return {
       _id: p._id,
       userId: p.userId,
       name: p.displayName,
       displayNameInitial: p.displayName.charAt(0).toUpperCase(),
-      age: p.age,
+      age: hideAgeFromViewer ? undefined : p.age,
       city: p.city,
       gender: p.gender,
       bio: p.privateBio,
@@ -388,6 +469,7 @@ export const getProfileByUserId = query({
       // Phase-2 does NOT have Phase-1 fields
       relationshipIntent: [],
       profilePrompts: [],
+      ...(distanceKm !== undefined ? { distanceKm } : {}),
     };
   },
 });

@@ -100,6 +100,35 @@ async function upsertParticipantUnreadCount(
   }
 }
 
+/**
+ * Whether the other participant in a 1:1 conversation has disabled read receipts for senders.
+ * Group threads (>2 participants): no single "recipient" for this flag — leave readAt visible (unchanged).
+ */
+async function recipientHidesReadReceiptsFromSender(
+  ctx: QueryCtx,
+  conversation: { participants: Id<'users'>[] },
+  viewerId: Id<'users'>
+): Promise<boolean> {
+  if (conversation.participants.length !== 2) return false;
+  const otherId = conversation.participants.find((p) => p !== viewerId);
+  if (!otherId) return false;
+  const other = await ctx.db.get(otherId);
+  return other?.disableReadReceipts === true;
+}
+
+/** Query-only: hide read state on the sender's copy when recipient opted out (DB readAt unchanged). */
+function applyReadReceiptSenderView<T extends Record<string, unknown>>(
+  payload: T,
+  msg: { senderId: Id<'users'> },
+  viewerId: Id<'users'>,
+  hideReadFromSender: boolean
+): T {
+  if (!hideReadFromSender || msg.senderId !== viewerId) {
+    return payload;
+  }
+  return { ...payload, readAt: undefined, readReceiptVisible: false } as T;
+}
+
 // Send a message
 // MSG-001 FIX: Auth hardening - verify caller identity server-side
 export const sendMessage = mutation({
@@ -484,6 +513,8 @@ export const getMessages = query({
       return [];
     }
 
+    const hideReadFromSender = await recipientHidesReadReceiptsFromSender(ctx, conversation, userId);
+
     // SYNC-FIX: Deterministic query - same for all devices
     let query = ctx.db
       .query('messages')
@@ -546,11 +577,16 @@ export const getMessages = query({
       // Voice messages: include audio URL
       if (msg.type === 'voice' && msg.audioStorageId) {
         const { audioStorageId, ...rest } = msg;
-        return {
-          ...rest,
-          isProtected: false,
-          audioUrl: audioUrlMap.get(audioStorageId as string) ?? null,
-        };
+        return applyReadReceiptSenderView(
+          {
+            ...rest,
+            isProtected: false,
+            audioUrl: audioUrlMap.get(audioStorageId as string) ?? null,
+          },
+          msg,
+          userId,
+          hideReadFromSender
+        );
       }
 
       if (msg.mediaId) {
@@ -572,21 +608,26 @@ export const getMessages = query({
         // SENDER-TIMER-FIX: Both sender and receiver use globallyExpired as single source of truth
         const isExpired = globallyExpired || !!recipientExpired;
 
-        return {
-          ...rest,
-          isProtected: true,
-          // SECURE-MEDIA-FIX: Include media metadata for both sender and receiver
-          viewMode: media?.viewMode ?? 'tap',
-          timerEndsAt: permission?.expiresAt ?? null, // Absolute deadline (wall-clock)
-          isExpired,
-          expiredAt: media?.expiredAt ?? null, // For auto-hide timer
-          // VIEW-ONCE-FIX: Include viewOnce flag for UI to handle properly
-          viewOnce: media?.viewOnce ?? false,
-          // SENDER-TIMER-FIX: Include opened state so sender knows recipient is viewing
-          recipientOpened: !!(permission?.openedAt),
-        };
+        return applyReadReceiptSenderView(
+          {
+            ...rest,
+            isProtected: true,
+            // SECURE-MEDIA-FIX: Include media metadata for both sender and receiver
+            viewMode: media?.viewMode ?? 'tap',
+            timerEndsAt: permission?.expiresAt ?? null, // Absolute deadline (wall-clock)
+            isExpired,
+            expiredAt: media?.expiredAt ?? null, // For auto-hide timer
+            // VIEW-ONCE-FIX: Include viewOnce flag for UI to handle properly
+            viewOnce: media?.viewOnce ?? false,
+            // SENDER-TIMER-FIX: Include opened state so sender knows recipient is viewing
+            recipientOpened: !!(permission?.openedAt),
+          },
+          msg,
+          userId,
+          hideReadFromSender
+        );
       }
-      return { ...msg, isProtected: false };
+      return applyReadReceiptSenderView({ ...msg, isProtected: false }, msg, userId, hideReadFromSender);
     });
   },
 });
@@ -667,6 +708,8 @@ export const getDmMessages = query({
         return { page: [], isDone: true, continueCursor: null };
       }
 
+      const hideReadFromSender = await recipientHidesReadReceiptsFromSender(ctx, conversation, userId);
+
       const numItems = Math.min(Math.max(paginationOpts.numItems, 1), 100);
 
       let q = ctx.db
@@ -697,6 +740,7 @@ export const getDmMessages = query({
         type: string;
         mediaUrl?: string;
         readAt?: number;
+        readReceiptVisible?: boolean;
         createdAt: number;
         isMe: boolean;
       };
@@ -727,20 +771,27 @@ export const getDmMessages = query({
             uiType = 'text';
           }
 
-          dmPage.push({
-            id: m._id as string,
-            threadId: threadId as string,
-            senderId: m.senderId as string,
-            senderName,
-            senderAvatar: profile?.privatePhotoUrls?.[0] ?? sender?.primaryPhotoUrl ?? undefined,
-            text:
-              m.type === 'text' || m.type === 'template' ? m.content : undefined,
-            type: uiType,
-            mediaUrl,
-            readAt: m.readAt,
-            createdAt: m.createdAt,
-            isMe: m.senderId === userId,
-          });
+          dmPage.push(
+            applyReadReceiptSenderView(
+              {
+                id: m._id as string,
+                threadId: threadId as string,
+                senderId: m.senderId as string,
+                senderName,
+                senderAvatar: profile?.privatePhotoUrls?.[0] ?? sender?.primaryPhotoUrl ?? undefined,
+                text:
+                  m.type === 'text' || m.type === 'template' ? m.content : undefined,
+                type: uiType,
+                mediaUrl,
+                readAt: m.readAt,
+                createdAt: m.createdAt,
+                isMe: m.senderId === userId,
+              },
+              m,
+              userId,
+              hideReadFromSender
+            ) as DmRow
+          );
         } catch {
           continue;
         }

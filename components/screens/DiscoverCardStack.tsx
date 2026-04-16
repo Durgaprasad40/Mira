@@ -1008,6 +1008,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           name: p.displayName || 'Anonymous',
           age: p.age,
           city: p.city,
+          distance: typeof p.distanceKm === 'number' ? p.distanceKm : undefined,
           bio: p.privateBio,
           photos,
           activities: p.hobbies ?? [],
