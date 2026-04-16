@@ -46,8 +46,8 @@ export {
 // Task name - must be unique and consistent
 const LOCATION_TASK = 'mira-background-location-task';
 
-// SecureStore key for auth token (same as authBootCache.ts)
-const TOKEN_KEY = 'mira_auth_token';
+// SecureStore key for auth userId (same as authBootCache.ts)
+const USER_ID_KEY = 'mira_auth_user_id';
 
 // Convex URL
 const CONVEX_URL = process.env.EXPO_PUBLIC_CONVEX_URL!;
@@ -78,9 +78,9 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
   }
 
   try {
-    const token = await SecureStore.getItemAsync(TOKEN_KEY);
+    const userId = await SecureStore.getItemAsync(USER_ID_KEY);
 
-    if (!token || !token.trim()) {
+    if (!userId || !userId.trim()) {
       if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] no auth');
       return;
     }
@@ -88,7 +88,7 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
     const convex = new ConvexHttpClient(CONVEX_URL);
 
     const result = await convex.mutation(api.crossedPaths.publishLocation, {
-      token,
+      userId,
       latitude,
       longitude,
     });
