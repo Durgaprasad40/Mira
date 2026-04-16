@@ -441,10 +441,10 @@ export default function EditProfileScreen() {
     if (!detailsInitialized && (backendProfile !== undefined || isDemoMode)) {
       setLocalHeight(height ?? null);
       setLocalWeight(weight ?? null);
-      setLocalSmoking(canonicalizeSmoking(smoking ?? null));
-      setLocalDrinking(canonicalizeDrinking(drinking ?? null));
-      setLocalEducation(canonicalizeEducation(education ?? null));
-      setLocalReligion(canonicalizeReligion(religion ?? null));
+      setLocalSmoking(smoking);
+      setLocalDrinking(drinking);
+      setLocalEducation(education);
+      setLocalReligion(religion);
       setLocalHobbies(hobbies || []);
       setDetailsInitialized(true);
     }
