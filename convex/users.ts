@@ -1063,10 +1063,20 @@ export const reportUser = mutation({
       v.literal("other"),
     ),
     description: v.optional(v.string()),
+    evidence: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id('_storage'),
+          type: v.union(v.literal('photo'), v.literal('video')),
+        })
+      )
+    ),
   },
   handler: async (ctx, args) => {
-    const { authUserId, reportedUserId, reason, description } = args;
+    const { authUserId, reportedUserId, reason, description, evidence } = args;
     const now = Date.now();
+    const REPORT_FLAG_WINDOW_DAYS = 30;
+    const REPORT_FLAG_THRESHOLD = 3;
 
     // C2 SECURITY: Resolve auth ID to Convex user ID
     const reporterId = await resolveUserIdByAuthId(ctx, authUserId);
@@ -1079,27 +1089,48 @@ export const reportUser = mutation({
       return { success: false, error: 'cannot_report_self' };
     }
 
+    // Minimal abuse prevention: enforce evidence limits
+    if (evidence && evidence.length > 0) {
+      const photos = evidence.filter((e) => e.type === 'photo');
+      const videos = evidence.filter((e) => e.type === 'video');
+
+      if (videos.length > 1) {
+        return { success: false, error: 'too_many_videos' };
+      }
+
+      // Either up to 5 photos OR 1 video (no mixing)
+      if (videos.length === 1 && photos.length > 0) {
+        return { success: false, error: 'cannot_mix_photo_and_video' };
+      }
+
+      if (photos.length > 5) {
+        return { success: false, error: 'too_many_photos' };
+      }
+    }
+
     await ctx.db.insert("reports", {
       reporterId,
       reportedUserId,
       reason,
       description,
+      evidence: evidence && evidence.length > 0 ? evidence : undefined,
       status: "pending",
       createdAt: now,
     });
 
-    // Count distinct reporters for this user
-    const allReports = await ctx.db
+    // Automated moderation signal (non-destructive):
+    // Flag users who receive repeated reports within a recent window.
+    const windowStart = now - REPORT_FLAG_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const recentReports = await ctx.db
       .query("reports")
       .withIndex("by_reported_user", (q) =>
         q.eq("reportedUserId", reportedUserId)
       )
+      .filter((q) => q.gte(q.field("createdAt"), windowStart))
       .collect();
 
-    const distinctReporters = new Set(allReports.map((r) => r.reporterId));
-
-    if (distinctReporters.size >= 3) {
-      // Check if already flagged
+    const recentReportCount = recentReports.length;
+    if (recentReportCount >= REPORT_FLAG_THRESHOLD) {
       const existingFlag = await ctx.db
         .query("behaviorFlags")
         .withIndex("by_user_type", (q) =>
@@ -1107,25 +1138,65 @@ export const reportUser = mutation({
         )
         .first();
 
+      const severity = recentReportCount >= 5 ? "high" : "medium";
+      const flagDescription = `Received ${recentReportCount} reports in last ${REPORT_FLAG_WINDOW_DAYS} days`;
+
       if (!existingFlag) {
         await ctx.db.insert("behaviorFlags", {
           userId: reportedUserId,
           flagType: "reported_by_multiple",
-          severity: distinctReporters.size >= 5 ? "high" : "medium",
-          description: `Reported by ${distinctReporters.size} distinct users`,
+          severity,
+          description: flagDescription,
           createdAt: now,
         });
-
-        // Force security_only if 5+ reporters
-        if (distinctReporters.size >= 5) {
-          await ctx.db.patch(reportedUserId, {
-            verificationEnforcementLevel: "security_only",
-          });
-        }
+      } else {
+        // Keep a single flag record, but refresh severity/description for visibility.
+        await ctx.db.patch(existingFlag._id, {
+          severity,
+          description: flagDescription,
+        });
       }
     }
 
     return { success: true };
+  },
+});
+
+// Basic automated moderation signal helper:
+// Count reports against a user in a recent window (default 30 days).
+export const getRecentReportCountForUser = query({
+  args: {
+    reportedUserId: v.id("users"),
+    days: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const days = Math.max(1, Math.min(args.days ?? 30, 365));
+    const windowStart = Date.now() - days * 24 * 60 * 60 * 1000;
+
+    const reports = await ctx.db
+      .query("reports")
+      .withIndex("by_reported_user", (q) => q.eq("reportedUserId", args.reportedUserId))
+      .filter((q) => q.gte(q.field("createdAt"), windowStart))
+      .collect();
+
+    return { reportedUserId: args.reportedUserId, days, count: reports.length };
+  },
+});
+
+// Generate an upload URL for report evidence (Convex storage)
+export const generateReportEvidenceUploadUrl = mutation({
+  args: {
+    // Auth-safe: require authUserId to prevent anonymous storage abuse
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const reporterId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!reporterId) {
+      return { success: false, error: 'unauthorized' };
+    }
+
+    const uploadUrl = await ctx.storage.generateUploadUrl();
+    return { success: true, uploadUrl };
   },
 });
 

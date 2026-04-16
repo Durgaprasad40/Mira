@@ -1025,6 +1025,14 @@ export default defineSchema({
       v.literal('selling')
     ),
     description: v.optional(v.string()),
+    evidence: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id('_storage'),
+          type: v.union(v.literal('photo'), v.literal('video')),
+        }),
+      ),
+    ),
     status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('resolved')),
     reviewedAt: v.optional(v.number()),
     createdAt: v.number(),

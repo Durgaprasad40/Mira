@@ -223,7 +223,7 @@ function mapConvexUploadUrlError(err: unknown): UploadError {
     m.includes('could not find function')
   ) {
     return new UploadError(
-      'Support upload is unavailable because the app and server are out of sync. Update the app or try again later.',
+      'Upload is unavailable because the app and server are out of sync. Update the app or try again later.',
       'SERVER_CONTRACT_ERROR',
       false
     );
