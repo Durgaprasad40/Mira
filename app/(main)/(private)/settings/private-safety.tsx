@@ -1,13 +1,9 @@
-import React, { useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useMutation } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
-import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { useAuthStore } from '@/stores/authStore';
-import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 
 const C = INCOGNITO_COLORS;
 
@@ -36,53 +32,12 @@ const SAFETY_TIPS = {
 export default function SafetyScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const authUserId = useAuthStore((s) => s.userId);
-  const updateFieldsByAuthId = useMutation(api.privateProfiles.updateFieldsByAuthId);
-
-  // Safe Mode from store (persisted via userPrivateProfiles)
-  const safeMode = usePrivateProfileStore((s) => s.safeMode);
-  const setSafeMode = usePrivateProfileStore((s) => s.setSafeMode);
 
   const [expandedTip, setExpandedTip] = useState<string | null>(null);
-
-  // Track saving state to prevent double-toggles
-  const [isSaving, setIsSaving] = useState(false);
 
   const toggleTip = (tipKey: string) => {
     setExpandedTip(expandedTip === tipKey ? null : tipKey);
   };
-
-  const persistSafeMode = useCallback(
-    (enabled: boolean) => {
-      if (!authUserId) return;
-      void updateFieldsByAuthId({
-        authUserId,
-        safeMode: enabled,
-      })
-        .then((res) => {
-          if (res && !res.success && __DEV__) {
-            console.warn('[PrivateSafety] updateFieldsByAuthId:', res.error);
-          }
-        })
-        .catch((err) => {
-          if (__DEV__) {
-            console.warn('[PrivateSafety] updateFieldsByAuthId failed', err);
-          }
-        });
-    },
-    [authUserId, updateFieldsByAuthId]
-  );
-
-  // Handle Safe Mode toggle — store first, then background persist
-  const handleSafeModeChange = useCallback(
-    (enabled: boolean) => {
-      if (isSaving) return; // Prevent double-toggle while saving
-      setSafeMode(enabled);
-      const { safeMode: nextSafeMode } = usePrivateProfileStore.getState();
-      persistSafeMode(nextSafeMode);
-    },
-    [isSaving, setSafeMode, persistSafeMode]
-  );
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -96,51 +51,39 @@ export default function SafetyScreen() {
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Safe Mode Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Protection</Text>
-
-          {/* Safe Mode Toggle */}
-          <View style={styles.safeModeCard}>
-            <View style={styles.safeModeRow}>
-              <View style={styles.safeModeInfo}>
-                <View style={[styles.safeModeIcon, safeMode && styles.safeModeIconActive]}>
-                  <Ionicons name="shield-checkmark" size={22} color={safeMode ? '#FFF' : C.text} />
-                </View>
-                <View style={styles.safeModeTextContainer}>
-                  <Text style={styles.safeModeTitle}>Safe Mode</Text>
-                  <Text style={styles.safeModeDescription}>
-                    Filter harmful or suspicious messages automatically
-                  </Text>
-                </View>
-              </View>
-              {isSaving ? (
-                <ActivityIndicator size="small" color={C.primary} />
-              ) : (
-                <Switch
-                  value={safeMode}
-                  onValueChange={handleSafeModeChange}
-                  trackColor={{ false: C.border, true: C.primary }}
-                  thumbColor="#FFF"
-                />
-              )}
-            </View>
-          </View>
-        </View>
-
         {/* Trust & Safety */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Trust & Safety</Text>
 
           {/* Blocked Users */}
           <TouchableOpacity
-            style={[styles.navRow, styles.navRowLast]}
+            style={styles.navRow}
             onPress={() => router.push('/(main)/(private)/settings/phase2-blocked-users')}
             activeOpacity={0.7}
           >
             <View style={styles.navRowLeft}>
               <Ionicons name="ban-outline" size={22} color={C.text} />
-              <Text style={styles.navRowTitle}>Blocked Users</Text>
+              <View style={styles.navRowTextBlock}>
+                <Text style={styles.navRowTitle}>Blocked Users</Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
+          </TouchableOpacity>
+
+          {/* Report a Person */}
+          <TouchableOpacity
+            style={[styles.navRow, styles.navRowLast]}
+            onPress={() => router.push('/(main)/(private)/settings/select-person' as any)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.navRowLeft}>
+              <Ionicons name="warning-outline" size={22} color={C.text} />
+              <View style={styles.navRowTextBlock}>
+                <Text style={styles.navRowTitle}>Report a Person</Text>
+                <Text style={styles.navRowSubtitle} numberOfLines={2}>
+                  Report harassment, fake profiles, or safety concerns
+                </Text>
+              </View>
             </View>
             <Ionicons name="chevron-forward" size={20} color={C.textLight} />
           </TouchableOpacity>
@@ -254,51 +197,6 @@ const styles = StyleSheet.create({
     color: C.textLight,
     marginBottom: 12,
   },
-  // Safe Mode card styles
-  safeModeCard: {
-    backgroundColor: C.surface,
-    borderRadius: 14,
-    overflow: 'hidden',
-    marginTop: 8,
-  },
-  safeModeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 14,
-  },
-  safeModeInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    marginRight: 12,
-  },
-  safeModeIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    backgroundColor: C.accent,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  safeModeIconActive: {
-    backgroundColor: C.primary,
-  },
-  safeModeTextContainer: {
-    flex: 1,
-  },
-  safeModeTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: C.text,
-    marginBottom: 2,
-  },
-  safeModeDescription: {
-    fontSize: 13,
-    color: C.textLight,
-    lineHeight: 17,
-  },
   tipRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -355,10 +253,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 14,
+    flex: 1,
+    marginRight: 8,
+  },
+  navRowTextBlock: {
+    flex: 1,
   },
   navRowTitle: {
     fontSize: 16,
     fontWeight: '500',
     color: C.text,
+  },
+  navRowSubtitle: {
+    fontSize: 13,
+    color: C.textLight,
+    marginTop: 2,
+    lineHeight: 18,
   },
 });

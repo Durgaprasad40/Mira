@@ -2,9 +2,11 @@
  * Phase-2 Support & FAQ Screen
  *
  * Deep Connect specific support and FAQ:
+ * - Support ticket history (quick link)
  * - FAQ topics relevant to Deep Connect
  * - Contact support form
- * - Support ticket history
+ *
+ * Person reporting lives under Profile → Safety.
  *
  * Uses Phase-2 dark premium styling (INCOGNITO_COLORS).
  */
@@ -262,43 +264,10 @@ export default function PrivateSupportScreen() {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Quick Actions Section */}
+          {/* Support Requests */}
           <View style={styles.quickActionsSection}>
-            <Text style={styles.sectionTitle}>Report & Track</Text>
+            <Text style={styles.sectionTitle}>Support</Text>
 
-            {/* Report a Person - routes through person selection */}
-            <TouchableOpacity
-              style={styles.actionCard}
-              onPress={() => router.push('/(main)/(private)/settings/select-person' as any)}
-              activeOpacity={0.7}
-            >
-              <View style={[styles.actionIconBox, styles.actionIconBoxRed]}>
-                <Ionicons name="warning" size={22} color="#FFF" />
-              </View>
-              <View style={styles.actionTextContainer}>
-                <Text style={styles.actionTitle}>Report a Person</Text>
-                <Text style={styles.actionSubtitle}>Report harassment, fake profiles, or safety concerns</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={20} color={C.textLight} />
-            </TouchableOpacity>
-
-            {/* My Reports */}
-            <TouchableOpacity
-              style={styles.actionCard}
-              onPress={() => router.push('/(main)/(private)/settings/private-my-reports' as any)}
-              activeOpacity={0.7}
-            >
-              <View style={[styles.actionIconBox, styles.actionIconBoxBlue]}>
-                <Ionicons name="document-text" size={22} color="#FFF" />
-              </View>
-              <View style={styles.actionTextContainer}>
-                <Text style={styles.actionTitle}>My Reports</Text>
-                <Text style={styles.actionSubtitle}>Track status of reports you've submitted</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={20} color={C.textLight} />
-            </TouchableOpacity>
-
-            {/* Support Requests */}
             <TouchableOpacity
               style={styles.actionCard}
               onPress={() => router.push('/(main)/(private)/settings/private-support-history' as any)}
@@ -419,7 +388,7 @@ export default function PrivateSupportScreen() {
               <View style={styles.categoryHelperNote}>
                 <Ionicons name="information-circle-outline" size={16} color={C.textLight} />
                 <Text style={styles.categoryHelperText}>
-                  To report a specific person, use "Report a Person" above.
+                  To report a specific person, open Profile → Safety → Report a Person.
                 </Text>
               </View>
             )}

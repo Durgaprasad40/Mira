@@ -43,7 +43,7 @@ export default function AccountScreen() {
 
     Alert.alert(
       'Final Confirmation',
-      'Your Deep Connect data will be hidden immediately and permanently deleted in 30 days. You can recover it during this period.',
+      'Your private profile will be hidden immediately. You can recover it within 30 days. After that, your private data may be permanently deleted when our systems run scheduled cleanup—not guaranteed on a specific day.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -58,7 +58,7 @@ export default function AccountScreen() {
 
               // CRITICAL: Verify userId exists before proceeding (non-demo mode)
               if (!isDemoMode && !userId) {
-                Alert.alert('Error', 'You must be logged in to deactivate Deep Connect.');
+                Alert.alert('Error', 'You must be logged in to deactivate your private profile.');
                 return;
               }
 
@@ -77,7 +77,7 @@ export default function AccountScreen() {
               }
 
               Alert.alert(
-                'Deep Connect Deactivated',
+                'Private Profile Deactivated',
                 'Your private profile is now hidden. You have 30 days to recover your data.',
                 [
                   {
@@ -90,8 +90,8 @@ export default function AccountScreen() {
                 ]
               );
             } catch (error) {
-              console.error('Error deactivating Deep Connect:', error);
-              Alert.alert('Error', 'Failed to deactivate Deep Connect. Please try again.');
+              console.error('Error deactivating private profile:', error);
+              Alert.alert('Error', 'Failed to deactivate your private profile. Please try again.');
             } finally {
               setIsDeleting(false);
             }
@@ -124,12 +124,12 @@ export default function AccountScreen() {
           <View style={styles.dangerCard}>
             <View style={styles.dangerCardHeader}>
               <Ionicons name="eye-off-outline" size={20} color={COLORS.error} />
-              <Text style={styles.dangerCardTitle}>Deactivate Deep Connect</Text>
+              <Text style={styles.dangerCardTitle}>Deactivate Private Profile</Text>
             </View>
             <Text style={styles.dangerCardDescription}>
-              Your private profile and Deep Connect data will be hidden. You can recover them within 30 days.{'\n'}
+              Your private profile and related Deep Connect data will be hidden. You can recover them within 30 days.{'\n'}
               {'\n'}
-              After 30 days, all data will be permanently deleted.
+              After 30 days, your private data may be permanently deleted when our systems run scheduled cleanup.
             </Text>
             <TouchableOpacity
               style={styles.dangerButton}
@@ -137,7 +137,7 @@ export default function AccountScreen() {
               activeOpacity={0.8}
             >
               <Ionicons name="eye-off-outline" size={18} color="#FFF" />
-              <Text style={styles.dangerButtonText}>Deactivate Deep Connect</Text>
+              <Text style={styles.dangerButtonText}>Deactivate Private Profile</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -154,14 +154,14 @@ export default function AccountScreen() {
           <View style={styles.modalContainer}>
             <View style={styles.modalHeader}>
               <Ionicons name="alert-circle" size={32} color={COLORS.error} />
-              <Text style={styles.modalTitle}>Deactivate Deep Connect</Text>
+              <Text style={styles.modalTitle}>Deactivate Private Profile</Text>
             </View>
 
             {/* Anti-Scam Warning */}
             <View style={styles.warningBox}>
               <Ionicons name="shield-checkmark-outline" size={20} color="#F59E0B" />
               <Text style={styles.warningText}>
-                If someone is asking you to deactivate Deep Connect, you may be getting scammed. Only proceed if YOU want to deactivate.
+                If someone is asking you to deactivate your private profile, you may be getting scammed. Only proceed if YOU want to deactivate.
               </Text>
             </View>
 
@@ -173,7 +173,7 @@ export default function AccountScreen() {
                 • You have 30 days to recover your data
               </Text>
               <Text style={styles.modalInfoItem}>
-                • After 30 days, all Deep Connect data will be permanently deleted
+                • After 30 days, private data may be permanently deleted when scheduled cleanup runs—not guaranteed on a specific day
               </Text>
             </View>
 
