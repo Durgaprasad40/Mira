@@ -2437,14 +2437,59 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     return (
       <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {/* Premium subtle gradient background for Phase-1 */}
+        {!dark && (
+          <LinearGradient
+            colors={['#FFFFFF', '#FAFAFA', '#F7F7F7']}
+            locations={[0, 0.5, 1]}
+            style={StyleSheet.absoluteFill}
+          />
+        )}
+        {/* Top fade overlay for header depth - Phase-1 only */}
+        {!dark && (
+          <LinearGradient
+            colors={[
+              'rgba(255,255,255,0.9)',
+              'rgba(255,255,255,0.6)',
+              'rgba(255,255,255,0.0)',
+            ]}
+            locations={[0, 0.4, 1]}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 140,
+              zIndex: 1,
+            }}
+            pointerEvents="none"
+          />
+        )}
         {/* Header - always visible even when feed is empty */}
         {!hideHeader && (
-          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
+          <View style={[
+            styles.header,
+            { paddingTop: insets.top, height: insets.top + HEADER_H },
+            dark && { backgroundColor: INCOGNITO_COLORS.background },
+            !dark && { backgroundColor: 'rgba(255, 255, 255, 0.85)' }
+          ]}>
+            <TouchableOpacity
+              style={[
+                styles.headerBtn,
+                !dark && { backgroundColor: 'rgba(0, 0, 0, 0.03)', borderWidth: 1, borderColor: 'rgba(0, 0, 0, 0.04)' }
+              ]}
+              onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}
+            >
               <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
             <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+            <TouchableOpacity
+              style={[
+                styles.headerBtn,
+                !dark && { backgroundColor: 'rgba(0, 0, 0, 0.03)', borderWidth: 1, borderColor: 'rgba(0, 0, 0, 0.04)' }
+              ]}
+              onPress={() => setShowNotificationPopover(true)}
+            >
               <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
               {unseenCount > 0 && (
                 <View style={styles.bellBadge}>
@@ -2454,7 +2499,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             </TouchableOpacity>
           </View>
         )}
-        <View style={[styles.center, { flex: 1 }]}>
+        <View style={[styles.center, { flex: 1 }, !dark && { backgroundColor: 'transparent' }]}>
           {/* Unified empty state for both Phase-1 and Phase-2 */}
           {isPhase2 ? (
             <>
@@ -2505,23 +2550,47 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               </Animated.View>
             </>
           ) : (
-            <View style={styles.phase1EmptyContent}>
-              {/* Star icon - light theme */}
-              <Text style={styles.emptyEmoji}>✨</Text>
-              <Text style={styles.emptyTitle}>We're finding people for you</Text>
-              <Text style={styles.emptySubtitle}>
-                Try adjusting your preferences to see more profiles
-              </Text>
-              {isDemoMode && (
-                <TouchableOpacity
-                  style={[styles.resetButton, { marginTop: 28 }]}
-                  onPress={handleResetDemoSwipes}
+            <>
+              {/* Subtle radial glow for Phase-1 */}
+              <View style={styles.phase1RadialGlow} />
+
+              <Animated.View
+                entering={FadeInUp.duration(400).delay(100).springify().damping(20)}
+                style={styles.phase1EmptyCard}
+              >
+                {/* Premium icon with multi-layer glow - light theme */}
+                <View style={styles.phase1IconOuter}>
+                  <View style={styles.phase1IconInner}>
+                    <Ionicons name="sparkles" size={32} color={COLORS.primary} />
+                  </View>
+                </View>
+
+                <Animated.Text
+                  entering={FadeInUp.duration(350).delay(200)}
+                  style={styles.phase1EmptyTitle}
                 >
-                  <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                  <Text style={styles.resetButtonText}>Reset Demo</Text>
-                </TouchableOpacity>
-              )}
-            </View>
+                  We're finding people for you
+                </Animated.Text>
+                <Animated.Text
+                  entering={FadeInUp.duration(350).delay(280)}
+                  style={styles.phase1EmptySubtitle}
+                >
+                  Try adjusting your preferences to see more profiles
+                </Animated.Text>
+
+                {isDemoMode && (
+                  <Animated.View entering={FadeIn.duration(300).delay(400)}>
+                    <TouchableOpacity
+                      style={styles.phase1ResetButton}
+                      onPress={handleResetDemoSwipes}
+                    >
+                      <Ionicons name="refresh" size={16} color="#FFFFFF" style={{ marginRight: 8 }} />
+                      <Text style={styles.phase1ResetButtonText}>Reset Demo</Text>
+                    </TouchableOpacity>
+                  </Animated.View>
+                )}
+              </Animated.View>
+            </>
           )}
         </View>
         {notificationPopover}
@@ -3236,6 +3305,139 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 340,
     paddingHorizontal: 24,
+    zIndex: 2,
+  },
+  // ══════════════════════════════════════════════════════════════════════════════
+  // PREMIUM PHASE-1 EMPTY STATE STYLES
+  // Clean, elegant, light theme with subtle depth
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Premium card container for empty state
+  phase1EmptyCard: {
+    alignItems: "center",
+    width: "100%",
+    maxWidth: 340,
+    paddingVertical: 48,
+    paddingHorizontal: 32,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 24,
+    // Natural vertical positioning (not stuck to center)
+    marginTop: -40,
+    // Premium subtle shadow
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.08,
+    shadowRadius: 28,
+    elevation: 6,
+    // Subtle border for definition
+    borderWidth: 1,
+    borderColor: "rgba(0, 0, 0, 0.04)",
+    zIndex: 2,
+  },
+  // Subtle radial glow for Phase-1 (light version - visible but soft)
+  phase1RadialGlow: {
+    position: "absolute",
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    backgroundColor: "rgba(255, 107, 107, 0.07)",
+    top: "22%",
+    alignSelf: "center",
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.10,
+    shadowRadius: 100,
+  },
+  // Premium icon container (outer glow ring - light theme)
+  phase1IconOuter: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: "rgba(255, 107, 107, 0.06)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 28,
+    // Soft outer glow
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 20,
+  },
+  // Inner icon container with tighter styling
+  phase1IconInner: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: "rgba(255, 107, 107, 0.10)",
+    alignItems: "center",
+    justifyContent: "center",
+    // Inner glow
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+  },
+  // Premium title typography (Phase-1)
+  phase1EmptyTitle: {
+    fontSize: 22,
+    fontWeight: "700",
+    color: COLORS.text,
+    textAlign: "center",
+    letterSpacing: -0.3,
+    lineHeight: 28,
+  },
+  // Softer subtitle typography (Phase-1)
+  phase1EmptySubtitle: {
+    fontSize: 15,
+    fontWeight: "400",
+    color: "#8E8E93",
+    textAlign: "center",
+    marginTop: 10,
+    lineHeight: 22,
+    letterSpacing: 0.1,
+    paddingHorizontal: 8,
+  },
+  // Premium reset button (Phase-1, demo only)
+  phase1ResetButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.primary,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 14,
+    marginTop: 28,
+    // Soft shadow for depth
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  phase1ResetButtonText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#FFFFFF",
+    letterSpacing: 0.2,
+  },
+  // Premium header for Phase-1 empty state
+  phase1Header: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingBottom: 12,
+    backgroundColor: "transparent",
+    zIndex: 10,
+  },
+  // Header button with subtle background
+  phase1HeaderBtn: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+    borderRadius: 22,
+    backgroundColor: "rgba(0, 0, 0, 0.03)",
   },
 
   // Premium Compact Header
