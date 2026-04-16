@@ -862,17 +862,6 @@ export default function ProfileScreen() {
         )}
       </View>
 
-      {/* 8. Deactivate Account - destructive action at bottom */}
-      <View style={styles.footer}>
-        <TouchableOpacity
-          onPress={handleDeactivate}
-          style={styles.deactivateButton}
-          accessibilityRole="button"
-          accessibilityLabel="Deactivate account"
-        >
-          <Text style={styles.deactivateText}>Deactivate Account</Text>
-        </TouchableOpacity>
-      </View>
     </ScrollView>
 
       {/* Full-screen photo preview modal */}

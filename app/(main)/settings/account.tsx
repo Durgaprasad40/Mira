@@ -32,7 +32,7 @@ export default function AccountSettingsScreen() {
   const token = useAuthStore((s) => s.token);
   const userId = useAuthStore((s) => s.userId);
   const softDeleteMutation = useMutation(api.auth.softDeleteAccount);
-  const serverLogout = useMutation(api.auth.logout);
+  const deactivateMutation = useMutation(api.users.deactivateAccount);
 
   // Query current user for email display (live mode only)
   const currentUserQuery = useQuery(
@@ -65,37 +65,38 @@ export default function AccountSettingsScreen() {
   // Delete confirmation modal state (Step 1: info modal)
   const [showDeleteModal, setShowDeleteModal] = useState(false);
 
-  const handleLogout = () => {
+  const handleDeactivatePress = () => {
     Alert.alert(
-      'Log Out',
-      'Are you sure you want to log out?',
+      'Deactivate Mira account?',
+      'Your full Mira account, including Phase-1 and Phase-2, will be hidden and deactivated until you sign in again.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Log Out',
+          text: 'Deactivate Mira account',
           style: 'destructive',
           onPress: async () => {
-            // SEC-3 FIX: Server logout FIRST (with timeout) to invalidate session
-            if (!isDemoMode && token) {
-              try {
-                await Promise.race([
-                  serverLogout({ token }),
-                  new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
-                ]);
-                if (__DEV__) console.log('[Logout] Server session invalidated');
-              } catch (e) {
-                console.warn('[Logout] Server logout failed or timed out:', e);
+            try {
+              if (isDemoMode) {
+                useDemoStore.getState().demoLogout();
+                useOnboardingStore.getState().reset();
+                await logout();
+                safeReplace(router, '/(auth)/welcome', 'account->deactivate');
+                return;
               }
-            }
 
-            // Clear local state after server logout attempt
-            if (isDemoMode) {
-              useDemoStore.getState().demoLogout();
+              if (!userId) {
+                Alert.alert('Error', 'Unable to deactivate your account. Please try again.');
+                return;
+              }
+
+              await deactivateMutation({ authUserId: userId });
+
+              useOnboardingStore.getState().reset();
+              await logout();
+              safeReplace(router, '/(auth)/welcome', 'account->deactivate');
+            } catch (error: any) {
+              Alert.alert('Error', error.message || 'Failed to deactivate account. Please try again.');
             }
-            useOnboardingStore.getState().reset();
-            // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
-            await logout();
-            safeReplace(router, '/(auth)/welcome', 'account->logout');
           },
         },
       ]
@@ -112,16 +113,15 @@ export default function AccountSettingsScreen() {
 
     // Step 2: Final confirmation alert
     Alert.alert(
-      'Are you sure?',
-      'This will deactivate your account. Sign in again at any time to reactivate it.',
+      'Delete Mira account?',
+      'Your full Mira account, including Phase-1 and Phase-2, will be marked for deletion. You can restore it by signing in again within 30 days. After 30 days, it may be permanently deleted.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Deactivate',
+          text: 'Delete Mira account',
           style: 'destructive',
           onPress: async () => {
             try {
-              // Demo mode: just log out
               if (isDemoMode) {
                 useDemoStore.getState().demoLogout();
                 useOnboardingStore.getState().reset();
@@ -141,7 +141,7 @@ export default function AccountSettingsScreen() {
                 reason: 'User requested account deactivation',
               });
 
-              // Clear local state and log out
+              // Clear local state and log out (matches existing logout routing behavior)
               useOnboardingStore.getState().reset();
               await logout();
               safeReplace(router, '/(auth)/welcome', 'account->delete');
@@ -208,16 +208,6 @@ export default function AccountSettingsScreen() {
           </View>
         </View>
 
-        {/* Session Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Session</Text>
-
-          <TouchableOpacity style={styles.logoutButton} onPress={handleLogout} activeOpacity={0.8}>
-            <Ionicons name="log-out-outline" size={20} color={COLORS.primary} />
-            <Text style={styles.logoutButtonText}>Log Out</Text>
-          </TouchableOpacity>
-        </View>
-
         {/* Danger Zone Section */}
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: COLORS.error }]}>Danger Zone</Text>
@@ -225,14 +215,28 @@ export default function AccountSettingsScreen() {
           <View style={styles.dangerCard}>
             <View style={styles.dangerCardHeader}>
               <Ionicons name="warning-outline" size={20} color={COLORS.error} />
-              <Text style={styles.dangerCardTitle}>Deactivate Account</Text>
+              <Text style={styles.dangerCardTitle}>Deactivate Mira account</Text>
             </View>
             <Text style={styles.dangerCardDescription}>
-              Your account will be deactivated until you sign in again.
+              This deactivates your full Mira account, including Phase-1 and Phase-2. Your profile will be hidden until you sign in again.
+            </Text>
+            <TouchableOpacity style={styles.dangerButton} onPress={handleDeactivatePress} activeOpacity={0.8}>
+              <Ionicons name="pause-outline" size={18} color={COLORS.white} />
+              <Text style={styles.dangerButtonText}>Deactivate Mira account</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={[styles.dangerCard, { marginTop: 12 }]}>
+            <View style={styles.dangerCardHeader}>
+              <Ionicons name="trash-outline" size={20} color={COLORS.error} />
+              <Text style={styles.dangerCardTitle}>Delete Mira account</Text>
+            </View>
+            <Text style={styles.dangerCardDescription}>
+              This deletes your full Mira account, including Phase-1 and Phase-2. You can restore it by signing in again within 30 days. After 30 days, it may be permanently deleted.
             </Text>
             <TouchableOpacity style={styles.dangerButton} onPress={handleDeletePress} activeOpacity={0.8}>
               <Ionicons name="trash-outline" size={18} color={COLORS.white} />
-              <Text style={styles.dangerButtonText}>Deactivate My Account</Text>
+              <Text style={styles.dangerButtonText}>Delete Mira account</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -250,15 +254,18 @@ export default function AccountSettingsScreen() {
           <View style={styles.modalContainer}>
             <View style={styles.modalHeader}>
               <Ionicons name="alert-circle" size={32} color={COLORS.error} />
-              <Text style={styles.modalTitle}>Deactivate Account</Text>
+              <Text style={styles.modalTitle}>Delete Mira account</Text>
             </View>
 
             <View style={styles.modalInfoList}>
               <Text style={styles.modalInfoItem}>
-                • Your account will be deactivated.
+                • This deletes your full Mira account (Phase-1 and Phase-2).
               </Text>
               <Text style={styles.modalInfoItem}>
-                • Signing in again will reactivate it.
+                • You can restore it by signing in again within 30 days.
+              </Text>
+              <Text style={styles.modalInfoItem}>
+                • After 30 days, it may be permanently deleted.
               </Text>
             </View>
 
