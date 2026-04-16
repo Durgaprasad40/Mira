@@ -11,6 +11,34 @@ import { v } from 'convex/values';
 import { query, internalMutation } from './_generated/server';
 import { resolveUserIdByAuthId } from './helpers';
 
+type Phase2RankingProfileSignals = {
+  privateIntentKeys?: string[];
+  privateDesireTagKeys?: string[];
+  hobbies?: string[];
+  privateBio?: string;
+  promptAnswers?: Array<{ question?: string; answer?: string }>;
+  smoking?: string;
+  drinking?: string;
+  city?: string;
+  isVerified?: boolean;
+};
+
+type Phase2RankingViewerSignals = {
+  privateIntentKeys?: string[];
+  privateDesireTagKeys?: string[];
+  hobbies?: string[];
+  privateBio?: string;
+  promptAnswers?: Array<{ question?: string; answer?: string }>;
+  smoking?: string;
+  drinking?: string;
+  city?: string;
+  preferenceStrength?: {
+    smoking?: 'not_important' | 'slight_preference' | 'important' | 'deal_breaker';
+    drinking?: 'not_important' | 'slight_preference' | 'important' | 'deal_breaker';
+    intent?: 'not_important' | 'prefer_similar' | 'important' | 'must_match_exactly';
+  };
+};
+
 /**
  * Initialize Phase-2 ranking metrics for a user.
  * Called once when Phase-2 onboarding completes.
@@ -94,6 +122,144 @@ function countAllPromptsAnswered(profile: any): number {
     return prompts.filter((p: any) => p.answer?.trim().length > 0).length;
   }
   return 0;
+}
+
+function normalizeStringArray(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((v) => (typeof v === 'string' ? v.trim() : ''))
+    .filter((v) => v.length > 0);
+}
+
+function overlapCount(a: string[] | undefined, b: string[] | undefined): number {
+  const aa = normalizeStringArray(a);
+  const bb = normalizeStringArray(b);
+  if (aa.length === 0 || bb.length === 0) return 0;
+  const setB = new Set(bb);
+  let count = 0;
+  for (const x of aa) if (setB.has(x)) count += 1;
+  return count;
+}
+
+function overlapRatio(a: string[] | undefined, b: string[] | undefined): number {
+  const aa = normalizeStringArray(a);
+  const bb = normalizeStringArray(b);
+  if (aa.length === 0 || bb.length === 0) return 0;
+  const denom = Math.min(aa.length, bb.length);
+  if (denom <= 0) return 0;
+  return overlapCount(aa, bb) / denom;
+}
+
+function extractKeywords(text: string): Set<string> {
+  const tokens = text
+    .toLowerCase()
+    .split(/\W+/)
+    .filter((t) => t.length >= 3);
+  return new Set(tokens);
+}
+
+function computeTextAffinity(viewer: Phase2RankingViewerSignals, candidate: Phase2RankingProfileSignals): number {
+  const viewerParts: string[] = [];
+  const candidateParts: string[] = [];
+
+  const vBio = typeof viewer.privateBio === 'string' ? viewer.privateBio : '';
+  const cBio = typeof candidate.privateBio === 'string' ? candidate.privateBio : '';
+  if (vBio) viewerParts.push(vBio);
+  if (cBio) candidateParts.push(cBio);
+
+  if (Array.isArray(viewer.promptAnswers)) {
+    for (const p of viewer.promptAnswers) {
+      const ans = typeof p?.answer === 'string' ? p.answer.trim() : '';
+      if (ans) viewerParts.push(ans);
+    }
+  }
+  if (Array.isArray(candidate.promptAnswers)) {
+    for (const p of candidate.promptAnswers) {
+      const ans = typeof p?.answer === 'string' ? p.answer.trim() : '';
+      if (ans) candidateParts.push(ans);
+    }
+  }
+
+  const vText = viewerParts.join(' ').trim();
+  const cText = candidateParts.join(' ').trim();
+  if (!vText || !cText) return 0;
+
+  const vKeys = extractKeywords(vText);
+  const cKeys = extractKeywords(cText);
+  if (vKeys.size === 0 || cKeys.size === 0) return 0;
+
+  let overlap = 0;
+  for (const w of cKeys) if (vKeys.has(w)) overlap += 1;
+  const denom = Math.min(vKeys.size, cKeys.size);
+  if (denom <= 0) return 0;
+  return Math.max(0, Math.min(1, overlap / denom));
+}
+
+function computeLifestylePenalty(viewer: Phase2RankingViewerSignals, candidate: Phase2RankingProfileSignals): number {
+  // Phase-2 safe: only apply when viewer explicitly marks as deal_breaker.
+  // Returns 0..10 (penalty points to subtract).
+  let penalty = 0;
+  const ps = viewer.preferenceStrength;
+
+  if (
+    ps?.smoking === 'deal_breaker' &&
+    typeof viewer.smoking === 'string' &&
+    typeof candidate.smoking === 'string' &&
+    viewer.smoking !== candidate.smoking
+  ) {
+    penalty += 6;
+  }
+
+  if (
+    ps?.drinking === 'deal_breaker' &&
+    typeof viewer.drinking === 'string' &&
+    typeof candidate.drinking === 'string' &&
+    viewer.drinking !== candidate.drinking
+  ) {
+    penalty += 6;
+  }
+
+  return Math.min(10, penalty);
+}
+
+function computeCompatibilityScore(viewer: Phase2RankingViewerSignals, candidate: Phase2RankingProfileSignals): number {
+  // Returns 0..25 (additive).
+  // Uses only Phase-2-safe fields already in private profiles.
+  let score = 0;
+
+  // A) Intent alignment (0..10)
+  const intentOverlap = overlapRatio(viewer.privateIntentKeys, candidate.privateIntentKeys);
+  const intentStrength = viewer.preferenceStrength?.intent;
+  if (intentStrength === 'must_match_exactly') {
+    // Strongly prioritize exact overlap; 0 otherwise
+    score += intentOverlap > 0 ? 10 : 0;
+  } else if (intentStrength === 'important') {
+    score += Math.round(10 * Math.min(1, intentOverlap));
+  } else if (intentStrength === 'prefer_similar') {
+    score += Math.round(8 * Math.min(1, intentOverlap));
+  } else {
+    // Not important / unknown -> mild signal
+    score += Math.round(6 * Math.min(1, intentOverlap));
+  }
+
+  // B) Desire tag overlap (0..7)
+  const desireOverlap = overlapRatio(viewer.privateDesireTagKeys, candidate.privateDesireTagKeys);
+  score += Math.round(7 * Math.min(1, desireOverlap));
+
+  // C) Interests/hobbies overlap (0..6)
+  const hobbyOverlap = overlapRatio(viewer.hobbies, candidate.hobbies);
+  score += Math.round(6 * Math.min(1, hobbyOverlap));
+
+  // D) Light text affinity (0..2)
+  const textAffinity = computeTextAffinity(viewer, candidate);
+  score += Math.round(2 * Math.min(1, textAffinity));
+
+  // E) Same city (0..2) — already present on private profile; optional.
+  if (viewer.city && candidate.city && viewer.city === candidate.city) {
+    score += 2;
+  }
+
+  return Math.max(0, Math.min(25, score));
 }
 
 /**
@@ -194,12 +360,44 @@ function computeJitter(viewerId: string, profileId: string): number {
  * Compute final ranking score (0-99) for a profile.
  * Combines: base (0-50) + freshness (0-25) + fairness (0-20) + jitter (0-4)
  */
-export function computeFinalScore(profile: any, metrics: any, viewerId: string): number {
+export function computeFinalScore(
+  profile: any,
+  metrics: any,
+  viewerId: string,
+  viewerSignals?: Phase2RankingViewerSignals
+): number {
+  // Completeness remains important, but should not dominate obvious fit differences.
+  // We keep the same underlying base components, then compress slightly.
   const base = computeBaseScore(profile);
+  const baseTuned = Math.round(base * 0.85); // 0–43 (from 0–50)
   const freshness = computeFreshnessScore(metrics, profile);
   const fairness = computeFairnessScore(metrics);
   const jitter = computeJitter(viewerId, profile.authUserId ?? profile.userId);
-  return base + freshness + fairness + jitter;
+
+  // Phase-2 compatibility (0..25) - only when viewer signals are available.
+  // This stays Phase-2-only and does not use Phase-1 preferences.
+  const compatibilityRaw = viewerSignals
+    ? computeCompatibilityScore(viewerSignals, profile as Phase2RankingProfileSignals)
+    : 0;
+
+  // Tune: amplify compatibility so strong-fit profiles surface above merely complete weak-fit profiles.
+  // Keep deterministic behavior (no randomness); cap to avoid brittle overfitting.
+  const compatibilityTuned = Math.min(40, Math.round(compatibilityRaw * 1.6)); // 0–40 (from 0–25)
+
+  // Phase-2 dealbreaker penalties (0..10)
+  const lifestylePenalty = viewerSignals
+    ? computeLifestylePenalty(viewerSignals, profile as Phase2RankingProfileSignals)
+    : 0;
+
+  // Soft weak-fit penalty (Phase-2 only):
+  // If compatibility is clearly weak AND the viewer has compatibility context,
+  // nudge these profiles down so "complete-but-weak-match" doesn't dominate.
+  const weakFitPenalty =
+    viewerSignals && compatibilityRaw > 0 && compatibilityRaw <= 4 ? 6 :
+    viewerSignals && compatibilityRaw === 0 ? 8 :
+    0;
+
+  return baseTuned + freshness + fairness + compatibilityTuned + jitter - lifestylePenalty - weakFitPenalty;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -261,6 +459,25 @@ export const debugRanking = query({
       )
       .first();
 
+    // Load viewer private profile for compatibility context (Phase-2 only)
+    const viewerPrivateProfile = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', viewerId))
+      .first();
+    const viewerSignals = viewerPrivateProfile
+      ? {
+          privateIntentKeys: viewerPrivateProfile.privateIntentKeys ?? [],
+          privateDesireTagKeys: viewerPrivateProfile.privateDesireTagKeys ?? [],
+          hobbies: (viewerPrivateProfile as any).hobbies ?? [],
+          privateBio: viewerPrivateProfile.privateBio ?? '',
+          promptAnswers: (viewerPrivateProfile as any).promptAnswers ?? [],
+          smoking: (viewerPrivateProfile as any).smoking,
+          drinking: (viewerPrivateProfile as any).drinking,
+          city: viewerPrivateProfile.city,
+          preferenceStrength: (viewerPrivateProfile as any).preferenceStrength,
+        }
+      : undefined;
+
     // Compute score breakdown
     // Base score components
     const photoCount = profile.privatePhotoUrls?.length ?? 0;
@@ -310,8 +527,30 @@ export const debugRanking = query({
     // Jitter
     const jitter = computeJitter(viewerId as string, args.targetUserId as string);
 
-    // Final score
-    const finalScore = baseScore + freshnessScore + fairnessScore + jitter;
+    // Compatibility + penalties (tuned)
+    const compatibilityRaw = viewerSignals
+      ? computeCompatibilityScore(viewerSignals, profile as any)
+      : 0;
+    const compatibilityTuned = Math.min(40, Math.round(compatibilityRaw * 1.6));
+    const lifestylePenalty = viewerSignals
+      ? computeLifestylePenalty(viewerSignals, profile as any)
+      : 0;
+    const weakFitPenalty =
+      viewerSignals && compatibilityRaw > 0 && compatibilityRaw <= 4 ? 6 :
+      viewerSignals && compatibilityRaw === 0 ? 8 :
+      0;
+
+    const baseTuned = Math.round(baseScore * 0.85);
+
+    // Final score (mirrors computeFinalScore)
+    const finalScore =
+      baseTuned +
+      freshnessScore +
+      fairnessScore +
+      compatibilityTuned +
+      jitter -
+      lifestylePenalty -
+      weakFitPenalty;
 
     // Suppression state
     const isSuppressed = viewerImpression
@@ -325,10 +564,17 @@ export const debugRanking = query({
       scores: {
         base: {
           total: baseScore,
+          tuned: baseTuned,
           photo: `${photoScore} (${photoCount} photos)`,
           desire: `${desireScore} (${desireLen} chars)`,
           prompts: `${promptScore} (${promptCount} answered)`,
           verified: `${verifiedScore} (${profile.isVerified ? 'yes' : 'no'})`,
+        },
+        compatibility: {
+          raw: compatibilityRaw,
+          tuned: compatibilityTuned,
+          weakFitPenalty,
+          lifestylePenalty,
         },
         freshness: {
           total: freshnessScore,

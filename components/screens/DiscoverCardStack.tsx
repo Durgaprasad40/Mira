@@ -996,16 +996,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         const photoUrls = p.blurredPhotoUrls ?? [];
         const photos = photoUrls.map((url: string) => ({ url }));
 
+        const trimmedNickname =
+          typeof p.displayName === "string" ? p.displayName.trim() : "";
+        const resolvedPhase2Name =
+          trimmedNickname.length > 0 ? trimmedNickname : "Anonymous";
+
         if (__DEV__ && DEBUG_PHASE2) {
-          console.log(`[P2_DATA] ${p.displayName}(${p.userId?.slice?.(-6)}) ${photoUrls.length}p`);
+          console.log(`[P2_DATA] ${resolvedPhase2Name}(${p.userId?.slice?.(-6)}) ${photoUrls.length}p`);
         }
 
         return toProfileData({
           _id: p._id,
           id: p.userId, // Phase-2 uses userId as the primary identifier for matching
           userId: p.userId,
-          // P0-002 FIX: Use displayName only for Phase-2 profiles
-          name: p.displayName || 'Anonymous',
+          // P0-002 FIX: Use displayName only for Phase-2 profiles (trim; whitespace-only → Anonymous)
+          name: resolvedPhase2Name,
           age: p.age,
           city: p.city,
           distance: typeof p.distanceKm === 'number' ? p.distanceKm : undefined,
@@ -1013,8 +1018,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           photos,
           activities: p.hobbies ?? [],
           isVerified: p.isVerified ?? false,
-          privateIntentKeys: p.intentKeys ?? [],
-          privateIntentKey: p.intentKeys?.[0],
+          privateIntentKeys: p.privateIntentKeys ?? p.intentKeys ?? [],
+          privateIntentKey: (p.privateIntentKeys ?? p.intentKeys)?.[0],
+          desireTagKeys: Array.isArray(p.desireTagKeys) ? p.desireTagKeys : [],
           // PHASE2_PARITY: Include gender for identity display
           gender: p.gender,
           // Phase-2 blur is per-photo: photoBlurEnabled + photoBlurSlots
@@ -1434,8 +1440,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Profile completion nudge DISABLED on Discover screen
   // Nudges should only appear on Profile/Edit Profile screens (not swiping context)
 
-  // Phase-1 swipe mutation (shared likes.ts)
-  const swipeMutation = useMutation(api.likes.swipe);
+  // Phase-1 swipe mutation (likes table, Phase-1 discovery)
+  const phase1SwipeMutation = useMutation(api.likes.swipe);
+  // Phase-2 Deep Connect: privateLikes / privateMatches / privateConversations (privateSwipes.ts)
+  const phase2SwipeMutation = useMutation(api.privateSwipes.swipe);
   // Phase-2 only: Impression recording for ranking system
   const recordImpressionsMutation = useMutation(api.privateDiscover.recordDeepConnectImpressions);
 
@@ -1990,20 +1998,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           });
         }
 
-        if (isPhase2 && !isDemoMode) {
-          resetPosition();
-          Toast.show("Deep Connect swipes are temporarily unavailable.");
-          releaseSwipeLock(activeSwipeId);
-          return;
-        }
-
         const SWIPE_TIMEOUT_MS = 6000;
-        const swipePromise = swipeMutation({
-          token: token!,
-          toUserId: swipedProfile.id as Id<'users'>,
-          action,
-          message: message,
-        });
+        const swipePromise =
+          isPhase2 && !isDemoMode
+            ? phase2SwipeMutation({
+                authUserId: convexUserId as string,
+                toUserId: swipedProfile.id as Id<'users'>,
+                action,
+                message,
+              })
+            : phase1SwipeMutation({
+                token: token!,
+                toUserId: swipedProfile.id as Id<'users'>,
+                action,
+                message,
+              });
 
         let result;
         if (isPhase2 && !isDemoMode) {
@@ -2123,7 +2132,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
       }
     },
-    [convexUserId, swipeMutation, isPhase2, isDemoMode, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, releaseSwipeLock, resetPosition],
+    [
+      convexUserId,
+      phase1SwipeMutation,
+      phase2SwipeMutation,
+      isPhase2,
+      isDemoMode,
+      advanceCard,
+      hasReachedLikeLimit,
+      hasReachedStandOutLimit,
+      incrementLikes,
+      incrementStandOuts,
+      demo.recordSwipe,
+      releaseSwipeLock,
+      token,
+    ],
   );
 
   const animateSwipe = useCallback(
@@ -2823,6 +2846,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 {isPhase2 ? (
                   <ProfileCard
                     key={next.id}
+                    phase="phase2"
                     name={next.name}
                     age={next.age}
                     bio={next.bio}
@@ -2838,6 +2862,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     profilePrompts={next.profilePrompts}
                     theme="dark"
                     privateIntentKeys={nextIntentKeys}
+                    desireTagKeys={(next as any).desireTagKeys}
                     isIncognito={next.isIncognito}
                     presenceStatus={nextPresenceStatus}
                     activities={next.activities}
@@ -2870,6 +2895,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                       ensuring photoIndex state resets to 0 for each new profile */}
                   <ProfileCard
                     key={current.id}
+                    phase={isPhase2 ? "phase2" : undefined}
                     name={current.name}
                     age={current.age}
                     bio={current.bio}
@@ -2887,6 +2913,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     onOpenProfile={openProfileCb}
                     theme={isPhase2 ? "dark" : "light"}
                     privateIntentKeys={currentIntentKeys}
+                    desireTagKeys={(current as any).desireTagKeys}
                     isIncognito={current.isIncognito}
                     exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
                     presenceStatus={currentPresenceStatus}

@@ -64,6 +64,12 @@ const GENDER_ICONS: Record<string, { icon: string; color: string }> = {
 };
 
 export interface ProfileCardProps {
+  /**
+   * Explicit phase context for rendering.
+   * When set to "phase2", Phase-2 card logic MUST be used even if optional data is missing.
+   * When unset, legacy inference is used for backward compatibility.
+   */
+  phase?: 'phase1' | 'phase2';
   name: string;
   // IDENTITY SIMPLIFICATION: firstName/lastName removed - use single `name` field
   age?: number;
@@ -245,6 +251,7 @@ const PhotoStack = memo(function PhotoStack({
 });
 
 export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
+  phase,
   name,
   // IDENTITY SIMPLIFICATION: firstName/lastName removed
   age,
@@ -283,7 +290,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const dark = theme === 'dark';
   // PHASE-2 DETECTION: Check for non-empty privateIntentKeys array
   // IMPORTANT: Empty array [] is truthy, so we must check length > 0
-  const isPhase2 = Array.isArray(privateIntentKeys) && privateIntentKeys.length > 0;
+  const isPhase2 =
+    phase === 'phase2'
+      ? true
+      : phase === 'phase1'
+        ? false
+        : (Array.isArray(privateIntentKeys) && privateIntentKeys.length > 0);
   const shouldBlurPhoto = isPhase2 ? (photoBlurEnabled === true) : photoBlurred === true;
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1351,8 +1363,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // - Identity (name + age + badge) is ALWAYS visible on every photo
   // - Secondary content is DISTRIBUTED across photos based on photo count
   // - Priority: intent → desires → interests → prompt1 → lifestyle → prompt2 → bio
-  // - If more photos than content, stay on last meaningful section
-  // - NO modulo cycling, NO rigid photo-number hardcoding
+  // - STRICT: No repetition of informational units across photos (identity excluded)
+  // - 5+ photos: after unique units are exhausted, use tasteful non-duplicative fallback
   // ═══════════════════════════════════════════════════════════════════════════
   type ContentSlot = 'intent' | 'desires' | 'interests' | 'prompt1' | 'lifestyle' | 'prompt2' | 'bio' | 'fallback';
 
@@ -1396,60 +1408,78 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     }
   }, [phase2IntentLabel, phase2Desires, phase2Interests, phase2Prompt1, phase2Lifestyle, phase2Prompt2, bio]);
 
-  // Build DISTRIBUTED content slots based on photo count
-  // Key insight: We distribute N content sections across M photos
-  const phase2DistributedSlots = useMemo((): ContentSlot[] => {
+  type Phase2PlannedSlot =
+    | { slot: Exclude<ContentSlot, 'fallback'> }
+    | { slot: 'fallback'; index: number; total: number };
+
+  // Build a strict no-repeat plan for Phase-2 content slots.
+  // 2/3/4 photos: show the strongest distinct units first.
+  // 5+ photos: after unique units exhaust, use per-photo fallback (no restating earlier sections).
+  const phase2Plan = useMemo((): Phase2PlannedSlot[] => {
     if (!isPhase2) return [];
 
-    // 1. Get all available content sections (in priority order)
-    const availableContent = CONTENT_PRIORITY.filter(slot => slotHasData(slot));
+    const uniqueSlots = CONTENT_PRIORITY
+      .filter((slot) => slot !== 'fallback')
+      .filter((slot) => slotHasData(slot));
 
-    // 2. If no content available, use fallback
-    if (availableContent.length === 0) {
-      return ['fallback'];
+    // If nothing exists, fall back for all photos (and at least 1 photo).
+    if (uniqueSlots.length === 0) {
+      const total = Math.max(photoCount, 1);
+      return Array.from({ length: total }, (_, i) => ({
+        slot: 'fallback' as const,
+        index: i,
+        total,
+      }));
     }
 
-    // 3. Distribute content across photos with smart cycling
-    // - If photoCount <= availableContent.length: show top N sections
-    // - If photoCount > availableContent.length: cycle through strongest slots (top 3)
-    // - This maintains variety instead of repeating last slot
-    const distributed: ContentSlot[] = [];
-    const strongSlots = availableContent.slice(0, Math.min(3, availableContent.length)); // Top 3 strongest
+    const plan: Phase2PlannedSlot[] = [];
+    const total = Math.max(photoCount, 1);
 
-    for (let i = 0; i < photoCount; i++) {
-      if (i < availableContent.length) {
-        // We have unique content for this photo
-        distributed.push(availableContent[i]);
+    for (let i = 0; i < total; i++) {
+      if (i < uniqueSlots.length) {
+        plan.push({ slot: uniqueSlots[i] as Exclude<ContentSlot, 'fallback'> });
       } else {
-        // More photos than content - cycle through strong slots for variety
-        const repeatIndex = (i - availableContent.length) % strongSlots.length;
-        distributed.push(strongSlots[repeatIndex]);
+        plan.push({ slot: 'fallback', index: i, total });
       }
     }
 
-    // LOG_NOISE_FIX: Gated behind DEBUG_P2_UI
     if (__DEV__ && DEBUG_P2_UI) {
-      console.log(`[P2_DIST] ${name} ${photoCount}p: ${distributed.join(',')}`);
+      const debug = plan.map((p) => (p.slot === 'fallback' ? 'fallback' : p.slot)).join(',');
+      console.log(`[P2_PLAN] ${name} ${total}p: ${debug}`);
     }
 
-    return distributed;
+    return plan;
   }, [isPhase2, slotHasData, photoCount, name]);
 
-  // Get the content slot for current photo index
-  // Direct mapping from distributed slots array
+  const currentPlanned = useMemo((): Phase2PlannedSlot | null => {
+    if (!isPhase2 || phase2Plan.length === 0) return null;
+    return phase2Plan[photoIndex] ?? phase2Plan[phase2Plan.length - 1] ?? { slot: 'fallback', index: photoIndex, total: Math.max(photoCount, 1) };
+  }, [isPhase2, phase2Plan, photoIndex]);
+
   const currentContentSlot = useMemo((): ContentSlot | null => {
-    if (!isPhase2 || phase2DistributedSlots.length === 0) return null;
+    return currentPlanned?.slot ?? null;
+  }, [currentPlanned]);
 
-    // Safe access - should always have a slot for each photoIndex
-    const slot = phase2DistributedSlots[photoIndex] ?? phase2DistributedSlots[phase2DistributedSlots.length - 1] ?? 'fallback';
+  const phase2FallbackCopy = useMemo(() => {
+    if (currentPlanned?.slot !== 'fallback') return null;
+    const idx = currentPlanned.index;
+    const total = currentPlanned.total;
 
-    // LOG_NOISE_FIX: Gated behind DEBUG_P2_UI (fires per photo change, very noisy)
-    if (__DEV__ && DEBUG_P2_UI) {
-      console.log(`[P2_SLOT] ${name} P${photoIndex}: ${slot}`);
-    }
+    // Premium, non-informational microcopy (never repeats profile content).
+    // Deterministic per slide; safe to reuse across users.
+    const lines = [
+      'Deep Connect • Private profile',
+      'Private Mode • More to explore',
+      'Deep Connect • Keep swiping',
+      'Private profile • Gallery',
+    ];
+    const line = lines[idx % lines.length] ?? 'Deep Connect • Private profile';
 
-    return slot;
-  }, [isPhase2, phase2DistributedSlots, photoIndex, photoCount, name]);
+    // Subtle progress hint without being mechanical.
+    // Example: "Slide 5/7"
+    const progress = total > 1 ? `Slide ${idx + 1}/${total}` : null;
+    return { line, progress };
+  }, [currentPlanned]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PREMIUM UX: First-render tracking to skip entrance animation on mount
@@ -1985,21 +2015,26 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             </Animated.View>
           )}
 
-          {/* Fallback slot - when no other content is available */}
-          {currentContentSlot === 'fallback' && profilePrompt && (
+          {/* Fallback slot - premium non-duplicative late-photo behavior */}
+          {currentContentSlot === 'fallback' && (
             <Animated.View
               key={`fallback-${photoIndex}`}
               entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
               exiting={FadeOut.duration(150)}
               style={styles.phase2RevealSection}
             >
-              <View style={styles.phase2PromptCard}>
-                <Text style={styles.phase2PromptQuestion} numberOfLines={1}>
-                  {profilePrompt.question}
-                </Text>
-                <Text style={styles.phase2PromptAnswer} numberOfLines={2}>
-                  {profilePrompt.answer}
-                </Text>
+              <View style={styles.phase2FallbackPill}>
+                <Ionicons name="lock-closed-outline" size={12} color="rgba(255,255,255,0.72)" />
+                <View style={styles.phase2FallbackTextBlock}>
+                  <Text style={styles.phase2FallbackText} numberOfLines={1}>
+                    {phase2FallbackCopy?.line ?? 'Deep Connect • Private profile'}
+                  </Text>
+                  {phase2FallbackCopy?.progress ? (
+                    <Text style={styles.phase2FallbackSubtext} numberOfLines={1}>
+                      {phase2FallbackCopy.progress}
+                    </Text>
+                  ) : null}
+                </View>
               </View>
             </Animated.View>
           )}
@@ -3053,6 +3088,38 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.85)',
     lineHeight: 20,
     fontStyle: 'italic',
+  },
+
+  // Phase-2 fallback (late photos after unique content exhausts)
+  phase2FallbackPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    alignSelf: 'flex-start',
+  },
+  phase2FallbackTextBlock: {
+    flexDirection: 'column',
+    gap: 2,
+  },
+  phase2FallbackText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.75)',
+    letterSpacing: 0.2,
+    maxWidth: 220,
+  },
+  phase2FallbackSubtext: {
+    fontSize: 10,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.5)',
+    letterSpacing: 0.2,
+    maxWidth: 220,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════

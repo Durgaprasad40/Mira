@@ -105,6 +105,13 @@ export const getProfiles = query({
       .withIndex('by_enabled', (q) => q.eq('isPrivateEnabled', true))
       .collect();
 
+    // Viewer private profile signals (Phase-2 only) for compatibility-aware ranking.
+    // NOTE: This does NOT affect eligibility filtering; it only improves ordering.
+    const viewerPrivateProfile = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', viewerUserId))
+      .first();
+
     // Get all deletion states to filter out pending deletions
     const deletionStates = await ctx.db
       .query('privateDeletionStates')
@@ -152,6 +159,20 @@ export const getProfiles = query({
     const unsuppressed: Array<{ profile: typeof eligible[0]; score: number }> = [];
     const suppressed: Array<{ profile: typeof eligible[0]; score: number }> = [];
 
+    const viewerSignals = viewerPrivateProfile
+      ? {
+          privateIntentKeys: viewerPrivateProfile.privateIntentKeys ?? [],
+          privateDesireTagKeys: viewerPrivateProfile.privateDesireTagKeys ?? [],
+          hobbies: (viewerPrivateProfile as any).hobbies ?? [],
+          privateBio: viewerPrivateProfile.privateBio ?? '',
+          promptAnswers: (viewerPrivateProfile as any).promptAnswers ?? [],
+          smoking: (viewerPrivateProfile as any).smoking,
+          drinking: (viewerPrivateProfile as any).drinking,
+          city: viewerPrivateProfile.city,
+          preferenceStrength: (viewerPrivateProfile as any).preferenceStrength,
+        }
+      : undefined;
+
     for (const p of eligible) {
       // Use fallback defaults for profiles without ranking metrics
       const metrics = metricsMap.get(p.userId as string) ?? {
@@ -160,7 +181,7 @@ export const getProfiles = query({
         totalImpressions: 0,
         lastShownAt: 0,
       };
-      const score = computeFinalScore(p, metrics, viewerId);
+      const score = computeFinalScore(p, metrics, viewerId, viewerSignals);
 
       if (recentlySeen.has(p.userId as string)) {
         suppressed.push({ profile: p, score });
@@ -290,6 +311,7 @@ export const getProfiles = query({
       return {
         _id: p._id,
         userId: p.userId,
+        displayName: p.displayName,
         displayNameInitial: p.displayName.charAt(0).toUpperCase(),
         age,
         city: p.city,
@@ -299,7 +321,13 @@ export const getProfiles = query({
         blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
         blurredPhotoUrls: p.privatePhotoUrls,
         intentKeys,
+        privateIntentKeys: intentKeys,
         desireTagKeys: p.privateDesireTagKeys,
+        promptAnswers: p.promptAnswers,
+        height: p.height,
+        smoking: p.smoking,
+        drinking: p.drinking,
+        isSetupComplete: p.isSetupComplete,
         privateBio: p.privateBio,
         revealPolicy: p.revealPolicy ?? 'mutual_only',
         // Include hobbies and verification status if available
