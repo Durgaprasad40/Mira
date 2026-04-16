@@ -1142,7 +1142,10 @@ export const deactivateAccount = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    await ctx.db.patch(userId, { isActive: false });
+    const now = Date.now();
+    // Full-account deactivation: hide user everywhere + revoke existing sessions.
+    // Also clear delete-request marker if one exists (deactivation is reversible indefinitely).
+    await ctx.db.patch(userId, { isActive: false, sessionsRevokedAt: now, deletedAt: undefined });
     return { success: true };
   },
 });

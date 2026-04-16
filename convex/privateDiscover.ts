@@ -269,6 +269,9 @@ export const getProfiles = query({
       // Privacy: hide age from others in Deep Connect (viewer is never self here — excluded above)
       const age = profile.hideAge === true ? undefined : p.age;
       const ownerUser = ownerById.get(p.userId as string);
+      if (!ownerUser || ownerUser.isActive !== true) {
+        return null;
+      }
       let distanceKm: number | undefined;
       if (
         profile.hideDistance !== true &&
@@ -304,7 +307,7 @@ export const getProfiles = query({
         isVerified: profile.isVerified ?? false,
         ...(distanceKm !== undefined ? { distanceKm } : {}),
       };
-    });
+    }).filter(Boolean);
   },
 });
 
@@ -319,6 +322,8 @@ export const getProfileCard = query({
   handler: async (ctx, args) => {
     const p = await ctx.db.get(args.profileId);
     if (!p || !p.isPrivateEnabled || !p.isSetupComplete) return null;
+    const owner = await ctx.db.get(p.userId);
+    if (!owner || owner.isActive !== true) return null;
 
     // Check if viewer blocked the profile owner
     const blockedByViewer = await ctx.db
@@ -347,7 +352,7 @@ export const getProfileCard = query({
 
     let distanceKm: number | undefined;
     if (args.viewerId !== p.userId && profile.hideDistance !== true) {
-      const [viewerU, ownerU] = await Promise.all([ctx.db.get(args.viewerId), ctx.db.get(p.userId)]);
+      const [viewerU, ownerU] = await Promise.all([ctx.db.get(args.viewerId), Promise.resolve(owner)]);
       if (
         viewerU?.latitude != null &&
         viewerU?.longitude != null &&

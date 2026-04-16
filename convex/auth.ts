@@ -605,6 +605,37 @@ export const registerWithEmail = mutation({
 const LOGIN_MAX_ATTEMPTS = 5;
 const LOGIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
 
+// Account deletion recovery window (full account)
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Enforce full-account restore/expiry policy consistently across ALL sign-in methods.
+ *
+ * State model:
+ * - Deactivated: isActive=false, deletedAt missing -> restore anytime on successful sign-in
+ * - Delete-requested: isActive=false, deletedAt set -> restore only within 30 days
+ * - Delete-requested expired: isActive=false, deletedAt set and >30 days -> block sign-in
+ *
+ * Throws Error("ACCOUNT_DELETION_EXPIRED") when deletion window has expired.
+ */
+async function enforceAccountRestorePolicy(ctx: any, user: any, now: number) {
+  if (!user || user.isActive !== false) return;
+
+  const deletedAt = user.deletedAt;
+  if (typeof deletedAt === 'number') {
+    const withinWindow = now - deletedAt <= THIRTY_DAYS_MS;
+    if (!withinWindow) {
+      throw new Error("ACCOUNT_DELETION_EXPIRED");
+    }
+    // Restore from delete-request within 30 days
+    await ctx.db.patch(user._id, { isActive: true, deletedAt: undefined, lastActive: now });
+    return;
+  }
+
+  // Restore from deactivation (no deadline)
+  await ctx.db.patch(user._id, { isActive: true, lastActive: now });
+}
+
 // Login with email/password (with rate limiting)
 export const loginWithEmail = mutation({
   args: {
@@ -668,6 +699,9 @@ export const loginWithEmail = mutation({
       throw new Error("Account has been suspended");
     }
 
+    // Full-account restore/expiry policy (deactivate vs delete-request)
+    await enforceAccountRestorePolicy(ctx, user, now);
+
     // Success — reset attempts, update last active, and migrate hash if needed
     const updateData: Record<string, any> = {
       lastActive: now,
@@ -724,6 +758,9 @@ export const socialAuth = mutation({
       .first();
 
     if (user) {
+      // Full-account restore/expiry policy (deactivate vs delete-request)
+      await enforceAccountRestorePolicy(ctx, user, now);
+
       // Existing user - update last active and create session
       // Backfill: ensure social auth users have emailVerified set
       await ctx.db.patch(user._id, {
@@ -758,6 +795,9 @@ export const socialAuth = mutation({
         .first();
 
       if (user) {
+        // Full-account restore/expiry policy (deactivate vs delete-request)
+        await enforceAccountRestorePolicy(ctx, user, now);
+
         // Link account + set email verified (social auth verifies on provider side)
         await ctx.db.patch(user._id, {
           externalId,
@@ -839,6 +879,9 @@ export const completeSocialAuth = mutation({
     }
 
     if (existingUser) {
+      // Full-account restore/expiry policy (deactivate vs delete-request)
+      await enforceAccountRestorePolicy(ctx, existingUser, now);
+
       // Race condition detected: user was created between socialAuth and completeSocialAuth
       // Return existing user instead of creating duplicate
       await ctx.db.patch(existingUser._id, { lastActive: now });
@@ -2164,10 +2207,30 @@ export const verifyPhoneOtp = mutation({
         return { success: false, code: "ACCOUNT_BANNED" as const, message: "Account has been suspended." };
       }
       if (user.isActive === false) {
-        return { success: false, code: "ACCOUNT_INACTIVE" as const, message: "Account is inactive." };
+        const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+        const deletedAt = user.deletedAt;
+
+        // Delete-requested state: recoverable within 30 days only.
+        if (typeof deletedAt === 'number') {
+          const withinWindow = now - deletedAt <= THIRTY_DAYS_MS;
+          if (!withinWindow) {
+            return {
+              success: false,
+              code: "ACCOUNT_DELETION_EXPIRED" as const,
+              message: "Account deletion window has expired.",
+            };
+          }
+
+          // Restore account (recover within 30 days)
+          await ctx.db.patch(user._id, { isActive: true, deletedAt: undefined, lastActive: now });
+        } else {
+          // Deactivated state: recover anytime on sign-in.
+          await ctx.db.patch(user._id, { isActive: true, lastActive: now });
+        }
+      } else {
+        // Update lastActive
+        await ctx.db.patch(user._id, { lastActive: now });
       }
-      // Update lastActive
-      await ctx.db.patch(user._id, { lastActive: now });
     }
 
     if (!user) {
