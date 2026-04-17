@@ -1,4 +1,4 @@
-import { mutation, query } from './_generated/server';
+import { mutation, query, type QueryCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
@@ -69,6 +69,56 @@ function serializeReply(reply: Doc<'confessionReplies'>): ConfessionThreadReplyD
     voiceDurationSec: reply.voiceDurationSec,
     parentReplyId: reply.parentReplyId,
     createdAt: reply.createdAt,
+  };
+}
+
+async function loadViewerConfessionExclusions(
+  ctx: QueryCtx,
+  rawViewerId?: Id<'users'> | string,
+): Promise<{
+  blockedUserIds: Set<string>;
+  reportedConfessionIds: Set<string>;
+}> {
+  const empty = {
+    blockedUserIds: new Set<string>(),
+    reportedConfessionIds: new Set<string>(),
+  };
+
+  if (!rawViewerId) {
+    return empty;
+  }
+
+  const viewerId = await resolveUserIdByAuthId(ctx, rawViewerId as string);
+  if (!viewerId) {
+    return empty;
+  }
+
+  const [reportedRows, blocksOut, blocksIn] = await Promise.all([
+    ctx.db
+      .query('confessionReports')
+      .withIndex('by_reporter', (q) => q.eq('reporterId', viewerId))
+      .collect(),
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', viewerId))
+      .collect(),
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerId))
+      .collect(),
+  ]);
+
+  const blockedUserIds = new Set<string>();
+  for (const block of blocksOut) blockedUserIds.add(block.blockedUserId as string);
+  for (const block of blocksIn) blockedUserIds.add(block.blockerId as string);
+
+  const reportedConfessionIds = new Set<string>(
+    reportedRows.map((report) => report.confessionId as string),
+  );
+
+  return {
+    blockedUserIds,
+    reportedConfessionIds,
   };
 }
 
@@ -246,9 +296,11 @@ export const createConfession = mutation({
 export const listConfessions = query({
   args: {
     sortBy: v.union(v.literal('trending'), v.literal('latest')),
+    viewerId: v.optional(v.union(v.id('users'), v.string())),
   },
-  handler: async (ctx, { sortBy }) => {
+  handler: async (ctx, { sortBy, viewerId }) => {
     const now = Date.now();
+    const exclusions = await loadViewerConfessionExclusions(ctx, viewerId);
     const allConfessions = await ctx.db
       .query('confessions')
       .withIndex('by_created')
@@ -257,7 +309,11 @@ export const listConfessions = query({
 
     // Filter out expired and deleted confessions
     const confessions = allConfessions.filter(
-      (c) => (c.expiresAt === undefined || c.expiresAt > now) && !c.isDeleted
+      (c) =>
+        (c.expiresAt === undefined || c.expiresAt > now) &&
+        !c.isDeleted &&
+        !exclusions.blockedUserIds.has(c.userId as string) &&
+        !exclusions.reportedConfessionIds.has(c._id as string)
     );
 
     // Attach 2 reply previews per confession
@@ -316,10 +372,13 @@ export const listConfessions = query({
 // Get trending confessions (last 48h, time-decay scoring)
 // Only returns non-expired confessions
 export const getTrendingConfessions = query({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    viewerId: v.optional(v.union(v.id('users'), v.string())),
+  },
+  handler: async (ctx, { viewerId }) => {
     const now = Date.now();
     const cutoff = now - 48 * 60 * 60 * 1000; // 48 hours ago
+    const exclusions = await loadViewerConfessionExclusions(ctx, viewerId);
 
     const confessions = await ctx.db
       .query('confessions')
@@ -329,7 +388,12 @@ export const getTrendingConfessions = query({
 
     // Filter to last 48h AND not expired AND not deleted
     const recent = confessions.filter(
-      (c) => c.createdAt > cutoff && (c.expiresAt === undefined || c.expiresAt > now) && !c.isDeleted
+      (c) =>
+        c.createdAt > cutoff &&
+        (c.expiresAt === undefined || c.expiresAt > now) &&
+        !c.isDeleted &&
+        !exclusions.blockedUserIds.has(c.userId as string) &&
+        !exclusions.reportedConfessionIds.has(c._id as string)
     );
 
     // Improved trending scoring with consistent weights

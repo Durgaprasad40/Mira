@@ -138,11 +138,20 @@ export default function ConfessionsScreen() {
 
   const liveConfessions = useQuery(
     api.confessions.listConfessions,
-    !isDemoMode ? { sortBy: 'latest' } : 'skip'
+    !isDemoMode
+      ? {
+          sortBy: 'latest',
+          ...(currentUserId ? { viewerId: currentUserId } : {}),
+        }
+      : 'skip'
   );
   const liveTrending = useQuery(
     api.confessions.getTrendingConfessions,
-    !isDemoMode ? {} : 'skip'
+    !isDemoMode
+      ? {
+          ...(currentUserId ? { viewerId: currentUserId } : {}),
+        }
+      : 'skip'
   );
   const liveTaggedConfessions = useQuery(
     api.confessions.listTaggedConfessionsForUser,
