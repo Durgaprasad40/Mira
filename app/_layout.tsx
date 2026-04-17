@@ -4,7 +4,7 @@ import { Stack, useRouter, useSegments } from "expo-router";
 
 // P0-1 STABILITY FIX: Import Sentry for crash reporting
 import { initSentry, captureException, setUserContext, clearUserContext } from "@/lib/sentry";
-import { DEBUG_ONBOARDING_HYDRATION, DEBUG_BACKGROUND_LOCATION, DEBUG_STARTUP } from "@/lib/debugFlags";
+import { DEBUG_ONBOARDING_HYDRATION, DEBUG_STARTUP } from "@/lib/debugFlags";
 
 // Initialize Sentry FIRST, before any other code runs
 // This ensures we catch errors during app initialization
@@ -115,7 +115,6 @@ import { collectDeviceFingerprint } from "@/lib/deviceFingerprint";
 import { markTiming } from "@/utils/startupTiming";
 import { autoSyncPhotosOnStartup } from "@/services/photoSync";
 import { checkAndHandleResetEpoch } from "@/lib/resetEpochCheck";
-import { startBackgroundLocation } from "@/utils/backgroundLocation";
 import { usePresenceAndLocation } from "@/hooks/usePresenceAndLocation";
 import { Toast } from "@/components/ui/Toast";
 import { safePush } from "@/lib/safeRouter";
@@ -735,47 +734,6 @@ function PresenceAndLocationManager() {
 }
 
 /**
- * BackgroundLocationManager - Starts background location tracking
- *
- * SAFETY:
- * - Only starts when user is authenticated
- * - Respects OS permissions (requests if needed)
- * - Does NOT modify existing Nearby logic
- * - Uses existing publishLocation mutation
- * - Updates every ~20 min with 200m distance filter
- *
- * HARDENING (v2):
- * - Respects user's preferred location mode (foreground vs background)
- * - Only requests background permission if user selected background mode
- * - Gracefully falls back to foreground-only if background denied
- */
-function BackgroundLocationManager() {
-  const userId = useAuthStore((s) => s.userId);
-  const authHydrated = useAuthStore((s) => s._hasHydrated);
-  const hasStartedRef = useRef(false);
-
-  useEffect(() => {
-    // Wait for auth hydration
-    if (!authHydrated) return;
-
-    // Only start once per session and when user is logged in
-    if (hasStartedRef.current || !userId) return;
-    hasStartedRef.current = true;
-
-    // Start background location (respects user's preferred mode)
-    startBackgroundLocation().then((result) => {
-      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) {
-        console.log(`[BG_MANAGER] init: ${result.effectiveMode}, ok=${result.success}`);
-      }
-    }).catch((error) => {
-      console.warn('[BG_MANAGER] start failed:', error?.message);
-    });
-  }, [userId, authHydrated]);
-
-  return null;
-}
-
-/**
  * CrossedPathToastManager - Shows in-app toast for crossed-path events globally
  *
  * BEHAVIOR:
@@ -921,7 +879,6 @@ export default function RootLayout() {
           <OnboardingDraftHydrator />
           <DeviceFingerprintCollector />
           <PresenceAndLocationManager />
-          <BackgroundLocationManager />
           <CrossedPathToastManager />
           <Stack screenOptions={{ headerShown: false }}>
             <Stack.Screen name="index" />

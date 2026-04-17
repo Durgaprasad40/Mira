@@ -479,11 +479,6 @@ export const recordLocation = mutation({
       return { success: true, nearbyCount: 0, skipped: true, reason: 'unverified' };
     }
 
-    // Skip crossed-path computation if current user has disabled crossed paths
-    if (currentUser.crossedPathsEnabled === false) {
-      return { success: true, nearbyCount: 0, skipped: true, reason: 'crossed_paths_disabled' };
-    }
-
     // Get current user's age for filtering
     const myAge = calculateAge(currentUser.dateOfBirth);
 
@@ -512,9 +507,6 @@ export const recordLocation = mutation({
 
       // Nearby visibility opt-out: Skip users who opted out of nearby
       if (user.nearbyEnabled === false) continue;
-
-      // Crossed paths opt-out: Skip users who disabled crossed paths
-      if (user.crossedPathsEnabled === false) continue;
 
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
@@ -968,14 +960,15 @@ export const getNearbyUsers = query({
 
       const locationAge = now - user.publishedAt!;
       const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
-      const distance = calculateDistanceMeters(
+      const realDistance = calculateDistanceMeters(
         myLat,
         myLng,
         user.publishedLat!,
         user.publishedLng!,
       );
 
-      sortDistanceByUserId.set(user._id as string, distance);
+      // Sorting uses real distance (server-side only, never returned to client).
+      sortDistanceByUserId.set(user._id as string, realDistance);
 
       // Strong Privacy Mode: fuzz returned map coordinates only.
       // IMPORTANT: Eligibility/filtering/sorting still use real publishedLat/publishedLng.
@@ -990,6 +983,13 @@ export const getNearbyUsers = query({
         returnLng = fuzzed.lng;
       }
 
+      // P0-3: Strong Privacy consistency — returned distance must match the
+      // fuzzed coord the client can see. Otherwise the client could back-solve
+      // the real location from (self coord, true distance).
+      const returnedDistance = user.strongPrivacyMode === true
+        ? calculateDistanceMeters(myLat, myLng, returnLat, returnLng)
+        : realDistance;
+
       results.push({
         id: user._id,
         name: user.name,
@@ -997,7 +997,7 @@ export const getNearbyUsers = query({
         publishedLat: returnLat,
         publishedLng: returnLng,
         publishedAt: user.publishedAt,
-        distance: user.hideDistance === true ? undefined : distance,
+        distance: user.hideDistance === true ? undefined : returnedDistance,
         freshness,
         photoUrl: user.primaryPhotoUrl ?? null,
         isVerified: user.isVerified,
@@ -1166,14 +1166,36 @@ export const getCrossPathHistory = query({
       // Area name: Only reveal after repeated crossings (privacy)
       const displayAreaName = crossingCount > 1 ? entry.areaName : 'Nearby area';
 
-      // Calculate distance range for display (Phase-2: no exact km)
+      // P0-3: Strong Privacy consistency for crossed-path history.
+      // When the other user has Strong Privacy Mode on, both the approximate
+      // location AND the distance we return must be coarsened by the same
+      // deterministic offset — otherwise the viewer could back-solve the real
+      // location from (self coord, distance).
+      let approxLat = entry.crossedLatApprox;
+      let approxLng = entry.crossedLngApprox;
+      if (
+        otherUser.strongPrivacyMode === true &&
+        approxLat !== undefined &&
+        approxLng !== undefined
+      ) {
+        const seed = simpleHash(String(otherUser._id));
+        const bearingRad = (seed % 360) * (Math.PI / 180);
+        const offsetMeters = 200 + (seed % 201); // 200–400 m, deterministic
+        const fuzzed = offsetCoords(approxLat, approxLng, offsetMeters, bearingRad);
+        approxLat = fuzzed.lat;
+        approxLng = fuzzed.lng;
+      }
+
+      // Calculate distance range for display (Phase-2: no exact km).
+      // Uses the (possibly fuzzed) approxLat/approxLng so the returned range is
+      // consistent with the location the client can see.
       let distanceRange: string | null = null;
-      if (myLat && myLng && entry.crossedLatApprox && entry.crossedLngApprox) {
+      if (myLat && myLng && approxLat !== undefined && approxLng !== undefined) {
         const distanceMeters = calculateDistanceMeters(
           myLat,
           myLng,
-          entry.crossedLatApprox,
-          entry.crossedLngApprox,
+          approxLat,
+          approxLng,
         );
         distanceRange = formatDistanceRange(distanceMeters);
       }
@@ -1191,8 +1213,8 @@ export const getCrossPathHistory = query({
         otherUserAge: calculateAge(otherUser.dateOfBirth),
         areaName: displayAreaName,
         // Approximate crossing location (not current location — persists across travel)
-        crossedLatApprox: entry.crossedLatApprox,
-        crossedLngApprox: entry.crossedLngApprox,
+        crossedLatApprox: approxLat,
+        crossedLngApprox: approxLng,
         // Crossing count (for UI display)
         crossingCount,
         // Distance range (e.g., "4-5 km")

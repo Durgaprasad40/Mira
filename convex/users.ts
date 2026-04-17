@@ -749,7 +749,6 @@ export const updateNearbySettings = mutation({
   args: {
     authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
     nearbyEnabled: v.optional(v.boolean()),
-    crossedPathsEnabled: v.optional(v.boolean()),
     hideDistance: v.optional(v.boolean()),
     strongPrivacyMode: v.optional(v.boolean()),
     incognitoMode: v.optional(v.boolean()),

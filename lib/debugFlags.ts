@@ -50,9 +50,6 @@ export const DEBUG_PRESENCE = false;
 /** Enable location sync debugging */
 export const DEBUG_LOCATION = false;
 
-/** Enable background location debugging ([BG], [BG_MANAGER]) */
-export const DEBUG_BACKGROUND_LOCATION = false;
-
 /** Enable notification state debugging ([useNotifications]) */
 export const DEBUG_NOTIFICATIONS = false;
 

@@ -26,12 +26,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         "Mira needs microphone access for video recording.",
       NSLocationWhenInUseUsageDescription:
         "Mira uses your location to show people near you.",
-      NSLocationAlwaysAndWhenInUseUsageDescription:
-        "Mira uses your location to find crossed paths with other users.",
       NSFaceIDUsageDescription: "Use Face ID for secure login.",
     },
     config: {
-      googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || "",
+      googleMapsApiKey:
+        process.env.GOOGLE_MAPS_IOS_API_KEY ||
+        process.env.GOOGLE_MAPS_API_KEY ||
+        "",
     },
   },
   android: {
@@ -51,12 +52,14 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "READ_MEDIA_VIDEO",
       "ACCESS_FINE_LOCATION",
       "ACCESS_COARSE_LOCATION",
-      "ACCESS_BACKGROUND_LOCATION",
       "VIBRATE",
     ],
     config: {
       googleMaps: {
-        apiKey: process.env.GOOGLE_MAPS_API_KEY || "",
+        apiKey:
+          process.env.GOOGLE_MAPS_ANDROID_API_KEY ||
+          process.env.GOOGLE_MAPS_API_KEY ||
+          "",
       },
     },
   },
@@ -94,8 +97,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     [
       "expo-location",
       {
-        locationAlwaysAndWhenInUsePermission:
-          "Allow Mira to use your location to find crossed paths and show people near you.",
+        locationWhenInUsePermission:
+          "Allow Mira to use your location to show people near you while you're using the app.",
       },
     ],
     "@react-native-community/datetimepicker",

@@ -108,3 +108,40 @@ export const verifyLegacyFieldsRemoved = query({
     };
   },
 });
+
+/**
+ * Backfill: clear legacy `crossedPathsEnabled === false` values.
+ *
+ * Phase-1 removed the user-facing "Participate in Crossed Paths" toggle and all
+ * live backend enforcement. Any pre-existing users with `crossedPathsEnabled: false`
+ * would otherwise remain opted-out forever (even though the code no longer
+ * reads the field), because the schema field is retained as optional for
+ * migration safety. This migration neutralizes those legacy values by setting
+ * the field to `undefined` so every user is treated uniformly.
+ *
+ * Idempotent: safe to run multiple times.
+ *
+ * Run from Convex Dashboard: Functions -> migrations -> backfillCrossedPathsEnabled
+ */
+export const backfillCrossedPathsEnabled = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    console.log("[MIGRATION] Starting crossedPathsEnabled backfill...");
+
+    const allUsers = await ctx.db.query("users").collect();
+
+    let cleared = 0;
+    for (const user of allUsers) {
+      const legacy = (user as { crossedPathsEnabled?: boolean }).crossedPathsEnabled;
+      if (legacy === false) {
+        await ctx.db.patch(user._id, {
+          crossedPathsEnabled: undefined,
+        } as Record<string, unknown>);
+        cleared++;
+      }
+    }
+
+    console.log(`[MIGRATION] Complete. crossedPathsEnabled cleared: ${cleared}`);
+    return { success: true, cleared };
+  },
+});

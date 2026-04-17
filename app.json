@@ -21,7 +21,6 @@
         "NSPhotoLibraryUsageDescription": "Mira needs photo library access to upload profile photos.",
         "NSMicrophoneUsageDescription": "Mira needs microphone access for video recording.",
         "NSLocationWhenInUseUsageDescription": "Mira uses your location to show people near you.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Mira uses your location to find crossed paths with other users.",
         "NSFaceIDUsageDescription": "Use Face ID for secure login."
       }
     },
@@ -33,7 +32,7 @@
       },
       "config": {
         "googleMaps": {
-          "apiKey": "AIzaSyDfe8ugMWyttDV47k8tTvPnnQpazJmUllo"
+          "apiKey": "REPLACE_WITH_RESTRICTED_GOOGLE_MAPS_API_KEY"
         }
       },
       "edgeToEdgeEnabled": false,
@@ -47,7 +46,6 @@
         "READ_MEDIA_VIDEO",
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION",
         "VIBRATE"
       ]
     },
@@ -83,7 +81,7 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow Mira to use your location to find crossed paths and show people near you."
+          "locationWhenInUsePermission": "Allow Mira to use your location to show people near you while you're using the app."
         }
       ],
       "@react-native-community/datetimepicker",
@@ -91,13 +89,13 @@
       [
         "react-native-maps",
         {
-          "apiKey": "AIzaSyDfe8ugMWyttDV47k8tTvPnnQpazJmUllo"
+          "apiKey": "REPLACE_WITH_RESTRICTED_GOOGLE_MAPS_API_KEY"
         }
       ],
       [
         "./plugins/withGoogleMapsApiKey.js",
         {
-          "apiKey": "AIzaSyDfe8ugMWyttDV47k8tTvPnnQpazJmUllo"
+          "apiKey": "REPLACE_WITH_RESTRICTED_GOOGLE_MAPS_API_KEY"
         }
       ]
     ],

@@ -423,11 +423,6 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       useLocationStore.getState().stopLocationTracking();
     } catch {}
 
-    try {
-      const { cleanupBackgroundLocation } = require('@/utils/backgroundLocation');
-      await cleanupBackgroundLocation();
-    } catch {}
-
     // STEP 4: Finish logout - clear in-memory state
     get().finishLogout();
   },
