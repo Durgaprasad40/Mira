@@ -728,12 +728,297 @@ export type TimedRevealOption = 'never' | '24h' | '48h';
 // - blur_photo: partially hidden (blurred photo, visible name/age/gender)
 export type ConfessionAuthorVisibility = 'anonymous' | 'open' | 'blur_photo';
 
+export const CONFESSION_BLUR_PHOTO_RADIUS = 20;
+
+const CONFESSION_GENDER_LABELS: Record<string, string> = {
+  male: 'M',
+  female: 'F',
+  non_binary: 'NB',
+  lesbian: 'F',
+  other: '',
+};
+
+type ConfessionIdentityInput = {
+  authorVisibility?: string | null;
+  authorName?: string;
+  authorAge?: number;
+  authorGender?: string;
+};
+
+export function normalizeConfessionAuthorVisibility(
+  authorVisibility?: string | null,
+  isAnonymous?: boolean,
+): ConfessionAuthorVisibility {
+  if (
+    authorVisibility === 'anonymous' ||
+    authorVisibility === 'open' ||
+    authorVisibility === 'blur_photo'
+  ) {
+    return authorVisibility;
+  }
+  if (authorVisibility === 'blur') {
+    return 'blur_photo';
+  }
+  return isAnonymous === false ? 'open' : 'anonymous';
+}
+
+export function getConfessionIdentityView({
+  authorVisibility,
+  authorName,
+  authorAge,
+  authorGender,
+}: ConfessionIdentityInput) {
+  const normalizedVisibility = normalizeConfessionAuthorVisibility(authorVisibility);
+  const isFullyAnonymous = normalizedVisibility === 'anonymous';
+  const isBlurPhoto = normalizedVisibility === 'blur_photo';
+
+  if (isFullyAnonymous) {
+    return {
+      authorVisibility: normalizedVisibility,
+      isFullyAnonymous,
+      isBlurPhoto,
+      displayName: 'Anonymous',
+    };
+  }
+
+  let displayName = authorName || 'Someone';
+  if (authorAge) {
+    displayName += `, ${authorAge}`;
+  }
+  if (authorGender && CONFESSION_GENDER_LABELS[authorGender]) {
+    displayName += ` ${CONFESSION_GENDER_LABELS[authorGender]}`;
+  }
+
+  return {
+    authorVisibility: normalizedVisibility,
+    isFullyAnonymous,
+    isBlurPhoto,
+    displayName,
+  };
+}
+
+export type ConfessionEmojiCount = {
+  emoji: string;
+  count: number;
+};
+
+export type ConfessionReplyPreviewData = {
+  text: string;
+  isAnonymous: boolean;
+  type: ConfessionReplyType;
+  createdAt: number;
+};
+
+export type ConfessionThreadReplyData = {
+  _id: string;
+  confessionId: string;
+  userId: string;
+  text: string;
+  isAnonymous: boolean;
+  type: ConfessionReplyType;
+  voiceUrl?: string;
+  voiceDurationSec?: number;
+  parentReplyId?: string;
+  createdAt: number;
+};
+
+export type ConfessionAvailabilityState = 'available' | 'deleted' | 'expired' | 'missing';
+
+type ConfessionAvailabilityInput = {
+  isDeleted?: boolean;
+  expiresAt?: number;
+  isExpired?: boolean;
+};
+
+export function getConfessionAvailabilityState(
+  confession: ConfessionAvailabilityInput | null | undefined,
+  now: number = Date.now(),
+): ConfessionAvailabilityState {
+  if (!confession) return 'missing';
+  if (confession.isDeleted) return 'deleted';
+  if (confession.isExpired) return 'expired';
+  if (typeof confession.expiresAt === 'number' && confession.expiresAt <= now) {
+    return 'expired';
+  }
+  return 'available';
+}
+
+export interface ConfessionRenderData {
+  id: string;
+  userId: string;
+  text: string;
+  isAnonymous: boolean;
+  authorVisibility: ConfessionAuthorVisibility;
+  mood: ConfessionMood;
+  visibility: 'global';
+  authorName?: string;
+  authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
+  replyCount: number;
+  reactionCount: number;
+  voiceReplyCount: number;
+  createdAt: number;
+  expiresAt?: number;
+  isDeleted?: boolean;
+  deletedAt?: number;
+  targetUserId?: string;
+  targetUserName?: string;
+  trendingScore?: number;
+  isExpired?: boolean;
+  topEmojis: ConfessionEmojiCount[];
+  replyPreviews: ConfessionReplyPreviewData[];
+}
+
+type ConfessionRenderSource = {
+  id?: string;
+  _id?: string;
+  userId?: string;
+  text?: string;
+  isAnonymous?: boolean;
+  authorVisibility?: string | null;
+  mood?: ConfessionMood;
+  visibility?: 'global';
+  authorName?: string;
+  authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
+  replyCount?: number;
+  reactionCount?: number;
+  voiceReplyCount?: number;
+  createdAt?: number;
+  expiresAt?: number;
+  isDeleted?: boolean;
+  deletedAt?: number;
+  taggedUserId?: string;
+  taggedUserName?: string;
+  targetUserId?: string;
+  targetUserName?: string;
+  trendingScore?: number;
+  isExpired?: boolean;
+  topEmojis?: ConfessionEmojiCount[];
+  replyPreviews?: Array<{
+    text?: string;
+    isAnonymous?: boolean;
+    type?: string;
+    createdAt?: number;
+  }>;
+};
+
+export function normalizeConfessionReplyPreview(
+  preview: ConfessionRenderSource['replyPreviews'] extends Array<infer Item> ? Item : never,
+): ConfessionReplyPreviewData | null {
+  if (!preview?.text || typeof preview.createdAt !== 'number') {
+    return null;
+  }
+
+  return {
+    text: preview.text,
+    isAnonymous: preview.isAnonymous === true,
+    type: preview.type === 'voice' ? 'voice' : 'text',
+    createdAt: preview.createdAt,
+  };
+}
+
+export function normalizeConfessionRenderData(
+  confession: ConfessionRenderSource | null | undefined,
+): ConfessionRenderData | null {
+  if (!confession) return null;
+
+  const id = confession.id ?? confession._id;
+  if (
+    !id ||
+    !confession.userId ||
+    !confession.text ||
+    !confession.mood ||
+    typeof confession.createdAt !== 'number'
+  ) {
+    return null;
+  }
+
+  const authorVisibility = normalizeConfessionAuthorVisibility(
+    confession.authorVisibility,
+    confession.isAnonymous,
+  );
+  const replyPreviews = (confession.replyPreviews ?? [])
+    .map((preview) => normalizeConfessionReplyPreview(preview))
+    .filter((preview): preview is ConfessionReplyPreviewData => preview != null);
+
+  return {
+    id,
+    userId: confession.userId,
+    text: confession.text,
+    isAnonymous: authorVisibility === 'anonymous',
+    authorVisibility,
+    mood: confession.mood,
+    visibility: confession.visibility ?? 'global',
+    authorName: authorVisibility === 'anonymous' ? undefined : confession.authorName,
+    authorPhotoUrl: authorVisibility === 'anonymous' ? undefined : confession.authorPhotoUrl,
+    authorAge: authorVisibility === 'anonymous' ? undefined : confession.authorAge,
+    authorGender: authorVisibility === 'anonymous' ? undefined : confession.authorGender,
+    replyCount: confession.replyCount ?? 0,
+    reactionCount: confession.reactionCount ?? 0,
+    voiceReplyCount: confession.voiceReplyCount ?? 0,
+    createdAt: confession.createdAt,
+    expiresAt: confession.expiresAt,
+    isDeleted: confession.isDeleted,
+    deletedAt: confession.deletedAt,
+    targetUserId: confession.targetUserId ?? confession.taggedUserId,
+    targetUserName: confession.targetUserName ?? confession.taggedUserName,
+    trendingScore: confession.trendingScore,
+    isExpired: confession.isExpired,
+    topEmojis: confession.topEmojis ?? [],
+    replyPreviews,
+  };
+}
+
+type ConfessionReplySource = {
+  _id?: string;
+  confessionId?: string;
+  userId?: string;
+  text?: string;
+  isAnonymous?: boolean;
+  type?: string;
+  voiceUrl?: string;
+  voiceDurationSec?: number;
+  parentReplyId?: string;
+  createdAt?: number;
+};
+
+export function normalizeConfessionThreadReply(
+  reply: ConfessionReplySource | null | undefined,
+): ConfessionThreadReplyData | null {
+  if (
+    !reply?._id ||
+    !reply.confessionId ||
+    !reply.userId ||
+    typeof reply.text !== 'string' ||
+    typeof reply.createdAt !== 'number'
+  ) {
+    return null;
+  }
+
+  return {
+    _id: reply._id,
+    confessionId: reply.confessionId,
+    userId: reply.userId,
+    text: reply.text,
+    isAnonymous: reply.isAnonymous === true,
+    type: reply.type === 'voice' ? 'voice' : 'text',
+    voiceUrl: reply.voiceUrl,
+    voiceDurationSec: reply.voiceDurationSec,
+    parentReplyId: reply.parentReplyId,
+    createdAt: reply.createdAt,
+  };
+}
+
+// Legacy demo/store model. New live Confess surfaces should prefer ConfessionRenderData.
 export interface Confession {
   id: string;
   userId: string;
   text: string;
-  isAnonymous: boolean; // Legacy field - use authorVisibility instead
-  authorVisibility?: ConfessionAuthorVisibility; // New 3-mode visibility
+  isAnonymous: boolean; // Legacy mirror of authorVisibility === 'anonymous'
+  authorVisibility?: ConfessionAuthorVisibility; // Canonical backend-driven identity mode
   mood: ConfessionMood;
   topic?: ConfessionTopic;
   reactions?: Record<string, number>;
@@ -747,6 +1032,8 @@ export interface Confession {
   voiceReplyCount?: number;
   authorName?: string;
   authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
   createdAt: number;
   expiresAt?: number; // Confession expires 24h after creation (optional for backward compat)
   revealPolicy: ConfessionRevealPolicy;

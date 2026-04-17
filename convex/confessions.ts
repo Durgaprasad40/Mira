@@ -2,6 +2,13 @@ import { mutation, query } from './_generated/server';
 import { v } from 'convex/values';
 import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+import {
+  normalizeConfessionAuthorVisibility,
+  type ConfessionAuthorVisibility,
+  type ConfessionEmojiCount,
+  type ConfessionReplyPreviewData,
+  type ConfessionThreadReplyData,
+} from '../types';
 
 // Phone number & email patterns for server-side validation
 const PHONE_PATTERN = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
@@ -19,7 +26,7 @@ type SerializedConfession = {
   userId: Id<'users'>;
   text: string;
   isAnonymous: boolean;
-  authorVisibility?: 'anonymous' | 'open' | 'blur_photo';
+  authorVisibility: ConfessionAuthorVisibility;
   mood: 'romantic' | 'spicy' | 'emotional' | 'funny';
   visibility: 'global';
   imageUrl?: string;
@@ -29,7 +36,7 @@ type SerializedConfession = {
   authorGender?: string;
   replyCount: number;
   reactionCount: number;
-  voiceReplyCount?: number;
+  voiceReplyCount: number;
   createdAt: number;
   expiresAt?: number;
   isDeleted?: boolean;
@@ -37,7 +44,33 @@ type SerializedConfession = {
   taggedUserId?: Id<'users'>;
   trendingScore?: number;
   isExpired?: boolean;
+  topEmojis: ConfessionEmojiCount[];
+  replyPreviews: ConfessionReplyPreviewData[];
 };
+
+function serializeReplyPreview(reply: Doc<'confessionReplies'>): ConfessionReplyPreviewData {
+  return {
+    text: reply.text,
+    isAnonymous: reply.isAnonymous,
+    type: reply.type === 'voice' ? 'voice' : 'text',
+    createdAt: reply.createdAt,
+  };
+}
+
+function serializeReply(reply: Doc<'confessionReplies'>): ConfessionThreadReplyData {
+  return {
+    _id: reply._id,
+    confessionId: reply.confessionId,
+    userId: reply.userId,
+    text: reply.text,
+    isAnonymous: reply.isAnonymous,
+    type: reply.type === 'voice' ? 'voice' : 'text',
+    voiceUrl: reply.voiceUrl,
+    voiceDurationSec: reply.voiceDurationSec,
+    parentReplyId: reply.parentReplyId,
+    createdAt: reply.createdAt,
+  };
+}
 
 function serializeConfession(
   confession: Doc<'confessions'>,
@@ -47,30 +80,37 @@ function serializeConfession(
     isExpired?: boolean;
   }
 ): SerializedConfession {
+  const authorVisibility = normalizeConfessionAuthorVisibility(
+    confession.authorVisibility,
+    confession.isAnonymous,
+  );
+  const isAnonymous = authorVisibility === 'anonymous';
   const result: SerializedConfession = {
     _id: confession._id,
     _creationTime: confession._creationTime,
     userId: confession.userId,
     text: confession.text,
-    isAnonymous: confession.isAnonymous,
-    authorVisibility: confession.authorVisibility as 'anonymous' | 'open' | 'blur_photo' | undefined,
+    isAnonymous,
+    authorVisibility,
     mood: confession.mood,
     visibility: confession.visibility,
     imageUrl: confession.imageUrl,
-    authorName: confession.authorName,
-    authorPhotoUrl: confession.authorPhotoUrl,
-    authorAge: confession.authorAge,
-    authorGender: confession.authorGender,
+    authorName: isAnonymous ? undefined : confession.authorName,
+    authorPhotoUrl: isAnonymous ? undefined : confession.authorPhotoUrl,
+    authorAge: isAnonymous ? undefined : confession.authorAge,
+    authorGender: isAnonymous ? undefined : confession.authorGender,
     replyCount: confession.replyCount,
     reactionCount: confession.reactionCount,
-    voiceReplyCount: confession.voiceReplyCount,
+    voiceReplyCount: confession.voiceReplyCount ?? 0,
     createdAt: confession.createdAt,
     expiresAt: confession.expiresAt,
     isDeleted: confession.isDeleted,
     deletedAt: confession.deletedAt,
+    topEmojis: [],
+    replyPreviews: [],
   };
 
-  if (options?.includeTaggedUserId && !confession.isAnonymous) {
+  if (options?.includeTaggedUserId && authorVisibility !== 'anonymous') {
     result.taggedUserId = confession.taggedUserId;
   }
 
@@ -104,6 +144,11 @@ export const createConfession = mutation({
   handler: async (ctx, args) => {
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const authorVisibility = normalizeConfessionAuthorVisibility(
+      args.authorVisibility,
+      args.isAnonymous,
+    );
+    const isAnonymous = authorVisibility === 'anonymous';
 
     // P1-01: Server-side rate limiting - count confessions in last 24 hours
     const now = Date.now();
@@ -163,15 +208,15 @@ export const createConfession = mutation({
     const confessionId = await ctx.db.insert('confessions', {
       userId: userId,
       text: trimmed,
-      isAnonymous: args.isAnonymous,
-      authorVisibility: args.authorVisibility,
+      isAnonymous,
+      authorVisibility,
       mood: args.mood,
       visibility: args.visibility,
       imageUrl: args.imageUrl,
-      authorName: args.isAnonymous ? undefined : args.authorName,
-      authorPhotoUrl: args.isAnonymous ? undefined : args.authorPhotoUrl,
-      authorAge: args.isAnonymous ? undefined : args.authorAge,
-      authorGender: args.isAnonymous ? undefined : args.authorGender,
+      authorName: isAnonymous ? undefined : args.authorName,
+      authorPhotoUrl: isAnonymous ? undefined : args.authorPhotoUrl,
+      authorAge: isAnonymous ? undefined : args.authorAge,
+      authorGender: isAnonymous ? undefined : args.authorGender,
       replyCount: 0,
       reactionCount: 0,
       voiceReplyCount: 0,
@@ -242,13 +287,7 @@ export const listConfessions = query({
 
         return {
           ...serializeConfession(c, { includeTaggedUserId: true }),
-          replyPreviews: replies.map((r) => ({
-            _id: r._id,
-            text: r.text,
-            isAnonymous: r.isAnonymous,
-            type: r.type || 'text',
-            createdAt: r.createdAt,
-          })),
+          replyPreviews: replies.map((r) => serializeReplyPreview(r)),
           topEmojis,
         };
       })
@@ -321,6 +360,9 @@ export const getConfession = query({
   handler: async (ctx, { confessionId }) => {
     const confession = await ctx.db.get(confessionId);
     if (!confession) return null;
+    const now = Date.now();
+    if (confession.isDeleted) return null;
+    if (confession.expiresAt !== undefined && confession.expiresAt <= now) return null;
     return serializeConfession(confession, { includeTaggedUserId: true });
   },
 });
@@ -418,24 +460,21 @@ export const deleteReply = mutation({
 export const getReplies = query({
   args: { confessionId: v.id('confessions') },
   handler: async (ctx, { confessionId }) => {
+    const confession = await ctx.db.get(confessionId);
+    const now = Date.now();
+    if (!confession || confession.isDeleted) {
+      return [];
+    }
+    if (confession.expiresAt !== undefined && confession.expiresAt <= now) {
+      return [];
+    }
+
     const replies = await ctx.db
       .query('confessionReplies')
       .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
       .order('asc')
       .collect();
-    return replies.map((reply) => ({
-      _id: reply._id,
-      _creationTime: reply._creationTime,
-      confessionId: reply.confessionId,
-      userId: reply.userId,
-      text: reply.text,
-      isAnonymous: reply.isAnonymous,
-      type: reply.type,
-      voiceUrl: reply.voiceUrl,
-      voiceDurationSec: reply.voiceDurationSec,
-      parentReplyId: reply.parentReplyId,
-      createdAt: reply.createdAt,
-    }));
+    return replies.map((reply) => serializeReply(reply));
   },
 });
 
@@ -642,24 +681,29 @@ export const reportConfession = mutation({
     const reporterId = await ensureUserByAuthId(ctx, args.reporterId as string);
 
     const confession = await ctx.db.get(args.confessionId);
-    if (!confession) {
-      throw new Error('Confession not found.');
+    if (!confession || confession.isDeleted) {
+      return {
+        success: false,
+        alreadyReported: false,
+        unavailable: true,
+      } as const;
     }
 
     // Check if already reported by this user
     const existingReport = await ctx.db
       .query('confessionReports')
-      .filter((q) =>
-        q.and(
-          q.eq(q.field('confessionId'), args.confessionId),
-          q.eq(q.field('reporterId'), reporterId)
-        )
+      .withIndex('by_confession_reporter', (q) =>
+        q.eq('confessionId', args.confessionId).eq('reporterId', reporterId)
       )
       .first();
 
     if (existingReport) {
       // Already reported - just return success (idempotent)
-      return { success: true, alreadyReported: true };
+      return {
+        success: true,
+        alreadyReported: true,
+        unavailable: false,
+      } as const;
     }
 
     // Create report record
@@ -673,7 +717,15 @@ export const reportConfession = mutation({
       createdAt: Date.now(),
     });
 
-    return { success: true, alreadyReported: false };
+    await ctx.db.patch(args.confessionId, {
+      reportCount: (confession.reportCount ?? 0) + 1,
+    });
+
+    return {
+      success: true,
+      alreadyReported: false,
+      unavailable: false,
+    } as const;
   },
 });
 

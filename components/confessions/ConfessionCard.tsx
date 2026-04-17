@@ -29,41 +29,28 @@ import {
   HAIRLINE,
   moderateScale,
 } from '@/lib/constants';
-import { ConfessionMood, ConfessionAuthorVisibility } from '@/types';
+import {
+  CONFESSION_BLUR_PHOTO_RADIUS,
+  ConfessionAuthorVisibility,
+  ConfessionMood,
+  ConfessionReplyPreviewData,
+  getConfessionIdentityView,
+} from '@/types';
 import ReactionBar, { EmojiCount } from './ReactionBar';
-
-// Blur radius for blur_photo mode
-const BLUR_PHOTO_RADIUS = 20;
 
 // Responsive avatar size
 const AVATAR_SIZE = moderateScale(22, 0.3);
 
-interface ReplyPreview {
-  text: string;
-  isAnonymous: boolean;
-  type: string;
-  createdAt: number;
-}
-
-// Gender labels for display
-const GENDER_LABELS: Record<string, string> = {
-  male: 'M',
-  female: 'F',
-  non_binary: 'NB',
-  lesbian: 'F',
-  other: '',
-};
-
 interface ConfessionCardProps {
   id: string;
   text: string;
-  isAnonymous: boolean;
+  isAnonymous: boolean; // Legacy mirror; rendering uses authorVisibility
   authorVisibility?: ConfessionAuthorVisibility; // New 3-mode visibility
   mood: ConfessionMood;
   topEmojis: EmojiCount[];
   userEmoji: string | null;
   replyCount: number;
-  replyPreviews: ReplyPreview[];
+  replyPreviews: ConfessionReplyPreviewData[];
   reactionCount: number;
   authorName?: string;
   authorPhotoUrl?: string;
@@ -129,7 +116,6 @@ function getTimeAgo(timestamp: number | undefined | null): string {
 
 export default function ConfessionCard({
   text,
-  isAnonymous,
   authorVisibility,
   topEmojis,
   userEmoji,
@@ -301,11 +287,16 @@ export default function ConfessionCard({
   // Composed gesture: LongPress takes priority (listed first in Exclusive)
   const composedGesture = Gesture.Exclusive(longPressGesture, tapGesture);
 
-  // Determine effective visibility mode (backward compat: use isAnonymous if authorVisibility not set)
-  const effectiveVisibility: ConfessionAuthorVisibility = authorVisibility || (isAnonymous ? 'anonymous' : 'open');
-  const isFullyAnonymous = effectiveVisibility === 'anonymous';
-  // Handle both 'blur_photo' (current) and 'blur' (legacy schema value)
-  const isBlurPhoto = effectiveVisibility === 'blur_photo' || (effectiveVisibility as string) === 'blur';
+  const { isFullyAnonymous, isBlurPhoto, displayName } = useMemo(
+    () =>
+      getConfessionIdentityView({
+        authorVisibility,
+        authorName,
+        authorAge,
+        authorGender,
+      }),
+    [authorAge, authorGender, authorName, authorVisibility],
+  );
   // Tag display logic - show actual tagged user name to all viewers
   // Author remains anonymous, but target is visible
   const getTagDisplayText = (): string | null => {
@@ -316,23 +307,6 @@ export default function ConfessionCard({
     return 'Someone';
   };
   const tagDisplayText = getTagDisplayText();
-
-  // Build display name with age and gender based on visibility mode
-  const getDisplayName = (): string => {
-    if (isFullyAnonymous) return 'Anonymous';
-    if (!authorName) return 'Someone';
-
-    let name = authorName;
-    // For blur_photo and open modes, show age and gender
-    if (authorAge) {
-      name += `, ${authorAge}`;
-    }
-    if (authorGender && GENDER_LABELS[authorGender]) {
-      name += ` ${GENDER_LABELS[authorGender]}`;
-    }
-    return name;
-  };
-  const displayName = getDisplayName();
 
   // Check if we have a tappable tag to display
   const hasTag = taggedUserId && taggedUserName;
@@ -355,7 +329,7 @@ export default function ConfessionCard({
           source={{ uri: authorPhotoUrl }}
           style={styles.avatarImage}
           contentFit="cover"
-          blurRadius={BLUR_PHOTO_RADIUS}
+          blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
         />
       ) : authorPhotoUrl ? (
         // Open: show clear photo
@@ -581,19 +555,21 @@ export default function ConfessionCard({
 const styles = StyleSheet.create({
   card: {
     backgroundColor: COLORS.background,
-    borderRadius: 16,
-    paddingHorizontal: 18,
+    borderRadius: 18,
+    paddingHorizontal: 16,
     paddingTop: 16,
-    paddingBottom: 14,
+    paddingBottom: 15,
     marginHorizontal: 12,
-    marginVertical: 6,
+    marginVertical: 8,
+    borderWidth: HAIRLINE,
+    borderColor: 'rgba(17, 24, 39, 0.06)',
     // Shadow for iOS
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
     // Elevation for Android (proper cross-platform shadow)
-    elevation: 3,
+    elevation: 2,
   },
   cardHighlighted: {
     // Keep white background, add subtle left accent only
@@ -621,8 +597,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 10,
-    minHeight: 26,
+    marginBottom: 12,
+    minHeight: 28,
   },
   avatar: {
     width: AVATAR_SIZE,
@@ -650,9 +626,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.xs, // Clean spacing
-    paddingVertical: SPACING.xxs,
+    paddingVertical: SPACING.xxs + 1,
     paddingRight: SPACING.xs,
-    borderRadius: SIZES.radius.xs,
+    borderRadius: 10,
     flexShrink: 1,
   },
   authorName: {
@@ -691,9 +667,9 @@ const styles = StyleSheet.create({
   confessionText: {
     fontSize: 16,
     fontWeight: '500',
-    lineHeight: 24,
+    lineHeight: 25,
     color: COLORS.text,
-    marginBottom: 14,
+    marginBottom: 16,
     letterSpacing: 0.1,
     // Text wrapping safety - works with card padding for proper line length
   },
@@ -706,11 +682,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.xs + 1,
-    marginBottom: SPACING.xs + 2, // Tightened from SPACING.sm
-    paddingVertical: SPACING.xxs + 1, // Tightened from SPACING.xs + 1
-    paddingHorizontal: SPACING.sm + 2,
+    marginBottom: 12,
+    paddingVertical: SPACING.xs,
+    paddingHorizontal: SPACING.sm + 4,
     backgroundColor: 'rgba(255,107,107,0.05)',
-    borderRadius: SIZES.radius.sm,
+    borderRadius: 12,
     alignSelf: 'flex-start',
   },
   taggedLabel: {
@@ -733,9 +709,9 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     backgroundColor: 'rgba(255,107,107,0.1)',
     paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: SIZES.radius.sm,
-    marginBottom: SPACING.sm,
+    paddingVertical: SPACING.sm + 1,
+    borderRadius: 12,
+    marginBottom: 12,
   },
   viewProfileButtonUsed: {
     backgroundColor: 'rgba(153,153,153,0.1)',
@@ -771,18 +747,24 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
   reactionBarWrap: {
-    marginBottom: 8,
+    marginBottom: 10,
     marginTop: 2,
+    paddingTop: 12,
+    borderTopWidth: HAIRLINE,
+    borderTopColor: 'rgba(17, 24, 39, 0.08)',
   },
   replyPreviewSection: {
-    marginBottom: SPACING.xs + 2,
+    marginBottom: 10,
     gap: SPACING.xs,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(153,153,153,0.06)',
   },
   replyPreviewRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.xs + 2,
-    paddingLeft: SPACING.xs,
   },
   replyPreviewAvatar: {
     width: moderateScale(16, 0.3),
@@ -801,8 +783,8 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZE.caption,
     fontWeight: FONT_WEIGHT.medium, // Lighter than semibold for Android
     color: COLORS.primary,
-    paddingLeft: moderateScale(26, 0.3),
-    marginTop: SPACING.xxs,
+    paddingLeft: 0,
+    marginTop: 2,
   },
   footer: {
     flexDirection: 'row',
@@ -810,8 +792,8 @@ const styles = StyleSheet.create({
     gap: 16,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
-    paddingTop: 12,
-    marginTop: 6,
+    paddingTop: 14,
+    marginTop: 2,
   },
   footerButton: {
     flexDirection: 'row',

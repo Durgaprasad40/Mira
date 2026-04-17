@@ -38,26 +38,15 @@ import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
+import {
+  CONFESSION_BLUR_PHOTO_RADIUS,
+  type ConfessionRenderData,
+  getConfessionAvailabilityState,
+  getConfessionIdentityView,
+  normalizeConfessionRenderData,
+} from '@/types';
 
-type FeedConfession = {
-  id: string;
-  userId: string;
-  text: string;
-  isAnonymous: boolean;
-  authorVisibility?: 'anonymous' | 'open' | 'blur_photo';
-  mood: 'romantic' | 'spicy' | 'emotional' | 'funny';
-  authorName?: string;
-  authorPhotoUrl?: string;
-  authorAge?: number;
-  authorGender?: string;
-  targetUserId?: string;
-  targetUserName?: string;
-  topEmojis: { emoji: string; count: number }[];
-  replyPreviews: Array<{ text: string; isAnonymous: boolean; type: string; createdAt: number }>;
-  replyCount: number;
-  reactionCount: number;
-  createdAt: number;
-};
+type FeedConfession = ConfessionRenderData;
 
 type TaggedConfessionItem = {
   notificationId: string;
@@ -127,11 +116,9 @@ export default function ConfessionsScreen() {
   const demoToggleReaction = useConfessionStore((s) => s.toggleReaction);
   const demoAddConfession = useConfessionStore((s) => s.addConfession);
   const demoDeleteConfession = useConfessionStore((s) => s.deleteConfession);
-  const demoReportConfession = useConfessionStore((s) => s.reportConfession);
   const demoCanPostConfession = useConfessionStore((s) => s.canPostConfession);
   const demoRecordConfessionTimestamp = useConfessionStore((s) => s.recordConfessionTimestamp);
   const getTimeUntilNextConfession = useConfessionStore((s) => s.getTimeUntilNextConfession);
-  const getMyLatestConfession = useConfessionStore((s) => s.getMyLatestConfession);
   const seenTaggedConfessionIds = useConfessionStore((s) => s.seenTaggedConfessionIds);
   const markTaggedConfessionSeen = useConfessionStore((s) => s.markTaggedConfessionSeen);
   const markAllTaggedConfessionsSeen = useConfessionStore((s) => s.markAllTaggedConfessionsSeen);
@@ -270,24 +257,9 @@ export default function ConfessionsScreen() {
     if (!isDemoMode) {
       if (!liveConfessions) return [];
       return liveConfessions
-        .map((confession: any) => ({
-          id: confession._id,
-          userId: confession.userId,
-          text: confession.text,
-          isAnonymous: confession.isAnonymous,
-          authorVisibility: confession.authorVisibility,
-          mood: confession.mood,
-          authorName: confession.authorName,
-          authorPhotoUrl: confession.authorPhotoUrl,
-          authorAge: confession.authorAge,
-          authorGender: confession.authorGender,
-          targetUserId: confession.taggedUserId,
-          topEmojis: confession.topEmojis ?? [],
-          replyPreviews: confession.replyPreviews ?? [],
-          replyCount: confession.replyCount ?? 0,
-          reactionCount: confession.reactionCount ?? 0,
-          createdAt: confession.createdAt,
-        }))
+        .map((confession: any) => normalizeConfessionRenderData(confession))
+        .filter((confession): confession is FeedConfession => confession != null)
+        .filter((confession) => getConfessionAvailabilityState(confession) === 'available')
         .filter((confession: FeedConfession) => !blockedUserIds.includes(confession.userId))
         .filter((confession: FeedConfession) => !hiddenSet.has(confession.id));
     }
@@ -299,24 +271,9 @@ export default function ConfessionsScreen() {
       .filter((confession: any) => !blockedUserIds.includes(confession.userId))
       .filter((confession: any) => !hiddenSet.has(confession.id))
       .sort((a: any, b: any) => b.createdAt - a.createdAt)
-      .map((confession: any) => ({
-        id: confession.id,
-        userId: confession.userId,
-        text: confession.text,
-        isAnonymous: confession.isAnonymous,
-        mood: confession.mood,
-        authorName: confession.authorName,
-        authorPhotoUrl: confession.authorPhotoUrl,
-        authorAge: confession.authorAge,
-        authorGender: confession.authorGender,
-        targetUserId: confession.targetUserId,
-        targetUserName: confession.targetUserName,
-        topEmojis: confession.topEmojis ?? [],
-        replyPreviews: confession.replyPreviews ?? [],
-        replyCount: confession.replyCount ?? 0,
-        reactionCount: confession.reactionCount ?? 0,
-        createdAt: confession.createdAt,
-      }));
+      .map((confession: any) => normalizeConfessionRenderData(confession))
+      .filter((confession): confession is FeedConfession => confession != null)
+      .filter((confession) => getConfessionAvailabilityState(confession) === 'available');
   }, [blockedUserIds, demoConfessions, hiddenConfessionIds, liveConfessions]);
 
   const taggedConfessions = useMemo<TaggedConfessionItem[]>(() => {
@@ -367,20 +324,10 @@ export default function ConfessionsScreen() {
   const trendingHero = useMemo(() => {
     if (!isDemoMode) {
       const item = liveTrending?.[0];
-      if (!item) return null;
-      return {
-        id: item._id,
-        userId: item.userId,
-        text: item.text,
-        isAnonymous: item.isAnonymous,
-        authorName: item.authorName,
-        authorPhotoUrl: item.authorPhotoUrl,
-        authorAge: item.authorAge,
-        authorGender: item.authorGender,
-        createdAt: item.createdAt,
-        replyCount: item.replyCount ?? 0,
-        reactionCount: item.reactionCount ?? 0,
-      };
+      const normalized = item ? normalizeConfessionRenderData(item) : null;
+      return normalized && getConfessionAvailabilityState(normalized) === 'available'
+        ? normalized
+        : null;
     }
 
     if (confessions.length === 0) return null;
@@ -406,16 +353,11 @@ export default function ConfessionsScreen() {
   // Get user's most recent confession (for "Your confession" section)
   const myLatestConfession = useMemo(() => {
     if (!currentUserId) return null;
-    if (isDemoMode) {
-      return getMyLatestConfession(currentUserId);
-    }
-    // For live mode, find from liveConfessions
-    if (!liveConfessions) return null;
-    const myConfessions = liveConfessions
-      .filter((c: any) => c.userId === currentUserId)
-      .sort((a: any, b: any) => b.createdAt - a.createdAt);
+    const myConfessions = confessions
+      .filter((c) => c.userId === currentUserId)
+      .sort((a, b) => b.createdAt - a.createdAt);
     return myConfessions[0] || null;
-  }, [currentUserId, getMyLatestConfession, liveConfessions]);
+  }, [confessions, currentUserId]);
 
   // Format countdown time
   const formatCountdown = useCallback((ms: number): string => {
@@ -432,7 +374,7 @@ export default function ConfessionsScreen() {
 
   // Get IDs to exclude from normal feed (prevent duplicates)
   const myConfessionId = myLatestConfession
-    ? ((myLatestConfession as any).id || (myLatestConfession as any)._id)
+    ? myLatestConfession.id
     : null;
   const trendingConfessionId = trendingHero?.id || null;
 
@@ -523,6 +465,7 @@ export default function ConfessionsScreen() {
     }
 
     const authorInfo = !composerAnonymous ? getAuthorInfo() : {};
+    const authorVisibility = composerAnonymous ? 'anonymous' : 'open';
     if (!composerAnonymous && !authorInfo.authorName) {
       Alert.alert('Profile Not Ready', 'Your profile is still loading. Please try again in a moment, or post anonymously.');
       return;
@@ -538,6 +481,7 @@ export default function ConfessionsScreen() {
           userId: currentUserId,
           text: trimmed,
           isAnonymous: composerAnonymous,
+          authorVisibility,
           mood: 'emotional',
           topEmojis: [],
           replyPreviews: [],
@@ -560,6 +504,7 @@ export default function ConfessionsScreen() {
           userId: currentUserId,
           text: trimmed,
           isAnonymous: composerAnonymous,
+          authorVisibility,
           mood: 'emotional',
           visibility: 'global',
           taggedUserId: taggedUser?.id as any,
@@ -721,24 +666,34 @@ export default function ConfessionsScreen() {
     reason: 'spam' | 'harassment' | 'hate' | 'sexual' | 'other'
   ) => {
     if (isDemoMode) {
-      demoReportConfession(confessionId);
-      setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
+      showToastMessage('Report submitted');
       return;
     }
 
     if (!currentUserId) return;
 
     try {
-      await reportConfessionMutation({
+      const result = await reportConfessionMutation({
         confessionId: confessionId as any,
         reporterId: currentUserId,
         reason,
       });
-      setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
+
+      if (!result.success && result.unavailable) {
+        showToastMessage('This confession is no longer available');
+        return;
+      }
+
+      if (result.alreadyReported) {
+        showToastMessage('You already reported this confession');
+        return;
+      }
+
+      showToastMessage('Report submitted');
     } catch {
       Alert.alert('Unable to report right now');
     }
-  }, [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation]);
+  }, [currentUserId, isDemoMode, reportConfessionMutation, showToastMessage]);
 
   const showReportReasonPicker = useCallback((confessionId: string) => {
     const reasons = [
@@ -856,17 +811,26 @@ export default function ConfessionsScreen() {
     );
   }, [menuTargetConfession, router]);
 
-  // Helper to get gender symbol
-  const getGenderSymbol = (gender?: string) => {
-    if (!gender) return null;
-    const g = gender.toLowerCase();
-    if (g === 'male' || g === 'm') return { symbol: '♂', color: '#4A90D9' };
-    if (g === 'female' || g === 'f') return { symbol: '♀', color: COLORS.primary };
-    return null;
-  };
+  const renderHeader = useCallback(() => {
+    const trendingIdentity = trendingHero
+      ? getConfessionIdentityView({
+          authorVisibility: trendingHero.authorVisibility,
+          authorName: trendingHero.authorName,
+          authorAge: trendingHero.authorAge,
+          authorGender: trendingHero.authorGender,
+        })
+      : null;
+    const myLatestIdentity = myLatestConfession
+      ? getConfessionIdentityView({
+          authorVisibility: myLatestConfession.authorVisibility,
+          authorName: myLatestConfession.authorName,
+          authorAge: myLatestConfession.authorAge,
+          authorGender: myLatestConfession.authorGender,
+        })
+      : null;
 
-  const renderHeader = useCallback(() => (
-    <View>
+    return (
+      <View style={styles.headerStack}>
       {/* 1. TRENDING SECTION (always first) - Premium card with full border */}
       {trendingHero && (
         <TouchableOpacity
@@ -884,10 +848,17 @@ export default function ConfessionsScreen() {
 
           {/* Author row - shows identity with gender symbol */}
           <View style={styles.trendingAuthorRow}>
-            {trendingHero.isAnonymous ? (
+            {trendingIdentity?.isFullyAnonymous ? (
               <View style={[styles.trendingAvatar, styles.trendingAvatarAnonymous]}>
                 <Ionicons name="eye-off" size={10} color={COLORS.textMuted} />
               </View>
+            ) : trendingIdentity?.isBlurPhoto && trendingHero.authorPhotoUrl ? (
+              <Image
+                source={{ uri: trendingHero.authorPhotoUrl }}
+                style={styles.trendingAvatarImage}
+                contentFit="cover"
+                blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
+              />
             ) : trendingHero.authorPhotoUrl ? (
               <Image
                 source={{ uri: trendingHero.authorPhotoUrl }}
@@ -899,16 +870,8 @@ export default function ConfessionsScreen() {
                 <Ionicons name="person" size={10} color={COLORS.primary} />
               </View>
             )}
-            <Text style={[styles.trendingAuthorName, !trendingHero.isAnonymous && styles.trendingAuthorNamePublic]}>
-              {trendingHero.isAnonymous ? 'Anonymous' : (
-                <>
-                  {trendingHero.authorName || 'Someone'}
-                  {trendingHero.authorAge ? `, ${trendingHero.authorAge}` : ''}
-                  {getGenderSymbol(trendingHero.authorGender) && (
-                    <Text style={{ color: getGenderSymbol(trendingHero.authorGender)!.color }}> {getGenderSymbol(trendingHero.authorGender)!.symbol}</Text>
-                  )}
-                </>
-              )}
+            <Text style={[styles.trendingAuthorName, !trendingIdentity?.isFullyAnonymous && styles.trendingAuthorNamePublic]}>
+              {trendingIdentity?.displayName ?? 'Anonymous'}
             </Text>
             <View style={{ flex: 1 }} />
             <Text style={styles.trendingTime}>{getTimeAgoSimple(trendingHero.createdAt)}</Text>
@@ -936,22 +899,29 @@ export default function ConfessionsScreen() {
         <TouchableOpacity
           style={styles.myConfessionCard}
           activeOpacity={0.88}
-          onPress={() => handleOpenThread((myLatestConfession as any).id || (myLatestConfession as any)._id)}
+          onPress={() => handleOpenThread(myLatestConfession.id)}
           onLongPress={() => handleOpenMenuSheet(
-            (myLatestConfession as any).id || (myLatestConfession as any)._id,
-            (myLatestConfession as any).userId
+            myLatestConfession.id,
+            myLatestConfession.userId
           )}
           delayLongPress={300}
         >
           {/* Author row - same as normal cards */}
           <View style={styles.myConfessionAuthorRow}>
-            {(myLatestConfession as any).isAnonymous ? (
+            {myLatestIdentity?.isFullyAnonymous ? (
               <View style={[styles.myConfessionAvatar, styles.myConfessionAvatarAnonymous]}>
                 <Ionicons name="eye-off" size={10} color={COLORS.textMuted} />
               </View>
-            ) : (myLatestConfession as any).authorPhotoUrl ? (
+            ) : myLatestIdentity?.isBlurPhoto && myLatestConfession.authorPhotoUrl ? (
               <Image
-                source={{ uri: (myLatestConfession as any).authorPhotoUrl }}
+                source={{ uri: myLatestConfession.authorPhotoUrl }}
+                style={styles.myConfessionAvatarImage}
+                contentFit="cover"
+                blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
+              />
+            ) : myLatestConfession.authorPhotoUrl ? (
+              <Image
+                source={{ uri: myLatestConfession.authorPhotoUrl }}
                 style={styles.myConfessionAvatarImage}
                 contentFit="cover"
               />
@@ -960,16 +930,8 @@ export default function ConfessionsScreen() {
                 <Ionicons name="person" size={10} color={COLORS.primary} />
               </View>
             )}
-            <Text style={[styles.myConfessionAuthorName, !(myLatestConfession as any).isAnonymous && styles.myConfessionAuthorNamePublic]}>
-              {(myLatestConfession as any).isAnonymous ? 'Anonymous' : (
-                <>
-                  {(myLatestConfession as any).authorName || 'You'}
-                  {(myLatestConfession as any).authorAge ? `, ${(myLatestConfession as any).authorAge}` : ''}
-                  {getGenderSymbol((myLatestConfession as any).authorGender) && (
-                    <Text style={{ color: getGenderSymbol((myLatestConfession as any).authorGender)!.color }}> {getGenderSymbol((myLatestConfession as any).authorGender)!.symbol}</Text>
-                  )}
-                </>
-              )}
+            <Text style={[styles.myConfessionAuthorName, !myLatestIdentity?.isFullyAnonymous && styles.myConfessionAuthorNamePublic]}>
+              {myLatestIdentity?.displayName ?? 'Anonymous'}
             </Text>
             <View style={{ flex: 1 }} />
             <Text style={styles.myConfessionTime}>{getTimeAgoSimple(myLatestConfession.createdAt)}</Text>
@@ -1020,7 +982,8 @@ export default function ConfessionsScreen() {
         </TouchableOpacity>
       )}
     </View>
-  ), [canPostNow, countdownMs, formatCountdown, handleOpenTaggedSection, handleOpenThread, myLatestConfession, taggedBadgeCount, taggedConfessions.length, trendingHero]);
+    );
+  }, [canPostNow, countdownMs, formatCountdown, handleOpenTaggedSection, handleOpenThread, myLatestConfession, taggedBadgeCount, taggedConfessions.length, trendingHero]);
 
   if (isLoading && confessions.length === 0) {
     return (
@@ -1052,7 +1015,9 @@ export default function ConfessionsScreen() {
         </TouchableOpacity>
       </View>
 
-      <Text style={styles.topHint}>Choose how you want to be seen</Text>
+      <View style={styles.topHintWrap}>
+        <Text style={styles.topHint}>Choose how you want to be seen</Text>
+      </View>
 
       <FlatList
         data={filteredConfessions}
@@ -1423,35 +1388,49 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
   headerTitle: {
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '700',
     color: COLORS.text,
   },
   headerButton: {
-    padding: 4,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.55)',
+  },
+  headerStack: {
+    paddingTop: 4,
+  },
+  topHintWrap: {
+    marginHorizontal: 12,
+    marginTop: 10,
+    marginBottom: 2,
+    paddingVertical: 6,
   },
   topHint: {
     fontSize: 12,
     color: COLORS.textLight,
     textAlign: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 6,
+    letterSpacing: 0.2,
   },
   listContent: {
-    paddingBottom: 96,
+    paddingTop: 6,
+    paddingBottom: 108,
   },
   loadingState: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     gap: 12,
+    paddingHorizontal: 40,
   },
   loadingText: {
     fontSize: 16,
@@ -1461,13 +1440,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginHorizontal: 10,
-    marginTop: 8,
-    marginBottom: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,107,107,0.08)',
+    marginHorizontal: 12,
+    marginTop: 12,
+    marginBottom: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderRadius: 16,
+    backgroundColor: COLORS.background,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,107,107,0.14)',
   },
   taggedRowLeft: {
     flexDirection: 'row',
@@ -1495,26 +1476,21 @@ const styles = StyleSheet.create({
   },
   // Trending card - Premium with deep blue accent
   trendingCard: {
-    marginHorizontal: 10,
+    marginHorizontal: 12,
     marginTop: 8,
-    marginBottom: 8,
-    borderRadius: 16,
+    marginBottom: 10,
+    borderRadius: 18,
     paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 12,
+    paddingTop: 16,
+    paddingBottom: 15,
     backgroundColor: COLORS.background,
-    borderWidth: 1.5,
-    borderColor: 'rgba(59, 130, 246, 0.3)',
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.24)',
     shadowColor: '#3B82F6',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  genderSymbol: {
-    fontSize: 14,
-    fontWeight: '600',
-    marginLeft: 4,
+    shadowOpacity: 0.09,
+    shadowRadius: 12,
+    elevation: 2,
   },
   trendingBadge: {
     flexDirection: 'row',
@@ -1522,10 +1498,10 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     gap: 4,
     backgroundColor: 'rgba(59, 130, 246, 0.08)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-    marginBottom: 10,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 9,
+    marginBottom: 12,
   },
   trendingBadgeText: {
     fontSize: 11,
@@ -1538,7 +1514,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
+    marginBottom: 12,
   },
   trendingAvatar: {
     width: 20,
@@ -1570,15 +1546,19 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
   trendingText: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 16,
+    lineHeight: 24,
     fontWeight: '500',
     color: COLORS.text,
-    marginBottom: 10,
+    marginBottom: 14,
   },
   trendingMeta: {
     flexDirection: 'row',
-    gap: 14,
+    gap: 16,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+    paddingTop: 12,
+    marginTop: 2,
   },
   trendingMetaItem: {
     flexDirection: 'row',
@@ -1593,12 +1573,16 @@ const styles = StyleSheet.create({
   emptyState: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 40,
-    paddingTop: 84,
+    marginHorizontal: 16,
+    marginTop: 28,
+    paddingHorizontal: 32,
+    paddingVertical: 32,
+    borderRadius: 20,
+    backgroundColor: COLORS.background,
   },
   emptyEmoji: {
-    fontSize: 56,
-    marginBottom: 16,
+    fontSize: 52,
+    marginBottom: 14,
   },
   emptyTitle: {
     fontSize: 22,
@@ -1628,9 +1612,9 @@ const styles = StyleSheet.create({
   fab: {
     position: 'absolute',
     right: 16,
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.primary,
@@ -1645,27 +1629,27 @@ const styles = StyleSheet.create({
   },
   // My Confession card - Same style as normal cards, with subtle border highlight
   myConfessionCard: {
-    marginHorizontal: 10,
+    marginHorizontal: 12,
     marginTop: 4,
-    marginBottom: 8,
-    borderRadius: 16,
+    marginBottom: 10,
+    borderRadius: 18,
     paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 12,
+    paddingTop: 16,
+    paddingBottom: 15,
     backgroundColor: COLORS.background,
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,107,107,0.25)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,107,107,0.22)',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    elevation: 2,
   },
   myConfessionAuthorRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
+    marginBottom: 12,
   },
   myConfessionAvatar: {
     width: 20,
@@ -1696,15 +1680,19 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
   myConfessionText: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 16,
+    lineHeight: 24,
     fontWeight: '500',
     color: COLORS.text,
-    marginBottom: 10,
+    marginBottom: 14,
   },
   myConfessionMeta: {
     flexDirection: 'row',
-    gap: 14,
+    gap: 16,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+    paddingTop: 12,
+    marginTop: 2,
   },
   myConfessionMetaItem: {
     flexDirection: 'row',
@@ -1722,12 +1710,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    marginHorizontal: 10,
-    marginBottom: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 10,
-    backgroundColor: 'rgba(153,153,153,0.08)',
+    marginHorizontal: 12,
+    marginBottom: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    backgroundColor: COLORS.background,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(17, 24, 39, 0.06)',
   },
   countdownText: {
     fontSize: 13,
@@ -1736,7 +1726,7 @@ const styles = StyleSheet.create({
   },
   toast: {
     position: 'absolute',
-    top: 56,
+    top: 64,
     left: 24,
     right: 24,
     flexDirection: 'row',
@@ -1745,7 +1735,7 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 18,
     paddingVertical: 12,
-    borderRadius: 12,
+    borderRadius: 14,
     backgroundColor: COLORS.white,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },

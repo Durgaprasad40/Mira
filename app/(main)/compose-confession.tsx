@@ -29,6 +29,10 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
+import {
+  normalizeConfessionAuthorVisibility,
+  normalizeConfessionRenderData,
+} from '@/types';
 
 // Identity modes for confession posting
 type IdentityMode = 'anonymous' | 'blur_photo' | 'open_to_all';
@@ -54,6 +58,13 @@ const DEMO_LIKED_USERS: LikedUser[] = [
   { id: 'demo_profile_5', name: 'Vikram', avatarUrl: 'https://i.pravatar.cc/150?img=11', age: 29, disambiguator: 'Photographer' },
   { id: 'demo_profile_6', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=16', age: 22, disambiguator: 'Yoga instructor' },
 ];
+
+function getIdentityModeFromAuthorVisibility(authorVisibility?: string | null): IdentityMode {
+  const normalized = normalizeConfessionAuthorVisibility(authorVisibility);
+  if (normalized === 'blur_photo') return 'blur_photo';
+  if (normalized === 'open') return 'open_to_all';
+  return 'anonymous';
+}
 
 function computeAge(dateOfBirth: string | undefined): number | undefined {
   if (!dateOfBirth) return undefined;
@@ -110,20 +121,13 @@ export default function ComposeConfessionScreen() {
 
     if (isDemoMode) {
       // Demo mode: find confession in demo store
-      const demoConfession = demoConfessions.find((c: any) => c.id === params.editId);
-      if (demoConfession) {
-        return {
-          text: demoConfession.text,
-          mood: demoConfession.mood,
-          isAnonymous: demoConfession.isAnonymous,
-          authorPhotoUrl: demoConfession.authorPhotoUrl,
-        };
-      }
-      return null;
+      return normalizeConfessionRenderData(
+        demoConfessions.find((c: any) => c.id === params.editId) as any,
+      );
     }
 
     // Live mode: use Convex query result
-    return existingConfessionQuery;
+    return normalizeConfessionRenderData(existingConfessionQuery as any);
   }, [isEditMode, params.editId, demoConfessions, existingConfessionQuery]);
 
   const [composerText, setComposerText] = useState('');
@@ -147,17 +151,8 @@ export default function ComposeConfessionScreen() {
   useEffect(() => {
     if (isEditMode && existingConfession && !hasPrefilledEdit) {
       setComposerText(existingConfession.text);
-      if (existingConfession.mood) {
-        setSelectedMood(existingConfession.mood as 'romantic' | 'spicy' | 'emotional' | 'funny');
-      }
-      // Set identity mode based on existing confession's anonymity
-      if (existingConfession.isAnonymous) {
-        setIdentityMode('anonymous');
-      } else if (existingConfession.authorPhotoUrl) {
-        setIdentityMode('open_to_all');
-      } else {
-        setIdentityMode('blur_photo');
-      }
+      setSelectedMood(existingConfession.mood);
+      setIdentityMode(getIdentityModeFromAuthorVisibility(existingConfession.authorVisibility));
       setHasPrefilledEdit(true);
     }
   }, [isEditMode, existingConfession, hasPrefilledEdit]);
@@ -169,8 +164,7 @@ export default function ComposeConfessionScreen() {
 
   // Get author info based on identity mode
   // - anonymous: no author info at all
-  // - blur_photo: name + age + gender, but NO photo
-  // - open_to_all: full profile with photo
+  // - blur_photo / open_to_all: author photo is stored and rendering decides whether to blur it
   const getAuthorInfo = useCallback((mode: IdentityMode) => {
     // Anonymous mode: completely anonymous, no author info
     if (mode === 'anonymous') {
@@ -178,7 +172,7 @@ export default function ComposeConfessionScreen() {
     }
 
     // Get user data for non-anonymous modes
-    // Both blur_photo and open_to_all need photo URL - blur_photo blurs it on display
+    // Both blur_photo and open_to_all carry the same photo payload; UI decides whether it is blurred.
     if (isDemoMode && demoCurrentUser) {
       return {
         authorName: demoCurrentUser.name,
@@ -270,6 +264,11 @@ export default function ComposeConfessionScreen() {
     // Only 'anonymous' mode is truly anonymous (no author info sent)
     // 'blur_photo' and 'open_to_all' both send isAnonymous: false with varying author info
     const isAnonymous = identityMode === 'anonymous';
+    const authorVisibility = identityMode === 'anonymous'
+      ? 'anonymous'
+      : identityMode === 'blur_photo'
+        ? 'blur_photo'
+        : 'open';
     const authorInfo = getAuthorInfo(identityMode);
 
     // For non-anonymous modes, require that we have author name (profile loaded)
@@ -295,6 +294,7 @@ export default function ComposeConfessionScreen() {
           userId: currentUserId,
           text: trimmed,
           isAnonymous,
+          authorVisibility,
           mood: 'emotional',
           topEmojis: [],
           replyPreviews: [],
@@ -322,10 +322,6 @@ export default function ComposeConfessionScreen() {
         });
       } else {
         // Live mode create: new confession
-        // Map frontend identityMode to backend authorVisibility
-        const authorVisibility = identityMode === 'anonymous' ? 'anonymous'
-          : identityMode === 'blur_photo' ? 'blur_photo'
-          : 'open';
         await createConfessionMutation({
           userId: currentUserId,
           text: trimmed,

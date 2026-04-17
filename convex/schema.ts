@@ -1650,7 +1650,7 @@ export default defineSchema({
     userId: v.id('users'),
     text: v.string(),
     isAnonymous: v.boolean(),
-    authorVisibility: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur'), v.literal('blur_photo'))), // legacy visibility flag; isAnonymous is the active source of truth
+    authorVisibility: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur'), v.literal('blur_photo'))), // canonical visibility field; isAnonymous is a legacy mirror for compatibility
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
     visibility: v.literal('global'),
     imageUrl: v.optional(v.string()),
@@ -1697,6 +1697,7 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index('by_confession', ['confessionId'])
+    .index('by_confession_reporter', ['confessionId', 'reporterId'])
     .index('by_reporter', ['reporterId'])
     .index('by_status', ['status']),
 
@@ -1706,7 +1707,7 @@ export default defineSchema({
     userId: v.id('users'),
     text: v.string(),
     isAnonymous: v.boolean(),
-    identityMode: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur'))), // legacy reply identity flag; isAnonymous is the active source of truth
+    identityMode: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur'))), // legacy reply identity flag; current Phase-1 thread UI still consumes isAnonymous for replies
     hasActiveConnectRequest: v.optional(v.boolean()), // legacy flag ignored by current Confessions UI/backend contract
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),

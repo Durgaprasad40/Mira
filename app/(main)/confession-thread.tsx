@@ -3,7 +3,7 @@
  * Matches the visual language of the Confession homepage.
  * Uses same colors, spacing, typography, and card styling patterns.
  */
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -29,35 +29,15 @@ import { isContentClean } from '@/lib/contentFilter';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
-
-type Reply = {
-  _id: string;
-  confessionId: string;
-  userId: string;
-  text: string;
-  isAnonymous: boolean;
-  type?: string;
-  voiceUrl?: string;
-  voiceDurationSec?: number;
-  createdAt: number;
-};
-
-type Confession = {
-  _id: string;
-  userId: string;
-  text: string;
-  isAnonymous: boolean;
-  authorVisibility?: 'anonymous' | 'open' | 'blur_photo';
-  mood: string;
-  authorName?: string;
-  authorPhotoUrl?: string;
-  authorAge?: number;
-  authorGender?: string;
-  replyCount: number;
-  reactionCount: number;
-  createdAt: number;
-  expiresAt?: number;
-};
+import {
+  CONFESSION_BLUR_PHOTO_RADIUS,
+  getConfessionAvailabilityState,
+  type ConfessionRenderData,
+  type ConfessionThreadReplyData,
+  getConfessionIdentityView,
+  normalizeConfessionRenderData,
+  normalizeConfessionThreadReply,
+} from '@/types';
 
 // Match homepage avatar size
 const AVATAR_SIZE = moderateScale(22, 0.3);
@@ -80,6 +60,7 @@ export default function ConfessionThreadScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { confessionId } = useLocalSearchParams<{ confessionId: string }>();
+  const hasConfessionId = typeof confessionId === 'string' && confessionId.length > 0;
   const userId = useAuthStore((s) => s.userId);
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : userId;
 
@@ -91,11 +72,11 @@ export default function ConfessionThreadScreen() {
   // Convex queries - only run in non-demo mode
   const convexConfession = useQuery(
     api.confessions.getConfession,
-    !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+    !isDemoMode && hasConfessionId ? { confessionId: confessionId as any } : 'skip'
   );
   const convexReplies = useQuery(
     api.confessions.getReplies,
-    !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+    !isDemoMode && hasConfessionId ? { confessionId: confessionId as any } : 'skip'
   );
   const createReplyMutation = useMutation(api.confessions.createReply);
 
@@ -106,26 +87,49 @@ export default function ConfessionThreadScreen() {
   const inputRef = useRef<TextInput>(null);
 
   // Get confession data
-  const confession: Confession | null = isDemoMode
-    ? (demoConfessions.find((c) => c.id === confessionId) as unknown as Confession | undefined) ?? null
-    : convexConfession ?? null;
+  const confession: ConfessionRenderData | null = useMemo(
+    () => {
+      const normalized = isDemoMode
+        ? normalizeConfessionRenderData(demoConfessions.find((c) => c.id === confessionId) as any)
+        : normalizeConfessionRenderData(convexConfession as any);
+
+      return getConfessionAvailabilityState(normalized) === 'available' ? normalized : null;
+    },
+    [confessionId, convexConfession, demoConfessions, isDemoMode],
+  );
 
   // Get replies
-  const replies: Reply[] = isDemoMode
-    ? (demoReplies[confessionId ?? ''] ?? []).map((r: any) => ({
-        _id: r.id,
-        confessionId: confessionId ?? '',
-        userId: r.userId,
-        text: r.text,
-        isAnonymous: r.isAnonymous,
-        type: r.type,
-        voiceUrl: r.voiceUrl,
-        voiceDurationSec: r.voiceDurationSec,
-        createdAt: r.createdAt,
-      }))
-    : (convexReplies ?? []);
+  const replies: ConfessionThreadReplyData[] = useMemo(
+    () => {
+      if (!hasConfessionId) return [];
+      if (isDemoMode && !confession) return [];
 
-  const isLoading = !isDemoMode && (convexConfession === undefined || convexReplies === undefined);
+      return (
+        isDemoMode
+          ? (demoReplies[confessionId ?? ''] ?? []).map((r: any) =>
+              normalizeConfessionThreadReply({
+                _id: r.id,
+                confessionId: confessionId ?? '',
+                userId: r.userId,
+                text: r.text,
+                isAnonymous: r.isAnonymous,
+                type: r.type,
+                voiceUrl: r.voiceUrl,
+                voiceDurationSec: r.voiceDurationSec,
+                parentReplyId: r.parentReplyId,
+                createdAt: r.createdAt,
+              })
+            )
+          : (convexReplies ?? []).map((reply: any) => normalizeConfessionThreadReply(reply))
+      ).filter((reply): reply is ConfessionThreadReplyData => reply != null);
+    },
+    [confession, confessionId, convexReplies, demoReplies, hasConfessionId, isDemoMode],
+  );
+
+  const isLoading = !isDemoMode && hasConfessionId && (
+    convexConfession === undefined ||
+    (convexConfession !== null && convexReplies === undefined)
+  );
 
   const handleBack = useCallback(() => {
     router.back();
@@ -185,7 +189,7 @@ export default function ConfessionThreadScreen() {
     submitting,
   ]);
 
-  const renderReplyItem = useCallback(({ item }: { item: Reply }) => {
+  const renderReplyItem = useCallback(({ item }: { item: ConfessionThreadReplyData }) => {
     const isOwnReply = item.userId === currentUserId;
 
     return (
@@ -212,28 +216,12 @@ export default function ConfessionThreadScreen() {
   const renderHeader = useCallback(() => {
     if (!confession) return null;
 
-    // Determine effective visibility mode (same logic as ConfessionCard)
-    const effectiveVisibility = confession.authorVisibility || (confession.isAnonymous ? 'anonymous' : 'open');
-    const isFullyAnonymous = effectiveVisibility === 'anonymous';
-    const isBlurPhoto = effectiveVisibility === 'blur_photo' || (effectiveVisibility as string) === 'blur';
-
-    // Build display name with age and gender (same logic as ConfessionCard)
-    const getDisplayName = (): string => {
-      if (isFullyAnonymous) return 'Anonymous';
-      if (!confession.authorName) return 'Someone';
-      let name = confession.authorName;
-      if (confession.authorAge) {
-        name += `, ${confession.authorAge}`;
-      }
-      if (confession.authorGender) {
-        const genderLabel = confession.authorGender === 'male' ? 'M'
-          : confession.authorGender === 'female' ? 'F'
-          : confession.authorGender === 'non_binary' ? 'NB'
-          : confession.authorGender === 'lesbian' ? 'F' : '';
-        if (genderLabel) name += ` ${genderLabel}`;
-      }
-      return name;
-    };
+    const identity = getConfessionIdentityView({
+      authorVisibility: confession.authorVisibility,
+      authorName: confession.authorName,
+      authorAge: confession.authorAge,
+      authorGender: confession.authorGender,
+    });
 
     return (
       <View style={styles.headerSection}>
@@ -241,16 +229,16 @@ export default function ConfessionThreadScreen() {
         <View style={styles.confessionCard}>
           {/* Author row - matches homepage card */}
           <View style={styles.authorRow}>
-            {isFullyAnonymous ? (
+            {identity.isFullyAnonymous ? (
               <View style={[styles.avatar, styles.avatarAnonymous]}>
                 <Ionicons name="eye-off" size={12} color={COLORS.textMuted} />
               </View>
-            ) : isBlurPhoto && confession.authorPhotoUrl ? (
+            ) : identity.isBlurPhoto && confession.authorPhotoUrl ? (
               <Image
                 source={{ uri: confession.authorPhotoUrl }}
                 style={styles.avatarImage}
                 contentFit="cover"
-                blurRadius={20}
+                blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
               />
             ) : confession.authorPhotoUrl ? (
               <Image
@@ -263,8 +251,8 @@ export default function ConfessionThreadScreen() {
                 <Ionicons name="person" size={12} color={COLORS.primary} />
               </View>
             )}
-            <Text style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>
-              {getDisplayName()}
+            <Text style={[styles.authorName, !identity.isFullyAnonymous && styles.authorNamePublic]}>
+              {identity.displayName}
             </Text>
             <Text style={styles.timeAgo}>{formatTimeAgo(confession.createdAt)}</Text>
           </View>
@@ -290,9 +278,11 @@ export default function ConfessionThreadScreen() {
         {/* Replies section header */}
         {replies.length > 0 && (
           <View style={styles.repliesSectionHeader}>
+            <View style={styles.repliesSectionLine} />
             <Text style={styles.repliesSectionTitle}>
               {replies.length} {replies.length === 1 ? 'Reply' : 'Replies'}
             </Text>
+            <View style={styles.repliesSectionLine} />
           </View>
         )}
       </View>
@@ -346,8 +336,8 @@ export default function ConfessionThreadScreen() {
           <View style={styles.errorIconWrap}>
             <Ionicons name="alert-circle-outline" size={48} color={COLORS.textMuted} />
           </View>
-          <Text style={styles.errorTitle}>Not Found</Text>
-          <Text style={styles.errorSubtitle}>This confession may have expired or been removed.</Text>
+          <Text style={styles.errorTitle}>Unavailable</Text>
+          <Text style={styles.errorSubtitle}>This confession is no longer available.</Text>
           <TouchableOpacity style={styles.errorButton} onPress={handleBack}>
             <Text style={styles.errorButtonText}>Go Back</Text>
           </TouchableOpacity>
@@ -467,7 +457,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   listContent: {
-    paddingTop: 8,
+    paddingTop: 12,
   },
 
   // ─────────────────────────────────────────────────────────────
@@ -477,14 +467,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
     backgroundColor: COLORS.backgroundDark,
   },
   headerTitle: {
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '700',
     color: COLORS.text,
   },
@@ -497,6 +487,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     gap: 12,
+    paddingHorizontal: 40,
   },
   loadingText: {
     fontSize: 16,
@@ -510,7 +501,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 40,
+    paddingHorizontal: 32,
   },
   errorIconWrap: {
     width: 80,
@@ -550,7 +541,8 @@ const styles = StyleSheet.create({
   // Header Section
   // ─────────────────────────────────────────────────────────────
   headerSection: {
-    paddingBottom: 4,
+    paddingTop: 2,
+    paddingBottom: 8,
   },
 
   // ─────────────────────────────────────────────────────────────
@@ -558,26 +550,29 @@ const styles = StyleSheet.create({
   // ─────────────────────────────────────────────────────────────
   confessionCard: {
     backgroundColor: COLORS.background,
-    borderRadius: 16,
-    paddingHorizontal: 18,
+    borderRadius: 18,
+    paddingHorizontal: 16,
     paddingTop: 16,
-    paddingBottom: 14,
+    paddingBottom: 15,
     marginHorizontal: 12,
-    marginVertical: 6,
+    marginTop: 8,
+    marginBottom: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(17, 24, 39, 0.06)',
     // Shadow for iOS - matches homepage
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
     // Elevation for Android
-    elevation: 3,
+    elevation: 2,
   },
   authorRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 10,
-    minHeight: 26,
+    marginBottom: 12,
+    minHeight: 28,
   },
   avatar: {
     width: AVATAR_SIZE,
@@ -611,19 +606,19 @@ const styles = StyleSheet.create({
   confessionText: {
     fontSize: 16,
     fontWeight: '500',
-    lineHeight: 24,
+    lineHeight: 25,
     color: COLORS.text,
-    marginBottom: 14,
+    marginBottom: 16,
     letterSpacing: 0.1,
   },
   statsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 16,
+    gap: 18,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
     paddingTop: 12,
-    marginTop: 6,
+    marginTop: 2,
   },
   statItem: {
     flexDirection: 'row',
@@ -644,15 +639,24 @@ const styles = StyleSheet.create({
   // Replies Section Header
   // ─────────────────────────────────────────────────────────────
   repliesSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
     paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingTop: 18,
+    paddingBottom: 12,
+  },
+  repliesSectionLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.border,
   },
   repliesSectionTitle: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '600',
     color: COLORS.textLight,
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    letterSpacing: 0.8,
   },
 
   // ─────────────────────────────────────────────────────────────
@@ -660,17 +664,19 @@ const styles = StyleSheet.create({
   // ─────────────────────────────────────────────────────────────
   replyCard: {
     backgroundColor: COLORS.background,
-    borderRadius: 16,
+    borderRadius: 18,
     paddingHorizontal: 16,
     paddingTop: 14,
-    paddingBottom: 12,
+    paddingBottom: 14,
     marginHorizontal: 12,
-    marginBottom: 8,
+    marginBottom: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(17, 24, 39, 0.05)',
     // Shadow for iOS
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
     // Elevation for Android
     elevation: 2,
   },
@@ -682,7 +688,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
+    marginBottom: 10,
   },
   replyAvatar: {
     width: moderateScale(18, 0.3),
@@ -710,7 +716,7 @@ const styles = StyleSheet.create({
   },
   replyText: {
     fontSize: 15,
-    lineHeight: 22,
+    lineHeight: 23,
     color: COLORS.text,
     paddingLeft: moderateScale(26, 0.3),
   },
@@ -721,8 +727,11 @@ const styles = StyleSheet.create({
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 40,
-    paddingTop: 56,
+    marginHorizontal: 16,
+    paddingHorizontal: 32,
+    paddingVertical: 30,
+    borderRadius: 20,
+    backgroundColor: COLORS.background,
   },
   emptyIconWrap: {
     width: 80,
@@ -731,10 +740,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(153,153,153,0.08)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 16,
+    marginBottom: 14,
   },
   emptyTitle: {
-    fontSize: 18,
+    fontSize: 19,
     fontWeight: '700',
     color: COLORS.text,
     marginBottom: 8,
@@ -754,14 +763,14 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.border,
     paddingHorizontal: 12,
-    paddingTop: 12,
+    paddingTop: 10,
   },
   ownerNoticeInner: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(153,153,153,0.08)',
-    borderRadius: 12,
-    padding: 12,
+    borderRadius: 14,
+    padding: 14,
     gap: 10,
   },
   ownerNoticeIcon: {
@@ -788,16 +797,21 @@ const styles = StyleSheet.create({
     borderTopColor: COLORS.border,
     paddingHorizontal: 12,
     paddingTop: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.03,
+    shadowRadius: 8,
+    elevation: 6,
   },
   composerRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 8,
+    gap: 10,
   },
   anonToggle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: COLORS.backgroundDark,
     alignItems: 'center',
     justifyContent: 'center',
@@ -808,17 +822,17 @@ const styles = StyleSheet.create({
   textInput: {
     flex: 1,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 20,
+    borderRadius: 18,
     paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingVertical: 12,
     fontSize: 14,
     color: COLORS.text,
-    maxHeight: 100,
+    maxHeight: 120,
   },
   sendButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
