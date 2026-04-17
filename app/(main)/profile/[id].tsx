@@ -16,7 +16,16 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS, PROFILE_PROMPT_QUESTIONS } from '@/lib/constants';
+import {
+  COLORS,
+  RELATIONSHIP_INTENTS,
+  ACTIVITY_FILTERS,
+  PROFILE_PROMPT_QUESTIONS,
+  KIDS_OPTIONS,
+  RELIGION_OPTIONS,
+  SMOKING_OPTIONS,
+  DRINKING_OPTIONS,
+} from '@/lib/constants';
 import { computeIntentCompat, getIntentCompatColor, getIntentMismatchWarning } from '@/lib/intentCompat';
 import { getTrustBadges } from '@/lib/trustBadges';
 // P0 UNIFIED PRESENCE: Reactive presence query for profile page
@@ -893,8 +902,15 @@ export default function ViewProfileScreen() {
 
         {/* Shared Interests - Both phases */}
         {!isConfessPreview && (() => {
-          const myActivities: string[] = isDemoMode ? getDemoCurrentUser().activities : [];
-          const shared = (profile.activities || []).filter((a: string) => myActivities.includes(a));
+          // P1-3: In live mode, pull current viewer's activities from the Convex
+          // currentViewer query (was previously hardcoded to [] outside demo mode,
+          // which meant "You both enjoy" never appeared for real users).
+          const viewerActivitiesRaw = isDemoMode
+            ? getDemoCurrentUser().activities
+            : (currentViewer as any)?.activities;
+          const myActivities: string[] = Array.isArray(viewerActivitiesRaw) ? viewerActivitiesRaw : [];
+          const candidateActivities: string[] = Array.isArray(profile.activities) ? profile.activities : [];
+          const shared = candidateActivities.filter((a: string) => myActivities.includes(a));
           if (shared.length === 0) return null;
           return (
             <View style={styles.section}>
@@ -931,7 +947,7 @@ export default function ViewProfileScreen() {
         )}
 
         {/* Interests - Both phases (Phase-2 shows above in different section) */}
-        {!isPhase2 && !isConfessPreview && profile.activities && profile.activities.length > 0 && (
+        {!isPhase2 && !isConfessPreview && Array.isArray(profile.activities) && profile.activities.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Interests</Text>
             <View style={styles.chips}>
@@ -950,38 +966,96 @@ export default function ViewProfileScreen() {
         )}
 
         {/* Details - Phase-1 ONLY (hidden in Phase-2) */}
-        {!isPhase2 && !isConfessPreview && (profile.height ||
-          profile.smoking ||
-          profile.drinking ||
-          profile.education ||
-          profile.jobTitle) && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Details</Text>
-            <View style={styles.details}>
-              {profile.height && (
-                <View style={styles.detailRow}>
-                  <Ionicons name="resize" size={20} color={COLORS.textLight} />
-                  <Text style={styles.detailText}>{profile.height} cm</Text>
-                </View>
-              )}
-              {profile.jobTitle && (
-                <View style={styles.detailRow}>
-                  <Ionicons name="briefcase" size={20} color={COLORS.textLight} />
-                  <Text style={styles.detailText}>
-                    {profile.jobTitle}
-                    {profile.company && ` at ${profile.company}`}
-                  </Text>
-                </View>
-              )}
-              {profile.education && (
-                <View style={styles.detailRow}>
-                  <Ionicons name="school" size={20} color={COLORS.textLight} />
-                  <Text style={styles.detailText}>{profile.education}</Text>
-                </View>
-              )}
+        {!isPhase2 && !isConfessPreview && (() => {
+          // P2-1: Extend Details section to include kids, religion, school,
+          // smoking, drinking (previously only height, job, education rendered).
+          const kidsLabel = profile.kids
+            ? KIDS_OPTIONS.find((o) => o.value === profile.kids)?.label ?? null
+            : null;
+          const religionLabel = profile.religion
+            ? RELIGION_OPTIONS.find((o) => o.value === profile.religion)?.label ?? null
+            : null;
+          const smokingLabel = profile.smoking
+            ? SMOKING_OPTIONS.find((o) => o.value === profile.smoking)?.label ?? null
+            : null;
+          const drinkingLabel = profile.drinking
+            ? DRINKING_OPTIONS.find((o) => o.value === profile.drinking)?.label ?? null
+            : null;
+          const schoolLabel = typeof profile.school === 'string' && profile.school.trim().length > 0
+            ? profile.school.trim()
+            : null;
+
+          const hasAny =
+            profile.height ||
+            profile.jobTitle ||
+            profile.education ||
+            kidsLabel ||
+            religionLabel ||
+            smokingLabel ||
+            drinkingLabel ||
+            schoolLabel;
+
+          if (!hasAny) return null;
+
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Details</Text>
+              <View style={styles.details}>
+                {profile.height && (
+                  <View style={styles.detailRow}>
+                    <Ionicons name="resize" size={20} color={COLORS.textLight} />
+                    <Text style={styles.detailText}>{profile.height} cm</Text>
+                  </View>
+                )}
+                {profile.jobTitle && (
+                  <View style={styles.detailRow}>
+                    <Ionicons name="briefcase" size={20} color={COLORS.textLight} />
+                    <Text style={styles.detailText}>
+                      {profile.jobTitle}
+                      {profile.company && ` at ${profile.company}`}
+                    </Text>
+                  </View>
+                )}
+                {profile.education && (
+                  <View style={styles.detailRow}>
+                    <Ionicons name="school" size={20} color={COLORS.textLight} />
+                    <Text style={styles.detailText}>{profile.education}</Text>
+                  </View>
+                )}
+                {schoolLabel && (
+                  <View style={styles.detailRow}>
+                    <Ionicons name="school-outline" size={20} color={COLORS.textLight} />
+                    <Text style={styles.detailText}>{schoolLabel}</Text>
+                  </View>
+                )}
+                {religionLabel && (
+                  <View style={styles.detailRow}>
+                    <Ionicons name="book-outline" size={20} color={COLORS.textLight} />
+                    <Text style={styles.detailText}>{religionLabel}</Text>
+                  </View>
+                )}
+                {kidsLabel && (
+                  <View style={styles.detailRow}>
+                    <Ionicons name="people-outline" size={20} color={COLORS.textLight} />
+                    <Text style={styles.detailText}>{kidsLabel}</Text>
+                  </View>
+                )}
+                {smokingLabel && (
+                  <View style={styles.detailRow}>
+                    <Ionicons name="flame-outline" size={20} color={COLORS.textLight} />
+                    <Text style={styles.detailText}>Smoking: {smokingLabel}</Text>
+                  </View>
+                )}
+                {drinkingLabel && (
+                  <View style={styles.detailRow}>
+                    <Ionicons name="wine-outline" size={20} color={COLORS.textLight} />
+                    <Text style={styles.detailText}>Drinking: {drinkingLabel}</Text>
+                  </View>
+                )}
+              </View>
             </View>
-          </View>
-        )}
+          );
+        })()}
 
         {/* Action Buttons placeholder removed - now sticky at bottom */}
       </View>

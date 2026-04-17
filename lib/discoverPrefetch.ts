@@ -38,6 +38,15 @@ let prefetchState: DiscoverPrefetchState | null = null;
 let prefetchUsed = false;
 
 /**
+ * P2-2: Maximum age of a prefetched bootstrap before it is considered stale.
+ * Prefetched data is only used as a first-frame bootstrap; the live useQuery
+ * subscription replaces it immediately. If the app was backgrounded for a
+ * while, or filters/blocks/swipes happened in other surfaces, the bootstrap
+ * may no longer reflect reality. Require consumption within this window.
+ */
+const PREFETCH_MAX_AGE_MS = 30 * 1000;
+
+/**
  * Start prefetching Discover profiles for a user.
  * Called during auth validation in index.tsx.
  *
@@ -127,6 +136,16 @@ export function getDiscoverPrefetch(userId: string, authVersion: number): Phase1
   if (prefetchState.userId !== userId) return null;
   if (prefetchState.authVersion !== authVersion) return null;
   if (prefetchState.result === null) return null;
+
+  // P2-2: Reject stale prefetch bootstraps. If the user returned from
+  // background, changed filters, or blocked/reported someone in another
+  // surface, an old prefetch can surface profiles that should be filtered.
+  // Let useQuery fetch fresh data instead of bootstrapping from stale cache.
+  if (Date.now() - prefetchState.startedAt > PREFETCH_MAX_AGE_MS) {
+    prefetchState = null;
+    prefetchUsed = false;
+    return null;
+  }
 
   return prefetchState.result;
 }

@@ -62,21 +62,30 @@ export type RenderableProfilePhoto = {
 export function getRenderableProfilePhotos(photos: unknown): RenderableProfilePhoto[] {
   if (!Array.isArray(photos)) return EMPTY_PHOTOS;
 
-  return photos.flatMap((photo: any) => {
+  // Dedupe by URL, preserving first-occurrence order. Prevents duplicate
+  // photos from rendering when the backend returns overlapping variants.
+  const seen = new Set<string>();
+  const result: RenderableProfilePhoto[] = [];
+
+  for (const photo of photos as any[]) {
+    let url = "";
+    let _id: string | undefined;
+    let id: string | undefined;
+
     if (typeof photo === "string") {
-      const url = photo.trim();
-      return url ? [{ url }] : [];
+      url = photo.trim();
+    } else {
+      url = typeof photo?.url === "string" ? photo.url.trim() : "";
+      _id = typeof photo?._id === "string" ? photo._id : undefined;
+      id = typeof photo?.id === "string" ? photo.id : undefined;
     }
 
-    const url = typeof photo?.url === "string" ? photo.url.trim() : "";
-    if (!url) return [];
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    result.push({ url, _id, id });
+  }
 
-    return [{
-      url,
-      _id: typeof photo?._id === "string" ? photo._id : undefined,
-      id: typeof photo?.id === "string" ? photo.id : undefined,
-    }];
-  });
+  return result.length > 0 ? result : EMPTY_PHOTOS;
 }
 
 /**

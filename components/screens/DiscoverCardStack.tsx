@@ -1867,6 +1867,31 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     });
   }, [nextHeroPhotoUrl]);
 
+  // P2-4: Prefetch the CURRENT card's remaining photos (beyond the hero) so
+  // that tapping into the full profile / swiping between photos does not
+  // stall on cold-cached images. The hero is already rendered by the card
+  // itself, so we skip index 0 and cap prefetch to a few photos to avoid
+  // wasteful bandwidth.
+  const currentFullPhotoUrls = useMemo(() => {
+    if (isPhase2 || !current) return EMPTY_STRING_ARRAY;
+    const urls = getRenderableProfilePhotos(current.photos)
+      .map((p) => p.url)
+      .filter((url) => typeof url === 'string' && url.length > 0)
+      .slice(1, 6); // Skip hero (index 0), cap at 5 additional photos
+    return urls.length > 0 ? urls : EMPTY_STRING_ARRAY;
+  }, [isPhase2, current]);
+
+  useEffect(() => {
+    if (currentFullPhotoUrls.length === 0) return;
+    for (const url of currentFullPhotoUrls) {
+      if (prefetchedNextHeroUrlsRef.current.has(url)) continue;
+      prefetchedNextHeroUrlsRef.current.add(url);
+      Image.prefetch(url).catch(() => {
+        prefetchedNextHeroUrlsRef.current.delete(url);
+      });
+    }
+  }, [currentFullPhotoUrls]);
+
   // Phase-2 only: Track profile views when card is shown
   const trackedProfileRef = useRef<string | null>(null);
   useEffect(() => {

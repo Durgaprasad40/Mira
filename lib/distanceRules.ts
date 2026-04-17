@@ -46,5 +46,9 @@ export function filterProfilesByDistance<T extends ProfileWithDistance>(
  */
 export function formatDiscoverDistanceKm(distance?: number | null): string | null {
   if (typeof distance !== "number" || !Number.isFinite(distance)) return null;
+  if (distance < 0) return null;
+  // Sub-1km: show "< 1 km away" instead of "0 km away" to avoid misleading UX
+  // when candidates are very close (Codex P2-3).
+  if (distance < 1) return "< 1 km away";
   return `${distance.toFixed(0)} km away`;
 }

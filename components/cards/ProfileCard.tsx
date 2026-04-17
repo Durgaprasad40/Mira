@@ -358,8 +358,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   // Phase-1 only: Get relationship intent labels
   const intentLabels = useMemo(() => {
-    if (isPhase2 || !relationshipIntent || relationshipIntent.length === 0) return [];
-    return relationshipIntent
+    if (isPhase2) return [];
+    // P1-5: Tolerate undefined / non-array relationshipIntent payloads.
+    const safeIntents: string[] = Array.isArray(relationshipIntent) ? relationshipIntent : [];
+    if (safeIntents.length === 0) return [];
+    return safeIntents
       .map(key => RELATIONSHIP_INTENTS.find(i => i.value === key))
       .filter(Boolean)
       .slice(0, 2) // Show max 2 on card
@@ -368,8 +371,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   // Phase-1 only: Get activity labels with emojis
   const activityItems = useMemo(() => {
-    if (isPhase2 || !activities || activities.length === 0) return [];
-    return activities
+    if (isPhase2) return [];
+    // P1-5: Guard against non-array activities payloads.
+    const safeActivities: string[] = Array.isArray(activities) ? activities : [];
+    if (safeActivities.length === 0) return [];
+    return safeActivities
       .map(key => ACTIVITY_FILTERS.find(a => a.value === key))
       .filter(Boolean)
       .slice(0, 5) // Show max 5 on reveal photo
@@ -378,8 +384,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   const phase1SupplementalTrustBadges = useMemo(() => {
     if (isPhase2 || !trustBadges || trustBadges.length === 0) return [];
+    // Exclude presence ('active'), identity-verified ('verified'), and the
+    // legacy "Face Verified" pill ('face_verified'). Product rule: only show a
+    // small verified tick next to name/age — never a separate Face Verified badge.
     return trustBadges
-      .filter((badge) => badge.key !== 'active' && badge.key !== 'verified')
+      .filter((badge) =>
+        badge.key !== 'active' &&
+        badge.key !== 'verified' &&
+        badge.key !== 'face_verified'
+      )
       .slice(0, 2);
   }, [isPhase2, trustBadges]);
 
@@ -513,8 +526,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const phase1SharedInterests = useMemo(() => {
     if (isPhase2 || !viewerProfile) return [];
 
-    const viewerActivities = viewerProfile.activities ?? [];
-    const candidateActivities = activities ?? [];
+    // P1-5: Harden against malformed payloads — activities may arrive as undefined
+    // or a non-array if the backend schema drifts.
+    const viewerActivities: string[] = Array.isArray(viewerProfile.activities)
+      ? viewerProfile.activities
+      : [];
+    const candidateActivities: string[] = Array.isArray(activities) ? activities : [];
 
     // Find activities that both have
     const sharedActivities = viewerActivities.filter(a => candidateActivities.includes(a));
@@ -609,8 +626,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // ═══════════════════════════════════════════════════════════════════════════
   const matchSignalCount = phase1SharedInterests.length;
   const hasSameRelationshipIntent = useMemo(() => {
-    if (isPhase2 || !viewerProfile?.relationshipIntent || !relationshipIntent) return false;
-    return viewerProfile.relationshipIntent.some(intent => relationshipIntent.includes(intent));
+    if (isPhase2) return false;
+    const viewerIntents = Array.isArray(viewerProfile?.relationshipIntent)
+      ? viewerProfile!.relationshipIntent
+      : [];
+    const candidateIntents = Array.isArray(relationshipIntent) ? relationshipIntent : [];
+    if (viewerIntents.length === 0 || candidateIntents.length === 0) return false;
+    return viewerIntents.some(intent => candidateIntents.includes(intent));
   }, [isPhase2, viewerProfile?.relationshipIntent, relationshipIntent]);
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2023,8 +2045,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                   />
                 </View>
               )}
-              {/* Verified tick: not on Photo 1 (spec: identity fields only on first slide) */}
-              {isVerified && photoIndex > 0 && (
+              {/* Verified tick: shown on ALL photos (including Photo 1) next to name/age.
+                  Product rule: small verified check beside identity, never a separate "Face Verified" badge. */}
+              {isVerified && (
                 <View style={styles.phase1VerifiedTick}>
                   <Ionicons name="checkmark-circle" size={18} color="#10B981" />
                 </View>
