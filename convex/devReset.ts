@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { action, mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 
 // ============================================================================
@@ -220,78 +220,182 @@ export const listAllUsers = query({
   },
 });
 
+// ----------------------------------------------------------------------------
+// Step 5 backfill: Convex-safe trust-counter recompute (single paginate per fn)
+// ----------------------------------------------------------------------------
+
+export const resetDiscoverTrustCountersPage = mutation({
+  args: {
+    token: v.string(),
+    cursor: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    validateAccess(args.token);
+
+    const page = await ctx.db
+      .query("users")
+      .paginate({ cursor: args.cursor ?? null, numItems: 250 });
+
+    let usersPatched = 0;
+    for (const u of page.page) {
+      await ctx.db.patch(u._id as Id<"users">, { reportCount: 0, blockCount: 0 });
+      usersPatched++;
+    }
+
+    return {
+      done: page.isDone,
+      continueCursor: page.continueCursor,
+      usersPatched,
+    };
+  },
+});
+
+export const backfillReportCountsPage = mutation({
+  args: {
+    token: v.string(),
+    cursor: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    validateAccess(args.token);
+
+    const page = await ctx.db
+      .query("reports")
+      .paginate({ cursor: args.cursor ?? null, numItems: 1000 });
+
+    let reportsProcessed = 0;
+    let usersPatched = 0;
+    for (const r of page.page) {
+      reportsProcessed++;
+      const targetId = r.reportedUserId as Id<"users">;
+      if (!targetId) continue;
+      const user = await ctx.db.get(targetId);
+      if (!user) continue; // user deleted
+      const prev = typeof user.reportCount === "number" ? user.reportCount : 0;
+      await ctx.db.patch(targetId, { reportCount: prev + 1 });
+      usersPatched++;
+    }
+
+    return {
+      done: page.isDone,
+      continueCursor: page.continueCursor,
+      reportsProcessed,
+      usersPatched,
+    };
+  },
+});
+
+export const backfillBlockCountsPage = mutation({
+  args: {
+    token: v.string(),
+    cursor: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    validateAccess(args.token);
+
+    const page = await ctx.db
+      .query("blocks")
+      .paginate({ cursor: args.cursor ?? null, numItems: 1000 });
+
+    let blocksProcessed = 0;
+    let usersPatched = 0;
+    for (const b of page.page) {
+      blocksProcessed++;
+      const targetId = b.blockedUserId as Id<"users">;
+      if (!targetId) continue;
+      const user = await ctx.db.get(targetId);
+      if (!user) continue; // user deleted
+      const prev = typeof user.blockCount === "number" ? user.blockCount : 0;
+      await ctx.db.patch(targetId, { blockCount: prev + 1 });
+      usersPatched++;
+    }
+
+    return {
+      done: page.isDone,
+      continueCursor: page.continueCursor,
+      blocksProcessed,
+      usersPatched,
+    };
+  },
+});
+
 /**
  * One-time backfill: recompute users.reportCount and users.blockCount.
  *
  * SECURITY: Requires DEV_RESET_ENABLED="true" AND valid DEV_RESET_TOKEN.
  *
- * Idempotent: recomputes totals from current reports/blocks tables and sets fields.
+ * Convex-safe: orchestrates page mutations (each performs a single paginate).
+ * Idempotent when run from start: resets counters to 0, then replays counts from reports/blocks.
  *
- * USAGE:
- * npx convex run devReset:backfillDiscoverTrustCounters '{"token":"YOUR_TOKEN"}'
+ * USAGE (run repeatedly until done === true):
+ * npx convex run --prod devReset:backfillDiscoverTrustCounters '{"token":"..."}'
  */
-export const backfillDiscoverTrustCounters = mutation({
-  args: { token: v.string() },
+export const backfillDiscoverTrustCounters = action({
+  args: {
+    token: v.string(),
+    phase: v.optional(v.union(v.literal("reset"), v.literal("reports"), v.literal("blocks"))),
+    cursor: v.optional(v.string()),
+  },
   handler: async (ctx, args) => {
     validateAccess(args.token);
 
-    const reportCounts = new Map<string, number>();
-    const blockCounts = new Map<string, number>();
+    const start = Date.now();
+    const MAX_MS = 20_000;
 
-    // Scan reports table: group by reportedUserId
-    let reportsCursor: string | null = null;
-    for (;;) {
-      const page = await ctx.db
-        .query("reports")
-        .paginate({ cursor: reportsCursor, numItems: 1000 });
-      for (const r of page.page) {
-        const k = r.reportedUserId as string;
-        if (!k) continue;
-        reportCounts.set(k, (reportCounts.get(k) || 0) + 1);
-      }
-      reportsCursor = page.continueCursor;
-      if (page.isDone) break;
-    }
+    let phase: "reset" | "reports" | "blocks" = (args.phase as any) ?? "reset";
+    let cursor: string | undefined = args.cursor;
 
-    // Scan blocks table: group by blockedUserId (only active blocks exist; unblock deletes rows)
-    let blocksCursor: string | null = null;
-    for (;;) {
-      const page = await ctx.db
-        .query("blocks")
-        .paginate({ cursor: blocksCursor, numItems: 1000 });
-      for (const b of page.page) {
-        const k = b.blockedUserId as string;
-        if (!k) continue;
-        blockCounts.set(k, (blockCounts.get(k) || 0) + 1);
-      }
-      blocksCursor = page.continueCursor;
-      if (page.isDone) break;
-    }
-
-    // Apply counts to every user (set to 0 when missing).
-    let usersCursor: string | null = null;
-    let usersPatched = 0;
-    for (;;) {
-      const page = await ctx.db
-        .query("users")
-        .paginate({ cursor: usersCursor, numItems: 250 });
-      for (const u of page.page) {
-        const id = u._id as Id<"users">;
-        const rc = reportCounts.get(id as string) || 0;
-        const bc = blockCounts.get(id as string) || 0;
-        await ctx.db.patch(id, { reportCount: rc, blockCount: bc });
-        usersPatched++;
-      }
-      usersCursor = page.continueCursor;
-      if (page.isDone) break;
-    }
-
-    return {
-      success: true,
-      usersPatched,
-      distinctReportedUsers: reportCounts.size,
-      distinctBlockedUsers: blockCounts.size,
+    const totals = {
+      usersReset: 0,
+      reportsProcessed: 0,
+      blocksProcessed: 0,
     };
+
+    while (Date.now() - start < MAX_MS) {
+      if (phase === "reset") {
+        const res: any = await ctx.runMutation("devReset:resetDiscoverTrustCountersPage" as any, {
+          token: args.token,
+          cursor,
+        });
+        totals.usersReset += res.usersPatched ?? 0;
+        if (res.done) {
+          phase = "reports";
+          cursor = undefined;
+        } else {
+          cursor = res.continueCursor;
+          continue;
+        }
+      }
+
+      if (phase === "reports") {
+        const res: any = await ctx.runMutation("devReset:backfillReportCountsPage" as any, {
+          token: args.token,
+          cursor,
+        });
+        totals.reportsProcessed += res.reportsProcessed ?? 0;
+        if (res.done) {
+          phase = "blocks";
+          cursor = undefined;
+        } else {
+          cursor = res.continueCursor;
+          continue;
+        }
+      }
+
+      if (phase === "blocks") {
+        const res: any = await ctx.runMutation("devReset:backfillBlockCountsPage" as any, {
+          token: args.token,
+          cursor,
+        });
+        totals.blocksProcessed += res.blocksProcessed ?? 0;
+        if (res.done) {
+          return { success: true, done: true, totals };
+        }
+        cursor = res.continueCursor;
+        continue;
+      }
+    }
+
+    return { success: true, done: false, next: { phase, cursor }, totals };
   },
 });
 
