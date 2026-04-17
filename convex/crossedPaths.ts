@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId } from './helpers';
+import { NEARBY_MAX_METERS, NEARBY_MIN_METERS } from '../lib/distanceRules';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
@@ -90,10 +91,6 @@ async function prefetchSwipes(
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-// Nearby map: 100m - 1km range (users closer than 100m are hidden for privacy)
-const NEARBY_MIN_METERS = 100;  // Minimum distance to show on map
-const NEARBY_MAX_METERS = 1000; // Maximum distance for nearby map
 
 // Crossed paths: 100m - 750m range
 const CROSSED_MIN_METERS = 100;  // Minimum distance to trigger crossing
@@ -184,6 +181,35 @@ function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>, now: 
   // 1-hour time bucket (milliseconds -> hours)
   const bucket = Math.floor(now / (60 * 60 * 1000));
   return `crossed_paths:${sorted[0]}:${sorted[1]}:${bucket}`;
+}
+
+function getStrongPrivacyOffset(userId: Id<'users'> | string): {
+  bearingRad: number;
+  distanceMeters: number;
+} {
+  const seed = simpleHash(String(userId));
+  return {
+    bearingRad: (seed % 360) * (Math.PI / 180),
+    distanceMeters: 200 + (seed % 201), // 200-400m stable offset
+  };
+}
+
+function getNearbyPrivacyProtectedCoords(
+  userId: Id<'users'> | string,
+  lat: number,
+  lng: number,
+  strongPrivacyMode: boolean,
+): { lat: number; lng: number } {
+  if (!strongPrivacyMode) {
+    return { lat, lng };
+  }
+
+  const { bearingRad, distanceMeters } = getStrongPrivacyOffset(userId);
+  return offsetCoords(lat, lng, distanceMeters, bearingRad);
+}
+
+function clampNearbyDistanceMeters(distanceMeters: number): number {
+  return Math.max(NEARBY_MIN_METERS, Math.min(NEARBY_MAX_METERS, distanceMeters));
 }
 
 // ---------------------------------------------------------------------------
@@ -479,9 +505,9 @@ export const recordLocation = mutation({
       return { success: true, nearbyCount: 0, skipped: true, reason: 'unverified' };
     }
 
-    // Skip crossed-path computation if current user has disabled crossed paths
+    // Legacy backfill: normalize old opt-out rows now that crossed paths is mandatory.
     if (currentUser.crossedPathsEnabled === false) {
-      return { success: true, nearbyCount: 0, skipped: true, reason: 'crossed_paths_disabled' };
+      await ctx.db.patch(userId, { crossedPathsEnabled: true });
     }
 
     // Get current user's age for filtering
@@ -498,6 +524,7 @@ export const recordLocation = mutation({
 
     // First pass: collect candidate user IDs that pass basic filters
     const candidateUserIds: string[] = [];
+    const crossedPathsBackfillIds: Id<'users'>[] = [];
     type UserWithDistance = (typeof verifiedUsers)[0] & { distance: number };
     const candidateUsers: UserWithDistance[] = [];
 
@@ -513,8 +540,9 @@ export const recordLocation = mutation({
       // Nearby visibility opt-out: Skip users who opted out of nearby
       if (user.nearbyEnabled === false) continue;
 
-      // Crossed paths opt-out: Skip users who disabled crossed paths
-      if (user.crossedPathsEnabled === false) continue;
+      if (user.crossedPathsEnabled === false) {
+        crossedPathsBackfillIds.push(user._id);
+      }
 
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
@@ -535,6 +563,14 @@ export const recordLocation = mutation({
         candidateUserIds.push(user._id as string);
         candidateUsers.push({ ...user, distance });
       }
+    }
+
+    if (crossedPathsBackfillIds.length > 0) {
+      await Promise.all(
+        crossedPathsBackfillIds.map((id) =>
+          ctx.db.patch(id, { crossedPathsEnabled: true })
+        )
+      );
     }
 
     // STABILITY FIX: Fetch photo counts only for candidates (not all users)
@@ -968,40 +1004,43 @@ export const getNearbyUsers = query({
 
       const locationAge = now - user.publishedAt!;
       const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
-      const distance = calculateDistanceMeters(
-        myLat,
-        myLng,
+      const strongPrivacyMode = user.strongPrivacyMode === true;
+      const protectedCoords = getNearbyPrivacyProtectedCoords(
+        user._id,
         user.publishedLat!,
         user.publishedLng!,
+        strongPrivacyMode,
       );
+      const privacySafeDistance = strongPrivacyMode
+        ? clampNearbyDistanceMeters(
+            calculateDistanceMeters(
+              myLat,
+              myLng,
+              protectedCoords.lat,
+              protectedCoords.lng,
+            ),
+          )
+        : calculateDistanceMeters(
+            myLat,
+            myLng,
+            user.publishedLat!,
+            user.publishedLng!,
+          );
 
-      sortDistanceByUserId.set(user._id as string, distance);
-
-      // Strong Privacy Mode: fuzz returned map coordinates only.
-      // IMPORTANT: Eligibility/filtering/sorting still use real publishedLat/publishedLng.
-      let returnLat = user.publishedLat!;
-      let returnLng = user.publishedLng!;
-      if (user.strongPrivacyMode === true) {
-        const seed = simpleHash(String(user._id));
-        const bearingRad = (seed % 360) * (Math.PI / 180);
-        const distanceMeters = 200 + (seed % 201); // 200–400m
-        const fuzzed = offsetCoords(returnLat, returnLng, distanceMeters, bearingRad);
-        returnLat = fuzzed.lat;
-        returnLng = fuzzed.lng;
-      }
+      sortDistanceByUserId.set(user._id as string, privacySafeDistance);
 
       results.push({
         id: user._id,
         name: user.name,
         age: calculateAge(user.dateOfBirth),
-        publishedLat: returnLat,
-        publishedLng: returnLng,
+        publishedLat: protectedCoords.lat,
+        publishedLng: protectedCoords.lng,
         publishedAt: user.publishedAt,
-        distance: user.hideDistance === true ? undefined : distance,
+        distance: user.hideDistance === true ? undefined : privacySafeDistance,
         freshness,
         photoUrl: user.primaryPhotoUrl ?? null,
         isVerified: user.isVerified,
-        strongPrivacyMode: user.strongPrivacyMode ?? false,
+        strongPrivacyMode,
         hideDistance: user.hideDistance ?? false,
       });
     }
@@ -1163,12 +1202,24 @@ export const getCrossPathHistory = query({
         whyExplanation = `You were in the same area within the last 24 hours. ${reasonText || 'You have something in common.'}`;
       }
 
-      // Area name: Only reveal after repeated crossings (privacy)
-      const displayAreaName = crossingCount > 1 ? entry.areaName : 'Nearby area';
+      const isOtherUserStrongPrivacy = otherUser.strongPrivacyMode === true;
+
+      // Area name: Only reveal after repeated crossings (privacy).
+      // Strong Privacy users always stay on the generic label.
+      const displayAreaName =
+        isOtherUserStrongPrivacy || crossingCount <= 1
+          ? 'Nearby area'
+          : entry.areaName;
 
       // Calculate distance range for display (Phase-2: no exact km)
       let distanceRange: string | null = null;
-      if (myLat && myLng && entry.crossedLatApprox && entry.crossedLngApprox) {
+      if (
+        !isOtherUserStrongPrivacy &&
+        myLat &&
+        myLng &&
+        entry.crossedLatApprox &&
+        entry.crossedLngApprox
+      ) {
         const distanceMeters = calculateDistanceMeters(
           myLat,
           myLng,
@@ -1177,7 +1228,7 @@ export const getCrossPathHistory = query({
         );
         distanceRange = formatDistanceRange(distanceMeters);
       }
-      if (otherUser.hideDistance === true) {
+      if (otherUser.hideDistance === true || isOtherUserStrongPrivacy) {
         distanceRange = null;
       }
 
@@ -1191,8 +1242,8 @@ export const getCrossPathHistory = query({
         otherUserAge: calculateAge(otherUser.dateOfBirth),
         areaName: displayAreaName,
         // Approximate crossing location (not current location — persists across travel)
-        crossedLatApprox: entry.crossedLatApprox,
-        crossedLngApprox: entry.crossedLngApprox,
+        crossedLatApprox: isOtherUserStrongPrivacy ? null : entry.crossedLatApprox,
+        crossedLngApprox: isOtherUserStrongPrivacy ? null : entry.crossedLngApprox,
         // Crossing count (for UI display)
         crossingCount,
         // Distance range (e.g., "4-5 km")
@@ -1515,9 +1566,17 @@ export const getCrossedPaths = query({
       // P0 FIX: Require valid primary photo URL
       if (!otherUser.primaryPhotoUrl) continue;
 
+      const isOtherUserStrongPrivacy = otherUser.strongPrivacyMode === true;
+
       // Calculate distance range if we have location data
       let distanceRange: string | null = null;
-      if (myLat && myLng && cp.crossingLatitude && cp.crossingLongitude) {
+      if (
+        !isOtherUserStrongPrivacy &&
+        myLat &&
+        myLng &&
+        cp.crossingLatitude &&
+        cp.crossingLongitude
+      ) {
         const distanceMeters = calculateDistanceMeters(
           myLat,
           myLng,
@@ -1526,7 +1585,7 @@ export const getCrossedPaths = query({
         );
         distanceRange = formatDistanceRange(distanceMeters);
       }
-      if (otherUser.hideDistance === true) {
+      if (otherUser.hideDistance === true || isOtherUserStrongPrivacy) {
         distanceRange = null;
       }
 

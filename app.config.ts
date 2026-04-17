@@ -1,5 +1,17 @@
 import { ExpoConfig, ConfigContext } from "expo/config";
 
+function requireEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(
+      `[app.config] Missing ${name}. Set a rotated, restricted Google Maps key via local env or EAS secrets before building Mira.`
+    );
+  }
+  return value;
+}
+
+const googleMapsApiKey = requireEnv("GOOGLE_MAPS_API_KEY");
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
   name: "Mira",
   slug: "mira-app",
@@ -26,12 +38,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         "Mira needs microphone access for video recording.",
       NSLocationWhenInUseUsageDescription:
         "Mira uses your location to show people near you.",
-      NSLocationAlwaysAndWhenInUseUsageDescription:
-        "Mira uses your location to find crossed paths with other users.",
       NSFaceIDUsageDescription: "Use Face ID for secure login.",
     },
     config: {
-      googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || "",
+      googleMapsApiKey,
     },
   },
   android: {
@@ -51,12 +61,11 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "READ_MEDIA_VIDEO",
       "ACCESS_FINE_LOCATION",
       "ACCESS_COARSE_LOCATION",
-      "ACCESS_BACKGROUND_LOCATION",
       "VIBRATE",
     ],
     config: {
       googleMaps: {
-        apiKey: process.env.GOOGLE_MAPS_API_KEY || "",
+        apiKey: googleMapsApiKey,
       },
     },
   },
@@ -94,8 +103,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     [
       "expo-location",
       {
-        locationAlwaysAndWhenInUsePermission:
-          "Allow Mira to use your location to find crossed paths and show people near you.",
+        locationWhenInUsePermission:
+          "Allow Mira to use your location to show people near you.",
       },
     ],
     "@react-native-community/datetimepicker",

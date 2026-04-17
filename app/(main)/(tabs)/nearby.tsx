@@ -18,7 +18,8 @@
  * - Marker tap → full profile view (Discover-style)
  * - Clustering: overlapping markers merge into single marker
  * - Cluster tap → zooms into cluster area
- * - Uses Discovery preferences for filtering (no separate Nearby filters)
+ * - Uses Discovery preferences for age/gender filtering only
+ * - Nearby map distance is fixed to 100m-1km (privacy-safe server limit)
  *
  * ============================================================================
  * IMPLEMENTATION NOTES
@@ -72,6 +73,10 @@ import { useLocationStore, useBestLocation } from '@/stores/locationStore';
 import { useAuthStore } from '@/stores/authStore';
 import { safePush } from '@/lib/safeRouter';
 import { COLORS } from '@/lib/constants';
+import {
+  isWithinNearbyMapDistanceMeters,
+  NEARBY_RANGE_LABEL,
+} from '@/lib/distanceRules';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
 import { log } from '@/utils/logger';
@@ -1067,6 +1072,12 @@ export default function NearbyScreen() {
           skippedCount++;
           return false;
         }
+        // Defense-in-depth: Nearby UI should never render users outside the
+        // same fixed range the backend enforces.
+        if (!isWithinNearbyMapDistanceMeters(user.distance)) {
+          skippedCount++;
+          return false;
+        }
         // Skip self (shouldn't happen but guard anyway)
         if (user.id === userId) {
           skippedCount++;
@@ -1270,7 +1281,13 @@ export default function NearbyScreen() {
     }
 
     log.info('[NEARBY]', 'marker tapped, opening profile', { id: user.id, name: user.name });
-    safePush(router, `/(main)/profile/${user.id}` as any, 'nearby->profile');
+    safePush(router, {
+      pathname: '/(main)/profile/[id]',
+      params: {
+        id: user.id,
+        source: 'nearby',
+      },
+    } as any, 'nearby->profile');
   }, [router]);
 
   // ---------------------------------------------------------------------------
@@ -1836,7 +1853,7 @@ export default function NearbyScreen() {
               <Ionicons name="people-outline" size={32} color={COLORS.textLight} />
               <Text style={styles.emptyTitle}>No one nearby right now</Text>
               <Text style={styles.emptySubtitle}>
-                Your map is live. We&apos;ll show people here as soon as someone nearby appears.
+                Your map is live. We&apos;ll show people {NEARBY_RANGE_LABEL} away as soon as someone nearby appears.
               </Text>
               <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenCrossedPaths}>
                 <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
@@ -1874,7 +1891,10 @@ export default function NearbyScreen() {
       {/* Header renders immediately (shell pattern) */}
       <View style={styles.header}>
         <View style={{ width: 44 }} />
-        <Text style={styles.headerTitle}>Nearby</Text>
+        <View style={styles.headerTitleGroup}>
+          <Text style={styles.headerTitle}>Nearby</Text>
+          <Text style={styles.headerSubtitle}>{NEARBY_RANGE_LABEL} away</Text>
+        </View>
         <View style={styles.headerIcons}>
           <TouchableOpacity
             onPress={handleOpenNearbySettings}
@@ -1933,6 +1953,15 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '600',
     color: COLORS.text,
+  },
+  headerTitleGroup: {
+    alignItems: 'center',
+  },
+  headerSubtitle: {
+    marginTop: 2,
+    fontSize: 11,
+    fontWeight: '500',
+    color: COLORS.textLight,
   },
   headerIcons: {
     flexDirection: 'row',

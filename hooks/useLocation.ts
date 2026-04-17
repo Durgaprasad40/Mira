@@ -56,12 +56,7 @@ export function useLocation() {
   };
 
   const requestBackgroundPermission = async (): Promise<boolean> => {
-    try {
-      const { status } = await Location.requestBackgroundPermissionsAsync();
-      return status === 'granted';
-    } catch (error) {
-      return false;
-    }
+    return false;
   };
 
   const getCurrentLocation = useCallback(async () => {
@@ -244,7 +239,7 @@ export function useLocation() {
   const watchLocation = useCallback(async (
     onUpdate: (location: { latitude: number; longitude: number }) => void
   ) => {
-    const { status } = await Location.getBackgroundPermissionsAsync();
+    const { status } = await Location.getForegroundPermissionsAsync();
     if (status !== 'granted') {
       return null;
     }

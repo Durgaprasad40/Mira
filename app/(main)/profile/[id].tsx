@@ -285,7 +285,11 @@ export default function ViewProfileScreen() {
   const convexPhase1Profile = useQuery(
     api.users.getUserById,
     !isDemoMode && !isPhase2 && userId && currentViewerId
-      ? { userId: userId as Id<'users'>, viewerId: currentViewerId }
+      ? {
+          userId: userId as Id<'users'>,
+          viewerId: currentViewerId,
+          source: normalizedSource,
+        } as any
       : 'skip'
   );
 

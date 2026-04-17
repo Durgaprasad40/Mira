@@ -31,11 +31,6 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#FF6B6B"
       },
-      "config": {
-        "googleMaps": {
-          "apiKey": "AIzaSyDfe8ugMWyttDV47k8tTvPnnQpazJmUllo"
-        }
-      },
       "edgeToEdgeEnabled": false,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
@@ -87,19 +82,7 @@
         }
       ],
       "@react-native-community/datetimepicker",
-      "expo-video",
-      [
-        "react-native-maps",
-        {
-          "apiKey": "AIzaSyDfe8ugMWyttDV47k8tTvPnnQpazJmUllo"
-        }
-      ],
-      [
-        "./plugins/withGoogleMapsApiKey.js",
-        {
-          "apiKey": "AIzaSyDfe8ugMWyttDV47k8tTvPnnQpazJmUllo"
-        }
-      ]
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true

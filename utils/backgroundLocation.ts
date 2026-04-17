@@ -1,20 +1,18 @@
 /**
  * Background Location Tracking
  *
- * Enables periodic background location updates so user location is refreshed
- * even when the Nearby tab is NOT opened.
+ * Legacy background location wrapper.
+ * Shipped Phase-1 Nearby is foreground-only.
  *
  * SAFETY:
  * - Does NOT modify existing feature logic
- * - Respects battery + OS limitations
- * - Reuses existing publishLocation mutation only
- * - Keeps interval >= 20 minutes
- * - Publish-only: does NOT run crossed-path detection in background
+ * - Any existing background task is stopped
+ * - Foreground Nearby continues to work normally
  *
- * HARDENING (v2):
- * - User-selectable location mode: 'foreground' or 'background'
- * - Graceful fallback if background permission denied
- * - Does NOT start background task unless user selected background mode
+ * SAFE SHIPPING PATH:
+ * - Do not request background permission
+ * - Do not start background updates
+ * - Normalize all callers to foreground mode
  */
 
 import * as TaskManager from 'expo-task-manager';
@@ -24,9 +22,6 @@ import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../convex/_generated/api';
 import { DEBUG_BACKGROUND_LOCATION } from '@/lib/debugFlags';
 import {
-  checkPermissionStatus,
-  getPreferredLocationMode,
-  getEffectiveLocationMode,
   setEffectiveLocationMode,
   requestLocationPermissions,
   clearLocationModeSettings,
@@ -36,11 +31,7 @@ import {
 // Re-export for convenience
 export { type NearbyLocationMode } from './nearbyLocationMode';
 export {
-  getPreferredLocationMode,
-  setPreferredLocationMode,
-  getEffectiveLocationMode,
   getLocationModeStatus,
-  checkPermissionStatus,
 } from './nearbyLocationMode';
 
 // Task name - must be unique and consistent
@@ -102,13 +93,7 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
 });
 
 /**
- * Start background location tracking.
- * Call this on app startup after user is authenticated.
- *
- * SAFE STARTUP BEHAVIOR:
- * - Never requests permissions
- * - Only starts the background task if the user already granted the required permissions
- * - If permissions are missing, defers prompting to Nearby / Nearby settings
+ * Normalize startup to foreground-only shipping behavior.
  *
  * @returns Object with success flag and effective mode
  */
@@ -118,55 +103,14 @@ export async function startBackgroundLocation(): Promise<{
   backgroundDenied?: boolean;
 }> {
   try {
-    const preferredMode = await getPreferredLocationMode();
-    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] mode:', preferredMode);
-
-    // Foreground mode should never request or start background updates.
-    if (preferredMode === 'foreground') {
-      await stopBackgroundLocation();
-      await setEffectiveLocationMode('foreground');
-      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] foreground mode');
-      return {
-        success: true,
-        effectiveMode: 'foreground',
-        backgroundDenied: false,
-      };
-    }
-
-    const permissions = await checkPermissionStatus();
-
-    // Startup behavior: do NOT request permission here.
-    // Nearby tab / Nearby settings own the permission prompt.
-    if (!permissions.foreground || !permissions.background) {
-      await setEffectiveLocationMode('foreground');
-      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) {
-        console.log('[BG] missing permission, skipping background start');
-      }
-      return {
-        success: false,
-        effectiveMode: 'foreground',
-        backgroundDenied: permissions.foreground && !permissions.background,
-      };
-    }
-
-    const isRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK);
-
-    if (!isRunning) {
-      await Location.startLocationUpdatesAsync(LOCATION_TASK, {
-        accuracy: Location.Accuracy.Balanced,
-        timeInterval: 20 * 60 * 1000,
-        distanceInterval: 200,
-        showsBackgroundLocationIndicator: false,
-        foregroundService: {
-          notificationTitle: 'Mira',
-          notificationBody: 'Updating Nearby visibility',
-          notificationColor: '#FF69B4',
-        },
-      });
-      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] started');
-    }
-
-    return { success: true, effectiveMode: 'background' };
+    await stopBackgroundLocation();
+    await setEffectiveLocationMode('foreground');
+    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] foreground-only shipping path');
+    return {
+      success: true,
+      effectiveMode: 'foreground',
+      backgroundDenied: false,
+    };
   } catch (e: any) {
     if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] start error:', e?.message || e);
     await setEffectiveLocationMode('foreground');
@@ -175,8 +119,7 @@ export async function startBackgroundLocation(): Promise<{
 }
 
 /**
- * Apply a user-selected location mode change from Nearby settings.
- * This is the ONLY path that may actively request permissions.
+ * Apply a foreground-only location permission request from Nearby settings.
  */
 export async function applyBackgroundLocationModeChange(): Promise<{
   success: boolean;
@@ -184,27 +127,21 @@ export async function applyBackgroundLocationModeChange(): Promise<{
   backgroundDenied?: boolean;
 }> {
   try {
-    const preferredMode = await getPreferredLocationMode();
-    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] apply mode:', preferredMode);
-
-    const permResult = await requestLocationPermissions(preferredMode);
+    const permResult = await requestLocationPermissions('foreground');
 
     if (!permResult.success) {
       if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] permission failed');
       return { success: false, effectiveMode: 'foreground' };
     }
 
-    if (permResult.effectiveMode === 'foreground') {
-      await stopBackgroundLocation();
-      if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] applied foreground mode');
-      return {
-        success: true,
-        effectiveMode: 'foreground',
-        backgroundDenied: permResult.backgroundDenied,
-      };
-    }
-
-    return await startBackgroundLocation();
+    await stopBackgroundLocation();
+    await setEffectiveLocationMode('foreground');
+    if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] applied foreground mode');
+    return {
+      success: true,
+      effectiveMode: 'foreground',
+      backgroundDenied: false,
+    };
   } catch (e: any) {
     if (__DEV__ && DEBUG_BACKGROUND_LOCATION) console.log('[BG] apply error:', e?.message || e);
     await setEffectiveLocationMode('foreground');
@@ -218,8 +155,8 @@ export async function applyBackgroundLocationModeChange(): Promise<{
  * @deprecated Use startBackgroundLocation() which returns detailed result
  */
 export async function startBackgroundLocationLegacy(): Promise<boolean> {
-  const result = await startBackgroundLocation();
-  return result.success && result.effectiveMode === 'background';
+  await startBackgroundLocation();
+  return false;
 }
 
 /**

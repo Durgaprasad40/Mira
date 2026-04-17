@@ -9,6 +9,7 @@ import {
   FRONTEND_RELATIONSHIP_INTENT_IDS,
   normalizeRelationshipIntentValues,
 } from "../lib/discoveryNaming";
+import { NEARBY_MAX_METERS, NEARBY_MIN_METERS } from "../lib/distanceRules";
 
 const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
 
@@ -51,6 +52,98 @@ function normalizeOnboardingDraft<T extends Record<string, any> | null | undefin
       relationshipIntent: normalizedRelationshipIntent,
     },
   } as T;
+}
+
+function simpleHash(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash << 5) - hash + value.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function offsetCoords(
+  lat: number,
+  lng: number,
+  distanceMeters: number,
+  bearingRad: number,
+): { lat: number; lng: number } {
+  const R = 6371000;
+  const latRad = toRad(lat);
+  const lngRad = toRad(lng);
+  const d = distanceMeters / R;
+
+  const newLat = Math.asin(
+    Math.sin(latRad) * Math.cos(d) +
+    Math.cos(latRad) * Math.sin(d) * Math.cos(bearingRad),
+  );
+  const newLng =
+    lngRad +
+    Math.atan2(
+      Math.sin(bearingRad) * Math.sin(d) * Math.cos(latRad),
+      Math.cos(d) - Math.sin(latRad) * Math.sin(newLat),
+    );
+
+  return {
+    lat: newLat * (180 / Math.PI),
+    lng: newLng * (180 / Math.PI),
+  };
+}
+
+function calculateDistanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): number {
+  const R = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function getNearbyPrivacyProtectedCoords(
+  userId: Id<"users"> | string,
+  lat: number,
+  lng: number,
+): { lat: number; lng: number } {
+  const seed = simpleHash(String(userId));
+  const bearingRad = (seed % 360) * (Math.PI / 180);
+  const distanceMeters = 200 + (seed % 201); // 200-400m stable offset
+  return offsetCoords(lat, lng, distanceMeters, bearingRad);
+}
+
+function getNearbyPrivacyDistanceKm(
+  viewerLat: number,
+  viewerLng: number,
+  targetUserId: Id<"users"> | string,
+  targetLat: number,
+  targetLng: number,
+): number {
+  const protectedCoords = getNearbyPrivacyProtectedCoords(
+    targetUserId,
+    targetLat,
+    targetLng,
+  );
+  const distanceMeters = calculateDistanceMeters(
+    viewerLat,
+    viewerLng,
+    protectedCoords.lat,
+    protectedCoords.lng,
+  );
+  const clampedMeters = Math.max(
+    NEARBY_MIN_METERS,
+    Math.min(NEARBY_MAX_METERS, distanceMeters),
+  );
+  return clampedMeters / 1000;
 }
 
 function sanitizeProfilePrompts(
@@ -236,6 +329,7 @@ export const getUserById = query({
   args: {
     userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
     viewerId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
+    source: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     // Map authUserId -> Convex Id<"users"> if needed
@@ -292,7 +386,28 @@ export const getUserById = query({
     // Calculate distance if both have location
     const viewer = await ctx.db.get(viewerId);
     let distance: number | undefined;
-    if (
+    const isNearbySource = args.source === "nearby";
+    if (isNearbySource && user.strongPrivacyMode === true) {
+      const targetLat = user.publishedLat ?? user.latitude;
+      const targetLng = user.publishedLng ?? user.longitude;
+      const viewerLat = viewer?.publishedLat ?? viewer?.latitude;
+      const viewerLng = viewer?.publishedLng ?? viewer?.longitude;
+
+      if (
+        typeof targetLat === "number" &&
+        typeof targetLng === "number" &&
+        typeof viewerLat === "number" &&
+        typeof viewerLng === "number"
+      ) {
+        distance = getNearbyPrivacyDistanceKm(
+          viewerLat,
+          viewerLng,
+          userId,
+          targetLat,
+          targetLng,
+        );
+      }
+    } else if (
       user.latitude &&
       user.longitude &&
       viewer?.latitude &&
@@ -741,7 +856,7 @@ export const toggleIncognito = mutation({
 // ---------------------------------------------------------------------------
 
 /**
- * Update nearby settings (visibility, privacy, crossed paths).
+ * Update nearby settings (visibility and privacy).
  * All fields are optional - only provided fields will be updated.
  * P1 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
  */
@@ -749,7 +864,6 @@ export const updateNearbySettings = mutation({
   args: {
     authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
     nearbyEnabled: v.optional(v.boolean()),
-    crossedPathsEnabled: v.optional(v.boolean()),
     hideDistance: v.optional(v.boolean()),
     strongPrivacyMode: v.optional(v.boolean()),
     incognitoMode: v.optional(v.boolean()),
