@@ -526,6 +526,9 @@ export default defineSchema({
     verificationReminderDismissedAt: v.optional(v.number()),
     verificationEnforcementLevel: v.optional(v.union(v.literal('none'), v.literal('gentle_reminder'), v.literal('reduced_reach'), v.literal('security_only'))),
     profileQualityScore: v.optional(v.number()),
+    // Trust counters (Step 5): denormalized counts for ranking penalties at scale
+    reportCount: v.optional(v.number()),
+    blockCount: v.optional(v.number()),
 
     // Admin access (set manually for authorized users)
     isAdmin: v.optional(v.boolean()),
@@ -594,6 +597,7 @@ export default defineSchema({
     firstOpenedAt: v.optional(v.number()),
   })
     .index('by_from_user', ['fromUserId'])
+    .index('by_from_user_createdAt', ['fromUserId', 'createdAt'])
     .index('by_to_user', ['toUserId'])
     .index('by_from_to', ['fromUserId', 'toUserId'])
     .index('by_to_from', ['toUserId', 'fromUserId']),

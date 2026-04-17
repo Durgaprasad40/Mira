@@ -1115,6 +1115,13 @@ export const blockUser = mutation({
       createdAt: Date.now(),
     });
 
+    // Step 5: denormalized trust counter for Discover ranking (scale-safe)
+    const blockedUser = await ctx.db.get(blockedUserId);
+    if (blockedUser) {
+      const prev = typeof blockedUser.blockCount === 'number' ? blockedUser.blockCount : 0;
+      await ctx.db.patch(blockedUserId, { blockCount: prev + 1 });
+    }
+
     return { success: true };
   },
 });
@@ -1144,6 +1151,13 @@ export const unblockUser = mutation({
 
     if (block) {
       await ctx.db.delete(block._id);
+
+      // Step 5: keep denormalized trust counter in sync (best-effort)
+      const blockedUser = await ctx.db.get(blockedUserId);
+      if (blockedUser) {
+        const prev = typeof blockedUser.blockCount === 'number' ? blockedUser.blockCount : 0;
+        await ctx.db.patch(blockedUserId, { blockCount: Math.max(0, prev - 1) });
+      }
     }
 
     return { success: true };
@@ -1219,6 +1233,13 @@ export const reportUser = mutation({
       status: "pending",
       createdAt: now,
     });
+
+    // Step 5: denormalized trust counter for Discover ranking (scale-safe)
+    const reportedUser = await ctx.db.get(reportedUserId);
+    if (reportedUser) {
+      const prev = typeof reportedUser.reportCount === 'number' ? reportedUser.reportCount : 0;
+      await ctx.db.patch(reportedUserId, { reportCount: prev + 1 });
+    }
 
     // Automated moderation signal (non-destructive):
     // Flag users who receive repeated reports within a recent window.

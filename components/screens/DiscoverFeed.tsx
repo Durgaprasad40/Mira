@@ -584,7 +584,11 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
     }
 
     try {
-      await rewindMutation({ authUserId: userId as string });
+      if (!token) {
+        Alert.alert("Error", "Session expired. Please log in again.");
+        return;
+      }
+      await rewindMutation({ token });
       if (currentIndex > 0) {
         setCurrentIndex(currentIndex - 1);
       }
@@ -592,7 +596,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
     } catch (error: any) {
       Alert.alert("Error", error.message || "Failed to rewind");
     }
-  }, [userId, currentIndex, rewindMutation]);
+  }, [token, currentIndex, rewindMutation]);
 
   // Loading state
   if (!isDemoMode && !convexProfiles) {

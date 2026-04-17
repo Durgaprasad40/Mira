@@ -105,6 +105,45 @@ function isUserPaused(user: { isDiscoveryPaused?: boolean; discoveryPausedUntil?
   );
 }
 
+function orientationAllowsCandidateGender(args: {
+  viewerGender: string | undefined;
+  viewerOrientation: string | undefined;
+  candidateGender: string | undefined;
+}): boolean {
+  const { viewerGender, viewerOrientation, candidateGender } = args;
+
+  if (!viewerOrientation || viewerOrientation === 'prefer_not_to_say') return true;
+  if (candidateGender !== 'male' && candidateGender !== 'female') return true;
+  if (viewerGender !== 'male' && viewerGender !== 'female') return true;
+
+  if (viewerOrientation === 'bisexual') {
+    return candidateGender === 'male' || candidateGender === 'female';
+  }
+
+  if (viewerOrientation === 'straight') {
+    return viewerGender === 'male' ? candidateGender === 'female' : candidateGender === 'male';
+  }
+
+  if (viewerOrientation === 'gay') {
+    return candidateGender === viewerGender;
+  }
+
+  if (viewerOrientation === 'lesbian') {
+    return viewerGender === 'female' && candidateGender === 'female';
+  }
+
+  return true;
+}
+
+function hashString32(input: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
 function isEffectivelyHiddenFromDiscover(user: {
   hideFromDiscover?: boolean;
   isDiscoveryPaused?: boolean;
@@ -350,8 +389,6 @@ export const getDiscoverProfiles = query({
       blocksAgainstMe,
       likesToMe,
       myReports,
-      allReports,
-      allBlocks,
       myConversationParticipations,
     ] = await Promise.all([
       // All my swipes (likes/passes)
@@ -392,14 +429,6 @@ export const getDiscoverProfiles = query({
         .query('reports')
         .withIndex('by_reporter', (q) => q.eq('reporterId', userId))
         .collect(),
-      // All reports (for aggregate trust penalty - limited query)
-      ctx.db
-        .query('reports')
-        .take(1000),
-      // All blocks (for aggregate trust penalty - limited query)
-      ctx.db
-        .query('blocks')
-        .take(2000),
       // CONVERSATION PARTNER EXCLUSION: All my conversation participations
       // Users with existing message threads must not reappear in Discover
       ctx.db
@@ -450,24 +479,73 @@ export const getDiscoverProfiles = query({
       }
     }
 
-    // TRUST SIGNALS: Aggregate report counts per user (soft penalty)
+    // TRUST SIGNALS (Step 5): aggregate trust counts now come from denormalized per-user counters.
+    // This avoids truncated global scans (reports.take/blocks.take) which fail at scale.
     const aggregateReportCounts = new Map<string, number>();
-    for (const report of allReports) {
-      const targetId = report.reportedUserId as string;
-      aggregateReportCounts.set(targetId, (aggregateReportCounts.get(targetId) || 0) + 1);
-    }
-
-    // TRUST SIGNALS: Aggregate block counts per user (soft penalty)
     const aggregateBlockCounts = new Map<string, number>();
-    for (const block of allBlocks) {
-      const targetId = block.blockedUserId as string;
-      aggregateBlockCounts.set(targetId, (aggregateBlockCounts.get(targetId) || 0) + 1);
-    }
 
-    // PERF #8: Use take() with buffer to avoid loading entire user table
-    // Fetch more than needed since many will be filtered out
-    const fetchLimit = (offset + limit) * 10; // 10x buffer for filtering
-    const allUsers = await ctx.db.query('users').take(fetchLimit);
+    // Candidate supply (Step 4): avoid prefix-only users table scans.
+    // Use indexed gender buckets with deterministic rotation so later users become reachable.
+    const desiredGenders = Array.from(
+      new Set((currentUser.lookingFor ?? []).filter((g) => typeof g === 'string' && g.length > 0))
+    );
+
+    const USER_PAGE_SIZE = 220;
+    const MAX_PAGES_PER_GENDER = 6; // hard bound
+    const MAX_SKIP_PAGES = 12; // deterministic rotation window
+
+    const fetchGenderBucket = async (gender: string) => {
+      let cursor: string | null = null;
+      const skipPages =
+        desiredGenders.length > 0
+          ? hashString32(`${userId}\0${discoverDayNumber}\0${gender}`) % MAX_SKIP_PAGES
+          : 0;
+
+      for (let i = 0; i < skipPages; i++) {
+        const page = await ctx.db
+          .query('users')
+          .withIndex('by_gender', (q) => q.eq('gender', gender as any))
+          .paginate({ cursor, numItems: USER_PAGE_SIZE });
+        cursor = page.continueCursor;
+        if (page.isDone) break;
+      }
+
+      const users: any[] = [];
+      for (let i = 0; i < MAX_PAGES_PER_GENDER; i++) {
+        const page = await ctx.db
+          .query('users')
+          .withIndex('by_gender', (q) => q.eq('gender', gender as any))
+          .paginate({ cursor, numItems: USER_PAGE_SIZE });
+        users.push(...page.page);
+        cursor = page.continueCursor;
+        if (page.isDone) break;
+      }
+      return users;
+    };
+
+    const fetchedBuckets = await Promise.all(
+      (desiredGenders.length > 0 ? desiredGenders : ['male', 'female']).slice(0, 3).map(fetchGenderBucket)
+    );
+
+    const allUsersMap = new Map<string, any>();
+    for (const bucket of fetchedBuckets) {
+      for (const u of bucket) {
+        const id = u?._id as string | undefined;
+        if (!id) continue;
+        if (!allUsersMap.has(id)) allUsersMap.set(id, u);
+      }
+    }
+    const allUsers = Array.from(allUsersMap.values());
+
+    // Populate aggregate trust maps from denormalized counters (fallback to 0 for legacy rows).
+    for (const u of allUsers) {
+      const id = u?._id as string | undefined;
+      if (!id) continue;
+      const rc = typeof u.reportCount === 'number' ? u.reportCount : 0;
+      const bc = typeof u.blockCount === 'number' ? u.blockCount : 0;
+      if (rc > 0) aggregateReportCounts.set(id, rc);
+      if (bc > 0) aggregateBlockCounts.set(id, bc);
+    }
 
     // First pass: filter candidates without photo queries
     const filteredCandidates: { user: typeof allUsers[number]; distance?: number }[] = [];
@@ -489,6 +567,18 @@ export const getDiscoverProfiles = query({
       if (user.incognitoMode) {
         const canSee = currentUser.gender === 'female' || currentUser.subscriptionTier === 'premium';
         if (!canSee) continue;
+      }
+
+      // Orientation preference match (viewer → candidate)
+      if (
+        !orientationAllowsCandidateGender({
+          viewerGender: currentUser.gender,
+          viewerOrientation: currentUser.orientation ?? undefined,
+          candidateGender: user.gender,
+        })
+      ) {
+        prefFailCount++;
+        continue;
       }
 
       // Gender preference match (both ways)
@@ -709,7 +799,8 @@ export const getDiscoverProfiles = query({
       }));
 
       // Rank enough candidates to honor offset + limit (pagination window)
-      const rankWindow = Math.min(offset + limit, 500);
+      const MAX_RANK_WINDOW = 2000; // bounded expansion to reduce "unreachable beyond cap" failure mode
+      const rankWindow = Math.min(offset + limit, MAX_RANK_WINDOW, candidateProfiles.length);
 
       // Apply new ranking with exploration mix
       const { rankedCandidates, exhausted } = rankDiscoverCandidates(

@@ -220,6 +220,81 @@ export const listAllUsers = query({
   },
 });
 
+/**
+ * One-time backfill: recompute users.reportCount and users.blockCount.
+ *
+ * SECURITY: Requires DEV_RESET_ENABLED="true" AND valid DEV_RESET_TOKEN.
+ *
+ * Idempotent: recomputes totals from current reports/blocks tables and sets fields.
+ *
+ * USAGE:
+ * npx convex run devReset:backfillDiscoverTrustCounters '{"token":"YOUR_TOKEN"}'
+ */
+export const backfillDiscoverTrustCounters = mutation({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    validateAccess(args.token);
+
+    const reportCounts = new Map<string, number>();
+    const blockCounts = new Map<string, number>();
+
+    // Scan reports table: group by reportedUserId
+    let reportsCursor: string | null = null;
+    for (;;) {
+      const page = await ctx.db
+        .query("reports")
+        .paginate({ cursor: reportsCursor, numItems: 1000 });
+      for (const r of page.page) {
+        const k = r.reportedUserId as string;
+        if (!k) continue;
+        reportCounts.set(k, (reportCounts.get(k) || 0) + 1);
+      }
+      reportsCursor = page.continueCursor;
+      if (page.isDone) break;
+    }
+
+    // Scan blocks table: group by blockedUserId (only active blocks exist; unblock deletes rows)
+    let blocksCursor: string | null = null;
+    for (;;) {
+      const page = await ctx.db
+        .query("blocks")
+        .paginate({ cursor: blocksCursor, numItems: 1000 });
+      for (const b of page.page) {
+        const k = b.blockedUserId as string;
+        if (!k) continue;
+        blockCounts.set(k, (blockCounts.get(k) || 0) + 1);
+      }
+      blocksCursor = page.continueCursor;
+      if (page.isDone) break;
+    }
+
+    // Apply counts to every user (set to 0 when missing).
+    let usersCursor: string | null = null;
+    let usersPatched = 0;
+    for (;;) {
+      const page = await ctx.db
+        .query("users")
+        .paginate({ cursor: usersCursor, numItems: 250 });
+      for (const u of page.page) {
+        const id = u._id as Id<"users">;
+        const rc = reportCounts.get(id as string) || 0;
+        const bc = blockCounts.get(id as string) || 0;
+        await ctx.db.patch(id, { reportCount: rc, blockCount: bc });
+        usersPatched++;
+      }
+      usersCursor = page.continueCursor;
+      if (page.isDone) break;
+    }
+
+    return {
+      success: true,
+      usersPatched,
+      distinctReportedUsers: reportCounts.size,
+      distinctBlockedUsers: blockCounts.size,
+    };
+  },
+});
+
 // ============================================================================
 // FULL DATABASE WIPE (Dev/Test Only)
 // Deletes ALL user-generated data while preserving schema and system config.

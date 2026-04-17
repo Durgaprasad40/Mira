@@ -173,10 +173,9 @@ export default function MessagesScreen() {
         setActiveView('likes');
         // LIFECYCLE: Mark likes as opened when arriving via deep link
         // FOCUS-GUARD: Only call once per session to avoid repeated API calls
-        // FIX: Backend expects { authUserId }, not { token }
-        if (!isDemoMode && userId && !hasMarkedLikesOpenedRef.current) {
+        if (!isDemoMode && token && !hasMarkedLikesOpenedRef.current) {
           hasMarkedLikesOpenedRef.current = true;
-          markLikesOpened({ authUserId: userId }).catch((err) => {
+          markLikesOpened({ token }).catch((err) => {
             // Reset guard on failure so retry is possible
             hasMarkedLikesOpenedRef.current = false;
             log.warn('[MESSAGES]', 'markLikesOpened (deeplink) failed', { error: err });
@@ -916,9 +915,8 @@ export default function MessagesScreen() {
                   likesListLayoutReady.current = false;
                   setActiveView('likes');
                   // LIFECYCLE: Mark likes as opened (starts 24h expiry timer)
-                  // FIX: Backend expects { authUserId }, not { token }
-                  if (!isDemoMode && userId) {
-                    markLikesOpened({ authUserId: userId }).catch((err) => {
+                  if (!isDemoMode && token) {
+                    markLikesOpened({ token }).catch((err) => {
                       log.warn('[MESSAGES]', 'markLikesOpened failed', { error: err });
                     });
                   }

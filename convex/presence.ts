@@ -6,7 +6,7 @@
  */
 import { mutation } from "./_generated/server";
 import { v } from "convex/values";
-import { resolveUserIdByAuthId } from "./helpers";
+import { validateSessionToken } from "./helpers";
 
 /**
  * Mark user as active (foreground heartbeat).
@@ -19,8 +19,8 @@ export const markActive = mutation({
   handler: async (ctx, args) => {
     const { token } = args;
 
-    // Resolve token to userId
-    const userId = await resolveUserIdByAuthId(ctx, token);
+    // Resolve session token to userId
+    const userId = await validateSessionToken(ctx, token);
     if (!userId) {
       // Silent failure - don't throw, just return
       return { success: false };
@@ -47,8 +47,8 @@ export const markBackground = mutation({
   handler: async (ctx, args) => {
     const { token } = args;
 
-    // Resolve token to userId
-    const userId = await resolveUserIdByAuthId(ctx, token);
+    // Resolve session token to userId
+    const userId = await validateSessionToken(ctx, token);
     if (!userId) {
       // Silent failure - don't throw, just return
       return { success: false };

@@ -16,6 +16,7 @@ import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
+import { usePrivacyStore } from '@/stores/privacyStore';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -66,18 +67,19 @@ export default function SettingsScreen() {
     return () => clearTimeout(t);
   }, []);
 
-  const toggleIncognito = useMutation(api.users.toggleIncognito);
   const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
   const togglePhotoBlurMut = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
   const toggleShowLastSeenMut = useMutation(api.users.toggleShowLastSeen);
+  const updatePrivacySettings = useMutation(api.users.updatePrivacySettings);
 
   // P1-016 FIX: Track if settings have been hydrated from currentUser to prevent flicker
   const [settingsHydrated, setSettingsHydrated] = useState(false);
-  const [incognitoEnabled, setIncognitoEnabled] = useState(false);
   const [pauseEnabled, setPauseEnabled] = useState(false);
   const [showLastSeenEnabled, setShowLastSeenEnabled] = useState(true);
   const [blurEnabled, setBlurEnabled] = useState(false);
   const [showBlurNotice, setShowBlurNotice] = useState(false);
+  const hideFromDiscover = usePrivacyStore((s) => s.hideFromDiscover);
+  const setHideFromDiscover = usePrivacyStore((s) => s.setHideFromDiscover);
 
   // ── Hidden Dev Panel (7 taps on title) ──
   const [showDevPanel, setShowDevPanel] = useState(false);
@@ -139,7 +141,6 @@ export default function SettingsScreen() {
 
   React.useEffect(() => {
     if (currentUser) {
-      setIncognitoEnabled(currentUser.incognitoMode || false);
       setShowLastSeenEnabled(currentUser.showLastSeen !== false);
       // Check if pause is active and not expired
       const isPaused =
@@ -148,10 +149,11 @@ export default function SettingsScreen() {
         currentUser.discoveryPausedUntil > Date.now();
       setPauseEnabled(isPaused);
       setBlurEnabled(currentUser.photoBlurred === true);
+      setHideFromDiscover(currentUser.hideFromDiscover === true);
       // P1-016 FIX: Mark settings as hydrated to prevent flicker
       setSettingsHydrated(true);
     }
-  }, [currentUser]);
+  }, [currentUser, setHideFromDiscover]);
 
 
   const handleTogglePause = async (paused: boolean) => {
@@ -215,19 +217,6 @@ export default function SettingsScreen() {
     }
   };
 
-  const handleToggleIncognito = async (enabled: boolean) => {
-    if (!userId) return;
-
-    try {
-      // FIX: Backend expects { authUserId }, not { token }
-      await toggleIncognito({ authUserId: userId, enabled });
-      setIncognitoEnabled(enabled);
-    } catch {
-      Toast.show('Couldn\u2019t update this setting. Please try again.');
-      setIncognitoEnabled(!enabled);
-    }
-  };
-
   if (!currentUser) {
     return (
       <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -242,8 +231,21 @@ export default function SettingsScreen() {
     );
   }
 
-  const canUseIncognito =
-    currentUser.gender === 'female' || currentUser.subscriptionTier === 'premium';
+  const handleToggleHideFromDiscover = async (enabled: boolean) => {
+    if (isDemoMode) {
+      setHideFromDiscover(enabled);
+      return;
+    }
+    if (!userId) return;
+
+    try {
+      await updatePrivacySettings({ authUserId: userId, hideFromDiscover: enabled });
+      setHideFromDiscover(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update this setting. Please try again.');
+      setHideFromDiscover(!enabled);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -314,13 +316,11 @@ export default function SettingsScreen() {
             <Text style={styles.settingTitle}>Hide from Discovery</Text>
             <Text style={styles.settingDescription}>
               Browse profiles without appearing in others' feeds
-              {!canUseIncognito && ' (Premium required)'}
             </Text>
           </View>
           <Switch
-            value={incognitoEnabled}
-            onValueChange={handleToggleIncognito}
-            disabled={!canUseIncognito}
+            value={hideFromDiscover}
+            onValueChange={handleToggleHideFromDiscover}
             trackColor={{ false: COLORS.border, true: COLORS.primary }}
             thumbColor={COLORS.white}
           />

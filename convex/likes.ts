@@ -3,6 +3,15 @@ import { mutation, query, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 
+const DAILY_LIKE_LIMIT_FREE = 25;
+const DAILY_STANDOUT_LIMIT_FREE = 2; // stand-out == super_like in this codebase
+
+function getUtcDayStartMs(nowMs: number): number {
+  const d = new Date(nowMs);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
 // D1-REPAIR: Helper to check if either user has blocked the other
 // Returns true if blocked (should prevent messaging)
 async function isBlockedBidirectional(
@@ -188,6 +197,37 @@ export const swipe = mutation({
     if (action === 'like' || action === 'super_like') {
       if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
         throw new Error('Cannot like this user');
+      }
+    }
+
+    // P0-1: Server-side daily like / stand-out enforcement (backend is source of truth)
+    // Policy alignment: premium and female accounts are treated as unlimited; basic remains subject to limits.
+    // Enforcement is placed AFTER duplicate + block checks so those errors take precedence.
+    const isUnlimitedByPolicy =
+      fromUser.gender === 'female' ||
+      fromUser.subscriptionTier === 'premium';
+
+    if (!isUnlimitedByPolicy && (action === 'like' || action === 'super_like')) {
+      const dayStart = getUtcDayStartMs(now);
+      const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+
+      const todaysSwipes = await ctx.db
+        .query('likes')
+        .withIndex('by_from_user_createdAt', (q) =>
+          q.eq('fromUserId', fromUserId).gte('createdAt', dayStart).lt('createdAt', dayEnd)
+        )
+        .collect();
+
+      if (action === 'like') {
+        const likesToday = todaysSwipes.filter((s) => s.action === 'like').length;
+        if (likesToday >= DAILY_LIKE_LIMIT_FREE) {
+          throw new Error('Daily like limit reached');
+        }
+      } else {
+        const standoutsToday = todaysSwipes.filter((s) => s.action === 'super_like').length;
+        if (standoutsToday >= DAILY_STANDOUT_LIMIT_FREE) {
+          throw new Error('Daily stand-out limit reached');
+        }
       }
     }
 
@@ -521,18 +561,14 @@ export const swipe = mutation({
 // Rewind last swipe
 export const rewind = mutation({
   args: {
-    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
+    const { token } = args;
 
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, token);
     if (!userId) {
-      throw new Error('Unauthorized: user not found');
+      throw new Error('Unauthorized: invalid or expired session');
     }
 
     const user = await ctx.db.get(userId);
@@ -924,16 +960,15 @@ export const resetSwipeBetweenUsers = mutation({
 // =============================================================================
 export const markLikesOpened = mutation({
   args: {
-    authUserId: v.string(), // FIX: Use authUserId instead of token
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
+    const { token } = args;
     const now = Date.now();
 
-    // FIX: Use resolveUserIdByAuthId instead of validateSessionToken
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, token);
     if (!userId) {
-      throw new Error('Unauthorized: user not found');
+      throw new Error('Unauthorized: invalid or expired session');
     }
 
     // Get all unopened likes for this user
