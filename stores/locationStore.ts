@@ -252,11 +252,28 @@ export const useLocationStore = create<LocationState>((set, get) => ({
   // Called on app boot for quick map display without blocking startup
   fetchLastKnownOnly: async () => {
     try {
-      // Check permission first (don't request, just check)
-      const { status } = await Location.getForegroundPermissionsAsync();
-      if (status !== 'granted') {
+      const servicesEnabled = await Location.hasServicesEnabledAsync();
+      if (!servicesEnabled) {
+        set({ permissionStatus: 'services_disabled' });
         return;
       }
+
+      // Check permission first (don't request, just check)
+      const permission = await Location.getForegroundPermissionsAsync();
+      const { status } = permission;
+
+      if (status !== 'granted') {
+        if (status === 'denied') {
+          const isRestricted = permission.ios?.scope === 'none';
+          set({
+            permissionStatus: isRestricted ? 'restricted' : 'denied',
+          });
+        } else {
+          set({ permissionStatus: 'unknown' });
+        }
+        return;
+      }
+
       set({ permissionStatus: 'granted' });
 
       // Get cached/last known position (very fast, no GPS wait)

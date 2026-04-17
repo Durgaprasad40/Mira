@@ -54,6 +54,7 @@ export function usePresenceAndLocation() {
   const markBackgroundMutation = useMutation(api.presence.markBackground);
   const updateLocationMutation = useMutation(api.users.updateLocation);
 
+  const fetchLastKnownOnly = useLocationStore((s) => s.fetchLastKnownOnly);
   const getBestLocation = useLocationStore((s) => s.getBestLocation);
   const refreshLocation = useLocationStore((s) => s.refreshLocation);
   const permissionStatus = useLocationStore((s) => s.permissionStatus);
@@ -64,6 +65,17 @@ export function usePresenceAndLocation() {
   const lastSyncedCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastHeartbeatRef = useRef<number>(0);
   const currentAppStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const hasBootstrappedLocationRef = useRef(false);
+
+  // Root-safe location bootstrap:
+  // - seeds permission status before Nearby first opens
+  // - seeds last known coords if already granted
+  // - never requests permission or starts a watcher globally
+  useEffect(() => {
+    if (isDemoMode || hasBootstrappedLocationRef.current) return;
+    hasBootstrappedLocationRef.current = true;
+    void fetchLastKnownOnly();
+  }, [fetchLastKnownOnly]);
 
   // P0: Send presence heartbeat (markActive) to unified presence table
   const sendHeartbeat = useCallback(async () => {

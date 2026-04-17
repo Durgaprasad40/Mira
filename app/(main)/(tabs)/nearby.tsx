@@ -65,6 +65,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import MapView, { Region, Marker } from 'react-native-maps';
+import * as Location from 'expo-location';
 import Supercluster from 'supercluster';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
@@ -372,16 +373,10 @@ export default function NearbyScreen() {
   // Map ref for programmatic control
   const mapRef = useRef<MapView>(null);
 
-  // Supercluster instance ref
-  const superclusterRef = useRef<Supercluster<UserPointProperties> | null>(null);
-
   // Current map region for cluster computation
   const [currentRegion, setCurrentRegion] = useState<Region | null>(null);
   const [isNearbyFocused, setIsNearbyFocused] = useState(false);
   const [publishRefreshTick, setPublishRefreshTick] = useState(0);
-
-  // Computed clusters/points to render
-  const [clusters, setClusters] = useState<ClusterFeature[]>([]);
 
   // Auth store
   const userId = useAuthStore((s) => s.userId);
@@ -413,6 +408,7 @@ export default function NearbyScreen() {
   const locationAcquireTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const publishRefreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const loadingOverlayDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const servicesEnabledPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // P1-003 FIX: Ref to track query completion for timeout callback
   // This provides fresh state check inside setTimeout, avoiding stale closure values
@@ -475,6 +471,10 @@ export default function NearbyScreen() {
       if (loadingOverlayDelayRef.current) {
         clearTimeout(loadingOverlayDelayRef.current);
         loadingOverlayDelayRef.current = null;
+      }
+      if (servicesEnabledPollRef.current) {
+        clearInterval(servicesEnabledPollRef.current);
+        servicesEnabledPollRef.current = null;
       }
       if (autoRetryTimeoutRef.current) {
         clearTimeout(autoRetryTimeoutRef.current);
@@ -1142,39 +1142,29 @@ export default function NearbyScreen() {
       }));
   }, [mapUsers]);
 
-  const recomputeClusters = useCallback((region: Region | null) => {
-    if (!region || !superclusterRef.current) {
-      setClusters([]);
-      return;
-    }
-
-    try {
-      const zoom = getZoomFromRegion(region);
-      const bbox = getBoundingBox(region);
-      const newClusters = superclusterRef.current.getClusters(bbox, zoom);
-      setClusters(newClusters);
-    } catch (e) {
-      log.warn('[NEARBY]', 'Error computing clusters', { error: String(e) });
-      setClusters([]);
-    }
-  }, []);
-
-  // ---------------------------------------------------------------------------
-  // Supercluster: Initialize and compute clusters
-  // ---------------------------------------------------------------------------
-  useEffect(() => {
-    // Create supercluster instance with same settings as previous library
+  const clusterIndex = useMemo(() => {
     const cluster = new Supercluster<UserPointProperties>({
       radius: CLUSTER_RADIUS,
       maxZoom: CLUSTER_MAX_ZOOM,
     });
     cluster.load(clusterPoints);
-    superclusterRef.current = cluster;
+    return cluster;
   }, [clusterPoints]);
 
-  useEffect(() => {
-    recomputeClusters(currentRegion);
-  }, [clusterPoints, currentRegion, recomputeClusters]);
+  const clusters = useMemo<ClusterFeature[]>(() => {
+    if (!currentRegion) {
+      return [];
+    }
+
+    try {
+      const zoom = getZoomFromRegion(currentRegion);
+      const bbox = getBoundingBox(currentRegion);
+      return clusterIndex.getClusters(bbox, zoom);
+    } catch (e) {
+      log.warn('[NEARBY]', 'Error computing clusters', { error: String(e) });
+      return [];
+    }
+  }, [clusterIndex, currentRegion]);
 
   // Handler for map region changes - recompute clusters
   const handleRegionChangeComplete = useCallback((region: Region) => {
@@ -1184,12 +1174,12 @@ export default function NearbyScreen() {
   // Handler for cluster press - zoom into cluster
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleClusterPress = useCallback((cluster: Supercluster.ClusterFeature<any>) => {
-    if (!mapRef.current || !superclusterRef.current) return;
+    if (!mapRef.current) return;
 
     try {
       Haptics.selectionAsync().catch(() => {});
       const clusterId = cluster.properties.cluster_id;
-      const expansionZoom = superclusterRef.current.getClusterExpansionZoom(clusterId);
+      const expansionZoom = clusterIndex.getClusterExpansionZoom(clusterId);
       const [lng, lat] = cluster.geometry.coordinates;
 
       // Calculate new region based on expansion zoom
@@ -1205,7 +1195,7 @@ export default function NearbyScreen() {
     } catch (e) {
       log.warn('[NEARBY]', 'Error handling cluster press', { error: String(e) });
     }
-  }, []);
+  }, [clusterIndex]);
 
   // ---------------------------------------------------------------------------
   // Empty state: stay visible whenever Nearby is truthfully empty
@@ -1452,6 +1442,47 @@ export default function NearbyScreen() {
       setLocationUIState('checking');
     }
   }, [blockingLocationErrorMessage, hasValidBestLocation, isDemo, permissionStatus]);
+
+  useEffect(() => {
+    if (servicesEnabledPollRef.current) {
+      clearInterval(servicesEnabledPollRef.current);
+      servicesEnabledPollRef.current = null;
+    }
+
+    if (!isNearbyFocused || isDemo || locationUIState !== 'services_disabled') {
+      return;
+    }
+
+    let cancelled = false;
+
+    const checkServicesEnabled = async () => {
+      try {
+        const enabled = await Location.hasServicesEnabledAsync();
+        if (cancelled || !isMountedRef.current || !enabled) {
+          return;
+        }
+
+        setLocationTimeoutMessage(null);
+        setQueryError(null);
+        startLocationTracking();
+      } catch {
+        // Silent retry on next poll tick
+      }
+    };
+
+    void checkServicesEnabled();
+    servicesEnabledPollRef.current = setInterval(() => {
+      void checkServicesEnabled();
+    }, 10_000);
+
+    return () => {
+      cancelled = true;
+      if (servicesEnabledPollRef.current) {
+        clearInterval(servicesEnabledPollRef.current);
+        servicesEnabledPollRef.current = null;
+      }
+    };
+  }, [isDemo, isNearbyFocused, locationUIState, startLocationTracking]);
 
   // ---------------------------------------------------------------------------
   // Compute map region

@@ -8,7 +8,7 @@
  * - Foreground-only location shipping path
  * - Explicit status display
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -33,11 +33,19 @@ import {
 } from '@/utils/backgroundLocation';
 
 type VisibilityMode = 'always' | 'app_open' | 'recent';
+type NearbySettingsField =
+  | 'nearbyEnabled'
+  | 'strongPrivacyMode'
+  | 'hideDistance'
+  | 'incognitoMode'
+  | 'nearbyVisibilityMode';
+
+const SAVE_DEBOUNCE_MS = 300;
 
 const VISIBILITY_OPTIONS: { value: VisibilityMode; label: string; description: string }[] = [
-  { value: 'always', label: 'Always visible', description: 'Show me in Nearby all the time' },
-  { value: 'app_open', label: 'Only while using app', description: 'Hide when app is closed' },
-  { value: 'recent', label: '30 min after use', description: 'Visible for 30 min after I close the app' },
+  { value: 'always', label: 'Always visible', description: 'Use the longest map visibility window when Nearby is active' },
+  { value: 'app_open', label: 'Only while using app', description: 'Appear on the map only while Mira is open' },
+  { value: 'recent', label: '30 min after use', description: 'Stay visible on the map for 30 minutes after you leave Mira' },
 ];
 
 export default function NearbySettingsScreen() {
@@ -69,6 +77,9 @@ export default function NearbySettingsScreen() {
   // Loading states
   const [timedOut, setTimedOut] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const saveTimeoutsRef = useRef<Partial<Record<NearbySettingsField, ReturnType<typeof setTimeout>>>>({});
+  const pendingFieldsRef = useRef<Set<NearbySettingsField>>(new Set());
+  const activeSaveCountRef = useRef(0);
 
   // Loading timeout
   useEffect(() => {
@@ -81,11 +92,21 @@ export default function NearbySettingsScreen() {
   useEffect(() => {
     if (currentUser) {
       setTimedOut(false);
-      setNearbyEnabled(currentUser.nearbyEnabled !== false);
-      setStrongPrivacyMode(currentUser.strongPrivacyMode === true);
-      setHideDistance(currentUser.hideDistance === true);
-      setIncognitoMode(currentUser.incognitoMode === true);
-      setVisibilityMode(currentUser.nearbyVisibilityMode || 'always');
+      if (!pendingFieldsRef.current.has('nearbyEnabled')) {
+        setNearbyEnabled(currentUser.nearbyEnabled !== false);
+      }
+      if (!pendingFieldsRef.current.has('strongPrivacyMode')) {
+        setStrongPrivacyMode(currentUser.strongPrivacyMode === true);
+      }
+      if (!pendingFieldsRef.current.has('hideDistance')) {
+        setHideDistance(currentUser.hideDistance === true);
+      }
+      if (!pendingFieldsRef.current.has('incognitoMode')) {
+        setIncognitoMode(currentUser.incognitoMode === true);
+      }
+      if (!pendingFieldsRef.current.has('nearbyVisibilityMode')) {
+        setVisibilityMode(currentUser.nearbyVisibilityMode || 'always');
+      }
 
       // Check pause status
       const pauseUntil = currentUser.nearbyPausedUntil;
@@ -121,41 +142,66 @@ export default function NearbySettingsScreen() {
     }, [loadLocationModeStatus])
   );
 
+  useEffect(() => {
+    return () => {
+      for (const timeout of Object.values(saveTimeoutsRef.current)) {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+      }
+      saveTimeoutsRef.current = {};
+      pendingFieldsRef.current.clear();
+      activeSaveCountRef.current = 0;
+    };
+  }, []);
+
   // Premium check for incognito (premium-only, no gender-based access)
   const canUseIncognito = currentUser?.subscriptionTier === 'premium';
 
-  // Save handler
+  const revertField = useCallback((field: NearbySettingsField) => {
+    if (!currentUser) return;
+    if (field === 'nearbyEnabled') setNearbyEnabled(currentUser.nearbyEnabled !== false);
+    if (field === 'strongPrivacyMode') setStrongPrivacyMode(currentUser.strongPrivacyMode === true);
+    if (field === 'hideDistance') setHideDistance(currentUser.hideDistance === true);
+    if (field === 'incognitoMode') setIncognitoMode(currentUser.incognitoMode === true);
+    if (field === 'nearbyVisibilityMode') setVisibilityMode(currentUser.nearbyVisibilityMode || 'always');
+  }, [currentUser]);
+
   const handleSave = useCallback(
-    async (field: string, value: boolean | string) => {
-      if (isDemoMode) {
-        // Demo mode: just update local state (already done)
+    (field: NearbySettingsField, value: boolean | string) => {
+      if (isDemoMode || !userId) {
         return;
       }
 
-      if (!userId) return;
-      setIsSaving(true);
-
-      try {
-        // FIX: Backend expects { authUserId }, not { token }
-        await updateNearbySettingsMut({
-          authUserId: userId,
-          [field]: value,
-        });
-      } catch (error: any) {
-        Toast.show(error.message || 'Failed to update setting');
-        // Revert local state on error
-        if (currentUser) {
-          if (field === 'nearbyEnabled') setNearbyEnabled(currentUser.nearbyEnabled !== false);
-          if (field === 'strongPrivacyMode') setStrongPrivacyMode(currentUser.strongPrivacyMode === true);
-          if (field === 'hideDistance') setHideDistance(currentUser.hideDistance === true);
-          if (field === 'incognitoMode') setIncognitoMode(currentUser.incognitoMode === true);
-          if (field === 'nearbyVisibilityMode') setVisibilityMode(currentUser.nearbyVisibilityMode || 'always');
-        }
-      } finally {
-        setIsSaving(false);
+      pendingFieldsRef.current.add(field);
+      const existingTimeout = saveTimeoutsRef.current[field];
+      if (existingTimeout) {
+        clearTimeout(existingTimeout);
       }
+
+      saveTimeoutsRef.current[field] = setTimeout(async () => {
+        saveTimeoutsRef.current[field] = undefined;
+        activeSaveCountRef.current += 1;
+        setIsSaving(true);
+
+        try {
+          await updateNearbySettingsMut({
+            authUserId: userId,
+            [field]: value,
+          });
+        } catch (error: any) {
+          Toast.show(error.message || 'Failed to update setting');
+          revertField(field);
+        } finally {
+          pendingFieldsRef.current.delete(field);
+          activeSaveCountRef.current = Math.max(0, activeSaveCountRef.current - 1);
+          if (activeSaveCountRef.current === 0) {
+            setIsSaving(false);
+          }
+        }
+      }, SAVE_DEBOUNCE_MS);
     },
-    [userId, currentUser, updateNearbySettingsMut]
+    [revertField, updateNearbySettingsMut, userId]
   );
 
   // Toggle handlers
@@ -291,7 +337,7 @@ export default function NearbySettingsScreen() {
             <View style={styles.toggleInfo}>
               <Text style={styles.toggleTitle}>Show me in Nearby</Text>
               <Text style={styles.toggleDescription}>
-                Allow others to see you on the Nearby map
+                Controls whether your profile can appear on the Nearby map
               </Text>
             </View>
             <Switch
@@ -324,7 +370,7 @@ export default function NearbySettingsScreen() {
           <View style={styles.visibilitySection}>
             <Text style={styles.toggleTitle}>Time-based Visibility</Text>
             <Text style={styles.toggleDescription}>
-              Control when you appear in Nearby
+              Choose how long your map presence stays active after you use Mira
             </Text>
             <View style={styles.visibilityOptions}>
               {VISIBILITY_OPTIONS.map((option) => (
@@ -335,6 +381,7 @@ export default function NearbySettingsScreen() {
                     visibilityMode === option.value && styles.visibilityOptionActive,
                   ]}
                   onPress={() => handleVisibilityChange(option.value)}
+                  disabled={isSaving}
                 >
                   <View style={styles.visibilityRadio}>
                     {visibilityMode === option.value && <View style={styles.visibilityRadioInner} />}
