@@ -8,6 +8,35 @@ import { mutation } from "./_generated/server";
 import { v } from "convex/values";
 import { validateSessionToken } from "./helpers";
 
+async function upsertPresence(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: string,
+  appState: "foreground" | "background",
+  now: number,
+) {
+  const existing = await ctx.db
+    .query("presence")
+    .withIndex("by_user", (q: any) => q.eq("userId", userId))
+    .first();
+
+  if (existing) {
+    await ctx.db.patch(existing._id, {
+      lastSeenAt: now,
+      appState,
+      updatedAt: now,
+    });
+    return;
+  }
+
+  await ctx.db.insert("presence", {
+    userId,
+    lastSeenAt: now,
+    appState,
+    updatedAt: now,
+  });
+}
+
 /**
  * Mark user as active (foreground heartbeat).
  * Updates user's lastActive timestamp.
@@ -27,9 +56,11 @@ export const markActive = mutation({
     }
 
     // Update lastActive timestamp
+    const now = Date.now();
     await ctx.db.patch(userId, {
-      lastActive: Date.now(),
+      lastActive: now,
     });
+    await upsertPresence(ctx, userId, "foreground", now);
 
     return { success: true };
   },
@@ -55,9 +86,11 @@ export const markBackground = mutation({
     }
 
     // Update lastActive timestamp (could add background-specific logic later)
+    const now = Date.now();
     await ctx.db.patch(userId, {
-      lastActive: Date.now(),
+      lastActive: now,
     });
+    await upsertPresence(ctx, userId, "background", now);
 
     return { success: true };
   },

@@ -88,6 +88,35 @@ async function prefetchSwipes(
   return map;
 }
 
+/**
+ * Pre-fetch presence rows for a set of users.
+ * Returns a Map keyed by userId for Nearby visibility decisions.
+ */
+async function prefetchPresenceMap(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userIds: Array<Id<'users'> | string>,
+): Promise<Map<string, Doc<'presence'>>> {
+  const uniqueUserIds = [...new Set(userIds.map((id) => String(id)))];
+  const rows = await Promise.all(
+    uniqueUserIds.map((userId) =>
+      ctx.db
+        .query('presence')
+        .withIndex('by_user', (q: any) => q.eq('userId', userId))
+        .first()
+    )
+  );
+
+  const map = new Map<string, Doc<'presence'>>();
+  uniqueUserIds.forEach((userId, index) => {
+    const row = rows[index];
+    if (row) {
+      map.set(userId, row);
+    }
+  });
+  return map;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -139,6 +168,8 @@ const DELAYED_CROSSING_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 // Notification rate limiting
 const NOTIFICATION_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour minimum between notifications per pair
 const MAX_NOTIFICATIONS_PER_DAY = 3; // Maximum notifications per day per user
+const APP_OPEN_VISIBILITY_WINDOW_MS = 5 * 60 * 1000;
+const RECENT_VISIBILITY_WINDOW_MS = 30 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // GPS Jitter Protection Constants (server-side)
@@ -212,6 +243,39 @@ function clampNearbyDistanceMeters(distanceMeters: number): number {
   return Math.max(NEARBY_MIN_METERS, Math.min(NEARBY_MAX_METERS, distanceMeters));
 }
 
+function isNearbyDetectionDisabled(user: Doc<'users'>, now: number): boolean {
+  if (user.nearbyEnabled === false) return true;
+  if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) return true;
+  return false;
+}
+
+function isUserVisibleForNearby(
+  user: Doc<'users'>,
+  presence: Doc<'presence'> | null | undefined,
+  now: number,
+): boolean {
+  if (isNearbyDetectionDisabled(user, now)) {
+    return false;
+  }
+
+  if (user.nearbyVisibilityMode === 'app_open') {
+    return Boolean(
+      presence &&
+      presence.appState === 'foreground' &&
+      now - presence.lastSeenAt <= APP_OPEN_VISIBILITY_WINDOW_MS,
+    );
+  }
+
+  if (user.nearbyVisibilityMode === 'recent') {
+    return Boolean(
+      presence &&
+      now - presence.lastSeenAt <= RECENT_VISIBILITY_WINDOW_MS,
+    );
+  }
+
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // publishLocation — updates published location (max once per 6 hours)
 // Called when Nearby screen is opened. Others see publishedLat/Lng, not live GPS.
@@ -234,6 +298,9 @@ export const publishLocation = mutation({
 
     const user = await ctx.db.get(userId);
     if (!user) return { success: false, reason: 'user_not_found' };
+    if (user.verificationStatus !== 'verified') {
+      throw new Error('Verification required');
+    }
 
     // Check if published location is still within the 6-hour window
     if (user.publishedAt && now - user.publishedAt < PUBLISH_WINDOW_MS) {
@@ -283,6 +350,9 @@ export const detectCrossedUsers = mutation({
     if (!currentUser) {
       return { triggered: false, reason: 'user_not_found' };
     }
+    if (isNearbyDetectionDisabled(currentUser, now)) {
+      return { triggered: false, reason: 'nearby_disabled' };
+    }
 
     // 2) Enforce cooldown — check most recent crossedEvent for this user
     const lastEvent = await ctx.db
@@ -303,7 +373,10 @@ export const detectCrossedUsers = mutation({
       .collect();
 
     // STABILITY FIX S6: Pre-fetch blocks before loop
-    const blockedIds = await prefetchBlockedUserIds(ctx, userId);
+    const [blockedIds, presenceMap] = await Promise.all([
+      prefetchBlockedUserIds(ctx, userId),
+      prefetchPresenceMap(ctx, verifiedUsers.map((user) => user._id)),
+    ]);
 
     const candidates: Id<'users'>[] = [];
 
@@ -314,6 +387,7 @@ export const detectCrossedUsers = mutation({
       if (!user.isActive) continue;
       // Skip blocked (using pre-fetched set)
       if (blockedIds.has(user._id as string)) continue;
+      if (!isUserVisibleForNearby(user, presenceMap.get(user._id as string), now)) continue;
       // Skip if no published location
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
       // Skip if published location is stale (>6 days)
@@ -423,6 +497,12 @@ export const recordLocation = mutation({
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return { success: false };
+    if (currentUser.verificationStatus !== 'verified') {
+      throw new Error('Verification required');
+    }
+    if (isNearbyDetectionDisabled(currentUser, now)) {
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'nearby_disabled' };
+    }
 
     // ---------------------------------------------------------------------------
     // GPS JITTER PROTECTION (server-side)
@@ -499,12 +579,6 @@ export const recordLocation = mutation({
       };
     }
 
-    // Skip crossed-path computation if current user is not verified
-    const currentStatus = currentUser.verificationStatus || 'unverified';
-    if (currentStatus !== 'verified') {
-      return { success: true, nearbyCount: 0, skipped: true, reason: 'unverified' };
-    }
-
     // Legacy backfill: normalize old opt-out rows now that crossed paths is mandatory.
     if (currentUser.crossedPathsEnabled === false) {
       await ctx.db.patch(userId, { crossedPathsEnabled: true });
@@ -520,7 +594,10 @@ export const recordLocation = mutation({
       .collect();
 
     // STABILITY FIX S6/C2: Pre-fetch blocks before loop
-    const blockedIds = await prefetchBlockedUserIds(ctx, userId);
+    const [blockedIds, presenceMap] = await Promise.all([
+      prefetchBlockedUserIds(ctx, userId),
+      prefetchPresenceMap(ctx, verifiedUsers.map((user) => user._id)),
+    ]);
 
     // First pass: collect candidate user IDs that pass basic filters
     const candidateUserIds: string[] = [];
@@ -537,12 +614,13 @@ export const recordLocation = mutation({
       // Note: Incognito users can still trigger crossings, they just don't appear on map
       // This is intentional per spec: "Incognito: hidden from map, but crossed-path detection may still happen"
 
-      // Nearby visibility opt-out: Skip users who opted out of nearby
-      if (user.nearbyEnabled === false) continue;
+      if (isNearbyDetectionDisabled(user, now)) continue;
 
       if (user.crossedPathsEnabled === false) {
         crossedPathsBackfillIds.push(user._id);
       }
+
+      if (!isUserVisibleForNearby(user, presenceMap.get(user._id as string), now)) continue;
 
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
@@ -897,7 +975,12 @@ export const getNearbyUsers = query({
     if (!currentUser) return [];
 
     // Current user must be verified to see nearby users
-    if (currentUser.verificationStatus !== 'verified') return [];
+    if (currentUser.verificationStatus !== 'verified') {
+      return {
+        status: 'viewer_unverified' as const,
+        users: [],
+      };
+    }
 
     // Use current user's published location for distance checks
     // (they should have published when opening Nearby screen)
@@ -916,9 +999,10 @@ export const getNearbyUsers = query({
       .collect();
 
     // STABILITY FIX S6/C2: Pre-fetch blocks and swipes before loop
-    const [blockedIds, swipedUsersMap] = await Promise.all([
+    const [blockedIds, swipedUsersMap, presenceMap] = await Promise.all([
       prefetchBlockedUserIds(ctx, userId),
       prefetchSwipes(ctx, userId),
+      prefetchPresenceMap(ctx, verifiedUsers.map((user) => user._id)),
     ]);
 
     // First pass: collect candidate user IDs that pass basic filters
@@ -932,20 +1016,7 @@ export const getNearbyUsers = query({
       // Incognito mode: Hidden users don't appear on map
       if (user.incognitoMode === true) continue;
 
-      // Nearby visibility opt-out: Respect user preference
-      if (user.nearbyEnabled === false) continue;
-
-      // Nearby pause: User has temporarily hidden from Nearby
-      if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) continue;
-
-      // Time-based visibility mode
-      if (user.nearbyVisibilityMode === 'app_open') {
-        const inactiveThreshold = 5 * 60 * 1000;
-        if (now - user.lastActive > inactiveThreshold) continue;
-      } else if (user.nearbyVisibilityMode === 'recent') {
-        const recentThreshold = 30 * 60 * 1000;
-        if (now - user.lastActive > recentThreshold) continue;
-      }
+      if (!isUserVisibleForNearby(user, presenceMap.get(user._id as string), now)) continue;
 
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
@@ -1079,6 +1150,9 @@ export const getCrossPathHistory = query({
 
     // Get current user for distance calculation
     const currentUser = await ctx.db.get(userId);
+    if (!currentUser || currentUser.verificationStatus !== 'verified') {
+      return [];
+    }
     const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
     const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
 
@@ -1228,7 +1302,7 @@ export const getCrossPathHistory = query({
         );
         distanceRange = formatDistanceRange(distanceMeters);
       }
-      if (otherUser.hideDistance === true || isOtherUserStrongPrivacy) {
+      if (currentUser?.hideDistance === true || otherUser.hideDistance === true || isOtherUserStrongPrivacy) {
         distanceRange = null;
       }
 
@@ -1484,6 +1558,9 @@ export const getCrossedPaths = query({
 
     // Get current user for distance calculation
     const currentUser = await ctx.db.get(userId);
+    if (!currentUser || currentUser.verificationStatus !== 'verified') {
+      return [];
+    }
     const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
     const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
 
@@ -1585,7 +1662,7 @@ export const getCrossedPaths = query({
         );
         distanceRange = formatDistanceRange(distanceMeters);
       }
-      if (otherUser.hideDistance === true || isOtherUserStrongPrivacy) {
+      if (currentUser?.hideDistance === true || otherUser.hideDistance === true || isOtherUserStrongPrivacy) {
         distanceRange = null;
       }
 
@@ -1653,6 +1730,11 @@ export const getCrossedPathsCount = query({
   handler: async (ctx, args) => {
     const { userId } = args;
 
+    const currentUser = await ctx.db.get(userId);
+    if (!currentUser || currentUser.verificationStatus !== 'verified') {
+      return 0;
+    }
+
     const asUser1 = await ctx.db
       .query('crossedPaths')
       .withIndex('by_user1', (q) => q.eq('user1Id', userId))
@@ -1680,6 +1762,11 @@ export const getCrossedPathSummary = query({
     // Resolve authUserId to Convex ID
     const userId = await resolveUserIdByAuthId(ctx, args.userId);
     if (!userId) {
+      return { count: 0, latestCreatedAt: null };
+    }
+
+    const currentUser = await ctx.db.get(userId);
+    if (!currentUser || currentUser.verificationStatus !== 'verified') {
       return { count: 0, latestCreatedAt: null };
     }
 

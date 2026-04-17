@@ -16,7 +16,6 @@ import {
   ScrollView,
   TouchableOpacity,
   Switch,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -28,6 +27,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
 import { Toast } from '@/components/ui/Toast';
 import { getDemoCurrentUser } from '@/lib/demoData';
+import { safePush } from '@/lib/safeRouter';
 import {
   getLocationModeStatus,
 } from '@/utils/backgroundLocation';
@@ -157,6 +157,9 @@ export default function NearbySettingsScreen() {
 
   // Premium check for incognito (premium-only, no gender-based access)
   const canUseIncognito = currentUser?.subscriptionTier === 'premium';
+  const openSubscriptionPaywall = useCallback(() => {
+    safePush(router, '/(main)/subscription' as any, 'nearby-settings->subscription');
+  }, [router]);
 
   const revertField = useCallback((field: NearbySettingsField) => {
     if (!currentUser) return;
@@ -190,7 +193,13 @@ export default function NearbySettingsScreen() {
             [field]: value,
           });
         } catch (error: any) {
-          Toast.show(error.message || 'Failed to update setting');
+          const message = error?.message || 'Failed to update setting';
+          if (field === 'incognitoMode' && message.includes('Premium required')) {
+            revertField(field);
+            openSubscriptionPaywall();
+            return;
+          }
+          Toast.show(message);
           revertField(field);
         } finally {
           pendingFieldsRef.current.delete(field);
@@ -201,7 +210,7 @@ export default function NearbySettingsScreen() {
         }
       }, SAVE_DEBOUNCE_MS);
     },
-    [revertField, updateNearbySettingsMut, userId]
+    [openSubscriptionPaywall, revertField, updateNearbySettingsMut, userId]
   );
 
   // Toggle handlers
@@ -222,11 +231,7 @@ export default function NearbySettingsScreen() {
 
   const handleIncognitoToggle = (value: boolean) => {
     if (!canUseIncognito && value) {
-      Alert.alert(
-        'Premium Feature',
-        'Incognito Nearby is available with Premium. Upgrade to browse invisibly.',
-        [{ text: 'OK' }]
-      );
+      openSubscriptionPaywall();
       return;
     }
     setIncognitoMode(value);

@@ -1206,6 +1206,16 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_token', ['token']),
 
+  // Presence table (ephemeral user activity for Nearby visibility windows)
+  presence: defineTable({
+    userId: v.id('users'),
+    lastSeenAt: v.number(),
+    appState: v.union(v.literal('foreground'), v.literal('background')),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_last_seen', ['lastSeenAt']),
+
   // Typing status table (ephemeral)
   typingStatus: defineTable({
     conversationId: v.id('conversations'),
