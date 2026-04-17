@@ -15,7 +15,6 @@ import {
   ScrollView,
   TouchableOpacity,
   Switch,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -148,11 +147,10 @@ export default function NearbySettingsScreen() {
 
   const handleIncognitoToggle = (value: boolean) => {
     if (!canUseIncognito && value) {
-      Alert.alert(
-        'Premium Feature',
-        'Incognito Nearby is available with Premium. Upgrade to browse invisibly.',
-        [{ text: 'OK' }]
-      );
+      // P1-4: Non-premium users must be routed to the paywall instead of
+      // hitting a dead-end alert. Entry point is tagged so the subscription
+      // screen can show the relevant Incognito Nearby context.
+      router.push('/(main)/subscription?from=nearby_incognito' as any);
       return;
     }
     setIncognitoMode(value);
@@ -231,12 +229,14 @@ export default function NearbySettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Visibility</Text>
 
-          {/* Show me in Nearby */}
+          {/* Show me in Nearby (also gates crossing detection) */}
           <View style={styles.toggleRow}>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Show me in Nearby</Text>
+              <Text style={styles.toggleTitle}>Nearby visibility & crossings</Text>
               <Text style={styles.toggleDescription}>
-                Allow others to see you on the Nearby map
+                Show your profile on the Nearby map and record when you cross
+                paths with others. Turn off to hide from the map and stop
+                crossing detection.
               </Text>
             </View>
             <Switch
@@ -248,14 +248,14 @@ export default function NearbySettingsScreen() {
             />
           </View>
 
-          {/* Pause Nearby */}
+          {/* Pause Nearby (also pauses crossing detection) */}
           <TouchableOpacity style={styles.actionRow} onPress={handlePauseNearby}>
             <View style={styles.actionInfo}>
-              <Text style={styles.toggleTitle}>Pause Nearby</Text>
+              <Text style={styles.toggleTitle}>Pause Nearby activity</Text>
               <Text style={styles.toggleDescription}>
                 {isPaused && pausedUntil
-                  ? `Paused until ${new Date(pausedUntil).toLocaleString()}`
-                  : 'Temporarily hide from Nearby for 24 hours'}
+                  ? `Paused until ${new Date(pausedUntil).toLocaleString()} — you are hidden from the map and crossings are not recorded.`
+                  : 'Hide from the Nearby map and pause crossing detection for 24 hours.'}
               </Text>
             </View>
             <View style={[styles.actionButton, isPaused && styles.actionButtonActive]}>

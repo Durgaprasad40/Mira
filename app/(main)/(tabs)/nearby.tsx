@@ -1245,10 +1245,6 @@ export default function NearbyScreen() {
     safePush(router, '/(main)/crossed-paths' as any, 'nearby->crossed-paths');
   }, [router]);
 
-  const handleOpenNearbySettings = useCallback(() => {
-    safePush(router, '/(main)/nearby-settings' as any, 'nearby->nearby-settings');
-  }, [router]);
-
   const handleOpenVerification = useCallback(() => {
     safePush(router, '/(main)/verification' as any, 'nearby->verification');
   }, [router]);
@@ -1872,18 +1868,12 @@ export default function NearbyScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       {/* Header renders immediately (shell pattern) */}
+      {/* Nearby settings entry is intentionally NOT here — users access
+          Nearby settings only via Profile → Privacy → Nearby settings. */}
       <View style={styles.header}>
-        <View style={{ width: 44 }} />
+        <View style={{ width: 22 }} />
         <Text style={styles.headerTitle}>Nearby</Text>
         <View style={styles.headerIcons}>
-          <TouchableOpacity
-            onPress={handleOpenNearbySettings}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Nearby settings"
-            accessibilityHint="Open Nearby settings"
-          >
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
-          </TouchableOpacity>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}

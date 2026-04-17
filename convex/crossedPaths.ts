@@ -209,6 +209,25 @@ export const publishLocation = mutation({
     const user = await ctx.db.get(userId);
     if (!user) return { success: false, reason: 'user_not_found' };
 
+    // P1-2: Verification gate — unverified users must not publish a location.
+    // Keeps publishLocation consistent with detectCrossedUsers/recordLocation,
+    // which already skip crossing work for unverified callers.
+    const currentStatus = user.verificationStatus || 'unverified';
+    if (currentStatus !== 'verified') {
+      return { success: false, published: false, reason: 'unverified' };
+    }
+
+    // P1.6: Caller opt-out — a verified user who has disabled Nearby or is
+    // actively paused must not publish a location. Mirrors the opt-out gates
+    // in recordLocation (P1-1) and detectCrossedUsers (P1.5-1) so the
+    // "Show me in Nearby" / "Pause Nearby" promise holds for publish too.
+    if (user.nearbyEnabled === false) {
+      return { success: false, published: false, reason: 'disabled_or_paused' };
+    }
+    if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
+      return { success: false, published: false, reason: 'disabled_or_paused' };
+    }
+
     // Check if published location is still within the 6-hour window
     if (user.publishedAt && now - user.publishedAt < PUBLISH_WINDOW_MS) {
       return {
@@ -256,6 +275,17 @@ export const detectCrossedUsers = mutation({
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) {
       return { triggered: false, reason: 'user_not_found' };
+    }
+
+    // P1.5-1: Caller opt-out — if Nearby is disabled or actively paused for
+    // the caller, we must not run detection logic and must not insert any
+    // crossedEvents row. Mirrors the recordLocation opt-out from P1-1 so the
+    // "Show me in Nearby" / "Pause Nearby" UI promises hold end-to-end.
+    if (currentUser.nearbyEnabled === false) {
+      return { triggered: false, reason: 'disabled_or_paused' };
+    }
+    if (currentUser.nearbyPausedUntil && currentUser.nearbyPausedUntil > now) {
+      return { triggered: false, reason: 'disabled_or_paused' };
     }
 
     // 2) Enforce cooldown — check most recent crossedEvent for this user
@@ -397,6 +427,17 @@ export const recordLocation = mutation({
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return { success: false };
+
+    // P1-1: Caller opt-out — if the user has disabled Nearby or paused it,
+    // we must NOT record any location/crossings for them. The UI promises
+    // "Show me in Nearby" and "Pause Nearby" include both map visibility
+    // AND crossing detection; respect that end-to-end.
+    if (currentUser.nearbyEnabled === false) {
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'disabled_or_paused' };
+    }
+    if (currentUser.nearbyPausedUntil && currentUser.nearbyPausedUntil > now) {
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'disabled_or_paused' };
+    }
 
     // ---------------------------------------------------------------------------
     // GPS JITTER PROTECTION (server-side)
@@ -1043,6 +1084,10 @@ export const getCrossPathHistory = query({
     const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
     const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
 
+    // P1-3: Block filter — blocked users (either direction) must never
+    // appear in crossed-paths history.
+    const blockedIds = await prefetchBlockedUserIds(ctx, userId);
+
     // Pre-fetch swipes for skip filtering (matches Discover behavior per Rule 9)
     const mySwipes = await ctx.db
       .query('likes')
@@ -1076,8 +1121,12 @@ export const getCrossPathHistory = query({
         if (isUser1 && entry.hiddenByUser1) return false;
         if (!isUser1 && entry.hiddenByUser2) return false;
 
-        // Skip filter: Same as Discover behavior (Rule 9)
+        // P1-3: Block filter — drop entries where the other party is blocked
+        // in either direction (using pre-fetched set for O(1) lookup).
         const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
+        if (blockedIds.has(otherUserId as string)) return false;
+
+        // Skip filter: Same as Discover behavior (Rule 9)
         const existingSwipe = swipedUsersMap.get(otherUserId as string);
         if (existingSwipe) {
           if (existingSwipe.action !== 'pass') return false; // Skip likes/super_likes
