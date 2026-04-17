@@ -21,7 +21,7 @@
 import { v } from 'convex/values';
 import { query, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { validateSessionToken } from './helpers';
 import {
   FRONTEND_EXPLORE_CATEGORY_IDS,
   normalizeExploreCategoryId,
@@ -150,6 +150,36 @@ function isEffectivelyHiddenFromDiscover(user: {
   discoveryPausedUntil?: number;
 }): boolean {
   return user.hideFromDiscover === true || isUserPaused(user);
+}
+
+const DISCOVERY_REPEAT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+function getDiscoveryRepeatCutoff(now: number): number {
+  return now - DISCOVERY_REPEAT_WINDOW_MS;
+}
+
+function isSwipeStillExcluded(
+  swipe: { createdAt: number },
+  repeatCutoff: number
+): boolean {
+  return swipe.createdAt >= repeatCutoff;
+}
+
+function isConversationStillExcluded(
+  conversation: { matchId?: Id<'matches'>; lastMessageAt?: number; createdAt?: number } | null,
+  repeatCutoff: number
+): boolean {
+  if (!conversation) return false;
+  if (conversation.matchId) return true;
+
+  const lastInteractionAt =
+    typeof conversation.lastMessageAt === 'number'
+      ? conversation.lastMessageAt
+      : typeof conversation.createdAt === 'number'
+        ? conversation.createdAt
+        : 0;
+
+  return lastInteractionAt >= repeatCutoff;
 }
 
 // BUGFIX #21: Safe date parsing with NaN guard
@@ -379,7 +409,7 @@ export const getDiscoverProfiles = query({
     // This converts O(6*N) queries into O(6) queries
     const now = Date.now();
     const discoverDayNumber = Math.floor(now / (1000 * 60 * 60 * 24));
-    const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
+    const repeatCutoff = getDiscoveryRepeatCutoff(now);
 
     const [
       mySwipes,
@@ -400,13 +430,11 @@ export const getDiscoverProfiles = query({
       ctx.db
         .query('matches')
         .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-        .filter((q) => q.eq(q.field('isActive'), true))
         .collect(),
       // Matches where I'm user2
       ctx.db
         .query('matches')
         .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-        .filter((q) => q.eq(q.field('isActive'), true))
         .collect(),
       // Blocks I created
       ctx.db
@@ -429,8 +457,8 @@ export const getDiscoverProfiles = query({
         .query('reports')
         .withIndex('by_reporter', (q) => q.eq('reporterId', userId))
         .collect(),
-      // CONVERSATION PARTNER EXCLUSION: All my conversation participations
-      // Users with existing message threads must not reappear in Discover
+      // Conversation participations are loaded once here, then reduced below
+      // to either permanent match exclusions or 7-day unmatched chat exclusions.
       ctx.db
         .query('conversationParticipants')
         .withIndex('by_user', (q) => q.eq('userId', userId))
@@ -440,8 +468,8 @@ export const getDiscoverProfiles = query({
     // Build Sets for O(1) lookups
     const swipedUserIds = new Set<string>();
     for (const swipe of mySwipes) {
-      // Skip expired passes (can re-show after 7 days)
-      if (swipe.action === 'pass' && swipe.createdAt < passExpiry) continue;
+      // Non-final swipe interactions expire after 7 days.
+      if (!isSwipeStillExcluded(swipe, repeatCutoff)) continue;
       swipedUserIds.add(swipe.toUserId as string);
     }
 
@@ -460,8 +488,8 @@ export const getDiscoverProfiles = query({
     const viewerReportedIds = new Set<string>();
     for (const report of myReports) viewerReportedIds.add(report.reportedUserId as string);
 
-    // CONVERSATION PARTNER EXCLUSION: Build set of users with existing message threads
-    // This ensures users who already have a chat connection don't reappear in Discover
+    // Conversations without a match only suppress repeat exposure for 7 days.
+    // Matched conversations remain permanently excluded.
     const conversationPartnerIds = new Set<string>();
     if (myConversationParticipations.length > 0) {
       // Batch fetch all conversations for efficiency
@@ -470,6 +498,7 @@ export const getDiscoverProfiles = query({
       );
       for (const conv of conversations) {
         if (!conv) continue;
+        if (!isConversationStillExcluded(conv, repeatCutoff)) continue;
         // Extract partner IDs from participants array (excluding self)
         for (const participantId of conv.participants) {
           if (participantId !== userId) {
@@ -634,7 +663,7 @@ export const getDiscoverProfiles = query({
         historyFailCount++;
         continue;
       }
-      // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
+      // Unmatched chat partners are suppressed for 7 days; matched partners stay permanent.
       if (conversationPartnerIds.has(user._id as string)) {
         historyFailCount++;
         continue;
@@ -1029,6 +1058,11 @@ type ExploreProfileResult = Omit<ExploreCandidateBase, 'rankingScore' | 'ranking
   photos: { url: string }[];
 };
 
+type ExploreCategoryMatchCandidate = Pick<
+  ExploreCandidateBase,
+  'distance' | 'isActiveNow' | 'wasActiveToday' | 'relationshipIntent' | 'activities'
+>;
+
 function isExploreCategoryId(value: string | undefined): value is ExploreCategoryId {
   return typeof value === 'string' && (EXPLORE_CATEGORY_IDS as readonly string[]).includes(value);
 }
@@ -1070,7 +1104,7 @@ function isActiveTodayCandidate(candidate: { wasActiveToday: boolean }): boolean
   return candidate.wasActiveToday === true;
 }
 
-function matchesExploreCategory(candidate: ExploreCandidateBase, categoryId: ExploreCategoryId): boolean {
+function matchesExploreCategory(candidate: ExploreCategoryMatchCandidate, categoryId: ExploreCategoryId): boolean {
   switch (categoryId) {
     case 'serious_vibes':
       return candidateMatchesAnyIntent(candidate, ['serious_vibes']);
@@ -1131,7 +1165,7 @@ function createEmptyExploreCounts(): Record<string, number> {
   return Object.fromEntries(EXPLORE_CATEGORY_IDS.map((id) => [id, 0]));
 }
 
-function countExploreCategories(candidates: ExploreCandidateBase[]): Record<string, number> {
+function countExploreCategories(candidates: ExploreCategoryMatchCandidate[]): Record<string, number> {
   const counts = createEmptyExploreCounts();
   for (const candidate of candidates) {
     for (const categoryId of EXPLORE_CATEGORY_IDS) {
@@ -1145,9 +1179,12 @@ function countExploreCategories(candidates: ExploreCandidateBase[]): Record<stri
 
 async function resolveExploreViewer(
   ctx: QueryCtx,
-  rawUserId: string | Id<'users'>
+  sessionToken: string
 ) {
-  const userId = await resolveUserIdByAuthId(ctx, rawUserId as string);
+  const trimmedToken = typeof sessionToken === 'string' ? sessionToken.trim() : '';
+  if (trimmedToken.length === 0) return null;
+
+  const userId = await validateSessionToken(ctx, trimmedToken);
   if (!userId) return null;
   const currentUser = await ctx.db.get(userId);
   if (!currentUser || !currentUser.isActive || currentUser.isBanned || isEffectivelyHiddenFromDiscover(currentUser)) return null;
@@ -1159,7 +1196,7 @@ async function loadExploreExclusions(
   userId: Id<'users'>
 ) {
   const now = Date.now();
-  const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
+  const repeatCutoff = getDiscoveryRepeatCutoff(now);
 
   const [
     mySwipes,
@@ -1177,12 +1214,10 @@ async function loadExploreExclusions(
     ctx.db
       .query('matches')
       .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-      .filter((q) => q.eq(q.field('isActive'), true))
       .collect(),
     ctx.db
       .query('matches')
       .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-      .filter((q) => q.eq(q.field('isActive'), true))
       .collect(),
     ctx.db
       .query('blocks')
@@ -1204,7 +1239,7 @@ async function loadExploreExclusions(
 
   const swipedUserIds = new Set<string>();
   for (const swipe of mySwipes) {
-    if (swipe.action === 'pass' && swipe.createdAt < passExpiry) continue;
+    if (!isSwipeStillExcluded(swipe, repeatCutoff)) continue;
     swipedUserIds.add(swipe.toUserId as string);
   }
 
@@ -1226,6 +1261,7 @@ async function loadExploreExclusions(
     );
     for (const conversation of conversations) {
       if (!conversation) continue;
+      if (!isConversationStillExcluded(conversation, repeatCutoff)) continue;
       for (const participantId of conversation.participants) {
         if (participantId !== userId) {
           conversationPartnerIds.add(participantId as string);
@@ -1311,7 +1347,7 @@ function buildExploreRankingScore(
 async function buildExploreCandidates(
   ctx: QueryCtx,
   args: {
-    rawUserId: string | Id<'users'>;
+    sessionToken: string;
     genderFilter?: string[];
     minAge?: number;
     maxAge?: number;
@@ -1320,9 +1356,11 @@ async function buildExploreCandidates(
     activities?: string[];
     categoryId?: string;
     maxPerGender: number;
+    includeRanking?: boolean;
+    sortResults?: boolean;
   }
 ): Promise<{ status: 'ready' | 'viewer_not_found'; currentUser: any | null; candidates: ExploreCandidateBase[] }> {
-  const resolvedViewer = await resolveExploreViewer(ctx, args.rawUserId);
+  const resolvedViewer = await resolveExploreViewer(ctx, args.sessionToken);
   if (!resolvedViewer) {
     return { status: 'viewer_not_found', currentUser: null, candidates: [] };
   }
@@ -1343,6 +1381,8 @@ async function buildExploreCandidates(
   const normalizedRelationshipIntentFilter = normalizeRelationshipIntentValues(args.relationshipIntent);
   const viewerAge = calculateAge(currentUser.dateOfBirth);
   const activeCategoryId = normalizePublicExploreCategoryId(args.categoryId);
+  const includeRanking = args.includeRanking !== false;
+  const sortResults = args.sortResults !== false;
 
   const userBuckets = await Promise.all(
     effectiveGender.map((gender) =>
@@ -1428,7 +1468,7 @@ async function buildExploreCandidates(
         isIncognito: user.incognitoMode === true,
         createdAt: user.createdAt ?? user._creationTime,
         rankingLastActive: user.lastActive ?? 0,
-        rankingScore: buildExploreRankingScore(user, currentUser, 1),
+        rankingScore: includeRanking ? buildExploreRankingScore(user, currentUser, 1) : 0,
         sourceUserId: user._id,
         primaryPhotoUrl: user.primaryPhotoUrl,
         displayPrimaryPhotoUrl: user.displayPrimaryPhotoUrl,
@@ -1439,15 +1479,17 @@ async function buildExploreCandidates(
     }
   }
 
-  candidates.sort((a, b) => {
-    if (activeCategoryId === 'nearby') {
-      return (a.distance ?? 999) - (b.distance ?? 999);
-    }
-    if (activeCategoryId === 'online_now' || activeCategoryId === 'active_today') {
-      return b.rankingLastActive - a.rankingLastActive;
-    }
-    return b.rankingScore - a.rankingScore;
-  });
+  if (sortResults) {
+    candidates.sort((a, b) => {
+      if (activeCategoryId === 'nearby') {
+        return (a.distance ?? 999) - (b.distance ?? 999);
+      }
+      if (activeCategoryId === 'online_now' || activeCategoryId === 'active_today') {
+        return b.rankingLastActive - a.rankingLastActive;
+      }
+      return b.rankingScore - a.rankingScore;
+    });
+  }
 
   return { status: 'ready', currentUser, candidates };
 }
@@ -1496,7 +1538,7 @@ async function hydrateExploreProfiles(
 
 export const getExploreCategoryProfiles = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
     genderFilter: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')))),
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
@@ -1523,7 +1565,7 @@ export const getExploreCategoryProfiles = query({
   },
   handler: async (ctx, args) => {
     const {
-      userId, genderFilter, minAge, maxAge, maxDistance,
+      token, genderFilter, minAge, maxAge, maxDistance,
       relationshipIntent, activities, sortByInterests,
       limit = 20, offset = 0,
       categoryId,
@@ -1534,7 +1576,7 @@ export const getExploreCategoryProfiles = query({
     const maxPerGender = Math.max(Math.ceil((baseWindow * fetchMultiplier) / Math.max((genderFilter?.length ?? 0) || 1, 1)), 140);
 
     const built = await buildExploreCandidates(ctx, {
-      rawUserId: userId,
+      sessionToken: token,
       genderFilter,
       minAge,
       maxAge,
@@ -1563,7 +1605,7 @@ export const getExploreCategoryProfiles = query({
       });
     }
 
-    const pageWindow = rankedCandidates.slice(offset, offset + limit * 3);
+    const pageWindow = rankedCandidates.slice(offset, offset + limit);
     const hydratedProfiles = await hydrateExploreProfiles(ctx, pageWindow);
 
     return {
@@ -1580,13 +1622,15 @@ export const getExploreCategoryProfiles = query({
 
 export const getExploreCategoryCounts = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
     refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const built = await buildExploreCandidates(ctx, {
-      rawUserId: args.userId,
+      sessionToken: args.token,
       maxPerGender: 2500,
+      includeRanking: false,
+      sortResults: false,
     });
 
     if (built.status !== 'ready') {
@@ -1595,7 +1639,6 @@ export const getExploreCategoryCounts = query({
         counts: emptyCounts,
         totalCount: 0,
         status: built.status === 'viewer_not_found' ? 'viewer_missing' : built.status,
-        nearbyStatus: 'ok' as const,
       };
     }
 
@@ -1605,7 +1648,6 @@ export const getExploreCategoryCounts = query({
       counts,
       totalCount: built.candidates.length,
       status: 'ok' as const,
-      nearbyStatus: 'ok' as const,
     };
   },
 });

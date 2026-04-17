@@ -3,7 +3,6 @@ export {
   EXPLORE_CATEGORIES,
   RELATIONSHIP_CATEGORIES,
   INTEREST_CATEGORIES,
-  countProfilesPerCategory,
 } from './exploreCategories';
 export type { ExploreCategory } from './exploreCategories';
 export { HorizontalCarousel } from './HorizontalCarousel';

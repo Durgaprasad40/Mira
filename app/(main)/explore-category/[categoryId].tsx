@@ -8,9 +8,9 @@ import { EXPLORE_CATEGORIES } from '@/components/explore/exploreCategories';
 import { useExplorePrefsStore } from '@/stores/explorePrefsStore';
 import { DiscoverCardStack } from '@/components/screens/DiscoverCardStack';
 import { COLORS } from '@/lib/constants';
+import { EXPLORE_CATEGORY_PAGE_SIZE } from '@/lib/exploreCategoryPrefetch';
 
 const HEADER_H = 48;
-const PAGE_SIZE = 50;
 
 export default function ExploreCategoryScreen() {
   const { categoryId } = useLocalSearchParams<{ categoryId?: string | string[] }>();
@@ -37,7 +37,7 @@ export default function ExploreCategoryScreen() {
     error,
   } = useExploreCategoryProfiles({
     categoryId: normalizedCategoryId ?? '',
-    limit: PAGE_SIZE,
+    limit: EXPLORE_CATEGORY_PAGE_SIZE,
     offset: pageOffset,
     refreshKey,
   });
@@ -113,7 +113,7 @@ export default function ExploreCategoryScreen() {
     setStackExhausted(false);
     setIsLoadingNextBatch(true);
     hadProfilesRef.current = false;
-    setPageOffset((currentOffset) => currentOffset + PAGE_SIZE);
+    setPageOffset((currentOffset) => currentOffset + EXPLORE_CATEGORY_PAGE_SIZE);
   }, []);
 
   // Use the profiles directly from the hook (already filtered by category)
@@ -152,12 +152,6 @@ export default function ExploreCategoryScreen() {
   }, [hasMore, isLoading]);
 
   const unavailableTitle = useMemo(() => {
-    if (status === 'location_required') {
-      return 'Nearby needs location';
-    }
-    if (status === 'verification_required') {
-      return 'Verify to use Nearby';
-    }
     if (status === 'invalid_category' || !cat) {
       return 'This vibe is unavailable';
     }
@@ -180,12 +174,6 @@ export default function ExploreCategoryScreen() {
   }, [cat, hasMore, partialBatchExhausted, showLoadMorePrompt, stackExhausted, status]);
 
   const unavailableSubtitle = useMemo(() => {
-    if (status === 'location_required') {
-      return 'Enable location access for Mira, then come back to see people close to you.';
-    }
-    if (status === 'verification_required') {
-      return 'Finish profile verification to browse people nearby.';
-    }
     if (status === 'invalid_category' || !cat) {
       return 'This Explore vibe is not live right now.';
     }
@@ -211,8 +199,6 @@ export default function ExploreCategoryScreen() {
   }, [cat, hasMore, pageOffset, partialBatchExhausted, showLoadMorePrompt, stackExhausted, status]);
 
   const emptyIconName = useMemo(() => {
-    if (status === 'location_required') return 'location-outline';
-    if (status === 'verification_required') return 'shield-checkmark-outline';
     if (status === 'discovery_paused') return 'pause-circle-outline';
     if (status === 'viewer_missing' || status === 'invalid_category') return 'alert-circle-outline';
     if (status === 'empty_category') return 'people-outline';

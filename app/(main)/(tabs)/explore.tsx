@@ -33,7 +33,12 @@ import {
   INTEREST_CATEGORIES,
 } from "@/components/explore/exploreCategories";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
+import { useAuthStore } from "@/stores/authStore";
 import { COLORS } from "@/lib/constants";
+import {
+  EXPLORE_CATEGORY_PAGE_SIZE,
+  startExploreCategoryPrefetch,
+} from "@/lib/exploreCategoryPrefetch";
 
 const GRID_PADDING = 16;
 const GRID_GAP = 14; // Slightly more breathing room
@@ -103,8 +108,6 @@ const ExploreTile = React.memo(function ExploreTile({
   tileWidth,
   tileHeight,
   isLastInRow,
-  disabled = false,
-  statusLabel,
 }: {
   category: ExploreCategory;
   count: number;
@@ -112,13 +115,10 @@ const ExploreTile = React.memo(function ExploreTile({
   tileWidth: number;
   tileHeight: number;
   isLastInRow: boolean;
-  disabled?: boolean;
-  statusLabel?: string;
 }) {
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
   const handlePressIn = () => {
-    if (disabled) return;
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } catch {}
@@ -131,7 +131,6 @@ const ExploreTile = React.memo(function ExploreTile({
   };
 
   const handlePressOut = () => {
-    if (disabled) return;
     Animated.timing(scaleAnim, {
       toValue: 1,
       duration: 150,
@@ -147,10 +146,9 @@ const ExploreTile = React.memo(function ExploreTile({
   return (
     <TouchableOpacity
       activeOpacity={1}
-      onPress={disabled ? undefined : onPress}
+      onPress={onPress}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
-      disabled={disabled}
       style={[
         styles.tileContainer,
         {
@@ -162,7 +160,6 @@ const ExploreTile = React.memo(function ExploreTile({
       <Animated.View
         style={[
           styles.tileWrapper,
-          disabled && styles.tileWrapperDisabled,
           { transform: [{ scale: scaleAnim }] },
         ]}
       >
@@ -191,11 +188,7 @@ const ExploreTile = React.memo(function ExploreTile({
             </View>
 
             {/* Count badge (top-right) */}
-            {statusLabel ? (
-              <View style={[styles.tileBadge, styles.tileStatusBadge]}>
-                <Text style={[styles.tileBadgeText, styles.tileStatusBadgeText]}>{statusLabel}</Text>
-              </View>
-            ) : typeof count === "number" && count > 0 ? (
+            {typeof count === "number" && count > 0 ? (
               <View style={styles.tileBadge}>
                 <Text style={styles.tileBadgeText}>{count}</Text>
               </View>
@@ -220,11 +213,9 @@ const ExploreTile = React.memo(function ExploreTile({
   return (
     prev.category === next.category &&
     prev.count === next.count &&
-    prev.disabled === next.disabled &&
     prev.tileWidth === next.tileWidth &&
     prev.tileHeight === next.tileHeight &&
-    prev.isLastInRow === next.isLastInRow &&
-    prev.statusLabel === next.statusLabel
+    prev.isLastInRow === next.isLastInRow
   );
 });
 
@@ -244,6 +235,9 @@ export default function ExploreScreen() {
   const { width: windowWidth } = useWindowDimensions();
   const [refreshKey, setRefreshKey] = useState(0);
   const hasFocusedOnceRef = useRef(false);
+  const authUserId = useAuthStore((s) => s.userId);
+  const authToken = useAuthStore((s) => s.token);
+  const authVersion = useAuthStore((s) => s.authVersion);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // INSTANT RENDER FIX: Track data state for shell UI pattern
@@ -262,13 +256,10 @@ export default function ExploreScreen() {
   const {
     data: backendCounts,
     status: countsStatus,
-    nearbyStatus,
     isLoading,
     isError,
     error,
   } = useExploreCategoryCounts(refreshKey);
-  const nearbyUnavailable = nearbyStatus !== "ok";
-  const nearbyStatusLabel = nearbyStatus === "verification_required" ? "Verify first" : "Enable location";
 
   // ═══════════════════════════════════════════════════════════════════════════
   // INSTANT RENDER FIX: Mark data as loaded once we have it
@@ -348,8 +339,16 @@ export default function ExploreScreen() {
   // Navigate to category detail
   const handleCategoryPress = useCallback(
     (category: ExploreCategory) => {
-      if (category.id === "nearby" && nearbyUnavailable) {
-        return;
+      if (authUserId && typeof authToken === "string" && authToken.trim()) {
+        startExploreCategoryPrefetch({
+          userId: authUserId,
+          token: authToken,
+          authVersion,
+          categoryId: category.id,
+          limit: EXPLORE_CATEGORY_PAGE_SIZE,
+          offset: 0,
+          refreshKey: 0,
+        });
       }
       trackCategoryClick(category.id);
       safePush(
@@ -361,12 +360,23 @@ export default function ExploreScreen() {
         "explore->category"
       );
     },
-    [nearbyUnavailable, router, trackCategoryClick]
+    [authToken, authUserId, authVersion, router, trackCategoryClick]
   );
 
   // Handle return hook press
   const handleReturnHookPress = useCallback(() => {
     if (returnCategoryId) {
+      if (authUserId && typeof authToken === "string" && authToken.trim()) {
+        startExploreCategoryPrefetch({
+          userId: authUserId,
+          token: authToken,
+          authVersion,
+          categoryId: returnCategoryId,
+          limit: EXPLORE_CATEGORY_PAGE_SIZE,
+          offset: 0,
+          refreshKey: 0,
+        });
+      }
       setShowReturnHook(false);
       safePush(
         router,
@@ -377,7 +387,7 @@ export default function ExploreScreen() {
         "explore->return-category"
       );
     }
-  }, [returnCategoryId, router]);
+  }, [authToken, authUserId, authVersion, returnCategoryId, router]);
 
   const handleRefresh = useCallback(() => {
     try {
@@ -430,11 +440,9 @@ export default function ExploreScreen() {
         tileWidth={tileWidth}
         tileHeight={tileHeight}
         isLastInRow={isLastInRow}
-        disabled={item.id === "nearby" && nearbyUnavailable}
-        statusLabel={item.id === "nearby" && nearbyUnavailable ? nearbyStatusLabel : undefined}
       />
     ),
-    [categoryCounts, handleCategoryPress, nearbyStatusLabel, nearbyUnavailable, tileHeight, tileWidth]
+    [categoryCounts, handleCategoryPress, tileHeight, tileWidth]
   );
 
   // Render a 2-column grid for a section
@@ -471,9 +479,7 @@ export default function ExploreScreen() {
       <Ionicons name="people-outline" size={52} color={COLORS.textLight} />
       <Text style={styles.emptyTitle}>No new people right now</Text>
       <Text style={styles.emptySubtitle}>
-        {nearbyUnavailable
-          ? "Fresh Explore profiles are quiet right now. Enable location for Nearby and check back soon."
-          : "Fresh Explore profiles are quiet right now. Check back soon for new people."}
+        {"Fresh Explore profiles are quiet right now. Check back soon for new people."}
       </Text>
       <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
         <Text style={styles.retryButtonText}>Refresh Explore</Text>
@@ -613,13 +619,6 @@ export default function ExploreScreen() {
                 <Text style={styles.sectionIcon}>⚡</Text>
                 <Text style={styles.sectionTitle}>Right Now</Text>
               </View>
-              {nearbyUnavailable && (
-                <Text style={styles.sectionHelperText}>
-                  {nearbyStatus === "verification_required"
-                    ? "Verify your profile to use Nearby."
-                    : "Enable location access for Mira to use Nearby."}
-                </Text>
-              )}
               <View style={[styles.sectionGrid, sectionGridStyle]}>
                 {renderSectionGrid(rightNowItems)}
               </View>
@@ -766,9 +765,6 @@ const styles = StyleSheet.create({
     // Ensure clipping respects border radius
     backgroundColor: COLORS.backgroundDark,
   },
-  tileWrapperDisabled: {
-    opacity: 0.7,
-  },
   tile: {
     borderRadius: TILE_BORDER_RADIUS,
   },
@@ -808,19 +804,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.overlaySubtle,
   },
-  tileStatusBadge: {
-    maxWidth: 110,
-    paddingHorizontal: 8,
-  },
   tileBadgeText: {
     color: COLORS.white,
     fontSize: 12,
     fontWeight: "700",
     letterSpacing: 0.3,
-  },
-  tileStatusBadgeText: {
-    fontSize: 11,
-    letterSpacing: 0,
   },
   // Title container with proper bottom spacing
   tileTitleContainer: {

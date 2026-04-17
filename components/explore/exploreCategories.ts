@@ -1,4 +1,17 @@
 import { isWithinAllowedDistance, NEAR_ME_DISTANCE_KM } from "@/lib/distanceRules";
+import { normalizeRelationshipIntentValues } from "@/lib/discoveryNaming";
+
+export type ExploreCategoryKind = "relationship" | "right_now" | "interest";
+
+type DemoExploreProfile = {
+  relationshipIntent?: readonly string[] | string | null;
+  activities?: readonly string[] | null;
+  distance?: number | null;
+  isActiveNow?: boolean | null;
+  wasActiveToday?: boolean | null;
+  lastActive?: number | null;
+  lastActiveAt?: number | null;
+};
 
 export type ExploreCategory = {
   id: string;
@@ -6,60 +19,30 @@ export type ExploreCategory = {
   title?: string;
   icon: string;
   color: string;
-  kind: "relationship" | "interest";
-  predicate: (p: any) => boolean;
+  kind: ExploreCategoryKind;
+  // Demo-only mirror of backend category semantics. Live Explore data is filtered on the backend.
+  demoPredicate: (profile: DemoExploreProfile) => boolean;
 };
 
 // ============================================
 // HELPER FUNCTIONS
 // ============================================
 
-// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
-const KNOWN_INTENTS = new Set([
-  "serious_vibes", "keep_it_casual", "exploring_vibes", "see_where_it_goes",
-  "open_to_vibes", "just_friends", "open_to_anything", "single_parent", "new_to_dating",
-]);
+const getRelationshipIntentValues = (profile: DemoExploreProfile): string[] =>
+  normalizeRelationshipIntentValues(profile.relationshipIntent);
 
-const getIntents = (p: any): string[] => {
-  const raw =
-    p?.relationshipIntent ??
-    p?.relationshipGoal ??
-    p?.lookingFor ??
-    p?.intent ??
-    null;
+const hasExactIntent = (profile: DemoExploreProfile, target: string): boolean =>
+  getRelationshipIntentValues(profile).includes(target);
 
-  const out: string[] = [];
+const hasExactActivity = (profile: DemoExploreProfile, target: string): boolean =>
+  Array.isArray(profile?.activities) && profile.activities.includes(target);
 
-  if (typeof raw === "string" && KNOWN_INTENTS.has(raw)) {
-    out.push(raw);
-  } else if (Array.isArray(raw)) {
-    for (const v of raw) {
-      if (typeof v === "string" && KNOWN_INTENTS.has(v)) out.push(v);
-    }
-  }
-
-  if (out.length > 0) return out;
-
-  // Fallback: derive from tags
-  const tags: string[] = Array.isArray(p?.tags) ? p.tags : [];
-  for (const t of tags) {
-    if (KNOWN_INTENTS.has(t)) out.push(t);
-  }
-
-  return out;
-};
-
-const hasIntent = (p: any, ...targets: string[]): boolean => {
-  const intents = getIntents(p);
-  return targets.some((t) => intents.includes(t));
-};
-
-const hasActivity = (p: any, ...targets: string[]): boolean => {
-  const activities: string[] = Array.isArray(p?.activities) ? p.activities : [];
-  const tags: string[] = Array.isArray(p?.tags) ? p.tags : [];
-  const combined = [...activities, ...tags];
-  return targets.some((t) => combined.includes(t));
-};
+const getLastActiveTimestamp = (profile: DemoExploreProfile): number | undefined =>
+  typeof profile?.lastActive === "number"
+    ? profile.lastActive
+    : typeof profile?.lastActiveAt === "number"
+      ? profile.lastActiveAt
+      : undefined;
 
 const minutesAgo = (ts?: number) =>
   ts ? (Date.now() - ts) / 60000 : Number.POSITIVE_INFINITY;
@@ -98,7 +81,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "💑",
     color: TILE_COLORS.pink,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "serious_vibes", "see_where_it_goes"),
+    demoPredicate: (profile) => hasExactIntent(profile, "serious_vibes"),
   },
   {
     id: "keep_it_casual",
@@ -107,7 +90,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "🎉",
     color: TILE_COLORS.orange,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "keep_it_casual", "open_to_vibes"),
+    demoPredicate: (profile) => hasExactIntent(profile, "keep_it_casual"),
   },
   {
     id: "exploring_vibes",
@@ -116,7 +99,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "🤔",
     color: TILE_COLORS.sky,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "exploring_vibes", "open_to_anything"),
+    demoPredicate: (profile) => hasExactIntent(profile, "exploring_vibes"),
   },
   {
     id: "see_where_it_goes",
@@ -125,7 +108,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "📈",
     color: TILE_COLORS.indigo,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "see_where_it_goes", "serious_vibes"),
+    demoPredicate: (profile) => hasExactIntent(profile, "see_where_it_goes"),
   },
   {
     id: "open_to_vibes",
@@ -134,7 +117,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "📉",
     color: TILE_COLORS.purple,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "open_to_vibes", "keep_it_casual"),
+    demoPredicate: (profile) => hasExactIntent(profile, "open_to_vibes"),
   },
   {
     id: "just_friends",
@@ -143,7 +126,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "👋",
     color: TILE_COLORS.teal,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "just_friends", "open_to_anything"),
+    demoPredicate: (profile) => hasExactIntent(profile, "just_friends"),
   },
   {
     id: "open_to_anything",
@@ -152,7 +135,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "✨",
     color: TILE_COLORS.gold,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "open_to_anything", "exploring_vibes"),
+    demoPredicate: (profile) => hasExactIntent(profile, "open_to_anything"),
   },
   {
     id: "single_parent",
@@ -161,7 +144,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "👨‍👧",
     color: TILE_COLORS.rose,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "single_parent"),
+    demoPredicate: (profile) => hasExactIntent(profile, "single_parent"),
   },
   {
     id: "new_to_dating",
@@ -170,7 +153,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "🌱",
     color: TILE_COLORS.mint,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "new_to_dating"),
+    demoPredicate: (profile) => hasExactIntent(profile, "new_to_dating"),
   },
 ];
 
@@ -185,8 +168,8 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     title: "Nearby",
     icon: "📍",
     color: TILE_COLORS.emerald,
-    kind: "relationship",
-    predicate: (p) => typeof p?.distance === "number" && isWithinAllowedDistance(p, NEAR_ME_DISTANCE_KM),
+    kind: "right_now",
+    demoPredicate: (profile) => typeof profile?.distance === "number" && isWithinAllowedDistance(profile, NEAR_ME_DISTANCE_KM),
   },
   {
     id: "online_now",
@@ -194,8 +177,9 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     title: "Online Now",
     icon: "🟢",
     color: TILE_COLORS.mint,
-    kind: "relationship",
-    predicate: (p) => p?.isOnline === true || minutesAgo(p?.lastActive ?? p?.lastActiveAt) <= 10,
+    kind: "right_now",
+    demoPredicate: (profile) =>
+      profile?.isActiveNow === true || minutesAgo(getLastActiveTimestamp(profile)) <= 10,
   },
   {
     id: "active_today",
@@ -203,8 +187,9 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     title: "Active Today",
     icon: "📱",
     color: TILE_COLORS.blue,
-    kind: "relationship",
-    predicate: (p) => minutesAgo(p?.lastActive ?? p?.lastActiveAt) <= 24 * 60,
+    kind: "right_now",
+    demoPredicate: (profile) =>
+      profile?.wasActiveToday === true || minutesAgo(getLastActiveTimestamp(profile)) <= 24 * 60,
   },
   {
     id: "free_tonight",
@@ -212,8 +197,8 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     title: "Free Tonight",
     icon: "🌙",
     color: TILE_COLORS.indigo,
-    kind: "relationship",
-    predicate: (p) => p?.activities?.includes("free_tonight"),
+    kind: "right_now",
+    demoPredicate: (profile) => hasExactActivity(profile, "free_tonight"),
   },
 ];
 
@@ -229,7 +214,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "☕",
     color: TILE_COLORS.amber,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "coffee"),
+    demoPredicate: (profile) => hasExactActivity(profile, "coffee"),
   },
   {
     id: "sports",
@@ -238,7 +223,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "⚽",
     color: TILE_COLORS.blue,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "sports"),
+    demoPredicate: (profile) => hasExactActivity(profile, "sports"),
   },
   {
     id: "nature_lovers",
@@ -247,7 +232,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "🌿",
     color: TILE_COLORS.emerald,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "outdoors"),
+    demoPredicate: (profile) => hasExactActivity(profile, "outdoors"),
   },
   {
     id: "binge_watchers",
@@ -256,7 +241,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "🎬",
     color: TILE_COLORS.coral,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "movies"),
+    demoPredicate: (profile) => hasExactActivity(profile, "movies"),
   },
   {
     id: "foodie",
@@ -265,7 +250,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "🍕",
     color: TILE_COLORS.orange,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "foodie"),
+    demoPredicate: (profile) => hasExactActivity(profile, "foodie"),
   },
   {
     id: "travel",
@@ -274,7 +259,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "✈️",
     color: TILE_COLORS.sky,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "travel"),
+    demoPredicate: (profile) => hasExactActivity(profile, "travel"),
   },
   {
     id: "art_culture",
@@ -283,7 +268,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "🎨",
     color: TILE_COLORS.rose,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "art_culture"),
+    demoPredicate: (profile) => hasExactActivity(profile, "art_culture"),
   },
   {
     id: "gaming",
@@ -292,7 +277,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "🎮",
     color: TILE_COLORS.purple,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "gaming"),
+    demoPredicate: (profile) => hasExactActivity(profile, "gaming"),
   },
   {
     id: "fitness",
@@ -301,7 +286,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "💪",
     color: TILE_COLORS.lime,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "gym_partner", "gym"),
+    demoPredicate: (profile) => hasExactActivity(profile, "gym_partner"),
   },
   {
     id: "music",
@@ -310,7 +295,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "🎵",
     color: TILE_COLORS.pink,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "music_lover", "concerts"),
+    demoPredicate: (profile) => hasExactActivity(profile, "concerts"),
   },
   {
     id: "nightlife",
@@ -319,7 +304,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "🍸",
     color: TILE_COLORS.indigo,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "nightlife"),
+    demoPredicate: (profile) => hasExactActivity(profile, "nightlife"),
   },
   {
     id: "brunch",
@@ -328,7 +313,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     icon: "🥂",
     color: TILE_COLORS.gold,
     kind: "interest",
-    predicate: (p) => hasActivity(p, "brunch"),
+    demoPredicate: (profile) => hasExactActivity(profile, "brunch"),
   },
 ];
 
@@ -344,14 +329,3 @@ export const EXPLORE_CATEGORIES: ExploreCategory[] = [
 export const RELATIONSHIP_CATEGORIES = RELATIONSHIP_TILES;
 export const RIGHT_NOW_CATEGORIES = RIGHT_NOW_TILES;
 export const INTEREST_CATEGORIES = INTEREST_TILES;
-
-// ============================================
-// COUNT HELPER FUNCTION
-// ============================================
-export function countProfilesPerCategory(
-  category: ExploreCategory,
-  profiles: any[]
-): number {
-  if (!profiles || !Array.isArray(profiles)) return 0;
-  return profiles.filter(category.predicate).length;
-}

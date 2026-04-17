@@ -18,12 +18,10 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 
 export type ExploreCategoryCountsStatus = 'ok' | 'viewer_missing' | 'discovery_paused';
-export type ExploreNearbyAvailabilityStatus = 'ok' | 'location_required' | 'verification_required';
 
 type ExploreCategoryCountsResult = {
   data: Record<string, number> | null;
   status: ExploreCategoryCountsStatus | null;
-  nearbyStatus: ExploreNearbyAvailabilityStatus;
   isLoading: boolean;
   isError: boolean;
   error: string | null;
@@ -56,15 +54,6 @@ function normalizeExploreCategoryCountsStatus(
   return null;
 }
 
-function normalizeExploreNearbyStatus(
-  status: string | null | undefined,
-): ExploreNearbyAvailabilityStatus {
-  if (status === 'location_required' || status === 'verification_required') {
-    return status;
-  }
-  return 'ok';
-}
-
 /**
  * Fetch category counts from the backend using the single-category system.
  * Returns explicit loading and error state so the homepage can stay truthful.
@@ -74,14 +63,15 @@ function normalizeExploreNearbyStatus(
  */
 export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsResult {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const lastGoodCountsRef = useRef<Record<string, number> | null>(null);
-  const lastNearbyStatusRef = useRef<ExploreNearbyAvailabilityStatus>('ok');
+  const sessionToken = typeof token === 'string' ? token.trim() : '';
 
   // Determine if we should skip the query
-  // Skip if: demo mode (legacy store mode) OR auth not ready OR userId missing
+  // Skip if: demo mode (legacy store mode) OR auth not ready OR auth context incomplete
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  const shouldSkip = isDemoMode || !authReady || !userId;
+  const shouldSkip = isDemoMode || !authReady || !userId || !sessionToken;
 
   // P1-001 FIX: Use useQuery() for reactive caching during the current Explore session.
   // refreshKey in args triggers re-fetch when changed (for manual refresh)
@@ -89,13 +79,12 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   // Pass token so the backend can resolve the trusted session user.
   const queryResult = useQuery(
     api.discover.getExploreCategoryCounts,
-    shouldSkip ? 'skip' : { refreshKey, userId }
+    shouldSkip ? 'skip' : { refreshKey, token: sessionToken }
   );
 
   useEffect(() => {
     if (queryResult && queryResult.status === 'ok' && queryResult.counts) {
       lastGoodCountsRef.current = queryResult.counts;
-      lastNearbyStatusRef.current = normalizeExploreNearbyStatus(queryResult.nearbyStatus);
     }
   }, [queryResult]);
 
@@ -105,7 +94,6 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     return {
       data: DEMO_CATEGORY_COUNTS,
       status: 'ok',
-      nearbyStatus: 'ok',
       isLoading: false,
       isError: false,
       error: null,
@@ -114,7 +102,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
 
   // Auth not ready yet - show loading
   if (!authReady) {
-    return { data: null, status: null, nearbyStatus: 'ok', isLoading: true, isError: false, error: null };
+    return { data: null, status: null, isLoading: true, isError: false, error: null };
   }
 
   // Auth ready but no userId - viewer state is unavailable, not a healthy empty result
@@ -122,7 +110,16 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     return {
       data: lastGoodCountsRef.current,
       status: 'viewer_missing',
-      nearbyStatus: lastNearbyStatusRef.current,
+      isLoading: false,
+      isError: false,
+      error: null,
+    };
+  }
+
+  if (!sessionToken) {
+    return {
+      data: lastGoodCountsRef.current,
+      status: 'viewer_missing',
       isLoading: false,
       isError: false,
       error: null,
@@ -134,7 +131,6 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     return {
       data: lastGoodCountsRef.current,
       status: lastGoodCountsRef.current ? 'ok' : null,
-      nearbyStatus: lastNearbyStatusRef.current,
       isLoading: true,
       isError: false,
       error: null,
@@ -147,7 +143,6 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     return {
       data: lastGoodCountsRef.current,
       status: lastGoodCountsRef.current ? 'ok' : null,
-      nearbyStatus: lastNearbyStatusRef.current,
       isLoading: false,
       isError: lastGoodCountsRef.current == null,
       error: lastGoodCountsRef.current == null ? EXPLORE_COUNTS_ERROR : null,
@@ -157,7 +152,6 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   return {
     data: queryResult.counts ?? null,
     status: normalizeExploreCategoryCountsStatus(queryResult.status),
-    nearbyStatus: normalizeExploreNearbyStatus(queryResult.nearbyStatus),
     isLoading: false,
     isError: false,
     error: null,
