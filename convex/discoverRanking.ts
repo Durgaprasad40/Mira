@@ -1,4 +1,25 @@
 /**
+ * 🔒 LOCKED: Phase-1 Discover (Production Ready)
+ *
+ * This feature has completed full audit and production hardening.
+ * Do NOT modify without explicit approval.
+ *
+ * Locked scope includes:
+ * - auth flow
+ * - ranking logic
+ * - pagination
+ * - swipe behavior
+ * - card rendering rules
+ * - presence handling
+ * - distance logic
+ * - empty state logic
+ *
+ * If changes are required:
+ * - open a new audit
+ * - do not modify directly
+ */
+
+/**
  * Phase-1 Discover Ranking Module
  *
  * Modular ranking system for the main Discover feed.
@@ -609,6 +630,7 @@ export function qualifiesForFallback(
  * @param limit - Number of results to return
  * @param useFallback - Whether to include fallback pool
  */
+// 🔒 LOCKED: Do not change ranking scores, exploration mix, or determinism without audit approval
 export function rankDiscoverCandidates(
   candidates: CandidateProfile[],
   currentUser: CurrentUser,

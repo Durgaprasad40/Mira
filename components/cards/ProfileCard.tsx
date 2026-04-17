@@ -1,3 +1,23 @@
+/**
+ * 🔒 LOCKED: Phase-1 Discover (Production Ready)
+ *
+ * This feature has completed full audit and production hardening.
+ * Do NOT modify without explicit approval.
+ *
+ * Locked scope includes:
+ * - auth flow
+ * - ranking logic
+ * - pagination
+ * - swipe behavior
+ * - card rendering rules
+ * - presence handling
+ * - distance logic
+ * - empty state logic
+ *
+ * If changes are required:
+ * - open a new audit
+ * - do not modify directly
+ */
 import React, { useState, useCallback, useEffect, useRef, useMemo, memo } from 'react';
 import {
   View,
@@ -664,6 +684,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   //   2–4 photos: P1 = identity; P2+ = wave / soft_fallback per branch
   //   5+ photos: P1 identity, P2 bio, P3 prompt1+basics, P4 prompt2+interests, then remaining + soft fallbacks
   // ═══════════════════════════════════════════════════════════════════════════
+  // 🔒 LOCKED: Do not change Phase-1 card distribution / photo rules without audit approval
   const phase1PhotoContents = useMemo((): Phase1PhotoContentItem[] => {
     if (isPhase2) return [];
 

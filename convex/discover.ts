@@ -1,3 +1,23 @@
+/**
+ * 🔒 LOCKED: Phase-1 Discover (Production Ready)
+ *
+ * This feature has completed full audit and production hardening.
+ * Do NOT modify without explicit approval.
+ *
+ * Locked scope includes:
+ * - auth flow
+ * - ranking logic
+ * - pagination
+ * - swipe behavior
+ * - card rendering rules
+ * - presence handling
+ * - distance logic
+ * - empty state logic
+ *
+ * If changes are required:
+ * - open a new audit
+ * - do not modify directly
+ */
 import { v } from 'convex/values';
 import { query, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
@@ -276,6 +296,7 @@ function reducedReachExcludeThisCandidate(viewerId: string, candidateId: string,
 // getDiscoverProfiles — main swipe deck query
 // ---------------------------------------------------------------------------
 
+// 🔒 LOCKED: Do not change discover query auth, filters, or empty-result contract without audit approval
 export const getDiscoverProfiles = query({
   args: {
     token: v.string(),

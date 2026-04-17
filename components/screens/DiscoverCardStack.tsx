@@ -1,3 +1,23 @@
+/**
+ * 🔒 LOCKED: Phase-1 Discover (Production Ready)
+ *
+ * This feature has completed full audit and production hardening.
+ * Do NOT modify without explicit approval.
+ *
+ * Locked scope includes:
+ * - auth flow
+ * - ranking logic
+ * - pagination
+ * - swipe behavior
+ * - card rendering rules
+ * - presence handling
+ * - distance logic
+ * - empty state logic
+ *
+ * If changes are required:
+ * - open a new audit
+ * - do not modify directly
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
@@ -384,6 +404,7 @@ const CATEGORY_TAG_LABELS: Record<string, string> = {
   music: "Music lover",
 };
 
+// 🔒 LOCKED: Do not change Discover stack orchestration (Phase-1/2 modes, queue) without audit approval
 export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader, exploreCategoryId, profileActionScope, onStackEmpty }: DiscoverCardStackProps) {
   const dark = theme === "dark";
   const isPhase2 = mode === "phase2";
@@ -804,6 +825,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [convexUserId, hasValidToken, token, skipInternalQuery, retryKey, sortBy, isPhase2, isDemoMode, shouldHoldPhase1Query, phase1FetchOffset, filterVersion],
   );
+  // 🔒 LOCKED: Do not change Phase-1 pagination / discover query contract without audit approval
   const phase1Profiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
   const phase1ProfilesWithPrefetch =
     phase1Profiles !== undefined
@@ -1568,6 +1590,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Nudges should only appear on Profile/Edit Profile screens (not swiping context)
 
   // Phase-1 swipe mutation (likes table, Phase-1 discovery)
+  // 🔒 LOCKED: Do not change swipe mutation wiring without audit approval
   const phase1SwipeMutation = useMutation(api.likes.swipe);
   // Phase-2 Deep Connect: privateLikes / privateMatches / privateConversations (privateSwipes.ts)
   const phase2SwipeMutation = useMutation(api.privateSwipes.swipe);
@@ -2431,6 +2454,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   handlePanEndRef.current = handlePanEnd;
 
   // Gesture.Pan() runs on UI thread - replaces PanResponder for better performance
+  // 🔒 LOCKED: Do not change swipe gesture / thresholds without audit approval
   const panGesture = useMemo(() =>
     Gesture.Pan()
       .minDistance(8)
