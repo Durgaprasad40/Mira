@@ -405,14 +405,42 @@ export function calculateRankScore(
 // Exploration Mixer
 // ---------------------------------------------------------------------------
 
+/** Calendar day index (UTC), aligned with rotationScore / Discover stability. */
+export function discoverDayNumberFromTimestamp(nowMs: number): number {
+  return Math.floor(nowMs / (1000 * 60 * 60 * 24));
+}
+
+/** 32-bit seed from viewer + day (deterministic per viewer per day). */
+function seedViewerDay(viewerId: string, dayNumber: number): number {
+  const s = `${viewerId}\0${dayNumber}`;
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h === 0 ? 0x9e3779b9 : h >>> 0;
+}
+
+/** Mulberry32 — returns values in [0, 1). */
+function createSeededUnitRandom(seed: number): () => number {
+  let a = seed >>> 0;
+  return function unitRandom() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), a | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /**
- * Fisher-Yates shuffle for uniform random ordering.
+ * Fisher-Yates shuffle using the provided RNG (uniform in [0,1)).
  * Returns a new shuffled array without modifying the original.
  */
-function fisherYatesShuffle<T>(array: T[]): T[] {
+function fisherYatesShuffle<T>(array: T[], unitRandom: () => number): T[] {
   const result = [...array];
   for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(unitRandom() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
@@ -424,7 +452,9 @@ function fisherYatesShuffle<T>(array: T[]): T[] {
  */
 export function applyExplorationMix(
   sortedCandidates: CandidateProfile[],
-  limit: number
+  limit: number,
+  viewerId: string,
+  dayNumber: number,
 ): CandidateProfile[] {
   if (sortedCandidates.length <= limit) {
     return sortedCandidates;
@@ -441,8 +471,9 @@ export function applyExplorationMix(
   const exploration: CandidateProfile[] = [];
 
   if (remaining.length > 0 && explorationCount > 0) {
-    // Shuffle remaining for random exploration
-    const shuffled = fisherYatesShuffle(remaining);
+    const unitRandom = createSeededUnitRandom(seedViewerDay(viewerId, dayNumber));
+    // Shuffle remaining for random exploration (deterministic per viewer+day)
+    const shuffled = fisherYatesShuffle(remaining, unitRandom);
     exploration.push(...shuffled.slice(0, explorationCount));
   }
 
@@ -594,9 +625,10 @@ export function rankDiscoverCandidates(
   // Sort by score (descending)
   scoredCandidates.sort((a, b) => b.score - a.score);
 
-  // Apply exploration mix
+  // Apply exploration mix (shuffle seed: viewer + calendar day — stable across pagination requests)
   const sortedCandidates = scoredCandidates.map(s => s.candidate);
-  const mixed = applyExplorationMix(sortedCandidates, limit);
+  const dayNumber = discoverDayNumberFromTimestamp(Date.now());
+  const mixed = applyExplorationMix(sortedCandidates, limit, currentUser._id, dayNumber);
 
   const exhausted = mixed.length < limit;
   let fallbackUsed = false;

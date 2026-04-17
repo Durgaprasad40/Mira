@@ -22,6 +22,56 @@ import { rankCandidates as sharedRankCandidates, logBatchRankingComparison } fro
 
 // DEV DEBUG: Structured logging
 import { convexLog, convexError } from './_logging';
+import type { Phase1DiscoverEmptyReason } from '../lib/phase1DiscoverQuery';
+
+// ---------------------------------------------------------------------------
+// Phase-1 Discover: structured empty result (Step 8 — distinguish empty reasons)
+// ---------------------------------------------------------------------------
+
+function phase1DiscoverEmpty(reason: Phase1DiscoverEmptyReason): {
+  profiles: [];
+  phase1EmptyReason: Phase1DiscoverEmptyReason;
+} {
+  return { profiles: [], phase1EmptyReason: reason };
+}
+
+/** When the deck has zero candidates after filtering, classify using preference vs history barriers. */
+function classifyPhase1EmptyDeck(
+  prefFails: number,
+  historyFails: number,
+  filteredLen: number,
+  candidatesLen: number,
+): Phase1DiscoverEmptyReason {
+  if (filteredLen > 0 && candidatesLen === 0) {
+    return 'unknown_empty';
+  }
+  if (prefFails > 0 && historyFails === 0) return 'filters_no_match';
+  if (historyFails > 0 && prefFails === 0) return 'no_more_profiles';
+  if (prefFails > 0 && historyFails > 0) {
+    return historyFails >= prefFails ? 'no_more_profiles' : 'filters_no_match';
+  }
+  return 'unknown_empty';
+}
+
+function emptyReasonWhenWindowEmpty(
+  offset: number,
+  fullRankedLength: number,
+  prefFails: number,
+  historyFails: number,
+  filteredLen: number,
+  candidatesLen: number,
+): Phase1DiscoverEmptyReason {
+  if (fullRankedLength > 0 && offset >= fullRankedLength) {
+    return 'no_more_profiles';
+  }
+  if (offset > 0 && fullRankedLength === 0) {
+    return classifyPhase1EmptyDeck(prefFails, historyFails, filteredLen, candidatesLen);
+  }
+  if (fullRankedLength === 0 && offset === 0) {
+    return classifyPhase1EmptyDeck(prefFails, historyFails, filteredLen, candidatesLen);
+  }
+  return 'unknown_empty';
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -211,6 +261,14 @@ function rotationScore(viewerId: string, candidateId: string): number {
   return Math.abs(h) % 101; // 0–100
 }
 
+/** ~50% exclusion for reduced_reach; same viewer+candidate+day → same outcome (replaces Math.random). */
+function reducedReachExcludeThisCandidate(viewerId: string, candidateId: string, dayNumber: number): boolean {
+  let h = dayNumber;
+  for (let i = 0; i < viewerId.length; i++) h = ((h << 5) - h + viewerId.charCodeAt(i)) | 0;
+  for (let i = 0; i < candidateId.length; i++) h = ((h << 5) - h + candidateId.charCodeAt(i)) | 0;
+  return (Math.abs(h) % 2) === 1;
+}
+
 // NOTE: Old rankScore function removed (P1 dead code cleanup)
 // New ranking system in discoverRanking.ts is now the only scoring logic
 
@@ -220,8 +278,7 @@ function rotationScore(viewerId: string, candidateId: string): number {
 
 export const getDiscoverProfiles = query({
   args: {
-    userId: v.optional(v.union(v.id('users'), v.string())), // Convex ID or authUserId; optional if token provided
-    token: v.optional(v.string()),
+    token: v.string(),
     sortBy: v.optional(v.union(
       v.literal('recommended'),
       v.literal('distance'),
@@ -241,35 +298,27 @@ export const getDiscoverProfiles = query({
 
     convexLog('discover.getDiscoverProfiles', { sortBy, limit, offset, status: 'started' });
 
-    // Resolve viewer: session token (preferred when present) or userId / authUserId string
-    let userId: Id<'users'> | null = null;
     const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
-    if (sessionToken.length > 0) {
-      userId = await validateSessionToken(ctx, sessionToken);
+    if (sessionToken.length === 0) {
+      convexLog('discover.getDiscoverProfiles', { status: 'missing_token', sortBy, limit, offset });
+      return phase1DiscoverEmpty('auth_missing_or_invalid');
     }
-    if (
-      !userId &&
-      args.userId !== undefined &&
-      String(args.userId).trim().length > 0
-    ) {
-      userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    }
+
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
-      convexLog('discover.getDiscoverProfiles', {
-        status: 'user_not_found',
-        hint: args.userId !== undefined ? String(args.userId).slice(-8) : 'no_userId',
-      });
-      return [];
+      convexLog('discover.getDiscoverProfiles', { status: 'invalid_or_expired_token', sortBy, limit, offset });
+      return phase1DiscoverEmpty('auth_missing_or_invalid');
     }
 
     const currentUser = await ctx.db.get(userId);
-    if (!currentUser) return [];
+    if (!currentUser) return phase1DiscoverEmpty('viewer_unavailable');
 
-    if (isEffectivelyHiddenFromDiscover(currentUser)) return [];
+    if (isEffectivelyHiddenFromDiscover(currentUser)) return phase1DiscoverEmpty('viewer_unavailable');
 
     // PERF #8: Pre-fetch all swipes, matches, blocks, and incoming likes upfront
     // This converts O(6*N) queries into O(6) queries
     const now = Date.now();
+    const discoverDayNumber = Math.floor(now / (1000 * 60 * 60 * 24));
     const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
 
     const [
@@ -401,14 +450,19 @@ export const getDiscoverProfiles = query({
 
     // First pass: filter candidates without photo queries
     const filteredCandidates: { user: typeof allUsers[number]; distance?: number }[] = [];
+    /** Users who failed mutual gender / age / distance (filters may be too strict). */
+    let prefFailCount = 0;
+    /** Users who passed preferences but were excluded by swipes/matches/blocks/etc. */
+    let historyFailCount = 0;
 
     for (const user of allUsers) {
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
       if (isEffectivelyHiddenFromDiscover(user)) continue;
 
-      // NOTE: Verification is NOT a hard filter - it's a ranking boost
-      // Unverified users appear lower in ranking, not excluded
+      // Align with likes.swipe: like/super_like require target verificationStatus === 'verified'
+      const targetVerificationStatus = user.verificationStatus || 'unverified';
+      if (targetVerificationStatus !== 'verified') continue;
 
       // Incognito check
       if (user.incognitoMode) {
@@ -417,14 +471,26 @@ export const getDiscoverProfiles = query({
       }
 
       // Gender preference match (both ways)
-      if (!currentUser.lookingFor.includes(user.gender)) continue;
-      if (!user.lookingFor.includes(currentUser.gender)) continue;
+      if (!currentUser.lookingFor.includes(user.gender)) {
+        prefFailCount++;
+        continue;
+      }
+      if (!user.lookingFor.includes(currentUser.gender)) {
+        prefFailCount++;
+        continue;
+      }
 
       // Age range
       const userAge = calculateAge(user.dateOfBirth);
-      if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;
+      if (userAge < currentUser.minAge || userAge > currentUser.maxAge) {
+        prefFailCount++;
+        continue;
+      }
       const myAge = calculateAge(currentUser.dateOfBirth);
-      if (myAge < user.minAge || myAge > user.maxAge) continue;
+      if (myAge < user.minAge || myAge > user.maxAge) {
+        prefFailCount++;
+        continue;
+      }
 
       // Distance
       let distance: number | undefined;
@@ -433,21 +499,48 @@ export const getDiscoverProfiles = query({
           currentUser.latitude, currentUser.longitude,
           user.latitude, user.longitude,
         );
-        if (!isDistanceAllowed(distance, currentUser.maxDistance)) continue;
+        if (!isDistanceAllowed(distance, currentUser.maxDistance)) {
+          prefFailCount++;
+          continue;
+        }
       }
 
       // PERF #8: O(1) Set lookups instead of database queries
-      if (swipedUserIds.has(user._id as string)) continue;
-      if (matchedUserIds.has(user._id as string)) continue;
-      if (blockedUserIds.has(user._id as string)) continue;
+      if (swipedUserIds.has(user._id as string)) {
+        historyFailCount++;
+        continue;
+      }
+      if (matchedUserIds.has(user._id as string)) {
+        historyFailCount++;
+        continue;
+      }
+      if (blockedUserIds.has(user._id as string)) {
+        historyFailCount++;
+        continue;
+      }
       // TRUST: Viewer-specific report exclusion (hard filter)
-      if (viewerReportedIds.has(user._id as string)) continue;
+      if (viewerReportedIds.has(user._id as string)) {
+        historyFailCount++;
+        continue;
+      }
       // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
-      if (conversationPartnerIds.has(user._id as string)) continue;
+      if (conversationPartnerIds.has(user._id as string)) {
+        historyFailCount++;
+        continue;
+      }
 
       // Enforcement
-      if (user.verificationEnforcementLevel === 'security_only') continue;
-      if (user.verificationEnforcementLevel === 'reduced_reach' && Math.random() > 0.5) continue;
+      if (user.verificationEnforcementLevel === 'security_only') {
+        historyFailCount++;
+        continue;
+      }
+      if (
+        user.verificationEnforcementLevel === 'reduced_reach' &&
+        reducedReachExcludeThisCandidate(userId as string, user._id as string, discoverDayNumber)
+      ) {
+        historyFailCount++;
+        continue;
+      }
 
       filteredCandidates.push({ user, distance });
     }
@@ -469,8 +562,10 @@ export const getDiscoverProfiles = query({
       const { user, distance } = filteredCandidates[i];
       const photos = photoResults[i];
 
-      const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
-      if (nonNsfwPhotos.length === 0) continue; // at least 1 photo required
+      const safePublicPhotos = photos.filter(
+        (p) => !p.isNsfw && p.photoType !== 'verification_reference',
+      );
+      if (safePublicPhotos.length === 0) continue; // at least 1 public-safe photo required
 
       const userAge = calculateAge(user.dateOfBirth);
       const theyLikedMe = usersWhoLikedMe.has(user._id as string);
@@ -497,19 +592,39 @@ export const getDiscoverProfiles = query({
         distance,
         distanceHidden: user.hideDistance === true,
         lastActive: user.lastActive,
+        showLastSeen: user.showLastSeen,
         createdAt: user.createdAt,
         lookingFor: user.lookingFor,
         relationshipIntent: normalizeRelationshipIntentValues(user.relationshipIntent),
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos: photos.sort((a, b) => a.order - b.order),
+        photos: safePublicPhotos.sort((a, b) => a.order - b.order),
         photoBlurred: user.photoBlurred === true,
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
-        photoCount: nonNsfwPhotos.length,
+        photoCount: safePublicPhotos.length,
         isIncognito: user.incognitoMode === true,
+        // Client live distance (Step 9): approximate position for haversine when viewer GPS updates
+        latitude: user.latitude,
+        longitude: user.longitude,
       });
     }
+
+    const mapDiscoverProfileRow = (c: any) => {
+      const { showLastSeen, ...rest } = c;
+      return {
+        ...rest,
+        age: c.ageHidden ? undefined : c.age,
+        distance: c.distanceHidden ? undefined : c.distance,
+        lastActive: showLastSeen === false ? undefined : c.lastActive,
+        // Omit coords when distance is hidden (privacy parity with distance field)
+        latitude: c.distanceHidden ? undefined : c.latitude,
+        longitude: c.distanceHidden ? undefined : c.longitude,
+      };
+    };
+
+    const filteredLenForEmpty = filteredCandidates.length;
+    const candidatesLenForEmpty = candidates.length;
 
     // Sort
     if (sortBy === 'recommended') {
@@ -572,12 +687,15 @@ export const getDiscoverProfiles = query({
         isBoosted: c.isBoosted,
       }));
 
+      // Rank enough candidates to honor offset + limit (pagination window)
+      const rankWindow = Math.min(offset + limit, 500);
+
       // Apply new ranking with exploration mix
       const { rankedCandidates, exhausted } = rankDiscoverCandidates(
         candidateProfiles,
         rankingCurrentUser,
         trustSignals,
-        limit,
+        rankWindow,
         false // useFallback flag - fallback logic handled below
       );
 
@@ -591,8 +709,8 @@ export const getDiscoverProfiles = query({
       // P1 FIX: Fallback mechanism when primary pool is exhausted
       // If we have fewer results than requested, activate fallback pool
       // Fallback candidates must have 2+ compatibility signals
-      if (exhausted && result.length < limit) {
-        const needed = limit - result.length;
+      if (exhausted && result.length < rankWindow) {
+        const needed = rankWindow - result.length;
         const usedIds = new Set(result.map(r => r.id as string));
 
         // Find candidates not already in result that qualify for fallback
@@ -667,7 +785,7 @@ export const getDiscoverProfiles = query({
           }));
 
           // Run shared ranking engine
-          const sharedResult = sharedRankCandidates(normalizedCandidates, normalizedViewer, undefined, { limit });
+          const sharedResult = sharedRankCandidates(normalizedCandidates, normalizedViewer, undefined, { limit: rankWindow });
 
           // Build rank lookup for shared results
           const sharedRankMap = new Map<string, number>();
@@ -691,11 +809,19 @@ export const getDiscoverProfiles = query({
       }
 
       const window = result.slice(offset, offset + limit);
-      return window.map((c: any) => ({
-        ...c,
-        age: c.ageHidden ? undefined : c.age,
-        distance: c.distanceHidden ? undefined : c.distance,
-      }));
+      const mappedRecommended = window.map(mapDiscoverProfileRow);
+      if (mappedRecommended.length > 0) {
+        return { profiles: mappedRecommended };
+      }
+      const emptyReasonRecommended = emptyReasonWhenWindowEmpty(
+        offset,
+        result.length,
+        prefFailCount,
+        historyFailCount,
+        filteredLenForEmpty,
+        candidatesLenForEmpty,
+      );
+      return phase1DiscoverEmpty(emptyReasonRecommended);
     } else {
       candidates.sort((a, b) => {
         // Boosted first
@@ -713,11 +839,19 @@ export const getDiscoverProfiles = query({
     }
 
     const window = candidates.slice(offset, offset + limit);
-    return window.map((c: any) => ({
-      ...c,
-      age: c.ageHidden ? undefined : c.age,
-      distance: c.distanceHidden ? undefined : c.distance,
-    }));
+    const mappedSort = window.map(mapDiscoverProfileRow);
+    if (mappedSort.length > 0) {
+      return { profiles: mappedSort };
+    }
+    const emptyReasonSort = emptyReasonWhenWindowEmpty(
+      offset,
+      candidates.length,
+      prefFailCount,
+      historyFailCount,
+      filteredLenForEmpty,
+      candidatesLenForEmpty,
+    );
+    return phase1DiscoverEmpty(emptyReasonSort);
   },
 });
 

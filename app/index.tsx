@@ -170,7 +170,7 @@ export default function Index() {
           // This eliminates the serial wait: validate → navigate → mount → query
           // Instead: validate + prefetch (parallel) → navigate → mount → render immediately
           const currentAuthVersion = useAuthStore.getState().authVersion;
-          startDiscoverPrefetch(authData.userId, currentAuthVersion);
+          startDiscoverPrefetch(authData.userId, authData.token, currentAuthVersion);
 
           setBootState("VALIDATING");
         } else {

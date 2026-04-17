@@ -29,6 +29,7 @@ import { useBlockStore } from "@/stores/blockStore";
 import { COLORS, INCOGNITO_COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useBestLocation, calculateDistanceKm } from "@/stores/locationStore";
+import { unwrapPhase1DiscoverQueryResult } from "@/lib/phase1DiscoverQuery";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const SWIPE_THRESHOLD_X = SCREEN_WIDTH * 0.15; // 15% — easier swipe
@@ -132,16 +133,20 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
 
   // Use demo data if in demo mode, otherwise use Convex
   // P1-007 FIX: Simplified userId handling - use userId directly without redundant cast
+  const hasValidToken = typeof token === "string" && token.trim().length > 0;
   const discoverArgs = useMemo(
     () =>
-      !isDemoMode && userId
+      !isDemoMode && userId && hasValidToken
         // P1-003 FIX: Include refreshKey to force refetch on "Start Over"
-        ? { userId, sortBy: sortByLocal, limit: 20, filterVersion: filterVersion + refreshKey }
+        ? { token: token!.trim(), sortBy: sortByLocal, limit: 20, filterVersion: filterVersion + refreshKey }
         : "skip" as const,
-    [userId, sortByLocal, filterVersion, refreshKey],
+    [userId, hasValidToken, token, sortByLocal, filterVersion, refreshKey],
   );
   const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
-  const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
+  const profilesSafe =
+    convexProfiles === undefined
+      ? EMPTY_ARRAY
+      : unwrapPhase1DiscoverQueryResult(convexProfiles).profiles;
 
   // Memoize excluded set from store-selected IDs
   const excludedSet = useMemo(() => new Set(excludedIds), [excludedIds]);

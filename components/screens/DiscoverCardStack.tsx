@@ -45,6 +45,10 @@ import { ProfileCardPreview } from "@/components/cards/ProfileCardPreview";
 import { WelcomeOverlay, SwipeGuidanceHint, SkeletonCard } from "@/components/ui";
 import { isDemoMode } from "@/hooks/useConvex";
 import { getDiscoverPrefetchSnapshot, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
+import {
+  unwrapPhase1DiscoverQueryResult,
+  type Phase1DiscoverEmptyReason,
+} from "@/lib/phase1DiscoverQuery";
 import { useNotificationBellBadge } from "@/hooks/useNotifications";
 import { DEMO_PROFILES, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
@@ -62,7 +66,7 @@ import { Toast } from "@/components/ui/Toast";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
-import { useLocationStore } from "@/stores/locationStore";
+import { useLocationStore, useLiveDistance } from "@/stores/locationStore";
 // REMOVED: IncognitoConversation, ConnectionSource types - no longer needed after disabling local conversation creation
 import type { Id } from "@/convex/_generated/dataModel";
 // P0 UNIFIED PRESENCE: Batch presence query for discover cards
@@ -499,6 +503,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     maxDistance,
     gender: genderFilter,
     sortBy,
+    filterVersion,
   } = useFilterStore(
     useShallow((s) => ({
       privateIntentKeys: s.privateIntentKeys,
@@ -509,6 +514,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       maxDistance: s.maxDistance,
       gender: s.gender,
       sortBy: s.sortBy,
+      filterVersion: s.filterVersion,
     })),
   );
 
@@ -520,6 +526,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const incrementLikes = useDiscoverStore((s) => s.incrementLikes);
   const incrementStandOuts = useDiscoverStore((s) => s.incrementStandOuts);
   const checkAndResetIfNewDay = useDiscoverStore((s) => s.checkAndResetIfNewDay);
+
+  // Phase-1 live pagination: merge Convex pages in-session (offset batches of PHASE1_PAGE_SIZE)
+  const PHASE1_PAGE_SIZE = 20;
+  const PHASE1_LOAD_MORE_THRESHOLD = 5;
+  const [phase1FetchOffset, setPhase1FetchOffset] = useState(0);
+  const [phase1SessionProfiles, setPhase1SessionProfiles] = useState<any[]>([]);
+  const phase1LoadMoreInFlightRef = useRef(false);
+  const phase1HasMoreRef = useRef(true);
 
   // Engagement triggers - swipe progress tracking
   const trackSwipe = useExplorePrefsStore((s) => s.trackSwipe);
@@ -700,11 +714,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         : null,
     [authVersion, isDemoMode, isPhase2, skipInternalQuery, userId],
   );
-  const [prefetchedProfiles, setPrefetchedProfiles] = useState<any[] | null>(() => prefetchSnapshot?.result ?? null);
+  const [prefetchedProfiles, setPrefetchedProfiles] = useState<any[] | null>(() => {
+    const r = prefetchSnapshot?.result;
+    if (r == null) return null;
+    return unwrapPhase1DiscoverQueryResult(r).profiles;
+  });
   const [prefetchWaitExpired, setPrefetchWaitExpired] = useState(false);
 
   useEffect(() => {
-    setPrefetchedProfiles(prefetchSnapshot?.result ?? null);
+    const r = prefetchSnapshot?.result;
+    setPrefetchedProfiles(r == null ? null : unwrapPhase1DiscoverQueryResult(r).profiles);
   }, [authVersion, prefetchSnapshot?.result, prefetchSnapshot?.startedAt, userId]);
 
   useEffect(() => {
@@ -722,7 +741,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       ?.then((result) => {
         if (cancelled) return;
         markPrefetchUsed();
-        setPrefetchedProfiles(result);
+        setPrefetchedProfiles(unwrapPhase1DiscoverQueryResult(result).profiles);
       })
       .catch(() => {
         if (cancelled) return;
@@ -768,14 +787,107 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const discoverArgs = useMemo(
     () =>
-      !isDemoMode && convexUserId && !skipInternalQuery && !isPhase2 && !shouldHoldPhase1Query
-        ? { userId: convexUserId, sortBy: (sortBy || "recommended") as any, limit: 20 }
+      !isDemoMode &&
+      convexUserId &&
+      hasValidToken &&
+      !skipInternalQuery &&
+      !isPhase2 &&
+      !shouldHoldPhase1Query
+        ? {
+            token: token!.trim(),
+            sortBy: (sortBy || "recommended") as any,
+            limit: PHASE1_PAGE_SIZE,
+            offset: phase1FetchOffset,
+            filterVersion,
+          }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [convexUserId, skipInternalQuery, retryKey, sortBy, isPhase2, isDemoMode, shouldHoldPhase1Query],
+    [convexUserId, hasValidToken, token, skipInternalQuery, retryKey, sortBy, isPhase2, isDemoMode, shouldHoldPhase1Query, phase1FetchOffset, filterVersion],
   );
   const phase1Profiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
-  const phase1ProfilesWithPrefetch = phase1Profiles ?? prefetchedProfiles ?? null;
+  const phase1ProfilesWithPrefetch =
+    phase1Profiles !== undefined
+      ? unwrapPhase1DiscoverQueryResult(phase1Profiles).profiles
+      : prefetchedProfiles ?? null;
+
+  /** Step 8: backend empty reason for Phase-1 (prefetch or live query). */
+  const phase1DiscoverEmptyReason = useMemo((): Phase1DiscoverEmptyReason | undefined => {
+    if (isPhase2 || isDemoMode || externalProfiles) return undefined;
+    const raw = phase1Profiles !== undefined ? phase1Profiles : prefetchSnapshot?.result ?? null;
+    if (raw === undefined || raw === null) return undefined;
+    return unwrapPhase1DiscoverQueryResult(raw).phase1EmptyReason ?? undefined;
+  }, [isPhase2, isDemoMode, externalProfiles, phase1Profiles, prefetchSnapshot?.result]);
+
+  const phase1EmptyMessaging = useMemo(() => {
+    switch (phase1DiscoverEmptyReason) {
+      case 'auth_missing_or_invalid':
+        return {
+          title: "Can't load Discover",
+          subtitle: 'Sign in again or check your connection.',
+        };
+      case 'viewer_unavailable':
+        return {
+          title: 'Discover unavailable',
+          subtitle: "You're hidden or paused. Turn Discover back on in settings.",
+        };
+      case 'filters_no_match':
+        return {
+          title: 'No matching profiles',
+          subtitle: "Try widening age, distance, or who you're looking for.",
+        };
+      case 'no_more_profiles':
+        return {
+          title: "You've seen everyone",
+          subtitle: 'Check back soon for new people, or try different preferences.',
+        };
+      case 'unknown_empty':
+      default:
+        return {
+          title: "We're finding people for you",
+          subtitle: 'Try adjusting your preferences to see more profiles',
+        };
+    }
+  }, [phase1DiscoverEmptyReason]);
+
+  useEffect(() => {
+    if (isPhase2 || isDemoMode || externalProfiles) return;
+    if (phase1Profiles === undefined) return;
+    const { profiles: phase1Page } = unwrapPhase1DiscoverQueryResult(phase1Profiles);
+    setPhase1SessionProfiles((prev) => {
+      if (phase1FetchOffset === 0) return [...phase1Page];
+      const seen = new Set(prev.map((p: { id: string }) => p.id));
+      const next = [...prev];
+      for (const p of phase1Page) {
+        if (!seen.has(p.id)) {
+          seen.add(p.id);
+          next.push(p);
+        }
+      }
+      return next;
+    });
+    phase1HasMoreRef.current = phase1Page.length >= PHASE1_PAGE_SIZE;
+    phase1LoadMoreInFlightRef.current = false;
+  }, [phase1Profiles, phase1FetchOffset, isPhase2, isDemoMode, externalProfiles]);
+
+  useEffect(() => {
+    if (!externalProfiles) return;
+    setPhase1FetchOffset(0);
+    setPhase1SessionProfiles([]);
+    phase1HasMoreRef.current = true;
+  }, [externalProfiles]);
+
+  useEffect(() => {
+    if (isPhase2 || isDemoMode || externalProfiles) return;
+    if (phase1LoadMoreInFlightRef.current) return;
+    if (!phase1HasMoreRef.current) return;
+    if (phase1SessionProfiles.length === 0) return;
+
+    const unshown = phase1SessionProfiles.filter((p) => !consumedIdsRef.current.has(p.id)).length;
+    if (unshown > PHASE1_LOAD_MORE_THRESHOLD) return;
+
+    phase1LoadMoreInFlightRef.current = true;
+    setPhase1FetchOffset((o) => o + PHASE1_PAGE_SIZE);
+  }, [index, phase1SessionProfiles, isPhase2, isDemoMode, externalProfiles]);
 
   // Clear prefetch cache once useQuery returns real data (subscription is active)
   useEffect(() => {
@@ -851,8 +963,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const viewerProfile = useQuery(api.users.getCurrentUser, viewerProfileArgs);
 
   // Use the correct profiles based on mode
-  // PERF: For Phase-1, use prefetch-aware variable that provides data during initial query loading
-  const convexProfiles = isPhase2 ? phase2Profiles : phase1ProfilesWithPrefetch;
+  // PERF: For Phase-1, merge paginated batches in-session; prefetch until first merge commits
+  const convexProfiles = isPhase2
+    ? phase2Profiles
+    : phase1SessionProfiles.length > 0
+      ? phase1SessionProfiles
+      : phase1ProfilesWithPrefetch;
 
   // Reset Deep Connect content lock when user changes (new session)
   const phase2ProfilesUserRef = useRef<string | null>(null);
@@ -1099,9 +1215,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         maxDistance,
         genderFilter,
         sortBy: sortBy ?? "recommended",
+        filterVersion,
         paused: phase1DiscoverPaused,
       }),
-    [genderFilter, maxAge, maxDistance, minAge, phase1DiscoverPaused, sortBy, userId],
+    [genderFilter, maxAge, maxDistance, minAge, phase1DiscoverPaused, sortBy, userId, filterVersion],
   );
   const prevPhase1CacheResetKeyRef = useRef<string | null>(null);
   if (!isPhase2 && !isDemoMode && !externalProfiles && prevPhase1CacheResetKeyRef.current !== phase1CacheResetKey) {
@@ -1202,6 +1319,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       prevPhase1QueueResetKeyRef.current = phase1CacheResetKey;
       setIndex(0);
       setQueueVersion((version) => version + 1);
+      setPhase1FetchOffset(0);
+      setPhase1SessionProfiles([]);
+      phase1HasMoreRef.current = true;
       return;
     }
 
@@ -1401,6 +1521,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // User changed — clear queue and consumed IDs
       visibleQueueRef.current = [];
       consumedIdsRef.current.clear();
+      setPhase1FetchOffset(0);
+      setPhase1SessionProfiles([]);
+      phase1HasMoreRef.current = true;
     }
     prevUserIdRef.current = userId;
   }, [userId]);
@@ -1590,6 +1713,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // This ensures the back card doesn't change during swipe animation
   const current = queueCurrent; // From stable queue
   const next = queueNext; // From stable queue
+
+  // Step 9 (Phase-1): live GPS distance when device + candidate coords exist; else backend distance
+  const phase1LiveDistance = useLiveDistance(
+    !isPhase2 ? current?.latitude : undefined,
+    !isPhase2 ? current?.longitude : undefined,
+  );
+  const displayDistanceCurrentCard =
+    isPhase2
+      ? current?.distance
+      : phase1LiveDistance !== undefined
+        ? phase1LiveDistance
+        : current?.distance;
 
   // P0 UNIFIED PRESENCE: Batch query for current and next profile presence
   // Use userId or id (both should map to Convex user ID)
@@ -1913,7 +2048,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       if (direction === "right" && hasReachedLikeLimit()) { releaseSwipeLock(activeSwipeId); return; }
       if (direction === "up" && hasReachedStandOutLimit()) { releaseSwipeLock(activeSwipeId); return; }
 
-      const shouldAdvanceOptimistically = !isPhase2 || isDemoMode;
+      // Phase-1 live: advance only after backend success (matches Phase-2 live). Demo stays optimistic.
+      const shouldAdvanceOptimistically = isDemoMode;
       if (shouldAdvanceOptimistically) {
         advanceCard();
       }
@@ -2056,6 +2192,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           }
           if (direction === "right") incrementLikes();
           if (direction === "up") incrementStandOuts();
+        } else if (!isPhase2 && !isDemoMode) {
+          // Phase-1 live: mutation succeeded — now advance and apply local limits
+          advanceCard();
+          if (direction === "right") incrementLikes();
+          if (direction === "up") incrementStandOuts();
         }
 
         // Guard: check mounted/focused before navigating on match
@@ -2119,6 +2260,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
       } catch (error: any) {
         if (!mountedRef.current) return;
+        if (!isPhase2 && !isDemoMode) {
+          resetPosition();
+        }
         if (pendingPhase2SwipeRef.current?.swipeId === activeSwipeId) {
           pendingPhase2SwipeRef.current = null;
         }
@@ -2145,6 +2289,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       incrementStandOuts,
       demo.recordSwipe,
       releaseSwipeLock,
+      resetPosition,
       token,
     ],
   );
@@ -2592,13 +2737,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   entering={FadeInUp.duration(350).delay(200)}
                   style={styles.phase1EmptyTitle}
                 >
-                  We're finding people for you
+                  {phase1EmptyMessaging.title}
                 </Animated.Text>
                 <Animated.Text
                   entering={FadeInUp.duration(350).delay(280)}
                   style={styles.phase1EmptySubtitle}
                 >
-                  Try adjusting your preferences to see more profiles
+                  {phase1EmptyMessaging.subtitle}
                 </Animated.Text>
 
                 {isDemoMode && (
@@ -2901,7 +3046,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     bio={current.bio}
                     city={current.city}
                     isVerified={current.isVerified}
-                    distance={current.distance}
+                    distance={displayDistanceCurrentCard}
                     photos={current.photos}
                     photoBlurred={current.photoBlurred}
                     photoBlurEnabled={(current as any).photoBlurEnabled}

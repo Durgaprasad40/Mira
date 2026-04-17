@@ -365,20 +365,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE-1: PROMPT-FIRST DISCOVERY MODEL (UX REFACTOR)
-  // Priority: Prompt (P1) > Bio (P2) > Lifestyle (P3) > Interests (P4) > Intent (P5)
+  // Priority in wave units: bio → prompts (max 2 total) → basics → interests → relationship
   //
-  // Photo 1 = IDENTITY: name, age, gender, badges, distance (first impression)
-  // Photo 2 = PROMPT: strongest hook - personality reveal
-  // Photo 3 = BIO: about them
-  // Photo 4 = LIFESTYLE: height, drinking, smoking
-  // Photo 5 = INTERESTS: activities/hobbies
-  // Photo 6+ = INTENT: relationship goal OR minimal
+  // Photo 1 = IDENTITY ONLY: name, age, gender, presence, distance (no bio/prompts on P1)
+  // Later photos: wave-distributed content; soft fallbacks use distinct variants (no duplicate blocks)
   //
-  // ADAPTIVE FALLBACKS (based on photo count):
-  // - 2 photos: p1=identity, p2=prompt OR bio (single item)
-  // - 3 photos: p1=identity, p2=prompt/bio, p3=bio/lifestyle
-  // - 4 photos: p1=identity, p2=prompt, p3=bio, p4=lifestyle/interests
-  // - 5+ photos: Full progressive reveal
+  // ADAPTIVE FALLBACKS (based on photo count; see planner branches):
+  // - 1 photo: P1 identity only
+  // - 2–4+ photos: P1 identity; later slides per 2/3/4/5+ branch
   //
   // NO "Both..." comparison text, NO redundancy across photos
   //
@@ -603,7 +597,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // PHASE-1: WAVE DISTRIBUTION CONTENT MODEL
   // ═══════════════════════════════════════════════════════════════════════════
   // Wave density: LOW(1) → MEDIUM(2) → HIGH(3) → MEDIUM(2) → HIGH(3)...
-  // Photo 1 is special: identity only (or identity+bio for 2-4 photos)
+  // Photo 1 is special: identity only (no bio/prompt on first slide when multi-photo)
   // Each content unit used AT MOST ONCE - NO repetition
   // ═══════════════════════════════════════════════════════════════════════════
   interface Phase1PhotoContentItem {
@@ -646,11 +640,10 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     return label.charAt(0).toUpperCase() + label.slice(1);
   };
 
-  // DETERMINISTIC prompt selection: Use ALL prompts for richer content distribution
+  // Phase-1 spec: max 2 prompts total across the card experience
   const selectedPrompts = useMemo(() => {
     if (isPhase2 || phase1AllPrompts.length === 0) return [];
-    // Use ALL available prompts (up to 5) for better content distribution on 5+ photo profiles
-    return phase1AllPrompts.slice(0, 5).map((p, idx) => ({
+    return phase1AllPrompts.slice(0, 2).map((p, idx) => ({
       ...p,
       id: idx,
       shortLabel: toShortLabel(p.question),
@@ -666,12 +659,10 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // WAVE DENSITY PATTERN:
   //   LOW(1 unit) → MEDIUM(2 units) → HIGH(3 units) → MEDIUM → HIGH...
   //
-  // PHOTO-COUNT SPECIFIC RULES:
+  // PHOTO-COUNT SPECIFIC RULES (see branches below; max 2 prompts total):
   //   1 photo:  P1 = identity only
-  //   2 photos: P1 = identity+bio, P2 = prompt1+basics
-  //   3 photos: P1 = identity+bio, P2 = prompt1+basics, P3 = remaining medium
-  //   4 photos: P1 = identity+bio, P2 = prompt1+basics, P3 = medium, P4 = medium
-  //   5+ photos: P1 = identity only, then wave distribute remaining
+  //   2–4 photos: P1 = identity; P2+ = wave / soft_fallback per branch
+  //   5+ photos: P1 identity, P2 bio, P3 prompt1+basics, P4 prompt2+interests, then remaining + soft fallbacks
   // ═══════════════════════════════════════════════════════════════════════════
   const phase1PhotoContents = useMemo((): Phase1PhotoContentItem[] => {
     if (isPhase2) return [];
@@ -766,16 +757,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       });
     }
 
-    // Unit 6: Prompt 3 (priority 6, if available)
-    if (selectedPrompts.length > 2) {
-      units.push({
-        key: 'prompt3',
-        type: 'prompt',
-        priority: priority++,
-        payload: { prompt: selectedPrompts[2] },
-        weight: 1,
-      });
-    }
+    // Unit 6+: Prompt 3+ omitted — max 2 prompts total (spec)
 
     // Unit 7: Relationship Intent (priority 7)
     // Display what user is looking for to help swipe decisions
@@ -810,16 +792,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       });
     }
 
-    // Unit 9: Prompt 4 (if available)
-    if (selectedPrompts.length > 3) {
-      units.push({
-        key: 'prompt4',
-        type: 'prompt',
-        priority: priority++,
-        payload: { prompt: selectedPrompts[3] },
-        weight: 1,
-      });
-    }
+    // Unit 9: Prompt 4 omitted — max 2 prompts total (spec)
 
     // Unit 10: Interests Part 3 (third chunk of 3, if available)
     if (interestChunks.length > 2) {
@@ -832,16 +805,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       });
     }
 
-    // Unit 11: Prompt 5 (if available)
-    if (selectedPrompts.length > 4) {
-      units.push({
-        key: 'prompt5',
-        type: 'prompt',
-        priority: priority++,
-        payload: { prompt: selectedPrompts[4] },
-        weight: 1,
-      });
-    }
+    // Unit 11: Prompt 5 omitted — max 2 prompts total (spec)
 
     // ═══════════════════════════════════════════════════════════════════════
     // STRICT UNIQUE-CONTENT PLANNER: NO cycling, NO repetition
@@ -913,14 +877,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     };
 
     // ═══════════════════════════════════════════════════════════════════════
-    // SOFT FALLBACK BUILDER: Compact reinforcement for late photos
-    // Priority: interests > intent > bio snippet > CTA
-    // NOTE: Prompts are EXCLUDED to prevent repetition (already shown in wave distribution)
-    // This prevents "dead" late photos when unique content is exhausted
+    // SOFT FALLBACK: one variant per late slide (no duplicate interests/intent/bio across photos)
+    // Prompts excluded here (wave handles prompts; max 2 total)
     // ═══════════════════════════════════════════════════════════════════════
-    const buildSoftFallback = (): Phase1PhotoContentItem['softFallback'] | undefined => {
-      // Priority 1: Top interests (2-3 chips) - safe, no repetition with wave prompts
-      if (activities && activities.length > 0) {
+    const usedSoftFallbackKinds = new Set<string>();
+    const nextSoftFallback = (): Phase1PhotoContentItem['softFallback'] | undefined => {
+      if (activities && activities.length > 0 && !usedSoftFallbackKinds.has('interests')) {
+        usedSoftFallbackKinds.add('interests');
         const topChips = activities.slice(0, 3).map(key => {
           const activity = ACTIVITY_FILTERS.find(a => a.value === key);
           return activity ? { emoji: activity.emoji, label: activity.label } : null;
@@ -930,8 +893,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         }
       }
 
-      // Priority 2: Relationship intent
-      if (relationshipIntent && relationshipIntent.length > 0) {
+      if (relationshipIntent && relationshipIntent.length > 0 && !usedSoftFallbackKinds.has('intent')) {
+        usedSoftFallbackKinds.add('intent');
         const intentMap: Record<string, string> = {
           serious_vibes: 'Looking for something real',
           keep_it_casual: 'Keeping it casual',
@@ -949,8 +912,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         }
       }
 
-      // Priority 3: Bio snippet (first line)
-      if (hasBio && bio) {
+      if (hasBio && bio && !usedSoftFallbackKinds.has('bio')) {
+        usedSoftFallbackKinds.add('bio');
         const firstLine = bio.split(/[.\n]/)[0].trim();
         const snippet = firstLine.length > 50 ? firstLine.slice(0, 47) + '...' : firstLine;
         if (snippet.length > 10) {
@@ -958,45 +921,23 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         }
       }
 
-      // P0-FIX: Priority 4: Show "New here" message for sparse profiles
-      // This is more welcoming than just a CTA button
-      return { type: 'new_here' };
-    };
+      if (!usedSoftFallbackKinds.has('new_here')) {
+        usedSoftFallbackKinds.add('new_here');
+        return { type: 'new_here' };
+      }
 
-    // Pre-build the fallback once (used when unique content exhausts)
-    const softFallbackContent = buildSoftFallback();
+      return { type: 'cta' };
+    };
 
     // ═══════════════════════════════════════════════════════════════════════
     // DISTRIBUTION RULES BY PHOTO COUNT
     // ═══════════════════════════════════════════════════════════════════════
 
     if (totalPhotos === 1) {
-      // ─────────────────────────────────────────────────────────────────────
-      // 1 PHOTO: Identity + ONE personality hook (bio OR prompt OR fallback)
-      // UX FIX: Single photo profiles need personality context for swipe decision
-      // Priority: bio > first prompt > honest minimal cue
-      // ─────────────────────────────────────────────────────────────────────
+      // Single slide = Photo 1 spec: identity overlay only (name/age/gender/presence/distance in chrome)
       const content = createEmptyContent();
-
-      if (hasBio) {
-        // Priority 1: Use actual bio
-        content.bio = bio;
-        content.slotType = 'identity_bio';
-        content.waveDensity = 'medium';
-        usedUnitKeys.add('bio');
-      } else if (selectedPrompts.length > 0) {
-        // Priority 2: Use first prompt if no bio
-        content.prompts.push(selectedPrompts[0]);
-        content.slotType = 'wave_content';
-        content.waveDensity = 'medium';
-        usedUnitKeys.add('prompt1');
-      } else {
-        // Priority 3: Keep sparse profiles honest with a neutral minimal cue
-        content.slotType = 'soft_fallback';
-        content.softFallback = softFallbackContent ?? { type: 'cta' };
-        content.waveDensity = 'low';
-      }
-
+      content.slotType = 'identity';
+      content.waveDensity = 'low';
       contents.push(content);
 
     } else if (totalPhotos === 2) {
@@ -1026,13 +967,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       if (hasBio || p2Units.length > 0) {
         p2.slotType = 'wave_content';
         p2.waveDensity = (hasBio || p2Units.length >= 2) ? 'medium' : 'low';
-      } else if (softFallbackContent) {
-        // Sparse profile - use soft fallback
-        p2.slotType = 'soft_fallback';
-        p2.softFallback = softFallbackContent;
-        p2.waveDensity = 'low';
       } else {
-        p2.slotType = 'identity';
+        p2.slotType = 'soft_fallback';
+        p2.softFallback = nextSoftFallback();
         p2.waveDensity = 'low';
       }
       contents.push(p2);
@@ -1064,12 +1001,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       if (hasBio || p2Units.length > 0) {
         p2.slotType = 'wave_content';
         p2.waveDensity = 'medium';
-      } else if (softFallbackContent) {
-        p2.slotType = 'soft_fallback';
-        p2.softFallback = softFallbackContent;
-        p2.waveDensity = 'low';
       } else {
-        p2.slotType = 'identity';
+        p2.slotType = 'soft_fallback';
+        p2.softFallback = nextSoftFallback();
         p2.waveDensity = 'low';
       }
       contents.push(p2);
@@ -1081,12 +1015,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       if (p3Units.length > 0) {
         p3.slotType = 'wave_content';
         p3.waveDensity = 'medium';
-      } else if (softFallbackContent) {
-        p3.slotType = 'soft_fallback';
-        p3.softFallback = softFallbackContent;
-        p3.waveDensity = 'low';
       } else {
-        p3.slotType = 'identity';
+        p3.slotType = 'soft_fallback';
+        p3.softFallback = nextSoftFallback();
         p3.waveDensity = 'low';
       }
       contents.push(p3);
@@ -1118,12 +1049,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       if (hasBio || p2Units.length > 0) {
         p2.slotType = 'wave_content';
         p2.waveDensity = 'medium';
-      } else if (softFallbackContent) {
-        p2.slotType = 'soft_fallback';
-        p2.softFallback = softFallbackContent;
-        p2.waveDensity = 'low';
       } else {
-        p2.slotType = 'identity';
+        p2.slotType = 'soft_fallback';
+        p2.softFallback = nextSoftFallback();
         p2.waveDensity = 'low';
       }
       contents.push(p2);
@@ -1137,12 +1065,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         if (photoUnits.length > 0) {
           content.slotType = 'wave_content';
           content.waveDensity = 'medium';
-        } else if (softFallbackContent) {
-          content.slotType = 'soft_fallback';
-          content.softFallback = softFallbackContent;
-          content.waveDensity = 'low';
         } else {
-          content.slotType = 'identity';
+          content.slotType = 'soft_fallback';
+          content.softFallback = nextSoftFallback();
           content.waveDensity = 'low';
         }
         contents.push(content);
@@ -1222,7 +1147,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       p4.waveDensity = p4Units.length >= 2 ? 'high' : (p4Units.length > 0 ? 'medium' : 'low');
       contents.push(p4);
 
-      // Photo 5+: Remaining content (prompt3, etc.) - distribute evenly
+      // Photo 5+: Remaining unique units (no extra prompts beyond prompt1/prompt2) + soft fallbacks
       // REDESIGN: Use soft fallback for late photos when unique content exhausts
       for (let i = 4; i < totalPhotos; i++) {
         const content = createEmptyContent();
@@ -1234,14 +1159,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           // Has unique content - show it
           content.slotType = 'wave_content';
           content.waveDensity = photoUnits.length >= 2 ? 'medium' : 'low';
-        } else if (softFallbackContent) {
-          // No unique content - use soft fallback (compact reinforcement)
-          content.slotType = 'soft_fallback';
-          content.softFallback = softFallbackContent;
-          content.waveDensity = 'low';
         } else {
-          // Truly empty profile - identity only
-          content.slotType = 'identity';
+          content.slotType = 'soft_fallback';
+          content.softFallback = nextSoftFallback();
           content.waveDensity = 'low';
         }
         contents.push(content);
@@ -2047,7 +1967,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           <MatchSignalBadge
             commonCount={matchSignalCount}
             sameRelationshipIntent={hasSameRelationshipIntent}
-            visible={photoIndex === 0 && !isPhase2}
+            visible={photoIndex > 0 && !isPhase2}
             matchScore={matchScore}
           />
 
@@ -2058,7 +1978,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               ═══════════════════════════════════════════════════════════════════════════ */}
           <View style={styles.phase1IdentitySection}>
             {/* Explore category tag - only when present (Photo 1 only) */}
-            {exploreTag && photoIndex === 0 && (
+            {exploreTag && photoIndex > 0 && (
               <View style={styles.phase1ExploreTag}>
                 <Text style={styles.phase1ExploreTagText}>{exploreTag}</Text>
               </View>
@@ -2082,8 +2002,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                   />
                 </View>
               )}
-              {/* Compact verified tick badge - inline with name/age */}
-              {isVerified && (
+              {/* Verified tick: not on Photo 1 (spec: identity fields only on first slide) */}
+              {isVerified && photoIndex > 0 && (
                 <View style={styles.phase1VerifiedTick}>
                   <Ionicons name="checkmark-circle" size={18} color="#10B981" />
                 </View>
@@ -2100,15 +2020,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                   <Text style={styles.phase1PresenceTextMuted}>Active Today</Text>
                 </View>
               )}
-              {/* GROWTH: Match score badge - subtle compatibility indicator */}
-              {matchScore && matchScore >= 60 && (
+              {matchScore && matchScore >= 60 && photoIndex > 0 && (
                 <View style={styles.matchScorePill}>
                   <Ionicons name="heart" size={10} color="#EC4899" />
                   <Text style={styles.matchScoreText}>{matchScore}%</Text>
                 </View>
               )}
-              {/* GROWTH: "They Liked You" badge - prominent inbound interest signal */}
-              {theyLikedMe && (
+              {theyLikedMe && photoIndex > 0 && (
                 <View style={styles.theyLikedYouPill}>
                   <Ionicons name="heart" size={11} color="#FFFFFF" />
                   <Text style={styles.theyLikedYouText}>Likes You</Text>
@@ -2126,7 +2044,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               </View>
             )}
 
-            {photoIndex === 0 && phase1SupplementalTrustBadges.length > 0 && (
+            {photoIndex > 0 && phase1SupplementalTrustBadges.length > 0 && (
               <View style={styles.phase1BadgeRow}>
                 {phase1SupplementalTrustBadges.map((badge) => (
                   <View key={badge.key} style={styles.phase1BadgePill}>
@@ -2163,8 +2081,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
           {/* LOG_NOISE_FIX: Bio render debugging removed - was extremely noisy */}
 
-          {/* IDENTITY + BIO SLOT (for 2-4 photo profiles) */}
-          {currentPhotoContent.slotType === 'identity_bio' && currentPhotoContent.bio && (
+          {/* IDENTITY + BIO SLOT — never on Photo 1 (spec) */}
+          {photoIndex > 0 && currentPhotoContent.slotType === 'identity_bio' && currentPhotoContent.bio && (
             <Animated.View
               key={`p1-identity-bio-${photoIndex}`}
               entering={isFirstRenderRef.current ? undefined : FadeIn.duration(180)}
@@ -2179,8 +2097,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             </Animated.View>
           )}
 
-          {/* WAVE CONTENT SLOT (dynamic rendering based on distributed units) */}
-          {currentPhotoContent.slotType === 'wave_content' && (
+          {/* WAVE CONTENT — never on Photo 1 (spec: no bio/prompts on first slide) */}
+          {photoIndex > 0 && currentPhotoContent.slotType === 'wave_content' && (
             <Animated.View
               key={`p1-wave-${photoIndex}`}
               entering={isFirstRenderRef.current ? undefined : FadeIn.duration(180)}
@@ -2197,7 +2115,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               )}
 
               {/* Prompt units (render each prompt in sequence) */}
-              {currentPhotoContent.prompts.map((prompt, idx) => (
+              {currentPhotoContent.prompts.slice(0, 2).map((prompt, idx) => (
                 <View
                   key={`prompt-${idx}-${prompt.id}`}
                   style={[styles.phase1PromptCard, { marginTop: (currentPhotoContent.bio || idx > 0) ? 12 : 0 }]}
@@ -2258,7 +2176,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               Shows lightweight recap content when unique content is exhausted
               Visually lighter than wave_content to feel like continuity, not repetition
               ═══════════════════════════════════════════════════════════════════════════ */}
-          {currentPhotoContent.slotType === 'soft_fallback' && currentPhotoContent.softFallback && (
+          {photoIndex > 0 && currentPhotoContent.slotType === 'soft_fallback' && currentPhotoContent.softFallback && (
             <Animated.View
               key={`p1-softfallback-${photoIndex}`}
               entering={isFirstRenderRef.current ? undefined : FadeIn.duration(180)}

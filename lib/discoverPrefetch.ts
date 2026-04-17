@@ -17,12 +17,17 @@
 
 import { convex, isDemoMode } from '@/hooks/useConvex';
 import { api } from '@/convex/_generated/api';
+import {
+  unwrapPhase1DiscoverQueryResult,
+  type Phase1DiscoverQueryResult,
+} from '@/lib/phase1DiscoverQuery';
 
 interface DiscoverPrefetchState {
   userId: string;
+  token: string;
   authVersion: number;
-  promise: Promise<any[]> | null;
-  result: any[] | null;
+  promise: Promise<unknown> | null;
+  result: Phase1DiscoverQueryResult | null;
   startedAt: number;
 }
 
@@ -36,34 +41,48 @@ let prefetchUsed = false;
  * Start prefetching Discover profiles for a user.
  * Called during auth validation in index.tsx.
  *
- * @param userId - The user's Convex ID
+ * @param userId - The user's Convex ID (cache key; identity comes from token)
+ * @param token - Validated session or demo token (required for Discover query)
  * @param authVersion - Current auth version (for invalidation on logout)
  */
-export function startDiscoverPrefetch(userId: string, authVersion: number): void {
+export function startDiscoverPrefetch(userId: string, token: string, authVersion: number): void {
   // P0-004 FIX: Demo bypass only in __DEV__ builds
   if (__DEV__ && isDemoMode) return;
 
+  const trimmedToken = token.trim();
+  if (!trimmedToken) return;
+
   // Clear any stale prefetch from different user/session
-  if (prefetchState && (prefetchState.userId !== userId || prefetchState.authVersion !== authVersion)) {
+  if (
+    prefetchState &&
+    (prefetchState.userId !== userId ||
+      prefetchState.token !== trimmedToken ||
+      prefetchState.authVersion !== authVersion)
+  ) {
     prefetchState = null;
     prefetchUsed = false;
   }
 
   // Don't re-prefetch if already in progress for same user
-  if (prefetchState?.userId === userId && prefetchState?.authVersion === authVersion) {
+  if (
+    prefetchState?.userId === userId &&
+    prefetchState?.token === trimmedToken &&
+    prefetchState?.authVersion === authVersion
+  ) {
     return;
   }
 
   // Prefetch start log disabled to reduce DEV noise
 
   const promise = convex.query(api.discover.getDiscoverProfiles, {
-    userId: userId as any,
+    token: trimmedToken,
     sortBy: 'recommended',
     limit: 20,
   });
 
   prefetchState = {
     userId,
+    token: trimmedToken,
     authVersion,
     promise,
     result: null,
@@ -75,7 +94,7 @@ export function startDiscoverPrefetch(userId: string, authVersion: number): void
     .then((result) => {
       // Only store if this prefetch is still valid
       if (prefetchState?.userId === userId && prefetchState?.authVersion === authVersion) {
-        prefetchState.result = result;
+        prefetchState.result = unwrapPhase1DiscoverQueryResult(result);
         // Prefetch complete log disabled to reduce DEV noise
       }
     })
@@ -103,7 +122,7 @@ export function startDiscoverPrefetch(userId: string, authVersion: number): void
  * @param userId - Expected user ID
  * @param authVersion - Expected auth version
  */
-export function getDiscoverPrefetch(userId: string, authVersion: number): any[] | null {
+export function getDiscoverPrefetch(userId: string, authVersion: number): Phase1DiscoverQueryResult | null {
   if (!prefetchState) return null;
   if (prefetchState.userId !== userId) return null;
   if (prefetchState.authVersion !== authVersion) return null;
@@ -122,6 +141,7 @@ export function getDiscoverPrefetchSnapshot(
 
   return {
     userId: prefetchState.userId,
+    token: prefetchState.token,
     authVersion: prefetchState.authVersion,
     promise: prefetchState.promise,
     result: prefetchState.result,

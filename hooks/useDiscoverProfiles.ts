@@ -6,6 +6,7 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { useBlockStore } from "@/stores/blockStore";
 import { useShallow } from "zustand/react/shallow";
+import { unwrapPhase1DiscoverQueryResult } from "@/lib/phase1DiscoverQuery";
 
 const EMPTY_PROFILES: any[] = [];
 
@@ -16,6 +17,7 @@ const EMPTY_PROFILES: any[] = [];
  */
 export function useDiscoverProfiles(): any[] {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   const demo = useDemoStore(
     useShallow((s) => ({
@@ -34,9 +36,9 @@ export function useDiscoverProfiles(): any[] {
 
   // Query args for Convex (skip in demo mode)
   const queryArgs = useMemo(() => {
-    if (isDemoMode || !userId) return "skip" as const;
-    return { userId: userId as any };
-  }, [userId]);
+    if (isDemoMode || !userId || !token || !String(token).trim()) return "skip" as const;
+    return { token: String(token).trim() };
+  }, [userId, token]);
 
   const result = useQuery(api.discover.getDiscoverProfiles, queryArgs);
 
@@ -46,9 +48,9 @@ export function useDiscoverProfiles(): any[] {
       return demo.profiles.filter((p) => !excludedSet.has(p._id));
     }
 
-    // Live mode: use Convex query result (returns array directly)
-    if (result && Array.isArray(result)) {
-      return result;
+    // Live mode: Convex returns { profiles, phase1EmptyReason? } or legacy array
+    if (result != null) {
+      return unwrapPhase1DiscoverQueryResult(result).profiles;
     }
 
     return EMPTY_PROFILES;

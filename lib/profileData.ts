@@ -13,6 +13,9 @@ export interface ProfileData {
   isVerified?: boolean;
   verificationStatus?: string;
   distance?: number;
+  /** Candidate position (e.g. Phase-1 Discover) for client live distance; omit when distance hidden */
+  latitude?: number;
+  longitude?: number;
   photos: { url: string }[];
   tags?: string[];
   activities?: string[];
@@ -94,6 +97,8 @@ export function toProfileData(p: any): ProfileData {
     isVerified: p.isVerified,
     verificationStatus: p.verificationStatus,
     distance: p.distance ?? p.distanceKm,
+    latitude: typeof p.latitude === 'number' ? p.latitude : undefined,
+    longitude: typeof p.longitude === 'number' ? p.longitude : undefined,
     photos: rawPhotos,
     tags: Array.isArray(p.tags) ? p.tags : [],
     activities: Array.isArray(p.activities) ? p.activities : [],
