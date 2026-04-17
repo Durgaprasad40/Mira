@@ -956,11 +956,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // ═══════════════════════════════════════════════════════════════════════════
   // VIEWER PROFILE QUERY - For computing common points with candidates
   // ═══════════════════════════════════════════════════════════════════════════
+  // Step 10: token-only viewer support — no caller-supplied identity (session validates Convex user)
   const viewerProfileArgs = useMemo(
-    () => !isDemoMode && userId && authReady && !isPhase2 ? { userId } : "skip" as const,
-    [authReady, userId, isPhase2]
+    () =>
+      !isDemoMode && hasValidToken && authReady && !isPhase2
+        ? { token: token!.trim() }
+        : ("skip" as const),
+    [authReady, hasValidToken, isPhase2, token]
   );
-  const viewerProfile = useQuery(api.users.getCurrentUser, viewerProfileArgs);
+  const viewerProfile = useQuery(api.users.getDiscoverViewerSupport, viewerProfileArgs);
 
   // Use the correct profiles based on mode
   // PERF: For Phase-1, merge paginated batches in-session; prefetch until first merge commits

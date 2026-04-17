@@ -116,6 +116,108 @@ export const getCurrentUser = query({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Step 10 (Phase-1 Discover): session-safe support reads — token only, no spoofable userId
+// ---------------------------------------------------------------------------
+
+/** Resolve authenticated viewer id from session token (Discover / presence hooks). */
+export const getSessionViewerId = query({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const sessionToken = typeof args.token === "string" ? args.token.trim() : "";
+    if (!sessionToken.length) return null;
+    const viewerId = await validateSessionToken(ctx, sessionToken);
+    if (!viewerId) return null;
+    return { userId: viewerId };
+  },
+});
+
+/** Minimal viewer fields for Discover card common-points (no photos / full profile). */
+export const getDiscoverViewerSupport = query({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const sessionToken = typeof args.token === "string" ? args.token.trim() : "";
+    if (!sessionToken.length) return null;
+    const viewerId = await validateSessionToken(ctx, sessionToken);
+    if (!viewerId) return null;
+    const user = await ctx.db.get(viewerId);
+    if (!user || !user.isActive || user.isBanned || user.deletedAt) return null;
+
+    return {
+      activities: user.activities ?? [],
+      relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
+      lookingFor: user.lookingFor ?? [],
+      smoking: user.smoking,
+      drinking: user.drinking,
+      height: user.height,
+      isDiscoveryPaused: user.isDiscoveryPaused === true,
+      discoveryPausedUntil: user.discoveryPausedUntil,
+    };
+  },
+});
+
+/**
+ * Batch presence for Discover: token-validated viewer; only lastActive when target showLastSeen !== false.
+ * No profile/photo payload.
+ */
+export const getDiscoverPresenceForUsers = query({
+  args: {
+    token: v.string(),
+    userIds: v.array(v.id("users")),
+  },
+  handler: async (ctx, args) => {
+    const sessionToken = typeof args.token === "string" ? args.token.trim() : "";
+    if (!sessionToken.length) {
+      return { entries: [] as { userId: Id<"users">; lastActive?: number }[] };
+    }
+    const viewerId = await validateSessionToken(ctx, sessionToken);
+    if (!viewerId) {
+      return { entries: [] };
+    }
+
+    const entries: { userId: Id<"users">; lastActive?: number }[] = [];
+    const seen = new Set<string>();
+
+    for (const rawId of args.userIds) {
+      const targetId = rawId;
+      const key = targetId as string;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (entries.length >= 24) break;
+
+      if (targetId === viewerId) continue;
+
+      const user = await ctx.db.get(targetId);
+      if (!user || !user.isActive || user.isBanned) continue;
+
+      const blocked = await ctx.db
+        .query("blocks")
+        .withIndex("by_blocker_blocked", (q) =>
+          q.eq("blockerId", targetId).eq("blockedUserId", viewerId),
+        )
+        .first();
+      if (blocked) continue;
+
+      const reverseBlocked = await ctx.db
+        .query("blocks")
+        .withIndex("by_blocker_blocked", (q) =>
+          q.eq("blockerId", viewerId).eq("blockedUserId", targetId),
+        )
+        .first();
+      if (reverseBlocked) continue;
+
+      const allowPresence = user.showLastSeen !== false;
+      entries.push({
+        userId: targetId,
+        lastActive:
+          allowPresence && typeof user.lastActive === "number" ? user.lastActive : undefined,
+      });
+    }
+
+    return { entries };
+  },
+});
+
 // Bootstrap: Ensure user record exists for authUserId
 // Call this mutation once after auth hydration to guarantee Convex user exists
 // before any queries run. This prevents "Cannot create user from query context" errors.
@@ -226,7 +328,7 @@ export const getUserById = query({
       verificationStatus: user.verificationStatus || "unverified",
       city: user.city,
       distance: user.hideDistance === true ? undefined : distance,
-      lastActive: user.lastActive,
+      lastActive: user.showLastSeen === false ? undefined : user.lastActive,
       lookingFor: user.lookingFor,
       relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
       activities: user.activities,

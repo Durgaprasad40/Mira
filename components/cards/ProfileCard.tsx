@@ -2012,7 +2012,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               {isActiveNow && (
                 <View style={styles.phase1PresencePill}>
                   <View style={styles.phase1PresenceDotInline} />
-                  <Text style={styles.phase1PresenceText}>Online</Text>
+                  <Text style={styles.phase1PresenceText}>Online Now</Text>
                 </View>
               )}
               {isActiveToday && !isActiveNow && (
@@ -3150,7 +3150,7 @@ const styles = StyleSheet.create({
     marginLeft: 4,
     alignSelf: 'center',
   },
-  // Presence pill - compact "Online" indicator
+  // Presence pill - compact "Online Now" indicator
   phase1PresencePill: {
     flexDirection: 'row',
     alignItems: 'center',

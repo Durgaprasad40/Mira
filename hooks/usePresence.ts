@@ -6,7 +6,7 @@
  * existing auth, messaging, and chat flows.
  */
 import { useCallback, useMemo } from 'react';
-import { useQueries, useQuery } from 'convex/react';
+import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
@@ -85,13 +85,13 @@ function derivePresenceInfo(
 }
 
 function useCurrentViewerId(): Id<'users'> | undefined {
-  const { userId } = useAuthStore();
-  const currentUser = useQuery(
-    api.users.getCurrentUser,
-    userId ? { userId } : 'skip'
+  const token = useAuthStore((s) => s.token);
+  const trimmed = typeof token === 'string' ? token.trim() : '';
+  const session = useQuery(
+    api.users.getSessionViewerId,
+    trimmed.length > 0 ? { token: trimmed } : 'skip',
   );
-
-  return currentUser?._id as Id<'users'> | undefined;
+  return session?.userId as Id<'users'> | undefined;
 }
 
 // =============================================================================
@@ -159,55 +159,44 @@ export function useBatchPresence(
   userIds: Id<'users'>[] | null | undefined,
   options: PresenceQueryOptions = {}
 ): Record<string, PresenceInfo> | undefined {
-  const viewerId = useCurrentViewerId();
+  const token = useAuthStore((s) => s.token);
+  const trimmed = typeof token === 'string' ? token.trim() : '';
 
-  const uniqueUserIds = useMemo(
-    () => Array.from(new Set((userIds ?? []).map((id) => id as string))),
-    [userIds]
+  const sortedIds = useMemo(() => {
+    if (!userIds || userIds.length === 0) return null;
+    return Array.from(new Set(userIds.map((id) => id as string)))
+      .sort()
+      .slice(0, 24) as Id<'users'>[];
+  }, [userIds]);
+
+  const data = useQuery(
+    api.users.getDiscoverPresenceForUsers,
+    trimmed.length > 0 && sortedIds && sortedIds.length > 0
+      ? { token: trimmed, userIds: sortedIds }
+      : 'skip'
   );
 
-  const queries = useMemo(() => {
-    if (!viewerId || uniqueUserIds.length === 0) {
-      return {};
-    }
-
-    return Object.fromEntries(
-      uniqueUserIds.map((id) => [
-        id,
-        {
-          query: api.users.getUserById,
-          args: {
-            userId: id as Id<'users'>,
-            viewerId,
-          },
-        },
-      ])
-    );
-  }, [viewerId, uniqueUserIds]);
-
-  const profiles = useQueries(queries);
-
   return useMemo(() => {
-    if (!viewerId || !userIds || userIds.length === 0) {
+    if (!trimmed || !sortedIds || sortedIds.length === 0) {
+      return undefined;
+    }
+    if (data === undefined) {
       return undefined;
     }
 
     const presenceByUserId: Record<string, PresenceInfo> = {};
+    const entries = data.entries ?? [];
 
-    for (const userId of userIds) {
-      const result = profiles[userId as string];
-      if (!result || result instanceof Error) {
-        continue;
-      }
-
-      const presence = derivePresenceInfo(result.lastActive, options.respectPrivacy);
+    for (const row of entries) {
+      const id = row.userId as string;
+      const presence = derivePresenceInfo(row.lastActive, options.respectPrivacy);
       if (presence) {
-        presenceByUserId[userId as string] = presence;
+        presenceByUserId[id] = presence;
       }
     }
 
     return presenceByUserId;
-  }, [viewerId, userIds, profiles, options.respectPrivacy]);
+  }, [data, sortedIds, options.respectPrivacy, trimmed]);
 }
 
 // =============================================================================
