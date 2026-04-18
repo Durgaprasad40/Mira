@@ -41,6 +41,7 @@ export default function Phase2LookingForScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
   const privateBio = usePrivateProfileStore((s) => s.privateBio);
@@ -74,11 +75,12 @@ export default function Phase2LookingForScreen() {
   }, [intentKeys, setIntentKeys]);
 
   const handleContinue = async () => {
-    if (!userId || !canContinue) return;
+    if (!userId || !token || !canContinue) return;
 
     setIsSaving(true);
     try {
       const result = await saveLookingFor({
+        token,
         authUserId: userId,
         privateIntentKeys: intentKeys,
         privateBio: privateBio.trim(),

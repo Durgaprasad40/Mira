@@ -40,6 +40,7 @@ export default function Phase2NicknameScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   const currentPrivateProfile = useQuery(
     api.privateProfiles.getByAuthUserId,
@@ -89,7 +90,10 @@ export default function Phase2NicknameScreen() {
     try {
       // If profile already exists, enforce server-side edit limits via updateDisplayNameByAuthId.
       if (currentPrivateProfile) {
-        const res = await updateDisplayName({ authUserId: userId, displayName: next });
+        if (!token) {
+          throw new Error('Missing session token');
+        }
+        const res = await updateDisplayName({ token, authUserId: userId, displayName: next });
         if (!res?.success) {
           const err = (res as any)?.error;
           if (err === 'Nickname change limit reached') {
@@ -111,7 +115,7 @@ export default function Phase2NicknameScreen() {
     } finally {
       setIsSaving(false);
     }
-  }, [currentPrivateProfile, draft, router, setStoreDisplayName, updateDisplayName, userId]);
+  }, [currentPrivateProfile, draft, router, setStoreDisplayName, token, updateDisplayName, userId]);
 
   return (
     <KeyboardAvoidingView
@@ -294,4 +298,3 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
 });
-

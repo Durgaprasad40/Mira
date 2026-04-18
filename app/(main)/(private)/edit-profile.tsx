@@ -301,7 +301,7 @@ export default function EditProfileScreen() {
   const insets = useSafeAreaInsets();
 
   // Auth
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
 
   // Backend profile query
   const backendProfile = useQuery(
@@ -578,7 +578,10 @@ export default function EditProfileScreen() {
           onPress: async () => {
             try {
               setIsSyncingDetails(true);
-              const res = await syncFromMainProfile({ authUserId: userId });
+              if (!token) {
+                throw new Error('Missing session token');
+              }
+              const res = await syncFromMainProfile({ token, authUserId: userId });
               if (!res?.success) {
                 const err = (res as any)?.error;
                 if (err === 'user_not_found') {
@@ -732,11 +735,12 @@ export default function EditProfileScreen() {
     ) => {
       try {
         if (!isDemoMode) {
-          if (!userId) {
+          if (!userId || !token) {
             throw new Error('Please sign in to save changes.');
           }
 
           await updatePrivateProfile({
+            token,
             authUserId: userId,
             ...updates,
           });
@@ -753,7 +757,7 @@ export default function EditProfileScreen() {
         return false;
       }
     },
-    [isDemoMode, updatePrivateProfile, userId]
+    [isDemoMode, token, updatePrivateProfile, userId]
   );
 
   const persistPhotoBlurSettings = useCallback(
@@ -774,7 +778,7 @@ export default function EditProfileScreen() {
           return false;
         }
         if (!isDemoMode) {
-          if (!userId) {
+          if (!userId || !token) {
             throw new Error('Please sign in to save changes.');
           }
 
@@ -1065,12 +1069,13 @@ export default function EditProfileScreen() {
 
       try {
         if (!isDemoMode) {
-          if (!userId) {
+          if (!userId || !token) {
             throw new Error('Please sign in to save changes.');
           }
 
           // Single backend write: merge profile fields + blur settings.
           await updatePrivateProfile({
+            token,
             authUserId: userId,
             privateBio: nextBio,
             height: localHeight,
@@ -1322,7 +1327,10 @@ export default function EditProfileScreen() {
                           return;
                         }
                         try {
-                          const res = await updateDisplayName({ authUserId: userId, displayName: next });
+                          if (!token) {
+                            throw new Error('Missing session token');
+                          }
+                          const res = await updateDisplayName({ token, authUserId: userId, displayName: next });
                           if (!res?.success) {
                             if ((res as any)?.error === 'Nickname change limit reached') {
                               setNicknameError('Nickname is now locked.');
@@ -1389,7 +1397,10 @@ export default function EditProfileScreen() {
                           return;
                         }
                         try {
-                          const res = await updateDisplayName({ authUserId: userId, displayName: next });
+                          if (!token) {
+                            throw new Error('Missing session token');
+                          }
+                          const res = await updateDisplayName({ token, authUserId: userId, displayName: next });
                           if (!res?.success) {
                             if ((res as any)?.error === 'Nickname change limit reached') {
                               setNicknameError('Nickname is now locked.');

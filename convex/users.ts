@@ -9,6 +9,12 @@ import {
   FRONTEND_RELATIONSHIP_INTENT_IDS,
   normalizeRelationshipIntentValues,
 } from "../lib/discoveryNaming";
+import {
+  CURRENT_PHASE2_SETUP_VERSION,
+  PHASE2_SECTION1_PROMPT_IDS,
+  PHASE2_SECTION2_PROMPT_IDS,
+  PHASE2_SECTION3_PROMPT_IDS,
+} from "./phase2Constants";
 
 const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
 const PROFILE_NAME_MAX_LENGTH = 50;
@@ -18,6 +24,12 @@ const PROFILE_CITY_MAX_LENGTH = 100;
 const PROFILE_PROMPT_QUESTION_MAX_LENGTH = 100;
 const PROFILE_PROMPT_ANSWER_MAX_LENGTH = 300;
 const REPORT_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const PHASE2_PRIVATE_BIO_MIN_LENGTH = 20;
+const PHASE2_PRIVATE_BIO_MAX_LENGTH = 300;
+const PHASE2_MIN_PRIVATE_PHOTOS = 2;
+const PHASE2_MIN_PRIVATE_INTENT_KEYS = 1;
+const PHASE2_MAX_PRIVATE_INTENT_KEYS = 3;
+const DEBUG_PHASE2_BACKEND = process.env.DEBUG_PHASE2 === "true";
 
 function normalizeOptionalTrimmedString(
   value: string | undefined,
@@ -2433,7 +2445,9 @@ export const getOnboardingStatus = query({
     }
 
     if (!resolvedUserId) {
-      console.log('[ONB_STATUS] User not found');
+      if (DEBUG_PHASE2_BACKEND) {
+        console.log('[ONB_STATUS] User not found');
+      }
       return null;
     }
 
@@ -2490,18 +2504,20 @@ export const getOnboardingStatus = query({
       privateWelcomeConfirmed: user.privateWelcomeConfirmed || false,
     };
 
-    console.log('[ONB_STATUS]', JSON.stringify({
-      userId: resolvedUserId.substring(0, 8),
-      onboardingCompleted: status.onboardingCompleted,
-      phase2OnboardingCompleted: status.phase2OnboardingCompleted,
-      privateWelcomeConfirmed: status.privateWelcomeConfirmed,
-      basicInfoPresent: status.basicInfoComplete,
-      referencePhotoExists: status.referencePhotoExists,
-      faceStatus: status.faceVerificationStatus,
-      normalPhotoCount: status.normalPhotoCount,
-      effectivePhotoCount,
-      hasMinPhotos: status.hasMinPhotos,
-    }));
+    if (DEBUG_PHASE2_BACKEND) {
+      console.log('[ONB_STATUS]', JSON.stringify({
+        userId: resolvedUserId.substring(0, 8),
+        onboardingCompleted: status.onboardingCompleted,
+        phase2OnboardingCompleted: status.phase2OnboardingCompleted,
+        privateWelcomeConfirmed: status.privateWelcomeConfirmed,
+        basicInfoPresent: status.basicInfoComplete,
+        referencePhotoExists: status.referencePhotoExists,
+        faceStatus: status.faceVerificationStatus,
+        normalPhotoCount: status.normalPhotoCount,
+        effectivePhotoCount,
+        hasMinPhotos: status.hasMinPhotos,
+      }));
+    }
 
     return status;
   },
@@ -2514,14 +2530,11 @@ export const getOnboardingStatus = query({
  */
 export const setPhase2OnboardingCompleted = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!resolvedUserId) {
-      console.warn('[P2_ONBOARD] setPhase2OnboardingCompleted: user not found');
-      return { success: false, error: 'user_not_found' };
-    }
+    const resolvedUserId = await validateOwnership(ctx, args.token, args.authUserId);
 
     const user = await ctx.db.get(resolvedUserId);
     if (!user) {
@@ -2531,9 +2544,92 @@ export const setPhase2OnboardingCompleted = mutation({
 
     // Idempotent: skip if already completed
     if (user.phase2OnboardingCompleted) {
-      console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: already completed, skipping');
+      if (DEBUG_PHASE2_BACKEND) {
+        console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: already completed, skipping');
+      }
       return { success: true, alreadyCompleted: true };
     }
+
+    const privateProfile = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', resolvedUserId))
+      .first();
+
+    if (!privateProfile) {
+      return { success: false, error: 'private_profile_not_found' as const };
+    }
+
+    const privatePhotoCount = Array.isArray(privateProfile.privatePhotoUrls)
+      ? privateProfile.privatePhotoUrls.filter(
+          (url) => typeof url === 'string' && url.trim().length > 0,
+        ).length
+      : 0;
+    if (privatePhotoCount < PHASE2_MIN_PRIVATE_PHOTOS) {
+      return { success: false, error: 'insufficient_private_photos' as const };
+    }
+
+    const privateIntentCount = Array.isArray(privateProfile.privateIntentKeys)
+      ? privateProfile.privateIntentKeys.length
+      : 0;
+    if (
+      privateIntentCount < PHASE2_MIN_PRIVATE_INTENT_KEYS ||
+      privateIntentCount > PHASE2_MAX_PRIVATE_INTENT_KEYS
+    ) {
+      return { success: false, error: 'invalid_private_intent_keys' as const };
+    }
+
+    const privateBio =
+      typeof privateProfile.privateBio === 'string' ? privateProfile.privateBio.trim() : '';
+    if (
+      privateBio.length < PHASE2_PRIVATE_BIO_MIN_LENGTH ||
+      privateBio.length > PHASE2_PRIVATE_BIO_MAX_LENGTH
+    ) {
+      return { success: false, error: 'invalid_private_bio' as const };
+    }
+
+    if (!Array.isArray(privateProfile.promptAnswers)) {
+      return { success: false, error: 'missing_prompt_answers' as const };
+    }
+
+    const answeredPromptIds = new Set(
+      privateProfile.promptAnswers
+        .filter(
+          (p) =>
+            typeof p?.promptId === 'string' &&
+            typeof p?.answer === 'string' &&
+            p.answer.trim().length > 0
+        )
+        .map((p) => p.promptId as string)
+    );
+
+    const section1AllAnswered = PHASE2_SECTION1_PROMPT_IDS.every((id) =>
+      answeredPromptIds.has(id)
+    );
+
+    const section2Answered = PHASE2_SECTION2_PROMPT_IDS.some((id) =>
+      answeredPromptIds.has(id)
+    );
+
+    const section3Answered = PHASE2_SECTION3_PROMPT_IDS.some((id) =>
+      answeredPromptIds.has(id)
+    );
+
+    if (!section1AllAnswered) {
+      return { success: false, error: 'incomplete_section1_prompts' as const };
+    }
+
+    if (!section2Answered) {
+      return { success: false, error: 'incomplete_section2_prompts' as const };
+    }
+
+    if (!section3Answered) {
+      return { success: false, error: 'incomplete_section3_prompts' as const };
+    }
+
+    await ctx.db.patch(privateProfile._id, {
+      phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
+      updatedAt: Date.now(),
+    });
 
     // Set the flag
     await ctx.db.patch(resolvedUserId, {
@@ -2546,7 +2642,9 @@ export const setPhase2OnboardingCompleted = mutation({
       userId: resolvedUserId,
     });
 
-    console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: success for user', resolvedUserId.substring(0, 8));
+    if (DEBUG_PHASE2_BACKEND) {
+      console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: success for user', resolvedUserId.substring(0, 8));
+    }
     return { success: true };
   },
 });
@@ -2558,14 +2656,11 @@ export const setPhase2OnboardingCompleted = mutation({
  */
 export const setPrivateWelcomeConfirmed = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!resolvedUserId) {
-      console.warn('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: user not found');
-      return { success: false, error: 'user_not_found' };
-    }
+    const resolvedUserId = await validateOwnership(ctx, args.token, args.authUserId);
 
     const user = await ctx.db.get(resolvedUserId);
     if (!user) {
@@ -2575,7 +2670,9 @@ export const setPrivateWelcomeConfirmed = mutation({
 
     // Idempotent: skip if already confirmed
     if (user.privateWelcomeConfirmed) {
-      console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: already confirmed, skipping');
+      if (DEBUG_PHASE2_BACKEND) {
+        console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: already confirmed, skipping');
+      }
       return { success: true, alreadyConfirmed: true };
     }
 
@@ -2585,7 +2682,9 @@ export const setPrivateWelcomeConfirmed = mutation({
       privateWelcomeConfirmedAt: Date.now(),
     });
 
-    console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: success for user', resolvedUserId.substring(0, 8));
+    if (DEBUG_PHASE2_BACKEND) {
+      console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: success for user', resolvedUserId.substring(0, 8));
+    }
     return { success: true };
   },
 });

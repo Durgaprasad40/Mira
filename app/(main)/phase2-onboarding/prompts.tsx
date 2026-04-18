@@ -55,6 +55,7 @@ export default function Phase2PromptsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const scrollViewRef = useRef<ScrollView>(null);
   const questionRefs = useRef<Record<string, View | null>>({});
 
@@ -152,7 +153,7 @@ export default function Phase2PromptsScreen() {
   const canContinue = !!userId && section1Complete && section2Complete && section3Complete && !isSaving;
 
   const handleContinue = useCallback(async () => {
-    if (!userId || !canContinue) return;
+    if (!userId || !token || !canContinue) return;
 
     const payload: Phase2PromptAnswer[] = [];
 
@@ -175,6 +176,7 @@ export default function Phase2PromptsScreen() {
     setIsSaving(true);
     try {
       const result = await saveOnboardingPrompts({
+        token,
         authUserId: userId,
         promptAnswers: payload,
       });

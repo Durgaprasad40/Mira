@@ -54,6 +54,7 @@ export default function Phase2ReviewScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
 
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken with token
@@ -141,6 +142,7 @@ export default function Phase2ReviewScreen() {
   // - Section 3: At least 1 prompt
   const canComplete =
     !!userId &&
+    !!token &&
     validPhotoUrls.length >= PHASE2_MIN_PHOTOS &&
     intentKeys.length >= PHASE2_MIN_INTENTS &&
     intentKeys.length <= PHASE2_MAX_INTENTS &&
@@ -183,7 +185,7 @@ export default function Phase2ReviewScreen() {
       });
     }
 
-    if (!userId || !canComplete || isFinalizingRef.current) {
+    if (!userId || !token || !canComplete || isFinalizingRef.current) {
       if (__DEV__) {
         console.log('[P2_STEP5] early exit', {
           noUserId: !userId,
@@ -200,7 +202,7 @@ export default function Phase2ReviewScreen() {
 
     try {
       if (__DEV__) console.log('[P2_STEP5] finalize start');
-      const profileResult = await finalizeOnboardingProfile({ userId });
+      const profileResult = await finalizeOnboardingProfile({ token, authUserId: userId });
       if (__DEV__) console.log('[P2_STEP5] finalize result', profileResult);
 
       if (!profileResult?.success) {

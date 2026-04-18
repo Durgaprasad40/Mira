@@ -47,6 +47,7 @@ export default function Phase2OnboardingConsentScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken with token
   const currentUser = useQuery(
@@ -93,19 +94,19 @@ export default function Phase2OnboardingConsentScreen() {
   }, [currentUser]);
 
   const isLoading = currentUser === undefined;
-  const canContinue = !!userId && !!currentUser && rulesChecked && noSharingChecked && !isSubmitting;
+  const canContinue = !!userId && !!token && !!currentUser && rulesChecked && noSharingChecked && !isSubmitting;
 
   const handleExit = () => {
     router.replace(PHASE1_DISCOVER_ROUTE as any);
   };
 
   const handleContinue = async () => {
-    if (!canContinue || !userId) return;
+    if (!canContinue || !userId || !token) return;
 
     setIsSubmitting(true);
     try {
       // FIX: setPrivateWelcomeConfirmed takes { userId } only
-      const result = await acceptConsent({ userId });
+      const result = await acceptConsent({ token, authUserId: userId });
 
       if (!result?.success) {
         throw new Error('Consent could not be saved');

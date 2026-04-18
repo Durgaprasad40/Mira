@@ -15,6 +15,7 @@ export default function PhotoMediaPrivacyScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const authUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const updateFieldsByAuthId = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
   const defaultPhotoVisibility = usePrivateProfileStore((s) => s.defaultPhotoVisibility);
@@ -26,7 +27,7 @@ export default function PhotoMediaPrivacyScreen() {
   const setDefaultSecureMediaTimer = usePrivateProfileStore((s) => s.setDefaultSecureMediaTimer);
 
   const persistPhotoMediaPrivacy = useCallback(() => {
-    if (!authUserId) return;
+    if (!authUserId || !token) return;
     const {
       defaultPhotoVisibility,
       allowUnblurRequests,
@@ -34,6 +35,7 @@ export default function PhotoMediaPrivacyScreen() {
       defaultSecureMediaViewingMode,
     } = usePrivateProfileStore.getState();
     void updateFieldsByAuthId({
+      token,
       authUserId,
       defaultPhotoVisibility,
       allowUnblurRequests,
@@ -50,7 +52,7 @@ export default function PhotoMediaPrivacyScreen() {
           console.warn('[PhotoMediaPrivacy] updateFieldsByAuthId failed', err);
         }
       });
-  }, [authUserId, updateFieldsByAuthId]);
+  }, [authUserId, token, updateFieldsByAuthId]);
 
   const onVisibilityChange = useCallback(
     (visibility: 'public' | 'blurred' | 'private') => {

@@ -1,7 +1,72 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { isPrivateDataDeleted } from './privateDeletion';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateOwnership } from './helpers';
+import {
+  CURRENT_PHASE2_SETUP_VERSION,
+  PHASE2_BOUNDARY_KEYS,
+  PHASE2_DESIRE_TAG_KEYS,
+  PHASE2_INTENT_KEYS,
+} from './phase2Constants';
+
+const PHASE2_PRIVATE_BIO_MIN_LENGTH = 20;
+const PHASE2_PRIVATE_BIO_MAX_LENGTH = 300;
+const PHASE2_PROMPT_ANSWER_MIN_LENGTH = 5;
+const PHASE2_PROMPT_ANSWER_MAX_LENGTH = 250;
+const PHASE2_MAX_PROMPTS = 10;
+const PHASE2_HEIGHT_MIN = 120;
+const PHASE2_HEIGHT_MAX = 230;
+const PHASE2_WEIGHT_MIN = 30;
+const PHASE2_WEIGHT_MAX = 250;
+
+const PHASE2_INTENT_KEY_SET = new Set<string>(PHASE2_INTENT_KEYS);
+const PHASE2_DESIRE_TAG_KEY_SET = new Set<string>(PHASE2_DESIRE_TAG_KEYS);
+const PHASE2_BOUNDARY_KEY_SET = new Set<string>(PHASE2_BOUNDARY_KEYS);
+const PHASE2_SMOKING_VALUES = new Set<string>([
+  'never',
+  'sometimes',
+  'often',
+  'trying_to_quit',
+  // Backward-compatible existing app values.
+  'regularly',
+]);
+const PHASE2_DRINKING_VALUES = new Set<string>([
+  'never',
+  'socially',
+  'often',
+  // Backward-compatible existing app values.
+  'regularly',
+  'sober',
+]);
+const PHASE2_EDUCATION_VALUES = new Set<string>([
+  'high_school',
+  'college',
+  'grad_school',
+  'phd',
+  'other',
+  // Backward-compatible existing app values.
+  'some_college',
+  'trade_school',
+  'bachelors',
+  'masters',
+  'doctorate',
+]);
+const PHASE2_RELIGION_VALUES = new Set<string>([
+  'hindu',
+  'muslim',
+  'christian',
+  'sikh',
+  'buddhist',
+  'jain',
+  'none',
+  'other',
+  // Backward-compatible existing app values.
+  'jewish',
+  'atheist',
+  'agnostic',
+  'spiritual',
+  'prefer_not_to_say',
+]);
 
 function calculateAgeFromDOB(dob: string | undefined | null): number {
   // Mirror Phase-1 backend behavior: accept any parsable date string (ISO or YYYY-MM-DD).
@@ -21,6 +86,171 @@ function ageFromUser(user: any): number {
   // Canonical source of truth: users.dateOfBirth (Phase-1)
   const dob = user?.dateOfBirth;
   return calculateAgeFromDOB(typeof dob === 'string' ? dob : null);
+}
+
+function sanitizePrivateBio(
+  privateBio: string | undefined,
+): { ok: true; value?: string } | { ok: false; error: string } {
+  if (privateBio === undefined) {
+    return { ok: true };
+  }
+
+  const trimmed = privateBio.trim();
+  if (
+    trimmed.length < PHASE2_PRIVATE_BIO_MIN_LENGTH ||
+    trimmed.length > PHASE2_PRIVATE_BIO_MAX_LENGTH
+  ) {
+    return {
+      ok: false,
+      error: `private_bio must be ${PHASE2_PRIVATE_BIO_MIN_LENGTH}-${PHASE2_PRIVATE_BIO_MAX_LENGTH} characters`,
+    };
+  }
+
+  return { ok: true, value: trimmed };
+}
+
+function sanitizePromptAnswers(
+  promptAnswers:
+    | Array<{ promptId: string; question: string; answer: string }>
+    | undefined,
+):
+  | { ok: true; value?: Array<{ promptId: string; question: string; answer: string }> }
+  | { ok: false; error: string } {
+  if (promptAnswers === undefined) {
+    return { ok: true };
+  }
+
+  if (promptAnswers.length > PHASE2_MAX_PROMPTS) {
+    return {
+      ok: false,
+      error: `promptAnswers must contain ${PHASE2_MAX_PROMPTS} or fewer items`,
+    };
+  }
+
+  const sanitized = promptAnswers.map((prompt) => ({
+    ...prompt,
+    question: prompt.question.trim(),
+    answer: prompt.answer.trim(),
+  }));
+
+  for (const prompt of sanitized) {
+    if (
+      prompt.answer.length < PHASE2_PROMPT_ANSWER_MIN_LENGTH ||
+      prompt.answer.length > PHASE2_PROMPT_ANSWER_MAX_LENGTH
+    ) {
+      return {
+        ok: false,
+        error: `promptAnswers answers must be ${PHASE2_PROMPT_ANSWER_MIN_LENGTH}-${PHASE2_PROMPT_ANSWER_MAX_LENGTH} characters`,
+      };
+    }
+  }
+
+  return { ok: true, value: sanitized };
+}
+
+function validateEnumKeys(
+  keys: string[] | undefined,
+  allowedKeys: Set<string>,
+  fieldName: string,
+): { ok: true } | { ok: false; error: string } {
+  if (!keys) {
+    return { ok: true };
+  }
+
+  const hasUnknownKey = keys.some((key) => !allowedKeys.has(key));
+  if (hasUnknownKey) {
+    return { ok: false, error: `invalid_${fieldName}` };
+  }
+
+  return { ok: true };
+}
+
+function validateOptionalRangeNumber(
+  value: number | null | undefined,
+  min: number,
+  max: number,
+  fieldName: string,
+): { ok: true } | { ok: false; error: string } {
+  if (value === undefined || value === null) {
+    return { ok: true };
+  }
+
+  if (!Number.isFinite(value) || value < min || value > max) {
+    return { ok: false, error: `invalid_${fieldName}` };
+  }
+
+  return { ok: true };
+}
+
+function validateOptionalEnumValue(
+  value: string | null | undefined,
+  allowedValues: Set<string>,
+  fieldName: string,
+): { ok: true } | { ok: false; error: string } {
+  if (value === undefined || value === null) {
+    return { ok: true };
+  }
+
+  if (!allowedValues.has(value)) {
+    return { ok: false, error: `invalid_${fieldName}` };
+  }
+
+  return { ok: true };
+}
+
+function validateLifestyleFields(args: {
+  height?: number | null;
+  weight?: number | null;
+  smoking?: string | null;
+  drinking?: string | null;
+  education?: string | null;
+  religion?: string | null;
+}): { ok: true } | { ok: false; error: string } {
+  const heightValidation = validateOptionalRangeNumber(
+    args.height,
+    PHASE2_HEIGHT_MIN,
+    PHASE2_HEIGHT_MAX,
+    'height',
+  );
+  if (!heightValidation.ok) return heightValidation;
+
+  const weightValidation = validateOptionalRangeNumber(
+    args.weight,
+    PHASE2_WEIGHT_MIN,
+    PHASE2_WEIGHT_MAX,
+    'weight',
+  );
+  if (!weightValidation.ok) return weightValidation;
+
+  const smokingValidation = validateOptionalEnumValue(
+    args.smoking,
+    PHASE2_SMOKING_VALUES,
+    'smoking',
+  );
+  if (!smokingValidation.ok) return smokingValidation;
+
+  const drinkingValidation = validateOptionalEnumValue(
+    args.drinking,
+    PHASE2_DRINKING_VALUES,
+    'drinking',
+  );
+  if (!drinkingValidation.ok) return drinkingValidation;
+
+  const educationValidation = validateOptionalEnumValue(
+    args.education,
+    PHASE2_EDUCATION_VALUES,
+    'education',
+  );
+  if (!educationValidation.ok) return educationValidation;
+
+  const religionValidation = validateOptionalEnumValue(
+    args.religion,
+    PHASE2_RELIGION_VALUES,
+    'religion',
+  );
+  if (!religionValidation.ok) return religionValidation;
+
+  return { ok: true };
 }
 
 export const debugAgeSourcesByAuthUserId = query({
@@ -301,6 +531,7 @@ export const deleteProfile = mutation({
  */
 export const updateFieldsByAuthId = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     // Photos
     privatePhotoUrls: v.optional(v.array(v.string())),
@@ -360,11 +591,58 @@ export const updateFieldsByAuthId = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      console.warn('[PRIVATE_PROFILE] updateFieldsByAuthId: user not found');
-      return { success: false, error: 'user_not_found' };
+    const bioValidation = sanitizePrivateBio(args.privateBio);
+    if (!bioValidation.ok) {
+      return { success: false, error: bioValidation.error };
     }
+
+    const promptValidation = sanitizePromptAnswers(args.promptAnswers);
+    if (!promptValidation.ok) {
+      return { success: false, error: promptValidation.error };
+    }
+    if (promptValidation.value) {
+      const seenPromptIds = new Set<string>();
+      for (const prompt of promptValidation.value) {
+        if (seenPromptIds.has(prompt.promptId)) {
+          return { success: false, error: 'duplicate_prompt_id' as const };
+        }
+        seenPromptIds.add(prompt.promptId);
+      }
+    }
+
+    const lifestyleValidation = validateLifestyleFields(args);
+    if (!lifestyleValidation.ok) {
+      return { success: false, error: lifestyleValidation.error };
+    }
+
+    const intentValidation = validateEnumKeys(
+      args.privateIntentKeys,
+      PHASE2_INTENT_KEY_SET,
+      'private_intent_keys',
+    );
+    if (!intentValidation.ok) {
+      return { success: false, error: intentValidation.error };
+    }
+
+    const desireValidation = validateEnumKeys(
+      args.privateDesireTagKeys,
+      PHASE2_DESIRE_TAG_KEY_SET,
+      'private_desire_tag_keys',
+    );
+    if (!desireValidation.ok) {
+      return { success: false, error: desireValidation.error };
+    }
+
+    const boundaryValidation = validateEnumKeys(
+      args.privateBoundaries,
+      PHASE2_BOUNDARY_KEY_SET,
+      'private_boundaries',
+    );
+    if (!boundaryValidation.ok) {
+      return { success: false, error: boundaryValidation.error };
+    }
+
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
@@ -384,12 +662,19 @@ export const updateFieldsByAuthId = mutation({
     }
 
     // Build clean updates (only defined values)
-    const { authUserId, ...updates } = args;
+    const { authUserId, token, ...updates } = args;
     const cleanUpdates: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(updates)) {
       if (value !== undefined) {
         cleanUpdates[key] = value;
       }
+    }
+
+    if (bioValidation.value !== undefined) {
+      cleanUpdates.privateBio = bioValidation.value;
+    }
+    if (promptValidation.value !== undefined) {
+      cleanUpdates.promptAnswers = promptValidation.value;
     }
 
     // Self-heal: opportunistically fix age if invalid
@@ -411,11 +696,6 @@ export const updateFieldsByAuthId = mutation({
     }
 
     await ctx.db.patch(existing._id, cleanUpdates);
-    if (cleanUpdates.privateIntentKeys !== undefined) {
-      console.log('[P2_PREF_SAVE]', {
-        privateIntentKeys: cleanUpdates.privateIntentKeys as string[],
-      });
-    }
     console.log('[PRIVATE_PROFILE] updateFieldsByAuthId: success');
     return { success: true };
   },
@@ -426,11 +706,11 @@ export const updateFieldsByAuthId = mutation({
  *
  * Rules:
  * - Total allowed changes = 3
- * - Onboarding creation counts as first use (saveOnboardingPhotos sets count=1)
  * - Missing count is treated as 0 (backward compatible)
  */
 export const updateDisplayNameByAuthId = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     displayName: v.string(),
   },
@@ -440,10 +720,7 @@ export const updateDisplayNameByAuthId = mutation({
       return { success: false, error: 'INVALID_DISPLAY_NAME' as const };
     }
 
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      return { success: false, error: 'user_not_found' as const };
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
@@ -486,13 +763,11 @@ export const updateDisplayNameByAuthId = mutation({
  */
 export const syncFromMainProfile = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      return { success: false, error: 'user_not_found' as const };
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     // Phase-1 user record (source of truth for this manual sync)
     const user = await ctx.db.get(userId);
@@ -583,12 +858,11 @@ export const backfillPrivateProfileAges = mutation({
  */
 export const saveOnboardingPhotos = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     privatePhotoUrls: v.array(v.string()),
     displayName: v.optional(v.string()),
     // Phase-1 imported fields to persist into Phase-2 on initial skeleton creation only
-    // NOTE: age is derived from backend users.dateOfBirth (args.age ignored; kept for backwards-compat callers)
-    age: v.optional(v.number()),
     height: v.optional(v.union(v.number(), v.null())),
     weight: v.optional(v.union(v.number(), v.null())),
     smoking: v.optional(v.union(v.string(), v.null())),
@@ -597,11 +871,7 @@ export const saveOnboardingPhotos = mutation({
     religion: v.optional(v.union(v.string(), v.null())),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      console.warn('[PRIVATE_PROFILE] saveOnboardingPhotos: user not found');
-      return { success: false, error: 'user_not_found' };
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
@@ -621,6 +891,7 @@ export const saveOnboardingPhotos = mutation({
       // Build patch object starting with photos
       const patch: Record<string, unknown> = {
         privatePhotoUrls: args.privatePhotoUrls,
+        phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
         updatedAt: now,
       };
 
@@ -660,9 +931,9 @@ export const saveOnboardingPhotos = mutation({
     const profileId = await ctx.db.insert('userPrivateProfiles', {
       userId,
       displayName: trimmedDisplayName || '',
-      // Onboarding creation counts as first nickname usage
-      displayNameEditCount: 1,
+      displayNameEditCount: 0,
       lastDisplayNameEditedAt: now,
+      phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
       // Canonical identity field: backend source of truth only
       age: derivedAge,
       gender: user?.gender || '',
@@ -751,11 +1022,6 @@ export const getByAuthUserId = query({
     // Always expose privateIntentKeys to clients (schema-required; normalize if ever missing in a row)
     const privateIntentKeys = profile.privateIntentKeys ?? [];
 
-    // TEMP: remove after QA — verify Phase-2 intents round-trip
-    console.log('[P2_PREF_BACKEND_READ]', {
-      privateIntentKeys,
-    });
-
     return {
       ...profile,
       privateIntentKeys,
@@ -772,12 +1038,12 @@ export const getByAuthUserId = query({
  * Frontend should use useMutation and call this on profile load for self-healing.
  */
 export const getAndHealByAuthUserId = mutation({
-  args: { authUserId: v.string() },
+  args: {
+    token: v.string(),
+    authUserId: v.string(),
+  },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      return null;
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     const user = await ctx.db.get(userId);
     if (!user) {
@@ -842,12 +1108,11 @@ export const getAndHealByAuthUserId = mutation({
  */
 export const upsertByAuthId = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     // NOTE: Do NOT allow displayName updates here (nickname limit is enforced in updateDisplayNameByAuthId).
     // Keep displayName in args for backward compatibility of callers, but do not patch it on existing profiles.
     displayName: v.string(),
-    // NOTE: age is derived from backend users.dateOfBirth (args.age ignored; kept for backwards-compat callers)
-    age: v.number(),
     gender: v.string(),
     privateBio: v.optional(v.string()),
     privateIntentKeys: v.array(v.string()),
@@ -886,11 +1151,52 @@ export const upsertByAuthId = mutation({
     })),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      console.warn('[PRIVATE_PROFILE] upsertByAuthId: user not found for authId');
-      return { success: false, error: 'user_not_found' };
+    const bioValidation = sanitizePrivateBio(args.privateBio);
+    if (!bioValidation.ok) {
+      return { success: false, error: bioValidation.error };
     }
+    if (!bioValidation.value || bioValidation.value.trim().length === 0) {
+      return { success: false, error: 'invalid_bio_required' as const };
+    }
+
+    const promptValidation = sanitizePromptAnswers(args.promptAnswers);
+    if (!promptValidation.ok) {
+      return { success: false, error: promptValidation.error };
+    }
+
+    const lifestyleValidation = validateLifestyleFields(args);
+    if (!lifestyleValidation.ok) {
+      return { success: false, error: lifestyleValidation.error };
+    }
+
+    const intentValidation = validateEnumKeys(
+      args.privateIntentKeys,
+      PHASE2_INTENT_KEY_SET,
+      'private_intent_keys',
+    );
+    if (!intentValidation.ok) {
+      return { success: false, error: intentValidation.error };
+    }
+
+    const desireValidation = validateEnumKeys(
+      args.privateDesireTagKeys,
+      PHASE2_DESIRE_TAG_KEY_SET,
+      'private_desire_tag_keys',
+    );
+    if (!desireValidation.ok) {
+      return { success: false, error: desireValidation.error };
+    }
+
+    const boundaryValidation = validateEnumKeys(
+      args.privateBoundaries,
+      PHASE2_BOUNDARY_KEY_SET,
+      'private_boundaries',
+    );
+    if (!boundaryValidation.ok) {
+      return { success: false, error: boundaryValidation.error };
+    }
+
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     const user = await ctx.db.get(userId);
     if (!user) {
@@ -919,7 +1225,7 @@ export const upsertByAuthId = mutation({
       // Canonical identity fields: backend source of truth only
       age: ageFromUser(user),
       gender: user?.gender || args.gender,
-      privateBio: args.privateBio || '',
+      privateBio: bioValidation.value,
       privateIntentKeys: args.privateIntentKeys,
       privatePhotoUrls: args.privatePhotoUrls,
       city: args.city || '',
@@ -935,7 +1241,7 @@ export const upsertByAuthId = mutation({
       hobbies: args.hobbies ?? [],
       isVerified: args.isVerified ?? false,
       // Phase-2 Onboarding Step 3: Prompt answers
-      promptAnswers: args.promptAnswers ?? [],
+      promptAnswers: promptValidation.value ?? [],
     };
 
     // Profile details (imported from Phase-1) - only include if defined
@@ -978,9 +1284,9 @@ export const upsertByAuthId = mutation({
 
     const profileId = await ctx.db.insert('userPrivateProfiles', {
       ...profileData,
-      // Initialize nickname edit limit fields on first creation (onboarding counts as first use elsewhere)
-      displayNameEditCount: 1,
+      displayNameEditCount: 0,
       lastDisplayNameEditedAt: now,
+      phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
       createdAt: now,
       updatedAt: now,
     });

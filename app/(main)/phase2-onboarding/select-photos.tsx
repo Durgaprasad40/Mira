@@ -36,6 +36,7 @@ export default function Phase2SelectPhotosScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // FIX: Fetch Phase-1 photos DIRECTLY from Convex instead of relying on store hydration
   const currentUser = useQuery(
@@ -98,7 +99,7 @@ export default function Phase2SelectPhotosScreen() {
   const validSelectedCount = selectedPhotoUrls.filter(isPersistedPhotoUrl).length;
   const photosNeeded = Math.max(0, PHASE2_MIN_PHOTOS - validSelectedCount);
 
-  const canContinue = !!userId && validSelectedCount >= PHASE2_MIN_PHOTOS && !isSaving && !isUploading;
+  const canContinue = !!userId && !!token && validSelectedCount >= PHASE2_MIN_PHOTOS && !isSaving && !isUploading;
 
   const isLoading = currentUser === undefined;
 
@@ -125,7 +126,7 @@ export default function Phase2SelectPhotosScreen() {
 
   // Add photo from phone (secondary option)
   const handleAddFromPhone = async () => {
-    if (!userId || isSaving || isUploading) return;
+    if (!userId || !token || isSaving || isUploading) return;
 
     if (selectedPhotoUrls.length >= MAX_PHASE2_PHOTOS) {
       Alert.alert('Maximum reached', `You can select up to ${MAX_PHASE2_PHOTOS} photos.`);
@@ -214,10 +215,10 @@ export default function Phase2SelectPhotosScreen() {
       }
 
       const result = await saveOnboardingPhotos({
+        token,
         authUserId: userId,
         privatePhotoUrls: persistedUrls,
         displayName: displayName || undefined,
-        // age removed - backend derives from users.dateOfBirth
         height,
         weight,
         smoking,

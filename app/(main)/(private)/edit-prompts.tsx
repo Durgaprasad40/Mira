@@ -51,7 +51,7 @@ export default function EditPromptsScreen() {
   const scrollViewRef = useRef<ScrollView>(null);
 
   // Auth
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
   // Store
@@ -209,7 +209,7 @@ export default function EditPromptsScreen() {
       return;
     }
 
-    if (!userId) {
+    if (!userId || !token) {
       Alert.alert('Error', 'Please sign in to save changes.');
       return;
     }
@@ -217,6 +217,7 @@ export default function EditPromptsScreen() {
     setIsSaving(true);
     try {
       await updatePrivateProfile({
+        token,
         authUserId: userId,
         promptAnswers: draftPromptAnswers,
       });

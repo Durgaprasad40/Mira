@@ -1361,6 +1361,7 @@ export default defineSchema({
     // Optional for backward compatibility; treat missing as 0 in code.
     displayNameEditCount: v.optional(v.number()),
     lastDisplayNameEditedAt: v.optional(v.number()),
+    phase2SetupVersion: v.optional(v.number()),
     age: v.number(),
     city: v.optional(v.string()),
     gender: v.string(),

@@ -30,7 +30,7 @@ export default function PrivatePrivacyScreen() {
   const insets = useSafeAreaInsets();
 
   // Auth and backend mutation
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
   // Local store state (now persisted to backend via P0-1 fix)
@@ -57,7 +57,7 @@ export default function PrivatePrivacyScreen() {
       // Demo mode: Allow immediate UI update
       return true;
     }
-    if (!userId) {
+    if (!userId || !token) {
       Toast.show('Please sign in to change settings.');
       return false;
     }
@@ -65,6 +65,7 @@ export default function PrivatePrivacyScreen() {
     setSavingField(field);
     try {
       await updatePrivateProfile({
+        token,
         authUserId: userId,
         [field]: value,
       });
@@ -76,7 +77,7 @@ export default function PrivatePrivacyScreen() {
     } finally {
       setSavingField(null);
     }
-  }, [userId, updatePrivateProfile]);
+  }, [token, userId, updatePrivateProfile]);
 
   // P0-001 FIX: Handle "Hide from Deep Connect" toggle - waits for backend confirmation
   const handleHideFromDeepConnectChange = useCallback(async (newValue: boolean) => {

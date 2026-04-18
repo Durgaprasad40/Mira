@@ -72,6 +72,7 @@ export default function PrivateNotificationsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const authUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const updateFieldsByAuthId = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
   // Master toggle from store (persisted via userPrivateProfiles)
@@ -87,8 +88,9 @@ export default function PrivateNotificationsScreen() {
 
   const persistNotificationSettings = useCallback(
     (enabled: boolean, categories: Record<string, boolean>) => {
-      if (!authUserId) return;
+      if (!authUserId || !token) return;
       void updateFieldsByAuthId({
+        token,
         authUserId,
         notificationsEnabled: enabled,
         notificationCategories: toConvexNotificationCategories(categories),
@@ -104,7 +106,7 @@ export default function PrivateNotificationsScreen() {
           }
         });
     },
-    [authUserId, updateFieldsByAuthId]
+    [authUserId, token, updateFieldsByAuthId]
   );
 
   // Handle master toggle — store first, then background persist

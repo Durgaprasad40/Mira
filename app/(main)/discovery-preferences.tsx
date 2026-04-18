@@ -51,7 +51,7 @@ export default function DiscoveryPreferencesScreen() {
   const isInPrivateRoute = segments.some(s => String(s).includes('private'));
   const isPhase2 = mode === 'phase2' || (mode === undefined && isInPrivateRoute);
 
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const convexUserId = userId ? asUserId(userId) : undefined;
 
   // Fetch current user preferences from Convex (source of truth for Phase-1 prefs on users table)
@@ -104,8 +104,8 @@ export default function DiscoveryPreferencesScreen() {
   // to fix race condition where cleanup ran before data arrived
   useEffect(() => {
     // Phase-2: Filter privateIntentKeys to only valid PRIVATE_INTENT_CATEGORIES values
-    const validPhase2Keys: string[] = PRIVATE_INTENT_CATEGORIES.map(c => c.key);
-    const cleanedPhase2 = privateIntentKeys.filter(k => validPhase2Keys.includes(k));
+    const validPhase2Keys = new Set<string>(PRIVATE_INTENT_CATEGORIES.map((c) => c.key));
+    const cleanedPhase2 = privateIntentKeys.filter((k) => validPhase2Keys.has(k));
     if (cleanedPhase2.length !== privateIntentKeys.length) {
       setPrivateIntentKeys(cleanedPhase2);
       if (__DEV__) console.log('[Prefs] Cleaned stale Phase-2 intents:', privateIntentKeys.length - cleanedPhase2.length, 'removed');
@@ -141,8 +141,8 @@ export default function DiscoveryPreferencesScreen() {
     if (!isPhase2 || isDemoMode) return;
     if (!privateProfileDoc) return;
 
-    const validPhase2Keys = PRIVATE_INTENT_CATEGORIES.map((c) => c.key);
-    const cleaned = (privateProfileDoc.privateIntentKeys ?? []).filter((k) => validPhase2Keys.includes(k));
+    const validPhase2Keys = new Set<string>(PRIVATE_INTENT_CATEGORIES.map((c) => c.key));
+    const cleaned = (privateProfileDoc.privateIntentKeys ?? []).filter((k) => validPhase2Keys.has(k));
 
     setPrivateIntentKeys(cleaned);
     setIntentKeysPrivateStore(cleaned as any);
@@ -349,12 +349,16 @@ export default function DiscoveryPreferencesScreen() {
 
         // Phase-2: Persist "What are you looking for" to userPrivateProfiles (not users.updatePreferences)
         if (isPhase2) {
-          const validPhase2Keys = PRIVATE_INTENT_CATEGORIES.map((c) => c.key);
-          const cleanedPrivate = privateIntentKeys.filter((k) => validPhase2Keys.includes(k));
+          if (!token) {
+            throw new Error('Please sign in again to save Deep Connect preferences.');
+          }
+          const validPhase2Keys = new Set<string>(PRIVATE_INTENT_CATEGORIES.map((c) => c.key));
+          const cleanedPrivate = privateIntentKeys.filter((k) => validPhase2Keys.has(k));
           if (__DEV__) {
             console.log('[P2_PREF_SAVE]', { payloadPrivateIntentKeys: cleanedPrivate });
           }
           const p2Result = await updatePrivateProfileFields({
+            token,
             authUserId: userId,
             privateIntentKeys: cleanedPrivate,
           });

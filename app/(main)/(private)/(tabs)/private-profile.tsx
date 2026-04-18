@@ -69,7 +69,7 @@ export default function PrivateProfileScreen() {
   const insets = useSafeAreaInsets();
 
   // Auth
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const demoUser = isDemoMode ? getDemoCurrentUser() : null;
   const [queryPaused, setQueryPaused] = useState(false);
 
@@ -113,10 +113,10 @@ export default function PrivateProfileScreen() {
       age <= 0 ||
       age >= 120;
 
-    if (needsHealing && !hasHealedRef.current && userId) {
+    if (needsHealing && !hasHealedRef.current && userId && token) {
       hasHealedRef.current = true;
 
-      healProfile({ authUserId: userId })
+      healProfile({ token, authUserId: userId })
         .then(() => {
           console.log('[P2_PROFILE] Age healing triggered');
         })
@@ -124,7 +124,7 @@ export default function PrivateProfileScreen() {
           console.warn('[P2_PROFILE] Age healing failed', err);
         });
     }
-  }, [backendProfile?.age, isDemoMode, userId, healProfile]);
+  }, [backendProfile?.age, isDemoMode, token, userId, healProfile]);
 
   // Error timeout
   useEffect(() => {
