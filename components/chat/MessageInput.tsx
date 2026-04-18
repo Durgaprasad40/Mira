@@ -22,7 +22,6 @@ interface MessageInputProps {
   onSendVoice?: (audioUri: string, durationMs: number) => void | Promise<void>;
   disabled?: boolean;
   isPreMatch?: boolean;
-  messagesRemaining?: number;
   subscriptionTier?: 'free' | 'basic' | 'premium';
   canSendCustom?: boolean;
   recipientName?: string;
@@ -44,7 +43,6 @@ export function MessageInput({
   onSendVoice,
   disabled = false,
   isPreMatch = false,
-  messagesRemaining = 0,
   subscriptionTier = 'free',
   canSendCustom = false,
   recipientName = '',
@@ -202,12 +200,6 @@ export function MessageInput({
       return;
     }
 
-    // Message limit enforcement removed — no weekly limit for now (until subscriptions added)
-    // if (!isDemoMode && isPreMatch && messagesRemaining <= 0) {
-    //   Alert.alert('No Messages Left', 'You have no messages remaining this week. Upgrade to get more!');
-    //   return;
-    // }
-
     const trimmed = text.trim();
     handleTextChange('');
     // P2-024 FIX: Dismiss keyboard after sending message
@@ -325,7 +317,7 @@ export function MessageInput({
               <Pressable style={styles.menuOverlay} onPress={() => setShowAttachMenu(false)}>
                 <View style={styles.menuContainer}>
                   <Text style={styles.menuCaption}>
-                    Secure media opens on tap. Choose view once or a timer before sending.
+                    Choose tap or hold, then pick view once or a timer before sending.
                   </Text>
                   {/* Camera option */}
                   {onSendCamera && (
@@ -494,19 +486,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.error,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  quotaBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.warning + '20',
-    padding: 8,
-    paddingHorizontal: 16,
-  },
-  quotaText: {
-    fontSize: 12,
-    color: COLORS.warning,
-    marginLeft: 8,
-    fontWeight: '500',
   },
   inputContainer: {
     flexDirection: 'row',

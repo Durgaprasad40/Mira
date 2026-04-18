@@ -232,7 +232,11 @@ function MessageBubbleComponent({
   // SECURE-REWRITE: Pending/optimistic message (uploading secure photo)
   // Always own message, no avatar needed
   if (message.isPending) {
-    const pendingLabel = message.type === 'video' ? 'Sending secure video...' : 'Sending secure photo...';
+    const pendingLabel = message.content.trim().length > 0
+      ? message.content
+      : message.type === 'video'
+        ? 'Sending secure video...'
+        : 'Sending secure photo...';
     return (
       <View style={[styles.container, styles.ownContainer]}>
         <View style={[styles.bubble, styles.ownBubble, styles.pendingBubble]}>

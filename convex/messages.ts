@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { Id, Doc } from './_generated/dataModel';
 import { softMaskText } from './softMask';
 import { resolveUserIdByAuthId } from './helpers';
 
@@ -43,10 +43,16 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
+function isUnavailableDmUser(user: Doc<'users'> | null): boolean {
+  return !user || !user.isActive || user.isBanned === true || !!user.deletedAt;
+}
+
 // UNREAD-RULE: Message types that count toward unread badges
 // Includes: text, image (photo), video, voice, template, dare
 // Excludes: system (screenshot events, permission events, T&D connection system messages, etc.)
 const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice', 'template', 'dare'];
+const TYPING_STATUS_TIMEOUT_MS = 5_000;
+const TYPING_STATUS_CLEANUP_MS = 60_000;
 
 // C1/C2/C3-REPAIR: Helper to compute unread count from source of truth (messages table)
 // Used for: race-safe updates, fallback when participant rows are missing, backfill
@@ -148,6 +154,10 @@ export const sendMessage = mutation({
   handler: async (ctx, args) => {
     const { conversationId, authUserId, type, content, imageStorageId, templateId, audioStorageId, audioDurationMs, clientMessageId } = args;
     const now = Date.now();
+    const normalizedContent =
+      type === 'text' || type === 'template'
+        ? content.trim()
+        : content;
 
     // MSG-001 FIX: Verify caller identity via session-based auth
     if (!authUserId || authUserId.trim().length === 0) {
@@ -161,11 +171,6 @@ export const sendMessage = mutation({
     // Phase-2: Block DMs if user has active chatRoom readOnly penalty
     if (await hasActiveChatRoomPenalty(ctx, senderId)) {
       throw new Error('You are in read-only mode (24h)');
-    }
-
-    // P2-006 FIX: Enforce message length limit (5000 characters max)
-    if (content.length > 5000) {
-      throw new Error('Message too long');
     }
 
     // BUGFIX #3: Check for duplicate message (idempotency for retries)
@@ -195,10 +200,25 @@ export const sendMessage = mutation({
     if (recipientId && await isBlockedBidirectional(ctx, senderId, recipientId)) {
       throw new Error('Cannot send message');
     }
+    if (recipientId) {
+      const recipient = await ctx.db.get(recipientId);
+      if (isUnavailableDmUser(recipient)) {
+        throw new Error('Recipient unavailable');
+      }
+    }
 
     // Block sending to expired confession-based conversations
     if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
       throw new Error('This chat has expired');
+    }
+
+    if ((type === 'text' || type === 'template') && normalizedContent.length === 0) {
+      throw new Error('Message cannot be empty');
+    }
+
+    // P2-006 FIX: Enforce message length limit (5000 characters max)
+    if (normalizedContent.length > 5000) {
+      throw new Error('Message too long');
     }
 
     // P2-007 FIX: Rate limiting for 1:1 messages (10 messages per minute per sender per conversation)
@@ -247,7 +267,10 @@ export const sendMessage = mutation({
     // ═══════════════════════════════════════════════════════════════════════════
 
     // Soft-mask sensitive words in Face 1 text messages
-    const maskedContent = type === 'text' ? softMaskText(content) : content;
+    const maskedContent =
+      type === 'text'
+        ? softMaskText(normalizedContent)
+        : normalizedContent;
 
     // Create message (store masked text only)
     // BUGFIX #3: Store clientMessageId for idempotency on retries
@@ -297,6 +320,7 @@ export const sendMessage = mutation({
           body: notificationBody,
           createdAt: now,
           expiresAt: now + 24 * 60 * 60 * 1000,
+          readAt: undefined,
         });
       } else {
         await ctx.db.insert('notifications', {
@@ -316,6 +340,69 @@ export const sendMessage = mutation({
   },
 });
 
+export const deleteMessage = mutation({
+  args: {
+    messageId: v.id('messages'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { messageId, authUserId }) => {
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const message = await ctx.db.get(messageId);
+    if (!message) {
+      return { success: true, deleted: false };
+    }
+
+    if (message.type !== 'voice') {
+      throw new Error('Only voice messages can be deleted');
+    }
+
+    if (message.senderId !== userId) {
+      throw new Error('Not authorized');
+    }
+
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      throw new Error('Conversation not found');
+    }
+
+    await ctx.db.delete(messageId);
+
+    if (message.audioStorageId) {
+      try {
+        await ctx.storage.delete(message.audioStorageId);
+      } catch {
+        // Best effort only - message deletion should still succeed.
+      }
+    }
+
+    const latestMessage = await ctx.db
+      .query('messages')
+      .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversation._id))
+      .order('desc')
+      .first();
+
+    await ctx.db.patch(conversation._id, {
+      lastMessageAt: latestMessage?.createdAt ?? conversation.createdAt,
+    });
+
+    await Promise.all(
+      conversation.participants.map((participantId) =>
+        upsertParticipantUnreadCount(ctx, conversation._id, participantId)
+      )
+    );
+
+    return { success: true, deleted: true };
+  },
+});
+
 // Send pre-match message (uses template or limited text)
 // MSG-002 FIX: Auth hardening - verify caller identity server-side
 export const sendPreMatchMessage = mutation({
@@ -330,6 +417,7 @@ export const sendPreMatchMessage = mutation({
   handler: async (ctx, args) => {
     const { authUserId, toUserId, content, templateId, clientMessageId } = args;
     const now = Date.now();
+    const normalizedContent = content.trim();
 
     // MSG-002 FIX: Verify caller identity via session-based auth
     if (!authUserId || authUserId.trim().length === 0) {
@@ -347,6 +435,10 @@ export const sendPreMatchMessage = mutation({
 
     const fromUser = await ctx.db.get(fromUserId);
     if (!fromUser) throw new Error('User not found');
+    const toUser = await ctx.db.get(toUserId);
+    if (isUnavailableDmUser(toUser)) {
+      throw new Error('Recipient unavailable');
+    }
 
     // 9-1: Check email verification before allowing pre-match message
     if (fromUser.emailVerified !== true) {
@@ -364,23 +456,53 @@ export const sendPreMatchMessage = mutation({
       throw new Error('Cannot send message');
     }
 
+    if (normalizedContent.length === 0) {
+      throw new Error('Message cannot be empty');
+    }
+
+    if (normalizedContent.length > 5000) {
+      throw new Error('Message too long');
+    }
+
     // Check if already have a conversation
-    let conversation = await ctx.db
-      .query('conversations')
-      .filter((q) =>
-        q.and(
-          q.eq(q.field('isPreMatch'), true),
-          q.or(
-            q.and(
-              q.eq(q.field('participants'), [fromUserId, toUserId])
-            ),
-            q.and(
-              q.eq(q.field('participants'), [toUserId, fromUserId])
+    let conversation: Doc<'conversations'> | null = null;
+    const senderParticipantRows = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', fromUserId))
+      .collect();
+
+    for (const participantRow of senderParticipantRows) {
+      const candidateConversation = await ctx.db.get(participantRow.conversationId);
+      if (
+        candidateConversation &&
+        candidateConversation.isPreMatch &&
+        candidateConversation.participants.length === 2 &&
+        candidateConversation.participants.includes(fromUserId) &&
+        candidateConversation.participants.includes(toUserId)
+      ) {
+        conversation = candidateConversation;
+        break;
+      }
+    }
+
+    if (!conversation) {
+      conversation = await ctx.db
+        .query('conversations')
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('isPreMatch'), true),
+            q.or(
+              q.and(
+                q.eq(q.field('participants'), [fromUserId, toUserId])
+              ),
+              q.and(
+                q.eq(q.field('participants'), [toUserId, fromUserId])
+              )
             )
           )
         )
-      )
-      .first();
+        .first();
+    }
 
     // Create conversation if doesn't exist
     if (!conversation) {
@@ -424,7 +546,7 @@ export const sendPreMatchMessage = mutation({
 
     // Soft-mask sensitive words in Face 1 text messages
     const msgType = templateId ? 'template' : 'text';
-    const maskedContent = msgType === 'text' ? softMaskText(content) : content;
+    const maskedContent = msgType === 'text' ? softMaskText(normalizedContent) : normalizedContent;
 
     // BUGFIX #3: Store clientMessageId for idempotency on retries
     const messageId = await ctx.db.insert('messages', {
@@ -461,6 +583,7 @@ export const sendPreMatchMessage = mutation({
         body: notificationBody,
         createdAt: now,
         expiresAt: now + 24 * 60 * 60 * 1000,
+        readAt: undefined,
       });
     } else {
       await ctx.db.insert('notifications', {
@@ -659,6 +782,11 @@ export const markAsRead = mutation({
       return;
     }
 
+    const otherParticipantId = conversation.participants.find((participantId) => participantId !== userId);
+    if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+      return { success: true, count: 0, blocked: true };
+    }
+
     // Get all unread messages not sent by this user
     const unreadMessages = await ctx.db
       .query('messages')
@@ -745,22 +873,54 @@ export const getDmMessages = query({
         isMe: boolean;
       };
 
+      const orderedMessages = slice.slice().reverse();
+      const senderIds = Array.from(new Set(orderedMessages.map((message) => message.senderId)));
+      const mediaStorageIds = Array.from(new Set(
+        orderedMessages.flatMap((message) => {
+          if ((message.type === 'image' || message.type === 'video') && message.imageStorageId) {
+            return [message.imageStorageId];
+          }
+          if (message.type === 'voice' && message.audioStorageId) {
+            return [message.audioStorageId];
+          }
+          return [];
+        })
+      ));
+
+      const [senders, senderProfiles, mediaUrls] = await Promise.all([
+        Promise.all(senderIds.map((senderId) => ctx.db.get(senderId))),
+        Promise.all(
+          senderIds.map((senderId) =>
+            ctx.db
+              .query('userPrivateProfiles')
+              .withIndex('by_user', (q) => q.eq('userId', senderId))
+              .first()
+          )
+        ),
+        Promise.all(mediaStorageIds.map((storageId) => ctx.storage.getUrl(storageId))),
+      ]);
+
+      const senderMap = new Map(senderIds.map((senderId, index) => [senderId, senders[index]]));
+      const senderProfileMap = new Map(
+        senderIds.map((senderId, index) => [senderId, senderProfiles[index]])
+      );
+      const mediaUrlMap = new Map(
+        mediaStorageIds.map((storageId, index) => [storageId, mediaUrls[index] ?? undefined])
+      );
+
       const dmPage: DmRow[] = [];
 
-      for (const m of slice.slice().reverse()) {
+      for (const m of orderedMessages) {
         try {
-          const sender = await ctx.db.get(m.senderId);
-          const profile = await ctx.db
-            .query('userPrivateProfiles')
-            .withIndex('by_user', (q) => q.eq('userId', m.senderId))
-            .first();
+          const sender = senderMap.get(m.senderId);
+          const profile = senderProfileMap.get(m.senderId);
           const senderName = profile?.displayName ?? sender?.name ?? 'User';
 
           let mediaUrl: string | undefined;
           if ((m.type === 'image' || m.type === 'video') && m.imageStorageId) {
-            mediaUrl = (await ctx.storage.getUrl(m.imageStorageId)) ?? undefined;
+            mediaUrl = mediaUrlMap.get(m.imageStorageId);
           } else if (m.type === 'voice' && m.audioStorageId) {
-            mediaUrl = (await ctx.storage.getUrl(m.audioStorageId)) ?? undefined;
+            mediaUrl = mediaUrlMap.get(m.audioStorageId);
           }
 
           let uiType = m.type as string;
@@ -771,27 +931,26 @@ export const getDmMessages = query({
             uiType = 'text';
           }
 
-          dmPage.push(
-            applyReadReceiptSenderView(
-              {
-                id: m._id as string,
-                threadId: threadId as string,
-                senderId: m.senderId as string,
-                senderName,
-                senderAvatar: profile?.privatePhotoUrls?.[0] ?? sender?.primaryPhotoUrl ?? undefined,
-                text:
-                  m.type === 'text' || m.type === 'template' ? m.content : undefined,
-                type: uiType,
-                mediaUrl,
-                readAt: m.readAt,
-                createdAt: m.createdAt,
-                isMe: m.senderId === userId,
-              },
-              m,
-              userId,
-              hideReadFromSender
-            ) as DmRow
+          const row: DmRow = applyReadReceiptSenderView(
+            {
+              id: m._id as string,
+              threadId: threadId as string,
+              senderId: m.senderId as string,
+              senderName,
+              senderAvatar: profile?.privatePhotoUrls?.[0] ?? sender?.primaryPhotoUrl ?? undefined,
+              text:
+                m.type === 'text' || m.type === 'template' ? m.content : undefined,
+              type: uiType,
+              mediaUrl,
+              readAt: m.readAt,
+              createdAt: m.createdAt,
+              isMe: m.senderId === userId,
+            },
+            m,
+            userId,
+            hideReadFromSender
           );
+          dmPage.push(row);
         } catch {
           continue;
         }
@@ -835,6 +994,11 @@ export const markAsDelivered = mutation({
     const conversation = await ctx.db.get(conversationId);
     if (!conversation || !conversation.participants.includes(userId)) {
       return { success: false, count: 0 };
+    }
+
+    const otherParticipantId = conversation.participants.find((participantId) => participantId !== userId);
+    if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+      return { success: true, count: 0, blocked: true };
     }
 
     // Get all messages from OTHER user that are not yet delivered
@@ -1018,6 +1182,7 @@ export const getConversations = query({
   handler: async (ctx, args) => {
     const { authUserId, limit = 50 } = args;
     const now = Date.now();
+    const normalizedLimit = Math.min(Math.max(limit, 1), 100);
 
     // APP-P0-004 FIX: Resolve auth ID to Convex user ID server-side
     const userId = await resolveUserIdByAuthId(ctx, authUserId);
@@ -1025,30 +1190,7 @@ export const getConversations = query({
       return []; // Unauthorized - return empty array
     }
 
-    // Get all conversations where user is a participant
-    const allConversations = await ctx.db
-      .query('conversations')
-      .withIndex('by_last_message')
-      .order('desc')
-      .collect();
-
-    const userConversations = allConversations
-      .filter((c) => {
-        // Must be a participant
-        if (!c.participants.includes(userId)) return false;
-        // Filter out expired confession-based conversations
-        if (c.confessionId && c.expiresAt && c.expiresAt <= now) return false;
-        return true;
-      })
-      .slice(0, limit);
-
-    if (userConversations.length === 0) return [];
-
     // PERF #7: Batch-fetch all related data in parallel instead of N+1 queries
-    const otherUserIds = userConversations
-      .map((c) => c.participants.find((id) => id !== userId))
-      .filter((id): id is Id<'users'> => id !== undefined);
-
     // M2 FIX: Batch-fetch ALL blocks for current user in just 2 queries (not 2*N)
     // Uses same efficient pattern as privateDiscover.ts
     const [blocksOut, blocksIn] = await Promise.all([
@@ -1070,11 +1212,193 @@ export const getConversations = query({
       ...blocksIn.map((b) => b.blockerId as string),
     ]);
 
-    // Parallel batch: users, photos, last messages, and unread counts
-    const [users, photos, lastMessages, unreadCounts] = await Promise.all([
-      // Batch fetch all other users
+    type ConversationCandidate = {
+      conversation: Doc<'conversations'>;
+      otherUserId: Id<'users'>;
+      unreadCount: number;
+    };
+
+    const getConversationSortTs = (conversation: Doc<'conversations'>) =>
+      conversation.lastMessageAt ?? conversation.createdAt;
+
+    const candidates: ConversationCandidate[] = [];
+    const seenConversationIds = new Set<string>();
+
+    const pushCandidate = (candidate: ConversationCandidate) => {
+      candidates.push(candidate);
+      candidates.sort((a, b) => {
+        const byActivity = getConversationSortTs(b.conversation) - getConversationSortTs(a.conversation);
+        if (byActivity !== 0) return byActivity;
+        return b.conversation._creationTime - a.conversation._creationTime;
+      });
+      if (candidates.length > normalizedLimit) {
+        candidates.length = normalizedLimit;
+      }
+    };
+
+    const participantPageSize = Math.min(Math.max(normalizedLimit * 2, 50), 100);
+    let participantCursor: string | null = null;
+
+    while (true) {
+      const participantPage = await ctx.db
+        .query('conversationParticipants')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .paginate({ cursor: participantCursor, numItems: participantPageSize });
+
+      if (participantPage.page.length === 0) {
+        break;
+      }
+
+      const pageConversations = await Promise.all(
+        participantPage.page.map((row) => ctx.db.get(row.conversationId))
+      );
+
+      const pageOtherUserIds = Array.from(
+        new Set(
+          pageConversations
+            .map((conversation) => conversation?.participants.find((id) => id !== userId) as string | undefined)
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+
+      const pageUsers = await Promise.all(
+        pageOtherUserIds.map((id) => ctx.db.get(id as Id<'users'>))
+      );
+      const pageUserMap = new Map(pageOtherUserIds.map((id, index) => [id, pageUsers[index]]));
+
+      for (let index = 0; index < participantPage.page.length; index++) {
+        const row = participantPage.page[index];
+        const conversation = pageConversations[index];
+        if (!conversation) continue;
+
+        seenConversationIds.add(conversation._id as string);
+
+        if (!conversation.participants.includes(userId)) continue;
+        if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
+          continue;
+        }
+
+        const otherUserId = conversation.participants.find((id) => id !== userId);
+        if (!otherUserId) continue;
+        if (blockedUserIds.has(otherUserId as string)) continue;
+
+        const otherUser = pageUserMap.get(otherUserId as string);
+        if (!otherUser || !otherUser.isActive) continue;
+
+        pushCandidate({
+          conversation,
+          otherUserId,
+          unreadCount: row.unreadCount,
+        });
+      }
+
+      if (participantPage.isDone) {
+        break;
+      }
+
+      participantCursor = participantPage.continueCursor;
+    }
+
+    // Fallback for legacy conversations that may not have participant rows yet.
+    // We scan only a bounded recent window from the recency index and still keep
+    // the backend as the source of truth for unread counts on those conversations.
+    let fallbackCursor: string | null = null;
+    let fallbackScanned = 0;
+    const MAX_FALLBACK_CONVERSATIONS = 500;
+
+    while (fallbackScanned < MAX_FALLBACK_CONVERSATIONS) {
+      const fallbackPageSize = Math.min(
+        participantPageSize,
+        MAX_FALLBACK_CONVERSATIONS - fallbackScanned
+      );
+
+      const fallbackPage = await ctx.db
+        .query('conversations')
+        .withIndex('by_last_message')
+        .order('desc')
+        .paginate({ cursor: fallbackCursor, numItems: fallbackPageSize });
+
+      if (fallbackPage.page.length === 0) {
+        break;
+      }
+
+      fallbackScanned += fallbackPage.page.length;
+
+      const fallbackOtherUserIds = Array.from(
+        new Set(
+          fallbackPage.page
+            .map((conversation) => conversation.participants.find((id) => id !== userId) as string | undefined)
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+
+      const fallbackUsers = await Promise.all(
+        fallbackOtherUserIds.map((id) => ctx.db.get(id as Id<'users'>))
+      );
+      const fallbackUserMap = new Map(
+        fallbackOtherUserIds.map((id, index) => [id, fallbackUsers[index]])
+      );
+
+      for (const conversation of fallbackPage.page) {
+        if (seenConversationIds.has(conversation._id as string)) continue;
+        seenConversationIds.add(conversation._id as string);
+
+        if (!conversation.participants.includes(userId)) continue;
+        if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
+          continue;
+        }
+
+        const otherUserId = conversation.participants.find((id) => id !== userId);
+        if (!otherUserId) continue;
+        if (blockedUserIds.has(otherUserId as string)) continue;
+
+        const otherUser = fallbackUserMap.get(otherUserId as string);
+        if (!otherUser || !otherUser.isActive) continue;
+
+        const unreadCount = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
+        pushCandidate({
+          conversation,
+          otherUserId,
+          unreadCount,
+        });
+      }
+
+      if (candidates.length === normalizedLimit) {
+        const oldestCandidate = candidates[candidates.length - 1];
+        const oldestFallbackPageItem = fallbackPage.page[fallbackPage.page.length - 1];
+
+        if (
+          oldestCandidate &&
+          oldestFallbackPageItem &&
+          getConversationSortTs(oldestFallbackPageItem) <=
+            getConversationSortTs(oldestCandidate.conversation)
+        ) {
+          break;
+        }
+      }
+
+      if (fallbackPage.isDone) {
+        break;
+      }
+
+      fallbackCursor = fallbackPage.continueCursor;
+    }
+
+    if (candidates.length === 0) return [];
+
+    const finalCandidates = candidates
+      .slice()
+      .sort((a, b) => {
+        const byActivity = getConversationSortTs(b.conversation) - getConversationSortTs(a.conversation);
+        if (byActivity !== 0) return byActivity;
+        return b.conversation._creationTime - a.conversation._creationTime;
+      });
+
+    const otherUserIds = finalCandidates.map((candidate) => candidate.otherUserId);
+
+    // Parallel batch: users, photos, and last messages for only the final bounded set.
+    const [users, photos, lastMessages] = await Promise.all([
       Promise.all(otherUserIds.map((id) => ctx.db.get(id))),
-      // Batch fetch primary photos for all other users
       Promise.all(
         otherUserIds.map((id) =>
           ctx.db
@@ -1084,57 +1408,28 @@ export const getConversations = query({
             .first()
         )
       ),
-      // Batch fetch last message for each conversation
       Promise.all(
-        userConversations.map((c) =>
+        finalCandidates.map((candidate) =>
           ctx.db
             .query('messages')
             .withIndex('by_conversation_created', (q) =>
-              q.eq('conversationId', c._id)
+              q.eq('conversationId', candidate.conversation._id)
             )
             .order('desc')
             .first()
         )
       ),
-      // Batch fetch unread messages for each conversation
-      Promise.all(
-        userConversations.map((c) =>
-          ctx.db
-            .query('messages')
-            .withIndex('by_conversation', (q) =>
-              q.eq('conversationId', c._id)
-            )
-            .filter((q) =>
-              q.and(
-                q.neq(q.field('senderId'), userId),
-                q.eq(q.field('readAt'), undefined)
-              )
-            )
-            .collect()
-        )
-      ),
     ]);
-
-    // Build maps for O(1) lookup
-    const userMap = new Map(otherUserIds.map((id, i) => [id, users[i]]));
-    const photoMap = new Map(otherUserIds.map((id, i) => [id, photos[i]]));
 
     // Build result
     const result = [];
-    for (let i = 0; i < userConversations.length; i++) {
-      const conversation = userConversations[i];
-      const otherUserId = conversation.participants.find((id) => id !== userId);
-      if (!otherUserId) continue;
-
-      // SAFETY FIX: Skip conversations with blocked users (either direction)
-      if (blockedUserIds.has(otherUserId as string)) continue;
-
-      const otherUser = userMap.get(otherUserId);
+    for (let i = 0; i < finalCandidates.length; i++) {
+      const { conversation, otherUserId, unreadCount } = finalCandidates[i];
+      const otherUser = users[i];
       if (!otherUser || !otherUser.isActive) continue;
 
-      const photo = photoMap.get(otherUserId);
+      const photo = photos[i];
       const lastMessage = lastMessages[i];
-      const unreadCount = unreadCounts[i]?.length || 0;
 
       // PRIVACY FIX: Check if the other user should be shown anonymously
       // This happens when they're the confession author on an anonymous confession
@@ -1386,6 +1681,11 @@ export const markDmConversationRead = mutation({
       return { success: false, count: 0 };
     }
 
+    const otherParticipantId = conversation.participants.find((participantId) => participantId !== userId);
+    if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+      return { success: true, count: 0, blocked: true };
+    }
+
     // Get all unread messages RECEIVED by this user (not sent by them)
     const unreadMessages = await ctx.db
       .query('messages')
@@ -1533,6 +1833,13 @@ export const setTypingStatus = mutation({
       )
       .first();
 
+    if (!isTyping) {
+      if (existing) {
+        await ctx.db.delete(existing._id);
+      }
+      return;
+    }
+
     if (existing) {
       await ctx.db.patch(existing._id, { isTyping, updatedAt: now });
     } else {
@@ -1558,7 +1865,6 @@ export const getTypingStatus = query({
   handler: async (ctx, args) => {
     const { conversationId, userId } = args;
     const now = Date.now();
-    const TYPING_TIMEOUT = 5000; // 5 seconds
 
     // Get conversation to find the other participant
     const conversation = await ctx.db.get(conversationId);
@@ -1580,9 +1886,26 @@ export const getTypingStatus = query({
     if (!typingStatus) return { isTyping: false };
 
     // Check if typing status is stale (older than 5 seconds)
-    const isStale = now - typingStatus.updatedAt > TYPING_TIMEOUT;
+    const isStale = now - typingStatus.updatedAt > TYPING_STATUS_TIMEOUT_MS;
     return {
       isTyping: typingStatus.isTyping && !isStale,
     };
+  },
+});
+
+export const cleanupStaleTypingStatus = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const cutoff = Date.now() - TYPING_STATUS_CLEANUP_MS;
+    const typingRows = await ctx.db.query('typingStatus').collect();
+
+    let deleted = 0;
+    for (const row of typingRows) {
+      if (row.updatedAt > cutoff) continue;
+      await ctx.db.delete(row._id);
+      deleted += 1;
+    }
+
+    return { success: true, deleted };
   },
 });

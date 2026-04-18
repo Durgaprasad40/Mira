@@ -12,6 +12,7 @@ import {
   StyleSheet,
   TouchableOpacity,
   Alert,
+  BackHandler,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -22,6 +23,7 @@ import {
   InteractionManager,
   Image,
   Modal,
+  Linking,
 } from 'react-native';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -38,11 +40,11 @@ import { CameraPhotoSheet, CameraPhotoOptions } from '@/components/chat/CameraPh
 import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system/legacy';
 import { isDemoMode } from '@/hooks/useConvex';
-import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
+import { useDemoDmStore } from '@/stores/demoDmStore';
 import { DEMO_PROFILES } from '@/lib/demoData';
-import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
-import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 // Toast import removed — using Alert.alert for guaranteed error visibility
@@ -55,6 +57,9 @@ import {
   getOtherUserIdFromMeta,
 } from '@/lib/threadsIntegrity';
 import { preloadVideos } from '@/lib/videoCache';
+import { validateFileSize } from '@/lib/uploadUtils';
+import type { DemoConversationMeta, DemoDmMessage } from '@/stores/demoDmStore';
+import type { Doc, Id } from '@/convex/_generated/dataModel';
 
 /** Resolve the current demo user ID at call-time from authStore.
  *  Falls back to 'demo_user_1' for legacy data compatibility. */
@@ -78,9 +83,106 @@ export interface ChatScreenInnerProps {
   source?: ChatSource;
 }
 
+type ConversationId = Id<'conversations'>;
+type MessageId = Id<'messages'>;
+type UserId = Id<'users'>;
+
+type LiveConversation = {
+  id: string;
+  matchId?: string;
+  isPreMatch: boolean;
+  createdAt: number;
+  isConfessionChat?: boolean;
+  expiresAt?: number;
+  isExpired?: boolean;
+  otherUser?: {
+    id?: string;
+    name?: string;
+    photoUrl?: string;
+    lastActive?: number;
+    isVerified?: boolean;
+    isAnonymous?: boolean;
+  };
+};
+
+type BaseRenderMessage = {
+  _id: string;
+  senderId: string;
+  type: 'text' | 'image' | 'video' | 'template' | 'dare' | 'system' | 'voice';
+  content: string;
+  createdAt: number;
+  readAt?: number;
+  readReceiptVisible?: boolean;
+  deliveredAt?: number;
+  clientMessageId?: string;
+  imageUrl?: string;
+  mediaUrl?: string | null;
+  videoUri?: string;
+  videoDurationMs?: number;
+  isProtected?: boolean;
+  protectedMedia?: {
+    localUri?: string;
+    mediaType?: 'photo' | 'video';
+    timer: number;
+    viewingMode?: 'tap' | 'hold';
+    screenshotAllowed: boolean;
+    viewOnce: boolean;
+    watermark: boolean;
+    isMirrored?: boolean;
+  };
+  viewMode?: 'tap' | 'hold';
+  isExpired?: boolean;
+  timerEndsAt?: number | null;
+  expiredAt?: number | null;
+  viewedAt?: number;
+  systemSubtype?: string;
+  mediaId?: string;
+  viewOnce?: boolean;
+  recipientOpened?: boolean;
+  audioUri?: string;
+  durationMs?: number;
+  audioUrl?: string | null;
+  audioDurationMs?: number;
+};
+
+type RenderMessage = BaseRenderMessage & {
+  isPending?: true;
+  optimisticStatus?: 'sending' | 'failed';
+  errorMessage?: string;
+};
+type PendingSecureMessage = RenderMessage & {
+  type: 'image' | 'video';
+  isPending: true;
+};
+type OptimisticTextMessage = RenderMessage & {
+  clientMessageId: string;
+  type: 'text' | 'template';
+  optimisticStatus: 'sending' | 'failed';
+};
+type CurrentUserSummary = Pick<Doc<'users'>, 'name' | 'gender' | 'subscriptionTier'>;
+
+const PHOTO_UPLOAD_COMPRESSION_THRESHOLD_BYTES = 4 * 1024 * 1024;
+const PHOTO_UPLOAD_MAX_WIDTH = 1600;
+
+const asConversationId = (value: string): ConversationId => value as ConversationId;
+const asMessageId = (value: string): MessageId => value as MessageId;
+const asUserId = (value: string): UserId => value as UserId;
+
+const getErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error && error.message ? error.message : fallback;
+
+const isAbortError = (error: unknown) =>
+  error instanceof Error && error.name === 'AbortError';
+
 export default function ChatScreenInner({ conversationId, source }: ChatScreenInnerProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const liveConversationId = useMemo(
+    () => (!conversationId || isDemoMode || conversationId.startsWith('match_') || conversationId.startsWith('demo_')
+      ? null
+      : asConversationId(conversationId)),
+    [conversationId]
+  );
 
   // Back handler — routes based on source to ensure consistent navigation
   const handleBack = useCallback(() => {
@@ -105,11 +207,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [router, conversationId]);
 
-  const { userId, token } = useAuthStore();
-  const flatListRef = useRef<FlashListRef<any>>(null);
+  const { userId } = useAuthStore();
+  const flatListRef = useRef<FlashListRef<RenderMessage>>(null);
 
   // Track screen focus to check for camera-composer handoff data
   const isFocused = useIsFocused();
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !isFocused) return;
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleBack();
+      return true;
+    });
+
+    return () => subscription.remove();
+  }, [handleBack, isFocused]);
 
   // ─── Mounted guard for async safety (stability fix 2.1/2.2) ───
   const mountedRef = useRef(true);
@@ -117,6 +230,54 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+
+  const androidScrollTaskRef = useRef<ReturnType<typeof InteractionManager.runAfterInteractions> | null>(null);
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const contentSizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const contentSizeFrameRef = useRef<number | null>(null);
+  const cooldownTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const uploadAbortControllersRef = useRef<Set<AbortController>>(new Set());
+
+  const clearManagedTimeouts = useCallback(() => {
+    if (androidScrollTaskRef.current) {
+      androidScrollTaskRef.current.cancel();
+      androidScrollTaskRef.current = null;
+    }
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+      scrollTimeoutRef.current = null;
+    }
+    if (contentSizeTimeoutRef.current) {
+      clearTimeout(contentSizeTimeoutRef.current);
+      contentSizeTimeoutRef.current = null;
+    }
+    if (contentSizeFrameRef.current !== null) {
+      cancelAnimationFrame(contentSizeFrameRef.current);
+      contentSizeFrameRef.current = null;
+    }
+    if (cooldownTimeoutRef.current) {
+      clearTimeout(cooldownTimeoutRef.current);
+      cooldownTimeoutRef.current = null;
+    }
+  }, []);
+
+  const createAbortController = useCallback(() => {
+    const controller = new AbortController();
+    uploadAbortControllersRef.current.add(controller);
+    return controller;
+  }, []);
+
+  const releaseAbortController = useCallback((controller: AbortController) => {
+    uploadAbortControllersRef.current.delete(controller);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearManagedTimeouts();
+      uploadAbortControllersRef.current.forEach((controller) => controller.abort());
+      uploadAbortControllersRef.current.clear();
+    };
+  }, [clearManagedTimeouts]);
 
   // ─── Composer height tracking (matches locked chat-rooms pattern) ───
   const [composerHeight, setComposerHeight] = useState(56);
@@ -236,37 +397,34 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // SYNC-FIX: Use authUserId for consistent identity resolution across devices
   const conversation = useQuery(
     api.messages.getConversation,
-    !isDemo && conversationId && userId && token
-      ? ({ conversationId: conversationId as any, token, authUserId: userId } as any)
+    !isDemo && liveConversationId && userId
+      ? { conversationId: liveConversationId, authUserId: userId }
       : 'skip'
-  );
+  ) as LiveConversation | null | undefined;
 
   // SYNC-FIX: Use authUserId for consistent identity resolution across devices
   const convexMessages = useQuery(
     api.messages.getMessages,
-    !isDemo && conversationId && userId && token
-      ? ({ conversationId: conversationId as any, token, authUserId: userId } as any)
+    !isDemo && liveConversationId && userId
+      ? { conversationId: liveConversationId, authUserId: userId }
       : 'skip'
-  );
+  ) as BaseRenderMessage[] | undefined;
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemo && userId ? { userId: userId as any } : 'skip'
-  );
+    !isDemo && userId ? { userId: asUserId(userId) } : 'skip'
+  ) as CurrentUserSummary | null | undefined;
 
-  const messages = isDemo ? demoMessageList : convexMessages;
+  const messages = (isDemo ? demoMessageList : convexMessages) as BaseRenderMessage[] | undefined;
 
   // Demo conversation metadata comes from demoDmStore.meta, seeded by
   // simulateMatch() or match-celebration's "Say Hi" flow.
   // Falls back to null → triggers the "not found" empty state.
-  const storedMeta = conversationId ? demoMeta[conversationId] : undefined;
-  // Robust otherUserId resolution: try id, then _id, then otherUserId
-  const resolvedOtherUserId = storedMeta?.otherUser?.id
-    || (storedMeta?.otherUser as any)?._id
-    || (storedMeta as any)?.otherUserId;
+  const storedMeta: DemoConversationMeta | undefined = conversationId ? demoMeta[conversationId] : undefined;
+  const resolvedOtherUserId = storedMeta?.otherUser?.id;
   // Fallback: if photoUrl missing from stored meta, lookup from DEMO_PROFILES
   const resolvedPhotoUrl = storedMeta?.otherUser?.photoUrl
-    || DEMO_PROFILES.find((p: any) => p._id === resolvedOtherUserId)?.photos?.[0]?.url;
+    || DEMO_PROFILES.find((profile) => profile._id === resolvedOtherUserId)?.photos?.[0]?.url;
   const demoConversation = storedMeta
     ? {
         otherUser: {
@@ -281,14 +439,15 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       }
     : null;
 
-  const activeConversation = isDemo ? demoConversation : conversation;
+  const activeConversation: LiveConversation | typeof demoConversation =
+    (isDemo ? demoConversation : conversation) ?? null;
 
   // Check if this is an expired confession-based chat
   const now = Date.now();
   const isExpiredChat = activeConversation
     ? (isDemo
         ? !!(activeConversation.isConfessionChat && activeConversation.expiresAt && activeConversation.expiresAt <= now)
-        : ((activeConversation as any).isExpired === true)
+        : ('isExpired' in activeConversation && activeConversation.isExpired === true)
       )
     : false;
 
@@ -303,6 +462,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [isExpiredChat]);
 
   const sendMessage = useMutation(api.messages.sendMessage);
+  const deleteMessage = useMutation(api.messages.deleteMessage);
   const markAsRead = useMutation(api.messages.markAsRead);
   const markAsDelivered = useMutation(api.messages.markAsDelivered); // MESSAGE-TICKS-FIX
   const markNotificationReadForConversation = useMutation(api.notifications.markReadForConversation);
@@ -331,24 +491,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // PARALLEL-SEND-FIX: Support multiple concurrent secure photo/video sends
   // Changed from single object to array to allow back-to-back sends
-  const [pendingSecureMessages, setPendingSecureMessages] = useState<Array<{
-    _id: string;
-    senderId: string;
-    type: 'image' | 'video';
-    content: string;
-    createdAt: number;
-    isPending: true;
-  }>>([]);
+  const [pendingSecureMessages, setPendingSecureMessages] = useState<PendingSecureMessage[]>([]);
+  const [optimisticTextMessages, setOptimisticTextMessages] = useState<OptimisticTextMessage[]>([]);
 
   // PARALLEL-SEND-FIX: Helper to add a pending message
-  const addPendingSecureMessage = useCallback((msg: {
-    _id: string;
-    senderId: string;
-    type: 'image' | 'video';
-    content: string;
-    createdAt: number;
-    isPending: true;
-  }) => {
+  const addPendingSecureMessage = useCallback((msg: PendingSecureMessage) => {
     setPendingSecureMessages((prev) => [...prev, msg]);
   }, []);
 
@@ -357,12 +504,157 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     setPendingSecureMessages((prev) => prev.filter((m) => m._id !== id));
   }, []);
 
-  // PARALLEL-SEND-FIX: Compute display messages with all pending secure messages
-  // Appends all pending messages at the end (most recent) if any are being sent
+  const updatePendingSecureMessage = useCallback(
+    (id: string, updater: (message: PendingSecureMessage) => PendingSecureMessage) => {
+      setPendingSecureMessages((prev) =>
+        prev.map((message) => (message._id === id ? updater(message) : message))
+      );
+    },
+    []
+  );
+
+  const clearPendingMediaComposerState = useCallback(() => {
+    setPendingImageUri(null);
+    setPendingMediaType('photo');
+    setPendingIsMirrored(false);
+  }, []);
+
+  useEffect(() => {
+    clearPendingMediaComposerState();
+  }, [conversationId, clearPendingMediaComposerState]);
+
+  const openAppSettings = useCallback(() => {
+    void Linking.openSettings().catch(() => {
+      if (mountedRef.current) {
+        Alert.alert('Settings Unavailable', 'Please open your device settings and grant permission manually.');
+      }
+    });
+  }, []);
+
+  const showPermissionSettingsAlert = useCallback(
+    (title: string, message: string) => {
+      Alert.alert(title, message, [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Open Settings', onPress: openAppSettings },
+      ]);
+    },
+    [openAppSettings]
+  );
+
+  const prepareSecureUploadAsset = useCallback(
+    async (uri: string, mediaType: 'photo' | 'video') => {
+      if (mediaType === 'video') {
+        await validateFileSize(uri, 'video');
+        return { uploadUri: uri, cleanupUri: null as string | null };
+      }
+
+      const fileInfo = await FileSystem.getInfoAsync(uri);
+      if (!fileInfo.exists) {
+        throw new Error('Selected media is no longer available.');
+      }
+
+      const fileSize = typeof fileInfo.size === 'number' ? fileInfo.size : 0;
+
+      if (fileSize <= PHOTO_UPLOAD_COMPRESSION_THRESHOLD_BYTES) {
+        await validateFileSize(uri, 'photo');
+        return { uploadUri: uri, cleanupUri: null as string | null };
+      }
+
+      try {
+        const optimized = await ImageManipulator.manipulateAsync(
+          uri,
+          [{ resize: { width: PHOTO_UPLOAD_MAX_WIDTH } }],
+          {
+            compress: 0.82,
+            format: ImageManipulator.SaveFormat.JPEG,
+          }
+        );
+
+        await validateFileSize(optimized.uri, 'photo');
+        return {
+          uploadUri: optimized.uri,
+          cleanupUri: optimized.uri !== uri ? optimized.uri : null,
+        };
+      } catch {
+        await validateFileSize(uri, 'photo');
+        return { uploadUri: uri, cleanupUri: null as string | null };
+      }
+    },
+    []
+  );
+
+  const addOptimisticTextMessage = useCallback((message: OptimisticTextMessage) => {
+    setOptimisticTextMessages((prev) => [
+      ...prev.filter((item) => item.clientMessageId !== message.clientMessageId),
+      message,
+    ]);
+  }, []);
+
+  const updateOptimisticTextMessage = useCallback(
+    (
+      clientMessageId: string,
+      updater: (message: OptimisticTextMessage) => OptimisticTextMessage
+    ) => {
+      setOptimisticTextMessages((prev) =>
+        prev.map((message) =>
+          message.clientMessageId === clientMessageId ? updater(message) : message
+        )
+      );
+    },
+    []
+  );
+
+  useEffect(() => {
+    setOptimisticTextMessages([]);
+  }, [conversationId]);
+
+  useEffect(() => {
+    if (!messages || messages.length === 0) return;
+
+    const deliveredClientMessageIds = new Set<string>();
+    for (const message of messages) {
+      if (typeof message.clientMessageId === 'string' && message.clientMessageId.length > 0) {
+        deliveredClientMessageIds.add(message.clientMessageId);
+      }
+    }
+
+    if (deliveredClientMessageIds.size === 0) return;
+
+    setOptimisticTextMessages((prev) => {
+      const next = prev.filter(
+        (message) => !deliveredClientMessageIds.has(message.clientMessageId)
+      );
+      return next.length === prev.length ? prev : next;
+    });
+  }, [messages]);
+
+  // PARALLEL-SEND-FIX: Compute display messages with all local pending/failed rows merged in.
   const displayMessages = React.useMemo(() => {
-    if (pendingSecureMessages.length === 0) return messages || [];
-    return [...(messages || []), ...pendingSecureMessages];
-  }, [messages, pendingSecureMessages]);
+    const serverMessages = messages || [];
+    const deliveredClientMessageIds = new Set<string>();
+
+    for (const message of serverMessages) {
+      if (typeof message.clientMessageId === 'string' && message.clientMessageId.length > 0) {
+        deliveredClientMessageIds.add(message.clientMessageId);
+      }
+    }
+
+    const localTextMessages = optimisticTextMessages.filter(
+      (message) => !deliveredClientMessageIds.has(message.clientMessageId)
+    );
+
+    if (pendingSecureMessages.length === 0 && localTextMessages.length === 0) {
+      return serverMessages;
+    }
+
+    return [...serverMessages, ...localTextMessages, ...pendingSecureMessages].sort(
+      (a, b) => {
+        const createdDiff = (a.createdAt ?? 0) - (b.createdAt ?? 0);
+        if (createdDiff !== 0) return createdDiff;
+        return String(a._id).localeCompare(String(b._id));
+      }
+    );
+  }, [messages, optimisticTextMessages, pendingSecureMessages]) as RenderMessage[];
 
   // LIVE-TICK-FIX: Compute a hash of message read/delivered states to force FlashList re-renders
   // When any message's deliveredAt or readAt changes, this hash changes, triggering a re-render
@@ -371,7 +663,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (!displayMessages || displayMessages.length === 0) return '';
     // Include only the last 20 messages for performance (most recent are what users see)
     const recentMessages = displayMessages.slice(-20);
-    const hash = recentMessages.map((m: any) =>
+    const hash = recentMessages.map((m) =>
       `${m._id}:${m.deliveredAt ?? 0}:${m.readAt ?? 0}`
     ).join('|');
 
@@ -381,8 +673,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       console.log('[LIVE-TICK-HASH] Hash computed:', {
         msgCount: recentMessages.length,
         lastMsgId: lastMsg?._id?.slice(-6),
-        lastDelivered: !!(lastMsg as any)?.deliveredAt,
-        lastRead: !!(lastMsg as any)?.readAt,
+        lastDelivered: !!lastMsg?.deliveredAt,
+        lastRead: !!lastMsg?.readAt,
       });
     }
 
@@ -400,19 +692,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     const recentMessages = displayMessages.slice(-10);
 
     for (const msg of recentMessages) {
-      // Cast to any to access all possible message properties
-      const m = msg as any;
-
       // Check for video type messages with URLs
-      if (m.type === 'video') {
-        const videoUrl = m.mediaUrl || m.videoUri || m.imageUrl;
+      if (msg.type === 'video') {
+        const videoUrl = msg.mediaUrl || msg.videoUri || msg.imageUrl;
         if (videoUrl && (videoUrl.startsWith('http://') || videoUrl.startsWith('https://'))) {
           videoUrls.push(videoUrl);
         }
       }
       // Check for protected video media
-      if (m.isProtected && m.protectedMedia?.mediaType === 'video') {
-        const protectedUrl = m.protectedMedia?.localUri || m.mediaUrl;
+      if (msg.isProtected && msg.protectedMedia?.mediaType === 'video') {
+        const protectedUrl = msg.protectedMedia?.localUri || msg.mediaUrl;
         if (protectedUrl && (protectedUrl.startsWith('http://') || protectedUrl.startsWith('https://'))) {
           videoUrls.push(protectedUrl);
         }
@@ -446,7 +735,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const endGameMutation = useMutation(api.games.endBottleSpinGame);
 
   // Get other user's ID for invite
-  const otherUserId = activeConversation?.otherUser?.id;
+  const truthDareOtherUserId = activeConversation?.otherUser?.id;
 
   // Track cooldown state for inline UI feedback (instead of Alert spam)
   const [showCooldownMessage, setShowCooldownMessage] = useState(false);
@@ -503,17 +792,21 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // Check if it's MY turn
     const isMyTurn = gameSession.currentTurnRole === myRole;
 
-    console.log('[BOTTLE_SPIN_AUTO_OPEN]', {
-      turnPhase: gameSession.turnPhase,
-      currentTurnRole: gameSession.currentTurnRole,
-      myRole,
-      isMyTurn,
-      modalCurrentlyOpen: showTruthDareGame,
-    });
+    if (__DEV__) {
+      console.log('[BOTTLE_SPIN_AUTO_OPEN]', {
+        turnPhase: gameSession.turnPhase,
+        currentTurnRole: gameSession.currentTurnRole,
+        myRole,
+        isMyTurn,
+        modalCurrentlyOpen: showTruthDareGame,
+      });
+    }
 
     // If it's my turn and modal is closed, open it automatically
     if (isMyTurn && !showTruthDareGame) {
-      console.log('[BOTTLE_SPIN_AUTO_OPEN] Opening modal - it is my turn to choose!');
+      if (__DEV__) {
+        console.log('[BOTTLE_SPIN_AUTO_OPEN] Opening modal - it is my turn to choose!');
+      }
       setShowTruthDareGame(true);
     }
   }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, userId, showTruthDareGame]);
@@ -534,7 +827,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       setCooldownRemainingMin(remainingMin);
       setShowCooldownMessage(true);
       // Auto-hide after 3 seconds
-      setTimeout(() => setShowCooldownMessage(false), 3000);
+      if (cooldownTimeoutRef.current) {
+        clearTimeout(cooldownTimeoutRef.current);
+      }
+      cooldownTimeoutRef.current = setTimeout(() => {
+        if (mountedRef.current) {
+          setShowCooldownMessage(false);
+        }
+      }, 3000);
       return;
     }
 
@@ -557,13 +857,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // Send game invite
   const handleSendInvite = useCallback(async () => {
-    if (!userId || !conversationId || !otherUserId) return;
+    if (!userId || !conversationId || !truthDareOtherUserId) return;
 
     try {
       await sendInviteMutation({
         authUserId: userId,
         conversationId,
-        otherUserId: String(otherUserId),
+        otherUserId: String(truthDareOtherUserId),
       });
       setShowTruthDareInvite(false);
 
@@ -571,17 +871,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // Using inviter's name so recipient sees "[Name] wants to play..." and sender sees their own name
       const inviterName = currentUser?.name || 'Someone';
       const markedMessage = `[SYSTEM:truthdare]${inviterName} wants to play Truth or Dare!`;
-      await sendMessage(({
-        conversationId: conversationId as any,
-        token: token ?? undefined,
+      await sendMessage({
+        conversationId: asConversationId(conversationId),
         authUserId: userId,
         content: markedMessage,
         type: 'text',
-      } as any));
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to send invite');
+      });
+    } catch (error) {
+      Alert.alert('Error', getErrorMessage(error, 'Failed to send invite'));
     }
-  }, [userId, conversationId, otherUserId, token, sendInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, truthDareOtherUserId, sendInviteMutation, currentUser, sendMessage]);
 
   // Respond to game invite
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
@@ -600,22 +899,21 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         ? `${responderName} is ready to play! Game starting...`
         : `${responderName} declined the game invite`;
       const markedMessage = `[SYSTEM:truthdare]${responseText}`;
-      await sendMessage(({
-        conversationId: conversationId as any,
-        token: token ?? undefined,
+      await sendMessage({
+        conversationId: asConversationId(conversationId),
         authUserId: userId,
         content: markedMessage,
         type: 'text',
-      } as any));
+      });
 
       // If accepted, open the game
       if (accept) {
         setShowTruthDareGame(true);
       }
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to respond to invite');
+    } catch (error) {
+      Alert.alert('Error', getErrorMessage(error, 'Failed to respond to invite'));
     }
-  }, [userId, conversationId, token, respondToInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, respondToInviteMutation, currentUser, sendMessage]);
 
   // End game (called from BottleSpinGame)
   const handleEndGame = useCallback(async () => {
@@ -630,7 +928,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       });
     } catch (error) {
       // Silent fail - UI will close anyway
-      console.warn('[TD] Failed to end game:', error);
+      if (__DEV__) {
+        console.warn('[TD] Failed to end game:', error);
+      }
     }
   }, [isDemo, userId, conversationId, endGameMutation]);
 
@@ -647,79 +947,65 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     try {
       if (isDemo) {
         // Demo mode: native system message type with subtype
-        addDemoMessage(conversationId, {
+        const demoSystemMessage: DemoDmMessage & { systemSubtype: 'truthdare'; type: 'system' } = {
           _id: `td_${Date.now()}`,
           content: message,
           senderId: getDemoUserId(),
           type: 'system',
           systemSubtype: 'truthdare',
           createdAt: Date.now(),
-        } as any); // Cast needed since DemoDmMessage doesn't have systemSubtype
+        };
+        addDemoMessage(conversationId, demoSystemMessage);
       } else if (userId) {
         // Convex mode: prefix with hidden marker (stripped by MessageBubble)
         const markedMessage = `[SYSTEM:truthdare]${message}`;
         // MSG-001 FIX: Use authUserId for server-side verification
-        await sendMessage(({
-          conversationId: conversationId as any,
-          token: token ?? undefined,
+        await sendMessage({
+          conversationId: asConversationId(conversationId),
           authUserId: userId,
           content: markedMessage,
           type: 'text',
-        } as any));
+        });
       }
     } catch {
       // Silent fail - game continues even if message fails
     }
-  }, [conversationId, isDemo, userId, token, addDemoMessage, sendMessage, handleEndGame]);
+  }, [conversationId, isDemo, userId, addDemoMessage, sendMessage, handleEndGame]);
 
   const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
   const markNotifReadForConvo = useDemoNotifStore((s) => s.markReadForConversation);
 
-  // LIVE-TICK-FIX-V2: These refs are no longer needed (replaced by simpler approach)
-  // Kept for compatibility with reset effect, will be removed in future cleanup
+  const currentChatUserId = isDemo ? getDemoUserId() : userId;
+  const unreadIncomingMessageIds = useMemo(
+    () =>
+      !messages || !currentChatUserId
+        ? []
+        : messages
+            .filter((message) => message.senderId !== currentChatUserId && !message.readAt)
+            .map((message) => message._id),
+    [messages, currentChatUserId]
+  );
+  const undeliveredIncomingMessageIds = useMemo(
+    () =>
+      isDemo || !messages || !currentChatUserId
+        ? []
+        : messages
+            .filter((message) => message.senderId !== currentChatUserId && !message.deliveredAt)
+            .map((message) => message._id),
+    [isDemo, messages, currentChatUserId]
+  );
 
-  // TASK-3: Mark as read on initial open AND when screen regains focus
-  // This ensures unread badges are properly cleared when user views a conversation
+  const lastReadSyncKeyRef = useRef<string>('');
+  const lastDeliveredSyncKeyRef = useRef<string>('');
+  const lastNotificationSyncKeyRef = useRef<string>('');
+  const wasFocusedRef = useRef(false);
+
   useEffect(() => {
-    if (isDemo && conversationId) {
-      markDemoRead(conversationId, getDemoUserId());
-      markNotifReadForConvo(conversationId);
-    } else if (!isDemo && conversationId && userId) {
-      // MSG-004 FIX: Use authUserId for server-side verification
-      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
-        .catch((err) => {
-          if (__DEV__) console.warn('[ChatScreen] markAsRead failed:', err);
-        });
-      markNotificationReadForConversation({ authUserId: userId, conversationId })
-        .catch((err) => {
-          if (__DEV__) console.warn('[ChatScreen] markReadForConversation failed:', err);
-        });
-      // MESSAGE-TICKS-FIX: Mark messages as delivered when conversation is opened
-      markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
-        .catch((err) => {
-          if (__DEV__) console.warn('[ChatScreen] markAsDelivered failed:', err);
-        });
-    }
-  }, [conversationId, userId, token, isDemo, markDemoRead, markNotifReadForConvo, markAsRead, markAsDelivered, markNotificationReadForConversation]);
-
-  // TASK-3: Also mark as read when screen regains focus (handles navigation back scenarios)
-  // This ensures badges are cleared even if user navigated away and back
-  useEffect(() => {
-    if (!isFocused) return;
-
-    if (isDemo && conversationId) {
-      markDemoRead(conversationId, getDemoUserId());
-    } else if (!isDemo && conversationId && userId) {
-      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
-        .catch((err) => {
-          if (__DEV__) console.warn('[ChatScreen] markAsRead on focus failed:', err);
-        });
-      markNotificationReadForConversation({ authUserId: userId, conversationId })
-        .catch((err) => {
-          if (__DEV__) console.warn('[ChatScreen] markReadForConversation on focus failed:', err);
-        });
-    }
-  }, [isFocused, conversationId, userId, token, isDemo, markDemoRead, markAsRead, markNotificationReadForConversation]);
+    lastReadSyncKeyRef.current = '';
+    lastDeliveredSyncKeyRef.current = '';
+    lastNotificationSyncKeyRef.current = '';
+    wasFocusedRef.current = false;
+  }, [conversationId]);
 
   // ONLINE-STATUS-FIX: Update presence periodically while chat is open
   // This allows the other user to see "Online" status
@@ -727,111 +1013,122 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (isDemo || !userId) return;
 
     // Update presence immediately on mount
-    updatePresence({ token: token ?? undefined, authUserId: userId } as any).catch(() => {
+    updatePresence({ authUserId: userId }).catch(() => {
       // Silent fail - presence is best-effort
     });
 
     // Update every 30 seconds while chat is open
     const interval = setInterval(() => {
-      updatePresence({ token: token ?? undefined, authUserId: userId } as any).catch(() => {
+      updatePresence({ authUserId: userId }).catch(() => {
         // Silent fail
       });
     }, 30_000);
 
     return () => clearInterval(interval);
-  }, [userId, token, isDemo, updatePresence]);
+  }, [userId, isDemo, updatePresence]);
 
-  // LIVE-TICK-FIX-V2: Track the last message ID we processed to detect truly new messages
-  const lastProcessedMsgIdRef = useRef<string | null>(null);
-
-  // LIVE-TICK-FIX-V2: Mark as delivered AND read when messages change while viewing
-  // This uses the messages array itself (not just length) to detect any changes
-  // and checks for ANY unread messages from the other user, not just the latest
   useEffect(() => {
-    // Log every time this effect runs for debugging
-    if (__DEV__) {
-      console.log('[LIVE-TICK-V2] Effect triggered, messages:', messages?.length ?? 0);
-    }
-
-    // Skip if no messages or required data
-    if (!messages || messages.length === 0) {
-      if (__DEV__) console.log('[LIVE-TICK-V2] No messages, skipping');
-      return;
-    }
-    if (!conversationId) {
-      if (__DEV__) console.log('[LIVE-TICK-V2] No conversationId, skipping');
+    if (!conversationId || !isFocused) {
+      wasFocusedRef.current = false;
+      lastReadSyncKeyRef.current = '';
+      lastDeliveredSyncKeyRef.current = '';
+      lastNotificationSyncKeyRef.current = '';
       return;
     }
 
-    const currentUserId = isDemo ? getDemoUserId() : userId;
-    if (!currentUserId) {
-      if (__DEV__) console.log('[LIVE-TICK-V2] No currentUserId, skipping');
-      return;
-    }
+    const enteringFocus = !wasFocusedRef.current;
+    wasFocusedRef.current = true;
 
-    // Get the latest message
-    const latestMsg = messages[messages.length - 1];
-    const latestMsgId = latestMsg?._id;
+    const unreadSyncKey = unreadIncomingMessageIds.join('|');
+    const deliveredSyncKey = undeliveredIncomingMessageIds.join('|');
 
-    // Check if we have any unread messages from the other user
-    const hasUnreadFromOther = messages.some((m: any) =>
-      m.senderId !== currentUserId && !m.readAt
-    );
-
-    if (__DEV__) {
-      console.log('[LIVE-TICK-V2] State check:', {
-        latestMsgId,
-        lastProcessedMsgIdRef: lastProcessedMsgIdRef.current,
-        latestSenderId: latestMsg?.senderId,
-        currentUserId,
-        hasUnreadFromOther,
-        isFromOther: latestMsg?.senderId !== currentUserId,
-        latestReadAt: (latestMsg as any)?.readAt,
-        latestDeliveredAt: (latestMsg as any)?.deliveredAt,
-      });
-    }
-
-    // If the latest message is from the other user and not yet read, mark as read
-    // This handles BOTH new incoming messages AND existing unread messages
-    if (hasUnreadFromOther) {
-      if (isDemo && conversationId) {
-        if (__DEV__) console.log('[LIVE-TICK-V2] Demo mode: marking as read');
+    if (isDemo) {
+      if (enteringFocus || unreadIncomingMessageIds.length > 0) {
         markDemoRead(conversationId, getDemoUserId());
-      } else if (!isDemo && userId) {
-        if (__DEV__) console.log('[LIVE-TICK-V2] Convex mode: calling markAsDelivered and markAsRead');
+        markNotifReadForConvo(conversationId);
+      }
+      return;
+    }
 
-        // Mark as delivered (sets deliveredAt on all undelivered messages from other user)
-        markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
-          .then((result) => {
-            if (__DEV__) console.log('[LIVE-TICK-V2] markAsDelivered result:', result);
-          })
-          .catch((err) => {
-            console.warn('[LIVE-TICK-V2] markAsDelivered error:', err);
-          });
+    if (!liveConversationId || !userId) return;
 
-        // Mark as read (sets readAt on all unread messages from other user)
-        markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
-          .then((result) => {
-            if (__DEV__) console.log('[LIVE-TICK-V2] markAsRead result:', result);
-          })
-          .catch((err) => {
-            console.warn('[LIVE-TICK-V2] markAsRead error:', err);
-          });
+    if (enteringFocus) {
+      const notificationFocusKey = `${conversationId}:focus`;
+      if (lastNotificationSyncKeyRef.current !== notificationFocusKey) {
+        lastNotificationSyncKeyRef.current = notificationFocusKey;
+        void markNotificationReadForConversation({ authUserId: userId, conversationId }).catch((error) => {
+          if (__DEV__) {
+            console.warn('[ChatScreen] markReadForConversation failed:', error);
+          }
+        });
       }
     }
 
-    // Update last processed message ID
-    lastProcessedMsgIdRef.current = latestMsgId;
-  }, [messages, conversationId, userId, token, isDemo, markDemoRead, markAsRead, markAsDelivered]);
+    if (deliveredSyncKey && lastDeliveredSyncKeyRef.current !== deliveredSyncKey) {
+      lastDeliveredSyncKeyRef.current = deliveredSyncKey;
+      void markAsDelivered({ conversationId: liveConversationId, authUserId: userId }).catch((error) => {
+        if (__DEV__) {
+          console.warn('[ChatScreen] markAsDelivered failed:', error);
+        }
+      });
+    }
+
+    if (unreadSyncKey && lastReadSyncKeyRef.current !== unreadSyncKey) {
+      lastReadSyncKeyRef.current = unreadSyncKey;
+      void markAsRead({ conversationId: liveConversationId, authUserId: userId }).catch((error) => {
+        if (__DEV__) {
+          console.warn('[ChatScreen] markAsRead failed:', error);
+        }
+      });
+
+      const notificationUnreadKey = `${conversationId}:${unreadSyncKey}`;
+      if (lastNotificationSyncKeyRef.current !== notificationUnreadKey) {
+        lastNotificationSyncKeyRef.current = notificationUnreadKey;
+        void markNotificationReadForConversation({ authUserId: userId, conversationId }).catch((error) => {
+          if (__DEV__) {
+            console.warn('[ChatScreen] markReadForConversation failed:', error);
+          }
+        });
+      }
+    }
+  }, [
+    conversationId,
+    isDemo,
+    isFocused,
+    liveConversationId,
+    markAsDelivered,
+    markAsRead,
+    markDemoRead,
+    markNotifReadForConvo,
+    markNotificationReadForConversation,
+    unreadIncomingMessageIds,
+    undeliveredIncomingMessageIds,
+    userId,
+  ]);
 
   // Helper: scroll to bottom with reliable Android timing
   const scrollToBottom = useCallback((animated = true) => {
     const doScroll = () => flatListRef.current?.scrollToEnd({ animated });
     if (Platform.OS === 'android') {
       // Android needs extra delay after keyboard animations settle
-      InteractionManager.runAfterInteractions(() => setTimeout(doScroll, 120));
+      if (androidScrollTaskRef.current) {
+        androidScrollTaskRef.current.cancel();
+      }
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
+      androidScrollTaskRef.current = InteractionManager.runAfterInteractions(() => {
+        scrollTimeoutRef.current = setTimeout(() => {
+          if (mountedRef.current) {
+            doScroll();
+          }
+        }, 120);
+      });
     } else {
-      requestAnimationFrame(doScroll);
+      if (contentSizeFrameRef.current !== null) {
+        cancelAnimationFrame(contentSizeFrameRef.current);
+      }
+      contentSizeFrameRef.current = requestAnimationFrame(doScroll);
     }
   }, []);
 
@@ -841,7 +1138,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     hasInitiallyScrolledRef.current = false;
     contentHeightRef.current = 0;
     prevMessageCountRef.current = 0;
-    lastProcessedMsgIdRef.current = null; // LIVE-TICK-FIX-V2: Reset for new conversation
   }, [conversationId]);
 
   // Phase-2 Fix A: Handle content size changes for initial scroll
@@ -853,8 +1149,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (!hasInitiallyScrolledRef.current && h > 0 && (messages?.length ?? 0) > 0) {
       hasInitiallyScrolledRef.current = true;
       // Use setTimeout(0) + requestAnimationFrame for reliable post-render scroll
-      setTimeout(() => {
-        requestAnimationFrame(() => {
+      if (contentSizeTimeoutRef.current) {
+        clearTimeout(contentSizeTimeoutRef.current);
+      }
+      if (contentSizeFrameRef.current !== null) {
+        cancelAnimationFrame(contentSizeFrameRef.current);
+      }
+      contentSizeTimeoutRef.current = setTimeout(() => {
+        contentSizeFrameRef.current = requestAnimationFrame(() => {
           if (mountedRef.current) {
             scrollToBottom(false); // No animation for initial scroll
           }
@@ -913,31 +1215,29 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // Typing indicator handler - notify backend when user starts/stops typing
   const handleTypingChange = useCallback((isTyping: boolean) => {
-    if (isDemo || !conversationId || !userId) return;
+    if (isDemo || !liveConversationId || !userId) return;
     // Fire and forget - don't block UI for typing status updates
-    setTypingStatus(({
-      conversationId: conversationId as any,
-      token: token ?? undefined,
+    setTypingStatus({
+      conversationId: liveConversationId,
       authUserId: userId,
       isTyping,
-    } as any)).catch(() => {
+    }).catch(() => {
       // Silently ignore typing status errors
     });
-  }, [isDemo, conversationId, userId, token, setTypingStatus]);
+  }, [isDemo, liveConversationId, userId, setTypingStatus]);
 
   // Clear typing status when leaving the chat
   useEffect(() => {
     return () => {
-      if (!isDemo && conversationId && userId) {
-        setTypingStatus(({
-          conversationId: conversationId as any,
-          token: token ?? undefined,
+      if (!isDemo && liveConversationId && userId) {
+        setTypingStatus({
+          conversationId: liveConversationId,
           authUserId: userId,
           isTyping: false,
-        } as any)).catch(() => {});
+        }).catch(() => {});
       }
     };
-  }, [isDemo, conversationId, userId, token, setTypingStatus]);
+  }, [isDemo, liveConversationId, userId, setTypingStatus]);
 
   // Check for camera-composer handoff data when screen regains focus
   // This handles returning from camera-composer with captured photo/video
@@ -960,6 +1260,92 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [isFocused, conversationId]);
 
+  const submitOptimisticTextMessage = useCallback(async (message: OptimisticTextMessage) => {
+    if (!activeConversation || !userId) return false;
+    if (isSendingRef.current) return false;
+
+    isSendingRef.current = true;
+    if (mountedRef.current) setIsSending(true);
+    handleTypingChange(false);
+
+    updateOptimisticTextMessage(message.clientMessageId, (current) => ({
+      ...current,
+      optimisticStatus: 'sending',
+      errorMessage: undefined,
+    }));
+
+    if (__DEV__) console.log('[STABILITY][ChatSend] starting async send');
+
+    try {
+      if (activeConversation.isPreMatch) {
+        const preMatchRecipientId = activeConversation.otherUser?.id;
+        if (!preMatchRecipientId) {
+          throw new Error('Recipient unavailable');
+        }
+        await sendPreMatchMessage({
+          authUserId: userId,
+          toUserId: asUserId(preMatchRecipientId),
+          content: message.content,
+          templateId: message.type === 'template' ? 'custom' : undefined,
+          clientMessageId: message.clientMessageId,
+        });
+      } else {
+        if (!liveConversationId) {
+          throw new Error('Conversation unavailable');
+        }
+        await sendMessage({
+          conversationId: liveConversationId,
+          authUserId: userId,
+          type: 'text',
+          content: message.content,
+          clientMessageId: message.clientMessageId,
+        });
+      }
+
+      if (conversationId) clearDemoDraft(conversationId);
+      return true;
+    } catch (error) {
+      updateOptimisticTextMessage(message.clientMessageId, (current) => ({
+        ...current,
+        optimisticStatus: 'failed',
+        errorMessage: getErrorMessage(error, 'Message could not be sent.'),
+      }));
+
+      if (mountedRef.current) {
+        Alert.alert(
+          'Send Failed',
+          getErrorMessage(error, 'Message could not be sent. Tap retry on the failed message.')
+        );
+      }
+      return false;
+    } finally {
+      isSendingRef.current = false;
+      if (mountedRef.current) setIsSending(false);
+    }
+  }, [
+    activeConversation,
+    clearDemoDraft,
+    conversationId,
+    handleTypingChange,
+    liveConversationId,
+    sendMessage,
+    sendPreMatchMessage,
+    updateOptimisticTextMessage,
+    userId,
+  ]);
+
+  const handleRetryOptimisticTextMessage = useCallback((clientMessageId: string) => {
+    const message = optimisticTextMessages.find(
+      (item) =>
+        item.clientMessageId === clientMessageId &&
+        item.optimisticStatus === 'failed'
+    );
+
+    if (!message) return;
+
+    void submitOptimisticTextMessage(message);
+  }, [optimisticTextMessages, submitOptimisticTextMessage]);
+
   const handleSend = async (text: string, type: 'text' | 'template' = 'text') => {
     if (!activeConversation) return;
     if (isSendingRef.current) return;
@@ -973,7 +1359,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (isDemo) {
       // C9 fix: use unique ID to prevent collision on rapid sends
       const uniqueId = `dm_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-      addDemoMessage(conversationId!, {
+      addDemoMessage(conversationId, {
         _id: uniqueId,
         content: text,
         type: 'text',
@@ -986,50 +1372,21 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
 
     if (!userId) return;
-    isSendingRef.current = true;
-    if (mountedRef.current) setIsSending(true);
-    // Clear typing status when sending a message
-    handleTypingChange(false);
-    if (__DEV__) console.log('[STABILITY][ChatSend] starting async send');
 
-    // P0-2 STABILITY FIX: Generate clientMessageId for idempotency on retry
-    // Prevents duplicate messages if network fails and user retries
-    const clientMessageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    const now = Date.now();
+    const clientMessageId = `msg_${now}_${Math.random().toString(36).slice(2, 11)}`;
+    const optimisticMessage: OptimisticTextMessage = {
+      _id: `local_${clientMessageId}`,
+      clientMessageId,
+      senderId: userId,
+      type,
+      content: text,
+      createdAt: now,
+      optimisticStatus: 'sending',
+    };
 
-    try {
-      if (activeConversation.isPreMatch) {
-        // MSG-002 FIX: Use authUserId for server-side verification
-        await sendPreMatchMessage(({
-          token: token ?? undefined,
-          authUserId: userId,
-          toUserId: (activeConversation as any).otherUser.id as any,
-          content: text,
-          templateId: type === 'template' ? 'custom' : undefined,
-          clientMessageId,
-        } as any));
-      } else {
-        // MSG-001 FIX: Use authUserId for server-side verification
-        await sendMessage(({
-          conversationId: conversationId as any,
-          token: token ?? undefined,
-          authUserId: userId,
-          type: 'text',
-          content: text,
-          clientMessageId,
-        } as any));
-      }
-      // B5 fix: clear draft after successful send in Convex mode
-      if (conversationId) clearDemoDraft(conversationId);
-    } catch (error: any) {
-      // Use Alert.alert instead of Toast for guaranteed visibility (Toast requires ToastHost to be mounted)
-      if (mountedRef.current) {
-        Alert.alert('Send Failed', error.message || 'Message could not be sent. Your text has been restored — tap send to retry.');
-      }
-      throw error; // Re-throw so MessageInput can restore text for retry
-    } finally {
-      isSendingRef.current = false;
-      if (mountedRef.current) setIsSending(false);
-    }
+    addOptimisticTextMessage(optimisticMessage);
+    await submitOptimisticTextMessage(optimisticMessage);
   };
 
   // Voice message sending - supports both demo and production
@@ -1049,51 +1406,104 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       });
     } else {
       // Production mode: upload audio and send via Convex
-      if (!userId) return;
+      if (!userId || !liveConversationId) return;
+      const readController = createAbortController();
+      let uploadController: AbortController | null = null;
       try {
         // Get upload URL
         const uploadUrl = await generateUploadUrl();
 
         // Read and upload audio file
-        const response = await fetch(audioUri);
+        const response = await fetch(audioUri, { signal: readController.signal });
         const blob = await response.blob();
+        releaseAbortController(readController);
+
+        const nextUploadController = createAbortController();
+        uploadController = nextUploadController;
         const uploadResult = await fetch(uploadUrl, {
           method: 'POST',
           headers: { 'Content-Type': blob.type || 'audio/m4a' },
           body: blob,
+          signal: nextUploadController.signal,
         });
         const { storageId } = await uploadResult.json();
 
         // Send voice message
-        await sendMessage(({
-          conversationId: conversationId as any,
-          token: token ?? undefined,
+        await sendMessage({
+          conversationId: liveConversationId,
           authUserId: userId,
           type: 'voice',
           content: 'Voice message',
           audioStorageId: storageId,
           audioDurationMs: durationMs,
-        } as any));
-      } catch (e) {
-        console.error('[ChatScreenInner] Failed to send voice message:', e);
-        Alert.alert('Error', 'Failed to send voice message. Please try again.');
+        });
+      } catch (error) {
+        if (isAbortError(error)) {
+          return;
+        }
+        if (__DEV__) {
+          console.warn('[ChatScreenInner] Failed to send voice message:', error);
+        }
+        if (mountedRef.current) {
+          Alert.alert('Error', 'Failed to send voice message. Please try again.');
+        }
+      } finally {
+        releaseAbortController(readController);
+        if (uploadController) {
+          releaseAbortController(uploadController);
+        }
       }
     }
-  }, [isDemo, activeConversation, conversationId, userId, token, addDemoMessage, generateUploadUrl, sendMessage]);
+  }, [
+    isDemo,
+    activeConversation,
+    conversationId,
+    userId,
+    liveConversationId,
+    addDemoMessage,
+    createAbortController,
+    generateUploadUrl,
+    releaseAbortController,
+    sendMessage,
+  ]);
 
-  // Delete voice message (demo mode only)
-  const handleVoiceDelete = useCallback((messageId: string) => {
+  // Delete voice message
+  const handleVoiceDelete = useCallback(async (messageId: string) => {
     if (!conversationId) return;
     if (isDemo) {
       deleteDemoMessage(conversationId, messageId);
+      return;
     }
-    // TODO: Add Convex delete support when backend is ready
-  }, [isDemo, conversationId, deleteDemoMessage]);
+    if (!userId) return;
+
+    try {
+      await deleteMessage({
+        messageId: asMessageId(messageId),
+        authUserId: userId,
+      });
+    } catch (error) {
+      if (__DEV__) {
+        console.warn('[ChatScreenInner] Failed to delete voice message:', error);
+      }
+      if (mountedRef.current) {
+        Alert.alert('Error', getErrorMessage(error, 'Failed to delete voice message.'));
+      }
+    }
+  }, [conversationId, deleteDemoMessage, deleteMessage, isDemo, userId]);
 
   // Camera handler: navigate to camera-composer for photo/video capture
   // This enables: photo/video toggle, 30s video limit, proper front camera handling
-  const handleSendCamera = useCallback(() => {
+  const handleSendCamera = useCallback(async () => {
     if (!activeConversation || !conversationId) return;
+
+    const permission = await ImagePicker.requestCameraPermissionsAsync();
+    if (permission.status !== 'granted') {
+      showPermissionSettingsAlert(
+        'Camera Permission Needed',
+        'Allow camera access in Settings to capture secure photos and videos for chat.'
+      );
+      return;
+    }
 
     // Navigate to camera-composer in secure capture mode
     router.push({
@@ -1103,15 +1513,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         conversationId: conversationId,
       },
     });
-  }, [activeConversation, conversationId, router]);
+  }, [activeConversation, conversationId, router, showPermissionSettingsAlert]);
 
   // Gallery handler: launch system gallery picker for photos and videos
   const handleSendGallery = useCallback(async () => {
     if (!activeConversation) return;
 
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission Required', 'Photo library access is needed to select photos and videos.');
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (permission.status !== 'granted') {
+      showPermissionSettingsAlert(
+        'Photo Access Needed',
+        'Allow full or limited photo access in Settings to choose secure photos and videos for chat.'
+      );
       return;
     }
 
@@ -1132,25 +1545,27 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         return;
       }
 
+      setPendingIsMirrored(false);
       setPendingImageUri(asset.uri);
       setPendingMediaType(isVideo ? 'video' : 'photo');
     }
-  }, [activeConversation]);
+  }, [activeConversation, showPermissionSettingsAlert]);
 
   const handleSecurePhotoConfirm = async (imageUri: string, options: CameraPhotoOptions) => {
     if (!userId || !conversationId) return;
 
     const isVideo = pendingMediaType === 'video';
     const isMirrored = pendingIsMirrored; // Capture before clearing
-    setPendingImageUri(null);
-    setPendingMediaType('photo'); // Reset for next time
-    setPendingIsMirrored(false); // Reset mirrored flag
+    clearPendingMediaComposerState();
     // PARALLEL-SEND-FIX: Don't block UI with isSending for media sends
     // The pending messages array provides visual feedback instead
     if (__DEV__) console.log('[STABILITY][SecureConfirm] starting async secure photo/video send');
 
     // PARALLEL-SEND-FIX: Declare pendingId at function scope for cleanup in catch
     let pendingId = '';
+    let readController: AbortController | null = null;
+    let uploadController: AbortController | null = null;
+    let cleanupUploadUri: string | null = null;
 
     try {
       // Demo mode: Store in BOTH stores
@@ -1215,29 +1630,53 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // Convex mode: upload and send
       // PARALLEL-SEND-FIX: Show immediate optimistic placeholder (supports multiple)
       // VIDEO-FIX: Use correct type for video
+      if (!liveConversationId) {
+        throw new Error('Conversation unavailable');
+      }
       pendingId = `pending_secure_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       addPendingSecureMessage({
         _id: pendingId,
         senderId: userId,
         type: isVideo ? 'video' : 'image',
-        content: isVideo ? 'Sending secure video...' : 'Sending secure photo...',
+        content: isVideo ? 'Preparing secure video...' : 'Preparing secure photo...',
         createdAt: Date.now(),
         isPending: true,
       });
 
+      const mediaType = isVideo ? 'video' : 'photo';
+      if (!isVideo) {
+        updatePendingSecureMessage(pendingId, (message) => ({
+          ...message,
+          content: 'Optimizing secure photo...',
+        }));
+      }
+      const preparedAsset = await prepareSecureUploadAsset(imageUri, mediaType);
+      cleanupUploadUri = preparedAsset.cleanupUri;
+
       // 1. Get upload URL
+      updatePendingSecureMessage(pendingId, (message) => ({
+        ...message,
+        content: isVideo ? 'Uploading secure video...' : 'Uploading secure photo...',
+      }));
       const uploadUrl = await generateUploadUrl();
 
       // 2. Upload the media
-      const response = await fetch(imageUri);
+      const nextReadController = createAbortController();
+      readController = nextReadController;
+      const response = await fetch(preparedAsset.uploadUri, { signal: nextReadController.signal });
       const blob = await response.blob();
+      releaseAbortController(readController);
+      readController = null;
       // VIDEO-FIX: Use correct Content-Type for video
       const contentType = isVideo ? (blob.type || 'video/mp4') : (blob.type || 'image/jpeg');
 
+      const nextUploadController = createAbortController();
+      uploadController = nextUploadController;
       const uploadResponse = await fetch(uploadUrl, {
         method: 'POST',
         headers: { 'Content-Type': contentType },
         body: blob,
+        signal: nextUploadController.signal,
       });
 
       // CRASH FIX: Validate upload response before accessing storageId
@@ -1251,14 +1690,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       }
       const { storageId } = uploadResult;
 
+      updatePendingSecureMessage(pendingId, (message) => ({
+        ...message,
+        content: isVideo ? 'Finalizing secure video...' : 'Finalizing secure photo...',
+      }));
+
       // 3. Send protected media message with Phase-1 options mapped to Convex format
       // MSG-003 FIX: Use authUserId for server-side verification
       // HOLD-TAP-FIX: Pass viewMode to backend for consistent rendering
       // VIDEO-FIX: Pass mediaType to distinguish photo vs video
       // VIDEO-MIRROR-FIX: Pass isMirrored for front-camera video correction
-      await sendProtectedImage(({
-        conversationId: conversationId as any,
-        token: token ?? undefined,
+      await sendProtectedImage({
+        conversationId: liveConversationId,
         authUserId: userId,
         imageStorageId: storageId,
         timer: options.timer,
@@ -1268,18 +1711,36 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         viewMode: options.viewingMode, // HOLD-TAP-FIX: Store the actual viewing mode
         mediaType: isVideo ? 'video' : 'image', // VIDEO-FIX: Pass correct media type
         isMirrored: isVideo && isMirrored, // VIDEO-MIRROR-FIX: Pass mirrored flag for front-camera videos
-      } as any));
+      });
       // PARALLEL-SEND-FIX: Remove specific pending message on success
       removePendingSecureMessage(pendingId);
-    } catch (error: any) {
+      releaseAbortController(uploadController);
+      uploadController = null;
+    } catch (error) {
       // PARALLEL-SEND-FIX: Remove pending message on error too (only if set)
       if (pendingId) removePendingSecureMessage(pendingId);
-      if (mountedRef.current) Alert.alert('Error', error.message || 'Failed to send secure photo');
+      if (!isAbortError(error) && mountedRef.current) {
+        Alert.alert('Error', getErrorMessage(error, 'Failed to send secure photo'));
+      }
     } finally {
+      if (readController) {
+        releaseAbortController(readController);
+      }
+      if (uploadController) {
+        releaseAbortController(uploadController);
+      }
+      if (cleanupUploadUri) {
+        FileSystem.deleteAsync(cleanupUploadUri, { idempotent: true }).catch(() => {});
+      }
       // PARALLEL-SEND-FIX: No isSending state management for media sends
       // The pending messages array handles UI feedback
     }
   };
+
+  const findDisplayMessageById = useCallback(
+    (messageId: string) => displayMessages.find((message) => message._id === messageId),
+    [displayMessages]
+  );
 
   const handleProtectedMediaPress = (messageId: string) => {
     if (isDemo) {
@@ -1289,7 +1750,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     } else {
       // Convex mode: use ProtectedMediaViewer
       // VIDEO-MIRROR-FIX: Look up message to get isMirrored state
-      const msg = displayMessages.find((m) => m._id === messageId) as any;
+      const msg = findDisplayMessageById(messageId);
       const isMirrored = msg?.protectedMedia?.isMirrored === true;
       setViewerIsMirrored(isMirrored);
       setViewerIsHoldMode(false); // HOLD-MODE-FIX: Tap mode
@@ -1307,7 +1768,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     } else {
       // Convex mode: open viewer on hold start
       // VIDEO-MIRROR-FIX: Look up message to get isMirrored state
-      const msg = displayMessages.find((m) => m._id === messageId) as any;
+      const msg = findDisplayMessageById(messageId);
       const isMirrored = msg?.protectedMedia?.isMirrored === true;
       if (__DEV__) console.log('[HOLD-MODE] Convex holdStart:', messageId, 'isMirrored:', isMirrored);
       setViewerIsMirrored(isMirrored);
@@ -1324,7 +1785,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         // Check and sync expired state before closing
         const privateMsg = privateMessages?.find((m) => m.id === messageId);
         if (privateMsg?.isExpired) {
-          markDemoSecurePhotoExpired(conversationId!, messageId);
+          markDemoSecurePhotoExpired(conversationId, messageId);
           logSecure('expired synced on holdEnd', { messageId, expiredAt: Date.now() });
         }
         // Sync timerEndsAt if set
@@ -1353,11 +1814,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // Convex mode: call backend to mark expired
       if (userId) {
         if (__DEV__) console.log('[EXPIRY] Marking media expired from bubble:', messageId);
-        markMediaExpired(({
-          messageId: messageId as any,
-          token: token ?? undefined,
+        markMediaExpired({
+          messageId: asMessageId(messageId),
           authUserId: userId,
-        } as any)).catch((err) => {
+        }).catch((err) => {
           if (__DEV__) console.error('[EXPIRY] Failed to mark expired:', err);
         });
       }
@@ -1365,7 +1825,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   };
 
   const handleSendDare = () => {
-    router.push(`/(main)/dare/send?userId=${activeConversation?.otherUser.id}`);
+    const dareRecipientId = activeConversation?.otherUser?.id;
+    if (!dareRecipientId) return;
+    router.push(`/(main)/dare/send?userId=${dareRecipientId}`);
   };
 
   // Get initials for avatar placeholder fallback (always shows something)
@@ -1421,6 +1883,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     );
   }
 
+  const otherUserId = typeof otherUser.id === 'string' && otherUser.id.length > 0
+    ? otherUser.id
+    : undefined;
+  const otherUserName = otherUser.name;
+  const otherUserPhotoUrl = otherUser.photoUrl;
+  const otherUserLastActive = otherUser.lastActive ?? 0;
+  const activeMatchId = !isDemo ? conversation?.matchId : undefined;
+
   const composerBottomPadding = source === 'messages'
     ? (Platform.OS === 'android' ? 8 : 6)
     : Math.max(insets.bottom, Platform.OS === 'android' ? 10 : 8);
@@ -1433,8 +1903,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         (!activeConversation.isPreMatch && currentUser.subscriptionTier !== 'free')
       : false;
 
-  const messagesRemaining = isDemo ? 999999 : (currentUser?.messagesRemaining || 0);
-
   return (
     <View style={styles.container}>
       {/* LOCKED: P1 chat header avatar + open profile. Do not modify without explicit approval. */}
@@ -1445,14 +1913,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         </TouchableOpacity>
         {/* Avatar with presence dot - tappable to open profile */}
         <TouchableOpacity
-          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+          onPress={() => handleOpenProfile(otherUserId)}
           style={styles.avatarButton}
           activeOpacity={0.7}
         >
           <View style={styles.avatarContainer}>
-            {activeConversation.otherUser.photoUrl ? (
+            {otherUserPhotoUrl ? (
               <Image
-                source={{ uri: activeConversation.otherUser.photoUrl }}
+                source={{ uri: otherUserPhotoUrl }}
                 style={styles.headerAvatar}
               />
             ) : (
@@ -1462,8 +1930,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             )}
             {/* PRESENCE-DOT: Online indicator on avatar */}
             {(() => {
-              const lastActive = activeConversation.otherUser.lastActive ?? 0;
-              const isOnline = Date.now() - lastActive < 60_000;
+              const isOnline = Date.now() - otherUserLastActive < 60_000;
               return (
                 <View style={[
                   styles.presenceDot,
@@ -1475,26 +1942,24 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         </TouchableOpacity>
         {/* Name + status - tappable to open profile */}
         <TouchableOpacity
-          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+          onPress={() => handleOpenProfile(otherUserId)}
           style={styles.headerInfo}
           activeOpacity={0.7}
         >
           {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
           <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
-            {activeConversation.otherUser.name}
+            {otherUserName}
           </Text>
           {/* ONLINE-STATUS-FIX: Show "Online" for very recent activity */}
           <Text style={styles.headerStatus}>
             {(() => {
-              const lastActive = activeConversation.otherUser.lastActive ?? 0;
-              const now = Date.now();
-              const diff = now - lastActive;
+              const diff = Date.now() - otherUserLastActive;
               // Online: within 1 minute (likely still in app)
               if (diff < 60_000) return 'Online';
               // Active now: within 5 minutes
               if (diff < 5 * 60_000) return 'Active now';
               // Recently active: anything else with valid timestamp
-              if (lastActive > 0) return 'Recently active';
+              if (otherUserLastActive > 0) return 'Recently active';
               return 'Offline';
             })()}
           </Text>
@@ -1582,7 +2047,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           // LIVE-TICK-FIX: Force re-render when message read/delivered states change
           // This ensures sender sees tick updates in real-time without reopening chat
           extraData={messageStatusHash}
-          renderItem={({ item, index }: { item: any; index: number }) => {
+          renderItem={({ item, index }: { item: RenderMessage; index: number }) => {
+            const optimisticStatus = 'optimisticStatus' in item ? item.optimisticStatus : undefined;
             // SECURE-REWRITE: Single source of truth for message ownership
             // Both IDs must be valid non-empty strings for comparison
             const msgSenderId = item.senderId;
@@ -1611,64 +2077,84 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 : undefined;
 
             return (
-            <MessageBubble
-              message={{
-                id: item._id,
-                content: item.content,
-                type: item.type as any,
-                senderId: item.senderId,
-                createdAt: item.createdAt,
-                readAt: item.readAt,
-                readReceiptVisible: item.readReceiptVisible,
-                deliveredAt: item.deliveredAt, // MESSAGE-TICKS-FIX: Pass deliveredAt for tick rendering
-                isProtected: item.isProtected ?? false,
-                // SECURE-MEDIA-FIX: Use merged protectedMedia with backend viewMode
-                protectedMedia: mergedProtectedMedia,
-                isExpired: item.isExpired,
-                timerEndsAt: item.timerEndsAt,
-                expiredAt: item.expiredAt,
-                viewedAt: item.viewedAt,
-                systemSubtype: item.systemSubtype,
-                mediaId: item.mediaId,
-                // SENDER-TIMER-FIX: Pass viewOnce and recipientOpened for sender status
-                viewOnce: item.viewOnce,
-                recipientOpened: item.recipientOpened,
-                // VOICE-FIX: Pass both demo and production audio fields
-                audioUri: item.audioUri,
-                durationMs: item.durationMs,
-                audioUrl: item.audioUrl,
-                audioDurationMs: item.audioDurationMs,
-              }}
-              isOwn={isMessageOwn}
-              otherUserName={activeConversation.otherUser.name}
-              currentUserId={currentUserId || undefined}
-              onProtectedMediaPress={handleProtectedMediaPress}
-              // HOLD-MODE-FIX: Enable hold handlers for both demo and Convex mode
-              onProtectedMediaHoldStart={handleProtectedMediaHoldStart}
-              onProtectedMediaHoldEnd={handleProtectedMediaHoldEnd}
-              onProtectedMediaExpire={handleProtectedMediaExpire}
-              // L2 FIX: Voice delete only works in demo mode
-              onVoiceDelete={isDemo ? handleVoiceDelete : undefined}
-              // AVATAR GROUPING: Pass grouping info for Instagram/Tinder style layout
-              showAvatar={showAvatar}
-              avatarUrl={activeConversation.otherUser.photoUrl}
-              isLastInGroup={isLastInGroup}
-              // PROFILE-TAP: Avatar tap opens profile
-              onAvatarPress={() => handleOpenProfile(activeConversation.otherUser.id)}
-            />
-          );
+              <View>
+                <MessageBubble
+                  message={{
+                    id: item._id,
+                    content: item.content,
+                    type: item.type,
+                    senderId: item.senderId,
+                    createdAt: item.createdAt,
+                    readAt: item.readAt,
+                    readReceiptVisible: item.readReceiptVisible,
+                    deliveredAt: item.deliveredAt, // MESSAGE-TICKS-FIX: Pass deliveredAt for tick rendering
+                    isProtected: item.isProtected ?? false,
+                    // SECURE-MEDIA-FIX: Use merged protectedMedia with backend viewMode
+                    protectedMedia: mergedProtectedMedia,
+                    isExpired: item.isExpired,
+                    timerEndsAt: item.timerEndsAt,
+                    expiredAt: item.expiredAt,
+                    viewedAt: item.viewedAt,
+                    systemSubtype: item.systemSubtype,
+                    mediaId: item.mediaId,
+                    // SENDER-TIMER-FIX: Pass viewOnce and recipientOpened for sender status
+                    viewOnce: item.viewOnce,
+                    recipientOpened: item.recipientOpened,
+                    // VOICE-FIX: Pass both demo and production audio fields
+                    audioUri: item.audioUri,
+                    durationMs: item.durationMs,
+                    audioUrl: item.audioUrl,
+                    audioDurationMs: item.audioDurationMs,
+                  }}
+                  isOwn={isMessageOwn}
+                  otherUserName={otherUserName}
+                  currentUserId={currentUserId || undefined}
+                  onProtectedMediaPress={handleProtectedMediaPress}
+                  // HOLD-MODE-FIX: Enable hold handlers for both demo and Convex mode
+                  onProtectedMediaHoldStart={handleProtectedMediaHoldStart}
+                  onProtectedMediaHoldEnd={handleProtectedMediaHoldEnd}
+                  onProtectedMediaExpire={handleProtectedMediaExpire}
+                  onVoiceDelete={handleVoiceDelete}
+                  // AVATAR GROUPING: Pass grouping info for Instagram/Tinder style layout
+                  showAvatar={showAvatar}
+                  avatarUrl={otherUserPhotoUrl}
+                  isLastInGroup={isLastInGroup}
+                  // PROFILE-TAP: Avatar tap opens profile
+                  onAvatarPress={() => handleOpenProfile(otherUserId)}
+                />
+                {isMessageOwn && optimisticStatus === 'sending' && (
+                  <View style={styles.optimisticStatusRow}>
+                    <ActivityIndicator size="small" color={COLORS.textLight} />
+                    <Text style={styles.optimisticStatusText}>Sending...</Text>
+                  </View>
+                )}
+                {isMessageOwn && optimisticStatus === 'failed' && (
+                  <TouchableOpacity
+                    style={[styles.optimisticStatusRow, styles.optimisticFailedRow]}
+                    onPress={() => handleRetryOptimisticTextMessage(item.clientMessageId)}
+                    disabled={isSending}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons name="alert-circle-outline" size={14} color={COLORS.error} />
+                    <Text style={[styles.optimisticStatusText, styles.optimisticFailedText]}>
+                      {item.errorMessage ? `${item.errorMessage} Tap to retry.` : 'Failed to send. Tap to retry.'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            );
           }}
           ListEmptyComponent={
             <View style={styles.emptyChat}>
               <Ionicons name="chatbubble-outline" size={40} color={COLORS.border} />
               <Text style={styles.emptyChatText}>
-                Start the conversation with {activeConversation.otherUser.name}.
+                Start the conversation with {otherUserName}.
               </Text>
             </View>
           }
           contentContainerStyle={{
             flexGrow: 1,
-            justifyContent: (messages?.length ?? 0) > 0 ? 'flex-end' as const : 'center' as const,
+            justifyContent: displayMessages.length > 0 ? 'flex-end' as const : 'center' as const,
             paddingTop: 8,
             paddingHorizontal: 12,
             paddingBottom: composerHeight + composerBottomPadding,
@@ -1694,10 +2180,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
                 disabled={isSending || isExpiredChat}
                 isPreMatch={activeConversation.isPreMatch}
-                messagesRemaining={messagesRemaining}
                 subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
                 canSendCustom={canSendCustom}
-                recipientName={activeConversation.otherUser.name}
+                recipientName={otherUserName}
                 initialText={demoDraft ?? ''}
                 onTextChange={handleDraftChange}
                 onTypingChange={handleTypingChange}
@@ -1713,7 +2198,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         imageUri={pendingImageUri}
         mediaType={pendingMediaType}
         onConfirm={handleSecurePhotoConfirm}
-        onCancel={() => { setPendingImageUri(null); setPendingMediaType('photo'); setPendingIsMirrored(false); }}
+        onCancel={clearPendingMediaComposerState}
       />
 
       {/* Protected Media Viewer (Convex mode) */}
@@ -1722,7 +2207,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           visible={!!viewerMessageId}
           messageId={viewerMessageId}
           userId={userId}
-          viewerName={currentUser?.name || activeConversation.otherUser.name}
+          viewerName={currentUser?.name || otherUserName}
           onClose={() => { setViewerMessageId(null); setViewerIsMirrored(false); setViewerIsHoldMode(false); }}
           onReport={() => {
             setViewerMessageId(null);
@@ -1762,7 +2247,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         <ReportModal
           visible={reportModalVisible}
           reporterId={userId}
-          reportedUserId={(activeConversation as any).otherUser?.id || ''}
+          reportedUserId={otherUserId || ''}
           chatId={conversationId || ''}
           onClose={() => setReportModalVisible(false)}
         />
@@ -1772,17 +2257,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       <ReportBlockModal
         visible={showReportBlock}
         onClose={() => setShowReportBlock(false)}
-        reportedUserId={(activeConversation as any).otherUser?.id || ''}
-        reportedUserName={activeConversation.otherUser?.name || ''}
+        reportedUserId={otherUserId || ''}
+        reportedUserName={otherUserName}
         currentUserId={userId || getDemoUserId()}
         conversationId={conversationId}
         // matchId: For Convex mode, use conversation.matchId. For demo mode, derive from conversation if it's a match.
         matchId={
           isDemo
             ? (!activeConversation.isPreMatch && !activeConversation.isConfessionChat
-                ? `demo_match_${(activeConversation as any).otherUser?.id}`
+                ? (otherUserId ? `demo_match_${otherUserId}` : undefined)
                 : undefined)
-            : (conversation as any)?.matchId
+            : activeMatchId
         }
         onBlockSuccess={handleBack}
         onUnmatchSuccess={handleBack}
@@ -1804,7 +2289,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               <Text style={styles.tdInviteTitle}>Truth or Dare</Text>
             </View>
             <Text style={styles.tdInviteMessage}>
-              Invite {activeConversation.otherUser.name} to play Truth or Dare?
+              Invite {otherUserName} to play Truth or Dare?
             </Text>
             <View style={styles.tdInviteActions}>
               <TouchableOpacity
@@ -1828,7 +2313,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       {gameSession?.state === 'pending' && gameSession?.inviteeId === userId && (
         <View style={styles.tdPendingInviteWrapper}>
           <TruthDareInviteCard
-            inviterName={activeConversation.otherUser.name}
+            inviterName={otherUserName}
             isInvitee={true}
             onAccept={() => handleRespondToInvite(true)}
             onReject={() => handleRespondToInvite(false)}
@@ -1841,7 +2326,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         visible={showTruthDareGame}
         onClose={() => setShowTruthDareGame(false)}
         currentUserName={isDemo ? 'You' : (currentUser?.name || 'You')}
-        otherUserName={activeConversation.otherUser.name}
+        otherUserName={otherUserName}
         conversationId={conversationId || ''}
         userId={userId || getDemoUserId()}
         onSendResultMessage={handleSendTruthDareResult}
@@ -1886,6 +2371,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600' as const,
     color: COLORS.white,
+  },
+  optimisticStatusRow: {
+    alignSelf: 'flex-end' as const,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 6,
+    marginTop: -4,
+    marginBottom: 6,
+    paddingHorizontal: 10,
+  },
+  optimisticStatusText: {
+    fontSize: 12,
+    color: COLORS.textLight,
+  },
+  optimisticFailedRow: {
+    maxWidth: '82%',
+  },
+  optimisticFailedText: {
+    color: COLORS.error,
   },
   header: {
     flexDirection: 'row',

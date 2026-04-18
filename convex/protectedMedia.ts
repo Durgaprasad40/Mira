@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { internalMutation, mutation, query, type MutationCtx } from './_generated/server';
+import type { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId } from './helpers';
 
 /**
@@ -7,6 +8,51 @@ import { resolveUserIdByAuthId } from './helpers';
  * New code should import from convex/media, convex/permissions, convex/events.
  * These wrappers keep existing frontend call-sites working during migration.
  */
+
+type MediaDoc = Doc<'media'>;
+
+async function revokeMediaPermissionsForMedia(
+  ctx: MutationCtx,
+  mediaId: Id<'media'>
+): Promise<void> {
+  const permissions = await ctx.db
+    .query('mediaPermissions')
+    .withIndex('by_media_recipient', (q) => q.eq('mediaId', mediaId))
+    .collect();
+
+  for (const permission of permissions) {
+    if (!permission.revoked) {
+      await ctx.db.patch(permission._id, { revoked: true });
+    }
+  }
+}
+
+async function finalizeExpiredMedia(
+  ctx: MutationCtx,
+  media: MediaDoc,
+  expiredAt: number
+): Promise<void> {
+  if (!media.expiredAt) {
+    await ctx.db.patch(media._id, { expiredAt });
+  }
+
+  await revokeMediaPermissionsForMedia(ctx, media._id);
+
+  if (media.deletedAt) {
+    return;
+  }
+
+  try {
+    await ctx.storage.delete(media.objectKey);
+    await ctx.db.patch(media._id, {
+      expiredAt: media.expiredAt ?? expiredAt,
+      deletedAt: expiredAt,
+    });
+  } catch {
+    // Best effort only. The expiredAt gate still blocks backend access and
+    // cron cleanup will retry storage deletion on the next sweep.
+  }
+}
 
 // Legacy: sendProtectedImage → delegates to media.createMediaMessage pattern
 // MSG-003 FIX: Auth hardening - verify caller identity server-side
@@ -134,22 +180,21 @@ export const sendProtectedImage = mutation({
 export const getMediaUrl = query({
   args: {
     messageId: v.id('messages'),
-    userId: v.id('users'),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { messageId, userId } = args;
+    const { messageId, authUserId } = args;
     const now = Date.now();
 
     // MSG-P1-001 FIX: Server-side auth verification
-    // Verify caller identity matches the requested userId
+    // Verify caller identity matches the requested authUserId
     const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      const callerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
-      if (callerUserId !== userId) {
-        // Caller is not authorized to view media as this user
-        return null;
-      }
+    if (identity?.subject && identity.subject !== authUserId) {
+      return null;
     }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) return null;
 
     const message = await ctx.db.get(messageId);
     if (!message) return null;
@@ -166,7 +211,7 @@ export const getMediaUrl = query({
     if (!media) return null;
 
     // EXPIRY-SYNC-FIX: Check global expiry first (applies to both owner and recipient)
-    if (media.expiredAt) {
+    if (media.expiredAt || media.deletedAt) {
       return {
         url: null,
         isExpired: true,
@@ -323,6 +368,7 @@ export const markViewed = mutation({
 
     const media = await ctx.db.get(message.mediaId);
     if (!media) return { success: true };
+    if (media.expiredAt || media.deletedAt) return { success: true };
 
     // Owner doesn't consume permissions
     if (media.ownerId === userId) return { success: true };
@@ -334,7 +380,10 @@ export const markViewed = mutation({
       )
       .first();
 
-    if (!permission) return { success: true };
+    if (!permission || permission.revoked || !permission.canView) return { success: true };
+    if (permission.expiresAt && now >= permission.expiresAt) {
+      return { success: true, expiresAt: permission.expiresAt };
+    }
 
     const updates: Record<string, any> = {
       viewCount: permission.viewCount + 1,
@@ -390,23 +439,7 @@ export const markExpired = mutation({
     const media = await ctx.db.get(message.mediaId);
     if (!media) return { success: true };
 
-    // EXPIRY-SYNC-FIX: Mark media itself as expired so BOTH sender and receiver see it
-    // This is the single source of truth for expiry status
-    if (!media.expiredAt) {
-      await ctx.db.patch(media._id, { expiredAt: now });
-    }
-
-    // Revoke all permissions
-    const permissions = await ctx.db
-      .query('mediaPermissions')
-      .withIndex('by_media_recipient', (q) => q.eq('mediaId', media._id))
-      .collect();
-
-    for (const perm of permissions) {
-      if (!perm.revoked) {
-        await ctx.db.patch(perm._id, { revoked: true });
-      }
-    }
+    await finalizeExpiredMedia(ctx, media, now);
 
     // Log event
     await ctx.db.insert('securityEvents', {
@@ -421,6 +454,38 @@ export const markExpired = mutation({
     // The ProtectedMediaBubble already shows "Expired" pill - no need for duplicate
 
     return { success: true };
+  },
+});
+
+export const cleanupExpiredMedia = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const permissions = await ctx.db.query('mediaPermissions').collect();
+    const expiredMediaIds = new Set<Id<'media'>>();
+
+    for (const permission of permissions) {
+      if (permission.expiresAt && permission.expiresAt <= now) {
+        expiredMediaIds.add(permission.mediaId);
+      }
+    }
+
+    const mediaRecords = await ctx.db.query('media').collect();
+    for (const media of mediaRecords) {
+      if (media.expiredAt || media.deletedAt) {
+        expiredMediaIds.add(media._id);
+      }
+    }
+
+    let expiredCount = 0;
+    for (const mediaId of expiredMediaIds) {
+      const media = await ctx.db.get(mediaId);
+      if (!media) continue;
+      await finalizeExpiredMedia(ctx, media, media.expiredAt ?? now);
+      expiredCount += 1;
+    }
+
+    return { success: true, expiredCount };
   },
 });
 

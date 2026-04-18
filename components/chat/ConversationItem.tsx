@@ -9,16 +9,16 @@ import type { PresenceStatus } from '@/hooks/usePresence';
 interface ConversationItemProps {
   id: string;
   otherUser: {
-    id: string;
-    name: string;
+    id?: string;
+    name?: string;
     photoUrl?: string;
     /** P0 UNIFIED PRESENCE: Presence status from unified system */
     presenceStatus?: PresenceStatus;
     /** @deprecated Use presenceStatus instead */
     lastActive?: number;
-    isVerified: boolean;
+    isVerified?: boolean;
     photoBlurred?: boolean;
-  };
+  } | null | undefined;
   lastMessage?: {
     content: string;
     type: string;
@@ -32,6 +32,7 @@ interface ConversationItemProps {
   /** DM-FIX: Tap avatar to view profile (optional, falls back to onPress if not provided) */
   onAvatarPress?: () => void;
   currentUserId?: string;
+  currentTimeMs?: number;
 }
 
 // P0 UNIFIED PRESENCE: Old threshold removed - now using presenceStatus prop directly
@@ -44,10 +45,22 @@ function ConversationItemComponent({
   onPress,
   onAvatarPress,
   currentUserId,
+  currentTimeMs,
 }: ConversationItemProps) {
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const highlightAnim = useRef(new Animated.Value(0)).current;
   const hasUnread = unreadCount > 0;
+  const otherUserId = typeof otherUser?.id === 'string' && otherUser.id.trim().length > 0
+    ? otherUser.id
+    : undefined;
+  const otherUserName = typeof otherUser?.name === 'string' && otherUser.name.trim().length > 0
+    ? otherUser.name.trim()
+    : 'Unknown user';
+  const otherUserPhotoUrl = otherUser?.photoUrl;
+  const otherUserIsVerified = otherUser?.isVerified === true;
+  const otherUserPhotoBlurred = otherUser?.photoBlurred === true;
+  const otherUserPresenceStatus = otherUser?.presenceStatus;
+  const referenceTimeMs = currentTimeMs ?? Date.now();
 
   // Subtle highlight pulse for new/unread messages on mount
   useEffect(() => {
@@ -88,8 +101,7 @@ function ConversationItemComponent({
   // Format time - cleaner, more compact
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
+    const diff = referenceTimeMs - date.getTime();
     const hours = Math.floor(diff / (1000 * 60 * 60));
     const days = Math.floor(hours / 24);
 
@@ -108,27 +120,27 @@ function ConversationItemComponent({
 
   // P1-MSG: Resolve photo URL with DEMO_PROFILES fallback
   const resolvedPhotoUrl = useMemo(() => {
-    if (otherUser.photoUrl) return otherUser.photoUrl;
+    if (otherUserPhotoUrl) return otherUserPhotoUrl;
     // Fallback: lookup from DEMO_PROFILES by user ID
-    const demoProfile = DEMO_PROFILES.find((p: any) => p._id === otherUser.id);
+    if (!otherUserId) return undefined;
+    const demoProfile = DEMO_PROFILES.find((profile) => profile._id === otherUserId);
     return demoProfile?.photos?.[0]?.url;
-  }, [otherUser.photoUrl, otherUser.id]);
+  }, [otherUserId, otherUserPhotoUrl]);
 
   // P1-MSG: Compute initials for avatar placeholder
   const avatarInitials = useMemo(() => {
-    const name = otherUser.name || '';
-    const parts = name.split(' ').filter(Boolean);
+    const parts = otherUserName.split(' ').filter(Boolean);
     if (parts.length >= 2) {
       return (parts[0][0] + parts[1][0]).toUpperCase();
     }
-    return name.slice(0, 2).toUpperCase() || '??';
-  }, [otherUser.name]);
+    return otherUserName.slice(0, 2).toUpperCase() || '??';
+  }, [otherUserName]);
 
   // System message marker regex (matches [SYSTEM:subtype] prefix)
   const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
 
   // P0 UNIFIED PRESENCE: Use presenceStatus directly from unified system
-  const isActiveNow = otherUser.presenceStatus === 'online';
+  const isActiveNow = otherUserPresenceStatus === 'online';
 
   // 5-7: Safe fallback for corrupted/missing preview content
   // TASK-2: Strip system message markers from preview
@@ -195,7 +207,7 @@ function ConversationItemComponent({
               source={{ uri: resolvedPhotoUrl }}
               style={styles.avatar}
               contentFit="cover"
-              blurRadius={otherUser.photoBlurred ? 20 : undefined}
+              blurRadius={otherUserPhotoBlurred ? 20 : undefined}
             />
           ) : (
             <View style={[styles.avatar, styles.avatarPlaceholder]}>
@@ -219,9 +231,9 @@ function ConversationItemComponent({
                 style={[styles.name, hasUnread && styles.nameUnread]}
                 numberOfLines={1}
               >
-                {otherUser.name}
+                {otherUserName}
               </Text>
-              {otherUser.isVerified && (
+              {otherUserIsVerified && (
                 <View style={styles.verifiedBadge}>
                   <Text style={styles.verifiedBadgeText}>✓</Text>
                 </View>
@@ -268,12 +280,13 @@ function areConversationItemPropsEqual(
     prev.unreadCount === next.unreadCount &&
     prev.isPreMatch === next.isPreMatch &&
     prev.currentUserId === next.currentUserId &&
-    prev.otherUser.id === next.otherUser.id &&
-    prev.otherUser.name === next.otherUser.name &&
-    prev.otherUser.photoUrl === next.otherUser.photoUrl &&
-    prev.otherUser.presenceStatus === next.otherUser.presenceStatus &&
-    prev.otherUser.isVerified === next.otherUser.isVerified &&
-    prev.otherUser.photoBlurred === next.otherUser.photoBlurred &&
+    prev.currentTimeMs === next.currentTimeMs &&
+    prev.otherUser?.id === next.otherUser?.id &&
+    prev.otherUser?.name === next.otherUser?.name &&
+    prev.otherUser?.photoUrl === next.otherUser?.photoUrl &&
+    prev.otherUser?.presenceStatus === next.otherUser?.presenceStatus &&
+    prev.otherUser?.isVerified === next.otherUser?.isVerified &&
+    prev.otherUser?.photoBlurred === next.otherUser?.photoBlurred &&
     prev.lastMessage?.content === next.lastMessage?.content &&
     prev.lastMessage?.type === next.lastMessage?.type &&
     prev.lastMessage?.senderId === next.lastMessage?.senderId &&

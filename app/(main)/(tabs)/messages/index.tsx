@@ -69,6 +69,8 @@ const SPACING = {
 
 // Recency threshold: 24 hours
 const RECENCY_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+const INBOX_TIMESTAMP_REFRESH_MS = 60 * 1000;
+const INBOX_LOADING_PLACEHOLDER_COUNT = 4;
 
 // Format relative time
 function formatRelativeTime(timestamp: number): string {
@@ -91,13 +93,64 @@ function isRecentLike(createdAt: number): boolean {
   return Date.now() - createdAt < RECENCY_THRESHOLD_MS;
 }
 
+type InboxConversationRow = ProcessedThread | {
+  id?: string | null;
+  conversationId?: string | null;
+  matchId?: string | null;
+  otherUser?: {
+    id?: string | null;
+    name?: string;
+    photoUrl?: string;
+    lastActive?: number;
+    isVerified?: boolean;
+  } | null;
+  lastMessage?: {
+    content: string;
+    type: string;
+    senderId: string;
+    createdAt: number;
+    isProtected?: boolean;
+  } | null;
+  unreadCount?: number;
+  isPreMatch?: boolean;
+};
+
+function getNonEmptyString(value: string | null | undefined): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function getConversationRouteId(item: InboxConversationRow): string | undefined {
+  return getNonEmptyString(item.conversationId) ?? getNonEmptyString(item.id);
+}
+
+function getInboxConversationKey(item: InboxConversationRow, index: number): string {
+  const directId = getConversationRouteId(item);
+  if (directId) return directId;
+
+  const matchId = getNonEmptyString(item.matchId);
+  if (matchId) return `match-${matchId}`;
+
+  const otherUserId = getNonEmptyString(item.otherUser?.id);
+  const lastMessageAt = typeof item.lastMessage?.createdAt === 'number'
+    ? item.lastMessage.createdAt
+    : undefined;
+
+  if (otherUserId && lastMessageAt) {
+    return `conversation-${otherUserId}-${lastMessageAt}`;
+  }
+  if (otherUserId) {
+    return `conversation-${otherUserId}`;
+  }
+
+  return `conversation-fallback-${index}`;
+}
+
 export default function MessagesScreen() {
   useScreenTrace("MESSAGES");
   const router = useRouter();
-  const { focus, profileId, source } = useLocalSearchParams<{
+  const { focus, profileId } = useLocalSearchParams<{
     focus?: string;
     profileId?: string;
-    source?: string;
   }>();
 
   const userId = useAuthStore((s) => s.userId);
@@ -105,6 +158,7 @@ export default function MessagesScreen() {
   const convexUserId = asUserId(userId);
   const convex = useConvex();
   const [refreshing, setRefreshing] = useState(false);
+  const [inboxTimeReferenceMs, setInboxTimeReferenceMs] = useState(() => Date.now());
 
   // Swipe mutation for Convex mode like/pass actions
   const swipe = useMutation(api.likes.swipe);
@@ -146,9 +200,6 @@ export default function MessagesScreen() {
 
   // FOCUS-GUARD: Prevent repeated markLikesOpened calls on tab focus
   const hasMarkedLikesOpenedRef = useRef(false);
-
-  // Track if we arrived from notification to prevent bounce-back
-  const arrivedFromNotification = source === 'notification';
 
   // Demo store — seed on mount, read mutable matches/likes
   const demoMatches = useDemoStore((s) => s.matches);
@@ -252,6 +303,19 @@ export default function MessagesScreen() {
     }, [activeView])
   );
 
+  useFocusEffect(
+    useCallback(() => {
+      if (activeView !== 'messages') return undefined;
+
+      setInboxTimeReferenceMs(Date.now());
+      const interval = setInterval(() => {
+        setInboxTimeReferenceMs(Date.now());
+      }, INBOX_TIMESTAMP_REFRESH_MS);
+
+      return () => clearInterval(interval);
+    }, [activeView])
+  );
+
   // HIGH #1 FIX: Memoize Convex query args to prevent re-subscriptions
   // Creating new object references on every render causes Convex to re-subscribe
   // FIX: Use correct argument names for each API endpoint
@@ -352,7 +416,7 @@ export default function MessagesScreen() {
   }, [isDemoMode, demoThreads, convexConversations]);
   const unreadCount = isDemoMode ? demoUnreadCount : convexUnreadCount;
   const currentUser = isDemoMode
-    ? { gender: 'male', messagesRemaining: 999999, messagesResetAt: undefined, subscriptionTier: 'premium' as const }
+    ? { gender: 'male', subscriptionTier: 'premium' as const }
     : convexCurrentUser;
 
   // Build matched user IDs set for likes filtering
@@ -404,6 +468,20 @@ export default function MessagesScreen() {
   const displayLikes = useMemo(() => {
     return [...superLikes, ...regularLikes];
   }, [superLikes, regularLikes]);
+
+  const handleConversationPress = useCallback((item: InboxConversationRow) => {
+    const routeId = getConversationRouteId(item);
+    if (!routeId) return;
+
+    safePush(router, `/(main)/(tabs)/messages/chat/${routeId}` as any, 'messages->chat');
+  }, [router]);
+
+  const handleConversationAvatarPress = useCallback((item: InboxConversationRow) => {
+    const otherUserId = getNonEmptyString(item.otherUser?.id);
+    if (!otherUserId) return;
+
+    safePush(router, `/(main)/profile/${otherUserId}` as any, 'messages->avatarProfile');
+  }, [router]);
 
   // Pending likes count (for header badge)
   const pendingLikesCount = displayLikes.length;
@@ -848,11 +926,6 @@ export default function MessagesScreen() {
     );
   };
 
-  // Message limit UI removed — no weekly limit for now (until subscriptions added)
-  const renderQuotaBanner = () => {
-    return null;
-  };
-
   // Loading state
   const isLoading = !isDemoMode && convexConversations === undefined;
 
@@ -869,8 +942,27 @@ export default function MessagesScreen() {
             <Text style={styles.title}>Messages</Text>
           </View>
           <View style={styles.loadingContainer}>
-            <ActivityIndicator size="small" color={COLORS.primary} />
-            <Text style={styles.helperText}>Bringing your conversations up to date...</Text>
+            <View style={styles.loadingStatus}>
+              <ActivityIndicator size="small" color={COLORS.primary} />
+              <Text style={styles.helperText}>Bringing your conversations up to date...</Text>
+            </View>
+            <View style={styles.loadingList}>
+              {Array.from({ length: INBOX_LOADING_PLACEHOLDER_COUNT }, (_, index) => (
+                <View
+                  key={`messages-loading-${index}`}
+                  style={styles.loadingConversationRow}
+                >
+                  <View style={styles.loadingAvatar} />
+                  <View style={styles.loadingConversationBody}>
+                    <View style={styles.loadingConversationHeader}>
+                      <View style={styles.loadingNameBar} />
+                      <View style={styles.loadingTimeBar} />
+                    </View>
+                    <View style={styles.loadingPreviewBar} />
+                  </View>
+                </View>
+              ))}
+            </View>
           </View>
         </SafeAreaView>
       </LoadingGuard>
@@ -1019,17 +1111,18 @@ export default function MessagesScreen() {
           <FlatList
             key="messages-list"
             style={styles.conversationList}
-            data={(conversations || []) as any[]}
-            keyExtractor={(item: any) => item.id}
-            renderItem={({ item }: { item: any }) => (
+            data={conversations || []}
+            keyExtractor={(item, index) => getInboxConversationKey(item as InboxConversationRow, index)}
+            renderItem={({ item }: { item: InboxConversationRow }) => (
               <ConversationItem
-                id={item.id}
+                id={item.id || item.conversationId || item.matchId || 'conversation'}
                 otherUser={item.otherUser}
                 lastMessage={item.lastMessage}
-                unreadCount={item.unreadCount}
-                isPreMatch={item.isPreMatch}
-                onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
-                onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
+                unreadCount={item.unreadCount ?? 0}
+                isPreMatch={item.isPreMatch ?? false}
+                currentTimeMs={inboxTimeReferenceMs}
+                onPress={() => handleConversationPress(item)}
+                onAvatarPress={() => handleConversationAvatarPress(item)}
               />
             )}
             ListEmptyComponent={
@@ -1437,34 +1530,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     textAlign: 'center',
   },
-  // Super Like badge on match avatar
-  superLikeMatchBadge: {
-    position: 'absolute',
-    bottom: 0,
-    right: 0,
-    backgroundColor: COLORS.superLike,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: COLORS.background,
-  },
-
-  // Section headers
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 12,
-    gap: 8,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
   countBadge: {
     backgroundColor: COLORS.superLike + '20',
     paddingHorizontal: 6,
@@ -1476,61 +1541,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.superLike,
   },
-  threadsSectionHeader: {
-    paddingHorizontal: 16,
-    paddingTop: SPACING.beforeMessages,
-    paddingBottom: 6,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-    marginTop: SPACING.sectionGap,
-  },
-
-  // Quota banner
-  quotaBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.warning + '20',
-    padding: 12,
-    paddingHorizontal: 16,
-    marginHorizontal: 16,
-    marginTop: 8,
-    borderRadius: 8,
-  },
-  quotaBannerActive: {
-    backgroundColor: COLORS.primary + '20',
-  },
-  quotaContent: {
-    flex: 1,
-    marginLeft: 12,
-  },
-  quotaTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  quotaSubtitle: {
-    fontSize: 12,
-    color: COLORS.textLight,
-    marginTop: 2,
-  },
-  quotaText: {
-    fontSize: 14,
-    color: COLORS.primary,
-    marginLeft: 12,
-    fontWeight: '500',
-  },
-  upgradeButton: {
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 16,
-  },
-  upgradeButtonText: {
-    color: COLORS.white,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
   // Placeholder avatar
   placeholderAvatar: {
     alignItems: 'center',
@@ -1545,10 +1555,57 @@ const styles = StyleSheet.create({
   // Loading
   loadingContainer: {
     flex: 1,
-    justifyContent: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 24,
+  },
+  loadingStatus: {
     alignItems: 'center',
-    paddingHorizontal: 24,
     gap: 12,
+    marginBottom: 18,
+  },
+  loadingList: {
+    gap: 2,
+  },
+  loadingConversationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+  },
+  loadingAvatar: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    marginRight: 14,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  loadingConversationBody: {
+    flex: 1,
+    gap: 10,
+  },
+  loadingConversationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  loadingNameBar: {
+    width: '40%',
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  loadingTimeBar: {
+    width: 42,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  loadingPreviewBar: {
+    width: '72%',
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: COLORS.backgroundDark,
   },
   helperText: {
     fontSize: 14,

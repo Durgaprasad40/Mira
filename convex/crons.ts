@@ -10,6 +10,22 @@ crons.hourly(
   internal.notifications.cleanupExpiredNotifications
 );
 
+// Phase-1 Messages: cleanup stale typing rows so abrupt closes/crashes do not leave
+// typing state records hanging around indefinitely.
+crons.interval(
+  'cleanup-stale-typing-status',
+  { minutes: 5 },
+  internal.messages.cleanupStaleTypingStatus
+);
+
+// Phase-1 secure media: enforce backend expiry by revoking expired access and
+// retrying storage deletion for already-expired media.
+crons.interval(
+  'cleanup-expired-protected-media',
+  { minutes: 1 },
+  internal.protectedMedia.cleanupExpiredMedia
+);
+
 // 8C: Cleanup verification photos older than 90 days (daily at 3:00 AM UTC)
 crons.daily(
   'cleanup-verification-photos',
