@@ -443,6 +443,14 @@ export default function NearbyScreen() {
   const recenterScale = useRef(new Animated.Value(1)).current;
   // P3-003: Loading overlay fade animation
   const loadingOpacity = useRef(new Animated.Value(0)).current;
+  // P3-004: Subtle pulse on empty state (center of map, low CPU, native driver)
+  const emptyPulseScale = useRef(new Animated.Value(1)).current;
+  const emptyPulseOpacity = useRef(new Animated.Value(0.28)).current;
+  // P3-005: Empty card entry animation (fade + slight rise)
+  const emptyCardOpacity = useRef(new Animated.Value(0)).current;
+  const emptyCardTranslateY = useRef(new Animated.Value(10)).current;
+  // P3-004: Delay before showing empty card so it doesn't flash on transient empties
+  const emptyStateShowDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // P2-FIX-4: Removed mapOpacity Animated.Value — the fade-in caused the
   // map to remain invisible when onMapReady didn't fire reliably on Android
   // (a known react-native-maps issue when mounted inside opacity:0 parent).
@@ -1225,8 +1233,9 @@ export default function NearbyScreen() {
     !isDemo &&
     (!shouldShowLoadingState || hasRetainedNearbyResult);
 
-  // P2-FIX-3: Show empty-state card directly (no fade-in). Suppressed once
-  // the card has auto-hidden — the flag resets when empty condition resolves.
+  // P2-FIX-3 / P3-004: Show empty-state card after a brief 1500 ms delay so
+  // it doesn't flash on transient empties. Suppressed once the card has
+  // auto-hidden — the flag resets when empty condition resolves.
   useEffect(() => {
     if (showEmptyState) {
       if (!isEmptyStateCondition) {
@@ -1235,7 +1244,19 @@ export default function NearbyScreen() {
       return;
     }
     if (isEmptyStateCondition && !hasAutoHiddenEmptyStateRef.current) {
-      setShowEmptyState(true);
+      if (emptyStateShowDelayRef.current) {
+        clearTimeout(emptyStateShowDelayRef.current);
+      }
+      emptyStateShowDelayRef.current = setTimeout(() => {
+        if (!isMountedRef.current) return;
+        setShowEmptyState(true);
+      }, 1500);
+      return () => {
+        if (emptyStateShowDelayRef.current) {
+          clearTimeout(emptyStateShowDelayRef.current);
+          emptyStateShowDelayRef.current = null;
+        }
+      };
     }
   }, [isEmptyStateCondition, showEmptyState]);
 
@@ -1265,6 +1286,69 @@ export default function NearbyScreen() {
       }
     };
   }, [showEmptyState]);
+
+  // P3-004: Subtle pulse loop while empty card is visible. Native driver,
+  // single Animated.loop, auto-stops on unmount / when card hides.
+  useEffect(() => {
+    if (!showEmptyState) {
+      emptyPulseScale.setValue(1);
+      emptyPulseOpacity.setValue(0.28);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.parallel([
+        Animated.sequence([
+          Animated.timing(emptyPulseScale, {
+            toValue: 1.6,
+            duration: 1400,
+            useNativeDriver: true,
+          }),
+          Animated.timing(emptyPulseScale, {
+            toValue: 1,
+            duration: 0,
+            useNativeDriver: true,
+          }),
+        ]),
+        Animated.sequence([
+          Animated.timing(emptyPulseOpacity, {
+            toValue: 0,
+            duration: 1400,
+            useNativeDriver: true,
+          }),
+          Animated.timing(emptyPulseOpacity, {
+            toValue: 0.28,
+            duration: 0,
+            useNativeDriver: true,
+          }),
+        ]),
+      ]),
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+    };
+  }, [showEmptyState, emptyPulseScale, emptyPulseOpacity]);
+
+  // P3-005: Empty card entry — fade + slight upward motion (native-driven, ~280 ms)
+  useEffect(() => {
+    if (!showEmptyState) {
+      emptyCardOpacity.setValue(0);
+      emptyCardTranslateY.setValue(10);
+      return;
+    }
+    Animated.parallel([
+      Animated.timing(emptyCardOpacity, {
+        toValue: 1,
+        duration: 280,
+        useNativeDriver: true,
+      }),
+      Animated.timing(emptyCardTranslateY, {
+        toValue: 0,
+        duration: 280,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [showEmptyState, emptyCardOpacity, emptyCardTranslateY]);
 
   // ---------------------------------------------------------------------------
   // Navigation handlers for header buttons
@@ -1857,10 +1941,27 @@ export default function NearbyScreen() {
               <Text style={styles.loadingText}>
                 {isRetrying || hasRetainedNearbyResult
                   ? 'Refreshing Nearby…'
-                  : 'Looking around you…'}
+                  : 'Searching nearby…'}
               </Text>
             </View>
           </Animated.View>
+        )}
+
+        {/* P3-004: Subtle pulse at the center of the map while empty state is up.
+             Single native-driven Animated.View. pointerEvents="none" so it never
+             blocks map gestures. */}
+        {showEmptyState && (
+          <View style={styles.emptyPulseWrap} pointerEvents="none">
+            <Animated.View
+              style={[
+                styles.emptyPulseDot,
+                {
+                  opacity: emptyPulseOpacity,
+                  transform: [{ scale: emptyPulseScale }],
+                },
+              ]}
+            />
+          </View>
         )}
 
         {/* Empty state card — shown briefly, auto-hides after ~3s (direct unmount). */}
@@ -1868,23 +1969,55 @@ export default function NearbyScreen() {
              overlay strip pass through to the map; only the card itself is tappable. */}
         {showEmptyState && (
           <View style={styles.emptyOverlay} pointerEvents="box-none">
-            <View style={styles.emptyCard}>
-              <View style={styles.emptyIconBubble}>
-                <Ionicons name="people-outline" size={26} color={COLORS.primary} />
+            <Animated.View
+              style={[
+                styles.emptyCardWrap,
+                {
+                  opacity: emptyCardOpacity,
+                  transform: [{ translateY: emptyCardTranslateY }],
+                },
+              ]}
+            >
+              <View style={styles.emptyCard}>
+                <View style={styles.emptyIconBubble}>
+                  <Ionicons name="people-outline" size={26} color={COLORS.primary} />
+                </View>
+                <Text style={styles.emptyTitle}>You&apos;re early — check back soon</Text>
+                <Text style={styles.emptySubtitle}>
+                  Be the first in your area or check back later.
+                </Text>
+                <Text style={styles.emptyTrust}>Your location is live</Text>
+                <Text style={styles.emptyHint}>Move the map to explore other areas</Text>
+                <View style={styles.emptyActionRow}>
+                  <TouchableOpacity
+                    style={[styles.emptyActionButton, isRetrying && styles.emptyActionButtonDisabled]}
+                    onPress={handleRetryQuery}
+                    activeOpacity={0.85}
+                    disabled={isRetrying}
+                    accessibilityLabel="Refresh nearby"
+                    accessibilityHint="Search again for people nearby"
+                    accessibilityState={{ disabled: isRetrying, busy: isRetrying }}
+                  >
+                    {isRetrying ? (
+                      <ActivityIndicator size="small" color={COLORS.primary} />
+                    ) : (
+                      <Ionicons name="refresh" size={16} color={COLORS.primary} />
+                    )}
+                    <Text style={styles.emptyActionText}>
+                      {isRetrying ? 'Refreshing Nearby…' : 'Refresh'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.emptyActionButton}
+                    onPress={handleOpenCrossedPaths}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
+                    <Text style={styles.emptyActionText}>Crossed Paths</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-              <Text style={styles.emptyTitle}>No one nearby right now</Text>
-              <Text style={styles.emptySubtitle}>
-                Your map is live. We&apos;ll show people here as soon as someone nearby appears.
-              </Text>
-              <TouchableOpacity
-                style={styles.emptyActionButton}
-                onPress={handleOpenCrossedPaths}
-                activeOpacity={0.85}
-              >
-                <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
-                <Text style={styles.emptyActionText}>Crossed Paths</Text>
-              </TouchableOpacity>
-            </View>
+            </Animated.View>
           </View>
         )}
 
@@ -2170,6 +2303,35 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     paddingHorizontal: 4,
   },
+  emptyCardWrap: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.10)',
+    borderRadius: 24,
+    padding: 6,
+  },
+  emptyTrust: {
+    fontSize: 11,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginTop: 8,
+    opacity: 0.75,
+    fontWeight: '500',
+  },
+  emptyHint: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginTop: 10,
+    opacity: 0.85,
+  },
+  emptyActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 16,
+    flexWrap: 'wrap',
+  },
   emptyActionButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2178,7 +2340,26 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     backgroundColor: `${COLORS.primary}15`,
     gap: 6,
-    marginTop: 16,
+    minWidth: 110,
+    justifyContent: 'center',
+  },
+  emptyActionButtonDisabled: {
+    opacity: 0.6,
+  },
+  emptyPulseWrap: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyPulseDot: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.primary,
   },
   emptyActionText: {
     fontSize: 13,
