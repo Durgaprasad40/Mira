@@ -1,4 +1,5 @@
 import { v } from 'convex/values';
+import type { PaginationResult } from 'convex/server';
 import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_generated/server';
 import { Id, Doc } from './_generated/dataModel';
 import { softMaskText } from './softMask';
@@ -1240,7 +1241,10 @@ export const getConversations = query({
     let participantCursor: string | null = null;
 
     while (true) {
-      const participantPage = await ctx.db
+      // TYPING-FIX: Annotate `participantPage` with the full PaginationResult
+      // type so downstream callback params don't collapse to `any`. Pure type
+      // annotation — no runtime behavior change.
+      const participantPage: PaginationResult<Doc<'conversationParticipants'>> = await ctx.db
         .query('conversationParticipants')
         .withIndex('by_user', (q) => q.eq('userId', userId))
         .paginate({ cursor: participantCursor, numItems: participantPageSize });
@@ -1249,26 +1253,30 @@ export const getConversations = query({
         break;
       }
 
-      const pageConversations = await Promise.all(
-        participantPage.page.map((row) => ctx.db.get(row.conversationId))
+      // TYPING-FIX: Explicitly type the awaited array so consumers below see
+      // `Doc<'conversations'> | null` instead of `any`.
+      const pageConversations: Array<Doc<'conversations'> | null> = await Promise.all(
+        participantPage.page.map((row: Doc<'conversationParticipants'>) => ctx.db.get(row.conversationId))
       );
 
       const pageOtherUserIds = Array.from(
         new Set(
           pageConversations
-            .map((conversation) => conversation?.participants.find((id) => id !== userId) as string | undefined)
+            .map((conversation: Doc<'conversations'> | null) =>
+              conversation?.participants.find((id: Id<'users'>) => id !== userId) as string | undefined
+            )
             .filter((id): id is string => Boolean(id))
         )
       );
 
       const pageUsers = await Promise.all(
-        pageOtherUserIds.map((id) => ctx.db.get(id as Id<'users'>))
+        pageOtherUserIds.map((id: string) => ctx.db.get(id as Id<'users'>))
       );
       const pageUserMap = new Map(pageOtherUserIds.map((id, index) => [id, pageUsers[index]]));
 
       for (let index = 0; index < participantPage.page.length; index++) {
         const row = participantPage.page[index];
-        const conversation = pageConversations[index];
+        const conversation: Doc<'conversations'> | null = pageConversations[index];
         if (!conversation) continue;
 
         seenConversationIds.add(conversation._id as string);
@@ -1278,7 +1286,7 @@ export const getConversations = query({
           continue;
         }
 
-        const otherUserId = conversation.participants.find((id) => id !== userId);
+        const otherUserId = conversation.participants.find((id: Id<'users'>) => id !== userId);
         if (!otherUserId) continue;
         if (blockedUserIds.has(otherUserId as string)) continue;
 
