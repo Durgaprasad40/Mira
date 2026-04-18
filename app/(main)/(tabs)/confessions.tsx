@@ -102,6 +102,9 @@ function computeAge(dateOfBirth: string | undefined): number | undefined {
   return age > 0 && age < 120 ? age : undefined;
 }
 
+// P0-1: Blur radius for blur_photo identity mode (matches ConfessionCard)
+const BLUR_PHOTO_RADIUS = 20;
+
 function getTimeAgoSimple(timestamp: number): string {
   const diff = Date.now() - timestamp;
   const minutes = Math.floor(diff / 60000);
@@ -151,11 +154,11 @@ export default function ConfessionsScreen() {
 
   const liveConfessions = useQuery(
     api.confessions.listConfessions,
-    !isDemoMode ? { sortBy: 'latest' } : 'skip'
+    !isDemoMode ? { sortBy: 'latest', viewerId: currentUserId ?? undefined } : 'skip'
   );
   const liveTrending = useQuery(
     api.confessions.getTrendingConfessions,
-    !isDemoMode ? {} : 'skip'
+    !isDemoMode ? { viewerId: currentUserId ?? undefined } : 'skip'
   );
   const liveTaggedConfessions = useQuery(
     api.confessions.listTaggedConfessionsForUser,
@@ -373,6 +376,7 @@ export default function ConfessionsScreen() {
         userId: item.userId,
         text: item.text,
         isAnonymous: item.isAnonymous,
+        authorVisibility: item.authorVisibility, // P0-1: carry blur/identity through
         authorName: item.authorName,
         authorPhotoUrl: item.authorPhotoUrl,
         authorAge: item.authorAge,
@@ -868,7 +872,13 @@ export default function ConfessionsScreen() {
   const renderHeader = useCallback(() => (
     <View>
       {/* 1. TRENDING SECTION (always first) - Premium card with full border */}
-      {trendingHero && (
+      {trendingHero && (() => {
+        // P0-1: Derive effective visibility (matches ConfessionCard logic)
+        const trendingVisibility = (trendingHero as any).authorVisibility
+          || (trendingHero.isAnonymous ? 'anonymous' : 'open');
+        const trendingIsAnonymous = trendingVisibility === 'anonymous';
+        const trendingIsBlurPhoto = trendingVisibility === 'blur_photo' || trendingVisibility === 'blur';
+        return (
         <TouchableOpacity
           style={styles.trendingCard}
           activeOpacity={0.88}
@@ -884,10 +894,17 @@ export default function ConfessionsScreen() {
 
           {/* Author row - shows identity with gender symbol */}
           <View style={styles.trendingAuthorRow}>
-            {trendingHero.isAnonymous ? (
+            {trendingIsAnonymous ? (
               <View style={[styles.trendingAvatar, styles.trendingAvatarAnonymous]}>
                 <Ionicons name="eye-off" size={10} color={COLORS.textMuted} />
               </View>
+            ) : trendingIsBlurPhoto && trendingHero.authorPhotoUrl ? (
+              <Image
+                source={{ uri: trendingHero.authorPhotoUrl }}
+                style={styles.trendingAvatarImage}
+                contentFit="cover"
+                blurRadius={BLUR_PHOTO_RADIUS}
+              />
             ) : trendingHero.authorPhotoUrl ? (
               <Image
                 source={{ uri: trendingHero.authorPhotoUrl }}
@@ -899,8 +916,8 @@ export default function ConfessionsScreen() {
                 <Ionicons name="person" size={10} color={COLORS.primary} />
               </View>
             )}
-            <Text style={[styles.trendingAuthorName, !trendingHero.isAnonymous && styles.trendingAuthorNamePublic]}>
-              {trendingHero.isAnonymous ? 'Anonymous' : (
+            <Text style={[styles.trendingAuthorName, !trendingIsAnonymous && styles.trendingAuthorNamePublic]}>
+              {trendingIsAnonymous ? 'Anonymous' : (
                 <>
                   {trendingHero.authorName || 'Someone'}
                   {trendingHero.authorAge ? `, ${trendingHero.authorAge}` : ''}
@@ -929,10 +946,18 @@ export default function ConfessionsScreen() {
             </View>
           </View>
         </TouchableOpacity>
-      )}
+        );
+      })()}
 
       {/* 2. MY CONFESSION SECTION (second, owner only) - Border highlight only */}
-      {myLatestConfession && (
+      {myLatestConfession && (() => {
+        // P0-1: Derive effective visibility (matches ConfessionCard logic)
+        const myAny = myLatestConfession as any;
+        const myVisibility = myAny.authorVisibility
+          || (myAny.isAnonymous ? 'anonymous' : 'open');
+        const myIsAnonymous = myVisibility === 'anonymous';
+        const myIsBlurPhoto = myVisibility === 'blur_photo' || myVisibility === 'blur';
+        return (
         <TouchableOpacity
           style={styles.myConfessionCard}
           activeOpacity={0.88}
@@ -945,10 +970,17 @@ export default function ConfessionsScreen() {
         >
           {/* Author row - same as normal cards */}
           <View style={styles.myConfessionAuthorRow}>
-            {(myLatestConfession as any).isAnonymous ? (
+            {myIsAnonymous ? (
               <View style={[styles.myConfessionAvatar, styles.myConfessionAvatarAnonymous]}>
                 <Ionicons name="eye-off" size={10} color={COLORS.textMuted} />
               </View>
+            ) : myIsBlurPhoto && (myLatestConfession as any).authorPhotoUrl ? (
+              <Image
+                source={{ uri: (myLatestConfession as any).authorPhotoUrl }}
+                style={styles.myConfessionAvatarImage}
+                contentFit="cover"
+                blurRadius={BLUR_PHOTO_RADIUS}
+              />
             ) : (myLatestConfession as any).authorPhotoUrl ? (
               <Image
                 source={{ uri: (myLatestConfession as any).authorPhotoUrl }}
@@ -960,8 +992,8 @@ export default function ConfessionsScreen() {
                 <Ionicons name="person" size={10} color={COLORS.primary} />
               </View>
             )}
-            <Text style={[styles.myConfessionAuthorName, !(myLatestConfession as any).isAnonymous && styles.myConfessionAuthorNamePublic]}>
-              {(myLatestConfession as any).isAnonymous ? 'Anonymous' : (
+            <Text style={[styles.myConfessionAuthorName, !myIsAnonymous && styles.myConfessionAuthorNamePublic]}>
+              {myIsAnonymous ? 'Anonymous' : (
                 <>
                   {(myLatestConfession as any).authorName || 'You'}
                   {(myLatestConfession as any).authorAge ? `, ${(myLatestConfession as any).authorAge}` : ''}
@@ -992,7 +1024,8 @@ export default function ConfessionsScreen() {
             </View>
           </View>
         </TouchableOpacity>
-      )}
+        );
+      })()}
 
       {/* Countdown notice when limit is reached */}
       {!canPostNow && countdownMs > 0 && (

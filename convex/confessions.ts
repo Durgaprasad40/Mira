@@ -198,11 +198,13 @@ export const createConfession = mutation({
 
 // List confessions (latest) with 2 reply previews per confession
 // Only returns non-expired confessions for public feed
+// P0-3: Viewer-aware — excludes confessions reported by viewer
 export const listConfessions = query({
   args: {
     sortBy: v.union(v.literal('trending'), v.literal('latest')),
+    viewerId: v.optional(v.union(v.id('users'), v.string())),
   },
-  handler: async (ctx, { sortBy }) => {
+  handler: async (ctx, { sortBy, viewerId }) => {
     const now = Date.now();
     const allConfessions = await ctx.db
       .query('confessions')
@@ -210,9 +212,25 @@ export const listConfessions = query({
       .order('desc')
       .collect();
 
-    // Filter out expired and deleted confessions
+    // P0-3: Build set of confession IDs the viewer has reported (server-side filter)
+    let reportedIds: Set<string> = new Set();
+    if (viewerId) {
+      const resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
+      if (resolvedViewerId) {
+        const myReports = await ctx.db
+          .query('confessionReports')
+          .withIndex('by_reporter', (q) => q.eq('reporterId', resolvedViewerId))
+          .collect();
+        reportedIds = new Set(myReports.map((r) => r.confessionId as unknown as string));
+      }
+    }
+
+    // Filter out expired, deleted, and viewer-reported confessions
     const confessions = allConfessions.filter(
-      (c) => (c.expiresAt === undefined || c.expiresAt > now) && !c.isDeleted
+      (c) =>
+        (c.expiresAt === undefined || c.expiresAt > now) &&
+        !c.isDeleted &&
+        !reportedIds.has(c._id as unknown as string)
     );
 
     // Attach 2 reply previews per confession
@@ -276,9 +294,12 @@ export const listConfessions = query({
 
 // Get trending confessions (last 48h, time-decay scoring)
 // Only returns non-expired confessions
+// P0-3: Viewer-aware — excludes confessions reported by viewer
 export const getTrendingConfessions = query({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    viewerId: v.optional(v.union(v.id('users'), v.string())),
+  },
+  handler: async (ctx, { viewerId }) => {
     const now = Date.now();
     const cutoff = now - 48 * 60 * 60 * 1000; // 48 hours ago
 
@@ -288,9 +309,26 @@ export const getTrendingConfessions = query({
       .order('desc')
       .collect();
 
-    // Filter to last 48h AND not expired AND not deleted
+    // P0-3: Build set of confession IDs the viewer has reported (server-side filter)
+    let reportedIds: Set<string> = new Set();
+    if (viewerId) {
+      const resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
+      if (resolvedViewerId) {
+        const myReports = await ctx.db
+          .query('confessionReports')
+          .withIndex('by_reporter', (q) => q.eq('reporterId', resolvedViewerId))
+          .collect();
+        reportedIds = new Set(myReports.map((r) => r.confessionId as unknown as string));
+      }
+    }
+
+    // Filter to last 48h AND not expired AND not deleted AND not viewer-reported
     const recent = confessions.filter(
-      (c) => c.createdAt > cutoff && (c.expiresAt === undefined || c.expiresAt > now) && !c.isDeleted
+      (c) =>
+        c.createdAt > cutoff &&
+        (c.expiresAt === undefined || c.expiresAt > now) &&
+        !c.isDeleted &&
+        !reportedIds.has(c._id as unknown as string)
     );
 
     // Improved trending scoring with consistent weights
@@ -316,11 +354,15 @@ export const getTrendingConfessions = query({
 });
 
 // Get a single confession by ID
+// P0-2: Fail closed — returns null if missing, deleted, or expired
 export const getConfession = query({
   args: { confessionId: v.id('confessions') },
   handler: async (ctx, { confessionId }) => {
     const confession = await ctx.db.get(confessionId);
     if (!confession) return null;
+    if (confession.isDeleted) return null;
+    const now = Date.now();
+    if (confession.expiresAt !== undefined && confession.expiresAt <= now) return null;
     return serializeConfession(confession, { includeTaggedUserId: true });
   },
 });
@@ -340,6 +382,19 @@ export const createReply = mutation({
   handler: async (ctx, args) => {
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // P0-2: Fail closed — refuse replies on missing/deleted/expired parent
+    const parent = await ctx.db.get(args.confessionId);
+    if (!parent) {
+      throw new Error('Confession not found.');
+    }
+    if (parent.isDeleted) {
+      throw new Error('This confession is no longer available.');
+    }
+    const nowMs = Date.now();
+    if (parent.expiresAt !== undefined && parent.expiresAt <= nowMs) {
+      throw new Error('This confession has expired.');
+    }
 
     const replyType = args.type || 'text';
 
@@ -415,9 +470,16 @@ export const deleteReply = mutation({
 });
 
 // Get replies for a confession
+// P0-2: Fail closed — returns [] if parent missing, deleted, or expired
 export const getReplies = query({
   args: { confessionId: v.id('confessions') },
   handler: async (ctx, { confessionId }) => {
+    const parent = await ctx.db.get(confessionId);
+    if (!parent) return [];
+    if (parent.isDeleted) return [];
+    const now = Date.now();
+    if (parent.expiresAt !== undefined && parent.expiresAt <= now) return [];
+
     const replies = await ctx.db
       .query('confessionReplies')
       .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
