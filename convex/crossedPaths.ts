@@ -213,7 +213,13 @@ export const publishLocation = mutation({
     // Keeps publishLocation consistent with detectCrossedUsers/recordLocation,
     // which already skip crossing work for unverified callers.
     const currentStatus = user.verificationStatus || 'unverified';
-    if (currentStatus !== 'verified') {
+    // DEV-ONLY bypass: allow unverified users to publish when demo auth mode is
+    // enabled on the Convex deployment env. Production behavior is unchanged
+    // because EXPO_PUBLIC_DEMO_AUTH_MODE must be explicitly set to the string
+    // "true" on the Convex deployment (not just the Expo client bundle) for
+    // this bypass to engage.
+    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+    if (currentStatus !== 'verified' && !isDevBypass) {
       return { success: false, published: false, reason: 'unverified' };
     }
 
@@ -516,18 +522,27 @@ export const recordLocation = mutation({
 
     // Skip crossed-path computation if current user is not verified
     const currentStatus = currentUser.verificationStatus || 'unverified';
-    if (currentStatus !== 'verified') {
+    // DEV-ONLY bypass (matches publishLocation). Engages only when the Convex
+    // deployment env explicitly sets EXPO_PUBLIC_DEMO_AUTH_MODE to "true".
+    // Production behavior is unchanged because this env is NOT auto-propagated
+    // from .env.local to the Convex deployment.
+    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+    if (currentStatus !== 'verified' && !isDevBypass) {
       return { success: true, nearbyCount: 0, skipped: true, reason: 'unverified' };
     }
 
     // Get current user's age for filtering
     const myAge = calculateAge(currentUser.dateOfBirth);
 
-    // STABILITY FIX S3: Use indexed query for verified users only
-    const verifiedUsers = await ctx.db
-      .query('users')
-      .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
-      .collect();
+    // STABILITY FIX S3: Use indexed query for verified users only (production).
+    // In DEV bypass: widen to all users so unverified demo peers are discoverable.
+    // All downstream filters (isActive, nearbyEnabled, pause, blocks, etc.) still apply.
+    const verifiedUsers = isDevBypass
+      ? await ctx.db.query('users').collect()
+      : await ctx.db
+          .query('users')
+          .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+          .collect();
 
     // STABILITY FIX S6/C2: Pre-fetch blocks before loop
     const blockedIds = await prefetchBlockedUserIds(ctx, userId);
@@ -893,8 +908,14 @@ export const getNearbyUsers = query({
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];
 
-    // Current user must be verified to see nearby users
-    if (currentUser.verificationStatus !== 'verified') return [];
+    // Current user must be verified to see nearby users.
+    // DEV-ONLY bypass (matches publishLocation / detectCrossedUsers). Engages
+    // only when the Convex deployment env explicitly sets
+    // EXPO_PUBLIC_DEMO_AUTH_MODE to "true". Production behavior is unchanged
+    // because this env is NOT auto-propagated from .env.local to the Convex
+    // deployment.
+    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+    if (currentUser.verificationStatus !== 'verified' && !isDevBypass) return [];
 
     // Use current user's published location for distance checks
     // (they should have published when opening Nearby screen)
@@ -905,12 +926,16 @@ export const getNearbyUsers = query({
     // Get current user's age for filtering
     const myAge = calculateAge(currentUser.dateOfBirth);
 
-    // STABILITY FIX S1: Use indexed query for verified users only
-    // This avoids iterating through ALL users in the database
-    const verifiedUsers = await ctx.db
-      .query('users')
-      .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
-      .collect();
+    // STABILITY FIX S1: Use indexed query for verified users only (production).
+    // In DEV bypass: widen to all users so unverified demo peers render on map.
+    // All downstream filters (isActive, incognito, nearbyEnabled, pause,
+    // visibility mode, distance, age, blocks, swipes, freshness) still apply.
+    const verifiedUsers = isDevBypass
+      ? await ctx.db.query('users').collect()
+      : await ctx.db
+          .query('users')
+          .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+          .collect();
 
     // STABILITY FIX S6/C2: Pre-fetch blocks and swipes before loop
     const [blockedIds, swipedUsersMap] = await Promise.all([

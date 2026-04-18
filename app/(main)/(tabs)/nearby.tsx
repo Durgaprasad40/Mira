@@ -289,6 +289,17 @@ const DEMO_LOCATION = {
   longitude: DEMO_USER.longitude,
 };
 
+// P0 MAP-RECOVERY: Safe fallback region used for initialRegion when live
+// location hasn't resolved yet. Ensures MapView always mounts with a valid
+// Region object (never undefined / NaN), preventing blank-map regressions.
+// The map re-centers to the user's real location as soon as it's available.
+const FALLBACK_REGION: Region = {
+  latitude: DEMO_LOCATION.latitude,
+  longitude: DEMO_LOCATION.longitude,
+  latitudeDelta: DEFAULT_LATITUDE_DELTA,
+  longitudeDelta: DEFAULT_LONGITUDE_DELTA,
+};
+
 // Supercluster configuration (matches previous react-native-map-clustering behavior)
 const CLUSTER_RADIUS = 45;
 const CLUSTER_MAX_ZOOM = 20;
@@ -422,13 +433,21 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   // P3 POLISH: Animation refs for premium feel
   // ---------------------------------------------------------------------------
-  // P3-001: Empty state fade animation
-  const emptyStateOpacity = useRef(new Animated.Value(0)).current;
+  // P2-FIX-3: Auto-hide empty state after ~3s with direct unmount (no fade).
+  // Flag suppresses re-show until the empty condition resolves (users appeared)
+  // or the screen remounts. No Animated.Value used — plain conditional render
+  // so nothing sits over the map after the timer fires.
+  const emptyStateAutoHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasAutoHiddenEmptyStateRef = useRef(false);
   // P3-002: Recenter button press scale animation
   const recenterScale = useRef(new Animated.Value(1)).current;
   // P3-003: Loading overlay fade animation
   const loadingOpacity = useRef(new Animated.Value(0)).current;
-  const mapOpacity = useRef(new Animated.Value(0)).current;
+  // P2-FIX-4: Removed mapOpacity Animated.Value — the fade-in caused the
+  // map to remain invisible when onMapReady didn't fire reliably on Android
+  // (a known react-native-maps issue when mounted inside opacity:0 parent).
+  // Map now renders at full opacity from mount; isMapReady still drives the
+  // boot overlay for UX.
   const lastNearbyRefreshAtRef = useRef(0);
   const [nearbySyncIssue, setNearbySyncIssue] = useState<NearbySyncIssue | null>(null);
   const requestNearbyRefresh = useCallback(
@@ -1206,34 +1225,46 @@ export default function NearbyScreen() {
     !isDemo &&
     (!shouldShowLoadingState || hasRetainedNearbyResult);
 
-  // P3-001: Animate empty state opacity on show/hide
+  // P2-FIX-3: Show empty-state card directly (no fade-in). Suppressed once
+  // the card has auto-hidden — the flag resets when empty condition resolves.
   useEffect(() => {
     if (showEmptyState) {
       if (!isEmptyStateCondition) {
-        Animated.timing(emptyStateOpacity, {
-          toValue: 0,
-          duration: 160,
-          useNativeDriver: true,
-        }).start(({ finished }) => {
-          if (finished && isMountedRef.current) {
-            setShowEmptyState(false);
-          }
-        });
-        return;
+        setShowEmptyState(false);
       }
-      Animated.timing(emptyStateOpacity, {
-        toValue: 1,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
       return;
     }
-
-    if (isEmptyStateCondition) {
-      emptyStateOpacity.setValue(0);
+    if (isEmptyStateCondition && !hasAutoHiddenEmptyStateRef.current) {
       setShowEmptyState(true);
     }
-  }, [emptyStateOpacity, isEmptyStateCondition, showEmptyState]);
+  }, [isEmptyStateCondition, showEmptyState]);
+
+  // P2-FIX-3: Reset the auto-hide flag whenever the empty condition resolves
+  // (e.g. nearby users appeared). Lets the card show again briefly next time.
+  useEffect(() => {
+    if (!isEmptyStateCondition) {
+      hasAutoHiddenEmptyStateRef.current = false;
+    }
+  }, [isEmptyStateCondition]);
+
+  // P2-FIX-3: Auto-hide empty-state card after ~3s. Direct unmount, no fade —
+  // card disappears cleanly and nothing stays over the map.
+  useEffect(() => {
+    if (!showEmptyState) return;
+
+    emptyStateAutoHideTimerRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
+      hasAutoHiddenEmptyStateRef.current = true;
+      setShowEmptyState(false);
+    }, 3000);
+
+    return () => {
+      if (emptyStateAutoHideTimerRef.current) {
+        clearTimeout(emptyStateAutoHideTimerRef.current);
+        emptyStateAutoHideTimerRef.current = null;
+      }
+    };
+  }, [showEmptyState]);
 
   // ---------------------------------------------------------------------------
   // Navigation handlers for header buttons
@@ -1459,12 +1490,10 @@ export default function NearbyScreen() {
     return null;
   }, [isDemo, bestLocation]);
 
-  useEffect(() => {
-    if (locationUIState !== 'ready' || !mapRegion) {
-      setIsMapReady(false);
-      mapOpacity.setValue(0);
-    }
-  }, [locationUIState, mapOpacity, mapRegion]);
+  // P0 MAP-RECOVERY: Do NOT reset isMapReady once the MapView has reported
+  // ready. Map is always mounted now (with FALLBACK_REGION if needed), so
+  // onMapReady fires exactly once per screen mount. Resetting mid-lifecycle
+  // would freeze the boot overlay because onMapReady wouldn't fire again.
 
   // ---------------------------------------------------------------------------
   // Open device settings
@@ -1573,18 +1602,10 @@ export default function NearbyScreen() {
   // Helper: Render the appropriate content based on current state
   // Header is rendered separately (shell pattern), only content varies
   const renderContent = () => {
-    // Checking state - location being acquired
-    if (locationUIState === 'checking') {
-      return (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.title}>Finding your location</Text>
-          <Text style={styles.subtitle}>
-            Nearby works best with a fresh location. This usually takes a few seconds.
-          </Text>
-        </View>
-      );
-    }
+    // P0 MAP-RECOVERY: The 'checking' state no longer short-circuits rendering.
+    // Map mounts immediately with FALLBACK_REGION; the boot overlay + "Looking
+    // around you…" indicator provide feedback while GPS resolves. This prevents
+    // the blank-screen regression when location acquisition is slow.
 
     // Denied - needs settings
     if (locationUIState === 'denied_needs_settings') {
@@ -1678,45 +1699,63 @@ export default function NearbyScreen() {
       );
     }
 
-    // Safety check: no map region yet
-    if (!mapRegion) {
-      if (__DEV__) {
-        log.info('[NEARBY]', 'Waiting for map region');
-      }
-      return (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.title}>Preparing your map</Text>
-          <Text style={styles.subtitle}>
-            We&apos;re getting Nearby ready for you.
-          </Text>
-        </View>
-      );
-    }
+    // P0 MAP-RECOVERY: No more early return when mapRegion is null — we pass
+    // FALLBACK_REGION to MapView so the map is always mounted. It re-centers
+    // to the real location as soon as `bestLocation` becomes valid (handled
+    // by the existing recenter/animation code paths).
 
     // Ready state - render map with error boundary
     // P1-001 FIX: Removed DEV log from render path (was logging on every render)
 
+    // P0 MAP-RECOVERY: Strict Number.isFinite guard on every field of the
+    // Region. Any NaN/Infinity/undefined/null in latitude, longitude, or the
+    // deltas falls back to FALLBACK_REGION. react-native-maps on both iOS
+    // (Apple Maps) and Android (Google Maps) can render a blank canvas if
+    // the native view receives an invalid LatLng or non-finite span, so we
+    // harden this at the render boundary.
+    const isValidFiniteRegion = (r: Region | null | undefined): r is Region =>
+      !!r &&
+      Number.isFinite(r.latitude) &&
+      Number.isFinite(r.longitude) &&
+      Number.isFinite(r.latitudeDelta) &&
+      Number.isFinite(r.longitudeDelta) &&
+      r.latitude >= -90 &&
+      r.latitude <= 90 &&
+      r.longitude >= -180 &&
+      r.longitude <= 180 &&
+      r.latitudeDelta > 0 &&
+      r.longitudeDelta > 0;
+
+    const safeInitialRegion: Region = isValidFiniteRegion(mapRegion)
+      ? mapRegion
+      : FALLBACK_REGION;
+
+    if (__DEV__ && !isValidFiniteRegion(mapRegion)) {
+      log.info('[NEARBY]', 'Using FALLBACK_REGION for initialRegion', {
+        hadMapRegion: !!mapRegion,
+      });
+    }
+
     return (
       <MapErrorBoundary>
       <View style={styles.mapContainer}>
-        <Animated.View style={[styles.mapStage, { opacity: mapOpacity }]}>
+        <View style={styles.mapStage}>
           <MapView
             ref={mapRef}
             style={styles.map}
-            initialRegion={mapRegion}
+            initialRegion={safeInitialRegion}
             onRegionChangeComplete={handleRegionChangeComplete}
             onMapReady={() => {
+              if (__DEV__) {
+                log.info('[NEARBY]', 'onMapReady fired', {
+                  hasRegion: !!mapRegion,
+                  locationUIState,
+                });
+              }
               if (mapRegion) {
                 setCurrentRegion(mapRegion);
               }
               setIsMapReady(true);
-              mapOpacity.setValue(0);
-              Animated.timing(mapOpacity, {
-                toValue: 1,
-                duration: MAP_FADE_IN_DURATION_MS,
-                useNativeDriver: true,
-              }).start();
             }}
             showsUserLocation={permissionStatus === 'granted'}
             showsMyLocationButton={false}
@@ -1785,7 +1824,7 @@ export default function NearbyScreen() {
             }
           })}
           </MapView>
-        </Animated.View>
+        </View>
 
         {!isMapReady && (
           <View style={styles.mapBootOverlay} pointerEvents="none">
@@ -1824,22 +1863,29 @@ export default function NearbyScreen() {
           </Animated.View>
         )}
 
-        {/* Empty state overlay - stays visible whenever Nearby is currently empty */}
-        {/* P3-001: Animated fade in/out for premium feel */}
+        {/* Empty state card — shown briefly, auto-hides after ~3s (direct unmount). */}
+        {/* P2-FIX-3: pointerEvents="box-none" lets taps on the surrounding
+             overlay strip pass through to the map; only the card itself is tappable. */}
         {showEmptyState && (
-          <Animated.View style={[styles.emptyOverlay, { opacity: emptyStateOpacity }]}>
+          <View style={styles.emptyOverlay} pointerEvents="box-none">
             <View style={styles.emptyCard}>
-              <Ionicons name="people-outline" size={32} color={COLORS.textLight} />
+              <View style={styles.emptyIconBubble}>
+                <Ionicons name="people-outline" size={26} color={COLORS.primary} />
+              </View>
               <Text style={styles.emptyTitle}>No one nearby right now</Text>
               <Text style={styles.emptySubtitle}>
                 Your map is live. We&apos;ll show people here as soon as someone nearby appears.
               </Text>
-              <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenCrossedPaths}>
+              <TouchableOpacity
+                style={styles.emptyActionButton}
+                onPress={handleOpenCrossedPaths}
+                activeOpacity={0.85}
+              >
                 <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
                 <Text style={styles.emptyActionText}>Crossed Paths</Text>
               </TouchableOpacity>
             </View>
-          </Animated.View>
+          </View>
         )}
 
         {/* My location button (static, tap-once recenter) */}
@@ -1871,7 +1917,7 @@ export default function NearbyScreen() {
       {/* Nearby settings entry is intentionally NOT here — users access
           Nearby settings only via Profile → Privacy → Nearby settings. */}
       <View style={styles.header}>
-        <View style={{ width: 22 }} />
+        <View style={{ width: 24 }} />
         <Text style={styles.headerTitle}>Nearby</Text>
         <View style={styles.headerIcons}>
           <TouchableOpacity
@@ -1881,7 +1927,7 @@ export default function NearbyScreen() {
             accessibilityHint="View people you've crossed paths with"
           >
             <View>
-              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              <Ionicons name="footsteps-outline" size={24} color={COLORS.text} />
               {hasNewCrossedPaths && (
                 <Badge dot animate style={styles.crossedPathsBadge} />
               )}
@@ -1914,15 +1960,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    backgroundColor: COLORS.background,
+    // No shadow / elevation / border — header and SafeArea share the
+    // same background so the top of the screen reads as one continuous
+    // premium surface. Visual hierarchy comes from typography + spacing.
   },
   headerTitle: {
-    fontSize: 20,
-    fontWeight: '600',
+    fontSize: 22,
+    fontWeight: '700',
     color: COLORS.text,
+    letterSpacing: -0.3,
   },
   headerIcons: {
     flexDirection: 'row',
@@ -1981,9 +2030,13 @@ const styles = StyleSheet.create({
   },
   mapContainer: {
     flex: 1,
+    // P2-FIX-5: neutral Google-Maps-like base color so the canvas never
+    // reads as pure white if native tile paint is momentarily delayed.
+    backgroundColor: '#E5E3DF',
   },
   mapStage: {
     flex: 1,
+    backgroundColor: '#E5E3DF',
   },
   map: {
     flex: 1,
@@ -2082,37 +2135,50 @@ const styles = StyleSheet.create({
   emptyCard: {
     flexDirection: 'column',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.97)',
-    paddingHorizontal: 24,
-    paddingVertical: 20,
-    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.98)',
+    paddingHorizontal: 28,
+    paddingVertical: 24,
+    borderRadius: 20,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.12,
-    shadowRadius: 6,
-    elevation: 4,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 5,
+  },
+  emptyIconBubble: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: COLORS.primarySubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
   },
   emptyTitle: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 17,
+    fontWeight: '700',
     color: COLORS.text,
-    marginTop: 10,
+    marginTop: 12,
     textAlign: 'center',
+    letterSpacing: -0.2,
   },
   emptySubtitle: {
     fontSize: 13,
     color: COLORS.textLight,
     textAlign: 'center',
-    marginTop: 4,
+    marginTop: 6,
+    lineHeight: 19,
+    paddingHorizontal: 4,
   },
   emptyActionButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 22,
     backgroundColor: `${COLORS.primary}15`,
     gap: 6,
+    marginTop: 16,
   },
   emptyActionText: {
     fontSize: 13,
