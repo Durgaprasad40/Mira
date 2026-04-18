@@ -113,9 +113,9 @@ export default function PrivacySettingsScreen() {
     const applyChange = async () => {
       setHideFromDiscover(newValue);
       // Sync to backend in live mode
-      if (!isDemoMode && userId) {
+      if (!isDemoMode && userId && token) {
         try {
-          await updatePrivacySettings({ authUserId: userId, hideFromDiscover: newValue });
+          await updatePrivacySettings({ token, authUserId: userId, hideFromDiscover: newValue });
           // Keep any existing legacy pause countdown if present. When turning OFF, clear countdown.
           setDiscoveryPauseEndsAt(newValue ? discoveryPauseEndsAt : null);
         } catch {
@@ -149,43 +149,43 @@ export default function PrivacySettingsScreen() {
       return; // Don't toggle yet, wait for user confirmation
     }
     applyChange();
-  }, [warningShownThisSession, setHideFromDiscover, updatePrivacySettings, userId, discoveryPauseEndsAt]);
+  }, [warningShownThisSession, setHideFromDiscover, updatePrivacySettings, userId, token, discoveryPauseEndsAt]);
 
   const handleHideAgeChange = useCallback(async (newValue: boolean) => {
     setHideAge(newValue);
-    if (!isDemoMode && userId) {
+    if (!isDemoMode && userId && token) {
       try {
-        await updatePrivacySettings({ authUserId: userId, hideAge: newValue });
+        await updatePrivacySettings({ token, authUserId: userId, hideAge: newValue });
       } catch {
         Toast.show("Couldn't update setting. Please try again.");
         setHideAge(!newValue);
       }
     }
-  }, [setHideAge, updatePrivacySettings, userId]);
+  }, [setHideAge, updatePrivacySettings, userId, token]);
 
   const handleHideDistanceChange = useCallback(async (newValue: boolean) => {
     setHideDistance(newValue);
-    if (!isDemoMode && userId) {
+    if (!isDemoMode && userId && token) {
       try {
-        await updatePrivacySettings({ authUserId: userId, hideDistance: newValue });
+        await updatePrivacySettings({ token, authUserId: userId, hideDistance: newValue });
       } catch {
         Toast.show("Couldn't update setting. Please try again.");
         setHideDistance(!newValue);
       }
     }
-  }, [setHideDistance, updatePrivacySettings, userId]);
+  }, [setHideDistance, updatePrivacySettings, userId, token]);
 
   const handleDisableReadReceiptsChange = useCallback(async (newValue: boolean) => {
     setDisableReadReceipts(newValue);
-    if (!isDemoMode && userId) {
+    if (!isDemoMode && userId && token) {
       try {
-        await updatePrivacySettings({ authUserId: userId, disableReadReceipts: newValue });
+        await updatePrivacySettings({ token, authUserId: userId, disableReadReceipts: newValue });
       } catch {
         Toast.show("Couldn't update setting. Please try again.");
         setDisableReadReceipts(!newValue);
       }
     }
-  }, [setDisableReadReceipts, updatePrivacySettings, userId]);
+  }, [setDisableReadReceipts, updatePrivacySettings, userId, token]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>

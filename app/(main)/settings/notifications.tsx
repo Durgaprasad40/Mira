@@ -91,6 +91,7 @@ export default function NotificationsSettingsScreen() {
       }
 
       await updateNotificationSettings({
+        token,
         authUserId: userId,
         notificationsEnabled: enabled,
       });

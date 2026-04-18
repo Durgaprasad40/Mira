@@ -1386,6 +1386,7 @@ export default function EditProfileScreen() {
         console.warn('[EDIT_PROFILE] Cannot update profile - no userId');
       } else if (shouldWriteCoreProfile) {
         await updateProfile({
+          token: sessionToken,
           authUserId: userId,
           name: nextName,
           bio: nextBio,

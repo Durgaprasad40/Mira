@@ -84,12 +84,12 @@ export default function AccountSettingsScreen() {
                 return;
               }
 
-              if (!userId) {
+              if (!userId || !token) {
                 Alert.alert('Error', 'Unable to deactivate your account. Please try again.');
                 return;
               }
 
-              await deactivateMutation({ authUserId: userId });
+              await deactivateMutation({ token, authUserId: userId });
 
               useOnboardingStore.getState().reset();
               await logout();
@@ -131,12 +131,13 @@ export default function AccountSettingsScreen() {
               }
 
               // Real mode: call soft delete mutation before logging out
-              if (!userId) {
+              if (!userId || !token) {
                 Alert.alert('Error', 'Unable to delete your account. Please log out and back in, then try again.');
                 return;
               }
 
               await softDeleteMutation({
+                token,
                 authUserId: userId,
                 reason: 'User requested account deletion',
               });

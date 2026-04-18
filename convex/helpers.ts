@@ -345,6 +345,61 @@ export async function validateSessionToken(
 }
 
 /**
+ * Enforce that the caller owns the requested `authUserId`.
+ *
+ * Mirrors the `logout` mutation's ownership-validation pattern so any mutation
+ * that mutates user-owned state can reject spoofed `authUserId` inputs.
+ *
+ * Checks performed:
+ *  1. `token` must be a non-empty string
+ *  2. `authUserId` must resolve to a real Convex user (requested user)
+ *  3. `token` must be valid per `validateSessionToken` (owner user)
+ *  4. `tokenOwnerId === requestedUserId`
+ *  5. If `ctx.auth` has an identity, its subject must also resolve to the
+ *     same Convex user (defense-in-depth, matches logout)
+ *
+ * @param ctx - Convex mutation context (requires `ctx.auth` + `ctx.db`)
+ * @param token - Session or demo token from the client auth store
+ * @param authUserId - Auth ID the client claims to be acting as
+ * @returns Verified Convex userId if all checks pass
+ * @throws Error('Unauthorized: ...') on any validation failure
+ */
+export async function validateOwnership(
+  ctx: MutationCtx,
+  token: string,
+  authUserId: string,
+): Promise<Id<'users'>> {
+  const trimmed = (token ?? '').trim();
+  if (!trimmed) {
+    throw new Error('Unauthorized: Missing session token');
+  }
+
+  const requestedUserId = await resolveUserIdByAuthId(ctx, authUserId);
+  if (!requestedUserId) {
+    throw new Error('Unauthorized: Invalid caller');
+  }
+
+  const tokenOwnerId = await validateSessionToken(ctx, trimmed);
+  if (!tokenOwnerId) {
+    throw new Error('Unauthorized: Invalid or expired session');
+  }
+
+  if (tokenOwnerId !== requestedUserId) {
+    throw new Error('Unauthorized: Session ownership mismatch');
+  }
+
+  const identity = await ctx.auth.getUserIdentity();
+  if (identity?.subject) {
+    const callerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!callerUserId || callerUserId !== tokenOwnerId) {
+      throw new Error('Unauthorized: Session does not belong to caller');
+    }
+  }
+
+  return tokenOwnerId;
+}
+
+/**
  * Get Phase-2 display name for a user.
  *
  * Phase-2 privacy rules:

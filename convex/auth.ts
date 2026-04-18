@@ -3,7 +3,7 @@ import { internalMutation, mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { api } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
-import { resolveUserIdByAuthId, validateSessionToken } from "./helpers";
+import { resolveUserIdByAuthId, validateOwnership, validateSessionToken } from "./helpers";
 
 // ============================================================================
 // Crypto helpers (Convex-compatible, no Node.js dependencies)
@@ -2001,31 +2001,42 @@ export const checkIdentityExists = query({
  */
 export const softDeleteAccount = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(), // Auth ID from client, resolved server-side
     reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, reason } = args;
+    const { token, authUserId, reason } = args;
     const now = Date.now();
 
-    // Resolve auth ID to actual user ID server-side (prevents spoofing)
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error("User not found");
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, token, authUserId);
 
     const user = await ctx.db.get(userId);
     if (!user) {
       throw new Error("User not found");
     }
 
-    // Soft delete: set flags, revoke sessions
+    // Soft delete: set flags, mass-revoke sessions via sessionsRevokedAt,
+    // and clear the push token so no further pushes are sent to this device.
+    // R-1: pushToken cleared immediately.
     await ctx.db.patch(userId, {
       deletedAt: now,
       deletionFinalizedAt: undefined,
       isActive: false,
       sessionsRevokedAt: now,
+      pushToken: undefined,
     });
+
+    // R-1: Delete active session rows immediately so tokens stop working
+    // right away (not just via sessionsRevokedAt on next validation).
+    const activeSessions = await ctx.db
+      .query("sessions")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+    for (const session of activeSessions) {
+      await ctx.db.delete(session._id);
+    }
 
     // Audit log
     await logAdminAction(ctx, {
@@ -2036,6 +2047,7 @@ export const softDeleteAccount = mutation({
       metadata: {
         previousIsActive: user.isActive,
         deletedAt: now,
+        sessionsRevoked: activeSessions.length,
       },
     });
 

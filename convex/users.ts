@@ -4,7 +4,7 @@ import { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { validateAccess } from "./devReset";
-import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
+import { resolveUserIdByAuthId, ensureUserByAuthId, validateOwnership, validateSessionToken } from "./helpers";
 import {
   FRONTEND_RELATIONSHIP_INTENT_IDS,
   normalizeRelationshipIntentValues,
@@ -513,6 +513,7 @@ export const updateProfilePrompts = mutation({
 // Update user profile
 export const updateProfile = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
     name: v.optional(v.string()),
     bio: v.optional(v.string()),
@@ -662,6 +663,7 @@ export const updateProfile = mutation({
   },
   handler: async (ctx, args) => {
     const {
+      token,
       authUserId,
       name,
       bio,
@@ -673,14 +675,8 @@ export const updateProfile = mutation({
       ...otherUpdates
     } = args;
 
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, token, authUserId);
 
     const normalizedName = normalizeOptionalTrimmedString(
       name,
@@ -1058,6 +1054,7 @@ export const toggleShowLastSeen = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only update their own privacy settings
 export const updatePrivacySettings = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(),
     hideFromDiscover: v.optional(v.boolean()),
     hideAge: v.optional(v.boolean()),
@@ -1065,13 +1062,10 @@ export const updatePrivacySettings = mutation({
     disableReadReceipts: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, hideFromDiscover, hideAge, hideDistance, disableReadReceipts } = args;
+    const { token, authUserId, hideFromDiscover, hideAge, hideDistance, disableReadReceipts } = args;
 
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, token, authUserId);
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -1104,6 +1098,7 @@ export const updatePrivacySettings = mutation({
 // APP-P0-002 FIX: Server-side auth - user can only update their own settings
 export const updateNotificationSettings = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(),
     notificationsEnabled: v.optional(v.boolean()),
     emailNotificationsEnabled: v.optional(v.boolean()),
@@ -1115,6 +1110,7 @@ export const updateNotificationSettings = mutation({
   },
   handler: async (ctx, args) => {
     const {
+      token,
       authUserId,
       notificationsEnabled,
       emailNotificationsEnabled,
@@ -1124,11 +1120,8 @@ export const updateNotificationSettings = mutation({
       notifyProfileViews,
     } = args;
 
-    // APP-P0-002 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, token, authUserId);
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -1499,14 +1492,12 @@ export const generateReportEvidenceUploadUrl = mutation({
 // APP-P0-003 FIX: Server-side auth - user can only deactivate their own account
 export const deactivateAccount = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    // APP-P0-003 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     const now = Date.now();
     // Full-account deactivation: hide user everywhere + revoke existing sessions.
@@ -1520,14 +1511,12 @@ export const deactivateAccount = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only reactivate their own account
 export const reactivateAccount = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     await ctx.db.patch(userId, { isActive: true, lastActive: Date.now() });
     return { success: true };
