@@ -1,4 +1,5 @@
 import { v } from 'convex/values';
+import { internal } from './_generated/api';
 import { mutation, query, internalMutation, type MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId } from './helpers';
@@ -276,8 +277,13 @@ export const createNotification = mutation({
       expiresAt, // 4-2: Set expiry timestamp
     });
 
-    // TODO: Send push notification via Expo
-    // This would typically be done in an action that calls Expo's push API
+    await ctx.scheduler.runAfter(0, internal.pushNotifications.send, {
+      userId,
+      title,
+      body,
+      data: data ?? null,
+      type,
+    });
 
     return { success: true, notificationId, updated: false };
   },
@@ -443,6 +449,13 @@ export const sendWeeklyRefreshNotifications = mutation({
           dedupeKey: `weekly_refresh:${new Date(now).toDateString()}`, // 4-1: One per day
           createdAt: now,
           expiresAt, // 4-2: Set expiry
+        });
+        await ctx.scheduler.runAfter(0, internal.pushNotifications.send, {
+          userId: user._id,
+          title: 'Weekly Messages Refreshed!',
+          body: 'Your weekly messages have been reset. Start connecting!',
+          data: null,
+          type: 'weekly_refresh',
         });
         sentCount++;
       }

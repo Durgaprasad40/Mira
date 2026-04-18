@@ -1421,6 +1421,16 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_enabled', ['isPrivateEnabled']),
 
+  userPrivateProfileAuditLog: defineTable({
+    userId: v.id('users'),
+    changedFields: v.array(v.string()),
+    previousValues: v.optional(v.any()),
+    newValues: v.optional(v.any()),
+    changedAt: v.number(),
+    source: v.literal('user'),
+  })
+    .index('by_user_changedAt', ['userId', 'changedAt']),
+
   // Reveal Requests table (mutual photo reveal for Private Mode)
   revealRequests: defineTable({
     fromUserId: v.id('users'),

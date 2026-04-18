@@ -167,6 +167,55 @@ function validateEnumKeys(
   return { ok: true };
 }
 
+const PHASE2_NOTIFICATION_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const PHASE2_NOTIFICATION_RATE_LIMIT_MAX_WRITES = 20;
+
+function normalizeNotificationCategorySettings(
+  categories:
+    | {
+        deepConnect?: boolean;
+        privateMessages?: boolean;
+        chatRooms?: boolean;
+        truthOrDare?: boolean;
+      }
+    | undefined,
+) {
+  return {
+    deepConnect: categories?.deepConnect,
+    privateMessages: categories?.privateMessages,
+    chatRooms: categories?.chatRooms,
+    truthOrDare: categories?.truthOrDare,
+  };
+}
+
+function notificationCategorySettingsEqual(
+  left:
+    | {
+        deepConnect?: boolean;
+        privateMessages?: boolean;
+        chatRooms?: boolean;
+        truthOrDare?: boolean;
+      }
+    | undefined,
+  right:
+    | {
+        deepConnect?: boolean;
+        privateMessages?: boolean;
+        chatRooms?: boolean;
+        truthOrDare?: boolean;
+      }
+    | undefined,
+) {
+  const normalizedLeft = normalizeNotificationCategorySettings(left);
+  const normalizedRight = normalizeNotificationCategorySettings(right);
+  return (
+    normalizedLeft.deepConnect === normalizedRight.deepConnect &&
+    normalizedLeft.privateMessages === normalizedRight.privateMessages &&
+    normalizedLeft.chatRooms === normalizedRight.chatRooms &&
+    normalizedLeft.truthOrDare === normalizedRight.truthOrDare
+  );
+}
+
 function validateOptionalRangeNumber(
   value: number | null | undefined,
   min: number,
@@ -572,14 +621,6 @@ export const updateFieldsByAuthId = mutation({
     disableReadReceipts: v.optional(v.boolean()),
     // Phase-2 Safety
     safeMode: v.optional(v.boolean()),
-    // Phase-2 Notifications
-    notificationsEnabled: v.optional(v.boolean()),
-    notificationCategories: v.optional(v.object({
-      deepConnect: v.optional(v.boolean()),
-      privateMessages: v.optional(v.boolean()),
-      chatRooms: v.optional(v.boolean()),
-      truthOrDare: v.optional(v.boolean()),
-    })),
     // Phase-2 Photo & Media Privacy
     defaultPhotoVisibility: v.optional(
       v.union(v.literal('public'), v.literal('blurred'), v.literal('private'))
@@ -700,6 +741,105 @@ export const updateFieldsByAuthId = mutation({
     await ctx.db.patch(existing._id, cleanUpdates);
     console.log('[PRIVATE_PROFILE] updateFieldsByAuthId: success');
     return { success: true };
+  },
+});
+
+export const setPhase2NotificationPreferences = mutation({
+  args: {
+    token: v.string(),
+    authUserId: v.string(),
+    notificationsEnabled: v.optional(v.boolean()),
+    notificationCategories: v.optional(v.object({
+      deepConnect: v.optional(v.boolean()),
+      privateMessages: v.optional(v.boolean()),
+      chatRooms: v.optional(v.boolean()),
+      truthOrDare: v.optional(v.boolean()),
+    })),
+  },
+  handler: async (ctx, args) => {
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
+
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      return { success: false as const, error: 'deletion_pending' as const };
+    }
+
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    if (!existing) {
+      return { success: false as const, error: 'profile_not_found' as const };
+    }
+
+    const now = Date.now();
+    const recentWrites = await ctx.db
+      .query('userPrivateProfileAuditLog')
+      .withIndex('by_user_changedAt', (q) =>
+        q.eq('userId', userId).gte('changedAt', now - PHASE2_NOTIFICATION_RATE_LIMIT_WINDOW_MS)
+      )
+      .take(PHASE2_NOTIFICATION_RATE_LIMIT_MAX_WRITES + 1);
+
+    if (recentWrites.length > PHASE2_NOTIFICATION_RATE_LIMIT_MAX_WRITES) {
+      return { success: false as const, error: 'rate_limited' as const };
+    }
+
+    const changedFields: string[] = [];
+    const previousValues: Record<string, unknown> = {};
+    const newValues: Record<string, unknown> = {};
+    const patch: Record<string, unknown> = {};
+
+    if (
+      args.notificationsEnabled !== undefined &&
+      args.notificationsEnabled !== existing.notificationsEnabled
+    ) {
+      changedFields.push('notificationsEnabled');
+      previousValues.notificationsEnabled = existing.notificationsEnabled;
+      newValues.notificationsEnabled = args.notificationsEnabled;
+      patch.notificationsEnabled = args.notificationsEnabled;
+    }
+
+    if (args.notificationCategories !== undefined) {
+      const nextNotificationCategories = {
+        ...(existing.notificationCategories ?? {}),
+        ...args.notificationCategories,
+      };
+
+      if (
+        !notificationCategorySettingsEqual(
+          existing.notificationCategories,
+          nextNotificationCategories,
+        )
+      ) {
+        changedFields.push('notificationCategories');
+        previousValues.notificationCategories = normalizeNotificationCategorySettings(
+          existing.notificationCategories,
+        );
+        newValues.notificationCategories = normalizeNotificationCategorySettings(
+          nextNotificationCategories,
+        );
+        patch.notificationCategories = nextNotificationCategories;
+      }
+    }
+
+    if (changedFields.length === 0) {
+      return { success: true as const };
+    }
+
+    patch.updatedAt = now;
+    await ctx.db.patch(existing._id, patch);
+
+    await ctx.db.insert('userPrivateProfileAuditLog', {
+      userId,
+      changedFields,
+      previousValues,
+      newValues,
+      changedAt: now,
+      source: 'user',
+    });
+
+    return { success: true as const };
   },
 });
 

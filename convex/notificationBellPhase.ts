@@ -11,7 +11,6 @@ export const PHASE2_ONLY_TYPES = new Set<string>([
   'phase2_match',
   'phase2_like',
   'phase2_private_message',
-  'tod_connect',
 ]);
 
 /**

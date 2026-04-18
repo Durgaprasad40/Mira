@@ -173,6 +173,7 @@ interface PrivateProfileState {
   // Phase-2 Notifications Settings
   notificationsEnabled: boolean;
   notificationCategories: Record<string, boolean>;
+  hasHydratedNotifications: boolean;
 
   // Actions — photo selection
   setSelectedPhotos: (ids: string[], urls: string[]) => void;
@@ -374,6 +375,7 @@ const initialWizardState = {
   // Phase-2 Notifications defaults
   notificationsEnabled: true,
   notificationCategories: {} as Record<string, boolean>,
+  hasHydratedNotifications: false,
 };
 
 export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
@@ -721,6 +723,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         safeMode: false,
         notificationsEnabled: true,
         notificationCategories: {},
+        hasHydratedNotifications: true,
         defaultPhotoVisibility: 'blurred',
         allowUnblurRequests: true,
         defaultSecureMediaTimer: 30,
@@ -819,6 +822,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       // P0-1 FIX: Notification settings (hydrate from backend)
       notificationsEnabled: convexProfile.notificationsEnabled ?? true,
       notificationCategories,
+      hasHydratedNotifications: true,
 
       // Phase-2 Photo & Media Privacy (defaults match initialWizardState / UI)
       defaultPhotoVisibility: convexProfile.defaultPhotoVisibility ?? 'blurred',

@@ -18,12 +18,10 @@ const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
 // - phase2_match: Matches created in Deep Connect
 // - phase2_like: Likes received in Deep Connect
 // - comment_connect: Confession comment connects
-// - tod_connect: Truth or Dare connections
 const PHASE2_ONLY_TYPES = new Set([
   'phase2_match',
   'phase2_like',
   'phase2_private_message',
-  'tod_connect',
 ]);
 
 // Types excluded from ALL in-app bells — messages have dedicated chat UI, not bell
@@ -155,9 +153,6 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
       return `phase2_like:${userId ?? 'unknown'}`;
     case 'phase2_private_message':
       return `phase2_message:${data?.conversationId ?? userId ?? 'unknown'}:unread`;
-    case 'tod_connect':
-      // Dedupe by answer/prompt context to avoid duplicate connect notifications
-      return `tod_connect:${data?.answerId ?? data?.promptId ?? userId ?? 'unknown'}`;
     case 'comment_connect':
       // Dedupe by conversation ID for comment-based connections
       return `comment_connect:${data?.conversationId ?? userId ?? 'unknown'}`;

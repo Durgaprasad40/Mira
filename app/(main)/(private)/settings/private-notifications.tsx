@@ -6,13 +6,12 @@
  * - Deep Connect notifications
  * - Private Messages
  * - Chat Rooms
- * - Truth or Dare
  *
  * Uses Phase-2 dark premium styling (INCOGNITO_COLORS).
  * No Phase-1 categories.
  */
 import React, { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
+import { Alert, View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useMutation } from 'convex/react';
@@ -37,7 +36,6 @@ function toConvexNotificationCategories(categories: Record<string, boolean>) {
     deepConnect: categories.deepConnect !== false,
     privateMessages: categories.privateMessages !== false,
     chatRooms: categories.chatRooms !== false,
-    truthOrDare: categories.truthOrDare !== false,
   };
 }
 
@@ -60,12 +58,6 @@ const NOTIFICATION_CATEGORIES: NotificationCategory[] = [
     title: 'Chat Rooms',
     description: 'Activity in rooms you\'ve joined',
   },
-  {
-    key: 'truthOrDare',
-    icon: 'game-controller-outline',
-    title: 'Truth or Dare',
-    description: 'Game invites and responses',
-  },
 ];
 
 export default function PrivateNotificationsScreen() {
@@ -73,7 +65,9 @@ export default function PrivateNotificationsScreen() {
   const insets = useSafeAreaInsets();
   const authUserId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
-  const updateFieldsByAuthId = useMutation(api.privateProfiles.updateFieldsByAuthId);
+  const setPhase2NotificationPreferences = useMutation(
+    api.privateProfiles.setPhase2NotificationPreferences
+  );
 
   // Master toggle from store (persisted via userPrivateProfiles)
   const notificationsEnabled = usePrivateProfileStore((s) => s.notificationsEnabled);
@@ -82,61 +76,119 @@ export default function PrivateNotificationsScreen() {
   // Category toggles from store (persisted via userPrivateProfiles)
   const notificationCategories = usePrivateProfileStore((s) => s.notificationCategories);
   const setNotificationCategory = usePrivateProfileStore((s) => s.setNotificationCategory);
+  const hasHydratedNotifications = usePrivateProfileStore((s) => s.hasHydratedNotifications);
 
   // Track which field is being toggled to prevent double-toggles
   const [savingField, setSavingField] = useState<string | null>(null);
 
-  const persistNotificationSettings = useCallback(
-    (enabled: boolean, categories: Record<string, boolean>) => {
-      if (!authUserId || !token) return;
-      void updateFieldsByAuthId({
-        token,
-        authUserId,
-        notificationsEnabled: enabled,
-        notificationCategories: toConvexNotificationCategories(categories),
-      })
-        .then((res) => {
-          if (res && !res.success && __DEV__) {
-            console.warn('[PrivateNotifications] updateFieldsByAuthId:', res.error);
-          }
-        })
-        .catch((err) => {
-          if (__DEV__) {
-            console.warn('[PrivateNotifications] updateFieldsByAuthId failed', err);
-          }
-        });
+  const showSaveErrorAlert = useCallback(() => {
+    Alert.alert('Could not save settings', 'Please try again.');
+  }, []);
+
+  const rollbackNotificationSettings = useCallback(
+    (prevEnabled: boolean, prevCategories: Record<string, boolean>) => {
+      setNotificationsEnabled(prevEnabled);
+      NOTIFICATION_CATEGORIES.forEach(({ key }) => {
+        setNotificationCategory(key, prevCategories[key] !== false);
+      });
     },
-    [authUserId, token, updateFieldsByAuthId]
+    [setNotificationCategory, setNotificationsEnabled]
+  );
+
+  const persistNotificationSettings = useCallback(
+    async (
+      field: string,
+      enabled: boolean,
+      categories: Record<string, boolean>,
+      prevEnabled: boolean,
+      prevCategories: Record<string, boolean>
+    ) => {
+      setSavingField(field);
+
+      if (!authUserId || !token) {
+        rollbackNotificationSettings(prevEnabled, prevCategories);
+        showSaveErrorAlert();
+        setSavingField(null);
+        return;
+      }
+
+      try {
+        const res = await setPhase2NotificationPreferences({
+          token,
+          authUserId,
+          notificationsEnabled: enabled,
+          notificationCategories: toConvexNotificationCategories(categories),
+        });
+
+        if (!res?.success) {
+          rollbackNotificationSettings(prevEnabled, prevCategories);
+          showSaveErrorAlert();
+
+          if (__DEV__) {
+            console.warn('[PrivateNotifications] setPhase2NotificationPreferences:', res?.error);
+          }
+        }
+      } catch (err) {
+        rollbackNotificationSettings(prevEnabled, prevCategories);
+        showSaveErrorAlert();
+
+        if (__DEV__) {
+          console.warn('[PrivateNotifications] setPhase2NotificationPreferences failed', err);
+        }
+      } finally {
+        setSavingField(null);
+      }
+    },
+    [
+      authUserId,
+      rollbackNotificationSettings,
+      setPhase2NotificationPreferences,
+      showSaveErrorAlert,
+      token,
+    ]
   );
 
   // Handle master toggle — store first, then background persist
   const handleMasterToggle = useCallback(
     (enabled: boolean) => {
-      if (savingField) return; // Prevent double-toggle while saving
+      if (!hasHydratedNotifications || savingField) return; // Prevent double-toggle while saving
+      const prevEnabled = usePrivateProfileStore.getState().notificationsEnabled;
+      const prevCategories = { ...usePrivateProfileStore.getState().notificationCategories };
       setNotificationsEnabled(enabled);
       const { notificationsEnabled: nextEnabled, notificationCategories: nextCategories } =
         usePrivateProfileStore.getState();
-      persistNotificationSettings(nextEnabled, nextCategories);
+      void persistNotificationSettings('master', nextEnabled, nextCategories, prevEnabled, prevCategories);
     },
-    [savingField, setNotificationsEnabled, persistNotificationSettings]
+    [hasHydratedNotifications, savingField, setNotificationsEnabled, persistNotificationSettings]
   );
 
   // Handle category toggle — store first, then background persist
   const handleCategoryToggle = useCallback(
     (categoryKey: string, enabled: boolean) => {
-      if (savingField) return; // Prevent double-toggle while saving
+      if (!hasHydratedNotifications || savingField) return; // Prevent double-toggle while saving
+      const prevEnabled = usePrivateProfileStore.getState().notificationsEnabled;
+      const prevCategories = { ...usePrivateProfileStore.getState().notificationCategories };
       setNotificationCategory(categoryKey, enabled);
       const { notificationsEnabled: nextEnabled, notificationCategories: nextCategories } =
         usePrivateProfileStore.getState();
-      persistNotificationSettings(nextEnabled, nextCategories);
+      void persistNotificationSettings(categoryKey, nextEnabled, nextCategories, prevEnabled, prevCategories);
     },
-    [savingField, setNotificationCategory, persistNotificationSettings]
+    [hasHydratedNotifications, savingField, setNotificationCategory, persistNotificationSettings]
   );
 
   // Check if category is enabled
   const isCategoryEnabled = (key: string): boolean => {
     return notificationCategories[key] !== false; // Default to true if not set
   };
+
+  if (!hasHydratedNotifications) {
+    return (
+      <View style={[styles.container, styles.loadingContainer, { paddingTop: insets.top }]}>
+        <ActivityIndicator size="large" color={C.primary} />
+        <Text style={styles.loadingText}>Loading notification settings…</Text>
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -283,6 +335,15 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  loadingContainer: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 12,
+  },
+  loadingText: {
+    color: C.text,
+    fontSize: 15,
   },
   section: {
     paddingHorizontal: 16,
