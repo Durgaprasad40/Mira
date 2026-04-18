@@ -667,7 +667,7 @@ async function enforceAccountRestorePolicy(ctx: any, user: any, now: number) {
 async function finalizeExpiredSoftDeletedUser(ctx: any, user: any, now: number) {
   const sessions = await ctx.db
     .query("sessions")
-    .withIndex("by_user", (q) => q.eq("userId", user._id))
+    .withIndex("by_user", (q: any) => q.eq("userId", user._id))
     .collect();
 
   for (const session of sessions) {
