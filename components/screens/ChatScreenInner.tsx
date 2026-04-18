@@ -237,7 +237,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const conversation = useQuery(
     api.messages.getConversation,
     !isDemo && conversationId && userId && token
-      ? { conversationId: conversationId as any, token, authUserId: userId }
+      ? ({ conversationId: conversationId as any, token, authUserId: userId } as any)
       : 'skip'
   );
 
@@ -245,7 +245,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const convexMessages = useQuery(
     api.messages.getMessages,
     !isDemo && conversationId && userId && token
-      ? { conversationId: conversationId as any, token, authUserId: userId }
+      ? ({ conversationId: conversationId as any, token, authUserId: userId } as any)
       : 'skip'
   );
 
@@ -381,8 +381,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       console.log('[LIVE-TICK-HASH] Hash computed:', {
         msgCount: recentMessages.length,
         lastMsgId: lastMsg?._id?.slice(-6),
-        lastDelivered: !!lastMsg?.deliveredAt,
-        lastRead: !!lastMsg?.readAt,
+        lastDelivered: !!(lastMsg as any)?.deliveredAt,
+        lastRead: !!(lastMsg as any)?.readAt,
       });
     }
 
@@ -571,13 +571,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // Using inviter's name so recipient sees "[Name] wants to play..." and sender sees their own name
       const inviterName = currentUser?.name || 'Someone';
       const markedMessage = `[SYSTEM:truthdare]${inviterName} wants to play Truth or Dare!`;
-      await sendMessage({
+      await sendMessage(({
         conversationId: conversationId as any,
         token: token ?? undefined,
         authUserId: userId,
         content: markedMessage,
         type: 'text',
-      });
+      } as any));
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to send invite');
     }
@@ -600,13 +600,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         ? `${responderName} is ready to play! Game starting...`
         : `${responderName} declined the game invite`;
       const markedMessage = `[SYSTEM:truthdare]${responseText}`;
-      await sendMessage({
+      await sendMessage(({
         conversationId: conversationId as any,
         token: token ?? undefined,
         authUserId: userId,
         content: markedMessage,
         type: 'text',
-      });
+      } as any));
 
       // If accepted, open the game
       if (accept) {
@@ -659,13 +659,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         // Convex mode: prefix with hidden marker (stripped by MessageBubble)
         const markedMessage = `[SYSTEM:truthdare]${message}`;
         // MSG-001 FIX: Use authUserId for server-side verification
-        await sendMessage({
+        await sendMessage(({
           conversationId: conversationId as any,
           token: token ?? undefined,
           authUserId: userId,
           content: markedMessage,
           type: 'text',
-        });
+        } as any));
       }
     } catch {
       // Silent fail - game continues even if message fails
@@ -686,7 +686,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       markNotifReadForConvo(conversationId);
     } else if (!isDemo && conversationId && userId) {
       // MSG-004 FIX: Use authUserId for server-side verification
-      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
         .catch((err) => {
           if (__DEV__) console.warn('[ChatScreen] markAsRead failed:', err);
         });
@@ -695,7 +695,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           if (__DEV__) console.warn('[ChatScreen] markReadForConversation failed:', err);
         });
       // MESSAGE-TICKS-FIX: Mark messages as delivered when conversation is opened
-      markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+      markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
         .catch((err) => {
           if (__DEV__) console.warn('[ChatScreen] markAsDelivered failed:', err);
         });
@@ -710,7 +710,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (isDemo && conversationId) {
       markDemoRead(conversationId, getDemoUserId());
     } else if (!isDemo && conversationId && userId) {
-      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+      markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
         .catch((err) => {
           if (__DEV__) console.warn('[ChatScreen] markAsRead on focus failed:', err);
         });
@@ -727,13 +727,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (isDemo || !userId) return;
 
     // Update presence immediately on mount
-    updatePresence({ token: token ?? undefined, authUserId: userId }).catch(() => {
+    updatePresence({ token: token ?? undefined, authUserId: userId } as any).catch(() => {
       // Silent fail - presence is best-effort
     });
 
     // Update every 30 seconds while chat is open
     const interval = setInterval(() => {
-      updatePresence({ token: token ?? undefined, authUserId: userId }).catch(() => {
+      updatePresence({ token: token ?? undefined, authUserId: userId } as any).catch(() => {
         // Silent fail
       });
     }, 30_000);
@@ -786,8 +786,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         currentUserId,
         hasUnreadFromOther,
         isFromOther: latestMsg?.senderId !== currentUserId,
-        latestReadAt: latestMsg?.readAt,
-        latestDeliveredAt: latestMsg?.deliveredAt,
+        latestReadAt: (latestMsg as any)?.readAt,
+        latestDeliveredAt: (latestMsg as any)?.deliveredAt,
       });
     }
 
@@ -801,7 +801,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         if (__DEV__) console.log('[LIVE-TICK-V2] Convex mode: calling markAsDelivered and markAsRead');
 
         // Mark as delivered (sets deliveredAt on all undelivered messages from other user)
-        markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+        markAsDelivered({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
           .then((result) => {
             if (__DEV__) console.log('[LIVE-TICK-V2] markAsDelivered result:', result);
           })
@@ -810,7 +810,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           });
 
         // Mark as read (sets readAt on all unread messages from other user)
-        markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId })
+        markAsRead({ conversationId: conversationId as any, token: token ?? undefined, authUserId: userId } as any)
           .then((result) => {
             if (__DEV__) console.log('[LIVE-TICK-V2] markAsRead result:', result);
           })
@@ -915,12 +915,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const handleTypingChange = useCallback((isTyping: boolean) => {
     if (isDemo || !conversationId || !userId) return;
     // Fire and forget - don't block UI for typing status updates
-    setTypingStatus({
+    setTypingStatus(({
       conversationId: conversationId as any,
       token: token ?? undefined,
       authUserId: userId,
       isTyping,
-    }).catch(() => {
+    } as any)).catch(() => {
       // Silently ignore typing status errors
     });
   }, [isDemo, conversationId, userId, token, setTypingStatus]);
@@ -929,12 +929,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   useEffect(() => {
     return () => {
       if (!isDemo && conversationId && userId) {
-        setTypingStatus({
+        setTypingStatus(({
           conversationId: conversationId as any,
           token: token ?? undefined,
           authUserId: userId,
           isTyping: false,
-        }).catch(() => {});
+        } as any)).catch(() => {});
       }
     };
   }, [isDemo, conversationId, userId, token, setTypingStatus]);
@@ -999,24 +999,24 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     try {
       if (activeConversation.isPreMatch) {
         // MSG-002 FIX: Use authUserId for server-side verification
-        await sendPreMatchMessage({
+        await sendPreMatchMessage(({
           token: token ?? undefined,
           authUserId: userId,
           toUserId: (activeConversation as any).otherUser.id as any,
           content: text,
           templateId: type === 'template' ? 'custom' : undefined,
           clientMessageId,
-        });
+        } as any));
       } else {
         // MSG-001 FIX: Use authUserId for server-side verification
-        await sendMessage({
+        await sendMessage(({
           conversationId: conversationId as any,
           token: token ?? undefined,
           authUserId: userId,
           type: 'text',
           content: text,
           clientMessageId,
-        });
+        } as any));
       }
       // B5 fix: clear draft after successful send in Convex mode
       if (conversationId) clearDemoDraft(conversationId);
@@ -1065,7 +1065,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         const { storageId } = await uploadResult.json();
 
         // Send voice message
-        await sendMessage({
+        await sendMessage(({
           conversationId: conversationId as any,
           token: token ?? undefined,
           authUserId: userId,
@@ -1073,7 +1073,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           content: 'Voice message',
           audioStorageId: storageId,
           audioDurationMs: durationMs,
-        });
+        } as any));
       } catch (e) {
         console.error('[ChatScreenInner] Failed to send voice message:', e);
         Alert.alert('Error', 'Failed to send voice message. Please try again.');
@@ -1256,7 +1256,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // HOLD-TAP-FIX: Pass viewMode to backend for consistent rendering
       // VIDEO-FIX: Pass mediaType to distinguish photo vs video
       // VIDEO-MIRROR-FIX: Pass isMirrored for front-camera video correction
-      await sendProtectedImage({
+      await sendProtectedImage(({
         conversationId: conversationId as any,
         token: token ?? undefined,
         authUserId: userId,
@@ -1268,7 +1268,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         viewMode: options.viewingMode, // HOLD-TAP-FIX: Store the actual viewing mode
         mediaType: isVideo ? 'video' : 'image', // VIDEO-FIX: Pass correct media type
         isMirrored: isVideo && isMirrored, // VIDEO-MIRROR-FIX: Pass mirrored flag for front-camera videos
-      });
+      } as any));
       // PARALLEL-SEND-FIX: Remove specific pending message on success
       removePendingSecureMessage(pendingId);
     } catch (error: any) {
@@ -1353,11 +1353,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // Convex mode: call backend to mark expired
       if (userId) {
         if (__DEV__) console.log('[EXPIRY] Marking media expired from bubble:', messageId);
-        markMediaExpired({
+        markMediaExpired(({
           messageId: messageId as any,
           token: token ?? undefined,
           authUserId: userId,
-        }).catch((err) => {
+        } as any)).catch((err) => {
           if (__DEV__) console.error('[EXPIRY] Failed to mark expired:', err);
         });
       }
