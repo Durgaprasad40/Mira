@@ -310,7 +310,7 @@ export default function PrivateLayout() {
   // This ensures user preferences (intentKeys, etc.) persist after app restart
   const convexPrivateProfile = useQuery(
     api.privateProfiles.getByAuthUserId,
-    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+    !isDemoMode && userId && token ? { token, authUserId: userId } : 'skip'
   );
 
   // Query Phase-1 onboarding status from backend
@@ -350,8 +350,10 @@ export default function PrivateLayout() {
   useEffect(() => {
     if (!isInPhase2 || isDemoMode) return;
     if (convexPrivateProfile === undefined || convexPrivateProfile === null) return;
-    const valid = PRIVATE_INTENT_CATEGORIES.map((c) => c.key);
-    const cleaned = (convexPrivateProfile.privateIntentKeys ?? []).filter((k) => valid.includes(k));
+    const valid = new Set<string>(PRIVATE_INTENT_CATEGORIES.map((c) => c.key));
+    const cleaned = (convexPrivateProfile.privateIntentKeys ?? []).filter(
+      (k): k is (typeof PRIVATE_INTENT_CATEGORIES)[number]['key'] => valid.has(k)
+    );
     const prev = useFilterStore.getState().privateIntentKeys;
     const isSame =
       prev.length === cleaned.length && prev.every((v, i) => v === cleaned[i]);

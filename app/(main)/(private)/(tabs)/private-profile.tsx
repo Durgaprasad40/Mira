@@ -30,8 +30,15 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import {
+  PHASE2_SECTION1_PROMPTS,
+  PHASE2_SECTION2_PROMPTS,
+  PHASE2_SECTION3_PROMPTS,
+  PHASE2_PROMPT_MIN_TEXT_LENGTH,
+  PHASE2_PROMPT_MAX_TEXT_LENGTH,
+} from '@/lib/privateConstants';
 import { useAuthStore } from '@/stores/authStore';
-import { usePrivateProfileStore, hydratePhotoBlurSettings } from '@/stores/privateProfileStore';
+import { hydratePhotoBlurSettings } from '@/stores/privateProfileStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useScreenTrace } from '@/lib/devTrace';
@@ -70,21 +77,22 @@ export default function PrivateProfileScreen() {
 
   // Auth
   const { userId, token } = useAuthStore();
-  const demoUser = isDemoMode ? getDemoCurrentUser() : null;
+  const demoUser = useMemo(
+    () => (isDemoMode ? getDemoCurrentUser() : null),
+    [isDemoMode]
+  );
   const [queryPaused, setQueryPaused] = useState(false);
 
   // Backend profile query
   const backendProfile = useQuery(
     api.privateProfiles.getByAuthUserId,
-    !isDemoMode && userId && !queryPaused ? { authUserId: userId } : 'skip'
+    !isDemoMode && userId && token && !queryPaused ? { token, authUserId: userId } : 'skip'
   );
   const backendProfileLoaded = backendProfile !== undefined;
 
-  // Store data (used for non-canonical fields). Do NOT use store as canonical for identity/completion.
-  const storeGender = usePrivateProfileStore((s) => s.gender);
-
   // Loading and error states
   const [hasLoadError, setHasLoadError] = useState(false);
+  const [showSlowNetworkHint, setShowSlowNetworkHint] = useState(false);
   const isLoading = !isDemoMode && userId && backendProfile === undefined && !hasLoadError;
   const isMissingProfile = !isDemoMode && backendProfileLoaded && backendProfile === null;
   const isSignedOut = !isDemoMode && !userId;
@@ -132,16 +140,26 @@ export default function PrivateProfileScreen() {
       if (hasLoadError && backendProfile !== undefined) {
         setHasLoadError(false);
       }
+      setShowSlowNetworkHint(false);
       return;
     }
+
+    const slowHint = setTimeout(() => {
+      if (mountedRef.current && backendProfile === undefined) {
+        setShowSlowNetworkHint(true);
+      }
+    }, 5000);
 
     const timeout = setTimeout(() => {
       if (mountedRef.current && backendProfile === undefined) {
         setHasLoadError(true);
       }
-    }, 15000);
+    }, 8000);
 
-    return () => clearTimeout(timeout);
+    return () => {
+      clearTimeout(slowHint);
+      clearTimeout(timeout);
+    };
   }, [backendProfile, hasLoadError, queryPaused, isDemoMode]);
 
   const handleRetry = useCallback(() => {
@@ -168,21 +186,29 @@ export default function PrivateProfileScreen() {
     return backendProfile?.age || 0;
   }, [backendProfile?.age, demoUser, isDemoMode]);
 
-  // Get main photo URL for avatar
-  const mainPhoto = useMemo(() => {
+  // Get main photo URL + index for avatar
+  // P0-1: Track the source index so blur flag is read from the matching slot,
+  // not always slot 0 (which can mismatch when earlier slots are invalid).
+  const mainPhotoEntry = useMemo(() => {
     const photos = isDemoMode
-      ? (demoUser?.photos?.map((photo) => photo.url) || [])
+      ? (demoUser?.photos?.map((p) => p.url) || [])
       : (backendProfile?.privatePhotoUrls || []);
-    const validPhotos = photos.filter(isValidPhotoUrl);
-    return validPhotos[0] || null;
+
+    for (let i = 0; i < photos.length; i++) {
+      if (isValidPhotoUrl(photos[i])) {
+        return { url: photos[i], index: i };
+      }
+    }
+    return null;
   }, [backendProfile?.privatePhotoUrls, demoUser, isDemoMode]);
 
   const isMainPhotoBlurred = useMemo(() => {
     if (isDemoMode) return false;
     if (!backendProfile) return false;
+    if (!mainPhotoEntry) return false;
     const { photoBlurEnabled, photoBlurSlots } = hydratePhotoBlurSettings(backendProfile);
-    return Boolean(photoBlurEnabled && photoBlurSlots[0]);
-  }, [backendProfile, isDemoMode]);
+    return Boolean(photoBlurEnabled && photoBlurSlots[mainPhotoEntry.index]);
+  }, [backendProfile, isDemoMode, mainPhotoEntry]);
 
   const resolvedName = useMemo(() => {
     if (displayName && displayName.trim().length > 0) {
@@ -210,11 +236,24 @@ export default function PrivateProfileScreen() {
     return Boolean(backendProfile?.privateBio?.trim());
   }, [backendProfile?.privateBio, isDemoMode]);
 
-  const promptCount = useMemo(() => {
-    if (isDemoMode) {
-      return 0;
-    }
-    return (backendProfile?.promptAnswers || []).filter((answer) => answer.answer.trim().length > 0).length;
+  const promptSectionStatus = useMemo(() => {
+    if (isDemoMode) return { s1: 0, s2: 0, s3: 0, complete: false };
+
+    const answered = new Map<string, string>(
+      (backendProfile?.promptAnswers || [])
+        .filter((a) => typeof a?.promptId === 'string' && typeof a?.answer === 'string')
+        .map((a) => [a.promptId, a.answer.trim()])
+    );
+
+    const isValidText = (v: string) =>
+      v.length >= PHASE2_PROMPT_MIN_TEXT_LENGTH &&
+      v.length <= PHASE2_PROMPT_MAX_TEXT_LENGTH;
+
+    const s1 = PHASE2_SECTION1_PROMPTS.filter((p) => (answered.get(p.id) || '').length > 0).length;
+    const s2 = PHASE2_SECTION2_PROMPTS.filter((p) => isValidText(answered.get(p.id) || '')).length;
+    const s3 = PHASE2_SECTION3_PROMPTS.filter((p) => isValidText(answered.get(p.id) || '')).length;
+
+    return { s1, s2, s3, complete: s1 === 3 && s2 >= 1 && s3 >= 1 };
   }, [backendProfile?.promptAnswers, isDemoMode]);
 
   const hasIntentSelection = useMemo(() => {
@@ -224,12 +263,11 @@ export default function PrivateProfileScreen() {
     return (backendProfile?.privateIntentKeys?.length || 0) > 0;
   }, [backendProfile?.privateIntentKeys, isDemoMode]);
 
-  // Resolve gender with fallback chain: backend query → store → empty
+  // P0-2: Backend is canonical for gender (no store fallback, no `as any`).
   const gender = useMemo(() => {
     if (isDemoMode) return '';
-    // Fallback chain: backend query → store → empty
-    return (backendProfile as any)?.gender || storeGender || '';
-  }, [(backendProfile as any)?.gender, storeGender, isDemoMode]);
+    return (backendProfile?.gender || '').trim();
+  }, [backendProfile?.gender, isDemoMode]);
 
   // Cast to access optional schema fields
   const profileWithDetails = backendProfile as typeof backendProfile & {
@@ -279,8 +317,10 @@ export default function PrivateProfileScreen() {
     },
     {
       label: 'Prompts',
-      complete: promptCount > 0,
-      detail: promptCount > 0 ? `${promptCount} answered` : 'Add at least 1 answer',
+      complete: promptSectionStatus.complete,
+      detail: promptSectionStatus.complete
+        ? 'Answered'
+        : `Quick ${promptSectionStatus.s1}/3 · Values ${promptSectionStatus.s2}/1 · Personality ${promptSectionStatus.s3}/1`,
       hidden: false,
     },
     {
@@ -333,7 +373,16 @@ export default function PrivateProfileScreen() {
       detail: profileWithDetails?.religion ? 'Set' : 'Add your religion',
       hidden: true,
     },
-  ]), [displayName, age, gender, profileWithDetails, hasBio, hasIntentSelection, photoCount, promptCount]);
+  ]), [
+    displayName,
+    age,
+    gender,
+    profileWithDetails,
+    hasBio,
+    hasIntentSelection,
+    photoCount,
+    promptSectionStatus,
+  ]);
 
   // Visible missing items (for nudge display)
   const visibleMissingItems = useMemo(
@@ -348,8 +397,9 @@ export default function PrivateProfileScreen() {
   );
 
   const completionPercentage = useMemo(() => {
-    const total = completionItems.length || 1;
-    const completed = completionItems.filter((i) => i.complete).length;
+    const visible = completionItems.filter((i) => !i.hidden);
+    const total = visible.length || 1;
+    const completed = visible.filter((i) => i.complete).length;
     return Math.round((completed / total) * 100);
   }, [completionItems]);
 
@@ -415,6 +465,11 @@ export default function PrivateProfileScreen() {
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={C.primary} />
           <Text style={styles.loadingText}>Loading profile...</Text>
+          {showSlowNetworkHint ? (
+            <TouchableOpacity onPress={handleRetry} activeOpacity={0.7}>
+              <Text style={styles.slowNetworkHint}>Still loading — tap to retry</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       </View>
     );
@@ -499,10 +554,10 @@ export default function PrivateProfileScreen() {
         {/* Profile Header Section */}
         <View style={styles.profileHeader}>
           {/* Main Photo */}
-          {mainPhoto ? (
+          {mainPhotoEntry ? (
             <View style={styles.avatarContainer}>
               <Image
-                source={{ uri: mainPhoto }}
+                source={{ uri: mainPhotoEntry.url }}
                 style={styles.avatarImage}
                 contentFit="cover"
                 blurRadius={isMainPhotoBlurred ? 8 : 0}
@@ -900,6 +955,11 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 15,
     color: C.textLight,
+  },
+  slowNetworkHint: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.primary,
   },
   errorContainer: {
     flex: 1,

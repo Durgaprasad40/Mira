@@ -44,7 +44,7 @@ export default function Phase2NicknameScreen() {
 
   const currentPrivateProfile = useQuery(
     api.privateProfiles.getByAuthUserId,
-    userId ? { authUserId: userId } : 'skip',
+    userId && token ? { token, authUserId: userId } : 'skip',
   );
 
   const setStoreDisplayName = usePrivateProfileStore((s) => s.setDisplayName);

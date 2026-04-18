@@ -9,6 +9,8 @@ import {
   PHASE2_INTENT_KEYS,
 } from './phase2Constants';
 
+const DEBUG_PHASE2_BACKEND = process.env.DEBUG_PHASE2 === "true";
+
 const PHASE2_PRIVATE_BIO_MIN_LENGTH = 20;
 const PHASE2_PRIVATE_BIO_MAX_LENGTH = 300;
 const PHASE2_PROMPT_ANSWER_MIN_LENGTH = 5;
@@ -979,31 +981,30 @@ export const saveOnboardingPhotos = mutation({
  * The frontend only sends the user's own ID from authStore (populated after login).
  */
 export const getByAuthUserId = query({
-  args: { authUserId: v.string() },
+  args: {
+    token: v.string(),
+    authUserId: v.string(),
+  },
   handler: async (ctx, args) => {
-    // Resolve the provided authUserId to a Convex user ID
-    // authUserId can be either a Convex ID directly or a Clerk/auth ID
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      console.log('[P2_PROFILE_QUERY] getByAuthUserId: user not found', {
-        authUserId: args.authUserId?.substring(0, 8),
-      });
-      return null;
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     // Verify the user exists (ownership check via ID resolution)
     const user = await ctx.db.get(userId);
     if (!user) {
-      console.log('[P2_PROFILE_QUERY] getByAuthUserId: user record not found', {
-        userId: (userId as string)?.substring(0, 8),
-      });
+      if (DEBUG_PHASE2_BACKEND) {
+        console.log('[P2_PROFILE_QUERY] getByAuthUserId: user record not found', {
+          userId: (userId as string)?.substring(0, 8),
+        });
+      }
       return null;
     }
 
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
-      console.log('[P2_PROFILE_QUERY] getByAuthUserId: deletion pending');
+      if (DEBUG_PHASE2_BACKEND) {
+        console.log('[P2_PROFILE_QUERY] getByAuthUserId: deletion pending');
+      }
       return null;
     }
 
@@ -1013,9 +1014,11 @@ export const getByAuthUserId = query({
       .first();
 
     if (!profile) {
-      console.log('[P2_PROFILE_QUERY] getByAuthUserId: no profile found', {
-        userId: userId?.substring(0, 8),
-      });
+      if (DEBUG_PHASE2_BACKEND) {
+        console.log('[P2_PROFILE_QUERY] getByAuthUserId: no profile found', {
+          userId: userId?.substring(0, 8),
+        });
+      }
       return null;
     }
 

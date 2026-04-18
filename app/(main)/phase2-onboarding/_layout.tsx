@@ -70,6 +70,7 @@ function Phase2OnboardingNavigator() {
   const router = useRouter();
   const pathname = usePathname();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken with token
   const currentUser = useQuery(
@@ -79,7 +80,7 @@ function Phase2OnboardingNavigator() {
   // FIX: Use getByAuthUserId with authUserId instead of getCurrentOnboardingProfile with token
   const currentPrivateProfile = useQuery(
     api.privateProfiles.getByAuthUserId,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { token, authUserId: userId } : 'skip'
   );
   // FIX: Use users.getOnboardingStatus with userId for Phase-2 routing state
   const onboardingState = useQuery(

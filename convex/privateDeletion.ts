@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query, QueryCtx } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
-import { userIdToString, resolveUserIdByAuthId } from "./helpers";
+import { userIdToString, validateOwnership } from "./helpers";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -25,19 +25,11 @@ export async function isPrivateDataDeleted(
 // Get private deletion state for a user
 export const getPrivateDeletionState = query({
   args: {
-    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
+    token: v.string(),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!userId) {
-      console.log('[getPrivateDeletionState] User not found for authUserId:', args.userId);
-      return {
-        status: 'active' as const,
-        deletedAt: null,
-        recoverUntil: null,
-      };
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     const deletionState = await ctx.db
       .query("privateDeletionStates")
@@ -63,16 +55,18 @@ export const getPrivateDeletionState = query({
 // Initiate private data deletion (soft delete with 30-day recovery window)
 export const initiatePrivateDeletion = mutation({
   args: {
-    userId: v.id("users"),
+    token: v.string(),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
     const now = Date.now();
     const recoverUntil = now + THIRTY_DAYS_MS;
 
     // Check if deletion state already exists
     const existingState = await ctx.db
       .query("privateDeletionStates")
-      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
       .first();
 
     if (existingState) {
@@ -86,7 +80,7 @@ export const initiatePrivateDeletion = mutation({
     } else {
       // Create new record
       await ctx.db.insert("privateDeletionStates", {
-        userId: args.userId,
+        userId,
         status: 'pending_deletion',
         deletedAt: now,
         recoverUntil,
@@ -106,14 +100,16 @@ export const initiatePrivateDeletion = mutation({
 // Recover private data (restore from soft delete)
 export const recoverPrivateDeletion = mutation({
   args: {
-    userId: v.id("users"),
+    token: v.string(),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
     const now = Date.now();
 
     const existingState = await ctx.db
       .query("privateDeletionStates")
-      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
       .first();
 
     if (!existingState) {

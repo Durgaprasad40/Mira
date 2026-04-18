@@ -358,14 +358,14 @@ export async function validateSessionToken(
  *  5. If `ctx.auth` has an identity, its subject must also resolve to the
  *     same Convex user (defense-in-depth, matches logout)
  *
- * @param ctx - Convex mutation context (requires `ctx.auth` + `ctx.db`)
+ * @param ctx - Convex query or mutation context (requires `ctx.auth` + `ctx.db`)
  * @param token - Session or demo token from the client auth store
  * @param authUserId - Auth ID the client claims to be acting as
  * @returns Verified Convex userId if all checks pass
  * @throws Error('Unauthorized: ...') on any validation failure
  */
 export async function validateOwnership(
-  ctx: MutationCtx,
+  ctx: QueryCtx | MutationCtx,
   token: string,
   authUserId: string,
 ): Promise<Id<'users'>> {

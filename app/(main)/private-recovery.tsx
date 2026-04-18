@@ -5,7 +5,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { Id } from '@/convex/_generated/dataModel';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -18,7 +17,7 @@ export default function PrivateDataRecoveryScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const localDeletionStatus = usePrivateProfileStore((s) => s.deletionStatus);
   const localDeletedAt = usePrivateProfileStore((s) => s.deletedAt);
   const localRecoverUntil = usePrivateProfileStore((s) => s.recoverUntil);
@@ -30,7 +29,7 @@ export default function PrivateDataRecoveryScreen() {
   // Query server deletion state (source of truth in non-demo mode)
   const serverDeletionState = useQuery(
     api.privateDeletion.getPrivateDeletionState,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && userId && token ? { token, authUserId: userId } : 'skip'
   );
 
   const [daysRemaining, setDaysRemaining] = useState(0);
@@ -182,7 +181,7 @@ export default function PrivateDataRecoveryScreen() {
               if (mountedRef.current) setIsRecovering(true);
 
               // CRITICAL: Verify userId exists before proceeding (non-demo mode)
-              if (!isDemoMode && !userId) {
+              if (!isDemoMode && (!userId || !token)) {
                 Alert.alert('Error', 'You must be logged in to recover private data.');
                 return;
               }
@@ -191,8 +190,8 @@ export default function PrivateDataRecoveryScreen() {
               recoverPrivateData();
 
               // Call server-side mutation (skip in demo mode)
-              if (!isDemoMode && userId) {
-                await recoverDeletionMutation({ userId: userId as Id<'users'> });
+              if (!isDemoMode && userId && token) {
+                await recoverDeletionMutation({ token, authUserId: userId });
               }
 
               Alert.alert(

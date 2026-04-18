@@ -8,7 +8,6 @@ import { Tabs, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
-import { stringToUserId } from "@/convex/helpers";
 import { COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useAuthStore } from "@/stores/authStore";
@@ -103,7 +102,7 @@ export default function MainTabsLayout() {
   // Query deletion state for Private tab entry gating (non-demo mode)
   const privateDeletionState = useQuery(
     api.privateDeletion.getPrivateDeletionState,
-    !isDemoMode && userId ? { userId: stringToUserId(userId) } : 'skip'
+    !isDemoMode && userId && token ? { token, authUserId: userId } : 'skip'
   );
 
   // STABILITY FIX: Query users.phase2OnboardingCompleted for durable routing decision

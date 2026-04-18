@@ -63,7 +63,7 @@ export default function DiscoveryPreferencesScreen() {
   // Phase-2: "What are you looking for" lives on userPrivateProfiles.privateIntentKeys — must load separately
   const privateProfileDoc = useQuery(
     api.privateProfiles.getByAuthUserId,
-    !isDemoMode && userId && isPhase2 ? { authUserId: userId } : 'skip'
+    !isDemoMode && userId && token && isPhase2 ? { token, authUserId: userId } : 'skip'
   );
 
   const {

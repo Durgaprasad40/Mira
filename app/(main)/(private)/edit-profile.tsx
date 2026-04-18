@@ -306,7 +306,7 @@ export default function EditProfileScreen() {
   // Backend profile query
   const backendProfile = useQuery(
     api.privateProfiles.getByAuthUserId,
-    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+    !isDemoMode && userId && token ? { token, authUserId: userId } : 'skip'
   );
   // Phase-1 fallback source for old Phase-2 profiles (read-only)
   const currentUser = useQuery(

@@ -65,7 +65,7 @@ export default function Phase2ReviewScreen() {
   // FIX: Use getByAuthUserId with authUserId instead of getCurrentOnboardingProfile with token
   const currentPrivateProfile = useQuery(
     api.privateProfiles.getByAuthUserId,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { token, authUserId: userId } : 'skip'
   );
   // FIX: Use getOnboardingStatus with userId instead of getPhase2OnboardingState with token
   const onboardingState = useQuery(

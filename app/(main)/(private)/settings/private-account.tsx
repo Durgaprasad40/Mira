@@ -17,7 +17,6 @@ import { INCOGNITO_COLORS, COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { Id } from '@/convex/_generated/dataModel';
 
 const C = INCOGNITO_COLORS;
 
@@ -25,7 +24,7 @@ export default function AccountScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const initiatePrivateDataDeletion = usePrivateProfileStore((s) => s.initiatePrivateDataDeletion);
   const recoverPrivateData = usePrivateProfileStore((s) => s.recoverPrivateData);
 
@@ -57,7 +56,7 @@ export default function AccountScreen() {
               setIsDeleting(true);
 
               // CRITICAL: Verify userId exists before proceeding (non-demo mode)
-              if (!isDemoMode && !userId) {
+              if (!isDemoMode && (!userId || !token)) {
                 Alert.alert('Error', 'You must be logged in to deactivate your private profile.');
                 return;
               }
@@ -66,9 +65,9 @@ export default function AccountScreen() {
               initiatePrivateDataDeletion();
 
               // M-004 FIX: Server mutation with rollback on failure
-              if (!isDemoMode && userId) {
+              if (!isDemoMode && userId && token) {
                 try {
-                  await initiateDeletionMutation({ userId: userId as Id<'users'> });
+                  await initiateDeletionMutation({ token, authUserId: userId });
                 } catch (serverError) {
                   // M-004 FIX: Rollback optimistic update to keep local+server consistent
                   recoverPrivateData();
