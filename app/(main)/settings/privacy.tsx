@@ -190,7 +190,11 @@ export default function PrivacySettingsScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          accessibilityLabel="Go back"
+        >
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Privacy</Text>
@@ -209,6 +213,7 @@ export default function PrivacySettingsScreen() {
           <TouchableOpacity
             style={styles.stateButton}
             onPress={() => router.replace('/(main)/(tabs)/profile' as any)}
+            accessibilityLabel="Back to profile"
           >
             <Text style={styles.stateButtonText}>Back to Profile</Text>
           </TouchableOpacity>
@@ -232,6 +237,7 @@ export default function PrivacySettingsScreen() {
               onValueChange={handleHideFromDiscoverChange}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
+              accessibilityLabel="Hide from Discover"
             />
           </View>
 
@@ -254,6 +260,7 @@ export default function PrivacySettingsScreen() {
               onValueChange={handleDisableReadReceiptsChange}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
+              accessibilityLabel="Disable read receipts"
             />
           </View>
         </View>
@@ -275,6 +282,7 @@ export default function PrivacySettingsScreen() {
               onValueChange={handleHideAgeChange}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
+              accessibilityLabel="Hide my age"
             />
           </View>
 
@@ -291,6 +299,7 @@ export default function PrivacySettingsScreen() {
               onValueChange={handleHideDistanceChange}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
+              accessibilityLabel="Hide my distance"
             />
           </View>
         </View>
@@ -303,6 +312,7 @@ export default function PrivacySettingsScreen() {
           <TouchableOpacity
             style={styles.linkRow}
             onPress={() => router.push('/(main)/nearby-settings' as any)}
+            accessibilityLabel="Open nearby settings"
           >
             <View style={styles.linkInfo}>
               <Ionicons name="location-outline" size={22} color={COLORS.text} style={styles.linkIcon} />

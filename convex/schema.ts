@@ -471,6 +471,7 @@ export default defineSchema({
     isBanned: v.boolean(),
     banReason: v.optional(v.string()),
     deletedAt: v.optional(v.number()), // Soft delete timestamp (account deletion)
+    deletionFinalizedAt: v.optional(v.number()), // When the 30-day soft-delete window was finalized
 
     // 3A1-4: Login rate limiting
     loginAttempts: v.optional(v.number()),
@@ -552,7 +553,8 @@ export default defineSchema({
     .index('by_boosted', ['boostedUntil'])
     .index('by_verification_status', ['verificationStatus'])
     .index('by_demo_user_id', ['demoUserId'])
-    .index('by_auth_user_id', ['authUserId']),
+    .index('by_auth_user_id', ['authUserId'])
+    .index('by_deleted_at', ['deletedAt']),
 
   // Photos table
   photos: defineTable({
@@ -564,6 +566,12 @@ export default defineSchema({
     hasFace: v.boolean(),
     isBlurred: v.optional(v.boolean()), // legacy stored flag; active blur contract now uses variantType/displayPrimaryPhotoVariant/user.photoBlurred
     isNsfw: v.boolean(),
+    moderationStatus: v.optional(v.union(
+      v.literal('pending'),
+      v.literal('clean'),
+      v.literal('flagged')
+    )),
+    moderationCheckedAt: v.optional(v.number()),
     width: v.optional(v.number()),
     height: v.optional(v.number()),
     createdAt: v.number(),
@@ -1045,6 +1053,7 @@ export default defineSchema({
   })
     .index('by_reported_user', ['reportedUserId'])
     .index('by_reporter', ['reporterId'])
+    .index('by_reporter_reported_created', ['reporterId', 'reportedUserId', 'createdAt'])
     .index('by_status', ['status'])
     .index('by_room', ['roomId']),
 

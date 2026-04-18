@@ -116,6 +116,7 @@ export default function NotificationsSettingsScreen() {
         <TouchableOpacity
           onPress={() => router.back()}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          accessibilityLabel="Go back"
         >
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
@@ -135,6 +136,7 @@ export default function NotificationsSettingsScreen() {
           <TouchableOpacity
             style={styles.stateButton}
             onPress={() => router.replace('/(main)/(tabs)/profile' as any)}
+            accessibilityLabel="Back to profile"
           >
             <Text style={styles.stateButtonText}>Back to Profile</Text>
           </TouchableOpacity>
@@ -155,12 +157,13 @@ export default function NotificationsSettingsScreen() {
                 onValueChange={handleToggle}
                 trackColor={{ false: COLORS.border, true: COLORS.primary }}
                 thumbColor={COLORS.white}
+                accessibilityLabel="Enable notifications"
               />
             </View>
 
             {/* Helper text */}
             <Text style={styles.helperText}>
-              Turn this off if you don't want updates from Mira.
+              Turn this off to stop push updates from Mira.
             </Text>
           </View>
         </View>

@@ -9,7 +9,6 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Platform,
   Alert,
   Modal,
   Pressable,
@@ -19,9 +18,8 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { safePush, safeReplace } from '@/lib/safeRouter';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
+import { COLORS } from '@/lib/constants';
 import { Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -175,7 +173,6 @@ export default function ProfileScreen() {
     }
   }, [isPhotosLoading, backendPhotos?.length, hasCachedPhotos]);
 
-  const deactivateAccount = useMutation(api.auth.softDeleteAccount);
   // 3A1-2: Server-side logout mutation
   const serverLogout = useMutation(api.auth.logout);
 
@@ -463,19 +460,19 @@ export default function ProfileScreen() {
 
   // 3A1-2: Logout clears client + server + onboarding
   const handleLogout = () => {
-    Alert.alert('Logout', 'Are you sure you want to logout?', [
+    Alert.alert('Log Out', 'Are you sure you want to log out?', [
       { text: 'Cancel', style: 'cancel' },
       {
-        text: 'Logout',
+        text: 'Log Out',
         style: 'destructive',
         onPress: async () => {
           // SEC-3 FIX: Server logout FIRST (with timeout) to invalidate session
           // This ensures the token is invalidated server-side before we clear local state
-          if (!isDemoMode && token) {
+          if (!isDemoMode && token && userId) {
             try {
               // Use Promise.race with 3s timeout - don't block UX indefinitely
               await Promise.race([
-                serverLogout({ token }),
+                serverLogout({ token, authUserId: userId }),
                 new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
               ]);
               if (__DEV__) console.log('[Logout] Server session invalidated');
@@ -500,42 +497,6 @@ export default function ProfileScreen() {
     ]);
   };
 
-  const handleDeactivate = () => {
-    if (!token) return;
-    Alert.alert(
-      'Deactivate Account',
-      'Are you sure you want to deactivate your account? Signing in again will reactivate it.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Deactivate',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              if (!isDemoMode) {
-                // FIX: Backend expects { authUserId }, not { token }
-                await deactivateAccount({
-                  authUserId: userId!,
-                });
-              } else {
-                useDemoStore.getState().demoLogout();
-              }
-              // 3A1-2: Also clear onboarding store on deactivate
-              useOnboardingStore.getState().reset();
-              // P0-002 FIX: Reset privacy store to prevent leaking settings to next user
-              usePrivacyStore.getState().resetPrivacy();
-              // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
-              await logout();
-              safeReplace(router, '/(auth)/welcome', 'profile->deactivate');
-            } catch (error: any) {
-              Alert.alert('Error', error.message || 'Failed to deactivate account');
-            }
-          },
-        },
-      ]
-    );
-  };
-
   if (isCurrentUserLoading) {
     return (
       <SafeAreaView edges={['top']} style={styles.container}>
@@ -557,7 +518,7 @@ export default function ProfileScreen() {
           <Text style={styles.loadingText}>
             {needsAuthRecovery
               ? 'Please sign in again to open your profile.'
-              : 'We couldn’t load your profile right now.'}
+              : 'We couldn’t load your profile right now. Please try again.'}
           </Text>
           <TouchableOpacity
             style={styles.profileRetryButton}
@@ -838,6 +799,7 @@ export default function ProfileScreen() {
           onPress={handleLogout}
           accessibilityRole="button"
           accessibilityLabel="Log out"
+          accessibilityHint="Signs you out of Mira on this device."
         >
           <Ionicons name="log-out-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Log Out</Text>
@@ -894,6 +856,7 @@ export default function ProfileScreen() {
           <TouchableOpacity
             style={styles.photoPreviewCloseButton}
             onPress={() => setShowPhotoPreview(false)}
+            accessibilityLabel="Close full screen photo"
           >
             <Ionicons name="close" size={28} color={COLORS.white} />
           </TouchableOpacity>
@@ -972,6 +935,7 @@ export default function ProfileScreen() {
                 safePush(router, '/(main)/verification', 'profile->verification-modal');
               }}
               activeOpacity={0.7}
+              accessibilityLabel={verificationStatusInfo.buttonLabel}
             >
               <Text style={[
                 styles.verificationModalButtonText,
@@ -985,6 +949,7 @@ export default function ProfileScreen() {
             <TouchableOpacity
               style={styles.verificationModalClose}
               onPress={() => setShowVerificationModal(false)}
+              accessibilityLabel="Close verification details"
             >
               <Text style={styles.verificationModalCloseText}>Close</Text>
             </TouchableOpacity>
@@ -1178,9 +1143,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.text,
   },
-  subscriptionButton: {
-    marginTop: 12,
-  },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // MENU SECTION - Clean settings list
@@ -1205,24 +1167,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: COLORS.text,
     marginLeft: 14,
-  },
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // FOOTER - Destructive actions
-  // ═══════════════════════════════════════════════════════════════════════════
-  footer: {
-    padding: 20,
-    paddingBottom: 40,
-    alignItems: 'center',
-  },
-  deactivateButton: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-  },
-  deactivateText: {
-    fontSize: 14,
-    color: COLORS.error,
-    fontWeight: '500',
   },
 
   // ═══════════════════════════════════════════════════════════════════════════

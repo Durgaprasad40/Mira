@@ -1,9 +1,9 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { api } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
-import { resolveUserIdByAuthId } from "./helpers";
+import { resolveUserIdByAuthId, validateSessionToken } from "./helpers";
 
 // ============================================================================
 // Crypto helpers (Convex-compatible, no Node.js dependencies)
@@ -651,12 +651,48 @@ async function enforceAccountRestorePolicy(ctx: any, user: any, now: number) {
       throw new Error("ACCOUNT_DELETION_EXPIRED");
     }
     // Restore from delete-request within 30 days
-    await ctx.db.patch(user._id, { isActive: true, deletedAt: undefined, lastActive: now });
+    await ctx.db.patch(user._id, {
+      isActive: true,
+      deletedAt: undefined,
+      deletionFinalizedAt: undefined,
+      lastActive: now,
+    });
     return;
   }
 
   // Restore from deactivation (no deadline)
   await ctx.db.patch(user._id, { isActive: true, lastActive: now });
+}
+
+async function finalizeExpiredSoftDeletedUser(ctx: any, user: any, now: number) {
+  const sessions = await ctx.db
+    .query("sessions")
+    .withIndex("by_user", (q) => q.eq("userId", user._id))
+    .collect();
+
+  for (const session of sessions) {
+    await ctx.db.delete(session._id);
+  }
+
+  await ctx.db.patch(user._id, {
+    authProvider: undefined,
+    email: undefined,
+    phone: undefined,
+    externalId: undefined,
+    authUserId: undefined,
+    demoUserId: undefined,
+    passwordHash: undefined,
+    hashVersion: undefined,
+    emailVerified: undefined,
+    emailVerifiedAt: undefined,
+    emailVerificationTokenHash: undefined,
+    emailVerificationExpiresAt: undefined,
+    pushToken: undefined,
+    loginAttempts: undefined,
+    lastLoginAttemptAt: undefined,
+    sessionsRevokedAt: now,
+    deletionFinalizedAt: now,
+  });
 }
 
 // Login with email/password (with rate limiting)
@@ -1027,18 +1063,54 @@ export const validateSession = query({
 export const logout = mutation({
   args: {
     token: v.string(),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { token } = args;
+    const token = args.token.trim();
+    if (!token) {
+      throw new Error("Unauthorized: Missing session token");
+    }
+
+    const requestedUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!requestedUserId) {
+      throw new Error("Unauthorized: Invalid caller");
+    }
+
+    const tokenOwnerId = await validateSessionToken(ctx, token);
+    if (!tokenOwnerId) {
+      throw new Error("Unauthorized: Invalid or expired session");
+    }
+
+    if (tokenOwnerId !== requestedUserId) {
+      throw new Error("Unauthorized: Session ownership mismatch");
+    }
+
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const callerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (!callerUserId || callerUserId !== tokenOwnerId) {
+        throw new Error("Unauthorized: Session does not belong to caller");
+      }
+    }
+
+    if (token.startsWith("demo_")) {
+      return { success: true };
+    }
 
     const session = await ctx.db
       .query("sessions")
       .withIndex("by_token", (q) => q.eq("token", token))
       .first();
 
-    if (session) {
-      await ctx.db.delete(session._id);
+    if (!session || session.userId !== tokenOwnerId) {
+      throw new Error("Unauthorized: Session not found");
     }
+
+    await ctx.db.patch(tokenOwnerId, {
+      pushToken: undefined,
+    });
+
+    await ctx.db.delete(session._id);
 
     return { success: true };
   },
@@ -1373,7 +1445,7 @@ export const getConsentStatus = query({
 // 2. Same identity (email/phone/externalId) MUST map to same userId ALWAYS
 // 3. Logout = session revocation ONLY, NEVER data deletion
 // 4. Messages, profiles, preferences are NEVER touched by auth functions
-// 5. Soft-deleted users are RESTORED on login (same identity = same account)
+// 5. Soft-deleted users are RESTORED on login only within the 30-day recovery window
 //
 // This follows WhatsApp/Instagram/Tinder architecture.
 // ============================================================================
@@ -1392,8 +1464,8 @@ const DEFAULT_FREE_TIER_LIMITS = {
  *
  * BEHAVIOR:
  * - If user exists and is active → return userId
- * - If user exists but is soft-deleted → RESTORE and return userId
- *   (Preserves ALL data: messages, matches, profile, onboarding state)
+ * - If user exists but is soft-deleted → RESTORE and return userId within 30 days
+ *   (Only within the 30-day delete recovery window)
  * - If user doesn't exist → CREATE new user with onboardingCompleted: false
  *
  * SAFETY:
@@ -1449,15 +1521,10 @@ export const getOrCreateUserByIdentity = mutation({
     // Step 2: Handle existing user
     // -------------------------------------------------------------------------
     if (existingUser) {
-      // CASE A: User is soft-deleted → RESTORE them
-      // SAFETY: We restore ALL their data (messages, matches, profile)
-      // This ensures same identity = same userId = same account ALWAYS
-      if (existingUser.deletedAt) {
-        await ctx.db.patch(existingUser._id, {
-          deletedAt: undefined,
-          isActive: true,
-          lastActive: Date.now(),
-        });
+      const now = Date.now();
+
+      if (existingUser.isActive === false) {
+        await enforceAccountRestorePolicy(ctx, existingUser, now);
         return {
           userId: existingUser._id,
           isNewUser: false,
@@ -1469,7 +1536,7 @@ export const getOrCreateUserByIdentity = mutation({
       // CASE B: User exists and is active → return userId
       // Update lastActive timestamp only
       await ctx.db.patch(existingUser._id, {
-        lastActive: Date.now(),
+        lastActive: now,
       });
 
       return {
@@ -1955,6 +2022,7 @@ export const softDeleteAccount = mutation({
     // Soft delete: set flags, revoke sessions
     await ctx.db.patch(userId, {
       deletedAt: now,
+      deletionFinalizedAt: undefined,
       isActive: false,
       sessionsRevokedAt: now,
     });
@@ -1974,6 +2042,35 @@ export const softDeleteAccount = mutation({
     return {
       success: true,
       message: "Account has been deleted. You can recover by logging in again.",
+    };
+  },
+});
+
+export const finalizeExpiredSoftDeletedAccounts = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const cutoff = now - THIRTY_DAYS_MS;
+
+    const expiredUsers = await ctx.db
+      .query("users")
+      .withIndex("by_deleted_at", (q) => q.gt("deletedAt", 0))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field("isActive"), false),
+          q.eq(q.field("deletionFinalizedAt"), undefined),
+          q.lte(q.field("deletedAt"), cutoff),
+        )
+      )
+      .collect();
+
+    for (const user of expiredUsers) {
+      await finalizeExpiredSoftDeletedUser(ctx, user, now);
+    }
+
+    return {
+      processed: expiredUsers.length,
+      cutoff,
     };
   },
 });

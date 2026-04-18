@@ -96,6 +96,10 @@ function isValidPhotoUrl(url: unknown): url is string {
   return typeof url === 'string' && url.length > 0 && url !== 'undefined' && url !== 'null';
 }
 
+function createEmptyPhotoIdSlots() {
+  return Array.from({ length: GRID_SIZE }, () => null) as (string | null)[];
+}
+
 export default function EditProfileScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -294,6 +298,7 @@ export default function EditProfileScreen() {
 
   // Photo state for 9-slot grid (SLOT-BASED: index = slot number)
   const [photoSlots, setPhotoSlots] = useState<PhotoSlots9>(createEmptyPhotoSlots());
+  const [photoIdSlots, setPhotoIdSlots] = useState<(string | null)[]>(createEmptyPhotoIdSlots());
   const [failedSlots, setFailedSlots] = useState<Set<number>>(new Set());
   // Photo preview modal state - stores both url and index for actions
   const [previewPhoto, setPreviewPhoto] = useState<{ url: string; index: number } | null>(null);
@@ -304,7 +309,7 @@ export default function EditProfileScreen() {
   // FIX 1: Initialize state ONCE per user using refs to prevent infinite loop
   // P1-004 FIX: Require currentUserId to be truthy to prevent race when ID is briefly null
   useEffect(() => {
-    const currentUserId = currentUser?._id || currentUser?.id || null;
+    const currentUserId = currentUser?._id || null;
     if (currentUser && currentUserId && (!hasInitializedRef.current || lastUserIdRef.current !== currentUserId)) {
       hasInitializedRef.current = true;
       lastUserIdRef.current = currentUserId;
@@ -409,8 +414,8 @@ export default function EditProfileScreen() {
         });
       }
 
-      // Load Life Rhythm from onboardingDraft
-      const lifeRhythm = currentUser?.onboardingDraft?.lifeRhythm;
+      // Load Phase-1-safe life rhythm projection
+      const lifeRhythm = (currentUser as any)?.lifeRhythm;
       if (lifeRhythm) {
         setLifeRhythmCity(lifeRhythm.city || '');
         setSocialRhythm(lifeRhythm.socialRhythm || null);
@@ -489,7 +494,7 @@ export default function EditProfileScreen() {
 
       setPhotoSlots(initSlots);
     }
-  }, [currentUser?._id, currentUser?.id, currentDemoUserId]);
+  }, [currentUser?._id, currentDemoUserId]);
 
   // LIVE MODE: Sync photo slots AND blur state from currentUser.photos (source of truth)
   // Backend handles photo ordering based on verification status:
@@ -501,18 +506,22 @@ export default function EditProfileScreen() {
     // Map photos to slots in the order provided by backend
     // Backend already handles verification-aware ordering
     const slotsFromBackend: PhotoSlots9 = createEmptyPhotoSlots();
+    const photoIdsFromBackend = createEmptyPhotoIdSlots();
     // Initialize blur state from backend photos.isBlurred field
     const blurFromBackend: Record<number, boolean> = {};
 
     currentUser.photos.forEach((photo: any, index: number) => {
       if (index >= 0 && index < 9 && photo.url) {
         slotsFromBackend[index] = photo.url;
+        photoIdsFromBackend[index] = photo._id ?? null;
         // Read isBlurred from backend photo record
         if (photo.isBlurred === true) {
           blurFromBackend[index] = true;
         }
       }
     });
+
+    setPhotoIdSlots(photoIdsFromBackend);
 
     // Only update if there's actual data (avoid clearing slots during loading)
     const hasPhotos = slotsFromBackend.some((s) => s !== null);
@@ -638,13 +647,14 @@ export default function EditProfileScreen() {
         quality: 0.8,
       });
       if (!result.canceled && result.assets[0]) {
-        const uri = result.assets[0].uri;
-        if (isValidPhotoUrl(uri)) {
-          // SLOT-BASED: Update specific slot directly (no shifting) for immediate preview
-          setPhotoSlots((prev) => {
-            const updated = [...prev] as PhotoSlots9;
-            updated[slotIndex] = uri;
-            return updated;
+          const uri = result.assets[0].uri;
+          if (isValidPhotoUrl(uri)) {
+            const previousPhotoId = photoIdSlots[slotIndex];
+            // SLOT-BASED: Update specific slot directly (no shifting) for immediate preview
+            setPhotoSlots((prev) => {
+              const updated = [...prev] as PhotoSlots9;
+              updated[slotIndex] = uri;
+              return updated;
           });
           // Clear failed state for this slot
           setFailedSlots((prev) => {
@@ -681,7 +691,9 @@ export default function EditProfileScreen() {
             // Find existing photo ID if replacing (for in-place replacement)
             let existingPhotoId: string | undefined;
             if (isReplacing && backendPhotos) {
-              const existingPhoto = backendPhotos.find((p) => p.order === slotIndex);
+              const existingPhoto = previousPhotoId
+                ? backendPhotos.find((p) => p._id === previousPhotoId)
+                : backendPhotos.find((p) => p.order === slotIndex);
               if (existingPhoto) {
                 existingPhotoId = existingPhoto._id;
                 if (__DEV__) {
@@ -724,6 +736,17 @@ export default function EditProfileScreen() {
                 updated[slotIndex] = isReplacing ? existingUrl : null;
                 return updated;
               });
+              setPhotoIdSlots((prev) => {
+                const updated = [...prev];
+                updated[slotIndex] = previousPhotoId;
+                return updated;
+              });
+            } else if (uploadResult.photoId) {
+              setPhotoIdSlots((prev) => {
+                const updated = [...prev];
+                updated[slotIndex] = uploadResult.photoId!;
+                return updated;
+              });
             }
           } else if (__DEV__) {
             console.log('[EditProfile] handleUploadPhoto (demo/local only)', {
@@ -748,9 +771,12 @@ export default function EditProfileScreen() {
   // SLOT-BASED: Remove photo by setting slot to null AND deleting from backend
   // Reference/verification photo is protected and cannot be deleted (keeps it in the system)
   const handleRemovePhoto = (slotIndex: number) => {
-    // Check if this photo is the reference/verification photo
-    const photoUrl = photoSlots[slotIndex];
-    const photoToCheck = currentUser?.photos?.find((p: any) => p.url === photoUrl);
+    const photoIdToRemove = photoIdSlots[slotIndex];
+    const photoToCheck =
+      (photoIdToRemove
+        ? backendPhotos?.find((p) => p._id === photoIdToRemove) ?? currentUser?.photos?.find((p: any) => p._id === photoIdToRemove)
+        : undefined) ??
+      currentUser?.photos?.[slotIndex];
     const isReferencePhoto = photoToCheck?.photoType === 'verification_reference';
 
     // Reference photo cannot be deleted - it must stay in the system
@@ -775,8 +801,14 @@ export default function EditProfileScreen() {
         onPress: async () => {
           // Optimistic UI update
           const previousUrl = photoSlots[slotIndex];
+          const previousPhotoId = photoIdSlots[slotIndex];
           setPhotoSlots((prev) => {
             const updated = [...prev] as PhotoSlots9;
+            updated[slotIndex] = null;
+            return updated;
+          });
+          setPhotoIdSlots((prev) => {
+            const updated = [...prev];
             updated[slotIndex] = null;
             return updated;
           });
@@ -792,11 +824,18 @@ export default function EditProfileScreen() {
                 updated[slotIndex] = previousUrl;
                 return updated;
               });
+              setPhotoIdSlots((prev) => {
+                const updated = [...prev];
+                updated[slotIndex] = previousPhotoId;
+                return updated;
+              });
               return;
             }
 
-            // Find the photo ID to delete
-            const photoToDelete = backendPhotos.find((p) => p.url === previousUrl);
+            // Delete using stable row identity instead of matching by URL
+            const photoToDelete = previousPhotoId
+              ? backendPhotos.find((p) => p._id === previousPhotoId)
+              : undefined;
             if (photoToDelete) {
               try {
                 if (__DEV__) {
@@ -821,9 +860,30 @@ export default function EditProfileScreen() {
                   updated[slotIndex] = previousUrl;
                   return updated;
                 });
+                setPhotoIdSlots((prev) => {
+                  const updated = [...prev];
+                  updated[slotIndex] = previousPhotoId;
+                  return updated;
+                });
               }
-            } else if (__DEV__) {
-              console.log('[EditProfile] handleRemovePhoto: No backend photo found for slot', slotIndex);
+            } else {
+              Alert.alert('Error', 'Could not identify this photo to remove. Please refresh and try again.');
+              setPhotoSlots((prev) => {
+                const updated = [...prev] as PhotoSlots9;
+                updated[slotIndex] = previousUrl;
+                return updated;
+              });
+              setPhotoIdSlots((prev) => {
+                const updated = [...prev];
+                updated[slotIndex] = previousPhotoId;
+                return updated;
+              });
+              if (__DEV__) {
+                console.log('[EditProfile] handleRemovePhoto: No backend photo found for slot', {
+                  slotIndex,
+                  previousPhotoId,
+                });
+              }
             }
           } else if (__DEV__) {
             console.log('[EditProfile] handleRemovePhoto (demo/local only) slot', slotIndex);
@@ -871,10 +931,15 @@ export default function EditProfileScreen() {
 
     // Optimistic UI update - swap locally
     const newSlots = [...photoSlots] as PhotoSlots9;
+    const newPhotoIdSlots = [...photoIdSlots];
     const temp = newSlots[0];
     newSlots[0] = newSlots[fromSlot];
     newSlots[fromSlot] = temp;
+    const tempPhotoId = newPhotoIdSlots[0];
+    newPhotoIdSlots[0] = newPhotoIdSlots[fromSlot];
+    newPhotoIdSlots[fromSlot] = tempPhotoId;
     setPhotoSlots(newSlots);
+    setPhotoIdSlots(newPhotoIdSlots);
 
     if (__DEV__) {
       console.log('[PHOTO_REORDER_BEFORE]', {
@@ -892,6 +957,7 @@ export default function EditProfileScreen() {
       if (!token) {
         Alert.alert('Error', 'Session expired. Please log in again.');
         setPhotoSlots(previousSlots); // Revert
+        setPhotoIdSlots(photoIdSlots);
         if (__DEV__) {
           console.log('[PHOTO_REORDER_ABORT] No session token');
         }
@@ -967,6 +1033,7 @@ export default function EditProfileScreen() {
           });
           Alert.alert('Error', 'Could not reorder photos safely. Please refresh and try again.');
           setPhotoSlots(previousSlots); // Revert
+          setPhotoIdSlots(photoIdSlots);
           return;
         }
 
@@ -1004,6 +1071,7 @@ export default function EditProfileScreen() {
         console.error('[PHOTO_REORDER_ABORT] Backend error:', error);
         Alert.alert('Error', error.message || 'Failed to set main photo. Please try again.');
         setPhotoSlots(previousSlots); // Revert on failure
+        setPhotoIdSlots(photoIdSlots);
       }
     }
   };
@@ -1377,7 +1445,7 @@ export default function EditProfileScreen() {
       }
 
       // Save Life Rhythm to onboardingDraft (skip if unchanged)
-      const existingLifeRhythm = (currentUser as any)?.onboardingDraft?.lifeRhythm ?? (currentUser as any)?.lifeRhythm ?? null;
+      const existingLifeRhythm = (currentUser as any)?.lifeRhythm ?? null;
       const nextLifeRhythm = {
         city: lifeRhythmCity || undefined,
         socialRhythm: socialRhythm || undefined,
@@ -1489,7 +1557,7 @@ export default function EditProfileScreen() {
       }
 
       if (photoOrderSaveFailed) {
-        Alert.alert('Profile saved', "Photo order couldn't be saved.");
+        Alert.alert('Profile saved', "We saved your profile, but couldn't update the photo order.");
       } else {
         Alert.alert('Success', 'Profile updated!');
       }
@@ -1498,7 +1566,7 @@ export default function EditProfileScreen() {
       if (coreProfileSaved) {
         Alert.alert(
           'Profile saved',
-          'Your main profile changes were saved, but some details may need another try.'
+          'Your main profile changes were saved, but a few details may need another try.'
         );
         return;
       }
@@ -1509,8 +1577,12 @@ export default function EditProfileScreen() {
   if (!currentUser) {
     return (
       <View style={[styles.loadingContainer, { paddingTop: insets.top }]}>
-        <Text style={styles.loadingText}>{timedOut ? 'Failed to load profile' : 'Loading...'}</Text>
-        <TouchableOpacity style={styles.loadingBackButton} onPress={() => router.back()}>
+        <Text style={styles.loadingText}>{timedOut ? 'We couldn’t load your profile.' : 'Loading your profile...'}</Text>
+        <TouchableOpacity
+          style={styles.loadingBackButton}
+          onPress={() => router.back()}
+          accessibilityLabel="Go back"
+        >
           <Ionicons name="arrow-back" size={18} color={COLORS.white} />
           <Text style={styles.loadingBackText}>Go Back</Text>
         </TouchableOpacity>
@@ -1524,7 +1596,11 @@ export default function EditProfileScreen() {
       <View style={[styles.loadingContainer, { paddingTop: insets.top }]}>
         <Ionicons name="alert-circle" size={48} color={COLORS.error} style={{ marginBottom: 12 }} />
         <Text style={[styles.loadingText, { color: COLORS.error }]}>{profileError}</Text>
-        <TouchableOpacity style={styles.loadingBackButton} onPress={() => router.back()}>
+        <TouchableOpacity
+          style={styles.loadingBackButton}
+          onPress={() => router.back()}
+          accessibilityLabel="Go back"
+        >
           <Ionicons name="arrow-back" size={18} color={COLORS.white} />
           <Text style={styles.loadingBackText}>Go Back</Text>
         </TouchableOpacity>
@@ -1574,6 +1650,7 @@ export default function EditProfileScreen() {
                 }
               }}
               activeOpacity={0.8}
+              accessibilityLabel="Delete this photo"
             >
               <View style={[styles.previewButtonCircle, styles.previewButtonDanger]}>
                 <Ionicons name="trash-outline" size={26} color={COLORS.white} />
@@ -1591,6 +1668,7 @@ export default function EditProfileScreen() {
                 }
               }}
               activeOpacity={0.8}
+              accessibilityLabel="Replace this photo"
             >
               <View style={styles.previewButtonCircle}>
                 <Ionicons name="refresh-outline" size={26} color={COLORS.white} />
@@ -1602,6 +1680,7 @@ export default function EditProfileScreen() {
               style={styles.previewFloatingButton}
               onPress={() => setPreviewPhoto(null)}
               activeOpacity={0.8}
+              accessibilityLabel="Close photo actions"
             >
               <View style={styles.previewButtonCircle}>
                 <Ionicons name="close" size={26} color={COLORS.white} />
@@ -1613,9 +1692,13 @@ export default function EditProfileScreen() {
       </Modal>
 
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}><Ionicons name="arrow-back" size={24} color={COLORS.text} /></TouchableOpacity>
+        <TouchableOpacity onPress={() => router.back()} accessibilityLabel="Go back">
+          <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+        </TouchableOpacity>
         <Text style={styles.headerTitle}>Edit Profile</Text>
-        <TouchableOpacity onPress={handleSave}><Text style={styles.saveButton}>Save</Text></TouchableOpacity>
+        <TouchableOpacity onPress={handleSave} accessibilityLabel="Save profile changes">
+          <Text style={styles.saveButton}>Save</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Basic Info Section */}

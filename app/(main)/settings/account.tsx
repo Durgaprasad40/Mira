@@ -68,7 +68,7 @@ export default function AccountSettingsScreen() {
   const handleDeactivatePress = () => {
     Alert.alert(
       'Deactivate Mira account?',
-      'Your full Mira account, including Phase-1 and Phase-2, will be hidden and deactivated until you sign in again.',
+      'Your Mira account, including Phase-1 and Phase-2, will be hidden until you sign in again.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -114,7 +114,7 @@ export default function AccountSettingsScreen() {
     // Step 2: Final confirmation alert
     Alert.alert(
       'Delete Mira account?',
-      'Your full Mira account, including Phase-1 and Phase-2, will be marked for deletion. You can restore it by signing in again within 30 days. After 30 days, it may be permanently deleted.',
+      'Your Mira account, including Phase-1 and Phase-2, will be scheduled for deletion. You can restore it by signing in again within 30 days. After that, it may be permanently deleted.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -132,13 +132,13 @@ export default function AccountSettingsScreen() {
 
               // Real mode: call soft delete mutation before logging out
               if (!userId) {
-                Alert.alert('Error', 'Unable to deactivate your account. Please try logging out and back in.');
+                Alert.alert('Error', 'Unable to delete your account. Please log out and back in, then try again.');
                 return;
               }
 
               await softDeleteMutation({
                 authUserId: userId,
-                reason: 'User requested account deactivation',
+                reason: 'User requested account deletion',
               });
 
               // Clear local state and log out (matches existing logout routing behavior)
@@ -146,7 +146,7 @@ export default function AccountSettingsScreen() {
               await logout();
               safeReplace(router, '/(auth)/welcome', 'account->delete');
             } catch (error: any) {
-              Alert.alert('Error', error.message || 'Failed to deactivate account. Please try again.');
+              Alert.alert('Error', error.message || 'Failed to delete account. Please try again.');
             }
           },
         },
@@ -161,7 +161,11 @@ export default function AccountSettingsScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={handleGoBack} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+        <TouchableOpacity
+          onPress={handleGoBack}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          accessibilityLabel="Go back"
+        >
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Account</Text>
@@ -177,7 +181,7 @@ export default function AccountSettingsScreen() {
         <View style={styles.stateContainer}>
           <Ionicons name="person-circle-outline" size={40} color={COLORS.textMuted} />
           <Text style={styles.stateText}>We couldn&apos;t load your account details.</Text>
-          <TouchableOpacity style={styles.stateButton} onPress={handleGoBack}>
+          <TouchableOpacity style={styles.stateButton} onPress={handleGoBack} accessibilityLabel="Back to profile">
             <Text style={styles.stateButtonText}>Back to Profile</Text>
           </TouchableOpacity>
         </View>
@@ -218,9 +222,15 @@ export default function AccountSettingsScreen() {
               <Text style={styles.dangerCardTitle}>Deactivate Mira account</Text>
             </View>
             <Text style={styles.dangerCardDescription}>
-              This deactivates your full Mira account, including Phase-1 and Phase-2. Your profile will be hidden until you sign in again.
+              This hides your Mira account, including Phase-1 and Phase-2, until you sign in again.
             </Text>
-            <TouchableOpacity style={styles.dangerButton} onPress={handleDeactivatePress} activeOpacity={0.8}>
+            <TouchableOpacity
+              style={styles.dangerButton}
+              onPress={handleDeactivatePress}
+              activeOpacity={0.8}
+              accessibilityLabel="Deactivate Mira account"
+              accessibilityHint="Hides your account until you sign in again."
+            >
               <Ionicons name="pause-outline" size={18} color={COLORS.white} />
               <Text style={styles.dangerButtonText}>Deactivate Mira account</Text>
             </TouchableOpacity>
@@ -232,9 +242,15 @@ export default function AccountSettingsScreen() {
               <Text style={styles.dangerCardTitle}>Delete Mira account</Text>
             </View>
             <Text style={styles.dangerCardDescription}>
-              This deletes your full Mira account, including Phase-1 and Phase-2. You can restore it by signing in again within 30 days. After 30 days, it may be permanently deleted.
+              This starts the deletion process for your Mira account. You can restore it by signing in again within 30 days.
             </Text>
-            <TouchableOpacity style={styles.dangerButton} onPress={handleDeletePress} activeOpacity={0.8}>
+            <TouchableOpacity
+              style={styles.dangerButton}
+              onPress={handleDeletePress}
+              activeOpacity={0.8}
+              accessibilityLabel="Delete Mira account"
+              accessibilityHint="Starts the 30-day deletion window for your account."
+            >
               <Ionicons name="trash-outline" size={18} color={COLORS.white} />
               <Text style={styles.dangerButtonText}>Delete Mira account</Text>
             </TouchableOpacity>
@@ -270,13 +286,18 @@ export default function AccountSettingsScreen() {
             </View>
 
             <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.modalCancelButton} onPress={handleDeleteCancel}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={handleDeleteCancel}
+                accessibilityLabel="Cancel account deletion"
+              >
                 <Text style={styles.modalCancelText}>Cancel</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
                 style={styles.modalConfirmButton}
                 onPress={handleDeleteContinue}
+                accessibilityLabel="Continue account deletion"
               >
                 <Text style={styles.modalConfirmText}>Continue</Text>
               </TouchableOpacity>
@@ -372,23 +393,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '500',
     color: COLORS.text,
-  },
-  // Logout button
-  logoutButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    paddingVertical: 14,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    backgroundColor: 'transparent',
-  },
-  logoutButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: COLORS.primary,
   },
   // Danger zone card
   dangerCard: {

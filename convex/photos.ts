@@ -84,6 +84,9 @@ async function validateSessionToken(
 const MAX_PHOTO_SIZE_BYTES = 10 * 1024 * 1024; // 10MB max
 const ALLOWED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic'];
 const MIN_PHOTO_DIMENSION = 200; // Minimum width/height in pixels
+// Supported normal ceiling is 10 photos (9 display + optional verification reference).
+// Keep a buffer for legacy/order-repair cases while avoiding unbounded reads.
+const MAX_GET_USER_PHOTOS = 25;
 
 // Generate upload URL
 export const generateUploadUrl = mutation({
@@ -257,6 +260,7 @@ export const addPhoto = mutation({
 
     // 8C: Use client-reported NSFW detection
     const flaggedNsfw = isNsfwDetected === true;
+    const moderationStatus = flaggedNsfw ? 'flagged' : 'pending';
 
     const photoId = await ctx.db.insert('photos', {
       userId,
@@ -266,6 +270,8 @@ export const addPhoto = mutation({
       isPrimary: willBePrimary,
       hasFace,
       isNsfw: flaggedNsfw,
+      moderationStatus,
+      moderationCheckedAt: flaggedNsfw ? Date.now() : undefined,
       width,
       height,
       createdAt: Date.now(),
@@ -418,6 +424,8 @@ export const replacePhoto = mutation({
       url,
       // Reset NSFW flag for new image
       isNsfw: false,
+      moderationStatus: 'pending',
+      moderationCheckedAt: undefined,
       // Update timestamp
       createdAt: Date.now(),
     });
@@ -627,7 +635,7 @@ export const getUserPhotos = query({
     const photos = await ctx.db
       .query('photos')
       .withIndex('by_user_order', (q) => q.eq('userId', convexUserId))
-      .collect();
+      .take(MAX_GET_USER_PHOTOS);
 
     // Photo ordering depends on verification status:
     // - NOT verified: force reference photo first (locked until verification complete)
@@ -737,7 +745,11 @@ export const markPhotoNsfw = mutation({
       throw new Error('Unauthorized: only photo owner or admin can mark NSFW status');
     }
 
-    await ctx.db.patch(args.photoId, { isNsfw: args.isNsfw });
+    await ctx.db.patch(args.photoId, {
+      isNsfw: args.isNsfw,
+      moderationStatus: args.isNsfw ? 'flagged' : 'clean',
+      moderationCheckedAt: Date.now(),
+    });
     return { success: true };
   },
 });
@@ -895,6 +907,7 @@ export const uploadVerificationReferencePhoto = mutation({
       isPrimary: true, // Will be primary until display photo is set differently
       hasFace: true,
       isNsfw: false,
+      moderationStatus: 'pending',
       width,
       height,
       createdAt: Date.now(),
@@ -1052,6 +1065,7 @@ export const setDisplayPhotoVariant = mutation({
         isPrimary: true,
         hasFace: true,
         isNsfw: false,
+        moderationStatus: 'pending',
         createdAt: Date.now(),
         photoType: 'display',
         derivedFromPhotoId: originalPhoto?._id,

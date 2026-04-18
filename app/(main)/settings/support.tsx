@@ -233,12 +233,12 @@ export default function SupportScreen() {
   // Upload attachments and submit ticket
   const handleSubmit = async () => {
     if (!message.trim()) {
-      Toast.show('Please enter a message');
+      Toast.show('Please enter a message for support');
       return;
     }
 
     if (!token) {
-      Toast.show('Please log in to submit a request');
+      Toast.show('Please sign in to contact support');
       return;
     }
 
@@ -249,7 +249,7 @@ export default function SupportScreen() {
       let uploadedAttachments: { storageId: Id<'_storage'>; type: 'photo' | 'video' }[] = [];
 
       if (attachments.length > 0) {
-        setUploadProgress(`Uploading ${attachments.length} file(s)...`);
+        setUploadProgress(`Uploading ${attachments.length} attachment(s)...`);
 
         for (let i = 0; i < attachments.length; i++) {
           const attachment = attachments[i];
@@ -279,14 +279,14 @@ export default function SupportScreen() {
         attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
       });
 
-      Toast.show('Support request submitted successfully');
+      Toast.show('Your support request was sent');
       setMessage('');
       setSelectedCategory('other');
       setAttachments([]);
     } catch (error: any) {
       console.error('[SUPPORT] Submit failed:', error);
       setUploadProgress(null);
-      Toast.show(error.message || 'Failed to submit request. Please try again.');
+      Toast.show(error.message || 'We couldn’t submit your request. Please try again.');
       // Note: We do NOT clear message or attachments on failure
     } finally {
       setIsSubmitting(false);
@@ -315,6 +315,7 @@ export default function SupportScreen() {
           <TouchableOpacity
             onPress={() => router.back()}
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            accessibilityLabel="Go back"
           >
             <Ionicons name="arrow-back" size={24} color={COLORS.text} />
           </TouchableOpacity>
@@ -333,6 +334,7 @@ export default function SupportScreen() {
             style={styles.historyLink}
             onPress={() => router.push('/(main)/settings/support-history')}
             activeOpacity={0.7}
+            accessibilityLabel="Open your support requests"
           >
             <View style={styles.historyLinkLeft}>
               <View style={styles.historyIconContainer}>
@@ -388,7 +390,8 @@ export default function SupportScreen() {
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Contact Support</Text>
             <Text style={styles.sectionSubtitle}>
-              Can't find what you're looking for? Send us a message.
+              Can&apos;t find what you&apos;re looking for? Send us a message and
+              we&apos;ll help.
             </Text>
 
             {/* Category Selector */}
@@ -397,6 +400,7 @@ export default function SupportScreen() {
               style={styles.categorySelector}
               onPress={() => setShowCategoryPicker(!showCategoryPicker)}
               activeOpacity={0.7}
+              accessibilityLabel="Choose support category"
             >
               <Text style={styles.categorySelectorText}>{selectedCategoryLabel}</Text>
               <Ionicons
@@ -468,6 +472,7 @@ export default function SupportScreen() {
                 onPress={handleAddPhotos}
                 disabled={hasVideo || isSubmitting}
                 activeOpacity={0.7}
+                accessibilityLabel="Add photos to support request"
               >
                 <Ionicons
                   name="images-outline"
@@ -492,6 +497,7 @@ export default function SupportScreen() {
                 onPress={handleAddVideo}
                 disabled={hasPhotos || isSubmitting}
                 activeOpacity={0.7}
+                accessibilityLabel="Add video to support request"
               >
                 <Ionicons
                   name="videocam-outline"
@@ -524,6 +530,7 @@ export default function SupportScreen() {
                       <TouchableOpacity
                         style={styles.removeButton}
                         onPress={() => handleRemoveAttachment(index)}
+                        accessibilityLabel={`Remove attachment ${index + 1}`}
                       >
                         <Ionicons name="close" size={14} color={COLORS.white} />
                       </TouchableOpacity>
@@ -547,6 +554,7 @@ export default function SupportScreen() {
                 <TouchableOpacity
                   style={styles.removeVideoButton}
                   onPress={handleClearAttachments}
+                  accessibilityLabel="Remove attached video"
                 >
                   <Ionicons name="trash-outline" size={18} color={COLORS.error} />
                 </TouchableOpacity>
@@ -567,6 +575,7 @@ export default function SupportScreen() {
               onPress={handleSubmit}
               disabled={isSubmitting || !message.trim()}
               activeOpacity={0.8}
+              accessibilityLabel="Submit support request"
             >
               {isSubmitting ? (
                 <ActivityIndicator color={COLORS.white} size="small" />
