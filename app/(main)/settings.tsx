@@ -39,6 +39,7 @@ const LEGAL_URLS = {
 export default function SettingsScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUserQuery = useQuery(
@@ -236,10 +237,10 @@ export default function SettingsScreen() {
       setHideFromDiscover(enabled);
       return;
     }
-    if (!userId) return;
+    if (!userId || !token) return;
 
     try {
-      await updatePrivacySettings({ authUserId: userId, hideFromDiscover: enabled });
+      await updatePrivacySettings({ token, authUserId: userId, hideFromDiscover: enabled });
       setHideFromDiscover(enabled);
     } catch {
       Toast.show('Couldn\u2019t update this setting. Please try again.');

@@ -1,16 +1,42 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { Id } from "./_generated/dataModel";
+import { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { validateAccess } from "./devReset";
-import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
+import { resolveUserIdByAuthId, ensureUserByAuthId, validateOwnership, validateSessionToken } from "./helpers";
 import {
   FRONTEND_RELATIONSHIP_INTENT_IDS,
   normalizeRelationshipIntentValues,
 } from "../lib/discoveryNaming";
 
 const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
+const PROFILE_NAME_MAX_LENGTH = 50;
+const PROFILE_BIO_MAX_LENGTH = 500;
+const PROFILE_DETAIL_MAX_LENGTH = 100;
+const PROFILE_CITY_MAX_LENGTH = 100;
+const PROFILE_PROMPT_QUESTION_MAX_LENGTH = 100;
+const PROFILE_PROMPT_ANSWER_MAX_LENGTH = 300;
+const REPORT_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function normalizeOptionalTrimmedString(
+  value: string | undefined,
+  fieldLabel: string,
+  maxLength: number,
+): string | undefined {
+  if (value === undefined) return undefined;
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  if (trimmed.length > maxLength) {
+    throw new Error(`${fieldLabel} must be ${maxLength} characters or less`);
+  }
+
+  return trimmed;
+}
 
 function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | undefined {
   if (!intent || !Array.isArray(intent)) return intent;
@@ -60,12 +86,132 @@ function sanitizeProfilePrompts(
 
   const cleaned = prompts
     .map((prompt) => ({
-      question: prompt.question?.trim().slice(0, 100) ?? "",
-      answer: prompt.answer?.trim().slice(0, 200) ?? "",
+      question: prompt.question?.trim() ?? "",
+      answer: prompt.answer?.trim() ?? "",
     }))
-    .filter((prompt) => prompt.question.length > 0 && prompt.answer.length > 0);
+    .filter((prompt) => prompt.question.length > 0 && prompt.answer.length > 0)
+    .map((prompt) => {
+      if (prompt.question.length > PROFILE_PROMPT_QUESTION_MAX_LENGTH) {
+        throw new Error(
+          `Prompt question must be ${PROFILE_PROMPT_QUESTION_MAX_LENGTH} characters or less`,
+        );
+      }
+      if (prompt.answer.length > PROFILE_PROMPT_ANSWER_MAX_LENGTH) {
+        throw new Error(
+          `Prompt answer must be ${PROFILE_PROMPT_ANSWER_MAX_LENGTH} characters or less`,
+        );
+      }
+      return prompt;
+    });
 
   return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function orderCurrentUserPhotos(
+  user: Doc<"users">,
+  photos: Doc<"photos">[],
+): Doc<"photos">[] {
+  if (!user.isVerified) {
+    const referencePhoto = photos.find((photo) => photo.photoType === "verification_reference");
+    const otherPhotos = photos
+      .filter((photo) => photo.photoType !== "verification_reference")
+      .sort((a, b) => a.order - b.order);
+    return referencePhoto ? [referencePhoto, ...otherPhotos] : otherPhotos;
+  }
+
+  const primaryPhoto = photos.find((photo) => photo.isPrimary === true);
+  const otherPhotos = photos
+    .filter((photo) => photo.isPrimary !== true)
+    .sort((a, b) => a.order - b.order);
+  return primaryPhoto
+    ? [primaryPhoto, ...otherPhotos]
+    : [...photos].sort((a, b) => a.order - b.order);
+}
+
+function projectCurrentUserPhotos(photos: Doc<"photos">[]) {
+  return photos.map((photo) => ({
+    _id: photo._id,
+    url: photo.url,
+    order: photo.order,
+    isPrimary: photo.isPrimary === true,
+    isBlurred: photo.isBlurred === true,
+    photoType: photo.photoType,
+  }));
+}
+
+function projectCurrentUserLifeRhythm(user: Doc<"users">) {
+  const normalizedDraft = normalizeOnboardingDraft(user.onboardingDraft ?? null);
+  const lifeRhythm = normalizedDraft?.lifeRhythm;
+
+  if (!lifeRhythm) return undefined;
+
+  return {
+    city: lifeRhythm.city,
+    socialRhythm: lifeRhythm.socialRhythm,
+    sleepSchedule: lifeRhythm.sleepSchedule,
+    travelStyle: lifeRhythm.travelStyle,
+    workStyle: lifeRhythm.workStyle,
+    coreValues: lifeRhythm.coreValues ?? [],
+  };
+}
+
+function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]) {
+  return {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    phone: user.phone,
+    dateOfBirth: user.dateOfBirth,
+    gender: user.gender,
+    city: user.city,
+    bio: user.bio,
+    height: user.height,
+    weight: user.weight,
+    smoking: user.smoking,
+    drinking: user.drinking,
+    exercise: user.exercise,
+    pets: user.pets,
+    insect: user.insect,
+    kids: user.kids,
+    education: user.education,
+    religion: user.religion,
+    jobTitle: user.jobTitle,
+    company: user.company,
+    school: user.school,
+    isVerified: user.isVerified,
+    verificationStatus: user.verificationStatus,
+    verificationCompletedAt: user.verificationCompletedAt,
+    verificationEnforcementLevel: user.verificationEnforcementLevel,
+    lookingFor: user.lookingFor ?? [],
+    relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
+    activities: user.activities ?? [],
+    minAge: user.minAge,
+    maxAge: user.maxAge,
+    maxDistance: user.maxDistance,
+    orientation: user.orientation ?? null,
+    sortBy: user.sortBy,
+    subscriptionTier: user.subscriptionTier,
+    boostsRemaining: user.boostsRemaining,
+    notificationsEnabled: user.notificationsEnabled,
+    showLastSeen: user.showLastSeen,
+    hideFromDiscover: user.hideFromDiscover,
+    hideAge: user.hideAge,
+    hideDistance: user.hideDistance,
+    disableReadReceipts: user.disableReadReceipts,
+    strongPrivacyMode: user.strongPrivacyMode,
+    photoBlurred: user.photoBlurred,
+    incognitoMode: user.incognitoMode,
+    nearbyEnabled: user.nearbyEnabled,
+    nearbyPausedUntil: user.nearbyPausedUntil,
+    nearbyVisibilityMode: user.nearbyVisibilityMode,
+    isDiscoveryPaused: user.isDiscoveryPaused,
+    discoveryPausedUntil: user.discoveryPausedUntil,
+    consentAcceptedAt: user.consentAcceptedAt,
+    createdAt: user.createdAt,
+    profilePrompts: user.profilePrompts ?? [],
+    lifeRhythm: projectCurrentUserLifeRhythm(user),
+    photos: projectCurrentUserPhotos(photos),
+  };
 }
 
 // Get current user profile
@@ -90,29 +236,9 @@ export const getCurrentUser = query({
       .withIndex("by_user_order", (q) => q.eq("userId", convexUserId))
       .collect();
 
-    // Photo ordering depends on verification status:
-    // - NOT verified: force reference photo first (locked until verification complete)
-    // - Verified: respect user's chosen order (isPrimary determines main photo)
-    let orderedPhotos;
-    if (!user.isVerified) {
-      // Not verified: reference photo must be first
-      const referencePhoto = photos.find(photo => photo.photoType === 'verification_reference');
-      const otherPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
-      otherPhotos.sort((a, b) => a.order - b.order);
-      orderedPhotos = referencePhoto ? [referencePhoto, ...otherPhotos] : otherPhotos;
-    } else {
-      // Verified: respect order field, isPrimary photo comes first
-      const primaryPhoto = photos.find(photo => photo.isPrimary === true);
-      const otherPhotos = photos.filter(photo => photo.isPrimary !== true);
-      otherPhotos.sort((a, b) => a.order - b.order);
-      orderedPhotos = primaryPhoto ? [primaryPhoto, ...otherPhotos] : photos.sort((a, b) => a.order - b.order);
-    }
+    const orderedPhotos = orderCurrentUserPhotos(user, photos);
 
-    return {
-      ...user,
-      relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
-      photos: orderedPhotos,
-    };
+    return projectCurrentUserForPhase1(user, orderedPhotos);
   },
 });
 
@@ -376,7 +502,7 @@ export const updateProfilePrompts = mutation({
       }
     }
 
-    // Exactly 4 prompts (one per section), answer max 200 chars
+    // Keep the existing 4-slot contract, but reject oversize text instead of silently truncating.
     const cleaned = sanitizeProfilePrompts(args.prompts.slice(0, 4)) ?? [];
 
     await ctx.db.patch(userId, { profilePrompts: cleaned });
@@ -387,6 +513,7 @@ export const updateProfilePrompts = mutation({
 // Update user profile
 export const updateProfile = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
     name: v.optional(v.string()),
     bio: v.optional(v.string()),
@@ -535,21 +662,47 @@ export const updateProfile = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { authUserId, bio, pets, insect, ...otherUpdates } = args;
+    const {
+      token,
+      authUserId,
+      name,
+      bio,
+      jobTitle,
+      company,
+      school,
+      pets,
+      insect,
+      ...otherUpdates
+    } = args;
 
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, token, authUserId);
 
-    // BUGFIX #61: Bio length validation (max 300 chars)
-    if (bio !== undefined && bio.length > 300) {
-      throw new Error("Bio must be 300 characters or less");
-    }
+    const normalizedName = normalizeOptionalTrimmedString(
+      name,
+      "Name",
+      PROFILE_NAME_MAX_LENGTH,
+    );
+    const normalizedBio = normalizeOptionalTrimmedString(
+      bio,
+      "Bio",
+      PROFILE_BIO_MAX_LENGTH,
+    );
+    const normalizedJobTitle = normalizeOptionalTrimmedString(
+      jobTitle,
+      "Job title",
+      PROFILE_DETAIL_MAX_LENGTH,
+    );
+    const normalizedCompany = normalizeOptionalTrimmedString(
+      company,
+      "Company",
+      PROFILE_DETAIL_MAX_LENGTH,
+    );
+    const normalizedSchool = normalizeOptionalTrimmedString(
+      school,
+      "School",
+      PROFILE_DETAIL_MAX_LENGTH,
+    );
 
     // Server-side validation: pets max 3
     if (pets !== undefined && pets.length > 3) {
@@ -558,7 +711,11 @@ export const updateProfile = mutation({
 
     // Filter out undefined values
     const cleanUpdates: Record<string, unknown> = {};
-    if (bio !== undefined) cleanUpdates.bio = bio;
+    if (normalizedName !== undefined) cleanUpdates.name = normalizedName;
+    if (normalizedBio !== undefined) cleanUpdates.bio = normalizedBio;
+    if (normalizedJobTitle !== undefined) cleanUpdates.jobTitle = normalizedJobTitle;
+    if (normalizedCompany !== undefined) cleanUpdates.company = normalizedCompany;
+    if (normalizedSchool !== undefined) cleanUpdates.school = normalizedSchool;
     if (pets !== undefined) cleanUpdates.pets = pets;
     if (insect !== undefined) cleanUpdates.insect = insect;
     for (const [key, value] of Object.entries(otherUpdates)) {
@@ -897,6 +1054,7 @@ export const toggleShowLastSeen = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only update their own privacy settings
 export const updatePrivacySettings = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(),
     hideFromDiscover: v.optional(v.boolean()),
     hideAge: v.optional(v.boolean()),
@@ -904,13 +1062,10 @@ export const updatePrivacySettings = mutation({
     disableReadReceipts: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, hideFromDiscover, hideAge, hideDistance, disableReadReceipts } = args;
+    const { token, authUserId, hideFromDiscover, hideAge, hideDistance, disableReadReceipts } = args;
 
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, token, authUserId);
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -943,6 +1098,7 @@ export const updatePrivacySettings = mutation({
 // APP-P0-002 FIX: Server-side auth - user can only update their own settings
 export const updateNotificationSettings = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(),
     notificationsEnabled: v.optional(v.boolean()),
     emailNotificationsEnabled: v.optional(v.boolean()),
@@ -954,6 +1110,7 @@ export const updateNotificationSettings = mutation({
   },
   handler: async (ctx, args) => {
     const {
+      token,
       authUserId,
       notificationsEnabled,
       emailNotificationsEnabled,
@@ -963,11 +1120,8 @@ export const updateNotificationSettings = mutation({
       notifyProfileViews,
     } = args;
 
-    // APP-P0-002 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, token, authUserId);
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -1204,6 +1358,18 @@ export const reportUser = mutation({
       return { success: false, error: 'cannot_report_self' };
     }
 
+    const existingRecentReport = await ctx.db
+      .query("reports")
+      .withIndex("by_reporter_reported_created", (q) =>
+        q.eq("reporterId", reporterId).eq("reportedUserId", reportedUserId),
+      )
+      .filter((q) => q.gte(q.field("createdAt"), now - REPORT_DEDUPE_WINDOW_MS))
+      .first();
+
+    if (existingRecentReport) {
+      throw new Error("You already reported this user in the last 24 hours");
+    }
+
     // Minimal abuse prevention: enforce evidence limits
     if (evidence && evidence.length > 0) {
       const photos = evidence.filter((e) => e.type === 'photo');
@@ -1326,14 +1492,12 @@ export const generateReportEvidenceUploadUrl = mutation({
 // APP-P0-003 FIX: Server-side auth - user can only deactivate their own account
 export const deactivateAccount = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    // APP-P0-003 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     const now = Date.now();
     // Full-account deactivation: hide user everywhere + revoke existing sessions.
@@ -1347,14 +1511,12 @@ export const deactivateAccount = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only reactivate their own account
 export const reactivateAccount = mutation({
   args: {
+    token: v.string(), // R-3: Session token for ownership validation
     authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    // R-3: Enforce caller owns the requested authUserId (mirrors logout)
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     await ctx.db.patch(userId, { isActive: true, lastActive: Date.now() });
     return { success: true };
@@ -1701,6 +1863,7 @@ export const completeOnboarding = mutation({
             isPrimary: i === 0,
             hasFace: true, // Assuming face detection was done
             isNsfw: false,
+            moderationStatus: "pending",
             createdAt: Date.now(),
           });
         }
@@ -2177,6 +2340,26 @@ export const upsertOnboardingDraft = mutation({
 
     // Deep merge patch into existing onboardingDraft
     const existingDraft = user.onboardingDraft || {};
+    const lifeRhythmPatch = args.patch?.lifeRhythm;
+    if (
+      lifeRhythmPatch &&
+      typeof lifeRhythmPatch === "object" &&
+      !Array.isArray(lifeRhythmPatch) &&
+      "city" in lifeRhythmPatch
+    ) {
+      const normalizedCity = normalizeOptionalTrimmedString(
+        typeof lifeRhythmPatch.city === "string" ? lifeRhythmPatch.city : undefined,
+        "City",
+        PROFILE_CITY_MAX_LENGTH,
+      );
+      args.patch = {
+        ...args.patch,
+        lifeRhythm: {
+          ...lifeRhythmPatch,
+          city: normalizedCity,
+        },
+      };
+    }
 
     // P1 STABILITY: Warn if draft was updated very recently (potential race condition)
     const lastUpdatedAt = existingDraft.progress?.lastUpdatedAt;

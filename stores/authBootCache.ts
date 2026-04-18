@@ -14,6 +14,12 @@ const TOKEN_KEY = 'mira_auth_token';
 const USER_ID_KEY = 'mira_auth_user_id';
 const ONBOARDING_COMPLETED_KEY = 'mira_auth_onboarding_completed';
 const ONBOARDING_UPDATED_AT_KEY = 'mira_auth_onboarding_updated_at';
+const AUTH_BOOT_KEYS = [
+  { key: TOKEN_KEY, label: 'token' },
+  { key: USER_ID_KEY, label: 'userId' },
+  { key: ONBOARDING_COMPLETED_KEY, label: 'onboardingCompleted' },
+  { key: ONBOARDING_UPDATED_AT_KEY, label: 'onboardingCompletedUpdatedAt' },
+] as const;
 
 export interface AuthBootCacheData {
   isAuthenticated: boolean;
@@ -23,6 +29,11 @@ export interface AuthBootCacheData {
   onboardingCompletedUpdatedAt?: number;
   faceVerificationPassed: boolean;
   faceVerificationPending: boolean;
+}
+
+export interface AuthBootCacheClearResult {
+  success: boolean;
+  failedKeys: string[];
 }
 
 // Default state - unauthenticated
@@ -140,31 +151,41 @@ export async function saveAuthBootCache(
 /**
  * Clear auth token, userId, and onboardingCompleted from SecureStore.
  * Call on logout or when session validation fails.
- * C2/C3 FIX: Uses Promise.all for parallel deletion (faster, more atomic)
+ * Best-effort: clears as much as possible and reports any keys that could not be removed.
  */
-export async function clearAuthBootCache(): Promise<void> {
-  try {
-    // C2/C3 FIX: Delete all keys in parallel to reduce partial-state window
-    await Promise.all([
-      SecureStore.deleteItemAsync(TOKEN_KEY),
-      SecureStore.deleteItemAsync(USER_ID_KEY),
-      SecureStore.deleteItemAsync(ONBOARDING_COMPLETED_KEY),
-      SecureStore.deleteItemAsync(ONBOARDING_UPDATED_AT_KEY),
-    ]);
-    if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH_BOOT] cleared');
-  } catch (error: any) {
-    // M-4: Differentiate SecureStore quota/storage errors
-    if (__DEV__) {
-      const msg = error?.message || String(error);
-      if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
-        console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (clear):', msg);
-      } else {
-        console.error('[AUTH_BOOT] Failed to clear SecureStore:', error);
+export async function clearAuthBootCache(): Promise<AuthBootCacheClearResult> {
+  const initialResults = await Promise.allSettled(
+    AUTH_BOOT_KEYS.map(({ key }) => SecureStore.deleteItemAsync(key))
+  );
+
+  const failedEntries = AUTH_BOOT_KEYS.filter((_, index) => initialResults[index].status === 'rejected');
+  const failedKeys: string[] = [];
+
+  for (const entry of failedEntries) {
+    try {
+      await SecureStore.deleteItemAsync(entry.key);
+    } catch (error: any) {
+      failedKeys.push(entry.label);
+
+      if (__DEV__) {
+        const msg = error?.message || String(error);
+        if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
+          console.error(`[AUTH_BOOT] SecureStore QUOTA/STORAGE error (clear:${entry.label}):`, msg);
+        } else {
+          console.error(`[AUTH_BOOT] Failed to clear SecureStore key "${entry.label}":`, error);
+        }
       }
     }
-    // C2/C3 FIX: Re-throw so caller knows cleanup failed
-    throw error;
   }
+
+  if (__DEV__ && DEBUG_AUTH_BOOT) {
+    console.log('[AUTH_BOOT] cleared', { success: failedKeys.length === 0, failedKeys });
+  }
+
+  return {
+    success: failedKeys.length === 0,
+    failedKeys,
+  };
 }
 
 /**

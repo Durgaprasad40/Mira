@@ -11,6 +11,7 @@ import { useRouter } from "expo-router";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
+import { asUserId } from "@/convex/id";
 import { useAuthStore } from "@/stores/authStore";
 import { COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
@@ -24,6 +25,7 @@ export default function VerificationScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const [state, setState] = useState<VerificationState>("unverified");
   const [capturedUri, setCapturedUri] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -78,7 +80,10 @@ export default function VerificationScreen() {
   };
 
   const handleCapture = async () => {
-    if (!cameraRef.current) return;
+    if (!cameraRef.current) {
+      Alert.alert("Camera not ready", "Please wait a moment and try again.");
+      return;
+    }
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.8,
@@ -103,7 +108,12 @@ export default function VerificationScreen() {
       return;
     }
 
-    if (!token) return;
+    const currentUserId = asUserId(userId);
+    const sessionToken = typeof token === "string" ? token.trim() : "";
+    if (!currentUserId || !sessionToken) {
+      Alert.alert("Session expired", "Please sign in again to continue verification.");
+      return;
+    }
 
     setIsUploading(true);
     try {
@@ -117,12 +127,18 @@ export default function VerificationScreen() {
         headers: { "Content-Type": blob.type || "image/jpeg" },
         body: blob,
       });
+      if (!uploadResponse.ok) {
+        throw new Error("Failed to upload your selfie. Please try again.");
+      }
 
       const { storageId } = await uploadResponse.json();
+      if (!storageId) {
+        throw new Error("Could not save your selfie. Please try again.");
+      }
 
       // Create verification session
       await createSession({
-        token,
+        userId: currentUserId,
         selfieStorageId: storageId,
       });
 
@@ -141,8 +157,8 @@ export default function VerificationScreen() {
       </View>
       <Text style={styles.title}>Verify Your Identity</Text>
       <Text style={styles.subtitle}>
-        Take a quick selfie to verify you're real. Your photo is private and
-        never shown to others.
+        Take a quick selfie to confirm it&apos;s you. Your selfie stays private
+        and is never shown to others.
       </Text>
       <View style={styles.benefitsContainer}>
         <View style={styles.benefitRow}>
@@ -179,6 +195,8 @@ export default function VerificationScreen() {
       <TouchableOpacity
         style={styles.primaryButton}
         onPress={handleStartVerification}
+        accessibilityLabel="Start verification"
+        accessibilityHint="Opens the camera to take a verification selfie."
       >
         <Text style={styles.primaryButtonText}>Start Verification</Text>
       </TouchableOpacity>
@@ -186,6 +204,7 @@ export default function VerificationScreen() {
         <TouchableOpacity
           style={styles.secondaryButton}
           onPress={() => router.back()}
+          accessibilityLabel="Go back to your profile"
         >
           <Text style={styles.secondaryButtonText}>Maybe Later</Text>
         </TouchableOpacity>
@@ -199,12 +218,13 @@ export default function VerificationScreen() {
         <View style={styles.previewContainer}>
           <View style={styles.previewPlaceholder}>
             <Ionicons name="person-circle" size={120} color={COLORS.primary} />
-            <Text style={styles.previewText}>Selfie captured</Text>
+            <Text style={styles.previewText}>Selfie ready to submit</Text>
           </View>
           <View style={styles.cameraActions}>
             <TouchableOpacity
               style={styles.retakeButton}
               onPress={handleRetake}
+              accessibilityLabel="Retake selfie"
             >
               <Text style={styles.retakeButtonText}>Retake</Text>
             </TouchableOpacity>
@@ -212,6 +232,8 @@ export default function VerificationScreen() {
               style={[styles.primaryButton, styles.confirmButton]}
               onPress={handleConfirm}
               disabled={isUploading}
+              accessibilityLabel="Confirm and submit verification selfie"
+              accessibilityHint="Sends your selfie for review."
             >
               {isUploading ? (
                 <ActivityIndicator color={COLORS.white} />
@@ -242,6 +264,8 @@ export default function VerificationScreen() {
             <TouchableOpacity
               style={styles.captureButton}
               onPress={handleCapture}
+              accessibilityLabel="Capture verification selfie"
+              accessibilityHint="Takes a selfie for verification."
             >
               <View style={styles.captureInner} />
             </TouchableOpacity>
@@ -264,18 +288,20 @@ export default function VerificationScreen() {
       </View>
       <Text style={styles.title}>Verification Pending</Text>
       <Text style={styles.subtitle}>
-        We're confirming your selfie. This usually doesn't take long.
+        We&apos;re reviewing your selfie. This usually only takes a little
+        while.
       </Text>
       <View style={styles.privacyNote}>
         <Ionicons name="lock-closed" size={16} color={COLORS.textLight} />
         <Text style={styles.privacyText}>
-          Your photo is private and never shown to others
+          Your selfie stays private and is never shown to others
         </Text>
       </View>
       {!isLocked && (
         <TouchableOpacity
           style={styles.primaryButton}
           onPress={() => router.back()}
+          accessibilityLabel="Back to profile"
         >
           <Text style={styles.primaryButtonText}>Back to Profile</Text>
         </TouchableOpacity>
@@ -294,7 +320,7 @@ export default function VerificationScreen() {
       </View>
       <Text style={styles.title}>You're Verified!</Text>
       <Text style={styles.subtitle}>
-        Your profile now has a verified badge. Enjoy full access to all
+        Your profile now shows a verified badge. Enjoy full access to all
         features.
       </Text>
       <TouchableOpacity
@@ -308,6 +334,7 @@ export default function VerificationScreen() {
             router.back();
           }
         }}
+        accessibilityLabel="Finish verification"
       >
         <Text style={styles.primaryButtonText}>Done</Text>
       </TouchableOpacity>
@@ -321,6 +348,7 @@ export default function VerificationScreen() {
           <TouchableOpacity
             onPress={() => router.back()}
             style={styles.backBtn}
+            accessibilityLabel="Close verification"
           >
             <Ionicons name="close" size={28} color={COLORS.text} />
           </TouchableOpacity>

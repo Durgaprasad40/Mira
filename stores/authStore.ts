@@ -259,7 +259,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     //    After this point, ALL setAuthenticatedSession calls are rejected
     //
     // 2. Clear SecureStore (persistent layer)
-    //    If this fails, throw - don't leave partial state
+    //    Best effort only - logout must still finish if local cleanup is partial
     //
     // 3. Clear dependent stores (with try-catch each)
     //
@@ -274,18 +274,16 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       return; // Another logout is already running
     }
 
-    // STEP 2: Clear SecureStore FIRST
+    // STEP 2: Clear SecureStore FIRST (best effort)
     try {
       const { clearAuthBootCache } = require('@/stores/authBootCache');
-      await clearAuthBootCache();
-      if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH] logout: SecureStore');
+      const result = await clearAuthBootCache();
+      if (__DEV__ && DEBUG_AUTH_BOOT) console.log('[AUTH] logout: SecureStore', result);
+      if (!result.success && __DEV__) {
+        console.warn('[AUTH] logout: SecureStore cleanup incomplete; local session was still cleared:', result.failedKeys);
+      }
     } catch (error) {
-      if (__DEV__) console.error('[AUTH] logout: SecureStore cleanup failed:', error);
-      // CRITICAL: SecureStore failed - we must still clear in-memory to prevent
-      // the user staying logged in. On next boot, they may get ghost login,
-      // but that's better than being stuck logged in now.
-      get().finishLogout();
-      throw error;
+      if (__DEV__) console.error('[AUTH] logout: unexpected SecureStore cleanup error:', error);
     }
 
     // STEP 3: Clear dependent stores (each wrapped in try-catch)

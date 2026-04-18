@@ -80,7 +80,12 @@ export const useBlockStore = create<BlockState>()((set, get) => ({
 
   getBlockedUsersInfo: () => get().blockedUsersInfo,
 
-  clearBlocks: () => set({ blockedUserIds: [], blockedUsersInfo: [], _cachedBlockedSet: null }),
+  clearBlocks: () => set({
+    blockedUserIds: [],
+    blockedUsersInfo: [],
+    _cachedBlockedSet: null,
+    justUnblockedUserId: null,
+  }),
 
   setHasHydrated: (state) => set({ _hasHydrated: true }), // No-op
 

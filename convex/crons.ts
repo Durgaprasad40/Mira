@@ -65,6 +65,14 @@ crons.interval(
   internal.photos.retryFailedStorageDeletions
 );
 
+// Phase-1 account deletion: finalize expired soft-deleted accounts after the
+// 30-day recovery window so old identities cannot be restored indefinitely.
+crons.daily(
+  'finalize-expired-soft-deleted-accounts',
+  { hourUTC: 2, minuteUTC: 0 },
+  internal.auth.finalizeExpiredSoftDeletedAccounts
+);
+
 // Nearby/Crossed Paths: Cleanup expired crossed path history every 6 hours
 // Removes history entries past their 4-week expiration
 crons.interval(

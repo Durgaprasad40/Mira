@@ -64,7 +64,11 @@ export function PhotoGridEditor({
       return (
         <View key={slotIndex} style={styles.photoSlot}>
           {/* Tap photo to preview */}
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => onPreviewPhoto({ url: url!, index: slotIndex })}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => onPreviewPhoto({ url: url!, index: slotIndex })}
+            accessibilityLabel={`Preview photo ${slotIndex + 1}`}
+          >
             <Image
               source={{ uri: url }}
               style={styles.photoImage}
@@ -74,7 +78,11 @@ export function PhotoGridEditor({
               onLoadEnd={() => onPhotoLoad(slotIndex)}
             />
           </Pressable>
-          <TouchableOpacity style={styles.photoRemoveButton} onPress={() => onRemovePhoto(slotIndex)}>
+          <TouchableOpacity
+            style={styles.photoRemoveButton}
+            onPress={() => onRemovePhoto(slotIndex)}
+            accessibilityLabel={`Remove photo ${slotIndex + 1}`}
+          >
             <Ionicons name="close" size={14} color={COLORS.white} />
           </TouchableOpacity>
           {/* Star indicator: filled = current main (slot 0), outline = tap to make main */}
@@ -83,7 +91,11 @@ export function PhotoGridEditor({
               <Ionicons name="star" size={12} color="#FFD700" />
             </View>
           ) : (
-            <TouchableOpacity style={styles.setMainButton} onPress={() => onSetMainPhoto(slotIndex)}>
+            <TouchableOpacity
+              style={styles.setMainButton}
+              onPress={() => onSetMainPhoto(slotIndex)}
+              accessibilityLabel={`Set photo ${slotIndex + 1} as main photo`}
+            >
               <Ionicons name="star-outline" size={12} color={COLORS.white} />
             </TouchableOpacity>
           )}
@@ -92,7 +104,13 @@ export function PhotoGridEditor({
     }
     // Empty slot
     return (
-      <TouchableOpacity key={slotIndex} style={[styles.photoSlot, styles.photoSlotEmpty]} onPress={() => onUploadPhoto(slotIndex)} activeOpacity={0.7}>
+      <TouchableOpacity
+        key={slotIndex}
+        style={[styles.photoSlot, styles.photoSlotEmpty]}
+        onPress={() => onUploadPhoto(slotIndex)}
+        activeOpacity={0.7}
+        accessibilityLabel={`Add photo to slot ${slotIndex + 1}`}
+      >
         <Ionicons name="add" size={28} color={COLORS.primary} />
         <Text style={styles.uploadText}>Add</Text>
       </TouchableOpacity>

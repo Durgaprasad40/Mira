@@ -159,7 +159,11 @@ export default function SafetySettingsScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={handleGoBack} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+        <TouchableOpacity
+          onPress={handleGoBack}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          accessibilityLabel="Go back"
+        >
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Safety</Text>
@@ -175,7 +179,7 @@ export default function SafetySettingsScreen() {
         <View style={styles.stateContainer}>
           <Ionicons name="shield-checkmark-outline" size={40} color={COLORS.textMuted} />
           <Text style={styles.stateText}>We couldn&apos;t load your safety details.</Text>
-          <TouchableOpacity style={styles.stateButton} onPress={handleGoBack}>
+          <TouchableOpacity style={styles.stateButton} onPress={handleGoBack} accessibilityLabel="Back to profile">
             <Text style={styles.stateButtonText}>Back to Profile</Text>
           </TouchableOpacity>
         </View>
@@ -254,6 +258,7 @@ export default function SafetySettingsScreen() {
               style={styles.verificationButton}
               onPress={handleOpenVerification}
               activeOpacity={0.8}
+              accessibilityLabel="Open verification"
             >
               <Ionicons
                 name={faceStatus === 'verified' ? 'shield-checkmark-outline' : 'camera-outline'}
@@ -275,7 +280,12 @@ export default function SafetySettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Blocking & Reporting</Text>
 
-          <TouchableOpacity style={styles.menuRow} onPress={handleReportUser} activeOpacity={0.7}>
+          <TouchableOpacity
+            style={styles.menuRow}
+            onPress={handleReportUser}
+            activeOpacity={0.7}
+            accessibilityLabel="Report a user"
+          >
             <View style={styles.menuRowLeft}>
               <Ionicons name="flag-outline" size={22} color={COLORS.text} />
               <View style={styles.menuRowInfo}>
@@ -290,6 +300,7 @@ export default function SafetySettingsScreen() {
             style={styles.menuRow}
             onPress={() => router.push('/(main)/settings/blocked-users' as any)}
             activeOpacity={0.7}
+            accessibilityLabel="Manage blocked users"
           >
             <View style={styles.menuRowLeft}>
               <Ionicons name="ban-outline" size={22} color={COLORS.text} />
@@ -570,20 +581,10 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderRadius: 10,
   },
-  verificationButtonDisabled: {
-    backgroundColor: COLORS.border,
-  },
-  // P2-035 FIX: Loading state style for verification button
-  verificationButtonLoading: {
-    opacity: 0.8,
-  },
   verificationButtonText: {
     fontSize: 15,
     fontWeight: '600',
     color: COLORS.white,
-  },
-  verificationButtonTextDisabled: {
-    color: COLORS.textMuted,
   },
   pendingInfo: {
     flexDirection: 'row',
@@ -595,12 +596,6 @@ const styles = StyleSheet.create({
   pendingInfoText: {
     fontSize: 14,
     color: '#F59E0B',
-  },
-  kycGatingText: {
-    fontSize: 12,
-    color: COLORS.textMuted,
-    textAlign: 'center',
-    marginTop: 8,
   },
 
   // Menu rows
@@ -749,9 +744,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 4,
     borderColor: 'rgba(255, 255, 255, 0.3)',
-  },
-  captureButtonDisabled: {
-    opacity: 0.7,
   },
   captureButtonInner: {
     width: 56,
