@@ -494,32 +494,26 @@ export const getDiscoverProfiles = query({
     const MAX_PAGES_PER_GENDER = 6; // hard bound
     const MAX_SKIP_PAGES = 12; // deterministic rotation window
 
+    // P0 FIX (Option E): Convex only supports a single paginated query per function.
+    // The previous skip-and-read paginate loops issued up to ~54 .paginate() calls
+    // per request (3 genders × 18 pages), which tripped Convex's rule and crashed
+    // Discover in production. We now fetch a bounded bucket with a single .take().
+    //
+    // Rotation fairness is preserved downstream by:
+    //   - rotationScore() (day-seeded per viewer+candidate)
+    //   - reducedReachExcludeThisCandidate()
+    //   - per-viewer ranking window over MAX_RANK_WINDOW (2000)
+    //
+    // BUCKET_SIZE matches the prior read-loop upper bound (USER_PAGE_SIZE *
+    // MAX_PAGES_PER_GENDER = 1320) so candidate-pool capacity is unchanged.
+    const BUCKET_SIZE = USER_PAGE_SIZE * MAX_PAGES_PER_GENDER;
+
     const fetchGenderBucket = async (gender: string) => {
-      let cursor: string | null = null;
-      const skipPages =
-        desiredGenders.length > 0
-          ? hashString32(`${userId}\0${discoverDayNumber}\0${gender}`) % MAX_SKIP_PAGES
-          : 0;
+      const users = await ctx.db
+        .query('users')
+        .withIndex('by_gender', (q) => q.eq('gender', gender as any))
+        .take(BUCKET_SIZE);
 
-      for (let i = 0; i < skipPages; i++) {
-        const page = await ctx.db
-          .query('users')
-          .withIndex('by_gender', (q) => q.eq('gender', gender as any))
-          .paginate({ cursor, numItems: USER_PAGE_SIZE });
-        cursor = page.continueCursor;
-        if (page.isDone) break;
-      }
-
-      const users: any[] = [];
-      for (let i = 0; i < MAX_PAGES_PER_GENDER; i++) {
-        const page = await ctx.db
-          .query('users')
-          .withIndex('by_gender', (q) => q.eq('gender', gender as any))
-          .paginate({ cursor, numItems: USER_PAGE_SIZE });
-        users.push(...page.page);
-        cursor = page.continueCursor;
-        if (page.isDone) break;
-      }
       return users;
     };
 
