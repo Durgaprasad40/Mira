@@ -13,15 +13,14 @@ import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   RefreshControl, Platform, Animated, Pressable, Alert, Modal,
 } from 'react-native';
-import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { BlurView } from 'expo-blur';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { TodAvatar } from '@/components/truthdare/TodAvatar';
 import { useAuthStore } from '@/stores/authStore';
 import { useScreenTrace } from '@/lib/devTrace';
 
@@ -62,22 +61,28 @@ const PREMIUM = {
   shadowColor: '#000',
 };
 
-// Module-level cache for instant load across tab switches
-// M-001 FIX: Track cache for HMR cleanup
-let _cachedPromptsData: any[] = [];
-let _cachedTrendingData: { trendingDarePrompt: any; trendingTruthPrompt: any } | null = null;
-let _hasEverLoaded = false;
+const debugTodLog = (...args: unknown[]) => {
+  if (__DEV__) {
+    console.log(...args);
+  }
+};
+
+type TodFeedCacheEntry = {
+  prompts: any[];
+  trending: { trendingDarePrompt: any; trendingTruthPrompt: any } | null;
+};
+
+// Module-level cache is keyed by authenticated user to avoid cross-user leakage.
+let _todFeedCacheByUser: Record<string, TodFeedCacheEntry> = {};
 
 /**
  * Clear the T&D cache on logout to prevent data leak between users.
  * Called from authStore.logout() to ensure clean state.
  */
 export function clearTodCache() {
-  _cachedPromptsData = [];
-  _cachedTrendingData = null;
-  _hasEverLoaded = false;
+  _todFeedCacheByUser = {};
   if (__DEV__) {
-    console.log('[T/D] Cache cleared on logout');
+    debugTodLog('[T/D] Cache cleared on logout');
   }
 }
 
@@ -87,23 +92,16 @@ let _tabOpenTime = 0;
 // M-001 FIX: Reset cache on HMR to prevent stale data in development
 if (__DEV__ && typeof module !== 'undefined' && (module as any).hot) {
   (module as any).hot.accept(() => {
-    _cachedPromptsData = [];
-    _cachedTrendingData = null;
-    _hasEverLoaded = false;
+    _todFeedCacheByUser = {};
     _tabOpenTime = 0;
-    console.log('[T/D HMR] Cache cleared on hot reload');
+    debugTodLog('[T/D HMR] Cache cleared on hot reload');
   });
 }
 
-/** Prewarm the T/D cache with data (called from Private layout mount) */
+/** Prewarm is intentionally disabled until it can be keyed by authenticated user. */
 export function prewarmTodCache(prompts: any[] | undefined, trending: any | undefined) {
-  if (prompts !== undefined && prompts.length > 0 && !_hasEverLoaded) {
-    _cachedPromptsData = prompts;
-    _hasEverLoaded = true;
-    console.log(`[T/D PREWARM] cached ${prompts.length} prompts`);
-  }
-  if (trending !== undefined && !_cachedTrendingData) {
-    _cachedTrendingData = trending;
+  if (__DEV__ && (prompts !== undefined || trending !== undefined)) {
+    debugTodLog('[T/D PREWARM] skipped until user-scoped prewarm is re-enabled');
   }
 }
 
@@ -142,42 +140,6 @@ function isValidPhotoUrl(url?: string): boolean {
 
 const C = INCOGNITO_COLORS;
 
-/* ─── Owner Photo (simple, no blur) ─── */
-function OwnerPhoto({ uri, promptId }: { uri: string; promptId: string }) {
-  return (
-    <Image
-      source={{ uri }}
-      style={styles.ownerPhoto}
-      onError={() => {
-        console.log(`[T/D PHOTO ERROR] id=${promptId} uriPrefix=${getUrlPrefix(uri)}`);
-      }}
-    />
-  );
-}
-
-/* ─── Blurred Owner Photo (for blur-photo mode) ─── */
-function BlurredOwnerPhoto({ uri, promptId }: { uri: string; promptId: string }) {
-  return (
-    <View style={styles.ownerPhotoBlurContainer}>
-      <Image
-        source={{ uri }}
-        style={styles.ownerPhoto}
-        onError={() => {
-          console.log(`[T/D BLUR PHOTO ERROR] id=${promptId} uriPrefix=${getUrlPrefix(uri)}`);
-        }}
-      />
-      {/* Heavy blur effect - higher intensity for actual obscuring */}
-      <BlurView
-        intensity={Platform.OS === 'ios' ? 80 : 100}
-        tint="dark"
-        style={StyleSheet.absoluteFill}
-      />
-      {/* Additional dark overlay for Android where BlurView may be weak */}
-      <View style={styles.blurDarkOverlay} />
-    </View>
-  );
-}
-
 /**
  * Photo display mode for Truth or Dare cards
  */
@@ -207,18 +169,22 @@ function getPhotoMode(prompt: { isAnonymous?: boolean; photoBlurMode?: string; o
   return 'none';
 }
 
-// Legacy compatibility wrapper
-function shouldShowPhoto(prompt: { isAnonymous?: boolean; photoBlurMode?: string; ownerPhotoUrl?: string }): boolean {
-  return getPhotoMode(prompt) === 'clear';
-}
-
 // Gender icon helper
-function getGenderIcon(gender?: string): keyof typeof Ionicons.glyphMap {
-  if (!gender) return 'male-female';
+function getGenderIcon(gender?: string): keyof typeof Ionicons.glyphMap | null {
+  if (!gender) return null;
   const g = gender.toLowerCase();
   if (g === 'male') return 'male';
   if (g === 'female') return 'female';
-  return 'male-female';
+  if (
+    g === 'non_binary' ||
+    g === 'non-binary' ||
+    g === 'nonbinary' ||
+    g === 'nb' ||
+    g === 'other'
+  ) {
+    return 'male-female';
+  }
+  return null;
 }
 
 // Gender color helper
@@ -231,7 +197,7 @@ function getGenderColor(gender?: string): string {
 }
 
 /* ─── Skeleton Card (placeholder while loading) - Premium animated ─── */
-function SkeletonCard() {
+const SkeletonCard = React.memo(function SkeletonCard() {
   const pulseAnim = useRef(new Animated.Value(0.4)).current;
 
   useEffect(() => {
@@ -242,7 +208,12 @@ function SkeletonCard() {
       ])
     );
     pulse.start();
-    return () => pulse.stop();
+    return () => {
+      pulse.stop();
+      pulseAnim.stopAnimation(() => {
+        pulseAnim.setValue(0.4);
+      });
+    };
   }, [pulseAnim]);
 
   return (
@@ -259,10 +230,10 @@ function SkeletonCard() {
       <Animated.View style={[styles.skeletonButton, { opacity: pulseAnim }]} />
     </View>
   );
-}
+});
 
 /* ─── Compact Comment Preview Row - Premium styling ─── */
-function CommentPreviewRow({ answer }: { answer: any }) {
+const CommentPreviewRow = React.memo(function CommentPreviewRow({ answer }: { answer: any }) {
   const isMedia = answer.type === 'photo' || answer.type === 'video' || answer.type === 'voice';
   const displayName = answer.isAnonymous !== false ? 'Anonymous' : (answer.authorName || 'User');
 
@@ -284,7 +255,7 @@ function CommentPreviewRow({ answer }: { answer: any }) {
       </Text>
     </View>
   );
-}
+});
 
 /* ─── Section Header Component - Premium styling ─── */
 function SectionHeader({ label, isTrending }: { label: string; isTrending: boolean }) {
@@ -404,6 +375,7 @@ const TrendingCard = React.memo(function TrendingCard({
   const isAnon = prompt.isAnonymous ?? true;
   const answerCount = prompt.totalAnswers ?? prompt.answerCount ?? 0;
   const photoMode = getPhotoMode(prompt);
+  const ownerGenderIcon = getGenderIcon(prompt.ownerGender);
   const genderColor = getGenderColor(prompt.ownerGender);
 
   const pillColors: readonly [string, string] = isTruth
@@ -430,20 +402,17 @@ const TrendingCard = React.memo(function TrendingCard({
         {/* Header Row: Owner Identity */}
         <View style={styles.cardHeader}>
           <View style={styles.ownerIdentity}>
-            {/* Photo: clear, blur, or placeholder */}
-            {photoMode === 'clear' ? (
-              <View style={styles.ownerPhotoWrapper}>
-                <OwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
-              </View>
-            ) : photoMode === 'blur' ? (
-              <View style={styles.ownerPhotoWrapper}>
-                <BlurredOwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
-              </View>
-            ) : (
-              <View style={styles.ownerPhotoPlaceholder}>
-                <Ionicons name={isAnon ? 'eye-off' : 'person'} size={14} color={PREMIUM.textMuted} />
-              </View>
-            )}
+            <TodAvatar
+              size={28}
+              photoUrl={prompt.ownerPhotoUrl ?? null}
+              isAnonymous={isAnon}
+              photoBlurMode={prompt.photoBlurMode ?? (photoMode === 'blur' ? 'blur' : 'none')}
+              label={prompt.ownerName || 'User'}
+              borderWidth={1.5}
+              borderColor={PREMIUM.borderSubtle}
+              backgroundColor={PREMIUM.bgHighlight}
+              iconColor={PREMIUM.textMuted}
+            />
             {/* Identity: Name + Age/Gender on SAME ROW */}
             <View style={styles.ownerInfoRow}>
               <Text style={styles.ownerNamePremium} numberOfLines={1}>
@@ -454,10 +423,10 @@ const TrendingCard = React.memo(function TrendingCard({
                   {prompt.ownerAge && (
                     <Text style={styles.ownerAgeInline}>{prompt.ownerAge}</Text>
                   )}
-                  {prompt.ownerGender && (
+                  {prompt.ownerGender && ownerGenderIcon && (
                     <>
                       <View style={[styles.genderDotInline, { backgroundColor: genderColor }]} />
-                      <Ionicons name={getGenderIcon(prompt.ownerGender)} size={11} color={genderColor} />
+                      <Ionicons name={ownerGenderIcon} size={11} color={genderColor} />
                     </>
                   )}
                 </View>
@@ -562,6 +531,7 @@ const PromptCard = React.memo(function PromptCard({
   const answerCount = prompt.totalAnswers ?? prompt.answerCount ?? 0;
   const previewCount = prompt.top2Answers?.length ?? 0;
   const photoMode = getPhotoMode(prompt);
+  const ownerGenderIcon = getGenderIcon(prompt.ownerGender);
   const genderColor = getGenderColor(prompt.ownerGender);
 
   const pillColors: readonly [string, string] = isTruth
@@ -579,20 +549,17 @@ const PromptCard = React.memo(function PromptCard({
         {/* Header Row: Owner Identity */}
         <View style={styles.cardHeader}>
           <View style={styles.ownerIdentity}>
-            {/* Photo: clear, blur, or placeholder */}
-            {photoMode === 'clear' ? (
-              <View style={styles.ownerPhotoWrapper}>
-                <OwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
-              </View>
-            ) : photoMode === 'blur' ? (
-              <View style={styles.ownerPhotoWrapper}>
-                <BlurredOwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
-              </View>
-            ) : (
-              <View style={styles.ownerPhotoPlaceholder}>
-                <Ionicons name={isAnon ? 'eye-off' : 'person'} size={14} color={PREMIUM.textMuted} />
-              </View>
-            )}
+            <TodAvatar
+              size={28}
+              photoUrl={prompt.ownerPhotoUrl ?? null}
+              isAnonymous={isAnon}
+              photoBlurMode={prompt.photoBlurMode ?? (photoMode === 'blur' ? 'blur' : 'none')}
+              label={prompt.ownerName || 'User'}
+              borderWidth={1.5}
+              borderColor={PREMIUM.borderSubtle}
+              backgroundColor={PREMIUM.bgHighlight}
+              iconColor={PREMIUM.textMuted}
+            />
             {/* Identity: Name + Age/Gender on SAME ROW */}
             <View style={styles.ownerInfoRow}>
               <Text style={styles.ownerNamePremium} numberOfLines={1}>
@@ -603,10 +570,10 @@ const PromptCard = React.memo(function PromptCard({
                   {prompt.ownerAge && (
                     <Text style={styles.ownerAgeInline}>{prompt.ownerAge}</Text>
                   )}
-                  {prompt.ownerGender && (
+                  {prompt.ownerGender && ownerGenderIcon && (
                     <>
                       <View style={[styles.genderDotInline, { backgroundColor: genderColor }]} />
-                      <Ionicons name={getGenderIcon(prompt.ownerGender)} size={11} color={genderColor} />
+                      <Ionicons name={ownerGenderIcon} size={11} color={genderColor} />
                     </>
                   )}
                 </View>
@@ -678,14 +645,16 @@ export default function TruthOrDareScreen() {
   useScreenTrace("P2_TRUTH_OR_DARE");
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const [refreshKey, setRefreshKey] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [queryPaused, setQueryPaused] = useState(false);
+  const [bootstrapTimedOut, setBootstrapTimedOut] = useState(false);
   const firstRenderRef = useRef(true);
   const dataReceivedRef = useRef(false);
 
   // B2-HIGH FIX: Prevent stuck spinner and setState-after-unmount
   const mountedRef = useRef(true);
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const queryResumeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // B2-HIGH FIX: Cleanup on unmount
   useEffect(() => {
@@ -695,13 +664,17 @@ export default function TruthOrDareScreen() {
         clearTimeout(refreshTimeoutRef.current);
         refreshTimeoutRef.current = null;
       }
+      if (queryResumeTimeoutRef.current) {
+        clearTimeout(queryResumeTimeoutRef.current);
+        queryResumeTimeoutRef.current = null;
+      }
     };
   }, []);
 
   // DIAGNOSTIC: Log when tab opens
   useEffect(() => {
     _tabOpenTime = Date.now();
-    console.log(`[T/D REPORT] open_start=${_tabOpenTime}`);
+    debugTodLog(`[T/D REPORT] open_start=${_tabOpenTime}`);
     return () => { _tabOpenTime = 0; };
   }, []);
 
@@ -710,7 +683,7 @@ export default function TruthOrDareScreen() {
     if (firstRenderRef.current) {
       firstRenderRef.current = false;
       const renderMs = _tabOpenTime > 0 ? Date.now() - _tabOpenTime : 0;
-      console.log(`[T/D REPORT] first_render_ms=${renderMs}`);
+      debugTodLog(`[T/D REPORT] first_render_ms=${renderMs}`);
     }
   }, []);
 
@@ -726,23 +699,26 @@ export default function TruthOrDareScreen() {
   // Get trending prompts (1 Dare + 1 Truth) using viewerUserId
   const trendingDataQuery = useQuery(
     api.truthDare.getTrendingTruthAndDare,
-    userId ? { viewerUserId: userId } : 'skip'
+    userId && !queryPaused ? { viewerUserId: userId } : 'skip'
   );
 
   // Get all prompts (sorted by engagement)
   const promptsDataQuery = useQuery(
     api.truthDare.listActivePromptsWithTop2Answers,
-    userId ? { viewerUserId: userId } : 'skip'
+    userId && !queryPaused ? { viewerUserId: userId } : 'skip'
   );
 
   // Update cache when data arrives + log diagnostics
   useEffect(() => {
-    if (promptsDataQuery !== undefined) {
-      _cachedPromptsData = promptsDataQuery;
-      _hasEverLoaded = true;
+    if (userId && promptsDataQuery !== undefined) {
+      _todFeedCacheByUser[userId] = {
+        prompts: promptsDataQuery,
+        trending: _todFeedCacheByUser[userId]?.trending ?? null,
+      };
       // B2-HIGH FIX: Guard setState and clear timeout when data arrives
       if (mountedRef.current) {
         setIsRefreshing(false);
+        setBootstrapTimedOut(false);
         if (refreshTimeoutRef.current) {
           clearTimeout(refreshTimeoutRef.current);
           refreshTimeoutRef.current = null;
@@ -753,27 +729,49 @@ export default function TruthOrDareScreen() {
       if (!dataReceivedRef.current) {
         dataReceivedRef.current = true;
         const dataMs = _tabOpenTime > 0 ? Date.now() - _tabOpenTime : 0;
-        console.log(`[T/D REPORT] first_data_ms=${dataMs}`);
-        console.log(`[T/D REPORT] feed_count=${promptsDataQuery.length}`);
+        debugTodLog(`[T/D REPORT] first_data_ms=${dataMs}`);
+        debugTodLog(`[T/D REPORT] feed_count=${promptsDataQuery.length}`);
 
         // Log latest 3 prompts details
         promptsDataQuery.slice(0, 3).forEach((p: any, idx: number) => {
           const visibility = p.isAnonymous ? 'anonymous' : (p.photoBlurMode === 'blur' ? 'blurred' : 'everyone');
-          console.log(`[T/D REPORT] item${idx + 1} id=${String(p._id).slice(-6)} visibility=${visibility} hasName=${!!p.ownerName} hasPhoto=${!!p.ownerPhotoUrl} photoPrefix=${getUrlPrefix(p.ownerPhotoUrl)} blurMode=${p.photoBlurMode || 'none'}`);
+          debugTodLog(`[T/D REPORT] item${idx + 1} id=${String(p._id).slice(-6)} visibility=${visibility} hasName=${!!p.ownerName} hasPhoto=${!!p.ownerPhotoUrl} photoPrefix=${getUrlPrefix(p.ownerPhotoUrl)} blurMode=${p.photoBlurMode || 'none'}`);
         });
       }
     }
-  }, [promptsDataQuery]);
+  }, [promptsDataQuery, userId]);
 
   useEffect(() => {
-    if (trendingDataQuery !== undefined) {
-      _cachedTrendingData = trendingDataQuery;
+    if (userId && trendingDataQuery !== undefined) {
+      _todFeedCacheByUser[userId] = {
+        prompts: _todFeedCacheByUser[userId]?.prompts ?? [],
+        trending: trendingDataQuery,
+      };
     }
-  }, [trendingDataQuery]);
+  }, [trendingDataQuery, userId]);
 
-  // Use cached data ALWAYS for instant render - never block on query loading
-  const prompts = promptsDataQuery ?? _cachedPromptsData;
-  const trendingData = trendingDataQuery ?? _cachedTrendingData;
+  const cachedFeed = userId ? _todFeedCacheByUser[userId] : undefined;
+
+  // Use only the current user's cached data for instant render.
+  const prompts = promptsDataQuery ?? cachedFeed?.prompts ?? [];
+  const trendingData = trendingDataQuery ?? cachedFeed?.trending ?? null;
+
+  useEffect(() => {
+    if (!userId || prompts.length > 0 || promptsDataQuery !== undefined) {
+      if (bootstrapTimedOut) {
+        setBootstrapTimedOut(false);
+      }
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      if (mountedRef.current) {
+        setBootstrapTimedOut(true);
+      }
+    }, 8000);
+
+    return () => clearTimeout(timer);
+  }, [userId, prompts.length, promptsDataQuery, bootstrapTimedOut]);
 
   // Get trending prompt IDs to exclude from normal list
   const trendingIds = useMemo(() => {
@@ -794,12 +792,22 @@ export default function TruthOrDareScreen() {
 
   const onRefresh = useCallback(() => {
     setIsRefreshing(true);
-    setRefreshKey((k: number) => k + 1);
+    setBootstrapTimedOut(false);
+    setQueryPaused(true);
 
     // B2-HIGH FIX: Timeout fallback to prevent stuck spinner (10s)
     if (refreshTimeoutRef.current) {
       clearTimeout(refreshTimeoutRef.current);
     }
+    if (queryResumeTimeoutRef.current) {
+      clearTimeout(queryResumeTimeoutRef.current);
+    }
+    queryResumeTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current) {
+        setQueryPaused(false);
+      }
+      queryResumeTimeoutRef.current = null;
+    }, 80);
     refreshTimeoutRef.current = setTimeout(() => {
       if (mountedRef.current) {
         setIsRefreshing(false);
@@ -925,6 +933,43 @@ export default function TruthOrDareScreen() {
 
   // Check if we're in initial loading state (no data yet, cache empty)
   const isInitialLoading = promptsDataQuery === undefined && prompts.length === 0;
+
+  if (bootstrapTimedOut && prompts.length === 0) {
+    return (
+      <LinearGradient
+        colors={[PREMIUM.bgDeep, PREMIUM.bgBase]}
+        style={[styles.container, { paddingTop: insets.top }]}
+      >
+        <View style={styles.header}>
+          <LinearGradient
+            colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+            style={styles.headerIconBg}
+          >
+            <Ionicons name="flame" size={14} color="#FFF" />
+          </LinearGradient>
+          <Text style={styles.headerTitle}>Truth or Dare</Text>
+        </View>
+        <View style={styles.emptyState}>
+          <View style={styles.emptyIconContainer}>
+            <Ionicons name="refresh-circle-outline" size={52} color={PREMIUM.textMuted} />
+          </View>
+          <Text style={styles.emptyTitle}>Couldn&apos;t load Truth or Dare</Text>
+          <Text style={styles.emptySubtitle}>Pull to refresh or try again now.</Text>
+          <TouchableOpacity style={styles.createFirstBtn} onPress={onRefresh} activeOpacity={0.85}>
+            <LinearGradient
+              colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.createFirstBtnGradient}
+            >
+              <Ionicons name="refresh" size={18} color="#FFF" />
+              <Text style={styles.createFirstBtnText}>Retry</Text>
+            </LinearGradient>
+          </TouchableOpacity>
+        </View>
+      </LinearGradient>
+    );
+  }
 
   // Show skeleton cards while first load is happening
   if (isInitialLoading) {

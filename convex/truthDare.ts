@@ -9,6 +9,8 @@ const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
 // Rate limiting constants
 const RATE_LIMITS = {
+  prompt: { max: 5, windowMs: 60 * 1000 }, // 5 prompts per minute
+  connect: { max: 30, windowMs: 60 * 1000 }, // 30 connect requests per minute
   answer: { max: 10, windowMs: 60 * 1000 }, // 10 answers per minute
   reaction: { max: 30, windowMs: 60 * 1000 }, // 30 reactions per minute
   prompt_reaction: { max: 30, windowMs: 60 * 1000 }, // 30 prompt reactions per minute
@@ -22,12 +24,20 @@ const REPORT_HIDE_THRESHOLD = 5;
 
 // TOD-P2-001 FIX: Rate limit error message
 const RATE_LIMIT_ERROR = 'Rate limit exceeded. Please try again later.';
+const TOD_SYSTEM_OWNER_ID = 'system';
 
 const MIN_PROMPT_CHARS = 10;
 const MAX_PROMPT_CHARS = 280;
 const MAX_ANSWER_CHARS = 400;
 const MIN_MEDIA_VIEW_DURATION_SEC = 1;
 const MAX_MEDIA_VIEW_DURATION_SEC = 60;
+const SHOULD_DEBUG_TOD = process.env.NODE_ENV !== 'production';
+
+function debugTodLog(...args: any[]) {
+  if (SHOULD_DEBUG_TOD) {
+    console.log(...args);
+  }
+}
 
 function trimText(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
@@ -62,36 +72,242 @@ function validateViewDuration(durationSec: number | undefined): number | undefin
   return durationSec;
 }
 
-async function resolveRequiredTodUserId(
+async function requireAuthenticatedTodUserId(
   ctx: any,
-  authUserId: string,
   errorMessage: string = 'Unauthorized'
 ): Promise<Id<'users'>> {
-  if (!authUserId || authUserId.trim().length === 0) {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity?.subject) {
     throw new Error(errorMessage);
   }
-  const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  const userId = await resolveUserIdByAuthId(ctx, identity.subject);
   if (!userId) {
     throw new Error(errorMessage);
   }
   return userId;
 }
 
-async function resolveOptionalTodUserId(
+async function getOptionalAuthenticatedTodUserId(
   ctx: any,
-  authOrUserId: string | undefined
+  contextLabel: string = 'truthDare'
 ): Promise<Id<'users'> | undefined> {
-  if (!authOrUserId || authOrUserId.trim().length === 0) {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity?.subject) {
     return undefined;
   }
-  return (await resolveUserIdByAuthId(ctx, authOrUserId)) ?? undefined;
+  const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+  if (!userId) {
+    console.warn(`[T/D] Auth identity resolved without user record in ${contextLabel}`);
+    return undefined;
+  }
+  return userId;
+}
+
+function getTodDisplayName(
+  user: { handle?: string | null; name?: string | null } | null | undefined,
+  fallback: string = 'Someone'
+): string {
+  return user?.handle?.trim() || user?.name?.trim() || fallback;
+}
+
+function isSystemTodOwnerId(userId: string | null | undefined): boolean {
+  return userId === TOD_SYSTEM_OWNER_ID;
+}
+
+function calculateTodAge(dateOfBirth: string | undefined): number | null {
+  if (!dateOfBirth) return null;
+  const birthDate = new Date(dateOfBirth);
+  if (Number.isNaN(birthDate.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return age;
+}
+
+function getSafePhotoUrl(
+  user: { primaryPhotoUrl?: string | null } | null | undefined,
+  fallbackUrl?: string | null
+): string | null {
+  return trimText(user?.primaryPhotoUrl ?? undefined) ?? trimText(fallbackUrl ?? undefined) ?? null;
+}
+
+function isPromptHiddenForViewer(
+  prompt: { ownerUserId: string; reportCount?: number },
+  viewerUserId: Id<'users'> | undefined
+): boolean {
+  return (prompt.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD && prompt.ownerUserId !== viewerUserId;
+}
+
+async function deleteStorageIfPresent(
+  ctx: any,
+  storageId: Id<'_storage'> | undefined
+): Promise<void> {
+  if (!storageId) return;
+  try {
+    await ctx.storage.delete(storageId);
+  } catch {
+    // Storage may already be deleted.
+  }
+}
+
+function getNormalizedTodAnswerIdentity(
+  answer: {
+    isAnonymous?: boolean;
+    identityMode?: 'anonymous' | 'no_photo' | 'profile';
+    photoBlurMode?: 'none' | 'blur';
+    authorName?: string;
+    authorPhotoUrl?: string;
+    authorAge?: number;
+    authorGender?: string;
+  }
+): {
+  identityMode: 'anonymous' | 'no_photo' | 'profile';
+  isAnonymous: boolean;
+  photoBlurMode: 'none' | 'blur';
+  authorName: string | undefined;
+  authorPhotoUrl: string | undefined;
+  authorAge: number | undefined;
+  authorGender: string | undefined;
+} {
+  const identityMode =
+    answer.identityMode === 'anonymous' ||
+    answer.identityMode === 'no_photo' ||
+    answer.identityMode === 'profile'
+      ? answer.identityMode
+      : answer.isAnonymous !== false
+        ? 'anonymous'
+        : answer.photoBlurMode === 'blur'
+          ? 'no_photo'
+          : 'profile';
+  const isAnonymous = identityMode === 'anonymous';
+  const isNoPhoto = identityMode === 'no_photo';
+
+  return {
+    identityMode,
+    isAnonymous,
+    photoBlurMode: isNoPhoto ? 'blur' : 'none',
+    authorName: isAnonymous ? undefined : trimText(answer.authorName ?? undefined),
+    authorPhotoUrl:
+      isAnonymous || isNoPhoto ? undefined : trimText(answer.authorPhotoUrl ?? undefined),
+    authorAge: isAnonymous ? undefined : answer.authorAge,
+    authorGender: isAnonymous ? undefined : trimText(answer.authorGender ?? undefined),
+  };
+}
+
+type TodConnectIdentity = {
+  name: string;
+  photoUrl: string | null;
+  photoBlurMode: 'none' | 'blur';
+  age: number | null;
+  gender: string | null;
+  isAnonymous: boolean;
+};
+
+function getPromptConnectIdentity(
+  prompt: {
+    isAnonymous?: boolean;
+    photoBlurMode?: 'none' | 'blur';
+    ownerName?: string;
+    ownerPhotoUrl?: string;
+    ownerAge?: number;
+    ownerGender?: string;
+  },
+  user:
+    | {
+        handle?: string | null;
+        name?: string | null;
+        primaryPhotoUrl?: string | null;
+        dateOfBirth?: string;
+        gender?: string | null;
+      }
+    | null
+    | undefined
+): TodConnectIdentity {
+  const isAnonymous = prompt.isAnonymous !== false;
+  const photoBlurMode: 'none' | 'blur' =
+    !isAnonymous && prompt.photoBlurMode === 'blur' ? 'blur' : 'none';
+
+  return {
+    name: isAnonymous ? 'Anonymous' : getTodDisplayName(user, trimText(prompt.ownerName) ?? 'Someone'),
+    photoUrl: isAnonymous || photoBlurMode === 'blur' ? null : getSafePhotoUrl(user, prompt.ownerPhotoUrl),
+    photoBlurMode,
+    age: isAnonymous ? null : (prompt.ownerAge ?? calculateTodAge(user?.dateOfBirth)),
+    gender: isAnonymous
+      ? null
+      : (trimText(prompt.ownerGender ?? undefined) ?? trimText(user?.gender ?? undefined) ?? null),
+    isAnonymous,
+  };
+}
+
+function getAnswerConnectIdentity(
+  answer: {
+    isAnonymous?: boolean;
+    identityMode?: 'anonymous' | 'no_photo' | 'profile';
+    photoBlurMode?: 'none' | 'blur';
+    authorName?: string;
+    authorPhotoUrl?: string;
+    authorAge?: number;
+    authorGender?: string;
+  },
+  user:
+    | {
+        handle?: string | null;
+        name?: string | null;
+        primaryPhotoUrl?: string | null;
+        dateOfBirth?: string;
+        gender?: string | null;
+      }
+    | null
+    | undefined
+): TodConnectIdentity {
+  const normalized = getNormalizedTodAnswerIdentity(answer);
+
+  return {
+    name: normalized.isAnonymous
+      ? 'Anonymous'
+      : getTodDisplayName(user, normalized.authorName ?? 'Someone'),
+    photoUrl:
+      normalized.isAnonymous || normalized.photoBlurMode === 'blur'
+        ? null
+        : getSafePhotoUrl(user, normalized.authorPhotoUrl),
+    photoBlurMode: normalized.photoBlurMode,
+    age: normalized.isAnonymous ? null : (normalized.authorAge ?? calculateTodAge(user?.dateOfBirth)),
+    gender: normalized.isAnonymous
+      ? null
+      : (normalized.authorGender ?? trimText(user?.gender ?? undefined) ?? null),
+    isAnonymous: normalized.isAnonymous,
+  };
+}
+
+function getDefaultConnectIdentity(
+  user:
+    | {
+        handle?: string | null;
+        name?: string | null;
+        primaryPhotoUrl?: string | null;
+        dateOfBirth?: string;
+        gender?: string | null;
+      }
+    | null
+    | undefined
+): TodConnectIdentity {
+  return {
+    name: getTodDisplayName(user),
+    photoUrl: getSafePhotoUrl(user),
+    photoBlurMode: 'none',
+    age: calculateTodAge(user?.dateOfBirth),
+    gender: trimText(user?.gender ?? undefined) ?? null,
+    isAnonymous: false,
+  };
 }
 
 async function getBlockedUserIdsForViewer(
   ctx: any,
-  viewerAuthOrUserId: string | undefined
+  viewerUserId: Id<'users'> | undefined
 ): Promise<Set<string>> {
-  const viewerUserId = await resolveOptionalTodUserId(ctx, viewerAuthOrUserId);
   if (!viewerUserId) return new Set();
 
   const blocksOut = await ctx.db
@@ -110,6 +326,9 @@ async function getBlockedUserIdsForViewer(
 }
 
 async function hasBlockBetween(ctx: any, userA: string, userB: string): Promise<boolean> {
+  if (isSystemTodOwnerId(userA) || isSystemTodOwnerId(userB)) {
+    return false;
+  }
   const direct = await ctx.db
     .query('blocks')
     .withIndex('by_blocker', (q: any) => q.eq('blockerId', userA as Id<'users'>))
@@ -124,6 +343,375 @@ async function hasBlockBetween(ctx: any, userA: string, userB: string): Promise<
     .first();
   return !!reverse;
 }
+
+function getVoiceMediaUrlForViewer(
+  answer: {
+    type: string;
+    mediaUrl?: string;
+    visibility?: string;
+    userId: string;
+  },
+  viewerUserId: Id<'users'> | undefined,
+  promptOwnerUserId: string
+): string | undefined {
+  if (answer.type !== 'voice' || !answer.mediaUrl || !viewerUserId) {
+    return undefined;
+  }
+  if (viewerUserId === answer.userId) {
+    return answer.mediaUrl;
+  }
+  if (answer.visibility === 'owner_only') {
+    return promptOwnerUserId === viewerUserId ? answer.mediaUrl : undefined;
+  }
+  return answer.mediaUrl;
+}
+
+function getInlineAnswerMediaUrlForViewer(
+  answer: {
+    type: string;
+    mediaUrl?: string;
+    visibility?: string;
+    userId: string;
+  },
+  viewerUserId: Id<'users'> | undefined,
+  promptOwnerUserId: string
+): string | undefined {
+  if (!viewerUserId) {
+    return undefined;
+  }
+  if (answer.type === 'voice') {
+    return getVoiceMediaUrlForViewer(answer, viewerUserId, promptOwnerUserId);
+  }
+  if ((answer.type === 'photo' || answer.type === 'video') && viewerUserId === answer.userId) {
+    return answer.mediaUrl;
+  }
+  return undefined;
+}
+
+async function canViewerAccessAnswerMedia(
+  ctx: any,
+  answer: {
+    promptId: string;
+    visibility?: string;
+    userId: string;
+  },
+  viewerUserId: Id<'users'>,
+  prompt?: { ownerUserId: string } | null
+): Promise<boolean> {
+  if (viewerUserId === answer.userId) {
+    return true;
+  }
+
+  const promptDoc =
+    prompt ?? (await ctx.db.get(answer.promptId as Id<'todPrompts'>));
+  if (!promptDoc) {
+    return false;
+  }
+
+  if (await hasBlockBetween(ctx, viewerUserId as string, answer.userId)) {
+    return false;
+  }
+  if (
+    !isSystemTodOwnerId(promptDoc.ownerUserId) &&
+    promptDoc.ownerUserId !== answer.userId &&
+    await hasBlockBetween(ctx, viewerUserId as string, promptDoc.ownerUserId)
+  ) {
+    return false;
+  }
+
+  if (answer.visibility === 'owner_only') {
+    return promptDoc.ownerUserId === viewerUserId;
+  }
+
+  return true;
+}
+
+async function canViewerAccessVoiceAnswer(
+  ctx: any,
+  answer: {
+    promptId: string;
+    visibility?: string;
+    userId: string;
+  },
+  viewerUserId: Id<'users'>,
+  prompt?: { ownerUserId: string } | null
+): Promise<boolean> {
+  return canViewerAccessAnswerMedia(ctx, answer, viewerUserId, prompt);
+}
+
+async function getAnswerReactionSummary(
+  ctx: any,
+  answerId: string,
+  totalReactionCount: number,
+  viewerUserId: Id<'users'> | undefined
+): Promise<{ reactionCounts: { emoji: string; count: number }[]; myReaction: string | null }> {
+  if (totalReactionCount <= 0) {
+    return {
+      reactionCounts: [],
+      myReaction: null,
+    };
+  }
+
+  const reactions = await ctx.db
+    .query('todAnswerReactions')
+    .withIndex('by_answer', (q: any) => q.eq('answerId', answerId))
+    .collect();
+
+  const emojiCountMap: Map<string, number> = new Map();
+  for (const reaction of reactions) {
+    emojiCountMap.set(reaction.emoji, (emojiCountMap.get(reaction.emoji) || 0) + 1);
+  }
+
+  let myReaction: string | null = null;
+  if (viewerUserId) {
+    const myReactionDoc = reactions.find((reaction: any) => reaction.userId === viewerUserId);
+    if (myReactionDoc) {
+      myReaction = myReactionDoc.emoji;
+    }
+  }
+
+  return {
+    reactionCounts: Array.from(emojiCountMap.entries()).map(([emoji, count]) => ({ emoji, count })),
+    myReaction,
+  };
+}
+
+function sortTodAnswersByDisplayRank(
+  a: { totalReactionCount?: number; createdAt: number },
+  b: { totalReactionCount?: number; createdAt: number }
+): number {
+  const aReactions = a.totalReactionCount ?? 0;
+  const bReactions = b.totalReactionCount ?? 0;
+  if (bReactions !== aReactions) {
+    return bReactions - aReactions;
+  }
+  return b.createdAt - a.createdAt;
+}
+
+async function syncPromptAnswerCounts(
+  ctx: any,
+  promptId: string
+): Promise<{ answerCount: number; activeCount: number }> {
+  const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
+  if (!prompt) {
+    return { answerCount: 0, activeCount: 0 };
+  }
+
+  const answers = await ctx.db
+    .query('todAnswers')
+    .withIndex('by_prompt', (q: any) => q.eq('promptId', promptId))
+    .collect();
+
+  const answerCount = answers.length;
+  const activeCount = answerCount;
+
+  if (
+    prompt.answerCount !== answerCount ||
+    (prompt.activeCount ?? 0) !== activeCount
+  ) {
+    await ctx.db.patch(prompt._id, {
+      answerCount,
+      activeCount,
+    });
+  }
+
+  return { answerCount, activeCount };
+}
+
+async function isTodStorageStillReferenced(
+  ctx: any,
+  storageId: Id<'_storage'>
+): Promise<boolean> {
+  const answerUsingStorage = await ctx.db
+    .query('todAnswers')
+    .filter((q: any) => q.eq(q.field('mediaStorageId'), storageId))
+    .first();
+  if (answerUsingStorage) {
+    return true;
+  }
+
+  const privateMediaUsingStorage = await ctx.db
+    .query('todPrivateMedia')
+    .filter((q: any) => q.eq(q.field('storageId'), storageId))
+    .first();
+  if (privateMediaUsingStorage) {
+    return true;
+  }
+
+  const photoUsingStorage = await ctx.db
+    .query('photos')
+    .filter((q: any) => q.eq(q.field('storageId'), storageId))
+    .first();
+
+  return !!photoUsingStorage;
+}
+
+async function deleteTodAnswerForCleanup(
+  ctx: any,
+  answer: {
+    _id: Id<'todAnswers'>;
+    mediaStorageId?: Id<'_storage'>;
+  }
+): Promise<void> {
+  const answerId = answer._id as string;
+
+  const likes = await ctx.db
+    .query('todAnswerLikes')
+    .withIndex('by_answer', (q: any) => q.eq('answerId', answerId))
+    .collect();
+  for (const like of likes) {
+    await ctx.db.delete(like._id);
+  }
+
+  const reactions = await ctx.db
+    .query('todAnswerReactions')
+    .withIndex('by_answer', (q: any) => q.eq('answerId', answerId))
+    .collect();
+  for (const reaction of reactions) {
+    await ctx.db.delete(reaction._id);
+  }
+
+  const reports = await ctx.db
+    .query('todAnswerReports')
+    .withIndex('by_answer', (q: any) => q.eq('answerId', answerId))
+    .collect();
+  for (const report of reports) {
+    await ctx.db.delete(report._id);
+  }
+
+  const views = await ctx.db
+    .query('todAnswerViews')
+    .withIndex('by_answer', (q: any) => q.eq('answerId', answerId))
+    .collect();
+  for (const view of views) {
+    await ctx.db.delete(view._id);
+  }
+
+  const connectRequests = await ctx.db
+    .query('todConnectRequests')
+    .filter((q: any) => q.eq(q.field('answerId'), answerId))
+    .collect();
+  for (const request of connectRequests) {
+    await ctx.db.delete(request._id);
+  }
+
+  await deleteStorageIfPresent(ctx, answer.mediaStorageId);
+  await ctx.db.delete(answer._id);
+}
+
+export const trackPendingTodUploads = mutation({
+  args: {
+    storageIds: v.array(v.id('_storage')),
+  },
+  handler: async (ctx, { storageIds }) => {
+    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const uniqueStorageIds = Array.from(new Set(storageIds));
+    const trackedIds: Id<'_storage'>[] = [];
+
+    for (const storageId of uniqueStorageIds) {
+      const existing = await ctx.db
+        .query('pendingUploads')
+        .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+        .first();
+
+      if (existing) {
+        if (existing.userId !== userId) {
+          throw new Error('Storage ID already claimed by another user');
+        }
+        trackedIds.push(storageId);
+        continue;
+      }
+
+      await ctx.db.insert('pendingUploads', {
+        storageId,
+        userId,
+        createdAt: Date.now(),
+      });
+      trackedIds.push(storageId);
+    }
+
+    return {
+      success: true,
+      trackedCount: trackedIds.length,
+      trackedIds,
+    };
+  },
+});
+
+export const releasePendingTodUploads = mutation({
+  args: {
+    storageIds: v.array(v.id('_storage')),
+  },
+  handler: async (ctx, { storageIds }) => {
+    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const uniqueStorageIds = Array.from(new Set(storageIds));
+    let releasedCount = 0;
+
+    for (const storageId of uniqueStorageIds) {
+      const pending = await ctx.db
+        .query('pendingUploads')
+        .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+        .first();
+
+      if (!pending) {
+        continue;
+      }
+      if (pending.userId !== userId) {
+        throw new Error('Not authorized to release this upload');
+      }
+
+      await ctx.db.delete(pending._id);
+      releasedCount++;
+    }
+
+    return {
+      success: true,
+      releasedCount,
+    };
+  },
+});
+
+export const cleanupPendingTodUploads = mutation({
+  args: {
+    storageIds: v.array(v.id('_storage')),
+  },
+  handler: async (ctx, { storageIds }) => {
+    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const uniqueStorageIds = Array.from(new Set(storageIds));
+    let deletedCount = 0;
+    let skippedInUseCount = 0;
+
+    for (const storageId of uniqueStorageIds) {
+      const pending = await ctx.db
+        .query('pendingUploads')
+        .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+        .first();
+
+      if (!pending) {
+        continue;
+      }
+      if (pending.userId !== userId) {
+        throw new Error('Not authorized to clean up this upload');
+      }
+
+      if (await isTodStorageStillReferenced(ctx, storageId)) {
+        await ctx.db.delete(pending._id);
+        skippedInUseCount++;
+        continue;
+      }
+
+      await deleteStorageIfPresent(ctx, storageId);
+      await ctx.db.delete(pending._id);
+      deletedCount++;
+    }
+
+    return {
+      success: true,
+      deletedCount,
+      skippedInUseCount,
+    };
+  },
+});
 
 // Create a new Truth or Dare prompt
 // TOD-001 FIX: Auth hardening - verify caller identity server-side
@@ -143,19 +731,16 @@ export const createPrompt = mutation({
     ownerGender: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // TOD-001 FIX: Verify caller identity
-    const { authUserId } = args;
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const ownerUserId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!ownerUserId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const ownerUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
     const promptText = validatePromptText(args.text);
 
     const now = Date.now();
     const expiresAt = now + TWENTY_FOUR_HOURS_MS;
+
+    const rateCheck = await checkRateLimit(ctx, ownerUserId, 'prompt');
+    if (!rateCheck.allowed) {
+      throw new Error(RATE_LIMIT_ERROR);
+    }
 
     // Resolve photo URL from storage ID if provided (ensures HTTPS URL)
     let resolvedPhotoUrl = args.ownerPhotoUrl;
@@ -163,7 +748,7 @@ export const createPrompt = mutation({
       const storageUrl = await ctx.storage.getUrl(args.ownerPhotoStorageId);
       if (storageUrl) {
         resolvedPhotoUrl = storageUrl;
-        console.log(`[T/D] Resolved photo storageId to URL: ${storageUrl.substring(0, 60)}...`);
+        debugTodLog(`[T/D] Resolved photo storageId to URL: ${storageUrl.substring(0, 60)}...`);
       }
     }
 
@@ -206,7 +791,7 @@ export const createPrompt = mutation({
           finalOwnerPhotoUrl = userProfile.primaryPhotoUrl;
         }
 
-        console.log(`[T/D] Server-side identity fallback: name=${finalOwnerName}, age=${finalOwnerAge}, gender=${finalOwnerGender}, hasPhoto=${!!finalOwnerPhotoUrl}`);
+        debugTodLog(`[T/D] Server-side identity fallback: name=${finalOwnerName}, age=${finalOwnerAge}, gender=${finalOwnerGender}, hasPhoto=${!!finalOwnerPhotoUrl}`);
       }
     }
 
@@ -230,7 +815,7 @@ export const createPrompt = mutation({
 
     // Debug log for post creation
     const urlPrefix = finalOwnerPhotoUrl ? (finalOwnerPhotoUrl.startsWith('https://') ? 'https' : finalOwnerPhotoUrl.startsWith('http://') ? 'http' : 'other') : 'none';
-    console.log(`[T/D] Created prompt: id=${promptId}, type=${args.type}, isAnon=${args.isAnonymous ?? true}, photoBlurMode=${args.photoBlurMode ?? 'none'}, photoUrlPrefix=${urlPrefix}, identityFallback=${needsIdentityFallback}`);
+    debugTodLog(`[T/D] Created prompt: id=${promptId}, type=${args.type}, isAnon=${args.isAnonymous ?? true}, photoBlurMode=${args.photoBlurMode ?? 'none'}, photoUrlPrefix=${urlPrefix}, identityFallback=${needsIdentityFallback}`);
 
     return { promptId, expiresAt };
   },
@@ -244,19 +829,15 @@ export const editMyPrompt = mutation({
     newText: v.string(),
   },
   handler: async (ctx, { promptId, authUserId, newText }) => {
-    // Verify caller identity
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Get the prompt
     const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
     if (!prompt) {
       throw new Error('Prompt not found');
+    }
+    if (isSystemTodOwnerId(prompt.ownerUserId)) {
+      throw new Error('Prompt owner unavailable for private media');
     }
 
     // Verify ownership
@@ -279,7 +860,7 @@ export const editMyPrompt = mutation({
       text: validatedText,
     });
 
-    console.log(`[T/D] Edited prompt: id=${promptId}, newTextLength=${validatedText.length}`);
+    debugTodLog(`[T/D] Edited prompt: id=${promptId}, newTextLength=${validatedText.length}`);
 
     return { success: true };
   },
@@ -292,14 +873,7 @@ export const deleteMyPrompt = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { promptId, authUserId }) => {
-    // Verify caller identity
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Get the prompt
     const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
@@ -320,6 +894,16 @@ export const deleteMyPrompt = mutation({
 
     for (const answer of answers) {
       const answerId = answer._id as unknown as string;
+
+      await deleteStorageIfPresent(ctx, answer.mediaStorageId);
+
+      const legacyLikes = await ctx.db
+        .query('todAnswerLikes')
+        .withIndex('by_answer', (q) => q.eq('answerId', answerId))
+        .collect();
+      for (const like of legacyLikes) {
+        await ctx.db.delete(like._id);
+      }
 
       // Delete all reactions for this answer
       const reactions = await ctx.db
@@ -352,6 +936,31 @@ export const deleteMyPrompt = mutation({
       await ctx.db.delete(answer._id);
     }
 
+    const promptReactions = await ctx.db
+      .query('todPromptReactions')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+    for (const reaction of promptReactions) {
+      await ctx.db.delete(reaction._id);
+    }
+
+    const promptReports = await ctx.db
+      .query('todPromptReports')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+    for (const report of promptReports) {
+      await ctx.db.delete(report._id);
+    }
+
+    const privateMediaItems = await ctx.db
+      .query('todPrivateMedia')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+    for (const item of privateMediaItems) {
+      await deleteStorageIfPresent(ctx, item.storageId);
+      await ctx.db.delete(item._id);
+    }
+
     // Delete all connect requests for this prompt
     const connectRequests = await ctx.db
       .query('todConnectRequests')
@@ -364,7 +973,7 @@ export const deleteMyPrompt = mutation({
     // Delete the prompt itself
     await ctx.db.delete(prompt._id);
 
-    console.log(`[T/D] Deleted prompt: id=${promptId}, deletedAnswers=${answers.length}, deletedConnectRequests=${connectRequests.length}`);
+    debugTodLog(`[T/D] Deleted prompt: id=${promptId}, deletedAnswers=${answers.length}, deletedConnectRequests=${connectRequests.length}, deletedPrivateMedia=${privateMediaItems.length}`);
 
     return { success: true };
   },
@@ -375,8 +984,7 @@ export const deleteMyPrompt = mutation({
 export const getPendingConnectRequests = query({
   args: { authUserId: v.string() },
   handler: async (ctx, { authUserId }) => {
-    if (!authUserId) return [];
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await getOptionalAuthenticatedTodUserId(ctx, 'getPendingConnectRequests');
     if (!userId) return [];
 
     const requests = await ctx.db
@@ -402,18 +1010,15 @@ export const getPendingConnectRequests = query({
           .query('todPrompts')
           .filter((q) => q.eq(q.field('_id'), req.promptId as Id<'todPrompts'>))
           .first();
-
-        // Calculate age from dateOfBirth
-        let senderAge: number | null = null;
-        if (sender?.dateOfBirth) {
-          const birthDate = new Date(sender.dateOfBirth);
-          const today = new Date();
-          senderAge = today.getFullYear() - birthDate.getFullYear();
-          const monthDiff = today.getMonth() - birthDate.getMonth();
-          if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-            senderAge--;
-          }
+        if (!prompt) {
+          return null;
         }
+
+        if (await hasBlockBetween(ctx, req.fromUserId, userId as string)) {
+          return null;
+        }
+
+        const senderIdentity = getPromptConnectIdentity(prompt, sender);
 
         return {
           _id: req._id,
@@ -422,10 +1027,12 @@ export const getPendingConnectRequests = query({
           fromUserId: req.fromUserId,
           createdAt: req.createdAt,
           // Sender profile snapshot
-          senderName: sender?.name ?? 'Someone',
-          senderPhotoUrl: sender?.primaryPhotoUrl ?? null,
-          senderAge,
-          senderGender: sender?.gender ?? null,
+          senderName: senderIdentity.name,
+          senderPhotoUrl: senderIdentity.photoUrl,
+          senderPhotoBlurMode: senderIdentity.photoBlurMode,
+          senderIsAnonymous: senderIdentity.isAnonymous,
+          senderAge: senderIdentity.age,
+          senderGender: senderIdentity.gender,
           // Prompt context
           promptType: prompt?.type ?? 'truth',
           promptText: prompt?.text ?? '',
@@ -433,7 +1040,7 @@ export const getPendingConnectRequests = query({
       })
     );
 
-    return enriched;
+    return enriched.filter((request): request is NonNullable<typeof request> => request !== null);
   },
 });
 
@@ -445,13 +1052,7 @@ export const sendTodConnectRequest = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { promptId, answerId, authUserId }) => {
-    if (!authUserId) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!fromUserId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const fromUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Get prompt to verify ownership
     const prompt = await ctx.db
@@ -477,7 +1078,7 @@ export const sendTodConnectRequest = mutation({
       return { success: false, reason: 'Answer does not belong to this prompt' };
     }
 
-    const isAnonymousAnswer = answer.isAnonymous !== false || answer.identityMode === 'anonymous';
+    const isAnonymousAnswer = getNormalizedTodAnswerIdentity(answer).isAnonymous;
     if (isAnonymousAnswer) {
       return { success: false, reason: 'Cannot connect to an anonymous answer' };
     }
@@ -524,6 +1125,11 @@ export const sendTodConnectRequest = mutation({
       return { success: false, reason: 'Request already exists' };
     }
 
+    const rateCheck = await checkRateLimit(ctx, fromUserId, 'connect');
+    if (!rateCheck.allowed) {
+      throw new Error(RATE_LIMIT_ERROR);
+    }
+
     // Create connect request
     await ctx.db.insert('todConnectRequests', {
       promptId,
@@ -547,13 +1153,7 @@ export const respondToConnect = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { requestId, action, authUserId }) => {
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const recipientDbId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!recipientDbId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const recipientDbId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     const request = await ctx.db.get(requestId);
     if (!request || request.status !== 'pending') {
@@ -566,12 +1166,40 @@ export const respondToConnect = mutation({
     }
 
     if (action === 'connect') {
-      await ctx.db.patch(requestId, { status: 'connected' });
+      const prompt = await ctx.db.get(request.promptId as Id<'todPrompts'>);
+      if (!prompt || isSystemTodOwnerId(prompt.ownerUserId)) {
+        return { success: false, reason: 'Prompt unavailable for connect' };
+      }
+
+      const answer = await ctx.db
+        .query('todAnswers')
+        .filter((q) => q.eq(q.field('_id'), request.answerId as Id<'todAnswers'>))
+        .first();
+      const privateMedia = answer
+        ? null
+        : await ctx.db
+            .query('todPrivateMedia')
+            .filter((q) => q.eq(q.field('_id'), request.answerId as Id<'todPrivateMedia'>))
+            .first();
+
+      if (prompt.ownerUserId !== request.fromUserId) {
+        return { success: false, reason: 'Connect request is no longer valid' };
+      }
+      if (answer && answer.userId !== recipientDbId) {
+        return { success: false, reason: 'Connect request is no longer valid' };
+      }
+      if (privateMedia && privateMedia.fromUserId !== recipientDbId) {
+        return { success: false, reason: 'Connect request is no longer valid' };
+      }
 
       // Resolve sender to Id<'users'>
       const senderDbId = await resolveUserIdByAuthId(ctx, request.fromUserId);
       if (!senderDbId) {
         return { success: false, reason: 'Sender user not found' };
+      }
+
+      if (await hasBlockBetween(ctx, senderDbId as string, recipientDbId as string)) {
+        return { success: false, reason: 'Connect unavailable for this user' };
       }
 
       // Get sender profile for response
@@ -580,21 +1208,14 @@ export const respondToConnect = mutation({
       // Get recipient profile for response
       const recipient = await ctx.db.get(recipientDbId as Id<'users'>);
 
-      // Calculate ages
-      const calculateAge = (dob: string | undefined): number | null => {
-        if (!dob) return null;
-        const birthDate = new Date(dob);
-        const today = new Date();
-        let age = today.getFullYear() - birthDate.getFullYear();
-        const monthDiff = today.getMonth() - birthDate.getMonth();
-        if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-          age--;
-        }
-        return age;
-      };
+      const senderIdentity = getPromptConnectIdentity(prompt, sender);
+      const recipientIdentity = answer
+        ? getAnswerConnectIdentity(answer, recipient)
+        : getDefaultConnectIdentity(recipient);
 
-      const senderAge = calculateAge(sender?.dateOfBirth);
-      const recipientAge = calculateAge(recipient?.dateOfBirth);
+      if (recipientIdentity.isAnonymous) {
+        return { success: false, reason: 'Connect unavailable for this user' };
+      }
 
       // Order participants for consistent deduplication (lower ID first)
       const participantIds = [senderDbId as Id<'users'>, recipientDbId as Id<'users'>].sort();
@@ -657,12 +1278,19 @@ export const respondToConnect = mutation({
         // Create initial system message
         await ctx.db.insert('messages', {
           conversationId,
-          senderId: recipientDbId as Id<'users'>, // System message attributed to recipient
-          type: 'system',
-          content: 'T&D connection accepted! Say hi!',
+          senderId: recipientDbId as Id<'users'>,
+          type: 'text',
+          content: '[SYSTEM:truthdare]T&D connection accepted! Say hi!',
           createdAt: now,
         });
       }
+
+      if (privateMedia) {
+        await ctx.db.patch(privateMedia._id, {
+          connectStatus: 'accepted',
+        });
+      }
+      await ctx.db.patch(requestId, { status: 'connected' });
 
       return {
         success: true,
@@ -671,19 +1299,32 @@ export const respondToConnect = mutation({
         // Sender profile (for recipient's display)
         senderUserId: request.fromUserId,
         senderDbId: senderDbId as string,
-        senderName: sender?.name ?? 'Someone',
-        senderPhotoUrl: sender?.primaryPhotoUrl ?? null,
-        senderAge,
-        senderGender: sender?.gender ?? null,
+        senderName: senderIdentity.name,
+        senderPhotoUrl: senderIdentity.photoUrl,
+        senderPhotoBlurMode: senderIdentity.photoBlurMode,
+        senderIsAnonymous: senderIdentity.isAnonymous,
+        senderAge: senderIdentity.age,
+        senderGender: senderIdentity.gender,
         // Recipient profile (for sender's display when they query)
-        recipientUserId: authUserId,
+        recipientUserId: recipientDbId as string,
         recipientDbId: recipientDbId as string,
-        recipientName: recipient?.name ?? 'Someone',
-        recipientPhotoUrl: recipient?.primaryPhotoUrl ?? null,
-        recipientAge,
-        recipientGender: recipient?.gender ?? null,
+        recipientName: recipientIdentity.name,
+        recipientPhotoUrl: recipientIdentity.photoUrl,
+        recipientPhotoBlurMode: recipientIdentity.photoBlurMode,
+        recipientIsAnonymous: recipientIdentity.isAnonymous,
+        recipientAge: recipientIdentity.age,
+        recipientGender: recipientIdentity.gender,
       };
     } else {
+      const privateMedia = await ctx.db
+        .query('todPrivateMedia')
+        .filter((q) => q.eq(q.field('_id'), request.answerId as Id<'todPrivateMedia'>))
+        .first();
+      if (privateMedia) {
+        await ctx.db.patch(privateMedia._id, {
+          connectStatus: 'rejected',
+        });
+      }
       await ctx.db.patch(requestId, { status: 'removed' });
       return { success: true, action: 'removed' as const };
     }
@@ -698,8 +1339,7 @@ export const checkTodConnectStatus = query({
     authUserId: v.string(),
   },
   handler: async (ctx, { promptId, answerId, authUserId }) => {
-    if (!authUserId) return { status: 'none' as const };
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await getOptionalAuthenticatedTodUserId(ctx, 'checkTodConnectStatus');
     if (!userId) return { status: 'none' as const };
 
     // Get the answer to find the other user
@@ -749,7 +1389,7 @@ export const seedTrendingPrompts = internalMutation({
       type: 'truth',
       text: "What's the most spontaneous thing you've ever done for someone you liked?",
       isTrending: true,
-      ownerUserId: 'system',
+      ownerUserId: TOD_SYSTEM_OWNER_ID,
       answerCount: 42,
       activeCount: 18,
       createdAt: now,
@@ -760,7 +1400,7 @@ export const seedTrendingPrompts = internalMutation({
       type: 'dare',
       text: 'Record a 15-second video of your best impression of your celebrity crush!',
       isTrending: true,
-      ownerUserId: 'system',
+      ownerUserId: TOD_SYSTEM_OWNER_ID,
       answerCount: 27,
       activeCount: 11,
       createdAt: now,
@@ -788,28 +1428,41 @@ export const cleanupExpiredPrompts = internalMutation({
         .withIndex('by_prompt', (q) => q.eq('promptId', prompt._id as string))
         .collect();
 
+      const privateMediaItems = await ctx.db
+        .query('todPrivateMedia')
+        .withIndex('by_prompt', (q) => q.eq('promptId', prompt._id as string))
+        .collect();
+      for (const privateMedia of privateMediaItems) {
+        await deleteStorageIfPresent(ctx, privateMedia.storageId);
+        await ctx.db.delete(privateMedia._id);
+      }
+
       for (const answer of answers) {
-        // Delete media from storage if present
-        if (answer.mediaStorageId) {
-          await ctx.storage.delete(answer.mediaStorageId);
-        }
-        // Delete likes for this answer
-        const likes = await ctx.db
-          .query('todAnswerLikes')
-          .withIndex('by_answer', (q) => q.eq('answerId', answer._id as string))
-          .collect();
-        for (const like of likes) {
-          await ctx.db.delete(like._id);
-        }
-        // Delete connect requests for this answer
-        const connects = await ctx.db
-          .query('todConnectRequests')
-          .filter((q) => q.eq(q.field('answerId'), answer._id as string))
-          .collect();
-        for (const cr of connects) {
-          await ctx.db.delete(cr._id);
-        }
-        await ctx.db.delete(answer._id);
+        await deleteTodAnswerForCleanup(ctx, answer);
+      }
+
+      const promptReactions = await ctx.db
+        .query('todPromptReactions')
+        .withIndex('by_prompt', (q) => q.eq('promptId', prompt._id as string))
+        .collect();
+      for (const reaction of promptReactions) {
+        await ctx.db.delete(reaction._id);
+      }
+
+      const promptReports = await ctx.db
+        .query('todPromptReports')
+        .withIndex('by_prompt', (q) => q.eq('promptId', prompt._id as string))
+        .collect();
+      for (const report of promptReports) {
+        await ctx.db.delete(report._id);
+      }
+
+      const connects = await ctx.db
+        .query('todConnectRequests')
+        .withIndex('by_prompt', (q) => q.eq('promptId', prompt._id as string))
+        .collect();
+      for (const connect of connects) {
+        await ctx.db.delete(connect._id);
       }
 
       // Delete the prompt itself
@@ -827,7 +1480,7 @@ export const generateUploadUrl = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { authUserId }) => {
-    await resolveRequiredTodUserId(ctx, authUserId, 'Unauthorized');
+    await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -858,6 +1511,8 @@ export const submitPrivateMediaResponse = mutation({
     responderPhotoUrl: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const fromUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+
     // Validate prompt exists
     const prompt = await ctx.db
       .query('todPrompts')
@@ -871,7 +1526,7 @@ export const submitPrivateMediaResponse = mutation({
     const existing = await ctx.db
       .query('todPrivateMedia')
       .withIndex('by_prompt_from', (q) =>
-        q.eq('promptId', args.promptId).eq('fromUserId', args.fromUserId)
+        q.eq('promptId', args.promptId).eq('fromUserId', fromUserId)
       )
       .filter((q) => q.eq(q.field('status'), 'pending'))
       .first();
@@ -888,7 +1543,7 @@ export const submitPrivateMediaResponse = mutation({
     const now = Date.now();
     const id = await ctx.db.insert('todPrivateMedia', {
       promptId: args.promptId,
-      fromUserId: args.fromUserId,
+      fromUserId,
       toUserId: prompt.ownerUserId,
       mediaType: args.mediaType,
       storageId: args.storageId,
@@ -918,6 +1573,9 @@ export const getPrivateMediaForOwner = query({
     viewerUserId: v.string(),
   },
   handler: async (ctx, { promptId, viewerUserId }) => {
+    const currentUserId = await getOptionalAuthenticatedTodUserId(ctx, 'getPrivateMediaForOwner');
+    if (!currentUserId) return [];
+
     // Get the prompt to verify ownership
     const prompt = await ctx.db
       .query('todPrompts')
@@ -925,9 +1583,10 @@ export const getPrivateMediaForOwner = query({
       .first();
 
     if (!prompt) return [];
+    if (isSystemTodOwnerId(prompt.ownerUserId)) return [];
 
     // Only prompt owner can see private media
-    if (prompt.ownerUserId !== viewerUserId) {
+    if (prompt.ownerUserId !== currentUserId) {
       return [];
     }
 
@@ -960,8 +1619,8 @@ export const getPrivateMediaForOwner = query({
 
 /**
  * Begin viewing private media (owner only).
- * Sets status to 'viewing', starts timer, returns short-lived URL.
- * This is the ONLY way to get the media URL, and only works once.
+ * Returns a short-lived URL without durably consuming the one-time view.
+ * Durable consumption happens in finalizePrivateMediaView after successful display.
  */
 export const beginPrivateMediaView = mutation({
   args: {
@@ -969,18 +1628,23 @@ export const beginPrivateMediaView = mutation({
     viewerUserId: v.string(),
   },
   handler: async (ctx, { privateMediaId, viewerUserId }) => {
+    const currentUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
     const item = await ctx.db.get(privateMediaId);
     if (!item) {
       throw new Error('Private media not found');
     }
 
     // AUTH CHECK: Only prompt owner can view
-    if (item.toUserId !== viewerUserId) {
+    if (item.toUserId !== currentUserId) {
       throw new Error('Access denied: You are not the prompt owner');
     }
 
-    // Only allow viewing if status is 'pending'
-    if (item.status !== 'pending') {
+    if (await hasBlockBetween(ctx, currentUserId as string, item.fromUserId)) {
+      throw new Error('Access denied');
+    }
+
+    // Allow retrying records that were previously stuck in the old pre-finalize "viewing" state.
+    if (item.status !== 'pending' && item.status !== 'viewing') {
       throw new Error('Media already viewed or expired');
     }
 
@@ -989,21 +1653,14 @@ export const beginPrivateMediaView = mutation({
       throw new Error('Media file not found');
     }
 
-    const now = Date.now();
-    const expiresAt = now + item.durationSec * 1000;
-
-    // Update status to viewing
-    await ctx.db.patch(privateMediaId, {
-      status: 'viewing',
-      viewedAt: now,
-      expiresAt,
-    });
-
     // Generate short-lived URL (Convex URLs expire automatically)
     const url = await ctx.storage.getUrl(item.storageId);
     if (!url) {
       throw new Error('Failed to generate media URL');
     }
+
+    const now = Date.now();
+    const expiresAt = now + item.durationSec * 1000;
 
     return {
       url,
@@ -1017,7 +1674,7 @@ export const beginPrivateMediaView = mutation({
 
 /**
  * Finalize private media view (called when timer ends or user closes).
- * Deletes the storage file and marks as expired/deleted.
+ * Deletes the storage file and durably consumes the one-time view.
  */
 export const finalizePrivateMediaView = mutation({
   args: {
@@ -1025,26 +1682,29 @@ export const finalizePrivateMediaView = mutation({
     viewerUserId: v.string(),
   },
   handler: async (ctx, { privateMediaId, viewerUserId }) => {
+    const currentUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
     const item = await ctx.db.get(privateMediaId);
     if (!item) return { success: false };
 
     // AUTH CHECK: Only prompt owner can finalize
-    if (item.toUserId !== viewerUserId) {
+    if (item.toUserId !== currentUserId) {
       throw new Error('Access denied');
     }
 
-    // Delete storage file if exists
-    if (item.storageId) {
-      try {
-        await ctx.storage.delete(item.storageId);
-      } catch {
-        // Storage may already be deleted
-      }
+    if (await hasBlockBetween(ctx, currentUserId as string, item.fromUserId)) {
+      throw new Error('Access denied');
     }
+
+    const finalizedAt = Date.now();
+
+    // Delete storage file if exists
+    await deleteStorageIfPresent(ctx, item.storageId);
 
     // Mark as deleted
     await ctx.db.patch(privateMediaId, {
       status: 'deleted',
+      viewedAt: finalizedAt,
+      expiresAt: finalizedAt,
       storageId: undefined,
     });
 
@@ -1062,19 +1722,25 @@ export const sendPrivateMediaConnect = mutation({
     fromUserId: v.string(), // prompt owner sending the request
   },
   handler: async (ctx, { privateMediaId, fromUserId }) => {
+    const currentUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
     const item = await ctx.db.get(privateMediaId);
     if (!item) {
       throw new Error('Private media not found');
     }
 
     // Only prompt owner can send connect
-    if (item.toUserId !== fromUserId) {
+    if (item.toUserId !== currentUserId) {
       throw new Error('Access denied');
     }
 
     // Can only connect if not already connected/pending
     if (item.connectStatus !== 'none') {
       return { success: false, reason: 'Already processed' };
+    }
+
+    const rateCheck = await checkRateLimit(ctx, currentUserId, 'connect');
+    if (!rateCheck.allowed) {
+      throw new Error(RATE_LIMIT_ERROR);
     }
 
     // Update connect status
@@ -1086,7 +1752,7 @@ export const sendPrivateMediaConnect = mutation({
     await ctx.db.insert('todConnectRequests', {
       promptId: item.promptId,
       answerId: item._id as string, // using privateMediaId as reference
-      fromUserId: fromUserId, // prompt owner
+      fromUserId: currentUserId, // prompt owner
       toUserId: item.fromUserId, // responder
       status: 'pending',
       createdAt: Date.now(),
@@ -1105,11 +1771,12 @@ export const rejectPrivateMediaConnect = mutation({
     fromUserId: v.string(),
   },
   handler: async (ctx, { privateMediaId, fromUserId }) => {
+    const currentUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
     const item = await ctx.db.get(privateMediaId);
     if (!item) return { success: false };
 
     // Only prompt owner can reject
-    if (item.toUserId !== fromUserId) {
+    if (item.toUserId !== currentUserId) {
       throw new Error('Access denied');
     }
 
@@ -1221,13 +1888,7 @@ export const cleanupExpiredTodData = internalMutation({
         .collect();
 
       for (const pm of privateMedia) {
-        // Delete storage first
-        if (pm.storageId) {
-          try {
-            await ctx.storage.delete(pm.storageId);
-          } catch { /* already deleted */ }
-        }
-        // Delete record
+        await deleteStorageIfPresent(ctx, pm.storageId);
         await ctx.db.delete(pm._id);
         deletedPrivateMedia++;
       }
@@ -1239,26 +1900,29 @@ export const cleanupExpiredTodData = internalMutation({
         .collect();
 
       for (const answer of answers) {
-        // 2a) Delete all likes for this answer
         const likes = await ctx.db
           .query('todAnswerLikes')
           .withIndex('by_answer', (q) => q.eq('answerId', answer._id as string))
           .collect();
-        for (const like of likes) {
-          await ctx.db.delete(like._id);
-          deletedLikes++;
-        }
-
-        // 2b) Delete media from storage if present
-        if (answer.mediaStorageId) {
-          try {
-            await ctx.storage.delete(answer.mediaStorageId);
-          } catch { /* already deleted */ }
-        }
-
-        // 2c) Delete the answer record
-        await ctx.db.delete(answer._id);
+        deletedLikes += likes.length;
+        await deleteTodAnswerForCleanup(ctx, answer);
         deletedAnswers++;
+      }
+
+      const promptReactions = await ctx.db
+        .query('todPromptReactions')
+        .withIndex('by_prompt', (q) => q.eq('promptId', promptIdStr))
+        .collect();
+      for (const reaction of promptReactions) {
+        await ctx.db.delete(reaction._id);
+      }
+
+      const promptReports = await ctx.db
+        .query('todPromptReports')
+        .withIndex('by_prompt', (q) => q.eq('promptId', promptIdStr))
+        .collect();
+      for (const report of promptReports) {
+        await ctx.db.delete(report._id);
       }
 
       // 3) Delete all connect requests for this prompt
@@ -1284,11 +1948,7 @@ export const cleanupExpiredTodData = internalMutation({
     for (const pm of allPrivateMedia) {
       const pmExpires = pm.expiresAt ?? pm.createdAt + TWENTY_FOUR_HOURS_MS;
       if (pmExpires <= now) {
-        if (pm.storageId) {
-          try {
-            await ctx.storage.delete(pm.storageId);
-          } catch { /* already deleted */ }
-        }
+        await deleteStorageIfPresent(ctx, pm.storageId);
         await ctx.db.delete(pm._id);
         deletedPrivateMedia++;
       }
@@ -1309,8 +1969,8 @@ export const cleanupExpiredTodData = internalMutation({
 // ============================================================
 
 /**
- * List all active (non-expired) prompts with their top 2 answers.
- * Ranking: totalReactionCount DESC, then createdAt DESC.
+ * List all active (non-expired) prompts with up to 2 ranked preview answers.
+ * Preview-answer ordering uses totalReactionCount DESC, then createdAt DESC.
  * Respects hidden-by-reports logic for non-authors.
  */
 export const listActivePromptsWithTop2Answers = query({
@@ -1319,7 +1979,7 @@ export const listActivePromptsWithTop2Answers = query({
   },
   handler: async (ctx, { viewerUserId }) => {
     const now = Date.now();
-    const viewerDbId = await resolveOptionalTodUserId(ctx, viewerUserId);
+    const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, 'listActivePromptsWithTop2Answers');
 
     // TOD-P2-002 FIX: Get blocked user IDs for viewer (both directions)
     const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
@@ -1333,22 +1993,9 @@ export const listActivePromptsWithTop2Answers = query({
       if (expires <= now) return false;
       // TOD-P2-002 FIX: Filter out prompts from blocked users
       if (blockedUserIds.has(p.ownerUserId as string)) return false;
+      if (isPromptHiddenForViewer(p, viewerDbId)) return false;
       return true;
     });
-
-    // Compute totalReactionCount for each prompt (sum of all answer reactions)
-    const promptReactionCounts: Record<string, number> = {};
-    for (const prompt of activePrompts) {
-      const promptId = prompt._id as unknown as string;
-      const answers = await ctx.db
-        .query('todAnswers')
-        .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-        .collect();
-      promptReactionCounts[promptId] = answers.reduce(
-        (sum, a) => sum + (a.totalReactionCount ?? 0),
-        0
-      );
-    }
 
     // Sort by answerCount DESC, then createdAt ASC (older first for ties)
     // Prompts with more answers float to top; ties = older appears first (new goes to bottom)
@@ -1359,7 +2006,7 @@ export const listActivePromptsWithTop2Answers = query({
       return a.createdAt - b.createdAt;
     });
 
-    // For each prompt, get top 2 answers
+    // For each prompt, get up to 2 ranked preview answers
     const promptsWithAnswers = await Promise.all(
       activePrompts.map(async (prompt) => {
         const promptId = prompt._id as unknown as string;
@@ -1381,57 +2028,40 @@ export const listActivePromptsWithTop2Answers = query({
           return viewerDbId && a.userId === viewerDbId;
         });
 
-        // Rank: totalReactionCount DESC, createdAt DESC
-        visibleAnswers.sort((a, b) => {
-          const aReactions = a.totalReactionCount ?? 0;
-          const bReactions = b.totalReactionCount ?? 0;
-          if (bReactions !== aReactions) return bReactions - aReactions;
-          return b.createdAt - a.createdAt;
-        });
+        visibleAnswers.sort(sortTodAnswersByDisplayRank);
 
-        // Take top 2
+        // Take up to 2 ranked preview answers
         const top2 = visibleAnswers.slice(0, 2);
 
         // Get reaction counts for each answer
         const top2WithReactions = await Promise.all(
           top2.map(async (answer) => {
-            const reactions = await ctx.db
-              .query('todAnswerReactions')
-              .withIndex('by_answer', (q) => q.eq('answerId', answer._id as unknown as string))
-              .collect();
-
-            // Group by emoji - use array format for Convex compatibility (no emoji keys)
-            const emojiCountMap: Map<string, number> = new Map();
-            for (const r of reactions) {
-              emojiCountMap.set(r.emoji, (emojiCountMap.get(r.emoji) || 0) + 1);
-            }
-            const reactionCounts = Array.from(emojiCountMap.entries()).map(
-              ([emoji, count]) => ({ emoji, count })
+            const answerId = answer._id as unknown as string;
+            const normalizedIdentity = getNormalizedTodAnswerIdentity(answer);
+            const { reactionCounts, myReaction } = await getAnswerReactionSummary(
+              ctx,
+              answerId,
+              answer.totalReactionCount ?? 0,
+              viewerDbId
             );
-
-            // Get viewer's reaction if any
-            let myReaction: string | null = null;
-            if (viewerDbId) {
-              const myR = reactions.find((r) => r.userId === viewerDbId);
-              if (myR) myReaction = myR.emoji;
-            }
 
             return {
               _id: answer._id,
               promptId: answer.promptId,
               type: answer.type,
               text: answer.text,
-              mediaUrl:
-                answer.type === 'voice'
-                  ? answer.mediaUrl
-                  : (viewerDbId && viewerDbId === answer.userId ? answer.mediaUrl : undefined),
+              mediaUrl: getInlineAnswerMediaUrlForViewer(
+                answer,
+                viewerDbId,
+                prompt.ownerUserId as string
+              ),
               durationSec: answer.durationSec,
               createdAt: answer.createdAt,
               editedAt: answer.editedAt,
               totalReactionCount: answer.totalReactionCount ?? 0,
               reactionCounts,
               myReaction,
-              isAnonymous: answer.isAnonymous,
+              isAnonymous: normalizedIdentity.isAnonymous,
               visibility: answer.visibility,
               viewMode: answer.viewMode,
               viewDurationSec: answer.viewDurationSec,
@@ -1470,7 +2100,7 @@ export const listActivePromptsWithTop2Answers = query({
           ownerGender: prompt.ownerGender,
           ownerUserId: prompt.ownerUserId, // FIX: Include for owner detection in feed
           // Engagement metrics
-          totalReactionCount: promptReactionCounts[promptIdStr] ?? 0,
+          totalReactionCount: prompt.totalReactionCount ?? 0,
           // Answers and viewer state
           top2Answers: top2WithReactions,
           totalAnswers: visibleAnswers.length,
@@ -1494,7 +2124,7 @@ export const getTrendingTruthAndDare = query({
   },
   handler: async (ctx, { viewerUserId }) => {
     const now = Date.now();
-    const viewerDbId = await resolveOptionalTodUserId(ctx, viewerUserId);
+    const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, 'getTrendingTruthAndDare');
     const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
 
     // Get all prompts
@@ -1503,22 +2133,12 @@ export const getTrendingTruthAndDare = query({
     // Filter to active (not expired)
     const activePrompts = allPrompts.filter((p) => {
       const expires = p.expiresAt ?? p.createdAt + TWENTY_FOUR_HOURS_MS;
-      return expires > now && !blockedUserIds.has(p.ownerUserId as string);
-    });
-
-    // Compute totalReactionCount for each prompt
-    const promptReactionCounts: Record<string, number> = {};
-    for (const prompt of activePrompts) {
-      const promptId = prompt._id as unknown as string;
-      const answers = await ctx.db
-        .query('todAnswers')
-        .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-        .collect();
-      promptReactionCounts[promptId] = answers.reduce(
-        (sum, a) => sum + (a.totalReactionCount ?? 0),
-        0
+      return (
+        expires > now &&
+        !blockedUserIds.has(p.ownerUserId as string) &&
+        !isPromptHiddenForViewer(p, viewerDbId)
       );
-    }
+    });
 
     // Separate by type
     const darePrompts = activePrompts.filter((p) => p.type === 'dare');
@@ -1562,7 +2182,7 @@ export const getTrendingTruthAndDare = query({
         ownerGender: prompt.ownerGender,
         ownerUserId: prompt.ownerUserId, // FIX: Include for owner detection
         // Engagement metrics
-        totalReactionCount: promptReactionCounts[promptId] ?? 0,
+        totalReactionCount: prompt.totalReactionCount ?? 0,
       };
     };
 
@@ -1583,7 +2203,7 @@ export const getPromptThread = query({
     viewerUserId: v.optional(v.string()),
   },
   handler: async (ctx, { promptId, viewerUserId }) => {
-    const viewerDbId = await resolveOptionalTodUserId(ctx, viewerUserId);
+    const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, 'getPromptThread');
     const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
 
     // Get prompt
@@ -1594,6 +2214,7 @@ export const getPromptThread = query({
 
     if (!prompt) return null;
     if (blockedUserIds.has(prompt.ownerUserId as string)) return null;
+    if (isPromptHiddenForViewer(prompt, viewerDbId)) return null;
 
     // Check if expired
     const now = Date.now();
@@ -1609,7 +2230,7 @@ export const getPromptThread = query({
           visibleAnswerCount: 0, // No visible answers when expired
           createdAt: prompt.createdAt,
           expiresAt: expires,
-          isPromptOwner: viewerDbId === prompt.ownerUserId,
+          isPromptOwner: !isSystemTodOwnerId(prompt.ownerUserId) && viewerDbId === prompt.ownerUserId,
           // Prompt-level reactions (empty for expired)
           reactionCounts: [],
           myReaction: null,
@@ -1641,13 +2262,7 @@ export const getPromptThread = query({
       return viewerDbId && a.userId === viewerDbId;
     });
 
-    // Rank: totalReactionCount DESC, createdAt DESC
-    visibleAnswers.sort((a, b) => {
-      const aReactions = a.totalReactionCount ?? 0;
-      const bReactions = b.totalReactionCount ?? 0;
-      if (bReactions !== aReactions) return bReactions - aReactions;
-      return b.createdAt - a.createdAt;
-    });
+    visibleAnswers.sort(sortTodAnswersByDisplayRank);
 
     // Get prompt-level reactions
     const promptReactions = await ctx.db
@@ -1675,27 +2290,13 @@ export const getPromptThread = query({
     const enrichedAnswers = await Promise.all(
       visibleAnswers.map(async (answer) => {
         const answerId = answer._id as unknown as string;
-
-        const reactions = await ctx.db
-          .query('todAnswerReactions')
-          .withIndex('by_answer', (q) => q.eq('answerId', answerId))
-          .collect();
-
-        // Group by emoji - use array format for Convex compatibility (no emoji keys)
-        const emojiCountMap: Map<string, number> = new Map();
-        for (const r of reactions) {
-          emojiCountMap.set(r.emoji, (emojiCountMap.get(r.emoji) || 0) + 1);
-        }
-        const reactionCounts = Array.from(emojiCountMap.entries()).map(
-          ([emoji, count]) => ({ emoji, count })
+        const normalizedIdentity = getNormalizedTodAnswerIdentity(answer);
+        const { reactionCounts, myReaction } = await getAnswerReactionSummary(
+          ctx,
+          answerId,
+          answer.totalReactionCount ?? 0,
+          viewerDbId
         );
-
-        // Get viewer's reaction
-        let myReaction: string | null = null;
-        if (viewerDbId) {
-          const myR = reactions.find((r) => r.userId === viewerDbId);
-          if (myR) myReaction = myR.emoji;
-        }
 
         // Check if viewer reported this
         let hasReported = false;
@@ -1728,6 +2329,7 @@ export const getPromptThread = query({
 
         // Check if viewer (as prompt owner) has sent a connect request for this answer
         let hasSentConnect = false;
+        let connectStatus: 'none' | 'pending' | 'connected' = 'none';
         if (viewerDbId && viewerDbId !== answer.userId) {
           const connectReq = await ctx.db
             .query('todConnectRequests')
@@ -1742,24 +2344,26 @@ export const getPromptThread = query({
             )
             .first();
           hasSentConnect = !!connectReq;
+          connectStatus = (connectReq?.status as 'pending' | 'connected' | undefined) ?? 'none';
         }
 
         return {
           _id: answer._id,
           promptId: answer.promptId,
+          userId: answer.userId,
           type: answer.type,
           text: answer.text,
-          mediaUrl:
-            answer.type === 'voice'
-              ? answer.mediaUrl
-              : (viewerDbId && viewerDbId === answer.userId ? answer.mediaUrl : undefined),
+          mediaUrl: getInlineAnswerMediaUrlForViewer(
+            answer,
+            viewerDbId,
+            prompt.ownerUserId as string
+          ),
           durationSec: answer.durationSec,
           createdAt: answer.createdAt,
           editedAt: answer.editedAt,
           totalReactionCount: answer.totalReactionCount ?? 0,
           reactionCounts,
           myReaction,
-          isAnonymous: answer.isAnonymous,
           visibility: answer.visibility,
           viewMode: answer.viewMode,
           viewDurationSec: answer.viewDurationSec,
@@ -1768,14 +2372,17 @@ export const getPromptThread = query({
           hasReported,
           hasViewedMedia,
           hasSentConnect,
+          connectStatus,
           hasMedia: !!answer.mediaStorageId,
+          isVisualMediaConsumed: !!answer.mediaViewedAt || !!answer.promptOwnerViewedAt,
           // Author identity snapshot
-          authorName: answer.authorName,
-          authorPhotoUrl: answer.authorPhotoUrl,
-          authorAge: answer.authorAge,
-          authorGender: answer.authorGender,
-          photoBlurMode: answer.photoBlurMode,
-          identityMode: answer.identityMode,
+          authorName: normalizedIdentity.authorName,
+          authorPhotoUrl: normalizedIdentity.authorPhotoUrl,
+          authorAge: normalizedIdentity.authorAge,
+          authorGender: normalizedIdentity.authorGender,
+          photoBlurMode: normalizedIdentity.photoBlurMode,
+          identityMode: normalizedIdentity.identityMode,
+          isAnonymous: normalizedIdentity.isAnonymous,
           isFrontCamera: answer.isFrontCamera ?? false,
         };
       })
@@ -1791,7 +2398,7 @@ export const getPromptThread = query({
         visibleAnswerCount: enrichedAnswers.length, // FIX: Count of visible answers for UI
         createdAt: prompt.createdAt,
         expiresAt: expires,
-        isPromptOwner: viewerDbId === prompt.ownerUserId,
+        isPromptOwner: !isSystemTodOwnerId(prompt.ownerUserId) && viewerDbId === prompt.ownerUserId,
         // Prompt-level reactions
         reactionCounts: promptReactionCounts,
         myReaction: promptMyReaction,
@@ -1821,7 +2428,15 @@ export const getPromptThread = query({
 async function checkRateLimit(
   ctx: any,
   userId: string,
-  actionType: 'answer' | 'reaction' | 'prompt_reaction' | 'report' | 'prompt_report' | 'claim_media'
+  actionType:
+    | 'prompt'
+    | 'connect'
+    | 'answer'
+    | 'reaction'
+    | 'prompt_reaction'
+    | 'report'
+    | 'prompt_report'
+    | 'claim_media'
 ): Promise<{ allowed: boolean; remaining: number }> {
   const now = Date.now();
   const limit = RATE_LIMITS[actionType];
@@ -1907,7 +2522,7 @@ export const createOrEditAnswer = mutation({
     type: v.optional(v.union(v.literal('text'), v.literal('photo'), v.literal('video'), v.literal('voice'))),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveRequiredTodUserId(ctx, args.userId, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Validate prompt exists and not expired
     const prompt = await ctx.db
@@ -1957,7 +2572,7 @@ export const createOrEditAnswer = mutation({
       // Build patch object with only changed fields
       const patch: Record<string, any> = { editedAt: now };
 
-      console.log(`[T/D] EDIT existing answer`, {
+      debugTodLog(`[T/D] EDIT existing answer`, {
         existingText: existing.text,
         argsText: args.text,
         argsMediaStorageId: !!args.mediaStorageId,
@@ -1967,19 +2582,14 @@ export const createOrEditAnswer = mutation({
       // Text: update if provided, otherwise keep existing
       if (args.text !== undefined) {
         patch.text = normalizedText;
-        console.log(`[T/D] text updated to: ${patch.text}`);
+        debugTodLog(`[T/D] text updated to: ${patch.text}`);
       } else {
-        console.log(`[T/D] text preserved: ${existing.text}`);
+        debugTodLog(`[T/D] text preserved: ${existing.text}`);
       }
 
       // Media: handle remove, replace, or keep
       if (args.removeMedia) {
         // Remove media only
-        if (existing.mediaStorageId) {
-          try {
-            await ctx.storage.delete(existing.mediaStorageId);
-          } catch { /* already deleted */ }
-        }
         patch.mediaStorageId = undefined;
         patch.mediaUrl = undefined;
         patch.mediaMime = undefined;
@@ -1989,14 +2599,9 @@ export const createOrEditAnswer = mutation({
         patch.viewDurationSec = undefined;
         patch.mediaViewedAt = undefined;
         patch.promptOwnerViewedAt = undefined;
-        console.log(`[T/D] media removed from answer`);
+        debugTodLog(`[T/D] media removed from answer`);
       } else if (args.mediaStorageId) {
         // Replace media
-        if (existing.mediaStorageId && existing.mediaStorageId !== args.mediaStorageId) {
-          try {
-            await ctx.storage.delete(existing.mediaStorageId);
-          } catch { /* already deleted */ }
-        }
         patch.mediaStorageId = args.mediaStorageId;
         patch.mediaUrl = mediaUrl;
         patch.mediaMime = args.mediaMime;
@@ -2006,7 +2611,7 @@ export const createOrEditAnswer = mutation({
         patch.viewDurationSec = viewDurationSec ?? existing.viewDurationSec;
         patch.mediaViewedAt = undefined;
         patch.promptOwnerViewedAt = undefined;
-        console.log(`[T/D] media replaced, storageId=${args.mediaStorageId}`);
+        debugTodLog(`[T/D] media replaced, storageId=${args.mediaStorageId}`);
       } else if (args.viewMode !== undefined || args.viewDurationSec !== undefined) {
         patch.viewMode = args.viewMode ?? existing.viewMode ?? 'tap';
         patch.viewDurationSec = viewDurationSec ?? existing.viewDurationSec;
@@ -2041,7 +2646,9 @@ export const createOrEditAnswer = mutation({
       if (args.authorAge !== undefined) patch.authorAge = args.authorAge;
       if (args.authorGender !== undefined) patch.authorGender = args.authorGender;
 
-      console.log(`[T/D] identityMode reused=${existing.identityMode ?? 'anonymous'}`);
+      debugTodLog(`[T/D] identityMode reused=${existing.identityMode ?? 'anonymous'}`);
+
+      await ctx.db.patch(existing._id, patch);
 
       if (args.removeMedia || args.mediaStorageId) {
         const priorViews = await ctx.db
@@ -2053,7 +2660,15 @@ export const createOrEditAnswer = mutation({
         }
       }
 
-      await ctx.db.patch(existing._id, patch);
+      if (args.removeMedia) {
+        await deleteStorageIfPresent(ctx, existing.mediaStorageId);
+      } else if (
+        args.mediaStorageId &&
+        existing.mediaStorageId &&
+        existing.mediaStorageId !== args.mediaStorageId
+      ) {
+        await deleteStorageIfPresent(ctx, existing.mediaStorageId);
+      }
 
       // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
       await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
@@ -2110,16 +2725,12 @@ export const createOrEditAnswer = mutation({
         isFrontCamera: args.isFrontCamera,
       });
 
-      // Increment answer count on prompt
-      await ctx.db.patch(prompt._id, {
-        answerCount: prompt.answerCount + 1,
-        activeCount: prompt.activeCount + 1,
-      });
+      await syncPromptAnswerCounts(ctx, args.promptId);
 
       // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
       await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
 
-      console.log(`[T/D] answer created, identityMode=${identityMode}`);
+      debugTodLog(`[T/D] answer created, identityMode=${identityMode}`);
       return { answerId, isEdit: false };
     }
   },
@@ -2136,7 +2747,7 @@ export const setAnswerReaction = mutation({
     emoji: v.string(), // pass empty string to remove reaction
   },
   handler: async (ctx, { answerId, userId: argsUserId, emoji }) => {
-    const userId = await resolveRequiredTodUserId(ctx, argsUserId, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Validate answer exists
     const answer = await ctx.db
@@ -2211,13 +2822,15 @@ export const reportAnswer = mutation({
   args: {
     answerId: v.string(),
     reporterId: v.string(),
-    // Structured report reason (required)
+    // Structured report reason (must stay aligned with the T/D UI options)
     reasonCode: v.union(
       v.literal('harassment'),
       v.literal('sexual'),
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
       v.literal('other')
     ),
     // Optional additional details
@@ -2226,7 +2839,7 @@ export const reportAnswer = mutation({
     reason: v.optional(v.string()),
   },
   handler: async (ctx, { answerId, reporterId: argsReporterId, reasonCode, reasonText, reason }) => {
-    const reporterId = await resolveRequiredTodUserId(ctx, argsReporterId, 'Unauthorized');
+    const reporterId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Validate answer exists
     const answer = await ctx.db
@@ -2297,7 +2910,7 @@ export const setPromptReaction = mutation({
     emoji: v.string(), // pass empty string to remove reaction
   },
   handler: async (ctx, { promptId, userId: argsUserId, emoji }) => {
-    const userId = await resolveRequiredTodUserId(ctx, argsUserId, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Validate prompt exists
     const prompt = await ctx.db
@@ -2378,12 +2991,14 @@ export const reportPrompt = mutation({
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
       v.literal('other')
     ),
     reasonText: v.optional(v.string()),
   },
   handler: async (ctx, { promptId, reporterId: argsReporterId, reasonCode, reasonText }) => {
-    const reporterId = await resolveRequiredTodUserId(ctx, argsReporterId, 'Unauthorized');
+    const reporterId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Validate prompt exists
     const prompt = await ctx.db
@@ -2451,10 +3066,14 @@ export const getUserAnswer = query({
     userId: v.string(),
   },
   handler: async (ctx, { promptId, userId }) => {
+    const currentUserId = await getOptionalAuthenticatedTodUserId(ctx, 'getUserAnswer');
+    if (!currentUserId) {
+      return null;
+    }
     const answer = await ctx.db
       .query('todAnswers')
       .withIndex('by_prompt_user', (q) =>
-        q.eq('promptId', promptId).eq('userId', userId)
+        q.eq('promptId', promptId).eq('userId', currentUserId)
       )
       .first();
 
@@ -2471,7 +3090,7 @@ export const deleteMyAnswer = mutation({
     userId: v.string(),
   },
   handler: async (ctx, { answerId, userId: argsUserId }) => {
-    const userId = await resolveRequiredTodUserId(ctx, argsUserId, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     const answer = await ctx.db
       .query('todAnswers')
@@ -2486,7 +3105,7 @@ export const deleteMyAnswer = mutation({
       throw new Error('You can only delete your own answers');
     }
 
-    console.log(`[T/D] deleteMyAnswer allowed for answerId=${answerId}`);
+    debugTodLog(`[T/D] deleteMyAnswer allowed for answerId=${answerId}`);
 
     // Delete media if exists
     if (answer.mediaStorageId) {
@@ -2530,20 +3149,10 @@ export const deleteMyAnswer = mutation({
       await ctx.db.delete(request._id);
     }
 
-    // Decrement prompt answer count
-    const prompt = await ctx.db
-      .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), answer.promptId as Id<'todPrompts'>))
-      .first();
-    if (prompt && prompt.answerCount > 0) {
-      await ctx.db.patch(prompt._id, {
-        answerCount: prompt.answerCount - 1,
-        activeCount: Math.max(0, prompt.activeCount - 1),
-      });
-    }
-
     // Delete the answer
     await ctx.db.delete(answer._id);
+
+    await syncPromptAnswerCounts(ctx, answer.promptId);
 
     return { success: true };
   },
@@ -2557,7 +3166,8 @@ export const deleteMyAnswer = mutation({
  * Claim viewing rights for an answer's secure media.
  * - For 'owner_only' visibility: only prompt owner can view
  * - For 'public' visibility: anyone can view, but only once
- * Enforces one-time viewing via todAnswerViews tracking.
+ * Generates a one-time media URL without durably consuming the view.
+ * Durable consumption happens in finalizeAnswerMediaView after successful display.
  */
 export const claimAnswerMediaView = mutation({
   args: {
@@ -2565,7 +3175,7 @@ export const claimAnswerMediaView = mutation({
     viewerId: v.string(),
   },
   handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
-    const viewerId = await resolveRequiredTodUserId(ctx, argsViewerId, 'Unauthorized');
+    const viewerId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Rate limit check
     const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
@@ -2584,7 +3194,10 @@ export const claimAnswerMediaView = mutation({
     }
 
     // Must have media
-    if (!answer.mediaStorageId) {
+    if (
+      !answer.mediaStorageId ||
+      (answer.type !== 'photo' && answer.type !== 'video')
+    ) {
       return { status: 'no_media' as const };
     }
 
@@ -2603,15 +3216,16 @@ export const claimAnswerMediaView = mutation({
       return { status: 'no_media' as const };
     }
 
+    const canAccess = await canViewerAccessAnswerMedia(ctx, answer, viewerId, prompt);
+    if (!canAccess) {
+      return { status: 'not_authorized' as const };
+    }
+
     const isPromptOwner = prompt.ownerUserId === viewerId;
     const isAnswerAuthor = answer.userId === viewerId;
 
-    // Authorization check based on visibility
-    if (answer.visibility === 'owner_only') {
-      // Prompt owner and answer author can view owner_only media.
-      if (!isPromptOwner && !isAnswerAuthor) {
-        return { status: 'not_authorized' as const };
-      }
+    if (answer.visibility === 'owner_only' && !isPromptOwner && !isAnswerAuthor) {
+      return { status: 'not_authorized' as const };
     }
 
     // Determine role for frontend
@@ -2645,26 +3259,9 @@ export const claimAnswerMediaView = mutation({
       return { status: 'no_media' as const };
     }
 
-    const viewedAt = Date.now();
-
-    // Record the view (for non-authors) only after the media URL is ready.
-    if (!isAnswerAuthor) {
-      await ctx.db.insert('todAnswerViews', {
-        answerId,
-        viewerUserId: viewerId,
-        viewedAt,
-      });
-      console.log(`[T/D] mediaViewed allowed=true viewerId=${viewerId} answerId=${answerId}`);
-    } else {
-      console.log(`[T/D] mediaViewed allowed=true (owner) answerId=${answerId}`);
-    }
-
-    // Mark first successful claim time if not set.
-    if (!answer.mediaViewedAt) {
-      await ctx.db.patch(answer._id, {
-        mediaViewedAt: viewedAt,
-      });
-    }
+    debugTodLog(
+      `[T/D] mediaClaim allowed=true viewerId=${viewerId} answerId=${answerId} role=${role}`
+    );
 
     return {
       status: 'ok' as const,
@@ -2680,7 +3277,8 @@ export const claimAnswerMediaView = mutation({
 
 /**
  * Finalize answer media view.
- * If prompt owner is viewing, marks media as viewed and deletes storage.
+ * Durably consumes a one-time view after successful display.
+ * If prompt owner is viewing, also deletes the underlying storage for everyone.
  */
 export const finalizeAnswerMediaView = mutation({
   args: {
@@ -2688,7 +3286,7 @@ export const finalizeAnswerMediaView = mutation({
     viewerId: v.string(),
   },
   handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
-    const viewerId = await resolveRequiredTodUserId(ctx, argsViewerId, 'Unauthorized');
+    const viewerId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
 
     // Rate limit
     const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
@@ -2717,19 +3315,53 @@ export const finalizeAnswerMediaView = mutation({
     }
 
     const isPromptOwner = prompt.ownerUserId === viewerId;
+    const isAnswerAuthor = answer.userId === viewerId;
+
+    if (
+      (answer.type !== 'photo' && answer.type !== 'video') ||
+      !answer.mediaStorageId
+    ) {
+      return { status: 'not_found' as const };
+    }
+
+    const canAccess = await canViewerAccessAnswerMedia(ctx, answer, viewerId, prompt);
+    if (!canAccess) {
+      return { status: 'not_authorized' as const };
+    }
+
+    const finalizedAt = Date.now();
+
+    if (!isAnswerAuthor) {
+      const existingView = await ctx.db
+        .query('todAnswerViews')
+        .withIndex('by_answer_viewer', (q) =>
+          q.eq('answerId', answerId).eq('viewerUserId', viewerId)
+        )
+        .first();
+
+      if (!existingView) {
+        await ctx.db.insert('todAnswerViews', {
+          answerId,
+          viewerUserId: viewerId,
+          viewedAt: finalizedAt,
+        });
+      }
+    }
+
+    if (!answer.mediaViewedAt) {
+      await ctx.db.patch(answer._id, {
+        mediaViewedAt: finalizedAt,
+      });
+    }
 
     // If prompt owner finalized viewing, delete media for everyone
     if (isPromptOwner && answer.mediaStorageId && !answer.promptOwnerViewedAt) {
       // Delete storage file
-      try {
-        await ctx.storage.delete(answer.mediaStorageId);
-      } catch {
-        // Already deleted
-      }
+      await deleteStorageIfPresent(ctx, answer.mediaStorageId);
 
       // Mark as viewed by owner (this locks it for everyone)
       await ctx.db.patch(answer._id, {
-        promptOwnerViewedAt: Date.now(),
+        promptOwnerViewedAt: finalizedAt,
         mediaStorageId: undefined,
         mediaUrl: undefined,
       });
@@ -2748,6 +3380,8 @@ export const getVoiceUrl = query({
     answerId: v.string(),
   },
   handler: async (ctx, { answerId }) => {
+    const viewerUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+
     // Get the answer
     const answer = await ctx.db
       .query('todAnswers')
@@ -2761,6 +3395,20 @@ export const getVoiceUrl = query({
     // Must be voice type
     if (answer.type !== 'voice') {
       return { status: 'not_voice' as const };
+    }
+
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), answer.promptId as Id<'todPrompts'>))
+      .first();
+
+    if (!prompt) {
+      return { status: 'not_found' as const };
+    }
+
+    const canAccess = await canViewerAccessVoiceAnswer(ctx, answer, viewerUserId, prompt);
+    if (!canAccess) {
+      throw new Error('Access denied');
     }
 
     // Try mediaUrl first (may already be set)
@@ -2792,10 +3440,7 @@ export const getVoiceUrl = query({
 export const getUserConversations = query({
   args: { authUserId: v.string() },
   handler: async (ctx, { authUserId }) => {
-    if (!authUserId) return [];
-
-    // Resolve auth user ID to Convex user ID
-    const userDbId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userDbId = await getOptionalAuthenticatedTodUserId(ctx, 'getUserConversations');
     if (!userDbId) return [];
 
     // Get all conversation participations for this user
@@ -2822,15 +3467,38 @@ export const getUserConversations = query({
         const otherUser = await ctx.db.get(otherParticipantId);
         if (!otherUser) return null;
 
-        // Calculate age
-        let otherAge: number | null = null;
-        if (otherUser.dateOfBirth) {
-          const birthDate = new Date(otherUser.dateOfBirth);
-          const today = new Date();
-          otherAge = today.getFullYear() - birthDate.getFullYear();
-          const monthDiff = today.getMonth() - birthDate.getMonth();
-          if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-            otherAge--;
+        let participantIdentity = getDefaultConnectIdentity(otherUser);
+
+        if (conversation.connectionSource === 'tod') {
+          const outgoingTodRequests = await ctx.db
+            .query('todConnectRequests')
+            .withIndex('by_from_to', (q) =>
+              q.eq('fromUserId', userDbId as string).eq('toUserId', otherParticipantId as string)
+            )
+            .collect();
+          const incomingTodRequests = await ctx.db
+            .query('todConnectRequests')
+            .withIndex('by_from_to', (q) =>
+              q.eq('fromUserId', otherParticipantId as string).eq('toUserId', userDbId as string)
+            )
+            .collect();
+
+          const latestConnectedRequest = [...outgoingTodRequests, ...incomingTodRequests]
+            .filter((request) => request.status === 'connected')
+            .sort((a, b) => b.createdAt - a.createdAt)[0];
+
+          if (latestConnectedRequest) {
+            const prompt = await ctx.db.get(latestConnectedRequest.promptId as Id<'todPrompts'>);
+            const answer = await ctx.db
+              .query('todAnswers')
+              .filter((q) => q.eq(q.field('_id'), latestConnectedRequest.answerId as Id<'todAnswers'>))
+              .first();
+
+            if (prompt && prompt.ownerUserId === (otherParticipantId as string)) {
+              participantIdentity = getPromptConnectIdentity(prompt, otherUser);
+            } else if (answer && answer.userId === (otherParticipantId as string)) {
+              participantIdentity = getAnswerConnectIdentity(answer, otherUser);
+            }
           }
         }
 
@@ -2845,10 +3513,16 @@ export const getUserConversations = query({
           id: conversation._id,
           participantId: otherParticipantId,
           participantAuthId: otherUser.authUserId ?? null,
-          participantName: otherUser.name,
-          participantPhotoUrl: otherUser.primaryPhotoUrl ?? null,
-          participantAge: otherAge,
-          participantGender: otherUser.gender ?? null,
+          participantName: participantIdentity.name,
+          participantPhotoUrl: participantIdentity.photoUrl,
+          participantAge: participantIdentity.age,
+          participantGender: participantIdentity.gender,
+          participantIsAnonymous: participantIdentity.isAnonymous,
+          participantPhotoBlurMode: participantIdentity.photoBlurMode,
+          isPhotoBlurred:
+            participantIdentity.isAnonymous || participantIdentity.photoBlurMode === 'blur',
+          canViewClearPhoto:
+            !participantIdentity.isAnonymous && participantIdentity.photoBlurMode !== 'blur',
           connectionSource: conversation.connectionSource ?? 'match',
           lastMessage: lastMessage?.content ?? null,
           lastMessageAt: conversation.lastMessageAt ?? conversation.createdAt,

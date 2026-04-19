@@ -1,8 +1,8 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Modal } from 'react-native';
-import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { TodAvatar } from './TodAvatar';
 
 const C = INCOGNITO_COLORS;
 
@@ -10,23 +10,37 @@ interface ConnectPopupProps {
   visible: boolean;
   userName: string;
   userPhotoUrl?: string;
+  userPhotoBlurMode?: 'none' | 'blur';
+  userIsAnonymous?: boolean;
   onConnect: () => void;
   onRemove: () => void;
 }
 
-export function ConnectPopup({ visible, userName, userPhotoUrl, onConnect, onRemove }: ConnectPopupProps) {
+export function ConnectPopup({
+  visible,
+  userName,
+  userPhotoUrl,
+  userPhotoBlurMode,
+  userIsAnonymous,
+  onConnect,
+  onRemove,
+}: ConnectPopupProps) {
   return (
     <Modal visible={visible} transparent animationType="fade">
       <View style={styles.overlay}>
         <View style={styles.card}>
           <View style={styles.iconRow}>
-            {userPhotoUrl ? (
-              <Image source={{ uri: userPhotoUrl }} style={styles.avatar} />
-            ) : (
-              <View style={styles.avatarPlaceholder}>
-                <Ionicons name="person" size={28} color={C.textLight} />
-              </View>
-            )}
+            <TodAvatar
+              size={64}
+              photoUrl={userPhotoUrl ?? null}
+              isAnonymous={userIsAnonymous}
+              photoBlurMode={userPhotoBlurMode ?? 'none'}
+              label={userName}
+              style={styles.avatar}
+              backgroundColor={C.accent}
+              textColor={C.text}
+              iconColor={C.textLight}
+            />
           </View>
           <Text style={styles.title}>{userName}</Text>
           <Text style={styles.subtitle}>liked your prompt answer</Text>

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -58,6 +58,47 @@ function calculateAge(dob: string | undefined): number | undefined {
   return age > 0 ? age : undefined;
 }
 
+function isRetryableTodError(error: unknown): boolean {
+  const retryableFlag =
+    typeof error === 'object' &&
+    error !== null &&
+    'retryable' in error &&
+    (error as { retryable?: boolean }).retryable === true;
+  if (retryableFlag) {
+    return true;
+  }
+
+  const message =
+    typeof error === 'object' &&
+    error !== null &&
+    'message' in error &&
+    typeof (error as { message?: string }).message === 'string'
+      ? (error as { message: string }).message.toLowerCase()
+      : '';
+
+  return (
+    message.includes('network') ||
+    message.includes('timed out') ||
+    message.includes('timeout') ||
+    message.includes('offline') ||
+    message.includes('unable to connect') ||
+    message.includes('fetch failed') ||
+    message.includes('connection')
+  );
+}
+
+const debugTodLog = (...args: unknown[]) => {
+  if (__DEV__) {
+    console.log(...args);
+  }
+};
+
+const debugTodWarn = (...args: unknown[]) => {
+  if (__DEV__) {
+    console.warn(...args);
+  }
+};
+
 export default function CreateTodScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -83,6 +124,8 @@ export default function CreateTodScreen() {
 
   // Derive identity - collect ALL photo candidates (https preferred, then file://)
   const ownerIdentity = useMemo(() => {
+    const preferredDisplayName = p2DisplayName?.trim() || undefined;
+
     // Collect all photo candidates from Phase-2
     const allP2Photos: string[] = [];
     if (p2PhotoUrls) allP2Photos.push(...p2PhotoUrls.filter(u => u && u.length > 0));
@@ -92,7 +135,7 @@ export default function CreateTodScreen() {
     const demoProfile = currentDemoUserId ? demoProfiles[currentDemoUserId] : null;
 
     if (demoProfile) {
-      const demoName = demoProfile.name;
+      const demoName = preferredDisplayName || demoProfile.name;
       const demoAge = demoProfile.dateOfBirth ? calculateAge(demoProfile.dateOfBirth) : undefined;
       const demoGender = demoProfile.gender;
 
@@ -118,9 +161,9 @@ export default function CreateTodScreen() {
     }
 
     // Fallback to privateProfileStore (Phase-2 data)
-    if (p2DisplayName) {
+    if (preferredDisplayName) {
       return {
-        name: p2DisplayName,
+        name: preferredDisplayName,
         age: p2Age > 0 ? p2Age : undefined,
         gender: p2Gender || undefined,
         photoCandidates: allP2Photos,
@@ -134,12 +177,32 @@ export default function CreateTodScreen() {
   // Convex mutation
   const createPrompt = useMutation(api.truthDare.createPrompt);
   const generateUploadUrl = useMutation(api.truthDare.generateUploadUrl);
+  const trackPendingTodUploads = useMutation(api.truthDare.trackPendingTodUploads);
+  const releasePendingTodUploads = useMutation(api.truthDare.releasePendingTodUploads);
+  const cleanupPendingTodUploads = useMutation(api.truthDare.cleanupPendingTodUploads);
 
   const maxLength = 280;
   const canSubmit = content.trim().length >= 10 && !isSubmitting && !!effectiveUserId;
 
   // Synchronous lock to prevent double-tap race condition
   const isSubmittingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const localPhotoExistsCacheRef = useRef<Map<string, boolean>>(new Map());
+  const prefetchedPhotoResultRef = useRef<{
+    cacheKey: string;
+    result: { url: string | undefined; type: string; reason: string };
+  } | null>(null);
+  const ownerPhotoCandidatesKey = useMemo(
+    () => (ownerIdentity.photoCandidates || []).join('|'),
+    [ownerIdentity.photoCandidates]
+  );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   /**
    * Resolve best photo URL from candidates:
@@ -180,10 +243,15 @@ export default function CreateTodScreen() {
         }
 
         try {
-          const info = await FileSystem.getInfoAsync(uri);
-          const size = info.exists ? ((info as any).size || 0) : 0;
+          let exists = localPhotoExistsCacheRef.current.get(uri);
+          if (exists === undefined) {
+            const info = await FileSystem.getInfoAsync(uri);
+            const size = info.exists ? ((info as any).size || 0) : 0;
+            exists = info.exists && size > 0;
+            localPhotoExistsCacheRef.current.set(uri, exists);
+          }
 
-          if (info.exists && size > 0) {
+          if (exists) {
             verifiedLocalCount++;
             if (!chosenUrl) {
               chosenUrl = uri;
@@ -198,10 +266,36 @@ export default function CreateTodScreen() {
     }
 
     // Single summary log line
-    console.log(`[T/D REPORT] photoPick remoteCount=${remoteCount} verifiedLocalCount=${verifiedLocalCount} skippedCacheCount=${skippedCacheCount} chosen=${chosenType} reason=${chosenReason}`);
+    debugTodLog(`[T/D REPORT] photoPick remoteCount=${remoteCount} verifiedLocalCount=${verifiedLocalCount} skippedCacheCount=${skippedCacheCount} chosen=${chosenType} reason=${chosenReason}`);
 
     return { url: chosenUrl, type: chosenType, reason: chosenReason };
   }
+
+  useEffect(() => {
+    if (visibility !== 'public' || ownerIdentity.photoCandidates.length === 0) {
+      return;
+    }
+
+    if (prefetchedPhotoResultRef.current?.cacheKey === ownerPhotoCandidatesKey) {
+      return;
+    }
+
+    let cancelled = false;
+    resolveBestPhoto(ownerIdentity.photoCandidates)
+      .then((result) => {
+        if (!cancelled) {
+          prefetchedPhotoResultRef.current = {
+            cacheKey: ownerPhotoCandidatesKey,
+            result,
+          };
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [visibility, ownerIdentity.photoCandidates, ownerPhotoCandidatesKey]);
 
   const handleSubmit = async () => {
     // Synchronous guard: prevent double-tap race condition
@@ -211,10 +305,25 @@ export default function CreateTodScreen() {
       return;
     }
     isSubmittingRef.current = true;
+    const uploadedStorageIds: string[] = [];
 
-    setIsSubmitting(true);
+    if (mountedRef.current) {
+      setIsSubmitting(true);
+    }
 
     try {
+      const trackUploadedStorageId = async (storageId: string | undefined) => {
+        if (!storageId) return;
+        uploadedStorageIds.push(storageId);
+        try {
+          await trackPendingTodUploads({
+            storageIds: [storageId as any],
+          });
+        } catch (trackError) {
+          debugTodWarn('[T/D] Failed to track pending post upload:', trackError);
+        }
+      };
+
       // TOD-001 FIX: Use authUserId for server-side verification
       if (visibility === 'anonymous') {
         // Anonymous: no identity, no photo
@@ -225,7 +334,7 @@ export default function CreateTodScreen() {
           isAnonymous: true,
           photoBlurMode: 'none',
         });
-        console.log(`[T/D REPORT] created visibility=anonymous`);
+        debugTodLog(`[T/D REPORT] created visibility=anonymous`);
       } else if (visibility === 'no_photo') {
         // Without photo: identity visible, blur photo treatment
         // FIX: Send photoBlurMode: 'blur' to trigger blur treatment in renderer
@@ -241,10 +350,13 @@ export default function CreateTodScreen() {
           ownerGender: ownerIdentity.gender,
           // NO ownerPhotoUrl - backend will add from profile via server-side fallback
         });
-        console.log(`[T/D REPORT] created visibility=no_photo photoBlurMode=blur`);
+        debugTodLog(`[T/D REPORT] created visibility=no_photo photoBlurMode=blur`);
       } else {
         // Everyone (public): identity + photo (photo is optional - graceful fallback)
-        const photoResult = await resolveBestPhoto(ownerIdentity.photoCandidates || []);
+        const photoResult =
+          prefetchedPhotoResultRef.current?.cacheKey === ownerPhotoCandidatesKey
+            ? prefetchedPhotoResultRef.current.result
+            : await resolveBestPhoto(ownerIdentity.photoCandidates || []);
 
         let ownerPhotoUrl: string | undefined;
         let ownerPhotoStorageId: any;
@@ -258,9 +370,10 @@ export default function CreateTodScreen() {
                 () => generateUploadUrl({ authUserId: effectiveUserId }),
                 'photo'
               );
+              await trackUploadedStorageId(ownerPhotoStorageId);
             } catch (uploadError) {
               // Upload failed - proceed without photo rather than blocking
-              console.warn('[T/D] Photo upload failed, proceeding without photo:', uploadError);
+              debugTodWarn('[T/D] Photo upload failed, proceeding without photo:', uploadError);
             }
           } else {
             ownerPhotoUrl = photoResult.url;
@@ -283,15 +396,47 @@ export default function CreateTodScreen() {
         });
 
         const photoStatus = ownerPhotoUrl ? 'url' : ownerPhotoStorageId ? 'uploaded' : 'none';
-        console.log(`[T/D REPORT] created visibility=public photoStatus=${photoStatus} resolveResult=${photoResult.type}`);
+        debugTodLog(`[T/D REPORT] created visibility=public photoStatus=${photoStatus} resolveResult=${photoResult.type}`);
+      }
+
+      if (uploadedStorageIds.length > 0) {
+        try {
+          await releasePendingTodUploads({
+            storageIds: uploadedStorageIds as any,
+          });
+        } catch (releaseError) {
+          debugTodWarn('[T/D] Failed to release pending post uploads:', releaseError);
+        }
       }
 
       router.back();
     } catch (error: any) {
       console.error('[T/D UI] Post failed:', error);
+      const retryableError = isRetryableTodError(error);
+
+      if (!retryableError && uploadedStorageIds.length > 0) {
+        try {
+          await cleanupPendingTodUploads({
+            storageIds: uploadedStorageIds as any,
+          });
+        } catch (cleanupError) {
+          debugTodWarn('[T/D] Failed to clean up pending post uploads:', cleanupError);
+        }
+      }
+
+      if (retryableError) {
+        Alert.alert(
+          'Post Unconfirmed',
+          'We could not confirm your post was created. Check the feed before trying again.'
+        );
+      } else {
+        Alert.alert('Error', error?.message || 'Failed to create your post. Please try again.');
+      }
+    } finally {
       isSubmittingRef.current = false;
-      setIsSubmitting(false);
-      Alert.alert('Error', error?.message || 'Failed to create your post. Please try again.');
+      if (mountedRef.current) {
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -301,10 +446,12 @@ export default function CreateTodScreen() {
     <KeyboardAvoidingView
       style={[styles.container, { paddingTop: insets.top }]}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
     >
       <ScrollView
         contentContainerStyle={[styles.scrollContent, { paddingBottom: Math.max(insets.bottom, 16) + 24 }]}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         showsVerticalScrollIndicator={false}
       >
         {/* Header - close button only, no Post button here */}

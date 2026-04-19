@@ -1554,6 +1554,8 @@ export default defineSchema({
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
       v.literal('other')
     )),
     // Optional additional details (renamed from reason for clarity)
@@ -1588,6 +1590,8 @@ export default defineSchema({
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
       v.literal('other')
     )),
     reasonText: v.optional(v.string()),

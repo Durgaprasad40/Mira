@@ -21,6 +21,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS, COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+import { TodAvatar } from '@/components/truthdare/TodAvatar';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { useAuthStore } from '@/stores/authStore';
 import { textForPublicSurface } from '@/lib/contentFilter';
@@ -28,9 +29,8 @@ import { ReportModal } from '@/components/private/ReportModal';
 import { getTimeAgo } from '@/lib/utils';
 // P1-004 FIX: Removed DEMO_INCOGNITO_PROFILES - now using backend participantIntentKey
 import { useScreenTrace } from '@/lib/devTrace';
-// P2-002: Centralized blur constants and helper
-// PHOTO-BLUR-FIX: Use getAvatarBlurRadius for consistent blur based on backend flags
-import { PHASE2_BLUR_AVATAR, PHASE2_BLUR_AVATAR_SMALL, getAvatarBlurRadius } from '@/lib/phase2UI';
+// P2-002: Centralized blur helper
+import { getAvatarBlurRadius } from '@/lib/phase2UI';
 // P2-006: Connection source types
 import type { ConnectionSource } from '@/types';
 // P2-INSTRUMENTATION: Sentry breadcrumbs for Phase-2 debugging
@@ -99,6 +99,35 @@ const getOnlineStatus = (lastActive: number | undefined): OnlineStatus => {
   if (diff < ONE_MINUTE) return 'online';
   if (diff < ONE_DAY) return 'recently_active';
   return 'offline';
+};
+
+const isRetryableTodError = (error: unknown): boolean => {
+  const retryableFlag =
+    typeof error === 'object' &&
+    error !== null &&
+    'retryable' in error &&
+    (error as { retryable?: boolean }).retryable === true;
+  if (retryableFlag) {
+    return true;
+  }
+
+  const message =
+    typeof error === 'object' &&
+    error !== null &&
+    'message' in error &&
+    typeof (error as { message?: string }).message === 'string'
+      ? (error as { message: string }).message.toLowerCase()
+      : '';
+
+  return (
+    message.includes('network') ||
+    message.includes('timed out') ||
+    message.includes('timeout') ||
+    message.includes('offline') ||
+    message.includes('unable to connect') ||
+    message.includes('fetch failed') ||
+    message.includes('connection')
+  );
 };
 
 const PRESENCE_HEARTBEAT_INTERVAL = 15000; // 15 seconds
@@ -285,6 +314,12 @@ export default function ChatsScreen() {
   );
   const respondToConnect = useMutation(api.truthDare.respondToConnect);
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
+  const pendingConnectResponseRef = useRef<Set<string>>(new Set());
+  const [processedPendingRequestIds, setProcessedPendingRequestIds] = useState<Set<string>>(new Set());
+  const visiblePendingRequests = useMemo(() => {
+    if (!pendingRequests) return [];
+    return pendingRequests.filter((request) => !processedPendingRequestIds.has(request._id));
+  }, [pendingRequests, processedPendingRequestIds]);
 
   // P0-FIX: Success sheet state for post-accept celebration
   // FIX: Include both users' info for proper match display
@@ -293,8 +328,12 @@ export default function ChatsScreen() {
     conversationId: string;
     senderName: string;
     senderPhotoUrl: string;
+    senderPhotoBlurMode?: 'none' | 'blur';
+    senderIsAnonymous?: boolean;
     recipientName: string;
     recipientPhotoUrl: string;
+    recipientPhotoBlurMode?: 'none' | 'blur';
+    recipientIsAnonymous?: boolean;
   } | null>(null);
 
   // [T/D RECEIVE UI] Debug logs for pending connect requests
@@ -304,11 +343,24 @@ export default function ChatsScreen() {
         currentUserId: currentUserId?.slice(-8) ?? 'NULL',
         querySkipped: !currentUserId,
         pendingRequestsLoading: pendingRequests === undefined,
-        pendingRequestsCount: pendingRequests?.length ?? 0,
-        pendingRequestIds: pendingRequests?.map((r) => r._id?.slice(-8)) ?? [],
+        pendingRequestsCount: visiblePendingRequests.length,
+        pendingRequestIds: visiblePendingRequests.map((r) => r._id?.slice(-8)) ?? [],
       });
     }
-  }, [currentUserId, pendingRequests]);
+  }, [currentUserId, pendingRequests, visiblePendingRequests]);
+
+  useEffect(() => {
+    if (!pendingRequests) return;
+
+    setProcessedPendingRequestIds((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+      const liveIds = new Set(pendingRequests.map((request) => String(request._id)));
+      const next = new Set(Array.from(prev).filter((requestId) => liveIds.has(requestId)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [pendingRequests]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P0-002 FIX: Backend conversations from Phase-2 privateConversations table
@@ -445,7 +497,9 @@ export default function ChatsScreen() {
   // Handle accept T&D connect request
   const handleAcceptConnect = useCallback(async (requestId: string) => {
     if (!currentUserId) return;
+    if (pendingConnectResponseRef.current.has(`connect:${requestId}`)) return;
 
+    pendingConnectResponseRef.current.add(`connect:${requestId}`);
     setRespondingTo(requestId);
     try {
       const result = await respondToConnect({
@@ -455,6 +509,11 @@ export default function ChatsScreen() {
       });
 
       if (result?.success && result.action === 'connected') {
+        setProcessedPendingRequestIds((prev) => {
+          const next = new Set(prev);
+          next.add(requestId);
+          return next;
+        });
         // Backend created the conversation - use the backend conversation ID
         const backendConvoId = result.conversationId;
 
@@ -492,15 +551,27 @@ export default function ChatsScreen() {
           conversationId: backendConvoId!,
           senderName: result.senderName || 'Someone',
           senderPhotoUrl: result.senderPhotoUrl || '',
+          senderPhotoBlurMode: result.senderPhotoBlurMode || 'none',
+          senderIsAnonymous: !!result.senderIsAnonymous,
           recipientName: result.recipientName || 'You',
           recipientPhotoUrl: result.recipientPhotoUrl || '',
+          recipientPhotoBlurMode: result.recipientPhotoBlurMode || 'none',
+          recipientIsAnonymous: !!result.recipientIsAnonymous,
         });
       } else {
         Alert.alert('Error', result?.reason || 'Failed to accept connection.');
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to accept connection. Please try again.');
+      if (isRetryableTodError(error)) {
+        Alert.alert(
+          'Connection Unconfirmed',
+          'We could not confirm this request was accepted. Pull to refresh before trying again.'
+        );
+      } else {
+        Alert.alert('Error', 'Failed to accept connection. Please try again.');
+      }
     } finally {
+      pendingConnectResponseRef.current.delete(`connect:${requestId}`);
       setRespondingTo(null);
     }
   }, [currentUserId, respondToConnect, conversations, unlockUser, createConversation, router]);
@@ -508,7 +579,9 @@ export default function ChatsScreen() {
   // Handle reject T&D connect request
   const handleRejectConnect = useCallback(async (requestId: string) => {
     if (!currentUserId) return;
+    if (pendingConnectResponseRef.current.has(`remove:${requestId}`)) return;
 
+    pendingConnectResponseRef.current.add(`remove:${requestId}`);
     setRespondingTo(requestId);
     try {
       await respondToConnect({
@@ -516,9 +589,22 @@ export default function ChatsScreen() {
         action: 'remove',
         authUserId: currentUserId,
       });
+      setProcessedPendingRequestIds((prev) => {
+        const next = new Set(prev);
+        next.add(requestId);
+        return next;
+      });
     } catch (error) {
-      Alert.alert('Error', 'Failed to decline connection. Please try again.');
+      if (isRetryableTodError(error)) {
+        Alert.alert(
+          'Decline Unconfirmed',
+          'We could not confirm this request was declined. Pull to refresh before trying again.'
+        );
+      } else {
+        Alert.alert('Error', 'Failed to decline connection. Please try again.');
+      }
     } finally {
+      pendingConnectResponseRef.current.delete(`remove:${requestId}`);
       setRespondingTo(null);
     }
   }, [currentUserId, respondToConnect]);
@@ -541,8 +627,9 @@ export default function ChatsScreen() {
     conversations.forEach((convo) => {
       // Check backend-provided lastMessage to determine if it's a real conversation
       const lastMsg = convo.lastMessage?.trim() || '';
-      const isNewMatch = !lastMsg || NEW_MATCH_MESSAGES.some(
-        (placeholder) => lastMsg.toLowerCase() === placeholder.toLowerCase()
+      const normalizedLastMsg = lastMsg.replace(/^\[SYSTEM:[^\]]+\]/, '').trim();
+      const isNewMatch = !normalizedLastMsg || NEW_MATCH_MESSAGES.some(
+        (placeholder) => normalizedLastMsg.toLowerCase() === placeholder.toLowerCase()
       );
 
       if (isNewMatch) {
@@ -562,7 +649,7 @@ export default function ChatsScreen() {
 
   // Render T&D Pending Connect Requests
   const renderPendingConnectRequests = () => {
-    if (!pendingRequests || pendingRequests.length === 0) return null;
+    if (visiblePendingRequests.length === 0) return null;
 
     return (
       <View style={styles.pendingRequestsSection}>
@@ -570,21 +657,25 @@ export default function ChatsScreen() {
           <Ionicons name="flame" size={18} color={C.primary} />
           <Text style={styles.sectionTitle}>T&D Connect Requests</Text>
           <View style={styles.countBadge}>
-            <Text style={styles.countBadgeText}>{pendingRequests.length}</Text>
+            <Text style={styles.countBadgeText}>{visiblePendingRequests.length}</Text>
           </View>
         </View>
-        {pendingRequests.map((req) => {
+        {visiblePendingRequests.map((req) => {
           const isResponding = respondingTo === req._id;
           return (
-            <View key={req._id} style={styles.pendingRequestCard}>
+              <View key={req._id} style={styles.pendingRequestCard}>
               <View style={styles.pendingRequestHeader}>
-                {req.senderPhotoUrl ? (
-                  <Image source={{ uri: req.senderPhotoUrl }} style={styles.pendingAvatar} blurRadius={PHASE2_BLUR_AVATAR_SMALL} />
-                ) : (
-                  <View style={[styles.pendingAvatar, styles.pendingAvatarPlaceholder]}>
-                    <Ionicons name="person" size={20} color={C.textLight} />
-                  </View>
-                )}
+                <TodAvatar
+                  size={40}
+                  photoUrl={req.senderPhotoUrl ?? null}
+                  isAnonymous={req.senderIsAnonymous}
+                  photoBlurMode={req.senderPhotoBlurMode ?? 'none'}
+                  label={req.senderName}
+                  style={styles.pendingAvatar}
+                  backgroundColor={C.background}
+                  textColor={C.text}
+                  iconColor={C.textLight}
+                />
                 <View style={styles.pendingInfo}>
                   <Text style={styles.pendingName}>
                     {req.senderName}{req.senderAge ? `, ${req.senderAge}` : ''}
@@ -866,19 +957,19 @@ export default function ChatsScreen() {
               <View style={styles.successAvatarsRow}>
                 {/* Sender photo (T/D requester) */}
                 <View style={styles.successAvatarContainer}>
-                  {successSheet.senderPhotoUrl ? (
-                    <Image
-                      source={{ uri: successSheet.senderPhotoUrl }}
-                      style={styles.successAvatar}
-                      blurRadius={PHASE2_BLUR_AVATAR_SMALL}
-                    />
-                  ) : (
-                    <View style={[styles.successAvatar, styles.successAvatarPlaceholder]}>
-                      <Text style={styles.successAvatarInitial}>
-                        {successSheet.senderName?.[0] || '?'}
-                      </Text>
-                    </View>
-                  )}
+                  <TodAvatar
+                    size={70}
+                    photoUrl={successSheet.senderPhotoUrl ?? null}
+                    isAnonymous={successSheet.senderIsAnonymous}
+                    photoBlurMode={successSheet.senderPhotoBlurMode ?? 'none'}
+                    label={successSheet.senderName}
+                    borderWidth={3}
+                    borderColor={C.primary}
+                    backgroundColor={C.background}
+                    textColor={C.text}
+                    iconColor={C.textLight}
+                    style={styles.successAvatar}
+                  />
                   <Text style={styles.successAvatarName} numberOfLines={1}>
                     {successSheet.senderName}
                   </Text>
@@ -891,19 +982,19 @@ export default function ChatsScreen() {
 
                 {/* Recipient photo (current user / acceptor) */}
                 <View style={styles.successAvatarContainer}>
-                  {successSheet.recipientPhotoUrl ? (
-                    <Image
-                      source={{ uri: successSheet.recipientPhotoUrl }}
-                      style={styles.successAvatar}
-                      blurRadius={PHASE2_BLUR_AVATAR_SMALL}
-                    />
-                  ) : (
-                    <View style={[styles.successAvatar, styles.successAvatarPlaceholder]}>
-                      <Text style={styles.successAvatarInitial}>
-                        {successSheet.recipientName?.[0] || '?'}
-                      </Text>
-                    </View>
-                  )}
+                  <TodAvatar
+                    size={70}
+                    photoUrl={successSheet.recipientPhotoUrl ?? null}
+                    isAnonymous={successSheet.recipientIsAnonymous}
+                    photoBlurMode={successSheet.recipientPhotoBlurMode ?? 'none'}
+                    label={successSheet.recipientName}
+                    borderWidth={3}
+                    borderColor={C.primary}
+                    backgroundColor={C.background}
+                    textColor={C.text}
+                    iconColor={C.textLight}
+                    style={styles.successAvatar}
+                  />
                   <Text style={styles.successAvatarName} numberOfLines={1}>
                     {successSheet.recipientName}
                   </Text>

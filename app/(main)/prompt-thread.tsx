@@ -1,9 +1,8 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput, Animated, Pressable, Platform,
+  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput, Animated, Pressable,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { BlurView } from 'expo-blur';
 import { Video, ResizeMode } from 'expo-av';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -12,6 +11,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { TodAvatar } from '@/components/truthdare/TodAvatar';
 import { UnifiedAnswerComposer, IdentityMode, Attachment } from '@/components/truthdare/UnifiedAnswerComposer';
 import { TodVoicePlayer } from '@/components/truthdare/TodVoicePlayer';
 import { uploadMediaToConvex } from '@/lib/uploadUtils';
@@ -50,7 +50,7 @@ const PREMIUM = {
 // Available emoji reactions
 const REACTION_EMOJIS = ['😂', '🔥', '😍', '👏', '😮', '💀'];
 
-// Report reason options (P0-002: Added 'privacy' and 'scam' for prompt reports)
+// Report reason options must stay aligned with the backend reasonCode union.
 const REPORT_REASONS: { code: TodReportReason; label: string; icon: string }[] = [
   { code: 'harassment', label: 'Harassment', icon: '🚫' },
   { code: 'sexual', label: 'Sexual Content', icon: '🔞' },
@@ -72,6 +72,107 @@ function formatTimeLeft(expiresAt: number): string {
   if (hours > 0) return `${hours}h left`;
   return `${minutes}m left`;
 }
+
+type ThreadAuthorProfile = {
+  name?: string;
+  age?: number;
+  gender?: string;
+  photoUrl?: string;
+};
+
+type ThreadAnswerIdentitySource = {
+  identityMode?: IdentityMode | null;
+  isAnonymous?: boolean | null;
+  photoBlurMode?: 'none' | 'blur' | null;
+  authorName?: string | null;
+  authorPhotoUrl?: string | null;
+  authorAge?: number | null;
+  authorGender?: string | null;
+};
+
+function resolveThreadAnswerIdentity(
+  answer: ThreadAnswerIdentitySource,
+  fallbackProfile: ThreadAuthorProfile,
+  isOwnAnswer: boolean
+) {
+  const identityMode: IdentityMode =
+    answer.identityMode === 'anonymous' ||
+    answer.identityMode === 'no_photo' ||
+    answer.identityMode === 'profile'
+      ? answer.identityMode
+      : answer.isAnonymous !== false
+        ? 'anonymous'
+        : answer.photoBlurMode === 'blur'
+          ? 'no_photo'
+          : 'profile';
+  const isAnonymous = identityMode === 'anonymous';
+  const usesBlur = identityMode === 'no_photo';
+
+  let authorName = answer.authorName ?? undefined;
+  let authorPhotoUrl = answer.authorPhotoUrl ?? undefined;
+  let authorAge = answer.authorAge ?? undefined;
+  let authorGender = answer.authorGender ?? undefined;
+
+  if (!isAnonymous && isOwnAnswer) {
+    authorName = authorName || fallbackProfile.name;
+    if (identityMode === 'profile') {
+      authorPhotoUrl = authorPhotoUrl || fallbackProfile.photoUrl;
+    }
+    authorAge = authorAge ?? fallbackProfile.age;
+    authorGender = authorGender || fallbackProfile.gender;
+  }
+
+  return {
+    identityMode,
+    isAnonymous,
+    photoBlurMode: usesBlur ? 'blur' : 'none',
+    authorName: isAnonymous ? 'Anonymous' : (authorName || 'User'),
+    authorPhotoUrl: isAnonymous || usesBlur ? null : (authorPhotoUrl || null),
+    authorAge: isAnonymous ? undefined : authorAge,
+    authorGender: isAnonymous ? undefined : authorGender,
+  };
+}
+
+function isRetryableTodError(error: unknown): boolean {
+  const retryableFlag =
+    typeof error === 'object' &&
+    error !== null &&
+    'retryable' in error &&
+    (error as { retryable?: boolean }).retryable === true;
+  if (retryableFlag) {
+    return true;
+  }
+
+  const message =
+    typeof error === 'object' &&
+    error !== null &&
+    'message' in error &&
+    typeof (error as { message?: string }).message === 'string'
+      ? (error as { message: string }).message.toLowerCase()
+      : '';
+
+  return (
+    message.includes('network') ||
+    message.includes('timed out') ||
+    message.includes('timeout') ||
+    message.includes('offline') ||
+    message.includes('unable to connect') ||
+    message.includes('fetch failed') ||
+    message.includes('connection')
+  );
+}
+
+const debugTodLog = (...args: unknown[]) => {
+  if (__DEV__) {
+    console.log(...args);
+  }
+};
+
+const debugTodWarn = (...args: unknown[]) => {
+  if (__DEV__) {
+    console.warn(...args);
+  }
+};
 
 export default function PromptThreadScreen() {
   const router = useRouter();
@@ -128,32 +229,58 @@ export default function PromptThreadScreen() {
     conversationId: string;
     senderName: string;
     senderPhotoUrl: string;
+    senderPhotoBlurMode?: 'none' | 'blur';
+    senderIsAnonymous?: boolean;
     recipientName: string;
     recipientPhotoUrl: string;
+    recipientPhotoBlurMode?: 'none' | 'blur';
+    recipientIsAnonymous?: boolean;
   } | null>(null);
+  const [processedPendingRequestIds, setProcessedPendingRequestIds] = useState<Set<string>>(new Set());
 
   // Filter pending requests for this specific prompt
   const pendingRequestsForPrompt = useMemo(() => {
     if (!pendingRequests || !promptId) return [];
     return pendingRequests.filter((r) => r.promptId === promptId);
   }, [pendingRequests, promptId]);
+  const visiblePendingRequestsForPrompt = useMemo(() => {
+    if (pendingRequestsForPrompt.length === 0) return [];
+    return pendingRequestsForPrompt.filter((request) => !processedPendingRequestIds.has(request._id));
+  }, [pendingRequestsForPrompt, processedPendingRequestIds]);
 
   // Debug log for pending requests
   useEffect(() => {
     if (__DEV__) {
-      console.log('[T/D THREAD] Pending requests state:', {
+      debugTodLog('[T/D THREAD] Pending requests state:', {
         viewerUserId: userId?.slice(-8),
         promptId: promptId?.slice(-8),
         totalPendingRequests: pendingRequests?.length ?? 0,
         pendingForThisPrompt: pendingRequestsForPrompt.length,
-        pendingIds: pendingRequestsForPrompt.map((r) => r._id?.slice(-8)),
+        visiblePendingForThisPrompt: visiblePendingRequestsForPrompt.length,
+        pendingIds: visiblePendingRequestsForPrompt.map((r) => r._id?.slice(-8)),
       });
     }
-  }, [userId, promptId, pendingRequests, pendingRequestsForPrompt]);
+  }, [userId, promptId, pendingRequests, pendingRequestsForPrompt, visiblePendingRequestsForPrompt]);
+
+  useEffect(() => {
+    if (!pendingRequests) return;
+
+    setProcessedPendingRequestIds((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+      const liveIds = new Set(pendingRequests.map((request) => String(request._id)));
+      const next = new Set(Array.from(prev).filter((requestId) => liveIds.has(requestId)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [pendingRequests]);
 
   // Mutations
   const createOrEditAnswer = useMutation(api.truthDare.createOrEditAnswer);
   const generateUploadUrl = useMutation(api.truthDare.generateUploadUrl);
+  const trackPendingTodUploads = useMutation(api.truthDare.trackPendingTodUploads);
+  const releasePendingTodUploads = useMutation(api.truthDare.releasePendingTodUploads);
+  const cleanupPendingTodUploads = useMutation(api.truthDare.cleanupPendingTodUploads);
   const setReaction = useMutation(api.truthDare.setAnswerReaction);
   const setPromptReaction = useMutation(api.truthDare.setPromptReaction);
   const reportAnswer = useMutation(api.truthDare.reportAnswer);
@@ -170,28 +297,9 @@ export default function PromptThreadScreen() {
   const isLoading = threadData === undefined;
   const prompt = threadData?.prompt;
   const answers = threadData?.answers ?? [];
-  const visibleAnswerCount = prompt?.visibleAnswerCount ?? prompt?.answerCount ?? answers.length;
-  const isAnswerListTruncated = answers.length < visibleAnswerCount;
-
-  // Force re-render when expiry time passes (so isExpired updates in real-time)
-  const [, forceUpdate] = useState(0);
-  useEffect(() => {
-    if (!prompt?.expiresAt || threadData?.isExpired) return;
-    const msUntilExpiry = prompt.expiresAt - Date.now();
-    if (msUntilExpiry <= 0) return; // Already expired
-    // Schedule re-render when expiry time is reached
-    const timer = setTimeout(() => forceUpdate((n) => n + 1), msUntilExpiry + 100);
-    return () => clearTimeout(timer);
-  }, [prompt?.expiresAt, threadData?.isExpired]);
-
-  // Compute expiration locally to catch real-time expiry (server flag is a snapshot)
-  const isExpired = useMemo(() => {
-    // If server already says expired, trust it
-    if (threadData?.isExpired) return true;
-    // Otherwise check locally against expiresAt
-    if (!prompt?.expiresAt) return false;
-    return Date.now() >= prompt.expiresAt;
-  }, [threadData?.isExpired, prompt?.expiresAt]);
+  const visibleAnswerCount = prompt?.visibleAnswerCount ?? answers.length;
+  const [serverExpiryLocked, setServerExpiryLocked] = useState(false);
+  const isExpired = !!threadData?.isExpired || serverExpiryLocked;
 
   // Find user's own answer
   const myAnswer = useMemo(() => {
@@ -202,65 +310,12 @@ export default function PromptThreadScreen() {
   const [showUnifiedComposer, setShowUnifiedComposer] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // P0-005 FIX: Track pending answer submission to ensure data arrives before UI transitions
-  // When set, we're waiting for the answer to appear in threadData before closing composer
-  const [pendingAnswerSubmission, setPendingAnswerSubmission] = useState<{
-    submittedAt: number;
-    isEdit: boolean;
-  } | null>(null);
-
   // Close composer if prompt expires while it's open
   useEffect(() => {
     if (isExpired && showUnifiedComposer) {
       setShowUnifiedComposer(false);
     }
   }, [isExpired, showUnifiedComposer]);
-
-  // P0-005 FIX: Watch for answer data to arrive after submission
-  // This ensures we only close composer and scroll when data is actually present
-  useEffect(() => {
-    if (!pendingAnswerSubmission) return;
-
-    // Check if our answer is now in the data
-    const hasMyAnswer = answers.some((a) => a.isOwnAnswer);
-    const isRecentEnough = (myAnswer?.createdAt ?? 0) >= pendingAnswerSubmission.submittedAt - 5000 ||
-                           (myAnswer?.editedAt ?? 0) >= pendingAnswerSubmission.submittedAt - 5000;
-
-    if (hasMyAnswer && (pendingAnswerSubmission.isEdit || isRecentEnough)) {
-      // Data has arrived - safe to close composer, reset loading, and scroll
-      setPendingAnswerSubmission(null);
-      setIsSubmitting(false);
-      setShowUnifiedComposer(false);
-      // Scroll to end now that data is confirmed present
-      if (scrollTimeoutRef.current) {
-        clearTimeout(scrollTimeoutRef.current);
-      }
-      scrollTimeoutRef.current = setTimeout(() => {
-        if (isMountedRef.current && listRef.current) {
-          listRef.current.scrollToEnd({ animated: true });
-        }
-        scrollTimeoutRef.current = null;
-      }, 100); // Small delay for render to complete
-    }
-  }, [pendingAnswerSubmission, answers, myAnswer]);
-
-  // P0-005 FIX: Safety timeout - if data doesn't arrive within 5 seconds, close composer anyway
-  // This prevents UI from getting stuck if there's a network issue
-  useEffect(() => {
-    if (!pendingAnswerSubmission) return;
-
-    const safetyTimeout = setTimeout(() => {
-      if (isMountedRef.current && pendingAnswerSubmission) {
-        console.warn('[T/D] P0-005 safety timeout: closing composer after 5s');
-        setPendingAnswerSubmission(null);
-        setIsSubmitting(false);
-        setShowUnifiedComposer(false);
-        scrollToEnd();
-      }
-    }, 5000);
-
-    return () => clearTimeout(safetyTimeout);
-  }, [pendingAnswerSubmission]);
 
   // Emoji picker state (per answer)
   const [emojiPickerAnswerId, setEmojiPickerAnswerId] = useState<string | null>(null);
@@ -321,7 +376,7 @@ export default function PromptThreadScreen() {
   // CONNECT DEBUG: Log thread ownership state
   useEffect(() => {
     if (__DEV__ && threadData) {
-      console.log('[T/D Connect] Thread state:', {
+      debugTodLog('[T/D Connect] Thread state:', {
         promptId: promptId?.slice(-8),
         viewerUserId: userId?.slice(-8),
         promptOwnerUserId: prompt?.ownerUserId?.slice(-8),
@@ -361,15 +416,41 @@ export default function PromptThreadScreen() {
 
   // P0-001 FIX: Ref to track media claims in progress (prevents double-tap and stale state issues)
   const pendingMediaClaimsRef = useRef<Set<string>>(new Set());
+  const pendingMediaFinalizeRef = useRef<Set<string>>(new Set());
+  const connectSendInFlightRef = useRef(false);
+  const pendingConnectResponsesRef = useRef<Set<string>>(new Set());
+  const pendingScrollAnswerIdRef = useRef<string | null>(null);
+  const autoOpenHandledRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setServerExpiryLocked(false);
+    pendingScrollAnswerIdRef.current = null;
+    autoOpenHandledRef.current = null;
+  }, [promptId]);
 
   // Auto-open composer if requested from feed
   useEffect(() => {
-    if (autoOpenComposer === 'new' && !myAnswer) {
-      setShowUnifiedComposer(true);
-    } else if (autoOpenComposer === 'edit' && myAnswer) {
-      setShowUnifiedComposer(true);
+    if (!autoOpenComposer || !promptId || !prompt) return;
+    const autoOpenKey = `${promptId}:${autoOpenComposer}`;
+    if (autoOpenHandledRef.current === autoOpenKey) return;
+    autoOpenHandledRef.current = autoOpenKey;
+
+    if (isExpired || isPromptOwner) {
+      return;
     }
-  }, [autoOpenComposer, myAnswer]);
+
+    if (autoOpenComposer === 'edit' && !myAnswer) {
+      setShowUnifiedComposer(true);
+      return;
+    }
+
+    if (autoOpenComposer === 'new' && myAnswer) {
+      setShowUnifiedComposer(true);
+      return;
+    }
+
+    setShowUnifiedComposer(true);
+  }, [autoOpenComposer, isExpired, isPromptOwner, myAnswer, prompt, promptId]);
 
   // M-003 FIX: Safe scroll with cleanup support
   const scrollToEnd = () => {
@@ -385,16 +466,25 @@ export default function PromptThreadScreen() {
     }, 200);
   };
 
+  useEffect(() => {
+    if (!pendingScrollAnswerIdRef.current) return;
+    const hasSubmittedAnswer = answers.some((answer) => answer._id === pendingScrollAnswerIdRef.current);
+    if (!hasSubmittedAnswer) return;
+
+    pendingScrollAnswerIdRef.current = null;
+    scrollToEnd();
+  }, [answers]);
+
   // Handle emoji reaction
   const handleReact = useCallback(async (answerId: string, emoji: string) => {
     if (!userId) {
-      console.log('[T/D REACTION] skip - no userId');
+      debugTodLog('[T/D REACTION] skip - no userId');
       return;
     }
 
     // Prevent double-tap race condition
     if (pendingReactionsRef.current.has(answerId)) {
-      console.log('[T/D REACTION] skip - already pending');
+      debugTodLog('[T/D REACTION] skip - already pending');
       return;
     }
     pendingReactionsRef.current.add(answerId);
@@ -405,7 +495,7 @@ export default function PromptThreadScreen() {
     const answer = answersRef.current.find((a) => a._id === answerId);
     const answerIdPrefix = answerId.substring(0, 8);
 
-    console.log('[T/D REACTION] tap', {
+    debugTodLog('[T/D REACTION] tap', {
       answerIdPrefix,
       emoji: emoji || '(remove)',
       currentCount: answer?.totalReactionCount ?? 0,
@@ -418,13 +508,13 @@ export default function PromptThreadScreen() {
       const result = await setReaction({ answerId, userId, emoji });
       // Handle server returning ok: false (no throw, graceful fail)
       if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
-        console.warn('[T/D REACTION] failed', { reason: (result as any).reason });
+        debugTodWarn('[T/D REACTION] failed', { reason: (result as any).reason });
       } else {
-        console.log('[T/D REACTION] success', { action: (result as any)?.action });
+        debugTodLog('[T/D REACTION] success', { action: (result as any)?.action });
       }
     } catch (error: any) {
       // Graceful handling - don't crash UI
-      console.warn('[T/D REACTION] error', { message: error?.message?.substring(0, 50) });
+      debugTodWarn('[T/D REACTION] error', { message: error?.message?.substring(0, 50) });
       if (error.message?.includes('Rate limit')) {
         Alert.alert('Slow down', 'Please wait a moment before reacting again.');
       }
@@ -436,13 +526,13 @@ export default function PromptThreadScreen() {
   // Handle prompt emoji reaction
   const handlePromptReact = useCallback(async (emoji: string) => {
     if (!userId || !promptId) {
-      console.log('[T/D PROMPT REACTION] skip - no userId or promptId');
+      debugTodLog('[T/D PROMPT REACTION] skip - no userId or promptId');
       return;
     }
 
     setShowPromptEmojiPicker(false);
 
-    console.log('[T/D PROMPT REACTION] tap', {
+    debugTodLog('[T/D PROMPT REACTION] tap', {
       promptIdPrefix: promptId.substring(0, 8),
       emoji: emoji || '(remove)',
       hasAuth: !!userId,
@@ -451,12 +541,12 @@ export default function PromptThreadScreen() {
     try {
       const result = await setPromptReaction({ promptId, userId, emoji });
       if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
-        console.warn('[T/D PROMPT REACTION] failed', { reason: (result as any).reason });
+        debugTodWarn('[T/D PROMPT REACTION] failed', { reason: (result as any).reason });
       } else {
-        console.log('[T/D PROMPT REACTION] success', { action: (result as any)?.action });
+        debugTodLog('[T/D PROMPT REACTION] success', { action: (result as any)?.action });
       }
     } catch (error: any) {
-      console.warn('[T/D PROMPT REACTION] error', { message: error?.message?.substring(0, 50) });
+      debugTodWarn('[T/D PROMPT REACTION] error', { message: error?.message?.substring(0, 50) });
       if (error.message?.includes('Rate limit')) {
         Alert.alert('Slow down', 'Please wait a moment before reacting again.');
       }
@@ -479,6 +569,8 @@ export default function PromptThreadScreen() {
     // P0-002: Handle prompt vs answer reporting
     if (!isReportingPrompt && !reportingAnswerId) return;
 
+    const normalizedReasonText = reportReasonText.trim() || undefined;
+
     setIsSubmittingReport(true);
     try {
       if (isReportingPrompt && promptId && userId) {
@@ -487,7 +579,7 @@ export default function PromptThreadScreen() {
           promptId,
           reporterId: userId,
           reasonCode: selectedReportReason,
-          reasonText: reportReasonText.trim() || undefined,
+          reasonText: normalizedReasonText,
         });
         setReportModalVisible(false);
         if (result.isNowHidden) {
@@ -502,7 +594,7 @@ export default function PromptThreadScreen() {
           answerId: reportingAnswerId,
           reporterId: userId,
           reasonCode: selectedReportReason,
-          reasonText: reportReasonText.trim() || undefined,
+          reasonText: normalizedReasonText,
         });
         setReportModalVisible(false);
         // P1-002: Content is immediately hidden for the reporter
@@ -689,7 +781,12 @@ export default function PromptThreadScreen() {
   // FIX: Show success sheet instead of navigating directly to chat
   const handleAcceptConnect = useCallback(async (requestId: string) => {
     if (!userId) return;
-    setRespondingTo(requestId);
+    if (pendingConnectResponsesRef.current.has(`connect:${requestId}`)) return;
+
+    pendingConnectResponsesRef.current.add(`connect:${requestId}`);
+    if (isMountedRef.current) {
+      setRespondingTo(requestId);
+    }
     try {
       const result = await respondToConnect({
         requestId: requestId as any,
@@ -697,7 +794,7 @@ export default function PromptThreadScreen() {
         authUserId: userId,
       });
       if (__DEV__) {
-        console.log('[T/D ACCEPT RESULT]', {
+        debugTodLog('[T/D ACCEPT RESULT]', {
           success: result.success,
           conversationId: result.conversationId?.slice(-8),
           action: result.action,
@@ -705,30 +802,57 @@ export default function PromptThreadScreen() {
         });
       }
       if (result.success && result.conversationId) {
+        setProcessedPendingRequestIds((prev) => {
+          const next = new Set(prev);
+          next.add(requestId);
+          return next;
+        });
+        if (!isMountedRef.current) {
+          return;
+        }
         // FIX: Show success sheet instead of navigating directly
-        console.log('[T/D ACCEPT] Showing success sheet instead of direct navigation');
+        debugTodLog('[T/D ACCEPT] Showing success sheet instead of direct navigation');
         setSuccessSheet({
           visible: true,
           conversationId: result.conversationId,
           senderName: result.senderName || 'Someone',
           senderPhotoUrl: result.senderPhotoUrl || '',
+          senderPhotoBlurMode: result.senderPhotoBlurMode || 'none',
+          senderIsAnonymous: !!result.senderIsAnonymous,
           recipientName: result.recipientName || 'You',
           recipientPhotoUrl: result.recipientPhotoUrl || '',
+          recipientPhotoBlurMode: result.recipientPhotoBlurMode || 'none',
+          recipientIsAnonymous: !!result.recipientIsAnonymous,
         });
       } else {
         Alert.alert('Error', result.reason || 'Failed to accept request');
       }
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to accept connect request');
+      if (isRetryableTodError(error)) {
+        Alert.alert(
+          'Connection Unconfirmed',
+          'We could not confirm this request was accepted. Refresh the thread before trying again.'
+        );
+      } else {
+        Alert.alert('Error', error.message || 'Failed to accept connect request');
+      }
     } finally {
-      setRespondingTo(null);
+      pendingConnectResponsesRef.current.delete(`connect:${requestId}`);
+      if (isMountedRef.current) {
+        setRespondingTo(null);
+      }
     }
   }, [userId, respondToConnect]);
 
   // RECEIVER: Handle reject T&D connect request
   const handleRejectConnect = useCallback(async (requestId: string) => {
     if (!userId) return;
-    setRespondingTo(requestId);
+    if (pendingConnectResponsesRef.current.has(`remove:${requestId}`)) return;
+
+    pendingConnectResponsesRef.current.add(`remove:${requestId}`);
+    if (isMountedRef.current) {
+      setRespondingTo(requestId);
+    }
     try {
       const result = await respondToConnect({
         requestId: requestId as any,
@@ -736,25 +860,44 @@ export default function PromptThreadScreen() {
         authUserId: userId,
       });
       if (__DEV__) {
-        console.log('[T/D THREAD] Reject result:', result);
+        debugTodLog('[T/D THREAD] Reject result:', result);
       }
       if (!result.success) {
         Alert.alert('Error', result.reason || 'Failed to decline request');
+      } else {
+        setProcessedPendingRequestIds((prev) => {
+          const next = new Set(prev);
+          next.add(requestId);
+          return next;
+        });
       }
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to decline connect request');
+      if (isRetryableTodError(error)) {
+        Alert.alert(
+          'Decline Unconfirmed',
+          'We could not confirm this request was declined. Refresh the thread before trying again.'
+        );
+      } else {
+        Alert.alert('Error', error.message || 'Failed to decline connect request');
+      }
     } finally {
-      setRespondingTo(null);
+      pendingConnectResponsesRef.current.delete(`remove:${requestId}`);
+      if (isMountedRef.current) {
+        setRespondingTo(null);
+      }
     }
   }, [userId, respondToConnect]);
 
   // Handle send T&D connect request (prompt owner → answer author)
-  // P0-007 FIX: Add double-tap guard + backend is authoritative for dedup
+  // P0-10 FIX: Global in-flight guard + backend remains authoritative for dedup.
   const handleSendConnect = useCallback(async (answerId: string) => {
     if (!userId || !promptId) return;
-    if (connectSending) return; // P0-007: Prevent double-tap while request in flight
+    if (connectSendInFlightRef.current) return;
 
-    setConnectSending(answerId);
+    connectSendInFlightRef.current = true;
+    if (isMountedRef.current) {
+      setConnectSending(answerId);
+    }
     try {
       const result = await sendConnectRequest({
         promptId,
@@ -763,23 +906,39 @@ export default function PromptThreadScreen() {
       });
 
       if (result.success) {
-        setConnectSentFor((prev) => new Set(prev).add(answerId));
-        setSelectedAnswerId(null); // Clear selection after successful send
+        if (isMountedRef.current) {
+          setConnectSentFor((prev) => {
+            const next = new Set(prev);
+            next.add(answerId);
+            return next;
+          });
+          setSelectedAnswerId(null); // Clear selection after successful send
+        }
         Alert.alert('Connect Sent', 'Your connect request has been sent!');
       } else {
         // Backend already deduplicates - show user-friendly message
         Alert.alert('Cannot Connect', result.reason || 'Failed to send connect request.');
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to send connect request. Please try again.');
+      if (isRetryableTodError(error)) {
+        Alert.alert(
+          'Connect Unconfirmed',
+          'We could not confirm your connect request. Refresh the thread before trying again.'
+        );
+      } else {
+        Alert.alert('Error', 'Failed to send connect request. Please try again.');
+      }
     } finally {
-      setConnectSending(null);
+      connectSendInFlightRef.current = false;
+      if (isMountedRef.current) {
+        setConnectSending(null);
+      }
     }
-  }, [userId, promptId, connectSending, sendConnectRequest]);
+  }, [userId, promptId, sendConnectRequest]);
 
   // Handle tap-to-view for media content
   // P0-001 FIX: Backend is the source of truth for view state.
-  // P0-002 FIX: View is recorded atomically at claim time (backend already does this).
+  // P0-17 FIX: Durable consumption happens on finalize after successful display.
   const handleViewMedia = useCallback(async (answer: typeof answers[0]) => {
     if (!answer.mediaUrl || (answer.type !== 'photo' && answer.type !== 'video')) return;
 
@@ -788,19 +947,21 @@ export default function PromptThreadScreen() {
 
     // P0-001 FIX: Prevent double-tap while claim is in flight
     if (pendingMediaClaimsRef.current.has(answerId)) {
-      console.log('[T/D] Media claim already in progress, ignoring tap');
+      debugTodLog('[T/D] Media claim already in progress, ignoring tap');
       return;
     }
 
     // Owner can always view their own media (no claim needed)
     if (isOwner) {
-      setViewingMedia({
-        answerId,
-        mediaUrl: answer.mediaUrl,
-        mediaType: answer.type as 'photo' | 'video',
-        isOwnAnswer: true,
-        isFrontCamera: answer.isFrontCamera,
-      });
+      if (isMountedRef.current) {
+        setViewingMedia({
+          answerId,
+          mediaUrl: answer.mediaUrl,
+          mediaType: answer.type as 'photo' | 'video',
+          isOwnAnswer: true,
+          isFrontCamera: answer.isFrontCamera,
+        });
+      }
       return;
     }
 
@@ -817,7 +978,8 @@ export default function PromptThreadScreen() {
     pendingMediaClaimsRef.current.add(answerId);
 
     try {
-      // Backend claim is atomic and records the view at this moment (P0-002 FIX)
+      const mediaLabel = answer.type === 'video' ? 'video' : 'photo';
+      // Backend returns a fresh URL without durably consuming the one-time view yet.
       const result = await claimAnswerMediaView({
         answerId,
         viewerId: userId,
@@ -826,38 +988,57 @@ export default function PromptThreadScreen() {
       // Handle backend responses
       // ONE-TIME VIEW: Block if already viewed
       if (result.status === 'already_viewed') {
-        Alert.alert('Already Viewed', 'You can only view this media once.');
+        Alert.alert(
+          'Already Viewed',
+          `This one-time ${mediaLabel} has already been opened on your account.`
+        );
         return;
       }
 
       if (result.status === 'not_authorized') {
-        Alert.alert('Not Available', 'This media is only visible to the prompt owner.');
+        Alert.alert(
+          'Not Available',
+          `This ${mediaLabel} is only available to the prompt creator.`
+        );
         return;
       }
 
       if (result.status === 'no_media') {
-        Alert.alert('Media Unavailable', 'This media is no longer available.');
+        Alert.alert(
+          'Unavailable',
+          `This one-time ${mediaLabel} is no longer available.`
+        );
         return;
       }
 
       if (result.status !== 'ok' || !result.url) {
-        Alert.alert('Error', 'Failed to load media. Please try again.');
+        Alert.alert(
+          'Couldn’t Open',
+          `We couldn’t open this ${mediaLabel}. Please try again.`
+        );
         return;
       }
 
       // Use the fresh URL from backend
-      setViewingMedia({
-        answerId,
-        mediaUrl: result.url,
-        mediaType: result.mediaType,
-        isOwnAnswer: false,
-        hasViewed: false, // Will be marked true on close
-        isFrontCamera: result.isFrontCamera,
-      });
+      if (isMountedRef.current) {
+        setViewingMedia({
+          answerId,
+          mediaUrl: result.url,
+          mediaType: result.mediaType,
+          isOwnAnswer: false,
+          hasViewed: false, // Will be marked true on close
+          isFrontCamera: result.isFrontCamera,
+        });
+      }
     } catch (error: any) {
       console.error('[T/D] Claim media view failed:', error);
       if (error.message?.includes('Rate limit')) {
         Alert.alert('Please Wait', 'Too many requests. Try again in a moment.');
+      } else if (isRetryableTodError(error)) {
+        Alert.alert(
+          'Media Not Loaded',
+          'We could not load this media right now. Check your connection and try again.'
+        );
       } else {
         Alert.alert('Error', 'Failed to view media. Please try again.');
       }
@@ -869,28 +1050,48 @@ export default function PromptThreadScreen() {
 
   // Handle closing the media viewer
   const handleCloseMediaViewer = useCallback(async () => {
-    if (viewingMedia && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed && userId) {
+    const activeMedia = viewingMedia;
+    if (isMountedRef.current) {
+      setViewingMedia(null);
+    }
+    // T/D VIDEO FIX: Reset video progress state
+    if (isMountedRef.current) {
+      setVideoProgress({ position: 0, duration: 0, isPlaying: false });
+    }
+
+    if (!activeMedia || activeMedia.isOwnAnswer || activeMedia.hasViewed || !userId) {
+      return;
+    }
+
+    if (pendingMediaFinalizeRef.current.has(activeMedia.answerId)) {
+      return;
+    }
+
+    pendingMediaFinalizeRef.current.add(activeMedia.answerId);
+    try {
       // Finalize the view for non-owners
-      try {
-        await finalizeAnswerMediaView({
-          answerId: viewingMedia.answerId,
-          viewerId: userId,
-        });
-        console.log('[T/D] Media view finalized');
-      } catch (error) {
-        console.error('[T/D] Finalize media view failed:', error);
-        // M-002 FIX: Add non-disruptive user feedback on failure
-        // This informs the user but doesn't block the flow
+      await finalizeAnswerMediaView({
+        answerId: activeMedia.answerId,
+        viewerId: userId,
+      });
+      debugTodLog('[T/D] Media view finalized');
+    } catch (error) {
+      console.error('[T/D] Finalize media view failed:', error);
+      if (isRetryableTodError(error)) {
+        Alert.alert(
+          'View Unconfirmed',
+          'We could not confirm the view was recorded. Refresh the thread before trying again.'
+        );
+      } else {
         Alert.alert(
           'View Not Recorded',
           'Your view may not have been recorded. The media may still be viewable.',
           [{ text: 'OK', style: 'default' }]
         );
       }
+    } finally {
+      pendingMediaFinalizeRef.current.delete(activeMedia.answerId);
     }
-    setViewingMedia(null);
-    // T/D VIDEO FIX: Reset video progress state
-    setVideoProgress({ position: 0, duration: 0, isPlaying: false });
   }, [viewingMedia, userId, finalizeAnswerMediaView]);
 
   // Unified submit handler - handles text + optional media attachment
@@ -903,13 +1104,17 @@ export default function PromptThreadScreen() {
     mediaVisibility?: 'private' | 'public';
   }) => {
     if (!promptId || !userId) return;
+    const uploadedStorageIds: string[] = [];
 
-    setIsSubmitting(true);
+    if (isMountedRef.current) {
+      setIsSubmitting(true);
+    }
 
     try {
+      const wasEditing = !!myAnswer;
       const { text, attachment, removeMedia, identityMode, mediaVisibility } = params;
 
-      console.log('[T/D BEHAVIOR] submit_pipeline_start', {
+      debugTodLog('[T/D BEHAVIOR] submit_pipeline_start', {
         hasText: !!text.trim(),
         hasAttachment: !!attachment,
         attachmentKind: attachment?.kind ?? 'none',
@@ -928,6 +1133,17 @@ export default function PromptThreadScreen() {
       let durationSec: number | undefined;
       let isFrontCamera: boolean | undefined;
       let authorPhotoStorageId: string | undefined;
+      const trackUploadedStorageId = async (storageId: string | undefined) => {
+        if (!storageId) return;
+        uploadedStorageIds.push(storageId);
+        try {
+          await trackPendingTodUploads({
+            storageIds: [storageId as any],
+          });
+        } catch (trackError) {
+          debugTodWarn('[T/D] Failed to track pending upload:', trackError);
+        }
+      };
 
       if (attachment) {
         // Check if this is a remote URL (already uploaded media from existing answer)
@@ -936,14 +1152,14 @@ export default function PromptThreadScreen() {
 
         if (isRemoteUrl) {
           // Media is already in storage - don't upload, don't change mediaStorageId
-          console.log('[T/D UPLOAD] skip - remote URL (existing media)');
+          debugTodLog('[T/D UPLOAD] skip - remote URL (existing media)');
         } else {
           // Local file - upload to Convex storage
           isFrontCamera = attachment.isFrontCamera;
           mediaMime = attachment.mime;
 
           const mediaType = attachment.kind === 'audio' ? 'audio' : attachment.kind;
-          console.log('[T/D UPLOAD] start', { type: mediaType, isFrontCamera });
+          debugTodLog('[T/D UPLOAD] start', { type: mediaType, isFrontCamera });
 
           try {
             // FIX: generateUploadUrl requires authUserId
@@ -952,8 +1168,9 @@ export default function PromptThreadScreen() {
               () => generateUploadUrl({ authUserId: userId }),
               mediaType
             );
+            await trackUploadedStorageId(mediaStorageId);
             const storageIdPrefix = mediaStorageId?.substring(0, 8) ?? 'none';
-            console.log('[T/D UPLOAD] success', { storageIdPrefix });
+            debugTodLog('[T/D UPLOAD] success', { storageIdPrefix });
           } catch (uploadError: any) {
             console.error('[T/D UPLOAD] failed', { error: uploadError?.message?.substring(0, 50) });
             throw uploadError;
@@ -979,13 +1196,14 @@ export default function PromptThreadScreen() {
           () => generateUploadUrl({ authUserId: userId }),
           'photo'
         );
+        await trackUploadedStorageId(authorPhotoStorageId);
       }
 
       // Create or edit the answer with MERGE behavior
       // Only send fields that are explicitly provided
-      console.log('[T/D BEHAVIOR] createOrEditAnswer start', { identityMode, visibility: mediaVisibility === 'private' ? 'owner_only' : 'public' });
+      debugTodLog('[T/D BEHAVIOR] createOrEditAnswer start', { identityMode, visibility: mediaVisibility === 'private' ? 'owner_only' : 'public' });
       // FIX: Backend expects { userId }, not { token }
-      await createOrEditAnswer({
+      const result = await createOrEditAnswer({
         promptId,
         userId: userId ?? '',
         // Text - send if provided (even empty string is valid to clear)
@@ -1015,26 +1233,69 @@ export default function PromptThreadScreen() {
         isFrontCamera,
       });
 
-      console.log('[T/D BEHAVIOR] createOrEditAnswer success');
+      if (uploadedStorageIds.length > 0) {
+        try {
+          await releasePendingTodUploads({
+            storageIds: uploadedStorageIds as any,
+          });
+        } catch (releaseError) {
+          debugTodWarn('[T/D] Failed to release pending uploads after answer submit:', releaseError);
+        }
+      }
 
-      // P0-005 FIX: Instead of immediately closing composer and scrolling,
-      // set pending state and let useEffect handle it when data arrives.
-      // This ensures thread is updated before UI transitions.
-      const isEdit = !!myAnswer;
-      setPendingAnswerSubmission({
-        submittedAt: Date.now(),
-        isEdit,
-      });
-
-      // Keep isSubmitting true until data arrives (handled in finally after brief delay)
+      debugTodLog('[T/D BEHAVIOR] createOrEditAnswer success');
+      if (!wasEditing && result?.answerId) {
+        pendingScrollAnswerIdRef.current = result.answerId as string;
+      } else {
+        pendingScrollAnswerIdRef.current = null;
+      }
+      if (isMountedRef.current) {
+        setShowUnifiedComposer(false);
+        setIsSubmitting(false);
+      }
     } catch (error: any) {
       console.error('[T/D BEHAVIOR] submit_pipeline_failed', { error: error?.message?.substring(0, 50) });
-      Alert.alert('Error', error.message || 'Failed to post comment. Please try again.');
-      setIsSubmitting(false); // Only reset on error
+      const retryableError = isRetryableTodError(error);
+
+      if (!retryableError && uploadedStorageIds.length > 0) {
+        try {
+          await cleanupPendingTodUploads({
+            storageIds: uploadedStorageIds as any,
+          });
+        } catch (cleanupError) {
+          debugTodWarn('[T/D] Failed to clean up pending uploads after failed answer submit:', cleanupError);
+        }
+      }
+
+      if (error?.message?.includes('Prompt has expired')) {
+        if (isMountedRef.current) {
+          setServerExpiryLocked(true);
+          setShowUnifiedComposer(false);
+        }
+        Alert.alert('Prompt Expired', 'This prompt is no longer accepting responses.');
+      } else if (retryableError) {
+        Alert.alert(
+          'Submission Unconfirmed',
+          'We could not confirm your response was posted. Check the thread before trying again.'
+        );
+      } else {
+        Alert.alert('Error', error.message || 'Failed to post comment. Please try again.');
+      }
+      if (isMountedRef.current) {
+        setIsSubmitting(false);
+      }
     }
-    // P0-005 FIX: Don't reset isSubmitting in finally - let the useEffect handle it
-    // when data arrives, providing continuous loading feedback
-  }, [promptId, userId, generateUploadUrl, createOrEditAnswer, authorProfile, myAnswer]);
+  }, [
+    promptId,
+    userId,
+    generateUploadUrl,
+    createOrEditAnswer,
+    authorProfile,
+    myAnswer,
+    trackPendingTodUploads,
+    releasePendingTodUploads,
+    cleanupPendingTodUploads,
+  ]);
 
   // Helper for gender icon
   const getCommentGenderIcon = (gender: string | undefined): string => {
@@ -1042,8 +1303,22 @@ export default function PromptThreadScreen() {
     const g = gender.toLowerCase();
     if (g === 'male' || g === 'm') return '♂';
     if (g === 'female' || g === 'f') return '♀';
-    return '⚧';
+    if (
+      g === 'non_binary' ||
+      g === 'non-binary' ||
+      g === 'nonbinary' ||
+      g === 'nb' ||
+      g === 'other'
+    ) {
+      return '⚧';
+    }
+    return '';
   };
+  const hasMyAnswer = !!myAnswer;
+  const canReplyInline = !isExpired && !hasMyAnswer && !isPromptOwner;
+  const openComposer = useCallback(() => {
+    setShowUnifiedComposer(true);
+  }, []);
 
   // P2-003 FIX: Wrap renderAnswer in useCallback to prevent recreation on every render
   // Render answer card - Premium elevated design with tap-to-reveal
@@ -1060,23 +1335,13 @@ export default function PromptThreadScreen() {
       .slice(0, 3);
 
     // Author identity display logic
-    const isAnon = item.isAnonymous !== false; // default to anonymous if undefined
-
-    // Backward compatibility: if NOT anonymous but missing author fields,
-    // use current user profile if this is our own comment
-    let authorName = item.authorName;
-    let authorPhotoUrl = item.authorPhotoUrl;
-    let authorAge = item.authorAge;
-    let authorGender = item.authorGender;
-    const photoBlurMode = item.photoBlurMode;
-
-    // Fallback for old comments without author snapshot
-    if (!isAnon && isOwnAnswer && !authorName) {
-      authorName = authorProfile.name;
-      authorPhotoUrl = authorProfile.photoUrl;
-      authorAge = authorProfile.age;
-      authorGender = authorProfile.gender;
-    }
+    const normalizedIdentity = resolveThreadAnswerIdentity(item, authorProfile, isOwnAnswer);
+    const isAnon = normalizedIdentity.isAnonymous;
+    const authorName = normalizedIdentity.authorName;
+    const authorPhotoUrl = normalizedIdentity.authorPhotoUrl;
+    const authorAge = normalizedIdentity.authorAge;
+    const authorGender = normalizedIdentity.authorGender;
+    const photoBlurMode = normalizedIdentity.photoBlurMode;
 
     const genderIcon = getCommentGenderIcon(authorGender);
 
@@ -1094,24 +1359,6 @@ export default function PromptThreadScreen() {
     const canConnect = isEligibleForConnect && isSelected;
     const hasSentConnect = isPromptOwner && (item.hasSentConnect || connectSentFor.has(item._id));
 
-    // CONNECT DEBUG: Log eligibility for each answer
-    if (__DEV__) {
-      console.log(`[T/D Connect] Answer ${item._id.slice(-6)}:`, {
-        answerType: item.type,
-        isAnon,
-        identityMode: item.identityMode,
-        isPromptOwner,
-        isOwnAnswer,
-        hasSentConnectBackend: item.hasSentConnect,
-        hasSentConnectLocal: connectSentFor.has(item._id),
-        isEligibleForConnect,
-        isSelected,
-        canConnect,
-        // Product rule: Connect shown for ALL types except self/pending/connected
-        hideReason: isOwnAnswer ? 'own_answer' : item.hasSentConnect ? 'already_sent' : connectSentFor.has(item._id) ? 'local_sent' : !isPromptOwner ? 'not_owner' : null,
-      });
-    }
-
     return (
       <TouchableOpacity
         style={styles.answerCardWrapper}
@@ -1128,21 +1375,17 @@ export default function PromptThreadScreen() {
           {/* Header with 3-dot menu */}
           <View style={styles.answerHeader}>
             {/* Avatar: Anonymous icon OR photo (clear/blurred based on mode) OR placeholder */}
-            {isAnon ? (
-              <View style={styles.answerAvatarAnon}>
-                <Ionicons name="eye-off" size={14} color={PREMIUM.textMuted} />
-              </View>
-            ) : authorPhotoUrl ? (
-              <Image
-                source={{ uri: authorPhotoUrl }}
-                style={styles.answerAvatar}
-                blurRadius={photoBlurMode === 'blur' ? 20 : 0}
-              />
-            ) : (
-              <View style={styles.answerAvatarPlaceholder}>
-                <Ionicons name="person" size={14} color={PREMIUM.textMuted} />
-              </View>
-            )}
+            <TodAvatar
+              size={32}
+              photoUrl={authorPhotoUrl ?? null}
+              isAnonymous={isAnon}
+              photoBlurMode={photoBlurMode ?? 'none'}
+              label={authorName || 'User'}
+              borderWidth={1}
+              borderColor={PREMIUM.borderSubtle}
+              backgroundColor={PREMIUM.bgHighlight}
+              iconColor={PREMIUM.textMuted}
+            />
             <View style={styles.answerInfo}>
               <View style={styles.answerNameRow}>
                 <Text style={styles.answerName}>
@@ -1233,7 +1476,7 @@ export default function PromptThreadScreen() {
                   styles.mediaViewMode,
                   item.hasViewedMedia && !isOwnAnswer && { color: PREMIUM.textMuted },
                 ]}>
-                  {item.hasViewedMedia && !isOwnAnswer ? 'Viewed' : 'Tap to view (1 time)'}
+                  {item.hasViewedMedia && !isOwnAnswer ? 'Viewed' : 'Tap to view once'}
                 </Text>
               </View>
             </TouchableOpacity>
@@ -1272,10 +1515,10 @@ export default function PromptThreadScreen() {
                 />
               </TouchableOpacity>
               {/* Reply plus button - opens composer for new comment */}
-              {!isExpired && !myAnswer && !isPromptOwner && (
+              {canReplyInline && (
                 <TouchableOpacity
                   style={styles.replyBtnInline}
-                  onPress={() => setShowUnifiedComposer(true)}
+                  onPress={openComposer}
                 >
                   <Ionicons name="add-circle-outline" size={16} color={PREMIUM.textMuted} />
                 </TouchableOpacity>
@@ -1333,7 +1576,7 @@ export default function PromptThreadScreen() {
               {isOwnAnswer && !isExpired && (
                 <TouchableOpacity
                   style={styles.editBtnCompact}
-                  onPress={() => setShowUnifiedComposer(true)}
+                  onPress={openComposer}
                 >
                   <Ionicons name="pencil" size={12} color={PREMIUM.coral} />
                 </TouchableOpacity>
@@ -1378,10 +1621,13 @@ export default function PromptThreadScreen() {
       </TouchableOpacity>
     );
   }, [
-    // P2-003: Dependencies for stable renderAnswer callback
+    // P3-004: keep answer-row deps narrow so unrelated screen state changes don't reshuffle renderItem
     emojiPickerAnswerId,
     selectedAnswerId,
-    authorProfile,
+    authorProfile.name,
+    authorProfile.age,
+    authorProfile.gender,
+    authorProfile.photoUrl,
     isPromptOwner,
     connectSentFor,
     handleToggleSelect,
@@ -1391,9 +1637,8 @@ export default function PromptThreadScreen() {
     handleSendConnect,
     connectSending,
     isExpired,
-    myAnswer,
-    setShowUnifiedComposer,
-    setEmojiPickerAnswerId,
+    canReplyInline,
+    openComposer,
   ]);
 
   // Loading state
@@ -1440,7 +1685,16 @@ export default function PromptThreadScreen() {
     const g = gender.toLowerCase();
     if (g === 'male' || g === 'm') return 'male';
     if (g === 'female' || g === 'f') return 'female';
-    return 'male-female';
+    if (
+      g === 'non_binary' ||
+      g === 'non-binary' ||
+      g === 'nonbinary' ||
+      g === 'nb' ||
+      g === 'other'
+    ) {
+      return 'male-female';
+    }
+    return null;
   };
 
   // Helper for gender color
@@ -1504,30 +1758,17 @@ export default function PromptThreadScreen() {
         {/* Owner Identity Row - matches homepage/feed layout */}
         <View style={styles.ownerIdentityRow}>
           {/* Left: Photo (clear/blurred) or Anonymous icon or placeholder */}
-          {ownerIsAnonymous ? (
-            <View style={styles.ownerAvatarAnon}>
-              <Ionicons name="eye-off" size={16} color={PREMIUM.textMuted} />
-            </View>
-          ) : ownerPhotoUrl ? (
-            ownerPhotoBlurMode === 'blur' ? (
-              // Blurred photo treatment - EXACT MATCH with homepage BlurredOwnerPhoto
-              <View style={styles.ownerAvatarBlurContainer}>
-                <Image source={{ uri: ownerPhotoUrl }} style={styles.ownerAvatar} />
-                <BlurView
-                  intensity={Platform.OS === 'ios' ? 80 : 100}
-                  tint="dark"
-                  style={StyleSheet.absoluteFill}
-                />
-                <View style={styles.ownerAvatarBlurOverlay} />
-              </View>
-            ) : (
-              <Image source={{ uri: ownerPhotoUrl }} style={styles.ownerAvatar} />
-            )
-          ) : (
-            <View style={styles.ownerAvatarPlaceholder}>
-              <Ionicons name="person" size={16} color={PREMIUM.textMuted} />
-            </View>
-          )}
+          <TodAvatar
+            size={40}
+            photoUrl={ownerPhotoUrl ?? null}
+            isAnonymous={ownerIsAnonymous}
+            photoBlurMode={ownerPhotoBlurMode ?? 'none'}
+            label={ownerName || 'User'}
+            borderWidth={2}
+            borderColor={PREMIUM.borderSubtle}
+            backgroundColor={PREMIUM.bgHighlight}
+            iconColor={PREMIUM.textMuted}
+          />
 
           {/* Owner info: name + age/gender on SAME ROW (matches homepage layout) */}
           <View style={styles.ownerInfoRow}>
@@ -1676,19 +1917,27 @@ export default function PromptThreadScreen() {
         ListHeaderComponent={
           <View>
             {/* RECEIVER VISIBILITY: Simple inline Accept/Reject bar */}
-            {pendingRequestsForPrompt.length > 0 && (
-              <View style={styles.pendingConnectBar}>
+            {visiblePendingRequestsForPrompt.map((request, index) => (
+              <View
+                key={request._id}
+                style={[
+                  styles.pendingConnectBar,
+                  index > 0 ? styles.pendingConnectBarStacked : null,
+                ]}
+              >
                 <Ionicons name="heart" size={16} color={PREMIUM.coral} />
                 <Text style={styles.pendingConnectBarText}>
-                  Connect request from prompt owner
+                  {visiblePendingRequestsForPrompt.length > 1
+                    ? `${request.senderName || 'Prompt owner'} wants to connect`
+                    : 'Connect request from prompt owner'}
                 </Text>
                 <View style={styles.pendingConnectBarActions}>
                   <TouchableOpacity
                     style={styles.pendingConnectReject}
-                    onPress={() => handleRejectConnect(pendingRequestsForPrompt[0]._id)}
+                    onPress={() => handleRejectConnect(request._id)}
                     disabled={!!respondingTo}
                   >
-                    {respondingTo === pendingRequestsForPrompt[0]._id ? (
+                    {respondingTo === request._id ? (
                       <ActivityIndicator size="small" color={PREMIUM.textMuted} />
                     ) : (
                       <Text style={styles.pendingConnectRejectText}>Decline</Text>
@@ -1696,10 +1945,10 @@ export default function PromptThreadScreen() {
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.pendingConnectAcceptBtn}
-                    onPress={() => handleAcceptConnect(pendingRequestsForPrompt[0]._id)}
+                    onPress={() => handleAcceptConnect(request._id)}
                     disabled={!!respondingTo}
                   >
-                    {respondingTo === pendingRequestsForPrompt[0]._id ? (
+                    {respondingTo === request._id ? (
                       <ActivityIndicator size="small" color="#FFF" />
                     ) : (
                       <Text style={styles.pendingConnectAcceptBtnText}>Accept</Text>
@@ -1707,14 +1956,12 @@ export default function PromptThreadScreen() {
                   </TouchableOpacity>
                 </View>
               </View>
-            )}
+            ))}
             <View style={styles.commentsHeader}>
               <Text style={styles.commentsHeaderText}>
                 {visibleAnswerCount === 0
                   ? 'Be the first to respond'
-                  : isAnswerListTruncated
-                    ? `Showing ${answers.length} of ${visibleAnswerCount} responses`
-                    : `${visibleAnswerCount} ${visibleAnswerCount === 1 ? 'Response' : 'Responses'}`}
+                  : `${visibleAnswerCount} ${visibleAnswerCount === 1 ? 'Response' : 'Responses'}`}
               </Text>
             </View>
           </View>
@@ -1890,6 +2137,7 @@ export default function PromptThreadScreen() {
           kind: myAnswer.type === 'voice' ? 'audio' : (myAnswer.type === 'video' ? 'video' : 'photo'),
           uri: myAnswer.mediaUrl,
           durationMs: myAnswer.durationSec ? myAnswer.durationSec * 1000 : undefined,
+          isFrontCamera: myAnswer.isFrontCamera,
         } as Attachment : null}
         existingIdentityMode={myAnswer?.identityMode as IdentityMode | undefined}
         isNewAnswer={!myAnswer}
@@ -2074,19 +2322,19 @@ export default function PromptThreadScreen() {
               <View style={styles.successAvatarsRow}>
                 {/* Sender photo (T/D requester) */}
                 <View style={styles.successAvatarContainer}>
-                  {successSheet.senderPhotoUrl ? (
-                    <Image
-                      source={{ uri: successSheet.senderPhotoUrl }}
-                      style={styles.successAvatar}
-                      blurRadius={8}
-                    />
-                  ) : (
-                    <View style={[styles.successAvatar, styles.successAvatarPlaceholder]}>
-                      <Text style={styles.successAvatarInitial}>
-                        {successSheet.senderName?.[0] || '?'}
-                      </Text>
-                    </View>
-                  )}
+                  <TodAvatar
+                    size={70}
+                    photoUrl={successSheet.senderPhotoUrl ?? null}
+                    isAnonymous={successSheet.senderIsAnonymous}
+                    photoBlurMode={successSheet.senderPhotoBlurMode ?? 'none'}
+                    label={successSheet.senderName}
+                    borderWidth={3}
+                    borderColor={PREMIUM.coral}
+                    backgroundColor={PREMIUM.bgBase}
+                    textColor={PREMIUM.textPrimary}
+                    iconColor={PREMIUM.textMuted}
+                    style={styles.successAvatar}
+                  />
                   <Text style={styles.successAvatarName} numberOfLines={1}>
                     {successSheet.senderName}
                   </Text>
@@ -2099,19 +2347,19 @@ export default function PromptThreadScreen() {
 
                 {/* Recipient photo (current user / acceptor) */}
                 <View style={styles.successAvatarContainer}>
-                  {successSheet.recipientPhotoUrl ? (
-                    <Image
-                      source={{ uri: successSheet.recipientPhotoUrl }}
-                      style={styles.successAvatar}
-                      blurRadius={8}
-                    />
-                  ) : (
-                    <View style={[styles.successAvatar, styles.successAvatarPlaceholder]}>
-                      <Text style={styles.successAvatarInitial}>
-                        {successSheet.recipientName?.[0] || '?'}
-                      </Text>
-                    </View>
-                  )}
+                  <TodAvatar
+                    size={70}
+                    photoUrl={successSheet.recipientPhotoUrl ?? null}
+                    isAnonymous={successSheet.recipientIsAnonymous}
+                    photoBlurMode={successSheet.recipientPhotoBlurMode ?? 'none'}
+                    label={successSheet.recipientName}
+                    borderWidth={3}
+                    borderColor={PREMIUM.coral}
+                    backgroundColor={PREMIUM.bgBase}
+                    textColor={PREMIUM.textPrimary}
+                    iconColor={PREMIUM.textMuted}
+                    style={styles.successAvatar}
+                  />
                   <Text style={styles.successAvatarName} numberOfLines={1}>
                     {successSheet.recipientName}
                   </Text>
@@ -3078,6 +3326,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderRadius: 12,
     gap: 10,
+  },
+  pendingConnectBarStacked: {
+    marginTop: 0,
   },
   pendingConnectBarText: {
     flex: 1,

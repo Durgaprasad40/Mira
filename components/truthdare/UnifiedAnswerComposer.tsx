@@ -14,6 +14,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { InAppMediaCamera, MediaCaptureResult } from './InAppMediaCamera';
 import type { TodPrompt } from '@/types';
@@ -29,6 +30,18 @@ const MAX_AUDIO_SIZE_MB = 5;
 const MAX_PHOTO_SIZE = MAX_PHOTO_SIZE_MB * 1024 * 1024;
 const MAX_VIDEO_SIZE = MAX_VIDEO_SIZE_MB * 1024 * 1024;
 const MAX_AUDIO_SIZE = MAX_AUDIO_SIZE_MB * 1024 * 1024;
+
+const debugTodLog = (...args: unknown[]) => {
+  if (__DEV__) {
+    console.log(...args);
+  }
+};
+
+const debugTodWarn = (...args: unknown[]) => {
+  if (__DEV__) {
+    console.warn(...args);
+  }
+};
 
 // Identity modes matching backend
 export type IdentityMode = 'anonymous' | 'no_photo' | 'profile';
@@ -79,6 +92,8 @@ export function UnifiedAnswerComposer({
   onSubmit,
   isSubmitting,
 }: UnifiedAnswerComposerProps) {
+  const insets = useSafeAreaInsets();
+
   // Text state
   const [text, setText] = useState(initialText || '');
 
@@ -136,7 +151,7 @@ export function UnifiedAnswerComposer({
       setMediaVisibility('private');
       setFullscreenMedia(null);
       setShowMediaCamera(false);
-      console.log('[T/D COMPOSER] open', {
+      debugTodLog('[T/D COMPOSER] open', {
         mode: promptType,
         hasExistingAnswer: !!initialText || !!initialAttachment,
         attachmentKind: initialAttachment?.kind ?? 'none',
@@ -235,7 +250,7 @@ export function UnifiedAnswerComposer({
         // P2-001: Validate audio file size before attaching
         const fileSize = await getFileSizeBytes(uri);
         if (!validateMediaSize(fileSize, 'audio')) {
-          console.log(`[T/D Composer] Voice recording rejected: size ${fileSize} exceeds limit`);
+          debugTodLog(`[T/D Composer] Voice recording rejected: size ${fileSize} exceeds limit`);
           return; // Size validation failed, don't attach
         }
 
@@ -246,7 +261,7 @@ export function UnifiedAnswerComposer({
           durationMs: finalSeconds * 1000,
         });
         setMediaRemoved(false);
-        console.log(`[T/D Composer] Voice recorded: ${finalSeconds}s, size: ${fileSize}`);
+        debugTodLog(`[T/D Composer] Voice recorded: ${finalSeconds}s, size: ${fileSize}`);
       }
     } catch (error) {
       console.error('[T/D Composer] Stop recording error:', error);
@@ -307,7 +322,7 @@ export function UnifiedAnswerComposer({
   const validateMediaSize = (sizeBytes: number | null | undefined, kind: 'photo' | 'video' | 'audio'): boolean => {
     if (sizeBytes === null || sizeBytes === undefined) {
       // Can't determine size, allow it but log warning
-      console.warn('[T/D COMPOSER] Could not determine file size, allowing upload');
+      debugTodWarn('[T/D COMPOSER] Could not determine file size, allowing upload');
       return true;
     }
 
@@ -372,7 +387,7 @@ export function UnifiedAnswerComposer({
       const uriPrefix = slashIdx === -1
         ? asset.uri.substring(0, Math.min(15, asset.uri.length))
         : asset.uri.substring(0, Math.min(20, slashIdx + 1));
-      console.log('[T/D COMPOSER] gallery_pick', {
+      debugTodLog('[T/D COMPOSER] gallery_pick', {
         kind,
         uriPrefix,
         fileSize,
@@ -407,7 +422,7 @@ export function UnifiedAnswerComposer({
     });
     setMediaRemoved(false);
     const uriPrefix = result.uri.startsWith('file://') ? 'file://' : result.uri.substring(0, 10);
-    console.log('[T/D COMPOSER] camera_capture', {
+    debugTodLog('[T/D COMPOSER] camera_capture', {
       kind: result.kind,
       isFrontCamera: result.isFrontCamera,
       uriPrefix,
@@ -452,7 +467,7 @@ export function UnifiedAnswerComposer({
 
     setIsRecording(false);
     setIsPlayingPreview(false);
-    console.log('[T/D COMPOSER] close', { hadAttachment: !!attachment, hadText: text.trim().length > 0 });
+    debugTodLog('[T/D COMPOSER] close', { hadAttachment: !!attachment, hadText: text.trim().length > 0 });
     onClose();
   }, [onClose, attachment, text]);
 
@@ -462,7 +477,7 @@ export function UnifiedAnswerComposer({
     const trimmedText = text.trim();
     const hasMedia = !!attachment;
 
-    console.log('[T/D COMPOSER] submit_execute', {
+    debugTodLog('[T/D COMPOSER] submit_execute', {
       attachmentKind: attachment?.kind ?? 'none',
       identityMode,
       mediaVisibility: hasMedia ? mediaVisibility : 'n/a',
@@ -486,7 +501,7 @@ export function UnifiedAnswerComposer({
     // P1-005 FIX: Track all media types for visibility
     const hasPhotoOrVideo = attachment && (attachment.kind === 'photo' || attachment.kind === 'video');
 
-    console.log('[T/D COMPOSER] submit_start', {
+    debugTodLog('[T/D COMPOSER] submit_start', {
       hasText,
       hasAttachment,
       attachmentKind: attachment?.kind ?? 'none',
@@ -531,9 +546,12 @@ export function UnifiedAnswerComposer({
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
-      {/* P1-004 FIX: Add 'height' behavior for Android to prevent keyboard overlap */}
-      <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <View style={styles.sheet}>
+      <KeyboardAvoidingView
+        style={styles.overlay}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
+      >
+        <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 16) }]}>
           {/* Header */}
           <View style={styles.header}>
             <View style={[styles.badge, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
@@ -593,7 +611,7 @@ export function UnifiedAnswerComposer({
                 {attachment.kind === 'photo' && (() => {
                   const shouldUnmirror = attachment.isFrontCamera === true;
                   // P3-004: Gate noisy render-time log with __DEV__
-                  if (__DEV__) console.log(`[T/D Composer] previewRender kind=photo isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
+                  debugTodLog(`[T/D Composer] previewRender kind=photo isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
                   return (
                     <TouchableOpacity
                       style={styles.mediaPreview}
@@ -622,7 +640,7 @@ export function UnifiedAnswerComposer({
                 {attachment.kind === 'video' && (() => {
                   const shouldUnmirror = attachment.isFrontCamera === true;
                   // P3-004: Gate noisy render-time log with __DEV__
-                  if (__DEV__) console.log(`[T/D Composer] previewRender kind=video isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
+                  debugTodLog(`[T/D Composer] previewRender kind=video isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
                   return (
                     <TouchableOpacity
                       style={styles.mediaPreview}
