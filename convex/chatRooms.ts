@@ -99,33 +99,52 @@ async function recomputeMemberCount(
 // Used by closeRoom, resetMyPrivateRooms, deleteExpiredRoom, cleanupExpiredRooms
 // ═══════════════════════════════════════════════════════════════════════════
 async function deleteRoomFully(ctx: MutationCtx, roomId: Id<'chatRooms'>): Promise<void> {
-  // Delete all messages
-  const messages = await ctx.db
-    .query('chatRoomMessages')
-    .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
-    .collect();
-  for (const msg of messages) {
-    await cleanupChatRoomMessageRelations(ctx, roomId, msg._id);
-    await deleteChatRoomMessageStorage(ctx, msg);
-    await ctx.db.delete(msg._id);
+  // P2-3: Every related-table fan-out is now bounded by `.take(CASCADE_BATCH)`
+  // and looped until the table is drained. This keeps total docs read/written
+  // per iteration well under Convex per-mutation limits (~4096 reads/~8192
+  // writes) even for rooms with tens of thousands of messages/members.
+  const CASCADE_BATCH = 200;
+
+  // Delete all messages (drain in batches; each message has extra relation +
+  // storage cleanup so keep the batch size conservative).
+  while (true) {
+    const messages = await ctx.db
+      .query('chatRoomMessages')
+      .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+      .take(CASCADE_BATCH);
+    if (messages.length === 0) break;
+    for (const msg of messages) {
+      await cleanupChatRoomMessageRelations(ctx, roomId, msg._id);
+      await deleteChatRoomMessageStorage(ctx, msg);
+      await ctx.db.delete(msg._id);
+    }
+    if (messages.length < CASCADE_BATCH) break;
   }
 
   // Delete all members
-  const members = await ctx.db
-    .query('chatRoomMembers')
-    .withIndex('by_room', (q) => q.eq('roomId', roomId))
-    .collect();
-  for (const member of members) {
-    await ctx.db.delete(member._id);
+  while (true) {
+    const members = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .take(CASCADE_BATCH);
+    if (members.length === 0) break;
+    for (const member of members) {
+      await ctx.db.delete(member._id);
+    }
+    if (members.length < CASCADE_BATCH) break;
   }
 
   // Delete all penalties
-  const penalties = await ctx.db
-    .query('chatRoomPenalties')
-    .withIndex('by_room', (q) => q.eq('roomId', roomId))
-    .collect();
-  for (const penalty of penalties) {
-    await ctx.db.delete(penalty._id);
+  while (true) {
+    const penalties = await ctx.db
+      .query('chatRoomPenalties')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .take(CASCADE_BATCH);
+    if (penalties.length === 0) break;
+    for (const penalty of penalties) {
+      await ctx.db.delete(penalty._id);
+    }
+    if (penalties.length < CASCADE_BATCH) break;
   }
 
   // P0-4: Cascade remaining room-linked tables so private rooms leave no residue.
@@ -134,68 +153,96 @@ async function deleteRoomFully(ctx: MutationCtx, roomId: Id<'chatRooms'>): Promi
   // intentionally excluded.
 
   // Join requests for this room
-  const joinRequests = await ctx.db
-    .query('chatRoomJoinRequests')
-    .withIndex('by_room_user', (q) => q.eq('roomId', roomId))
-    .collect();
-  for (const req of joinRequests) {
-    await ctx.db.delete(req._id);
+  while (true) {
+    const joinRequests = await ctx.db
+      .query('chatRoomJoinRequests')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId))
+      .take(CASCADE_BATCH);
+    if (joinRequests.length === 0) break;
+    for (const req of joinRequests) {
+      await ctx.db.delete(req._id);
+    }
+    if (joinRequests.length < CASCADE_BATCH) break;
   }
 
   // Bans for this room
-  const bans = await ctx.db
-    .query('chatRoomBans')
-    .withIndex('by_room_user', (q) => q.eq('roomId', roomId))
-    .collect();
-  for (const ban of bans) {
-    await ctx.db.delete(ban._id);
+  while (true) {
+    const bans = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId))
+      .take(CASCADE_BATCH);
+    if (bans.length === 0) break;
+    for (const ban of bans) {
+      await ctx.db.delete(ban._id);
+    }
+    if (bans.length < CASCADE_BATCH) break;
   }
 
   // Presence rows for this room
-  const presence = await ctx.db
-    .query('chatRoomPresence')
-    .withIndex('by_room', (q) => q.eq('roomId', roomId))
-    .collect();
-  for (const row of presence) {
-    await ctx.db.delete(row._id);
+  while (true) {
+    const presence = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .take(CASCADE_BATCH);
+    if (presence.length === 0) break;
+    for (const row of presence) {
+      await ctx.db.delete(row._id);
+    }
+    if (presence.length < CASCADE_BATCH) break;
   }
 
   // Per-user mutes scoped to this room
-  const perUserMutes = await ctx.db
-    .query('chatRoomPerUserMutes')
-    .withIndex('by_room_muter', (q) => q.eq('roomId', roomId))
-    .collect();
-  for (const row of perUserMutes) {
-    await ctx.db.delete(row._id);
+  while (true) {
+    const perUserMutes = await ctx.db
+      .query('chatRoomPerUserMutes')
+      .withIndex('by_room_muter', (q) => q.eq('roomId', roomId))
+      .take(CASCADE_BATCH);
+    if (perUserMutes.length === 0) break;
+    for (const row of perUserMutes) {
+      await ctx.db.delete(row._id);
+    }
+    if (perUserMutes.length < CASCADE_BATCH) break;
   }
 
   // Password brute-force attempt records for this room
-  const passwordAttempts = await ctx.db
-    .query('chatRoomPasswordAttempts')
-    .withIndex('by_room_user', (q) => q.eq('roomId', roomId))
-    .collect();
-  for (const row of passwordAttempts) {
-    await ctx.db.delete(row._id);
+  while (true) {
+    const passwordAttempts = await ctx.db
+      .query('chatRoomPasswordAttempts')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId))
+      .take(CASCADE_BATCH);
+    if (passwordAttempts.length === 0) break;
+    for (const row of passwordAttempts) {
+      await ctx.db.delete(row._id);
+    }
+    if (passwordAttempts.length < CASCADE_BATCH) break;
   }
 
   // userRoomPrefs / userRoomReports are keyed by a string roomId. Delete
   // only the rows whose roomId matches this chat room's document id.
   const roomIdString = roomId as unknown as string;
 
-  const prefs = await ctx.db
-    .query('userRoomPrefs')
-    .withIndex('by_room', (q) => q.eq('roomId', roomIdString))
-    .collect();
-  for (const row of prefs) {
-    await ctx.db.delete(row._id);
+  while (true) {
+    const prefs = await ctx.db
+      .query('userRoomPrefs')
+      .withIndex('by_room', (q) => q.eq('roomId', roomIdString))
+      .take(CASCADE_BATCH);
+    if (prefs.length === 0) break;
+    for (const row of prefs) {
+      await ctx.db.delete(row._id);
+    }
+    if (prefs.length < CASCADE_BATCH) break;
   }
 
-  const reports = await ctx.db
-    .query('userRoomReports')
-    .withIndex('by_room', (q) => q.eq('roomId', roomIdString))
-    .collect();
-  for (const row of reports) {
-    await ctx.db.delete(row._id);
+  while (true) {
+    const reports = await ctx.db
+      .query('userRoomReports')
+      .withIndex('by_room', (q) => q.eq('roomId', roomIdString))
+      .take(CASCADE_BATCH);
+    if (reports.length === 0) break;
+    for (const row of reports) {
+      await ctx.db.delete(row._id);
+    }
+    if (reports.length < CASCADE_BATCH) break;
   }
 
   // Delete the room itself
@@ -815,17 +862,25 @@ export const listRooms = query({
 
     // BACKEND COUNT ONLY: Compute live online count from chatRoomPresence table.
     // This is the ONLY source of truth for "active users" count in the rooms list.
+    // P2-1: Use `by_room_heartbeat` index + range + `.take(ONLINE_CAP)` so this
+    // unauthenticated endpoint is O(rooms × ONLINE_CAP) instead of
+    // O(rooms × total presence rows). Any room with more than ONLINE_CAP
+    // online users is reported as exactly ONLINE_CAP — a safe upper-bound
+    // display for the room-list preview.
     const ONLINE_WINDOW_MS = 2 * 60 * 1000; // must align with presence expiry window
+    const ONLINE_CAP = 200;
+    const onlineSince = now - ONLINE_WINDOW_MS;
     const roomsWithLiveCounts = await Promise.all(
       rooms.map(async (room) => {
-        const presenceRecords = await ctx.db
+        const recent = await ctx.db
           .query('chatRoomPresence')
-          .withIndex('by_room', (q) => q.eq('roomId', room._id))
-          .collect();
-        const onlineCount = presenceRecords.filter((p) => now - p.lastHeartbeatAt < ONLINE_WINDOW_MS).length;
+          .withIndex('by_room_heartbeat', (q) =>
+            q.eq('roomId', room._id).gt('lastHeartbeatAt', onlineSince)
+          )
+          .take(ONLINE_CAP);
         return {
           ...room,
-          onlineCount,
+          onlineCount: recent.length,
         };
       })
     );
@@ -2808,21 +2863,24 @@ export const cleanupExpiredRooms = internalMutation({
 
 // Internal: Cleanup expired chat room messages (called by cron job)
 // Deletes only expired message rows in bounded batches.
+//
+// P2-11: This handler now loops batches of `BATCH` rows at a time under a
+// soft time budget. A single cron run keeps draining expired + legacy
+// rows until either (a) both queries return empty, or (b) the time budget
+// is exhausted. If the budget runs out with work remaining, the handler
+// self-schedules a follow-up run immediately so cleanup catches up on a
+// backlog instead of falling behind one BATCH every 5 minutes.
 export const cleanupExpiredChatRoomMessages = internalMutation({
   args: {},
   handler: async (ctx) => {
-    const now = Date.now();
+    const startedAt = Date.now();
     const BATCH = 200;
+    const TIME_BUDGET_MS = 20_000;
     const LEGACY_CUTOFF_MS = 24 * 60 * 60 * 1000;
-    const legacyCutoff = now - LEGACY_CUTOFF_MS;
-
-    const expiredMessages = await ctx.db
-      .query('chatRoomMessages')
-      .withIndex('by_expires', (q) => q.lte('expiresAt', now))
-      .take(BATCH);
 
     const deletedByRoom = new Map<string, number>();
     let deletedCount = 0;
+    let hitTimeBudget = false;
 
     const processMessage = async (
       message: Doc<'chatRoomMessages'>
@@ -2839,8 +2897,39 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
       }
     };
 
-    for (const message of expiredMessages) {
-      await processMessage(message);
+    const budgetExhausted = (): boolean =>
+      Date.now() - startedAt >= TIME_BUDGET_MS;
+
+    // Drain expired messages first, then fall through to the legacy sweep.
+    // Each iteration re-queries so rows deleted above don't reappear.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      if (budgetExhausted()) {
+        hitTimeBudget = true;
+        break;
+      }
+      const now = Date.now();
+      const expiredBatch = await ctx.db
+        .query('chatRoomMessages')
+        .withIndex('by_expires', (q) => q.lte('expiresAt', now))
+        .take(BATCH);
+      if (expiredBatch.length === 0) {
+        break;
+      }
+      for (const message of expiredBatch) {
+        if (budgetExhausted()) {
+          hitTimeBudget = true;
+          break;
+        }
+        await processMessage(message);
+      }
+      if (hitTimeBudget) {
+        break;
+      }
+      if (expiredBatch.length < BATCH) {
+        // No more expired rows (partial batch); fall through to legacy.
+        break;
+      }
     }
 
     // P0-3: Bounded legacy sweep.
@@ -2848,9 +2937,14 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
     // they will never match the `by_expires` range above. Here we pick up any
     // legacy rows older than 24h and apply the exact same full-cleanup path
     // (relations + storage + row delete + messageCount repair).
-    const legacyBudget = BATCH - expiredMessages.length;
-    if (legacyBudget > 0) {
-      const legacyCandidates = await ctx.db
+    // eslint-disable-next-line no-constant-condition
+    while (!hitTimeBudget) {
+      if (budgetExhausted()) {
+        hitTimeBudget = true;
+        break;
+      }
+      const legacyCutoff = Date.now() - LEGACY_CUTOFF_MS;
+      const legacyBatch = await ctx.db
         .query('chatRoomMessages')
         .withIndex('by_room_created')
         .filter((q) =>
@@ -2859,10 +2953,22 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
             q.lte(q.field('createdAt'), legacyCutoff)
           )
         )
-        .take(legacyBudget);
-
-      for (const message of legacyCandidates) {
+        .take(BATCH);
+      if (legacyBatch.length === 0) {
+        break;
+      }
+      for (const message of legacyBatch) {
+        if (budgetExhausted()) {
+          hitTimeBudget = true;
+          break;
+        }
         await processMessage(message);
+      }
+      if (hitTimeBudget) {
+        break;
+      }
+      if (legacyBatch.length < BATCH) {
+        break;
       }
     }
 
@@ -2893,6 +2999,18 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
       }
     }
 
+    // P2-11: If the time budget was exhausted before we drained the queue,
+    // self-schedule an immediate follow-up run so a backlog does not fall
+    // behind one BATCH per cron tick. The cron itself still runs every 5m
+    // as a safety net.
+    if (hitTimeBudget) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.chatRooms.cleanupExpiredChatRoomMessages,
+        {}
+      );
+    }
+
     return { deletedCount };
   },
 });
@@ -2915,6 +3033,62 @@ export const cleanupExpiredPenalties = internalMutation({
     }
 
     return { deletedCount: expiredPenalties.length };
+  },
+});
+
+// P2-14: Internal — Cleanup stale chatRoomPresence rows.
+// Clients send presence heartbeats every ~30s with a 2-min online window.
+// Rows whose last heartbeat is older than the stale cutoff (1h) represent
+// abandoned sessions (tab close, network drop, app kill) and are pure
+// storage bloat that also skews any future presence queries. We batch-delete
+// under a soft time budget and self-schedule if a backlog remains.
+export const cleanupStalePresence = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const startedAt = Date.now();
+    const STALE_CUTOFF_MS = 60 * 60 * 1000; // 1 hour
+    const BATCH = 500;
+    const TIME_BUDGET_MS = 20_000;
+    const cutoff = startedAt - STALE_CUTOFF_MS;
+
+    let deletedCount = 0;
+    let hitTimeBudget = false;
+
+    while (true) {
+      if (Date.now() - startedAt >= TIME_BUDGET_MS) {
+        hitTimeBudget = true;
+        break;
+      }
+      const stale = await ctx.db
+        .query('chatRoomPresence')
+        .withIndex('by_heartbeat', (q) => q.lt('lastHeartbeatAt', cutoff))
+        .take(BATCH);
+      if (stale.length === 0) break;
+      for (const row of stale) {
+        if (Date.now() - startedAt >= TIME_BUDGET_MS) {
+          hitTimeBudget = true;
+          break;
+        }
+        try {
+          await ctx.db.delete(row._id);
+          deletedCount++;
+        } catch {
+          // Already gone — ignore.
+        }
+      }
+      if (hitTimeBudget) break;
+      if (stale.length < BATCH) break;
+    }
+
+    if (hitTimeBudget) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.chatRooms.cleanupStalePresence,
+        {}
+      );
+    }
+
+    return { deletedCount };
   },
 });
 

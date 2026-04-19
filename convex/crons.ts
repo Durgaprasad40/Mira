@@ -66,6 +66,15 @@ crons.hourly(
   internal.chatRooms.cleanupExpiredPenalties
 );
 
+// P2-14: Phase-2 Chat Rooms — Cleanup stale presence rows every 10 minutes.
+// Deletes chatRoomPresence rows whose last heartbeat is older than 1 hour
+// so abandoned sessions don't accumulate indefinitely.
+crons.interval(
+  'cleanup-stale-chat-room-presence',
+  { minutes: 10 },
+  internal.chatRooms.cleanupStalePresence
+);
+
 // B2-FIX: Retry failed storage deletions every 30 minutes
 // Cleans up orphaned storage blobs from failed photo deletions
 crons.interval(

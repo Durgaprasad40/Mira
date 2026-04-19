@@ -1975,7 +1975,10 @@ export default defineSchema({
   })
     .index('by_room', ['roomId'])
     .index('by_user', ['userId'])
-    .index('by_room_user', ['roomId', 'userId']),
+    .index('by_room_user', ['roomId', 'userId'])
+    // P2-1: Range queries for online-count and P2-14 stale-presence cleanup.
+    .index('by_room_heartbeat', ['roomId', 'lastHeartbeatAt'])
+    .index('by_heartbeat', ['lastHeartbeatAt']),
 
   // Filter Presets table
   filterPresets: defineTable({
