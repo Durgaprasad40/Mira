@@ -105,6 +105,8 @@ async function deleteRoomFully(ctx: MutationCtx, roomId: Id<'chatRooms'>): Promi
     .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
     .collect();
   for (const msg of messages) {
+    await cleanupChatRoomMessageRelations(ctx, roomId, msg._id);
+    await deleteChatRoomMessageStorage(ctx, msg);
     await ctx.db.delete(msg._id);
   }
 
@@ -128,6 +130,70 @@ async function deleteRoomFully(ctx: MutationCtx, roomId: Id<'chatRooms'>): Promi
 
   // Delete the room itself
   await ctx.db.delete(roomId);
+}
+
+async function deleteChatRoomMessageStorage(
+  ctx: MutationCtx,
+  message: {
+    imageStorageId?: Id<'_storage'>;
+    videoStorageId?: Id<'_storage'>;
+    audioStorageId?: Id<'_storage'>;
+  }
+): Promise<void> {
+  const storageIds = [
+    message.imageStorageId,
+    message.videoStorageId,
+    message.audioStorageId,
+  ];
+
+  for (const storageId of storageIds) {
+    if (!storageId) continue;
+    try {
+      await ctx.storage.delete(storageId);
+    } catch {
+      // Best-effort cleanup: continue even if a blob was already removed or unavailable.
+    }
+  }
+}
+
+async function cleanupChatRoomMessageRelations(
+  ctx: MutationCtx,
+  roomId: Id<'chatRooms'>,
+  messageId: Id<'chatRoomMessages'>
+): Promise<void> {
+  try {
+    const reactions = await ctx.db
+      .query('chatRoomMessageReactions')
+      .withIndex('by_room_message', (q) => q.eq('roomId', roomId).eq('messageId', messageId))
+      .collect();
+
+    for (const reaction of reactions) {
+      try {
+        await ctx.db.delete(reaction._id);
+      } catch {
+        // Best-effort cleanup: continue if already deleted concurrently.
+      }
+    }
+  } catch {
+    // Best-effort cleanup: continue even if reaction lookup fails.
+  }
+
+  try {
+    const mentionNotifications = await ctx.db
+      .query('chatRoomMentionNotifications')
+      .withIndex('by_message', (q) => q.eq('messageId', messageId))
+      .collect();
+
+    for (const notification of mentionNotifications) {
+      try {
+        await ctx.db.delete(notification._id);
+      } catch {
+        // Best-effort cleanup: continue if already deleted concurrently.
+      }
+    }
+  } catch {
+    // Best-effort cleanup: continue even if notification lookup fails.
+  }
 }
 
 type DemoArgs = {
@@ -829,8 +895,8 @@ export const listMessages = query({
       return empty;
     }
 
+    const now = Date.now();
     try {
-      const now = Date.now();
       if (room.expiresAt && room.expiresAt <= now) {
         return empty;
       }
@@ -871,14 +937,27 @@ export const listMessages = query({
 
     let messages: Doc<'chatRoomMessages'>[] = [];
     try {
+      const legacyExpiryCutoff = now - 24 * 60 * 60 * 1000;
       let q = ctx.db
         .query('chatRoomMessages')
         .withIndex('by_room_created', (q) => q.eq('roomId', roomId));
 
       q = q.filter((qf) =>
-        qf.or(
-          qf.eq(qf.field('deletedAt'), undefined),
-          qf.eq(qf.field('deletedAt'), null)
+        qf.and(
+          qf.or(
+            qf.eq(qf.field('deletedAt'), undefined),
+            qf.eq(qf.field('deletedAt'), null)
+          ),
+          qf.or(
+            qf.gt(qf.field('expiresAt'), now),
+            qf.and(
+              qf.or(
+                qf.eq(qf.field('expiresAt'), undefined),
+                qf.eq(qf.field('expiresAt'), null)
+              ),
+              qf.gt(qf.field('createdAt'), legacyExpiryCutoff)
+            )
+          )
         )
       );
 
@@ -1340,6 +1419,7 @@ export const sendMessage = mutation({
 
     // 2. Rate limiting: max 10 messages per minute per user per room
     const now = Date.now();
+    const expiresAt = now + 24 * 60 * 60 * 1000;
     const oneMinuteAgo = now - 60000;
     const recentMessages = await ctx.db
       .query('chatRoomMessages')
@@ -1379,6 +1459,10 @@ export const sendMessage = mutation({
 
     // Determine message type: use explicit mediaType if provided, otherwise infer from media URLs
     const type = resolvedAudioUrl ? 'audio' : resolvedImageUrl ? (mediaType ?? 'image') : 'text';
+    const persistedImageStorageId =
+      type === 'image' || type === 'doodle' ? imageStorageId : undefined;
+    const persistedVideoStorageId = type === 'video' ? imageStorageId : undefined;
+    const persistedAudioStorageId = type === 'audio' ? audioStorageId : undefined;
 
     // Soft-mask sensitive words in text messages
     const maskedText = text ? softMaskText(text) : undefined;
@@ -1429,8 +1513,12 @@ export const sendMessage = mutation({
       type,
       text: maskedText,
       imageUrl: resolvedImageUrl ?? undefined,
+      imageStorageId: persistedImageStorageId,
+      videoStorageId: persistedVideoStorageId,
       audioUrl: resolvedAudioUrl ?? undefined,
+      audioStorageId: persistedAudioStorageId,
       createdAt: now,
+      expiresAt,
       clientId,
       status: 'sent',
       ...(replyToMessageId
@@ -1545,6 +1633,8 @@ export const sendMessage = mutation({
         if (deleted >= deleteCount) break;
         if (msg._id === messageId) continue; // Safety: never delete new message
         try {
+          await cleanupChatRoomMessageRelations(ctx, roomId, msg._id);
+          await deleteChatRoomMessageStorage(ctx, msg);
           await ctx.db.delete(msg._id);
           deleted++;
         } catch {
@@ -1636,6 +1726,9 @@ export const deleteMessage = mutation({
     if (!canDeleteInRoom(actorMembership.role, messageOwnerRole, isOwnMessage, isPlatformAdmin, isPlatformRoom)) {
       throw new Error('Unauthorized: you do not have permission to delete this message');
     }
+
+    await cleanupChatRoomMessageRelations(ctx, roomId, messageId);
+    await deleteChatRoomMessageStorage(ctx, message);
 
     // 10. Soft-delete by setting deletedAt timestamp
     await ctx.db.patch(messageId, { deletedAt: Date.now() });
@@ -2511,6 +2604,52 @@ export const cleanupExpiredRooms = internalMutation({
     }
 
     return { deletedCount: expiredRooms.length };
+  },
+});
+
+// Internal: Cleanup expired chat room messages (called by cron job)
+// Deletes only expired message rows in bounded batches.
+export const cleanupExpiredChatRoomMessages = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const BATCH = 200;
+
+    const expiredMessages = await ctx.db
+      .query('chatRoomMessages')
+      .withIndex('by_expires', (q) => q.lte('expiresAt', now))
+      .take(BATCH);
+
+    const deletedByRoom = new Map<string, number>();
+    let deletedCount = 0;
+
+    for (const message of expiredMessages) {
+      try {
+        await cleanupChatRoomMessageRelations(ctx, message.roomId, message._id);
+        await deleteChatRoomMessageStorage(ctx, message);
+        await ctx.db.delete(message._id);
+        deletedCount++;
+        const roomId = message.roomId as string;
+        deletedByRoom.set(roomId, (deletedByRoom.get(roomId) ?? 0) + 1);
+      } catch {
+        // Message may already be gone from a concurrent cleanup path.
+      }
+    }
+
+    for (const [roomId, roomDeletedCount] of deletedByRoom.entries()) {
+      const room = await ctx.db.get(roomId as Id<'chatRooms'>);
+      if (!room) {
+        continue;
+      }
+
+      if (typeof room.messageCount === 'number') {
+        await ctx.db.patch(room._id, {
+          messageCount: Math.max(0, room.messageCount - roomDeletedCount),
+        });
+      }
+    }
+
+    return { deletedCount };
   },
 });
 

@@ -44,6 +44,14 @@ crons.interval(
 // Phase-2 Chat Rooms: Cleanup expired rooms every 10 minutes (safety net for scheduler)
 // Deletes rooms past their 24h expiresAt, along with all messages/members/penalties
 crons.interval(
+  'cleanup-expired-chat-room-messages',
+  { minutes: 5 },
+  internal.chatRooms.cleanupExpiredChatRoomMessages
+);
+
+// Phase-2 Chat Rooms: Cleanup expired rooms every 10 minutes (safety net for scheduler)
+// Deletes rooms past their 24h expiresAt, along with all messages/members/penalties
+crons.interval(
   'cleanup-expired-chat-rooms',
   { minutes: 10 },
   internal.chatRooms.cleanupExpiredRooms

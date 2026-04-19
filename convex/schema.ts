@@ -1822,7 +1822,10 @@ export default defineSchema({
     type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('doodle'), v.literal('system'), v.literal('audio')),
     text: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
+    imageStorageId: v.optional(v.id('_storage')),
+    videoStorageId: v.optional(v.id('_storage')),
     audioUrl: v.optional(v.string()), // For audio/voice messages
+    audioStorageId: v.optional(v.id('_storage')),
     createdAt: v.number(),
     clientId: v.optional(v.string()), // For deduplication
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
@@ -1856,7 +1859,9 @@ export default defineSchema({
   })
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
-    .index('by_room_clientId', ['roomId', 'clientId']), // For idempotency check
+    .index('by_room_clientId', ['roomId', 'clientId']) // For idempotency check
+    .index('by_expires', ['expiresAt'])
+    .index('by_room_expires', ['roomId', 'expiresAt']),
 
   // Emoji reactions on chat room messages (Phase-2)
   chatRoomMessageReactions: defineTable({
@@ -1879,7 +1884,9 @@ export default defineSchema({
     roomName: v.string(),
     createdAt: v.number(),
     readAt: v.optional(v.number()),
-  }).index('by_mentioned_user_created', ['mentionedUserId', 'createdAt']),
+  })
+    .index('by_mentioned_user_created', ['mentionedUserId', 'createdAt'])
+    .index('by_message', ['messageId']),
 
   // Per-room mute of another member's messages (viewer-specific)
   chatRoomPerUserMutes: defineTable({
