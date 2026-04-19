@@ -714,9 +714,15 @@ async function requireRoomReadAccess(
       joinedAt: Date.now(),
     });
     membership = await ctx.db.get(membershipId);
-    // Update room member count
+    // P2-21: Recompute from the source of truth instead of a stale read-modify-write
+    // increment. Two parallel first-read auto-joins would otherwise both read the
+    // same `room.memberCount` and each +1 it, losing one membership from the count.
+    const actualMemberCount = await recomputeMemberCount(
+      ctx as MutationCtx,
+      roomId
+    );
     await (ctx as MutationCtx).db.patch(roomId, {
-      memberCount: (room.memberCount ?? 0) + 1,
+      memberCount: actualMemberCount,
     });
   }
 
@@ -1973,8 +1979,65 @@ export const deleteMessage = mutation({
     await cleanupChatRoomMessageRelations(ctx, roomId, messageId);
     await deleteChatRoomMessageStorage(ctx, message);
 
+    // Track whether this call is actually transitioning the message from
+    // visible → deleted. If the row was already soft-deleted we must NOT
+    // decrement again or touch `lastMessageAt` — idempotent re-calls happen
+    // e.g. on client retry.
+    const wasAlreadyDeleted = Boolean(message.deletedAt);
+
     // 10. Soft-delete by setting deletedAt timestamp
-    await ctx.db.patch(messageId, { deletedAt: Date.now() });
+    const deletedAt = Date.now();
+    await ctx.db.patch(messageId, { deletedAt });
+
+    if (!wasAlreadyDeleted) {
+      // P2-22: Keep `room.messageCount` in sync with visible messages so the
+      // trim-on-send threshold and other size-aware logic don't operate on
+      // inflated counts. Decrement with a floor at zero.
+      const currentCount = typeof room.messageCount === 'number'
+        ? room.messageCount
+        : 0;
+      const nextCount = Math.max(0, currentCount - 1);
+      await ctx.db.patch(roomId, { messageCount: nextCount });
+
+      // P2-23: If the deleted message was the newest visible message in the
+      // room, the room preview (`lastMessageAt`/`lastMessageText`) is now
+      // stale. Recompute from the newest surviving non-deleted message; if
+      // none remain, clear the preview fields safely.
+      if (
+        typeof room.lastMessageAt === 'number' &&
+        room.lastMessageAt === message.createdAt
+      ) {
+        const surviving = await ctx.db
+          .query('chatRoomMessages')
+          .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+          .order('desc')
+          .take(20);
+        const newest = surviving.find(
+          (m) => m._id !== messageId && !m.deletedAt
+        );
+        if (newest) {
+          const newestPreview =
+            newest.text ??
+            (newest.audioStorageId || newest.audioUrl
+              ? '[Audio]'
+              : newest.imageStorageId || newest.imageUrl
+              ? '[Image]'
+              : newest.videoStorageId
+              ? '[Video]'
+              : '');
+          await ctx.db.patch(roomId, {
+            lastMessageAt: newest.createdAt,
+            lastMessageText: newestPreview,
+          });
+        } else {
+          // No surviving visible messages; clear preview fields.
+          await ctx.db.patch(roomId, {
+            lastMessageAt: undefined,
+            lastMessageText: undefined,
+          });
+        }
+      }
+    }
 
     return { success: true };
   },
@@ -4757,11 +4820,28 @@ export const addReaction = mutation({
     if (!msg || msg.roomId !== roomId || msg.deletedAt) {
       throw new Error('Message not found');
     }
-    const existingSame = await ctx.db
+    // P2-19: Use the (messageId, userId, emoji) composite index so the
+    // pre-check is scoped to the exact tuple.
+    const existingForEmoji = await ctx.db
       .query('chatRoomMessageReactions')
-      .withIndex('by_message_user', (q) => q.eq('messageId', messageId).eq('userId', userId))
+      .withIndex('by_message_user_emoji', (q) =>
+        q.eq('messageId', messageId).eq('userId', userId).eq('emoji', emoji)
+      )
       .collect();
-    if (existingSame.some((r) => r.emoji === emoji)) {
+    if (existingForEmoji.length > 0) {
+      // P2-19: Two parallel inserts for the same tuple can both pass the
+      // pre-check and both write. Collapse any such duplicates so the
+      // system converges to exactly one row per (message, user, emoji).
+      // The oldest row wins; any extras (including our freshly-inserted
+      // losing row, had we inserted) are removed.
+      const [keep, ...extras] = existingForEmoji.sort(
+        (a, b) => a._creationTime - b._creationTime
+      );
+      for (const extra of extras) {
+        if (extra._id !== keep._id) {
+          await ctx.db.delete(extra._id);
+        }
+      }
       return { success: true as const };
     }
     await ctx.db.insert('chatRoomMessageReactions', {
@@ -4771,6 +4851,24 @@ export const addReaction = mutation({
       emoji,
       createdAt: Date.now(),
     });
+    // P2-19: Post-insert re-check to collapse any row inserted concurrently
+    // by a parallel handler. Keep the earliest row; delete the rest.
+    const afterInsert = await ctx.db
+      .query('chatRoomMessageReactions')
+      .withIndex('by_message_user_emoji', (q) =>
+        q.eq('messageId', messageId).eq('userId', userId).eq('emoji', emoji)
+      )
+      .collect();
+    if (afterInsert.length > 1) {
+      const [keep, ...extras] = afterInsert.sort(
+        (a, b) => a._creationTime - b._creationTime
+      );
+      for (const extra of extras) {
+        if (extra._id !== keep._id) {
+          await ctx.db.delete(extra._id);
+        }
+      }
+    }
     return { success: true as const };
   },
 });
@@ -4779,17 +4877,24 @@ export const removeReaction = mutation({
   args: {
     roomId: v.id('chatRooms'),
     messageId: v.id('chatRoomMessages'),
+    // P2-18: Explicitly target a single emoji rather than deleting every
+    // reaction the user placed on this message.
+    emoji: v.string(),
     authUserId: v.string(),
   },
-  handler: async (ctx, { roomId, messageId, authUserId }) => {
+  handler: async (ctx, { roomId, messageId, emoji, authUserId }) => {
     const { userId } = await requireRoomReadAccess(ctx, roomId, authUserId);
     const msg = await ctx.db.get(messageId);
     if (!msg || msg.roomId !== roomId) {
       throw new Error('Message not found');
     }
+    // P2-18: delete ONLY rows whose emoji matches — not every reaction this
+    // user has on the message.
     const rows = await ctx.db
       .query('chatRoomMessageReactions')
-      .withIndex('by_message_user', (q) => q.eq('messageId', messageId).eq('userId', userId))
+      .withIndex('by_message_user_emoji', (q) =>
+        q.eq('messageId', messageId).eq('userId', userId).eq('emoji', emoji)
+      )
       .collect();
     for (const row of rows) {
       await ctx.db.delete(row._id);
@@ -4851,13 +4956,24 @@ export const toggleMuteUserInRoom = mutation({
     if (!targetMembership) {
       throw new Error('User is not in this room');
     }
-    const rows = await ctx.db
+    // P2-20: Use the (roomId, muterId, targetUserId) composite index to
+    // scope the lookup to the exact tuple instead of scanning all mutes by
+    // this muter.
+    const existingRows = await ctx.db
       .query('chatRoomPerUserMutes')
-      .withIndex('by_room_muter', (q) => q.eq('roomId', roomId).eq('muterId', userId))
+      .withIndex('by_room_muter_target', (q) =>
+        q
+          .eq('roomId', roomId)
+          .eq('muterId', userId)
+          .eq('targetUserId', targetUserId)
+      )
       .collect();
-    const existing = rows.find((r) => r.targetUserId === targetUserId);
-    if (existing) {
-      await ctx.db.delete(existing._id);
+    if (existingRows.length > 0) {
+      // Toggle OFF: delete every matching row (also collapses any duplicates
+      // left by a prior race).
+      for (const row of existingRows) {
+        await ctx.db.delete(row._id);
+      }
       return { success: true as const, muted: false as const };
     }
     await ctx.db.insert('chatRoomPerUserMutes', {
@@ -4866,6 +4982,28 @@ export const toggleMuteUserInRoom = mutation({
       targetUserId,
       createdAt: Date.now(),
     });
+    // P2-20: Post-insert dedupe — if a parallel toggle also inserted for
+    // the same tuple, keep the earliest row and delete the rest so the
+    // table converges to exactly one mute row per (room, muter, target).
+    const afterInsert = await ctx.db
+      .query('chatRoomPerUserMutes')
+      .withIndex('by_room_muter_target', (q) =>
+        q
+          .eq('roomId', roomId)
+          .eq('muterId', userId)
+          .eq('targetUserId', targetUserId)
+      )
+      .collect();
+    if (afterInsert.length > 1) {
+      const [keep, ...extras] = afterInsert.sort(
+        (a, b) => a._creationTime - b._creationTime
+      );
+      for (const extra of extras) {
+        if (extra._id !== keep._id) {
+          await ctx.db.delete(extra._id);
+        }
+      }
+    }
     return { success: true as const, muted: true as const };
   },
 });

@@ -1872,7 +1872,10 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index('by_room_message', ['roomId', 'messageId'])
-    .index('by_message_user', ['messageId', 'userId']),
+    .index('by_message_user', ['messageId', 'userId'])
+    // P2-18/P2-19: precise lookup for (message, user, emoji) used by
+    // removeReaction (targeted delete) and addReaction (post-insert dedupe).
+    .index('by_message_user_emoji', ['messageId', 'userId', 'emoji']),
 
   // @mention inbox notifications (who was mentioned in which room/message)
   chatRoomMentionNotifications: defineTable({
@@ -1896,7 +1899,10 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index('by_room_muter', ['roomId', 'muterId'])
-    .index('by_room_target', ['roomId', 'targetUserId']),
+    .index('by_room_target', ['roomId', 'targetUserId'])
+    // P2-20: precise lookup for (room, muter, target) used by
+    // toggleMuteUserInRoom's post-insert dedupe.
+    .index('by_room_muter_target', ['roomId', 'muterId', 'targetUserId']),
 
   // DM threads hidden from inbox (per user; conversation id)
   chatRoomHiddenDmConversations: defineTable({

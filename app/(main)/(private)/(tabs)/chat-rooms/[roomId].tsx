@@ -3134,10 +3134,11 @@ export default function ChatRoomScreen() {
 
     try {
       if (userAlreadyReacted) {
-        // P3-FIX: removeReaction finds reaction by message+user, not by emoji
+        // P2-18: removeReaction now targets a specific emoji.
         await removeReactionMutation({
           roomId: roomIdStr as Id<'chatRooms'>,
           messageId: messageId as Id<'chatRoomMessages'>,
+          emoji: emoji as ReactionEmoji,
           authUserId,
         });
       } else {
