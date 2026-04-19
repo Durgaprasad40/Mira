@@ -2088,7 +2088,9 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_user', ['userId'])
-    .index('by_user_room', ['userId', 'roomId']),
+    .index('by_user_room', ['userId', 'roomId'])
+    // P0-4: Needed by deleteRoomFully to cascade room-scoped prefs
+    .index('by_room', ['roomId']),
 
   // User Room Reports (track which rooms user has reported)
   userRoomReports: defineTable({
@@ -2097,7 +2099,28 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index('by_user', ['userId'])
-    .index('by_user_room', ['userId', 'roomId']),
+    .index('by_user_room', ['userId', 'roomId'])
+    // P0-4: Needed by deleteRoomFully to cascade room-scoped reports
+    .index('by_room', ['roomId']),
+
+  // P0-1: Chat Room media upload ownership.
+  // Binds an uploaded storage blob to the user who first references it in a
+  // chat-room message. sendMessage consults this table before accepting any
+  // imageStorageId/videoStorageId/audioStorageId so a user cannot attach
+  // another user's storage blob.
+  chatRoomMediaUploads: defineTable({
+    storageId: v.id('_storage'),
+    uploaderUserId: v.id('users'),
+    mediaKind: v.union(
+      v.literal('image'),
+      v.literal('video'),
+      v.literal('audio'),
+      v.literal('doodle')
+    ),
+    createdAt: v.number(),
+  })
+    .index('by_storage', ['storageId'])
+    .index('by_uploader', ['uploaderUserId']),
 
   // User Game Limits (track game-specific limits like bottle spin skips)
   userGameLimits: defineTable({

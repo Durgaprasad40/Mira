@@ -128,6 +128,76 @@ async function deleteRoomFully(ctx: MutationCtx, roomId: Id<'chatRooms'>): Promi
     await ctx.db.delete(penalty._id);
   }
 
+  // P0-4: Cascade remaining room-linked tables so private rooms leave no residue.
+  // chatRoomProfiles is user-scoped (nickname persists across rooms) and
+  // chatRoomHiddenDmConversations is keyed by conversationId, so both are
+  // intentionally excluded.
+
+  // Join requests for this room
+  const joinRequests = await ctx.db
+    .query('chatRoomJoinRequests')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId))
+    .collect();
+  for (const req of joinRequests) {
+    await ctx.db.delete(req._id);
+  }
+
+  // Bans for this room
+  const bans = await ctx.db
+    .query('chatRoomBans')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId))
+    .collect();
+  for (const ban of bans) {
+    await ctx.db.delete(ban._id);
+  }
+
+  // Presence rows for this room
+  const presence = await ctx.db
+    .query('chatRoomPresence')
+    .withIndex('by_room', (q) => q.eq('roomId', roomId))
+    .collect();
+  for (const row of presence) {
+    await ctx.db.delete(row._id);
+  }
+
+  // Per-user mutes scoped to this room
+  const perUserMutes = await ctx.db
+    .query('chatRoomPerUserMutes')
+    .withIndex('by_room_muter', (q) => q.eq('roomId', roomId))
+    .collect();
+  for (const row of perUserMutes) {
+    await ctx.db.delete(row._id);
+  }
+
+  // Password brute-force attempt records for this room
+  const passwordAttempts = await ctx.db
+    .query('chatRoomPasswordAttempts')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId))
+    .collect();
+  for (const row of passwordAttempts) {
+    await ctx.db.delete(row._id);
+  }
+
+  // userRoomPrefs / userRoomReports are keyed by a string roomId. Delete
+  // only the rows whose roomId matches this chat room's document id.
+  const roomIdString = roomId as unknown as string;
+
+  const prefs = await ctx.db
+    .query('userRoomPrefs')
+    .withIndex('by_room', (q) => q.eq('roomId', roomIdString))
+    .collect();
+  for (const row of prefs) {
+    await ctx.db.delete(row._id);
+  }
+
+  const reports = await ctx.db
+    .query('userRoomReports')
+    .withIndex('by_room', (q) => q.eq('roomId', roomIdString))
+    .collect();
+  for (const row of reports) {
+    await ctx.db.delete(row._id);
+  }
+
   // Delete the room itself
   await ctx.db.delete(roomId);
 }
@@ -153,6 +223,98 @@ async function deleteChatRoomMessageStorage(
     } catch {
       // Best-effort cleanup: continue even if a blob was already removed or unavailable.
     }
+    // P0-1: Also drop the ownership row so reused IDs don't leak claims.
+    try {
+      const ownership = await ctx.db
+        .query('chatRoomMediaUploads')
+        .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+        .first();
+      if (ownership) {
+        await ctx.db.delete(ownership._id);
+      }
+    } catch {
+      // Best-effort cleanup: continue even if ownership row is already gone.
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P0-1 / P0-2: Chat Room media ownership + metadata validation helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+type ChatRoomMediaKind = 'image' | 'video' | 'audio' | 'doodle';
+
+// Server-side media limits. Mirrors client limits in lib/uploadUtils.ts.
+const CHAT_ROOM_MEDIA_LIMITS: Record<
+  ChatRoomMediaKind,
+  { maxBytes: number; contentTypePrefix: string }
+> = {
+  image: { maxBytes: 15 * 1024 * 1024, contentTypePrefix: 'image/' },
+  video: { maxBytes: 100 * 1024 * 1024, contentTypePrefix: 'video/' },
+  audio: { maxBytes: 20 * 1024 * 1024, contentTypePrefix: 'audio/' },
+  doodle: { maxBytes: 5 * 1024 * 1024, contentTypePrefix: 'image/' },
+};
+
+/**
+ * P0-1: Verify that the given storage blob belongs to `senderId`, or claim
+ * first-time ownership for the sender. Throws if another user already owns it.
+ *
+ * Storage IDs issued by Convex are unguessable random strings, so an attacker
+ * cannot practically race this claim against a legitimate uploader.
+ */
+async function verifyOrClaimChatRoomMediaOwnership(
+  ctx: MutationCtx,
+  storageId: Id<'_storage'>,
+  senderId: Id<'users'>,
+  mediaKind: ChatRoomMediaKind
+): Promise<void> {
+  const existing = await ctx.db
+    .query('chatRoomMediaUploads')
+    .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+    .first();
+
+  if (existing) {
+    if (existing.uploaderUserId !== senderId) {
+      throw new Error('Unauthorized: storage reference does not belong to sender');
+    }
+    return;
+  }
+
+  await ctx.db.insert('chatRoomMediaUploads', {
+    storageId,
+    uploaderUserId: senderId,
+    mediaKind,
+    createdAt: Date.now(),
+  });
+}
+
+/**
+ * P0-2: Validate the actual blob metadata (size + content-type) against the
+ * declared media kind. Rejects mismatched or oversized uploads regardless of
+ * what the client claimed via `mediaType`.
+ */
+async function validateChatRoomMediaMetadata(
+  ctx: MutationCtx,
+  storageId: Id<'_storage'>,
+  mediaKind: ChatRoomMediaKind
+): Promise<void> {
+  const meta = (await ctx.db.system.get(storageId)) as
+    | { size?: number; contentType?: string }
+    | null;
+
+  if (!meta) {
+    throw new Error('Invalid storage reference: metadata unavailable');
+  }
+
+  const limits = CHAT_ROOM_MEDIA_LIMITS[mediaKind];
+
+  if (typeof meta.size === 'number' && meta.size > limits.maxBytes) {
+    throw new Error(`Media exceeds size limit for ${mediaKind}`);
+  }
+
+  const contentType = typeof meta.contentType === 'string' ? meta.contentType : '';
+  if (!contentType.toLowerCase().startsWith(limits.contentTypePrefix)) {
+    throw new Error(`Media content type does not match declared ${mediaKind}`);
   }
 }
 
@@ -1442,6 +1604,19 @@ export const sendMessage = mutation({
     let resolvedAudioUrl = audioUrl;
 
     if (imageStorageId) {
+      // P0-1 / P0-2: Verify ownership + validate blob metadata BEFORE resolving
+      // URL so a mismatched or cross-user blob never reaches persistence.
+      // `imageStorageId` is reused by the frontend for video uploads when
+      // `mediaType === 'video'` — validate against the actual declared kind.
+      const imageKind: ChatRoomMediaKind =
+        mediaType === 'video'
+          ? 'video'
+          : mediaType === 'doodle'
+            ? 'doodle'
+            : 'image';
+      await verifyOrClaimChatRoomMediaOwnership(ctx, imageStorageId, senderId, imageKind);
+      await validateChatRoomMediaMetadata(ctx, imageStorageId, imageKind);
+
       const url = await ctx.storage.getUrl(imageStorageId);
       if (!url) {
         throw new Error('Invalid image storage reference');
@@ -1450,6 +1625,10 @@ export const sendMessage = mutation({
     }
 
     if (audioStorageId) {
+      // P0-1 / P0-2: Same ownership + metadata guard for audio uploads.
+      await verifyOrClaimChatRoomMediaOwnership(ctx, audioStorageId, senderId, 'audio');
+      await validateChatRoomMediaMetadata(ctx, audioStorageId, 'audio');
+
       const url = await ctx.storage.getUrl(audioStorageId);
       if (!url) {
         throw new Error('Invalid audio storage reference');
@@ -2614,6 +2793,8 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
   handler: async (ctx) => {
     const now = Date.now();
     const BATCH = 200;
+    const LEGACY_CUTOFF_MS = 24 * 60 * 60 * 1000;
+    const legacyCutoff = now - LEGACY_CUTOFF_MS;
 
     const expiredMessages = await ctx.db
       .query('chatRoomMessages')
@@ -2623,7 +2804,9 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
     const deletedByRoom = new Map<string, number>();
     let deletedCount = 0;
 
-    for (const message of expiredMessages) {
+    const processMessage = async (
+      message: Doc<'chatRoomMessages'>
+    ): Promise<void> => {
       try {
         await cleanupChatRoomMessageRelations(ctx, message.roomId, message._id);
         await deleteChatRoomMessageStorage(ctx, message);
@@ -2633,6 +2816,33 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
         deletedByRoom.set(roomId, (deletedByRoom.get(roomId) ?? 0) + 1);
       } catch {
         // Message may already be gone from a concurrent cleanup path.
+      }
+    };
+
+    for (const message of expiredMessages) {
+      await processMessage(message);
+    }
+
+    // P0-3: Bounded legacy sweep.
+    // Messages inserted before the retention fix have no `expiresAt` field, so
+    // they will never match the `by_expires` range above. Here we pick up any
+    // legacy rows older than 24h and apply the exact same full-cleanup path
+    // (relations + storage + row delete + messageCount repair).
+    const legacyBudget = BATCH - expiredMessages.length;
+    if (legacyBudget > 0) {
+      const legacyCandidates = await ctx.db
+        .query('chatRoomMessages')
+        .withIndex('by_room_created')
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('expiresAt'), undefined),
+            q.lte(q.field('createdAt'), legacyCutoff)
+          )
+        )
+        .take(legacyBudget);
+
+      for (const message of legacyCandidates) {
+        await processMessage(message);
       }
     }
 
