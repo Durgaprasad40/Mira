@@ -2902,25 +2902,58 @@ export const deleteExpiredRoom = internalMutation({
 export const cleanupExpiredRooms = internalMutation({
   args: {},
   handler: async (ctx) => {
-    const now = Date.now();
+    // P2-12: Loop batches under a soft time budget and self-reschedule if
+    // the queue still has work. `deleteRoomFully` itself does a bounded
+    // cascade (see P2-3), so we keep BATCH small to stay well under the
+    // per-mutation Convex limits.
+    const startedAt = Date.now();
+    const BATCH = 20;
+    const TIME_BUDGET_MS = 20_000;
 
-    // Find expired rooms (those with expiresAt <= now)
-    const expiredRooms = await ctx.db
-      .query('chatRooms')
-      .withIndex('by_expires')
-      .filter((q) =>
-        q.and(
-          q.neq(q.field('expiresAt'), undefined),
-          q.lte(q.field('expiresAt'), now)
+    let deletedCount = 0;
+    let hitTimeBudget = false;
+
+    const budgetExhausted = (): boolean =>
+      Date.now() - startedAt >= TIME_BUDGET_MS;
+
+    while (true) {
+      if (budgetExhausted()) {
+        hitTimeBudget = true;
+        break;
+      }
+      const now = Date.now();
+      const expiredRooms = await ctx.db
+        .query('chatRooms')
+        .withIndex('by_expires')
+        .filter((q) =>
+          q.and(
+            q.neq(q.field('expiresAt'), undefined),
+            q.lte(q.field('expiresAt'), now)
+          )
         )
-      )
-      .take(50); // Process in batches
-
-    for (const room of expiredRooms) {
-      await deleteRoomFully(ctx, room._id);
+        .take(BATCH);
+      if (expiredRooms.length === 0) break;
+      for (const room of expiredRooms) {
+        if (budgetExhausted()) {
+          hitTimeBudget = true;
+          break;
+        }
+        await deleteRoomFully(ctx, room._id);
+        deletedCount++;
+      }
+      if (hitTimeBudget) break;
+      if (expiredRooms.length < BATCH) break;
     }
 
-    return { deletedCount: expiredRooms.length };
+    if (hitTimeBudget) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.chatRooms.cleanupExpiredRooms,
+        {}
+      );
+    }
+
+    return { deletedCount };
   },
 });
 
@@ -3082,20 +3115,55 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
 export const cleanupExpiredPenalties = internalMutation({
   args: {},
   handler: async (ctx) => {
-    const now = Date.now();
+    // P2-13: Loop bounded batches under a soft time budget and
+    // self-reschedule if work remains.
+    const startedAt = Date.now();
+    const BATCH = 200;
+    const TIME_BUDGET_MS = 20_000;
 
-    // Find all expired penalties
-    const expiredPenalties = await ctx.db
-      .query('chatRoomPenalties')
-      .withIndex('by_expires')
-      .filter((q) => q.lte(q.field('expiresAt'), now))
-      .take(100); // Process in batches
+    let deletedCount = 0;
+    let hitTimeBudget = false;
 
-    for (const penalty of expiredPenalties) {
-      await ctx.db.delete(penalty._id);
+    const budgetExhausted = (): boolean =>
+      Date.now() - startedAt >= TIME_BUDGET_MS;
+
+    while (true) {
+      if (budgetExhausted()) {
+        hitTimeBudget = true;
+        break;
+      }
+      const now = Date.now();
+      const expiredPenalties = await ctx.db
+        .query('chatRoomPenalties')
+        .withIndex('by_expires')
+        .filter((q) => q.lte(q.field('expiresAt'), now))
+        .take(BATCH);
+      if (expiredPenalties.length === 0) break;
+      for (const penalty of expiredPenalties) {
+        if (budgetExhausted()) {
+          hitTimeBudget = true;
+          break;
+        }
+        try {
+          await ctx.db.delete(penalty._id);
+          deletedCount++;
+        } catch {
+          // Already gone — ignore.
+        }
+      }
+      if (hitTimeBudget) break;
+      if (expiredPenalties.length < BATCH) break;
     }
 
-    return { deletedCount: expiredPenalties.length };
+    if (hitTimeBudget) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.chatRooms.cleanupExpiredPenalties,
+        {}
+      );
+    }
+
+    return { deletedCount };
   },
 });
 
@@ -3147,6 +3215,330 @@ export const cleanupStalePresence = internalMutation({
       await ctx.scheduler.runAfter(
         0,
         internal.chatRooms.cleanupStalePresence,
+        {}
+      );
+    }
+
+    return { deletedCount };
+  },
+});
+
+// P2-15: Internal — Cleanup orphan chatRoomMediaUploads ownership rows.
+// Normal flow: upload creates an ownership row → sendMessage attaches it to
+// a chatRoomMessage → message expires at 24h → expiry cleanup calls
+// `deleteChatRoomMessageStorage` which best-effort deletes the blob AND the
+// ownership row. If that cascade ever fails (or sendMessage never completes
+// after upload), the ownership row + blob can linger forever. We enforce a
+// safety TTL: rows older than MESSAGE_RETENTION + GRACE are guaranteed to be
+// orphans (no live message can still reference them under the 24h retention
+// policy), so we best-effort delete the blob and then the ownership row.
+export const cleanupOrphanChatRoomMediaUploads = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const startedAt = Date.now();
+    const BATCH = 100;
+    const TIME_BUDGET_MS = 20_000;
+    // 24h retention + 24h grace so a just-expired message's cleanup has time
+    // to complete before we assume it's truly orphaned.
+    const ORPHAN_CUTOFF_MS = 48 * 60 * 60 * 1000;
+    const cutoff = startedAt - ORPHAN_CUTOFF_MS;
+
+    let deletedCount = 0;
+    let hitTimeBudget = false;
+
+    const budgetExhausted = (): boolean =>
+      Date.now() - startedAt >= TIME_BUDGET_MS;
+
+    while (true) {
+      if (budgetExhausted()) {
+        hitTimeBudget = true;
+        break;
+      }
+      // Oldest rows first. Since every old row in scope gets deleted
+      // unconditionally (past cutoff ⇒ orphan), no "kept" rows accumulate
+      // at the head across iterations.
+      const rows = await ctx.db
+        .query('chatRoomMediaUploads')
+        .order('asc')
+        .take(BATCH);
+      if (rows.length === 0) break;
+      if (rows[0].createdAt >= cutoff) break;
+      for (const row of rows) {
+        if (budgetExhausted()) {
+          hitTimeBudget = true;
+          break;
+        }
+        if (row.createdAt >= cutoff) {
+          // Remainder of batch is within retention grace; stop inner loop.
+          break;
+        }
+        try {
+          await ctx.storage.delete(row.storageId);
+        } catch {
+          // Best-effort: blob may already be gone.
+        }
+        try {
+          await ctx.db.delete(row._id);
+          deletedCount++;
+        } catch {
+          // Already gone — ignore.
+        }
+      }
+      if (hitTimeBudget) break;
+      if (rows.length < BATCH) break;
+    }
+
+    if (hitTimeBudget) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.chatRooms.cleanupOrphanChatRoomMediaUploads,
+        {}
+      );
+    }
+
+    return { deletedCount };
+  },
+});
+
+// P2-25: Internal — Orphan sweeper for chatRoomMessageReactions and
+// chatRoomMentionNotifications. `cleanupChatRoomMessageRelations` already
+// cascades these when a message is deleted, but that path is best-effort.
+// This sweeper runs at a low cadence (daily) as a safety net.
+//
+// Strategy: rows whose `_creationTime` is older than MESSAGE_RETENTION +
+// GRACE are guaranteed to have had their parent message deleted under the
+// 24h retention policy. So any surviving row past that cutoff is orphan —
+// delete unconditionally. This lets us drain the old portion of each table
+// without needing a secondary time-based index.
+export const cleanupOrphanReactionsAndMentions = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const startedAt = Date.now();
+    const BATCH = 200;
+    const TIME_BUDGET_MS = 20_000;
+    const ORPHAN_CUTOFF_MS = 48 * 60 * 60 * 1000;
+    const cutoff = startedAt - ORPHAN_CUTOFF_MS;
+
+    let deletedReactions = 0;
+    let deletedMentions = 0;
+    let hitTimeBudget = false;
+
+    const budgetExhausted = (): boolean =>
+      Date.now() - startedAt >= TIME_BUDGET_MS;
+
+    // Drain orphan reactions.
+    while (true) {
+      if (budgetExhausted()) {
+        hitTimeBudget = true;
+        break;
+      }
+      const rows = await ctx.db
+        .query('chatRoomMessageReactions')
+        .order('asc')
+        .take(BATCH);
+      if (rows.length === 0) break;
+      if (rows[0]._creationTime >= cutoff) break;
+      for (const row of rows) {
+        if (budgetExhausted()) {
+          hitTimeBudget = true;
+          break;
+        }
+        if (row._creationTime >= cutoff) break;
+        try {
+          await ctx.db.delete(row._id);
+          deletedReactions++;
+        } catch {
+          // Already gone — ignore.
+        }
+      }
+      if (hitTimeBudget) break;
+      if (rows.length < BATCH) break;
+    }
+
+    // Drain orphan mentions.
+    while (!hitTimeBudget) {
+      if (budgetExhausted()) {
+        hitTimeBudget = true;
+        break;
+      }
+      const rows = await ctx.db
+        .query('chatRoomMentionNotifications')
+        .order('asc')
+        .take(BATCH);
+      if (rows.length === 0) break;
+      if (rows[0]._creationTime >= cutoff) break;
+      for (const row of rows) {
+        if (budgetExhausted()) {
+          hitTimeBudget = true;
+          break;
+        }
+        if (row._creationTime >= cutoff) break;
+        try {
+          await ctx.db.delete(row._id);
+          deletedMentions++;
+        } catch {
+          // Already gone — ignore.
+        }
+      }
+      if (hitTimeBudget) break;
+      if (rows.length < BATCH) break;
+    }
+
+    if (hitTimeBudget) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.chatRooms.cleanupOrphanReactionsAndMentions,
+        {}
+      );
+    }
+
+    return { deletedReactions, deletedMentions };
+  },
+});
+
+// P2-16: Internal — TTL sweep for chatRoomJoinRequests.
+// Removes resolved (approved/rejected) rows older than RESOLVED_TTL_MS and
+// very old still-pending rows older than PENDING_TTL_MS so the table does
+// not accumulate forever. Uses the `by_status` index so rows are iterated
+// in _creationTime order within each status, letting us early-exit the
+// batch as soon as we see a row that is still within TTL.
+export const cleanupStaleJoinRequests = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const startedAt = Date.now();
+    const BATCH = 200;
+    const TIME_BUDGET_MS = 20_000;
+    const RESOLVED_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+    const PENDING_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+
+    const resolvedCutoff = startedAt - RESOLVED_TTL_MS;
+    const pendingCutoff = startedAt - PENDING_TTL_MS;
+
+    let deletedCount = 0;
+    let hitTimeBudget = false;
+
+    const budgetExhausted = (): boolean =>
+      Date.now() - startedAt >= TIME_BUDGET_MS;
+
+    const drainStatus = async (
+      status: 'approved' | 'rejected' | 'pending',
+      cutoffMs: number
+    ): Promise<void> => {
+      while (!hitTimeBudget) {
+        if (budgetExhausted()) {
+          hitTimeBudget = true;
+          return;
+        }
+        const rows = await ctx.db
+          .query('chatRoomJoinRequests')
+          .withIndex('by_status', (q) => q.eq('status', status))
+          .order('asc')
+          .take(BATCH);
+        if (rows.length === 0) return;
+        // Rows are sorted by _creationTime within the status equality. Use
+        // the row's updatedAt/createdAt as the "age" anchor so resolved
+        // requests whose status was flipped recently aren't swept too early.
+        const ageOf = (r: (typeof rows)[number]): number =>
+          r.updatedAt ?? r.createdAt;
+        if (ageOf(rows[0]) >= cutoffMs) return;
+        let deletedAny = false;
+        for (const row of rows) {
+          if (budgetExhausted()) {
+            hitTimeBudget = true;
+            return;
+          }
+          if (ageOf(row) >= cutoffMs) {
+            // We've reached young rows; stop inner loop. Note: since we
+            // sort by _creationTime (not updatedAt), a resolved row whose
+            // updatedAt is recent could appear before older-resolved rows.
+            // Skip such rows instead of breaking so we don't get stuck.
+            continue;
+          }
+          try {
+            await ctx.db.delete(row._id);
+            deletedCount++;
+            deletedAny = true;
+          } catch {
+            // Already gone — ignore.
+          }
+        }
+        if (!deletedAny) {
+          // Every row in this batch was kept (all within TTL window). To
+          // avoid infinite looping on a head of "young-looking" rows, stop.
+          return;
+        }
+        if (rows.length < BATCH) return;
+      }
+    };
+
+    await drainStatus('approved', resolvedCutoff);
+    if (!hitTimeBudget) await drainStatus('rejected', resolvedCutoff);
+    if (!hitTimeBudget) await drainStatus('pending', pendingCutoff);
+
+    if (hitTimeBudget) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.chatRooms.cleanupStaleJoinRequests,
+        {}
+      );
+    }
+
+    return { deletedCount };
+  },
+});
+
+// P2-17: Internal — TTL sweep for chatRoomPasswordAttempts.
+// Failed-attempt rows (including blocked) persist until an admin clears
+// them. This sweeper ages them out after STALE_TTL_MS so the table does
+// not accumulate forever. Uses the new `by_last_attempt` index for a
+// bounded range query.
+export const cleanupStalePasswordAttempts = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const startedAt = Date.now();
+    const BATCH = 200;
+    const TIME_BUDGET_MS = 20_000;
+    // 7-day TTL — long enough that legitimately-blocked users have cycled
+    // through normal attempt patterns, but short enough to bound growth.
+    const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    const cutoff = startedAt - STALE_TTL_MS;
+
+    let deletedCount = 0;
+    let hitTimeBudget = false;
+
+    const budgetExhausted = (): boolean =>
+      Date.now() - startedAt >= TIME_BUDGET_MS;
+
+    while (true) {
+      if (budgetExhausted()) {
+        hitTimeBudget = true;
+        break;
+      }
+      const rows = await ctx.db
+        .query('chatRoomPasswordAttempts')
+        .withIndex('by_last_attempt', (q) => q.lt('lastAttemptAt', cutoff))
+        .take(BATCH);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        if (budgetExhausted()) {
+          hitTimeBudget = true;
+          break;
+        }
+        try {
+          await ctx.db.delete(row._id);
+          deletedCount++;
+        } catch {
+          // Already gone — ignore.
+        }
+      }
+      if (hitTimeBudget) break;
+      if (rows.length < BATCH) break;
+    }
+
+    if (hitTimeBudget) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.chatRooms.cleanupStalePasswordAttempts,
         {}
       );
     }

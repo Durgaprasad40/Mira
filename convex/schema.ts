@@ -1936,7 +1936,10 @@ export default defineSchema({
   })
     .index('by_room_status', ['roomId', 'status'])
     .index('by_room_user', ['roomId', 'userId'])
-    .index('by_user_status', ['userId', 'status']),
+    .index('by_user_status', ['userId', 'status'])
+    // P2-16: Range-scan rows by status for TTL cleanup (rows are implicitly
+    // ordered by _creationTime within a status equality).
+    .index('by_status', ['status']),
 
   // Chat Room Bans table (Phase-2: kicked/banned users cannot rejoin)
   chatRoomBans: defineTable({
@@ -1959,7 +1962,9 @@ export default defineSchema({
     cooldownUntil: v.optional(v.number()), // if in cooldown, when it ends
     blocked: v.boolean(), // true if permanently blocked for this room
   })
-    .index('by_room_user', ['roomId', 'authUserId']),
+    .index('by_room_user', ['roomId', 'authUserId'])
+    // P2-17: Range-scan rows by lastAttemptAt for TTL cleanup.
+    .index('by_last_attempt', ['lastAttemptAt']),
 
   // Chat Room Profiles (separate identity for chat rooms)
   chatRoomProfiles: defineTable({

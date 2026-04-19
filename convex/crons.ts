@@ -75,6 +75,43 @@ crons.interval(
   internal.chatRooms.cleanupStalePresence
 );
 
+// P2-15: Phase-2 Chat Rooms — Cleanup orphan media ownership rows daily.
+// Any chatRoomMediaUploads row older than retention + grace is an orphan
+// because its referring message would have been cleaned up under the 24h
+// retention policy.
+crons.daily(
+  'cleanup-orphan-chat-room-media-uploads',
+  { hourUTC: 3, minuteUTC: 20 },
+  internal.chatRooms.cleanupOrphanChatRoomMediaUploads
+);
+
+// P2-25: Phase-2 Chat Rooms — Safety-net orphan sweep for reactions and
+// mention notifications (low frequency; the primary cascade runs inline
+// on message delete).
+crons.daily(
+  'cleanup-orphan-chat-room-reactions-mentions',
+  { hourUTC: 3, minuteUTC: 35 },
+  internal.chatRooms.cleanupOrphanReactionsAndMentions
+);
+
+// P2-16: Phase-2 Chat Rooms — TTL sweep for join requests.
+// Resolved (approved/rejected) rows age out after 30 days; still-pending
+// rows age out after 90 days.
+crons.daily(
+  'cleanup-stale-chat-room-join-requests',
+  { hourUTC: 3, minuteUTC: 50 },
+  internal.chatRooms.cleanupStaleJoinRequests
+);
+
+// P2-17: Phase-2 Chat Rooms — TTL sweep for password-attempt rows.
+// Rows whose lastAttemptAt is older than 7 days are removed (including
+// blocked rows) so the table does not accumulate forever.
+crons.daily(
+  'cleanup-stale-chat-room-password-attempts',
+  { hourUTC: 4, minuteUTC: 5 },
+  internal.chatRooms.cleanupStalePasswordAttempts
+);
+
 // B2-FIX: Retry failed storage deletions every 30 minutes
 // Cleans up orphaned storage blobs from failed photo deletions
 crons.interval(
