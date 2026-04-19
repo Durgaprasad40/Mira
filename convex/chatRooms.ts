@@ -1659,7 +1659,16 @@ export const sendMessage = mutation({
       | undefined;
     if (replyToMessageId) {
       const replyMsg = await ctx.db.get(replyToMessageId);
-      if (!replyMsg || replyMsg.roomId !== roomId || replyMsg.deletedAt) {
+      // P1: also reject replies to messages whose retention window has elapsed,
+      // so new replies can't be anchored to rows the cleanup cron is about to
+      // remove. Pre-retention rows (no expiresAt) remain reply-able until the
+      // legacy sweep catches them.
+      if (
+        !replyMsg ||
+        replyMsg.roomId !== roomId ||
+        replyMsg.deletedAt ||
+        (typeof replyMsg.expiresAt === 'number' && replyMsg.expiresAt <= now)
+      ) {
         throw new Error('Invalid reply target');
       }
       const replySender = await ctx.db.get(replyMsg.senderId);
@@ -2081,7 +2090,18 @@ export const joinRoomByCode = mutation({
       throw new Error('This room has expired.');
     }
 
-    // 5. Check if already a member
+    // 5. P1: Reject banned users BEFORE (re)creating membership. joinRoom and
+    // requestJoinPrivateRoom already check chatRoomBans; joinRoomByCode did
+    // not, which let banned users rejoin by obtaining the 6-char code.
+    const existingBan = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', room._id).eq('userId', userId))
+      .first();
+    if (existingBan) {
+      throw new Error('You are banned from this room.');
+    }
+
+    // 6. Check if already a member
     const existing = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room_user', (q) => q.eq('roomId', room._id).eq('userId', userId))
@@ -2090,7 +2110,7 @@ export const joinRoomByCode = mutation({
       return { roomId: room._id, alreadyMember: true };
     }
 
-    // 6. Join as member
+    // 7. Join as member
     await ctx.db.insert('chatRoomMembers', {
       roomId: room._id,
       userId,
@@ -2846,16 +2866,30 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
       }
     }
 
-    for (const [roomId, roomDeletedCount] of deletedByRoom.entries()) {
-      const room = await ctx.db.get(roomId as Id<'chatRooms'>);
+    // P1: Recompute messageCount from source of truth per affected room.
+    // The previous `messageCount - roomDeletedCount` subtraction drifted any
+    // time a prior run (or a manual delete path) failed to update the counter
+    // in lock-step, since the base value is already potentially stale. A
+    // recount over the surviving rows keeps the counter converged.
+    for (const roomId of deletedByRoom.keys()) {
+      const typedRoomId = roomId as Id<'chatRooms'>;
+      const room = await ctx.db.get(typedRoomId);
       if (!room) {
         continue;
       }
 
-      if (typeof room.messageCount === 'number') {
-        await ctx.db.patch(room._id, {
-          messageCount: Math.max(0, room.messageCount - roomDeletedCount),
-        });
+      if (typeof room.messageCount !== 'number') {
+        continue;
+      }
+
+      const survivingMessages = await ctx.db
+        .query('chatRoomMessages')
+        .withIndex('by_room_created', (q) => q.eq('roomId', typedRoomId))
+        .collect();
+      const actualCount = survivingMessages.filter((m) => !m.deletedAt).length;
+
+      if (actualCount !== room.messageCount) {
+        await ctx.db.patch(typedRoomId, { messageCount: actualCount });
       }
     }
 
@@ -4905,8 +4939,8 @@ export const joinRoomWithPassword = mutation({
       return { success: false, message: 'Room not found' };
     }
 
-    // Check if room is expired
-    if (room.expiresAt && room.expiresAt < Date.now()) {
+    // Check if room is expired (use <= to match every other expiry check)
+    if (room.expiresAt && room.expiresAt <= Date.now()) {
       return { success: false, message: 'This room has expired' };
     }
 
@@ -4970,15 +5004,22 @@ export const joinRoomWithPassword = mutation({
         return { success: false, message: 'User not found' };
       }
 
-      // Check if user is banned
+      // P1: Check chatRoomBans table (source of truth), not the legacy
+      // `isBanned` flag on chatRoomMembers. Bans created via kickAndBanMember
+      // only write to chatRoomBans, so checking isBanned allowed banned users
+      // to rejoin via the password flow.
+      const ban = await ctx.db
+        .query('chatRoomBans')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+        .first();
+      if (ban) {
+        return { success: false, message: 'You are not allowed to join this room' };
+      }
+
       const membership = await ctx.db
         .query('chatRoomMembers')
         .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
         .first();
-
-      if (membership?.isBanned) {
-        return { success: false, message: 'You are not allowed to join this room' };
-      }
 
       // Add or update membership
       if (membership) {
@@ -4995,8 +5036,10 @@ export const joinRoomWithPassword = mutation({
           isBanned: false,
           passwordVerified: true,
         });
-        // Increment member count
-        await ctx.db.patch(roomId, { memberCount: (room.memberCount || 0) + 1 });
+        // P1: Recompute memberCount from source of truth to avoid lost
+        // updates from concurrent joins racing on a stale read of `room`.
+        const actualMemberCount = await recomputeMemberCount(ctx, roomId);
+        await ctx.db.patch(roomId, { memberCount: actualMemberCount });
       }
 
       // Clear attempt record on success
