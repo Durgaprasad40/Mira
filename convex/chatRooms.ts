@@ -1077,13 +1077,27 @@ export const listMessages = query({
     roomId: v.string(),
     authUserId: v.string(),
     limit: v.number(),
+    // P2-2: Optional stable cursor for loading older messages.
+    // Pair (createdAt, _creationTime) — `_creationTime` is guaranteed
+    // unique + monotonic per table so it acts as a collision-free
+    // tiebreaker for rows that share a `createdAt` millisecond.
+    cursor: v.optional(
+      v.object({
+        createdAt: v.number(),
+        creationTime: v.number(),
+      })
+    ),
   },
   handler: async (ctx, args) => {
-    const empty = { messages: [] as Doc<'chatRoomMessages'>[], hasMore: false };
+    const empty = {
+      messages: [] as Doc<'chatRoomMessages'>[],
+      hasMore: false,
+      nextCursor: null as { createdAt: number; creationTime: number } | null,
+    };
     console.log('LIST_MESSAGES HIT', args);
     console.log('LIST_MESSAGES STEP 1');
 
-    const { roomId: roomIdRaw, authUserId, limit } = args;
+    const { roomId: roomIdRaw, authUserId, limit, cursor } = args;
 
     if (!roomIdRaw || typeof roomIdRaw !== 'string') {
       return empty;
@@ -1165,8 +1179,9 @@ export const listMessages = query({
         .query('chatRoomMessages')
         .withIndex('by_room_created', (q) => q.eq('roomId', roomId));
 
-      q = q.filter((qf) =>
-        qf.and(
+      q = q.filter((qf) => {
+        // Base filter: non-deleted and not past 24h retention.
+        const base = qf.and(
           qf.or(
             qf.eq(qf.field('deletedAt'), undefined),
             qf.eq(qf.field('deletedAt'), null)
@@ -1181,8 +1196,26 @@ export const listMessages = query({
               qf.gt(qf.field('createdAt'), legacyExpiryCutoff)
             )
           )
-        )
-      );
+        );
+        // P2-2: When a cursor is supplied, only return rows strictly
+        // older than (createdAt, _creationTime). `_creationTime` is a
+        // unique, monotonic per-table tiebreaker — two rows with the
+        // same `createdAt` cannot share it, so pages never skip or
+        // duplicate across calls.
+        if (cursor) {
+          return qf.and(
+            base,
+            qf.or(
+              qf.lt(qf.field('createdAt'), cursor.createdAt),
+              qf.and(
+                qf.eq(qf.field('createdAt'), cursor.createdAt),
+                qf.lt(qf.field('_creationTime'), cursor.creationTime)
+              )
+            )
+          );
+        }
+        return base;
+      });
 
       messages = await q.order('desc').take(limit + 1);
     } catch (err) {
@@ -1203,6 +1236,9 @@ export const listMessages = query({
 
     // Chat Rooms identity: attach sender chat-room profile fields only.
     // BLOCKED: do NOT use users/userPrivateProfiles for name/photo/bio.
+    // P2-4: Sender profile enrichment dedupes senderIds before fetching
+    // so each unique sender is looked up exactly once per page, even if
+    // they posted many messages in the returned slice.
     try {
       const senderIds = Array.from(new Set(result.map((m) => String(m.senderId))));
       const profiles = await Promise.all(
@@ -1227,6 +1263,18 @@ export const listMessages = query({
         ])
       );
 
+      // P2-2: Emit the cursor of the oldest row in the returned page so
+      // callers can request the next (older) page without any shared
+      // state on the server. When there are no more rows, nextCursor
+      // is null.
+      const oldest = hasMore ? result[0] : null;
+      const nextCursor = oldest
+        ? {
+            createdAt: oldest.createdAt,
+            creationTime: oldest._creationTime,
+          }
+        : null;
+
       return {
         messages: result.map((m) => {
           const p = profileMap.get(String(m.senderId));
@@ -1239,6 +1287,7 @@ export const listMessages = query({
           } as any;
         }),
         hasMore,
+        nextCursor,
       };
     } catch (err) {
       console.error('LIST_MESSAGES FAIL AT SENDER_IDENTITY_ENRICH', err);
@@ -1248,6 +1297,11 @@ export const listMessages = query({
 });
 
 // List members of a room
+// P2-6: Hard cap (500) so a large room can never return an unbounded
+// member list. Callers that need paginated browsing use
+// `listMembersWithProfiles` (capped at 50) or the mod-oriented
+// `listMembersWithPenalties` view.
+const LIST_MEMBERS_HARD_CAP = 500;
 export const listMembers = query({
   args: {
     roomId: v.id('chatRooms'),
@@ -1260,7 +1314,7 @@ export const listMembers = query({
     return await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room', (q) => q.eq('roomId', roomId))
-      .collect();
+      .take(LIST_MEMBERS_HARD_CAP);
   },
 });
 
@@ -2366,11 +2420,17 @@ export const getMyPrivateRooms = query({
         if (room.expiresAt && room.expiresAt <= now) return null;
 
         // BACKEND COUNT ONLY: Compute live online count from chatRoomPresence table.
+        // P2-1 adjacent: Use the (roomId, lastHeartbeatAt) range index so
+        // we read only currently-online rows instead of collecting every
+        // presence row the room has ever seen and filtering in memory.
+        const onlineThreshold = now - ONLINE_WINDOW_MS;
         const presenceRecords = await ctx.db
           .query('chatRoomPresence')
-          .withIndex('by_room', (q) => q.eq('roomId', room._id))
+          .withIndex('by_room_heartbeat', (q) =>
+            q.eq('roomId', room._id).gte('lastHeartbeatAt', onlineThreshold)
+          )
           .collect();
-        const onlineCount = presenceRecords.filter((p) => now - p.lastHeartbeatAt < ONLINE_WINDOW_MS).length;
+        const onlineCount = presenceRecords.length;
 
         // Determine if current user is a member
         const isMember = memberRoomIds.has(room._id.toString());
@@ -2668,11 +2728,14 @@ export const resetMyPrivateRooms = mutation({
     // Resolve userId (auth or demo)
     const userId = await resolveUserId(ctx, args);
 
-    // Find all private rooms created by this user (has joinCode = private)
-    const allRooms = await ctx.db.query('chatRooms').collect();
-    const myPrivateRooms = allRooms.filter(
-      (room) => room.joinCode && room.createdBy === userId
-    );
+    // P2-10: Use the `by_creator` index to fetch only this user's rooms
+    // instead of scanning every chat room in the database and filtering
+    // in memory. Private-ness is still checked by the `joinCode` field.
+    const myRooms = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_creator', (q) => q.eq('createdBy', userId))
+      .collect();
+    const myPrivateRooms = myRooms.filter((room) => !!room.joinCode);
 
     let deletedCount = 0;
 
@@ -3068,30 +3131,41 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
       }
     }
 
-    // P1: Recompute messageCount from source of truth per affected room.
-    // The previous `messageCount - roomDeletedCount` subtraction drifted any
-    // time a prior run (or a manual delete path) failed to update the counter
-    // in lock-step, since the base value is already potentially stale. A
-    // recount over the surviving rows keeps the counter converged.
-    for (const roomId of deletedByRoom.keys()) {
-      const typedRoomId = roomId as Id<'chatRooms'>;
-      const room = await ctx.db.get(typedRoomId);
-      if (!room) {
-        continue;
-      }
+    // P1 / P2-24: Recompute messageCount from source of truth per
+    // affected room. The previous `messageCount - roomDeletedCount`
+    // subtraction drifted any time a prior run (or a manual delete
+    // path) failed to update the counter in lock-step, since the base
+    // value is already potentially stale. A recount over the surviving
+    // rows keeps the counter converged.
+    //
+    // P2-24: Skip the recount when we hit the time budget — we're
+    // going to self-reschedule anyway, and doing the recount now would
+    // re-collect every surviving row in every affected room just to
+    // have the follow-up run redo the same work after it finishes
+    // draining the backlog. Running the recount only on the final
+    // (fully drained) pass removes that redundant full-table scan per
+    // room per tick without changing convergence guarantees.
+    if (!hitTimeBudget) {
+      for (const roomId of deletedByRoom.keys()) {
+        const typedRoomId = roomId as Id<'chatRooms'>;
+        const room = await ctx.db.get(typedRoomId);
+        if (!room) {
+          continue;
+        }
 
-      if (typeof room.messageCount !== 'number') {
-        continue;
-      }
+        if (typeof room.messageCount !== 'number') {
+          continue;
+        }
 
-      const survivingMessages = await ctx.db
-        .query('chatRoomMessages')
-        .withIndex('by_room_created', (q) => q.eq('roomId', typedRoomId))
-        .collect();
-      const actualCount = survivingMessages.filter((m) => !m.deletedAt).length;
+        const survivingMessages = await ctx.db
+          .query('chatRoomMessages')
+          .withIndex('by_room_created', (q) => q.eq('roomId', typedRoomId))
+          .collect();
+        const actualCount = survivingMessages.filter((m) => !m.deletedAt).length;
 
-      if (actualCount !== room.messageCount) {
-        await ctx.db.patch(typedRoomId, { messageCount: actualCount });
+        if (actualCount !== room.messageCount) {
+          await ctx.db.patch(typedRoomId, { messageCount: actualCount });
+        }
       }
     }
 
@@ -3805,19 +3879,31 @@ export const listJoinRequests = query({
       .withIndex('by_room_status', (q) => q.eq('roomId', roomId).eq('status', 'pending'))
       .collect();
 
-    // Fetch user info for each request
-    const requestsWithUsers = await Promise.all(
-      requests.map(async (req) => {
-        const user = await ctx.db.get(req.userId);
-        return {
-          _id: req._id,
-          userId: req.userId,
-          createdAt: req.createdAt,
-          userName: user?.name ?? 'Unknown',
-          userAvatar: user?.displayPrimaryPhotoUrl ?? null,
-        };
-      })
+    // P2-9: Dedupe userIds before fetching — the `by_room_user` uniqueness
+    // invariant means the typical case is 1 request per user, but the
+    // dedupe keeps the read count bounded to unique requesters even if
+    // a legacy duplicate slipped in.
+    const uniqueUserIds: Id<'users'>[] = Array.from(
+      new Set(requests.map((r) => String(r.userId)))
+    ).map((s) => s as Id<'users'>);
+    const uniqueUsers = await Promise.all(
+      uniqueUserIds.map((uid) => ctx.db.get(uid))
     );
+    const userById = new Map<string, Doc<'users'> | null>();
+    uniqueUserIds.forEach((uid, i) => {
+      userById.set(String(uid), uniqueUsers[i]);
+    });
+
+    const requestsWithUsers = requests.map((req) => {
+      const user = userById.get(String(req.userId)) ?? null;
+      return {
+        _id: req._id,
+        userId: req.userId,
+        createdAt: req.createdAt,
+        userName: user?.name ?? 'Unknown',
+        userAvatar: user?.displayPrimaryPhotoUrl ?? null,
+      };
+    });
 
     return requestsWithUsers;
   },
@@ -5212,28 +5298,19 @@ export const addReaction = mutation({
     if (!msg || msg.roomId !== roomId || msg.deletedAt) {
       throw new Error('Message not found');
     }
-    // P2-19: Use the (messageId, userId, emoji) composite index so the
-    // pre-check is scoped to the exact tuple.
-    const existingForEmoji = await ctx.db
+    // P2-7 / P2-19: Pre-check is the common path's only index read. Use
+    // `.first()` so the common "no prior reaction" case never pays the
+    // cost of collecting rows, and the common "already reacted" case
+    // returns immediately after a single row read. The post-insert
+    // dedupe below still collapses any duplicates that a parallel
+    // handler may have produced, so correctness is unchanged.
+    const existingFirst = await ctx.db
       .query('chatRoomMessageReactions')
       .withIndex('by_message_user_emoji', (q) =>
         q.eq('messageId', messageId).eq('userId', userId).eq('emoji', emoji)
       )
-      .collect();
-    if (existingForEmoji.length > 0) {
-      // P2-19: Two parallel inserts for the same tuple can both pass the
-      // pre-check and both write. Collapse any such duplicates so the
-      // system converges to exactly one row per (message, user, emoji).
-      // The oldest row wins; any extras (including our freshly-inserted
-      // losing row, had we inserted) are removed.
-      const [keep, ...extras] = existingForEmoji.sort(
-        (a, b) => a._creationTime - b._creationTime
-      );
-      for (const extra of extras) {
-        if (extra._id !== keep._id) {
-          await ctx.db.delete(extra._id);
-        }
-      }
+      .first();
+    if (existingFirst) {
       return { success: true as const };
     }
     await ctx.db.insert('chatRoomMessageReactions', {
@@ -5876,6 +5953,15 @@ export const heartbeatPresence = mutation({
       .first();
 
     if (existing) {
+      // P2-26: Server-side heartbeat throttle. If the last write is
+      // within HEARTBEAT_THROTTLE_MS, skip the patch — the "online"
+      // window (PRESENCE_ONLINE_THRESHOLD_MS = 2 min) is far larger
+      // than the throttle, so presence semantics are unchanged; we
+      // just stop amplifying chatty clients into redundant writes.
+      const HEARTBEAT_THROTTLE_MS = 10_000;
+      if (now - existing.lastHeartbeatAt < HEARTBEAT_THROTTLE_MS) {
+        return { success: true };
+      }
       // Update heartbeat
       await ctx.db.patch(existing._id, {
         lastHeartbeatAt: now,
@@ -5920,13 +6006,22 @@ export const getRoomPresence = query({
       return { online: [], recentlyLeft: [] };
     }
 
-    // Get all presence records for this room
+    const now = Date.now();
+
+    // P2-5: Bound the read to the "recently-left" window (anything older
+    // is dropped by the UI anyway), indexed by (roomId, lastHeartbeatAt),
+    // and hard-cap at PRESENCE_FETCH_CAP so the query never fans out to
+    // an unbounded number of rows. The cap is well above typical room
+    // size and only activates as a safety net in abusive scenarios.
+    const PRESENCE_FETCH_CAP = 200;
+    const visibleThreshold = now - PRESENCE_RECENTLY_LEFT_THRESHOLD_MS;
     const presenceRecords = await ctx.db
       .query('chatRoomPresence')
-      .withIndex('by_room', (q) => q.eq('roomId', roomId))
-      .collect();
-
-    const now = Date.now();
+      .withIndex('by_room_heartbeat', (q) =>
+        q.eq('roomId', roomId).gte('lastHeartbeatAt', visibleThreshold)
+      )
+      .order('desc')
+      .take(PRESENCE_FETCH_CAP);
 
     // Partition into online and recently left
     const online: Array<{
@@ -5954,24 +6049,38 @@ export const getRoomPresence = query({
       memberRoleMap.set(String(m.userId), m.role);
     }
 
-    // Chat Rooms identity: fetch chat-room profiles + users for age/gender ONLY.
-    const userIds = presenceRecords.map((p) => p.userId);
-    const [chatProfiles, users] = await Promise.all([
+    // P2-5: Dedupe userIds across presence rows before fetching so each
+    // unique user is read at most once even if a row-collapse race left
+    // behind duplicate presence rows. Profile + user reads are issued
+    // in parallel and reused via a lookup map.
+    const uniqueUserIds: Id<'users'>[] = Array.from(
+      new Set(presenceRecords.map((p) => String(p.userId)))
+    ).map((s) => s as Id<'users'>);
+    const [uniqueChatProfiles, uniqueUsers] = await Promise.all([
       Promise.all(
-        userIds.map((id) =>
+        uniqueUserIds.map((id) =>
           ctx.db
             .query('chatRoomProfiles')
             .withIndex('by_userId', (q) => q.eq('userId', id))
             .first()
         )
       ),
-      Promise.all(userIds.map((id) => ctx.db.get(id))),
+      Promise.all(uniqueUserIds.map((id) => ctx.db.get(id))),
     ]);
+    const chatProfileByUser = new Map<
+      string,
+      Doc<'chatRoomProfiles'> | null
+    >();
+    const userByUser = new Map<string, Doc<'users'> | null>();
+    uniqueUserIds.forEach((uid, i) => {
+      chatProfileByUser.set(String(uid), uniqueChatProfiles[i]);
+      userByUser.set(String(uid), uniqueUsers[i]);
+    });
 
     for (let i = 0; i < presenceRecords.length; i++) {
       const record = presenceRecords[i];
-        const chatProfile = chatProfiles[i];
-      const user = users[i];
+      const chatProfile = chatProfileByUser.get(String(record.userId)) ?? null;
+      const user = userByUser.get(String(record.userId)) ?? null;
 
       const timeSinceHeartbeat = now - record.lastHeartbeatAt;
       const role = memberRoleMap.get(String(record.userId)) || 'member';
