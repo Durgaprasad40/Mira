@@ -1466,7 +1466,10 @@ export default defineSchema({
   })
     .index('by_trending', ['isTrending'])
     .index('by_type', ['type'])
-    .index('by_owner', ['ownerUserId']),
+    .index('by_type_created', ['type', 'createdAt'])
+    .index('by_owner', ['ownerUserId'])
+    .index('by_created', ['createdAt'])
+    .index('by_expires', ['expiresAt']),
 
   // Truth & Dare Answers (one per user per prompt)
   todAnswers: defineTable({

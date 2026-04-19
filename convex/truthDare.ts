@@ -1415,10 +1415,14 @@ export const cleanupExpiredPrompts = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
-    const allPrompts = await ctx.db.query('todPrompts').collect();
+    const BATCH = 200;
+    const expiredPrompts = await ctx.db
+      .query('todPrompts')
+      .withIndex('by_expires', (q) => q.lte('expiresAt', now))
+      .take(BATCH);
     let deleted = 0;
 
-    for (const prompt of allPrompts) {
+    for (const prompt of expiredPrompts) {
       const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
       if (expires > now) continue;
 
@@ -1867,7 +1871,11 @@ export const cleanupExpiredTodData = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
-    const allPrompts = await ctx.db.query('todPrompts').collect();
+    const BATCH = 200;
+    const expiredPrompts = await ctx.db
+      .query('todPrompts')
+      .withIndex('by_expires', (q) => q.lte('expiresAt', now))
+      .take(BATCH);
 
     let deletedPrompts = 0;
     let deletedAnswers = 0;
@@ -1875,7 +1883,7 @@ export const cleanupExpiredTodData = internalMutation({
     let deletedConnects = 0;
     let deletedPrivateMedia = 0;
 
-    for (const prompt of allPrompts) {
+    for (const prompt of expiredPrompts) {
       const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
       if (expires > now) continue; // Not expired
 
@@ -1984,8 +1992,14 @@ export const listActivePromptsWithTop2Answers = query({
     // TOD-P2-002 FIX: Get blocked user IDs for viewer (both directions)
     const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
 
-    // Get all prompts
-    const allPrompts = await ctx.db.query('todPrompts').collect();
+    // Get recent prompts first, then apply the existing visibility filters below.
+    const allPrompts = await ctx.db
+      .query('todPrompts')
+      .withIndex('by_created', (q) =>
+        q.gt('createdAt', now - TWENTY_FOUR_HOURS_MS)
+      )
+      .order('desc')
+      .take(180);
 
     // Filter to active (not expired) and not from blocked users
     const activePrompts = allPrompts.filter((p) => {
@@ -2006,16 +2020,18 @@ export const listActivePromptsWithTop2Answers = query({
       return a.createdAt - b.createdAt;
     });
 
+    const cappedPrompts = activePrompts.slice(0, 60);
+
     // For each prompt, get up to 2 ranked preview answers
     const promptsWithAnswers = await Promise.all(
-      activePrompts.map(async (prompt) => {
+      cappedPrompts.map(async (prompt) => {
         const promptId = prompt._id as unknown as string;
 
-        // Get all answers for this prompt
+        // Get a bounded set of answers for this prompt, then reuse existing filtering/ranking.
         const answers = await ctx.db
           .query('todAnswers')
           .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-          .collect();
+          .take(10);
 
         // Filter: exclude hidden answers (reportCount >= 5) UNLESS viewer is the author
         // TOD-P2-002 FIX: Also exclude answers from blocked users
@@ -2127,8 +2143,24 @@ export const getTrendingTruthAndDare = query({
     const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, 'getTrendingTruthAndDare');
     const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
 
-    // Get all prompts
-    const allPrompts = await ctx.db.query('todPrompts').collect();
+    // Get bounded recent prompt candidates by type, then reuse the existing filters below.
+    const [dareCandidates, truthCandidates] = await Promise.all([
+      ctx.db
+        .query('todPrompts')
+        .withIndex('by_type_created', (q) =>
+          q.eq('type', 'dare').gt('createdAt', now - TWENTY_FOUR_HOURS_MS)
+        )
+        .order('desc')
+        .take(30),
+      ctx.db
+        .query('todPrompts')
+        .withIndex('by_type_created', (q) =>
+          q.eq('type', 'truth').gt('createdAt', now - TWENTY_FOUR_HOURS_MS)
+        )
+        .order('desc')
+        .take(30),
+    ]);
+    const allPrompts = [...dareCandidates, ...truthCandidates];
 
     // Filter to active (not expired)
     const activePrompts = allPrompts.filter((p) => {
