@@ -2291,6 +2291,14 @@ export const getPromptThread = query({
       visibleAnswers.map(async (answer) => {
         const answerId = answer._id as unknown as string;
         const normalizedIdentity = getNormalizedTodAnswerIdentity(answer);
+        const authorProfileFallbackNeeded =
+          !normalizedIdentity.isAnonymous &&
+          (!normalizedIdentity.authorName ||
+            normalizedIdentity.authorAge === undefined ||
+            !normalizedIdentity.authorGender);
+        const answerUser = authorProfileFallbackNeeded
+          ? await ctx.db.get(answer.userId as Id<'users'>)
+          : null;
         const { reactionCounts, myReaction } = await getAnswerReactionSummary(
           ctx,
           answerId,
@@ -2376,10 +2384,16 @@ export const getPromptThread = query({
           hasMedia: !!answer.mediaStorageId,
           isVisualMediaConsumed: !!answer.mediaViewedAt || !!answer.promptOwnerViewedAt,
           // Author identity snapshot
-          authorName: normalizedIdentity.authorName,
+          authorName: normalizedIdentity.isAnonymous
+            ? undefined
+            : (normalizedIdentity.authorName ?? getTodDisplayName(answerUser, 'User')),
           authorPhotoUrl: normalizedIdentity.authorPhotoUrl,
-          authorAge: normalizedIdentity.authorAge,
-          authorGender: normalizedIdentity.authorGender,
+          authorAge: normalizedIdentity.isAnonymous
+            ? undefined
+            : (normalizedIdentity.authorAge ?? calculateTodAge(answerUser?.dateOfBirth)),
+          authorGender: normalizedIdentity.isAnonymous
+            ? undefined
+            : (normalizedIdentity.authorGender ?? trimText(answerUser?.gender ?? undefined)),
           photoBlurMode: normalizedIdentity.photoBlurMode,
           identityMode: normalizedIdentity.identityMode,
           isAnonymous: normalizedIdentity.isAnonymous,
@@ -2638,15 +2652,26 @@ export const createOrEditAnswer = mutation({
       patch.type = type;
 
       // Identity: KEEP existing identityMode (do not change on edit)
-      // Only update author snapshot if explicitly provided
-      if (args.authorName !== undefined) patch.authorName = args.authorName;
-      if (args.authorPhotoUrl !== undefined || args.authorPhotoStorageId !== undefined) {
-        patch.authorPhotoUrl = resolvedAuthorPhotoUrl;
-      }
-      if (args.authorAge !== undefined) patch.authorAge = args.authorAge;
-      if (args.authorGender !== undefined) patch.authorGender = args.authorGender;
+      const existingIdentityMode = getNormalizedTodAnswerIdentity(existing).identityMode;
+      const shouldStripIdentitySnapshot =
+        existingIdentityMode === 'anonymous' || existingIdentityMode === 'no_photo';
 
-      debugTodLog(`[T/D] identityMode reused=${existing.identityMode ?? 'anonymous'}`);
+      if (shouldStripIdentitySnapshot) {
+        patch.authorName = undefined;
+        patch.authorPhotoUrl = undefined;
+        patch.authorAge = undefined;
+        patch.authorGender = undefined;
+      } else {
+        // Only update author snapshot if explicitly provided
+        if (args.authorName !== undefined) patch.authorName = args.authorName;
+        if (args.authorPhotoUrl !== undefined || args.authorPhotoStorageId !== undefined) {
+          patch.authorPhotoUrl = resolvedAuthorPhotoUrl;
+        }
+        if (args.authorAge !== undefined) patch.authorAge = args.authorAge;
+        if (args.authorGender !== undefined) patch.authorGender = args.authorGender;
+      }
+
+      debugTodLog(`[T/D] identityMode reused=${existingIdentityMode}`);
 
       await ctx.db.patch(existing._id, patch);
 
@@ -2688,6 +2713,7 @@ export const createOrEditAnswer = mutation({
       const identityMode = args.identityMode ?? 'anonymous';
       const isAnon = identityMode === 'anonymous';
       const isNoPhoto = identityMode === 'no_photo';
+      const shouldStripIdentitySnapshot = isAnon || isNoPhoto;
 
       // Compute type
       let type: 'text' | 'photo' | 'video' | 'voice' = 'text';
@@ -2716,11 +2742,11 @@ export const createOrEditAnswer = mutation({
         viewDurationSec: hasMedia ? viewDurationSec : undefined,
         totalReactionCount: 0,
         reportCount: 0,
-        // Author identity snapshot (cleared for anonymous, photo cleared for no_photo)
-        authorName: isAnon ? undefined : args.authorName,
-        authorPhotoUrl: isAnon || isNoPhoto ? undefined : resolvedAuthorPhotoUrl,
-        authorAge: isAnon ? undefined : args.authorAge,
-        authorGender: isAnon ? undefined : args.authorGender,
+        // Author identity snapshot (cleared for anonymous and no_photo)
+        authorName: shouldStripIdentitySnapshot ? undefined : args.authorName,
+        authorPhotoUrl: shouldStripIdentitySnapshot ? undefined : resolvedAuthorPhotoUrl,
+        authorAge: shouldStripIdentitySnapshot ? undefined : args.authorAge,
+        authorGender: shouldStripIdentitySnapshot ? undefined : args.authorGender,
         photoBlurMode: isNoPhoto ? 'blur' : 'none',
         isFrontCamera: args.isFrontCamera,
       });

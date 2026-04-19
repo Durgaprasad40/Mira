@@ -66,6 +66,20 @@ const isPhase2Source = (source: string): boolean => {
   return ['tod', 'room', 'desire', 'desire_match', 'desire_super_like'].includes(source);
 };
 
+const getTodConversationPhotoBlurMode = (
+  isPhotoBlurred?: boolean,
+  canViewClearPhoto?: boolean
+): 'none' | 'blur' => {
+  return isPhotoBlurred && canViewClearPhoto === false ? 'blur' : 'none';
+};
+
+const isTodConversationAnonymous = (
+  participantName: string | undefined,
+  participantPhotoUrl: string | undefined
+): boolean => {
+  return !participantPhotoUrl && participantName?.trim().toLowerCase() === 'anonymous';
+};
+
 /**
  * P1-004 FIX: Look up Phase-2 intent label for a participant.
  * @param intentKey - The privateIntentKey from backend userPrivateProfiles
@@ -765,7 +779,25 @@ export default function ChatsScreen() {
                     isSuperLike && { borderColor: COLORS.superLike, borderWidth: 3 },
                     isTodConnect && !isSuperLike && { borderColor: '#FF7849', borderWidth: 3 }
                   ]}>
-                    {item.participantPhotoUrl ? (
+                    {isTodConnect ? (
+                      <TodAvatar
+                        size={58}
+                        photoUrl={item.participantPhotoUrl || null}
+                        isAnonymous={isTodConversationAnonymous(
+                          item.participantName,
+                          item.participantPhotoUrl
+                        )}
+                        photoBlurMode={getTodConversationPhotoBlurMode(
+                          item.isPhotoBlurred,
+                          item.canViewClearPhoto
+                        )}
+                        label={item.participantName}
+                        style={styles.matchAvatar}
+                        backgroundColor={C.surface}
+                        textColor={C.text}
+                        iconColor={C.textLight}
+                      />
+                    ) : item.participantPhotoUrl ? (
                       <Image
                         source={{ uri: item.participantPhotoUrl }}
                         style={styles.matchAvatar}
@@ -888,7 +920,25 @@ export default function ChatsScreen() {
                 {/* CLEAN UI: Profile photo only (no extra badges/icons) */}
                 <View style={styles.chatAvatarWrap}>
                   <View style={styles.chatAvatarRing}>
-                    {convo.participantPhotoUrl ? (
+                    {convo.connectionSource === 'tod' ? (
+                      <TodAvatar
+                        size={46}
+                        photoUrl={convo.participantPhotoUrl || null}
+                        isAnonymous={isTodConversationAnonymous(
+                          convo.participantName,
+                          convo.participantPhotoUrl
+                        )}
+                        photoBlurMode={getTodConversationPhotoBlurMode(
+                          convo.isPhotoBlurred,
+                          convo.canViewClearPhoto
+                        )}
+                        label={convo.participantName}
+                        style={styles.chatAvatar}
+                        backgroundColor={C.accent}
+                        textColor={C.text}
+                        iconColor={C.textLight}
+                      />
+                    ) : convo.participantPhotoUrl ? (
                       // PHOTO-BLUR-FIX: Use consistent blur based on backend flags
                       <Image
                         source={{ uri: convo.participantPhotoUrl }}
