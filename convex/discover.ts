@@ -676,6 +676,18 @@ export const getDiscoverProfiles = query({
       );
       if (safePublicPhotos.length === 0) continue; // at least 1 public-safe photo required
 
+      // Photo ordering: mirror full-profile contract (convex/users.ts:427-431) so
+      // the user's chosen primary photo is always at position 0 on the swipe card.
+      // Prepend isPrimary photo, then sort the rest by `order`. NSFW and
+      // verification_reference filtering above is unchanged.
+      const primaryPhoto = safePublicPhotos.find((p) => p.isPrimary === true);
+      const nonPrimaryPhotos = safePublicPhotos
+        .filter((p) => p._id !== primaryPhoto?._id)
+        .sort((a, b) => a.order - b.order);
+      const orderedPublicPhotos = primaryPhoto
+        ? [primaryPhoto, ...nonPrimaryPhotos]
+        : nonPrimaryPhotos;
+
       const userAge = calculateAge(user.dateOfBirth);
       const theyLikedMe = usersWhoLikedMe.has(user._id as string);
 
@@ -707,7 +719,7 @@ export const getDiscoverProfiles = query({
         relationshipIntent: normalizeRelationshipIntentValues(user.relationshipIntent),
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos: safePublicPhotos.sort((a, b) => a.order - b.order),
+        photos: orderedPublicPhotos,
         photoBlurred: user.photoBlurred === true,
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
@@ -1570,10 +1582,21 @@ async function hydrateExploreProfiles(
 
     for (let index = 0; index < chunk.length; index += 1) {
       const candidate = chunk[index];
-      const publicPhotos = chunkPhotos[index]
-        .filter((photo) => !photo.isNsfw && photo.photoType !== 'verification_reference')
-        .sort((a, b) => a.order - b.order)
-        .map((photo) => ({ url: photo.url }));
+      // Photo ordering: mirror full-profile contract (convex/users.ts:427-431) so
+      // the user's chosen primary photo is always at position 0 on Explore cards.
+      // Prepend isPrimary photo, then sort the rest by `order`. NSFW and
+      // verification_reference filtering is unchanged.
+      const safePhotos = chunkPhotos[index].filter(
+        (photo) => !photo.isNsfw && photo.photoType !== 'verification_reference',
+      );
+      const primaryPhoto = safePhotos.find((p) => p.isPrimary === true);
+      const nonPrimaryPhotos = safePhotos
+        .filter((p) => p._id !== primaryPhoto?._id)
+        .sort((a, b) => a.order - b.order);
+      const orderedSafePhotos = primaryPhoto
+        ? [primaryPhoto, ...nonPrimaryPhotos]
+        : nonPrimaryPhotos;
+      const publicPhotos = orderedSafePhotos.map((photo) => ({ url: photo.url }));
 
       if (publicPhotos.length === 0) {
         const fallbackUrl = candidate.primaryPhotoUrl || candidate.displayPrimaryPhotoUrl;
