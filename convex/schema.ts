@@ -239,13 +239,14 @@ export default defineSchema({
     // Activity
     lastActive: v.number(),
     lastLocationUpdatedAt: v.optional(v.number()),   // timestamp of last location save (30-min gate)
-    nearbyEnabled: v.optional(v.boolean()),           // user opt-in toggle (default true)
-    crossedPathsEnabled: v.optional(v.boolean()),     // participate in crossed paths detection (default true)
+    nearbyEnabled: v.optional(v.boolean()),           // user opt-in toggle (default true) — gates map visibility
+    crossedPathsEnabled: v.optional(v.boolean()),     // LEGACY: superseded by recordCrossedPaths in Phase-2; kept for back-compat and migrations only, no longer read
+    recordCrossedPaths: v.optional(v.boolean()),      // Phase-2: separate opt-in for crossed-paths pipeline (default true when undefined)
     nearbyPausedUntil: v.optional(v.number()),        // pause nearby visibility until timestamp
-    nearbyVisibilityMode: v.optional(v.union(         // time-based visibility mode
-      v.literal('always'),          // Always visible (default)
-      v.literal('app_open'),        // Only while using app
-      v.literal('recent')           // Visible for 30 min after app use
+    nearbyVisibilityMode: v.optional(v.union(         // DEPRECATED (Phase-1 removed UI, Phase-2 stops reading it); kept to preserve existing data, no live code-path depends on it
+      v.literal('always'),
+      v.literal('app_open'),
+      v.literal('recent')
     )),
     createdAt: v.number(),
 

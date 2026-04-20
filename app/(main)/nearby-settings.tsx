@@ -27,13 +27,10 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { Toast } from '@/components/ui/Toast';
 import { getDemoCurrentUser } from '@/lib/demoData';
 
-type VisibilityMode = 'always' | 'app_open' | 'recent';
-
-const VISIBILITY_OPTIONS: { value: VisibilityMode; label: string; description: string }[] = [
-  { value: 'always', label: 'Always visible', description: 'Show me in Nearby all the time' },
-  { value: 'app_open', label: 'Only while using app', description: 'Hide when app is closed' },
-  { value: 'recent', label: '30 min after use', description: 'Visible for 30 min after I close the app' },
-];
+// Phase-1 cleanup: the `always / app_open / recent` visibility-mode UI was
+// removed because the backend no longer enforces these modes (Nearby became a
+// persistent coarse-discovery map). The setting would have been a dead promise.
+// Use the Pause and master "Nearby visibility & crossings" toggles instead.
 
 export default function NearbySettingsScreen() {
   const router = useRouter();
@@ -55,9 +52,12 @@ export default function NearbySettingsScreen() {
   const [strongPrivacyMode, setStrongPrivacyMode] = useState(false);
   const [hideDistance, setHideDistance] = useState(false);
   const [incognitoMode, setIncognitoMode] = useState(false);
-  const [visibilityMode, setVisibilityMode] = useState<VisibilityMode>('always');
+  // Phase-2: separate crossed-paths opt-in. Default true (undefined → on).
+  const [recordCrossedPaths, setRecordCrossedPaths] = useState(true);
   const [isPaused, setIsPaused] = useState(false);
   const [pausedUntil, setPausedUntil] = useState<number | null>(null);
+  // Phase-2: pause duration picker visibility
+  const [showPauseOptions, setShowPauseOptions] = useState(false);
 
   // Loading states
   const [timedOut, setTimedOut] = useState(false);
@@ -78,7 +78,8 @@ export default function NearbySettingsScreen() {
       setStrongPrivacyMode(currentUser.strongPrivacyMode === true);
       setHideDistance(currentUser.hideDistance === true);
       setIncognitoMode(currentUser.incognitoMode === true);
-      setVisibilityMode(currentUser.nearbyVisibilityMode || 'always');
+      // Phase-2: undefined treated as opted-in (default true).
+      setRecordCrossedPaths(currentUser.recordCrossedPaths !== false);
 
       // Check pause status
       const pauseUntil = currentUser.nearbyPausedUntil;
@@ -120,7 +121,7 @@ export default function NearbySettingsScreen() {
           if (field === 'strongPrivacyMode') setStrongPrivacyMode(currentUser.strongPrivacyMode === true);
           if (field === 'hideDistance') setHideDistance(currentUser.hideDistance === true);
           if (field === 'incognitoMode') setIncognitoMode(currentUser.incognitoMode === true);
-          if (field === 'nearbyVisibilityMode') setVisibilityMode(currentUser.nearbyVisibilityMode || 'always');
+          if (field === 'recordCrossedPaths') setRecordCrossedPaths(currentUser.recordCrossedPaths !== false);
         }
       } finally {
         setIsSaving(false);
@@ -157,45 +158,75 @@ export default function NearbySettingsScreen() {
     handleSave('incognitoMode', value);
   };
 
-  const handleVisibilityChange = (mode: VisibilityMode) => {
-    setVisibilityMode(mode);
-    handleSave('nearbyVisibilityMode', mode);
+  // Phase-2: record-crossed-paths toggle (independent from map visibility)
+  const handleRecordCrossedPathsToggle = (value: boolean) => {
+    setRecordCrossedPaths(value);
+    handleSave('recordCrossedPaths', value);
   };
 
-  // Pause handler
-  const handlePauseNearby = async () => {
+  // Phase-2: pause-duration options. null = indefinite ("Until turned back on").
+  const PAUSE_OPTIONS: Array<{ label: string; durationMs: number | null; shortLabel: string }> = [
+    { label: 'Pause for 1 hour',            shortLabel: '1h',        durationMs: 60 * 60 * 1000 },
+    { label: 'Pause for 8 hours',           shortLabel: '8h',        durationMs: 8 * 60 * 60 * 1000 },
+    { label: 'Pause for 24 hours',          shortLabel: '24h',       durationMs: 24 * 60 * 60 * 1000 },
+    { label: 'Pause until I turn it back on', shortLabel: 'Until off', durationMs: null },
+  ];
+
+  // Resume (clear pause)
+  const handleResumeNearby = async () => {
+    setShowPauseOptions(false);
     if (isDemoMode) {
-      if (isPaused) {
-        setIsPaused(false);
-        setPausedUntil(null);
-      } else {
-        setIsPaused(true);
-        setPausedUntil(Date.now() + 24 * 60 * 60 * 1000);
-      }
+      setIsPaused(false);
+      setPausedUntil(null);
       return;
     }
-
     if (!userId) return;
-
     try {
-      // FIX: Backend expects { authUserId }, not { token }
-      await pauseNearbyMut({
-        authUserId: userId,
-        paused: !isPaused,
-      });
-      if (isPaused) {
-        setIsPaused(false);
-        setPausedUntil(null);
-        Toast.show('Nearby visibility resumed');
-      } else {
-        setIsPaused(true);
-        setPausedUntil(Date.now() + 24 * 60 * 60 * 1000);
-        Toast.show('Nearby paused for 24 hours');
-      }
-    } catch (error) {
+      await pauseNearbyMut({ authUserId: userId, paused: false });
+      setIsPaused(false);
+      setPausedUntil(null);
+      Toast.show('Nearby visibility resumed');
+    } catch {
       Toast.show('Failed to update pause status');
     }
   };
+
+  // Pause with chosen duration (Phase-2)
+  const handlePauseWithDuration = async (durationMs: number | null, shortLabel: string) => {
+    setShowPauseOptions(false);
+    const INDEFINITE_DISPLAY_MS = 100 * 365 * 24 * 60 * 60 * 1000;
+    const effectiveMs = durationMs === null ? INDEFINITE_DISPLAY_MS : durationMs;
+
+    if (isDemoMode) {
+      setIsPaused(true);
+      setPausedUntil(Date.now() + effectiveMs);
+      return;
+    }
+    if (!userId) return;
+    try {
+      await pauseNearbyMut({ authUserId: userId, paused: true, durationMs });
+      setIsPaused(true);
+      setPausedUntil(Date.now() + effectiveMs);
+      Toast.show(
+        durationMs === null
+          ? 'Nearby paused until you turn it back on'
+          : `Nearby paused for ${shortLabel}`,
+      );
+    } catch {
+      Toast.show('Failed to update pause status');
+    }
+  };
+
+  // Format "paused until ..." status line. Indefinite pauses render as a
+  // text sentinel rather than the literal year-2125 timestamp.
+  const INDEFINITE_THRESHOLD_MS = 50 * 365 * 24 * 60 * 60 * 1000; // 50y
+  const pauseStatusText = (() => {
+    if (!isPaused || !pausedUntil) return null;
+    if (pausedUntil - Date.now() > INDEFINITE_THRESHOLD_MS) {
+      return 'Paused until you turn it back on — you are hidden from the map and crossings are not recorded.';
+    }
+    return `Paused until ${new Date(pausedUntil).toLocaleString()} — you are hidden from the map and crossings are not recorded.`;
+  })();
 
   // Loading state
   if (!currentUser) {
@@ -229,14 +260,15 @@ export default function NearbySettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Visibility</Text>
 
-          {/* Show me in Nearby (also gates crossing detection) */}
+          {/* Phase-2: Show on Nearby map (map visibility only) */}
           <View style={styles.toggleRow}>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Nearby visibility & crossings</Text>
+              <Text style={styles.toggleTitle}>Show on Nearby map</Text>
               <Text style={styles.toggleDescription}>
-                Show your profile on the Nearby map and record when you cross
-                paths with others. Turn off to hide from the map and stop
-                crossing detection.
+                Let others see your profile on the Nearby map. Turn off to
+                hide from the map.{'\n'}
+                Nearby shows an approximate area only — it is not live GPS
+                tracking, and positions are snapped and fuzzed for privacy.
               </Text>
             </View>
             <Switch
@@ -248,14 +280,41 @@ export default function NearbySettingsScreen() {
             />
           </View>
 
-          {/* Pause Nearby (also pauses crossing detection) */}
-          <TouchableOpacity style={styles.actionRow} onPress={handlePauseNearby}>
+          {/* Phase-2: Record crossed paths (independent opt-in) */}
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <Text style={styles.toggleTitle}>Record crossed paths</Text>
+              <Text style={styles.toggleDescription}>
+                We remember when you and others were in the same area so we
+                can surface a crossed-paths history and alerts. Independent
+                from the Nearby map — you can turn either one off.
+              </Text>
+            </View>
+            <Switch
+              value={recordCrossedPaths}
+              onValueChange={handleRecordCrossedPathsToggle}
+              trackColor={{ false: COLORS.border, true: COLORS.primary }}
+              thumbColor={COLORS.white}
+              disabled={isSaving}
+            />
+          </View>
+
+          {/* Phase-2: Pause with duration picker */}
+          <TouchableOpacity
+            style={styles.actionRow}
+            onPress={() => {
+              if (isPaused) {
+                handleResumeNearby();
+              } else {
+                setShowPauseOptions((v) => !v);
+              }
+            }}
+          >
             <View style={styles.actionInfo}>
               <Text style={styles.toggleTitle}>Pause Nearby activity</Text>
               <Text style={styles.toggleDescription}>
-                {isPaused && pausedUntil
-                  ? `Paused until ${new Date(pausedUntil).toLocaleString()} — you are hidden from the map and crossings are not recorded.`
-                  : 'Hide from the Nearby map and pause crossing detection for 24 hours.'}
+                {pauseStatusText
+                  ?? 'Hide from the Nearby map and pause crossing detection for a chosen duration.'}
               </Text>
             </View>
             <View style={[styles.actionButton, isPaused && styles.actionButtonActive]}>
@@ -265,33 +324,22 @@ export default function NearbySettingsScreen() {
             </View>
           </TouchableOpacity>
 
-          {/* Time-based Visibility */}
-          <View style={styles.visibilitySection}>
-            <Text style={styles.toggleTitle}>Time-based Visibility</Text>
-            <Text style={styles.toggleDescription}>
-              Control when you appear in Nearby
-            </Text>
-            <View style={styles.visibilityOptions}>
-              {VISIBILITY_OPTIONS.map((option) => (
+          {/* Phase-2: inline pause duration options (shown only when picking a duration) */}
+          {!isPaused && showPauseOptions && (
+            <View style={styles.pauseOptions}>
+              {PAUSE_OPTIONS.map((opt) => (
                 <TouchableOpacity
-                  key={option.value}
-                  style={[
-                    styles.visibilityOption,
-                    visibilityMode === option.value && styles.visibilityOptionActive,
-                  ]}
-                  onPress={() => handleVisibilityChange(option.value)}
+                  key={opt.shortLabel}
+                  style={styles.pauseOption}
+                  onPress={() => handlePauseWithDuration(opt.durationMs, opt.shortLabel)}
                 >
-                  <View style={styles.visibilityRadio}>
-                    {visibilityMode === option.value && <View style={styles.visibilityRadioInner} />}
-                  </View>
-                  <View style={styles.visibilityTextContainer}>
-                    <Text style={styles.visibilityLabel}>{option.label}</Text>
-                    <Text style={styles.visibilityDesc}>{option.description}</Text>
-                  </View>
+                  <Text style={styles.pauseOptionLabel}>{opt.label}</Text>
+                  <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
                 </TouchableOpacity>
               ))}
             </View>
-          </View>
+          )}
+
         </View>
 
         {/* Privacy Section */}
@@ -478,53 +526,27 @@ const styles = StyleSheet.create({
   actionButtonTextActive: {
     color: COLORS.white,
   },
-  visibilitySection: {
-    paddingVertical: 12,
-  },
-  visibilityOptions: {
-    marginTop: 12,
-    gap: 8,
-  },
-  visibilityOption: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  visibilityOptionActive: {
-    backgroundColor: COLORS.primaryLight || '#FFE4E9',
-  },
-  visibilityRadio: {
-    width: 20,
-    height: 20,
+  // Phase-2: pause-duration picker
+  pauseOptions: {
+    marginTop: 8,
+    marginBottom: 4,
     borderRadius: 10,
-    borderWidth: 2,
-    borderColor: COLORS.primary,
+    backgroundColor: COLORS.backgroundDark,
+    overflow: 'hidden',
+  },
+  pauseOption: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-    marginTop: 2,
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
   },
-  visibilityRadioInner: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: COLORS.primary,
-  },
-  visibilityTextContainer: {
-    flex: 1,
-  },
-  visibilityLabel: {
-    fontSize: 15,
-    fontWeight: '500',
+  pauseOptionLabel: {
+    fontSize: 14,
     color: COLORS.text,
-    marginBottom: 2,
-  },
-  visibilityDesc: {
-    fontSize: 12,
-    color: COLORS.textMuted,
+    fontWeight: '500',
   },
   premiumBadge: {
     paddingHorizontal: 6,

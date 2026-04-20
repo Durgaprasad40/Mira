@@ -215,7 +215,11 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
     incognitoMode: user.incognitoMode,
     nearbyEnabled: user.nearbyEnabled,
     nearbyPausedUntil: user.nearbyPausedUntil,
-    nearbyVisibilityMode: user.nearbyVisibilityMode,
+    // Phase-2: separate crossed-paths opt-in (undefined treated as true).
+    recordCrossedPaths: user.recordCrossedPaths,
+    // NOTE: nearbyVisibilityMode retained in schema for back-compat but no
+    // longer surfaced to clients — UI was removed in Phase-1 and backend
+    // stopped reading it in Phase-2.
     isDiscoveryPaused: user.isDiscoveryPaused,
     discoveryPausedUntil: user.discoveryPausedUntil,
     consentAcceptedAt: user.consentAcceptedAt,
@@ -921,13 +925,12 @@ export const updateNearbySettings = mutation({
     hideDistance: v.optional(v.boolean()),
     strongPrivacyMode: v.optional(v.boolean()),
     incognitoMode: v.optional(v.boolean()),
-    nearbyVisibilityMode: v.optional(
-      v.union(
-        v.literal("always"),
-        v.literal("app_open"),
-        v.literal("recent")
-      )
-    ),
+    // Phase-2: independent opt-in for crossed-paths recording.
+    // Separate from nearbyEnabled (which now only controls map visibility).
+    recordCrossedPaths: v.optional(v.boolean()),
+    // NOTE: nearbyVisibilityMode is deprecated — the old always/app_open/recent
+    // UI was removed in Phase-1 and the backend stopped reading it in Phase-2.
+    // The field is intentionally NOT accepted by this mutation anymore.
   },
   handler: async (ctx, args) => {
     const { authUserId, incognitoMode, ...updates } = args;
@@ -967,16 +970,24 @@ export const updateNearbySettings = mutation({
 });
 
 /**
- * Pause nearby visibility for 24 hours.
+ * Pause nearby visibility for a caller-chosen duration.
  * P1 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
+ *
+ * Phase-2: supports multiple pause durations (1h / 8h / 24h / indefinite).
+ * Backward compatible — callers that omit durationMs still get 24h. Passing
+ * durationMs: null pauses indefinitely ("Until turned back on") — a far-future
+ * sentinel timestamp is stored so the existing `nearbyPausedUntil > now`
+ * comparison in crossedPaths.ts keeps working without schema changes.
  */
 export const pauseNearby = mutation({
   args: {
     authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
     paused: v.boolean(),
+    // Phase-2: optional duration. Omit for legacy 24h behavior. null = indefinite.
+    durationMs: v.optional(v.union(v.number(), v.null())),
   },
   handler: async (ctx, args) => {
-    const { authUserId, paused } = args;
+    const { authUserId, paused, durationMs } = args;
 
     // P1 SECURITY: Resolve auth ID to Convex user ID server-side
     const userId = await resolveUserIdByAuthId(ctx, authUserId);
@@ -988,10 +999,25 @@ export const pauseNearby = mutation({
     if (!user) throw new Error("User not found");
 
     if (paused) {
-      // Pause for 24 hours
-      await ctx.db.patch(userId, {
-        nearbyPausedUntil: Date.now() + 24 * 60 * 60 * 1000,
-      });
+      // Phase-2: compute pause-until from optional duration.
+      // - undefined → 24h (legacy default)
+      // - null      → indefinite ("Until turned back on") → ~100y sentinel
+      // - number    → explicit duration (bounded to [1min, 1y] server-side
+      //               to block abuse or accidentally huge client values)
+      const ONE_MIN = 60 * 1000;
+      const ONE_YEAR = 365 * 24 * 60 * 60 * 1000;
+      const INDEFINITE_SENTINEL = 100 * ONE_YEAR; // ~year 2125
+
+      let pauseUntil: number;
+      if (durationMs === undefined) {
+        pauseUntil = Date.now() + 24 * 60 * 60 * 1000;
+      } else if (durationMs === null) {
+        pauseUntil = Date.now() + INDEFINITE_SENTINEL;
+      } else {
+        const clamped = Math.max(ONE_MIN, Math.min(ONE_YEAR, durationMs));
+        pauseUntil = Date.now() + clamped;
+      }
+      await ctx.db.patch(userId, { nearbyPausedUntil: pauseUntil });
     } else {
       // Clear pause
       await ctx.db.patch(userId, {
