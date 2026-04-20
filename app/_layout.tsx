@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { AppState, AppStateStatus, LogBox } from "react-native";
+import { AppState, AppStateStatus, LogBox, Text, TextInput } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 
 // P0-1 STABILITY FIX: Import Sentry for crash reporting
@@ -9,6 +9,41 @@ import { DEBUG_ONBOARDING_HYDRATION, DEBUG_STARTUP } from "@/lib/debugFlags";
 // Initialize Sentry FIRST, before any other code runs
 // This ensures we catch errors during app initialization
 initSentry();
+
+// ════════════════════════════════════════════════════════════════════════════
+// CROSS-DEVICE UI SCALING: Font-scale normalization
+// ════════════════════════════════════════════════════════════════════════════
+// Root cause: Some Android OEMs (e.g. OnePlus/OxygenOS, some MIUI/ColorOS
+// builds) ship with a system-level fontScale > 1.0 by default, while
+// stock Samsung One UI ships with fontScale = 1.0. Because our design
+// baseline (lib/responsive.ts) assumes fontScale = 1.0 and the Phase-1
+// Discover card uses hardcoded type sizes, any fontScale multiplier on
+// top produces an oversized UI on OnePlus while Samsung (Metro dev)
+// looks correct.
+//
+// Fix: Cap `maxFontSizeMultiplier` at 1 on every Text/TextInput rendered
+// by the app so the system fontScale cannot inflate our typography past
+// the design baseline. We keep `allowFontScaling` at the RN default so
+// that the accessibility contract (and our responsive.ts scaling based
+// on screen width / PixelRatio) is preserved.
+//
+// This is a module-load side-effect — it runs before the first render.
+// Individual Text/TextInput callsites may still override the prop
+// explicitly when needed (e.g. dedicated accessibility screens).
+// ════════════════════════════════════════════════════════════════════════════
+(() => {
+  const TextAny = Text as unknown as { defaultProps?: Record<string, unknown> };
+  if (TextAny.defaultProps == null) TextAny.defaultProps = {};
+  if (TextAny.defaultProps.maxFontSizeMultiplier == null) {
+    TextAny.defaultProps.maxFontSizeMultiplier = 1;
+  }
+
+  const TextInputAny = TextInput as unknown as { defaultProps?: Record<string, unknown> };
+  if (TextInputAny.defaultProps == null) TextInputAny.defaultProps = {};
+  if (TextInputAny.defaultProps.maxFontSizeMultiplier == null) {
+    TextInputAny.defaultProps.maxFontSizeMultiplier = 1;
+  }
+})();
 
 // Suppress known dev-mode warning: Expo's withDevTools calls useKeepAwake() which can fail
 // on Android before activity is ready. This is non-critical (screen may sleep during dev).
