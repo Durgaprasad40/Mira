@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId } from './helpers';
+import { loadDiscoveryExclusions } from './discoveryExclusions';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
@@ -91,27 +92,35 @@ async function prefetchSwipes(
 // Constants
 // ---------------------------------------------------------------------------
 
-// Nearby map: 100m - 1km range (users closer than 100m are hidden for privacy)
-const NEARBY_MIN_METERS = 100;  // Minimum distance to show on map
+// Nearby map: 0 – 1 km radius. Persistent eligibility model — once a user
+// has published a coarse location, they stay visible to eligible viewers
+// within this radius until their next coarse republish moves them out, or
+// an explicit exclusion fires (pause/incognito/disabled/skip/block).
+// No 100 m minimum floor: co-located users (0 m / 10 m / 50 m…) are eligible.
+const NEARBY_MIN_METERS = 0;    // No minimum floor; co-located users remain eligible
 const NEARBY_MAX_METERS = 1000; // Maximum distance for nearby map
 
-// Crossed paths: 100m - 750m range
+// Crossed paths: 100m - 750m range (kept as-is; crossed paths is a separate
+// notification pipeline and not subject to Nearby's persistence rules)
 const CROSSED_MIN_METERS = 100;  // Minimum distance to trigger crossing
 const CROSSED_MAX_METERS = 750;  // Maximum distance for crossed paths
 
 // Location update gate
 const LOCATION_UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
-// Published location window (privacy: only update shared location once per 6 hours)
+// Published location window (privacy: coarse republish cadence — a user's
+// published location refreshes at most once per 6 hours. Between republishes
+// the previously-published location remains visible on the map — this is the
+// persistent Nearby contract. The 6-hour gate only rate-limits writes, it no
+// longer gates visibility.)
 const PUBLISH_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
 
-// Marker visibility tiers (for map)
+// Marker visibility tiers (cosmetic only — for Nearby map marker styling)
 const SOLID_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // 1–3 days → solid marker
 const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
-// >6 days → hidden
-
-// Map visibility freshness window (Rule 4: only show users who published within 10 minutes)
-const MAP_VISIBILITY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+// Note: these are display tiers only. They do NOT expire Nearby visibility.
+// A user stays on the map regardless of the age of their published location
+// until a later coarse republish replaces it or an exclusion fires.
 
 // Crossed paths history
 const HISTORY_EXPIRY_MS = 28 * 24 * 60 * 60 * 1000; // 4 weeks (28 days)
@@ -119,6 +128,32 @@ const MAX_HISTORY_ENTRIES = 15; // Max crossed paths list entries
 
 // Grid size for approximate crossing location (privacy: round to ~300m)
 const LOCATION_GRID_METERS = 300;
+
+// ---------------------------------------------------------------------------
+// Phase-2 Nearby constants
+// ---------------------------------------------------------------------------
+
+// Ghost cutoff — users whose last coarse publish is older than this are
+// hidden from the Nearby map. This is NOT a short TTL / live-freshness
+// rule (we keep the persistent eligibility model). It only evicts users
+// who opened the app a long time ago and never came back, so the map does
+// not fill up with abandoned accounts.
+const GHOST_CUTOFF_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+
+// Coarse recency buckets for the UI freshness chip (Phase-2.5 three-tier).
+//   <= 24h              → "recent"  → "Recently here"
+//   > 24h, <= 7d        → "earlier" → "Earlier"
+//   > 7d, <= 14d cutoff → "stale"   → "A while ago"
+// No minutes / hours / "online now" — deliberately coarse for privacy.
+const NEARBY_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const NEARBY_EARLIER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// Phase-2.5 per-request map display jitter. The underlying stored coords are
+// already snapped to LOCATION_GRID_METERS (~300m). The map renders a
+// per-response randomized point INSIDE that same grid cell, so no stable or
+// exact coordinate ever leaves the server. Radius is half the grid cell so
+// the jittered point stays within the originating cell boundary.
+const CELL_JITTER_RADIUS_M = LOCATION_GRID_METERS / 2;
 
 // ---------------------------------------------------------------------------
 // Shared Places Constants (Phase-1)
@@ -244,10 +279,17 @@ export const publishLocation = mutation({
       };
     }
 
+    // Phase-1 privacy fix: snap incoming coords to the 300m grid BEFORE writing.
+    // Database no longer stores raw exact map coordinates for Nearby's published
+    // position — this closes the server-side exposure even if the DB leaks.
+    // Reuses the same roundToGrid helper already used by crossPathHistory so
+    // both pipelines share the same precision floor.
+    const snapped = roundToGrid(latitude, longitude);
+
     // Publish new location
     await ctx.db.patch(userId, {
-      publishedLat: latitude,
-      publishedLng: longitude,
+      publishedLat: snapped.lat,
+      publishedLng: snapped.lng,
       publishedAt: now,
     });
 
@@ -293,6 +335,11 @@ export const detectCrossedUsers = mutation({
     if (currentUser.nearbyPausedUntil && currentUser.nearbyPausedUntil > now) {
       return { triggered: false, reason: 'disabled_or_paused' };
     }
+    // Phase-2: caller must also be opted into crossed-paths recording for
+    // "Someone crossed you" alerts to fire. Treat undefined as opted-in.
+    if (currentUser.recordCrossedPaths === false) {
+      return { triggered: false, reason: 'crossed_paths_opt_out' };
+    }
 
     // 2) Enforce cooldown — check most recent crossedEvent for this user
     const lastEvent = await ctx.db
@@ -313,7 +360,13 @@ export const detectCrossedUsers = mutation({
       .collect();
 
     // STABILITY FIX S6: Pre-fetch blocks before loop
-    const blockedIds = await prefetchBlockedUserIds(ctx, userId);
+    // P1 EXCLUSION: Load the full negative-relationship exclusion set
+    // (blocks bidirectional, unmatched bidirectional, reports one-way).
+    const {
+      blockedUserIds: blockedIds,
+      unmatchedUserIds,
+      viewerReportedIds,
+    } = await loadDiscoveryExclusions(ctx, userId);
 
     const candidates: Id<'users'>[] = [];
 
@@ -324,6 +377,13 @@ export const detectCrossedUsers = mutation({
       if (!user.isActive) continue;
       // Skip blocked (using pre-fetched set)
       if (blockedIds.has(user._id as string)) continue;
+      // P1 EXCLUSION: skip any pair that has ever unmatched (bidirectional)
+      if (unmatchedUserIds.has(user._id as string)) continue;
+      // P1 EXCLUSION: skip users the viewer has reported (one-way)
+      if (viewerReportedIds.has(user._id as string)) continue;
+      // Phase-2: the other side must also be opted into crossed-paths
+      // recording. undefined treated as opted-in.
+      if (user.recordCrossedPaths === false) continue;
       // Skip if no published location
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
       // Skip if published location is stale (>6 days)
@@ -444,6 +504,14 @@ export const recordLocation = mutation({
     if (currentUser.nearbyPausedUntil && currentUser.nearbyPausedUntil > now) {
       return { success: true, nearbyCount: 0, skipped: true, reason: 'disabled_or_paused' };
     }
+    // Phase-2: Crossed-paths is now a separate opt-in from "Show on Nearby map".
+    // If the caller has explicitly turned off "Record crossed paths" we must
+    // not insert any crossedPaths / crossPathHistory / crossedEvents rows for
+    // them. Map visibility (publishLocation / getNearbyUsers) is unaffected.
+    // Treat undefined as true for backward compatibility with existing users.
+    if (currentUser.recordCrossedPaths === false) {
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'crossed_paths_opt_out' };
+    }
 
     // ---------------------------------------------------------------------------
     // GPS JITTER PROTECTION (server-side)
@@ -545,7 +613,12 @@ export const recordLocation = mutation({
           .collect();
 
     // STABILITY FIX S6/C2: Pre-fetch blocks before loop
-    const blockedIds = await prefetchBlockedUserIds(ctx, userId);
+    // P1 EXCLUSION: Load full negative-relationship exclusion set.
+    const {
+      blockedUserIds: blockedIds,
+      unmatchedUserIds,
+      viewerReportedIds,
+    } = await loadDiscoveryExclusions(ctx, userId);
 
     // First pass: collect candidate user IDs that pass basic filters
     const candidateUserIds: string[] = [];
@@ -563,6 +636,12 @@ export const recordLocation = mutation({
 
       // Nearby visibility opt-out: Skip users who opted out of nearby
       if (user.nearbyEnabled === false) continue;
+
+      // Phase-2: skip users who opted out of crossed-paths recording.
+      // Both sides must have recordCrossedPaths !== false for a crossing to
+      // be persisted. undefined is treated as opted-in (default true) so
+      // existing accounts are unaffected.
+      if (user.recordCrossedPaths === false) continue;
 
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
@@ -609,6 +688,10 @@ export const recordLocation = mutation({
 
       // STABILITY FIX S6/C2: Check if blocked using pre-fetched set (O(1) lookup)
       if (blockedIds.has(nearbyUser._id as string)) continue;
+      // P1 EXCLUSION: skip unmatched pairs (bidirectional) and reporter-hidden
+      // users before recording a crossed-paths entry.
+      if (unmatchedUserIds.has(nearbyUser._id as string)) continue;
+      if (viewerReportedIds.has(nearbyUser._id as string)) continue;
 
       // --- COMPATIBILITY GATE: At least ONE common element required ---
       const compatibility = computeCompatibility(
@@ -891,9 +974,17 @@ export const recordLocation = mutation({
 });
 
 // ---------------------------------------------------------------------------
-// getNearbyUsers — map markers with jittered coords & freshness
+// getNearbyUsers — map markers with cellId + per-request randomized coord
 // STABILITY FIX S1: Uses indexed query instead of full table scan
 // STABILITY FIX S6: Pre-fetches blocks before loop (eliminates N+1)
+//
+// Phase-2.5 data-minimization contract:
+//   - Response NEVER includes raw publishedLat/publishedLng/publishedAt or
+//     numeric distance. Those are server-only signals used for filtering.
+//   - Response includes cellId (coarse grid cell), displayLat/displayLng
+//     (per-request random point inside that cell), distanceBucket
+//     ('very_close' | 'nearby' | 'in_your_area'), and freshnessLabel
+//     ('recent' | 'earlier' | 'stale').
 // ---------------------------------------------------------------------------
 
 export const getNearbyUsers = query({
@@ -938,10 +1029,15 @@ export const getNearbyUsers = query({
           .collect();
 
     // STABILITY FIX S6/C2: Pre-fetch blocks and swipes before loop
-    const [blockedIds, swipedUsersMap] = await Promise.all([
-      prefetchBlockedUserIds(ctx, userId),
+    // P1 EXCLUSION: Load full negative-relationship exclusion set in parallel
+    // with swipes. Keep `blockedIds` as an alias so downstream uses are unchanged.
+    const [exclusions, swipedUsersMap] = await Promise.all([
+      loadDiscoveryExclusions(ctx, userId),
       prefetchSwipes(ctx, userId),
     ]);
+    const blockedIds = exclusions.blockedUserIds;
+    const unmatchedUserIds = exclusions.unmatchedUserIds;
+    const viewerReportedIds = exclusions.viewerReportedIds;
 
     // First pass: collect candidate user IDs that pass basic filters
     const candidateUserIds: string[] = [];
@@ -960,14 +1056,10 @@ export const getNearbyUsers = query({
       // Nearby pause: User has temporarily hidden from Nearby
       if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) continue;
 
-      // Time-based visibility mode
-      if (user.nearbyVisibilityMode === 'app_open') {
-        const inactiveThreshold = 5 * 60 * 1000;
-        if (now - user.lastActive > inactiveThreshold) continue;
-      } else if (user.nearbyVisibilityMode === 'recent') {
-        const recentThreshold = 30 * 60 * 1000;
-        if (now - user.lastActive > recentThreshold) continue;
-      }
+      // Persistent eligibility model: Nearby visibility is NOT coupled to
+      // lastActive / nearbyVisibilityMode freshness. A user remains visible
+      // until explicit exclusions fire (pause/incognito/disabled/skip/block)
+      // or a later coarse republish moves them out of range.
 
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
@@ -975,13 +1067,17 @@ export const getNearbyUsers = query({
       // P0 FIX: Require valid primary photo URL
       if (!user.primaryPhotoUrl) continue;
 
-      // Must have published location
+      // Must have published location (persistent: no freshness TTL — the last
+      // coarse published position stays eligible until the next republish).
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
 
-      // Freshness: published location must be within 10 minutes
-      if (now - user.publishedAt > MAP_VISIBILITY_WINDOW_MS) continue;
+      // Phase-2 ghost cutoff: evict users whose last coarse publish is older
+      // than GHOST_CUTOFF_MS (14 days). This is NOT a short TTL — active
+      // users are unaffected. It only prunes abandoned accounts so the map
+      // does not fill up with stale pins that will never move again.
+      if (now - user.publishedAt > GHOST_CUTOFF_MS) continue;
 
-      // Distance check — 100m to 1km range
+      // Distance check — 0 to 1 km range (no minimum floor; co-located users eligible)
       const distance = calculateDistanceMeters(
         myLat,
         myLng,
@@ -1001,6 +1097,10 @@ export const getNearbyUsers = query({
 
       // Block check (using pre-fetched set)
       if (blockedIds.has(user._id as string)) continue;
+      // P1 EXCLUSION: hide unmatched pairs (bidirectional) and reported users
+      // (one-way) from the Nearby map.
+      if (unmatchedUserIds.has(user._id as string)) continue;
+      if (viewerReportedIds.has(user._id as string)) continue;
 
       // Skip filter (using pre-fetched map)
       const existingSwipe = swipedUsersMap.get(user._id as string);
@@ -1016,9 +1116,26 @@ export const getNearbyUsers = query({
     // STABILITY FIX: Fetch photo counts only for candidates (not all users)
     const photoCountsMap = await prefetchPhotoCounts(ctx, candidateUserIds);
 
-    // Second pass: filter by photo count and build results
+    // Second pass: filter by photo count and build results.
+    // Phase-2.5 hardening + Phase-3 ranking & preview fields:
+    //   - NO raw / stored coordinates leave the server (cellId + per-request
+    //     randomized displayLatLng inside the cell only).
+    //   - NO numeric distance (distanceBucket only).
+    //   - freshnessLabel is three-tier: 'recent' | 'earlier' | 'stale'.
+    //   - Phase-3: each result carries a lightweight `tagline` and up to
+    //     three `sharedInterests` so the client can render a preview card
+    //     without a second round-trip. No sensitive data leaves the server.
+    //   - Phase-3: results are sorted by a simple score (freshness,
+    //     completeness, compatibility, activity) with a small random
+    //     tiebreak so the map does not look statically ordered.
+    const viewerActivities = new Set(currentUser.activities ?? []);
+    const viewerIntent = new Set(currentUser.relationshipIntent ?? []);
+
+    const freshnessScore: Record<string, number> = { recent: 30, earlier: 10, stale: 0 };
+
     const results = [];
-    const sortDistanceByUserId = new Map<string, number>();
+    const rankById = new Map<string, number>();
+
     for (let i = 0; i < candidateUsers.length; i++) {
       const user = candidateUsers[i];
       const photoCount = photoCountsMap.get(user._id as string) || 0;
@@ -1026,6 +1143,14 @@ export const getNearbyUsers = query({
 
       const locationAge = now - user.publishedAt!;
       const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
+      const freshnessLabel: 'recent' | 'earlier' | 'stale' =
+        locationAge <= NEARBY_RECENT_WINDOW_MS
+          ? 'recent'
+          : locationAge <= NEARBY_EARLIER_WINDOW_MS
+          ? 'earlier'
+          : 'stale';
+
+      // Server-side distance (never returned).
       const realDistance = calculateDistanceMeters(
         myLat,
         myLng,
@@ -1033,54 +1158,115 @@ export const getNearbyUsers = query({
         user.publishedLng!,
       );
 
-      // Sorting uses real distance (server-side only, never returned to client).
-      sortDistanceByUserId.set(user._id as string, realDistance);
-
-      // Strong Privacy Mode: fuzz returned map coordinates only.
-      // IMPORTANT: Eligibility/filtering/sorting still use real publishedLat/publishedLng.
-      let returnLat = user.publishedLat!;
-      let returnLng = user.publishedLng!;
+      // Strong Privacy Mode: shift the cell, then re-snap.
+      let cellLat = user.publishedLat!;
+      let cellLng = user.publishedLng!;
       if (user.strongPrivacyMode === true) {
         const seed = simpleHash(String(user._id));
         const bearingRad = (seed % 360) * (Math.PI / 180);
-        const distanceMeters = 200 + (seed % 201); // 200–400m
-        const fuzzed = offsetCoords(returnLat, returnLng, distanceMeters, bearingRad);
-        returnLat = fuzzed.lat;
-        returnLng = fuzzed.lng;
+        const distanceMeters = 200 + (seed % 201);
+        const fuzzed = offsetCoords(cellLat, cellLng, distanceMeters, bearingRad);
+        const resnapped = roundToGrid(fuzzed.lat, fuzzed.lng);
+        cellLat = resnapped.lat;
+        cellLng = resnapped.lng;
       }
 
-      // P0-3: Strong Privacy consistency — returned distance must match the
-      // fuzzed coord the client can see. Otherwise the client could back-solve
-      // the real location from (self coord, true distance).
-      const returnedDistance = user.strongPrivacyMode === true
-        ? calculateDistanceMeters(myLat, myLng, returnLat, returnLng)
+      const display = makeDisplayLatLng(cellLat, cellLng);
+      const cellId = makeCellId(cellLat, cellLng);
+
+      const bucketingDistance = user.strongPrivacyMode === true
+        ? calculateDistanceMeters(myLat, myLng, cellLat, cellLng)
         : realDistance;
+      const bucket = bucketNearbyDistance(bucketingDistance);
+
+      // --- Phase-3: preview fields + ranking signals ---
+
+      // Shared interests: intersection of activities + relationshipIntent,
+      // capped at 3. Only existing profile fields — no new data collection.
+      const shared: string[] = [];
+      for (const a of user.activities ?? []) {
+        if (shared.length >= 3) break;
+        if (viewerActivities.has(a)) shared.push(a);
+      }
+      for (const intent of user.relationshipIntent ?? []) {
+        if (shared.length >= 3) break;
+        if (viewerIntent.has(intent) && !shared.includes(intent)) shared.push(intent);
+      }
+
+      // Tagline: short human-readable hint derived from the target's own
+      // profile (no per-viewer leakage). Preference order:
+      //   1) first profile prompt answer (trimmed, <= 80 chars)
+      //   2) first activity / interest
+      //   3) bio snippet (<= 80 chars)
+      const firstPrompt = (user.profilePrompts ?? []).find(
+        (p: { question?: string; answer?: string }) =>
+          typeof p?.answer === 'string' && p.answer.trim().length > 0,
+      );
+      const firstActivity = (user.activities ?? []).find(
+        (a: string) => typeof a === 'string' && a.trim().length > 0,
+      );
+      let tagline: string | undefined;
+      if (firstPrompt && typeof firstPrompt.answer === 'string') {
+        tagline = clipText(firstPrompt.answer, 80);
+      } else if (firstActivity) {
+        tagline = `Into ${firstActivity.replace(/_/g, ' ')}`;
+      } else if (user.bio) {
+        tagline = clipText(user.bio, 80);
+      }
+
+      // Profile completeness (0..3): bio >=20 chars, >=3 photos, >=1 prompt.
+      const completeness =
+        ((user.bio && user.bio.length >= 20) ? 1 : 0) +
+        (photoCount >= 3 ? 1 : 0) +
+        (((user.profilePrompts ?? []).length >= 1) ? 1 : 0);
+
+      // Activity signal: prefer recent `lastActive`, capped and coarse.
+      const lastActive = typeof user.lastActive === 'number' ? user.lastActive : 0;
+      const activityAge = lastActive > 0 ? now - lastActive : Infinity;
+      const activityScore =
+        activityAge <= 24 * 60 * 60 * 1000 ? 10 :
+        activityAge <= 7 * 24 * 60 * 60 * 1000 ? 5 : 0;
+
+      // Final score. Weights are intentionally small & simple — freshness
+      // dominates, followed by compatibility, then completeness, then
+      // activity. A small random epsilon keeps same-score users shuffled.
+      const score =
+        (freshnessScore[freshnessLabel] ?? 0)
+        + shared.length * 7
+        + completeness * 5
+        + activityScore
+        + (user.isVerified ? 5 : 0)
+        + Math.random() * 4; // 0..4 jitter
+
+      rankById.set(user._id as string, score);
 
       results.push({
         id: user._id,
         name: user.name,
         age: calculateAge(user.dateOfBirth),
-        publishedLat: returnLat,
-        publishedLng: returnLng,
-        publishedAt: user.publishedAt,
-        distance: user.hideDistance === true ? undefined : returnedDistance,
+        cellId,
+        displayLat: display.lat,
+        displayLng: display.lng,
+        distanceBucket: user.hideDistance === true ? undefined : bucket.label,
         freshness,
+        freshnessLabel,
         photoUrl: user.primaryPhotoUrl ?? null,
         isVerified: user.isVerified,
         strongPrivacyMode: user.strongPrivacyMode ?? false,
         hideDistance: user.hideDistance ?? false,
+        // Phase-3 preview payload.
+        tagline,
+        sharedInterests: shared.length > 0 ? shared : undefined,
       });
     }
 
-    // Sort by recency first, then by distance
+    // Phase-3 sort: verified first, then by descending score, then random.
+    // Score already includes freshness weight and a small random epsilon.
     results.sort((a, b) => {
-      const recencyDiff = (b.publishedAt || 0) - (a.publishedAt || 0);
-      if (Math.abs(recencyDiff) > 60 * 60 * 1000) {
-        return recencyDiff;
-      }
-      const distA = sortDistanceByUserId.get(a.id as string) ?? Infinity;
-      const distB = sortDistanceByUserId.get(b.id as string) ?? Infinity;
-      return distA - distB;
+      if (a.isVerified !== b.isVerified) return a.isVerified ? -1 : 1;
+      const sa = rankById.get(a.id as string) ?? 0;
+      const sb = rankById.get(b.id as string) ?? 0;
+      return sb - sa;
     });
 
     return results;
@@ -1111,7 +1297,13 @@ export const getCrossPathHistory = query({
 
     // P1-3: Block filter — blocked users (either direction) must never
     // appear in crossed-paths history.
-    const blockedIds = await prefetchBlockedUserIds(ctx, userId);
+    // P1 EXCLUSION: also hide unmatched pairs (bidirectional) and users the
+    // viewer has reported (one-way).
+    const {
+      blockedUserIds: blockedIds,
+      unmatchedUserIds,
+      viewerReportedIds,
+    } = await loadDiscoveryExclusions(ctx, userId);
 
     // Pre-fetch swipes for skip filtering (matches Discover behavior per Rule 9)
     const mySwipes = await ctx.db
@@ -1150,6 +1342,10 @@ export const getCrossPathHistory = query({
         // in either direction (using pre-fetched set for O(1) lookup).
         const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
         if (blockedIds.has(otherUserId as string)) return false;
+        // P1 EXCLUSION: drop history rows for unmatched pairs and viewer-reported
+        // users so history stays consistent with the Nearby/Discover surfaces.
+        if (unmatchedUserIds.has(otherUserId as string)) return false;
+        if (viewerReportedIds.has(otherUserId as string)) return false;
 
         // Skip filter: Same as Discover behavior (Rule 9)
         const existingSwipe = swipedUsersMap.get(otherUserId as string);
@@ -2064,6 +2260,27 @@ function extractPromptKeywords(
 }
 
 /**
+ * Phase-1 privacy helper: bucket a computed distance (in meters) into a coarse
+ * label + a bucket-midpoint numeric value. The midpoint is what gets returned
+ * on the Nearby payload in place of raw meters, so clients can still sort
+ * stably (nearer buckets rank before farther ones) without learning
+ * sub-bucket precision.
+ *
+ *   very_close    : < 200 m  (midpoint 100)
+ *   nearby        : 200–500 m (midpoint 350)
+ *   in_your_area  : 500–1000 m (midpoint 750)
+ *
+ * Anything above 1 km is already filtered out by the Nearby eligibility loop,
+ * but we clamp to 'in_your_area' defensively.
+ */
+type NearbyDistanceBucket = 'very_close' | 'nearby' | 'in_your_area';
+function bucketNearbyDistance(meters: number): { label: NearbyDistanceBucket; midpoint: number } {
+  if (meters < 200) return { label: 'very_close', midpoint: 100 };
+  if (meters < 500) return { label: 'nearby', midpoint: 350 };
+  return { label: 'in_your_area', midpoint: 750 };
+}
+
+/**
  * Round coordinates to a grid for privacy.
  * Returns approximate location that doesn't reveal exact position.
  */
@@ -2074,6 +2291,50 @@ function roundToGrid(lat: number, lng: number): { lat: number; lng: number } {
     lat: Math.round(lat / gridSize) * gridSize,
     lng: Math.round(lng / gridSize) * gridSize,
   };
+}
+
+/**
+ * Phase-3 helper: clip a string to `max` characters without cutting in the
+ * middle of a word when avoidable. Returns the trimmed + ellipsised value.
+ * Defensive against non-string / empty input.
+ */
+function clipText(raw: unknown, max: number): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.replace(/\s+/g, ' ').trim();
+  if (trimmed.length === 0) return undefined;
+  if (trimmed.length <= max) return trimmed;
+  const cut = trimmed.slice(0, max);
+  const lastSpace = cut.lastIndexOf(' ');
+  const base = lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut;
+  return `${base.trimEnd()}…`;
+}
+
+/**
+ * Phase-2.5 privacy helper: stable cell identifier for a published (already
+ * grid-snapped) coordinate. The cellId is what leaves the server as the
+ * "location primitive" — it is coarse (LOCATION_GRID_METERS, ~300m) and the
+ * same for everyone in the same grid cell.
+ */
+function makeCellId(gridLat: number, gridLng: number): string {
+  return `cell:${gridLat.toFixed(5)}_${gridLng.toFixed(5)}`;
+}
+
+/**
+ * Phase-2.5 privacy helper: per-request randomized display point inside the
+ * originating grid cell. Math.random() is evaluated fresh for every result,
+ * so two viewers (or the same viewer across two requests) never see the same
+ * displayed coord for the same user. This removes the multi-observer /
+ * logging inference vector: clients only ever see random points inside the
+ * ~300m cell — not the stored grid coordinate, and never a GPS-precision
+ * value.
+ */
+function makeDisplayLatLng(
+  gridLat: number,
+  gridLng: number,
+): { lat: number; lng: number } {
+  const bearingRad = Math.random() * 2 * Math.PI;
+  const distanceMeters = Math.random() * CELL_JITTER_RADIUS_M;
+  return offsetCoords(gridLat, gridLng, distanceMeters, bearingRad);
 }
 
 /**

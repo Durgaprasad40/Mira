@@ -45,6 +45,7 @@ import { formatDiscoverDistanceKm } from '@/lib/distanceRules';
 import { getRenderableProfilePhotos } from '@/lib/profileData';
 // P0-FIX: Haptic feedback for premium interactions
 import * as Haptics from 'expo-haptics';
+import { trackEvent } from '@/lib/analytics';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -239,15 +240,51 @@ const skeletonStyles = StyleSheet.create({
 });
 
 export default function ViewProfileScreen() {
-  const { id: userId, mode, fromChat, source, actionScope } = useLocalSearchParams<{
+  const { id: userId, mode, fromChat, source, actionScope, freshness, intent } = useLocalSearchParams<{
     id: string;
     mode?: string;
     fromChat?: string;
     source?: string;
     actionScope?: string;
+    // Phase-2.5: coarse Nearby recency label passed from the Nearby marker tap.
+    // Values: 'recent' (<=24h) | 'earlier' (<=7d) | 'stale' (<=14d).
+    // Only shown when source=nearby.
+    freshness?: string;
+    // Phase-3: preview-card quick-action hint (currently only 'like').
+    // Used to highlight the CTA — does not auto-send any action.
+    intent?: string;
   }>();
   const normalizedSource = Array.isArray(source) ? source[0] : source;
   const normalizedActionScope = Array.isArray(actionScope) ? actionScope[0] : actionScope;
+  // Phase-2.5: coarse Nearby recency chip. Only rendered for source=nearby with
+  // a valid three-state label; never reveals minutes/hours/exact timestamp.
+  //   'recent'  → "Recently here"  (<=24h)
+  //   'earlier' → "Earlier"        (<=7d)
+  //   'stale'   → "A while ago"    (<=14d cutoff)
+  const normalizedFreshness = Array.isArray(freshness) ? freshness[0] : freshness;
+  const showFreshnessChip =
+    normalizedSource === 'nearby' &&
+    (normalizedFreshness === 'recent' ||
+      normalizedFreshness === 'earlier' ||
+      normalizedFreshness === 'stale');
+  const freshnessChipText =
+    normalizedFreshness === 'recent'
+      ? 'Recently here'
+      : normalizedFreshness === 'earlier'
+      ? 'Earlier'
+      : 'A while ago';
+  const freshnessChipIcon: keyof typeof Ionicons.glyphMap =
+    normalizedFreshness === 'recent'
+      ? 'time-outline'
+      : normalizedFreshness === 'earlier'
+      ? 'hourglass-outline'
+      : 'calendar-outline';
+  // Phase-3: only show the Nearby-source CTA when we arrived via a Nearby
+  // marker tap. It's intentionally small — a single line + two chip buttons —
+  // and never auto-triggers any action.
+  const isFromNearby = normalizedSource === 'nearby';
+  const normalizedIntent = Array.isArray(intent) ? intent[0] : intent;
+  const nearbyIntentLike = isFromNearby && normalizedIntent === 'like';
   const isPhase2 = mode === 'phase2';
   const isConfessPreview = mode === 'confess_preview';
   const router = useRouter();
@@ -718,6 +755,75 @@ export default function ViewProfileScreen() {
             <Text style={styles.distance}>{distanceLabel}</Text>
           )}
         </View>
+
+        {showFreshnessChip && (
+          <View style={styles.freshnessChip}>
+            <Ionicons
+              name={freshnessChipIcon}
+              size={12}
+              color={COLORS.textMuted}
+            />
+            <Text style={styles.freshnessChipText}>{freshnessChipText}</Text>
+          </View>
+        )}
+
+        {/* Phase-3: subtle "from Nearby" CTA. Only shown when the viewer
+            arrived via a Nearby marker tap. Two minimal actions — Say hi
+            (opens pre-match composer) and Like (uses the existing swipe
+            pipeline). The CTA is rendered as a soft pill row and does not
+            replace or hide the existing swipe affordances elsewhere on
+            the profile. */}
+        {isFromNearby && !isPhase2 && !isConfessPreview && (
+          <View style={styles.nearbyCtaWrap}>
+            <View style={styles.nearbyCtaHeader}>
+              <Ionicons name="location-outline" size={14} color={COLORS.textMuted} />
+              <Text style={styles.nearbyCtaHeaderText}>From Nearby — say hi first</Text>
+            </View>
+            <View style={styles.nearbyCtaRow}>
+              <TouchableOpacity
+                style={styles.nearbyCtaButton}
+                activeOpacity={0.85}
+                accessibilityLabel="Say hi"
+                accessibilityHint="Send a short message to introduce yourself"
+                onPress={() => {
+                  try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
+                  if (userId) {
+                    trackEvent({ name: 'nearby_to_message', targetUserId: userId });
+                    safePush(
+                      router,
+                      `/(main)/pre-match-message?userId=${userId}` as any,
+                      'profile->pre-match-message(nearby)'
+                    );
+                  }
+                }}
+              >
+                <Ionicons name="chatbubble-outline" size={14} color={COLORS.primary} />
+                <Text style={styles.nearbyCtaButtonText}>Say hi</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.nearbyCtaButton,
+                  styles.nearbyCtaButtonLike,
+                  nearbyIntentLike && styles.nearbyCtaButtonLikeIntent,
+                ]}
+                activeOpacity={0.85}
+                disabled={isActionPending}
+                accessibilityLabel="Like"
+                accessibilityHint="Send a like from Nearby"
+                onPress={() => {
+                  try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
+                  if (userId) {
+                    trackEvent({ name: 'nearby_to_like', targetUserId: userId });
+                  }
+                  handleSwipe('like');
+                }}
+              >
+                <Ionicons name="heart" size={14} color="#fff" />
+                <Text style={styles.nearbyCtaButtonLikeText}>Like</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
 
         {isConfessPreview && (
           <View style={styles.previewOnlyBanner}>
@@ -1245,6 +1351,85 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 12,
+  },
+  // Phase-2: coarse Nearby recency chip. Two-state only ('Recently here' / 'Earlier').
+  // Visual: soft chip that sits just above the trust badge row.
+  freshnessChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: COLORS.backgroundDark,
+    marginBottom: 12,
+  },
+  freshnessChipText: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+  // Phase-3: Nearby-source CTA pill row. Intentionally soft/neutral so it
+  // does not compete with the primary swipe affordances elsewhere on the
+  // profile. No paywall, no upsell, no new backend.
+  nearbyCtaWrap: {
+    marginBottom: 16,
+    marginTop: -4,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  nearbyCtaHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
+  },
+  nearbyCtaHeaderText: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+  nearbyCtaRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  nearbyCtaButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: `${COLORS.primary}33`,
+  },
+  nearbyCtaButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  nearbyCtaButtonLike: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.primary,
+  },
+  // Highlight state when the user arrived from the preview card's Like CTA —
+  // slightly stronger shadow so the Like pill reads as the pre-selected
+  // intent without auto-firing anything.
+  nearbyCtaButtonLikeIntent: {
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  nearbyCtaButtonLikeText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#fff',
   },
   trustBadgeRow: {
     flexDirection: 'row',

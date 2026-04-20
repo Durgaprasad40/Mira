@@ -24,7 +24,14 @@ type AnalyticsEvent =
   | { name: 'phase2_secure_photo_sent'; conversationId: string; timer: number; viewingMode: string }
   | { name: 'phase2_secure_photo_viewed'; conversationId: string; messageId: string }
   | { name: 'phase2_screen_opened'; screenName: string; [key: string]: string | number | boolean | undefined }
-  | { name: 'phase2_error'; context: string; errorMessage: string; errorCode?: string };
+  | { name: 'phase2_error'; context: string; errorMessage: string; errorCode?: string }
+  // Phase-3 Nearby discovery surface
+  | { name: 'nearby_map_open'; userCount?: number; isDemo?: boolean }
+  | { name: 'nearby_pin_tap'; targetUserId: string; freshnessLabel?: string; distanceBucket?: string }
+  | { name: 'nearby_preview_open'; targetUserId: string; freshnessLabel?: string }
+  | { name: 'nearby_profile_open'; targetUserId: string; via: 'preview' | 'direct' }
+  | { name: 'nearby_to_like'; targetUserId: string }
+  | { name: 'nearby_to_message'; targetUserId: string };
 
 /**
  * Track a named event with structured payload.

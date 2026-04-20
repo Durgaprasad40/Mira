@@ -80,6 +80,8 @@ import { Badge } from '@/components/ui/Badge';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
+import { NearbyPreviewCard, NearbyPreviewData } from '@/components/nearby/NearbyPreviewCard';
+import { trackEvent } from '@/lib/analytics';
 
 // Key for storing when user last viewed crossed paths
 const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
@@ -214,20 +216,39 @@ type LocationUIState =
   | 'error'
   | 'ready';
 
-/** Nearby user from query */
+/** Nearby user from query (Phase-2.5 payload contract).
+ *
+ * No raw/stored coordinates or numeric distance are transported. The server
+ * emits only:
+ *   - cellId: stable coarse grid cell identifier (~300m)
+ *   - displayLat/displayLng: per-request randomized point INSIDE that cell
+ *   - distanceBucket: 'very_close' | 'nearby' | 'in_your_area'
+ *   - freshnessLabel: 'recent' | 'earlier' | 'stale'
+ */
 interface NearbyUser {
   id: string;
   name: string;
   age: number;
-  publishedLat: number;
-  publishedLng: number;
-  publishedAt?: number;
-  distance?: number; // Server-side distance in meters (privacy-safe)
+  cellId: string;
+  displayLat: number;
+  displayLng: number;
+  distanceBucket?: 'very_close' | 'nearby' | 'in_your_area';
   freshness: 'solid' | 'faded';
+  // Phase-2.5: three-tier coarse recency label.
+  // 'recent' = <=24h, 'earlier' = <=7d, 'stale' = <=14d (ghost cutoff).
+  freshnessLabel?: 'recent' | 'earlier' | 'stale';
   photoUrl: string | null;
   isVerified: boolean;
   strongPrivacyMode: boolean;
   hideDistance: boolean;
+  // Phase-3 preview payload (server-provided, privacy-safe).
+  //   - tagline: short (<= 80 chars) teaser drawn from the target's own
+  //     profile fields (prompt answer → first activity → bio snippet).
+  //   - sharedInterests: up to 3 prettified interest keys the viewer and
+  //     target have in common.
+  // Both are optional and render nothing when absent.
+  tagline?: string;
+  sharedInterests?: string[];
 }
 
 type NearbyQueryStatus = 'ok' | 'viewer_unverified' | 'location_required';
@@ -237,11 +258,13 @@ interface NearbyUsersQueryResult {
   users: NearbyUser[];
 }
 
-/** Processed nearby user with backend-fuzzed map coordinates */
-interface ProcessedNearbyUser extends NearbyUser {
-  fuzzedLat: number;
-  fuzzedLng: number;
-}
+/** Processed nearby user — alias of the Phase-2.5 payload.
+ *
+ * We keep this named type because supercluster and downstream render
+ * code reference it, but we no longer carry any separate "fuzzed" coords
+ * on the client: the server already emits a per-request randomized
+ * displayLat/displayLng and that is what the map renders. */
+type ProcessedNearbyUser = NearbyUser;
 
 interface NearbyMapNotice {
   message: string;
@@ -410,6 +433,11 @@ export default function NearbyScreen() {
   const [isMapReady, setIsMapReady] = useState(false);
   const [retainedNearbyUsersResult, setRetainedNearbyUsersResult] = useState<NearbyUsersQueryResult | null>(null);
   const [nearbyRefreshKey, setNearbyRefreshKey] = useState(0);
+  // Phase-3: preview card state. When non-null, the single-step preview
+  // modal is shown and the user has not yet committed to opening the full
+  // profile. All preview data comes from the already-fetched payload — no
+  // additional network call.
+  const [previewUser, setPreviewUser] = useState<NearbyPreviewData | null>(null);
 
   // Mount guard for async operations
   const isMountedRef = useRef(true);
@@ -1014,13 +1042,15 @@ export default function NearbyScreen() {
     if (!isDemo) return [];
 
     // Demo marker offsets relative to current location (lat, lng in degrees)
-    // ~0.003 degrees ≈ 300m, spread in different directions
+    // ~0.003 degrees ≈ 300m, spread in different directions.
+    // Phase-2.5: demo uses the same payload shape as the backend — displayLat/Lng
+    // are the on-map points and distanceBucket replaces numeric distance.
     const demoOffsets = [
-      { latOff: +0.0030, lngOff: +0.0020, distance: 350 },  // NE ~350m
-      { latOff: -0.0025, lngOff: +0.0040, distance: 480 },  // SE ~480m
-      { latOff: -0.0035, lngOff: -0.0025, distance: 430 },  // SW ~430m
-      { latOff: +0.0020, lngOff: -0.0035, distance: 400 },  // NW ~400m
-      { latOff: +0.0045, lngOff: +0.0010, distance: 460 },  // N  ~460m
+      { latOff: +0.0030, lngOff: +0.0020, bucket: 'nearby' as const },      // NE
+      { latOff: -0.0025, lngOff: +0.0040, bucket: 'nearby' as const },      // SE
+      { latOff: -0.0035, lngOff: -0.0025, bucket: 'nearby' as const },      // SW
+      { latOff: +0.0020, lngOff: -0.0035, bucket: 'nearby' as const },      // NW
+      { latOff: +0.0045, lngOff: +0.0010, bucket: 'in_your_area' as const },// N
     ];
 
     // Use current location as base, fallback to demo location
@@ -1028,20 +1058,34 @@ export default function NearbyScreen() {
     const baseLng = bestLocation?.longitude ?? DEMO_LOCATION.longitude;
 
     return DEMO_PROFILES.slice(0, 5).map((profile, index) => {
-      const offset = demoOffsets[index] ?? { latOff: 0, lngOff: 0, distance: 500 };
+      const offset = demoOffsets[index] ?? { latOff: 0, lngOff: 0, bucket: 'in_your_area' as const };
+      const dLat = baseLat + offset.latOff;
+      const dLng = baseLng + offset.lngOff;
+      // Phase-3: fabricate preview payload from demo profile fields so the
+      // preview card has something to show without touching the network.
+      const demoTagline =
+        (profile as any)?.prompts?.[0]?.answer ??
+        ((profile as any)?.bio ? String((profile as any).bio).slice(0, 80) : undefined);
+      const demoInterests = Array.isArray((profile as any)?.activities)
+        ? ((profile as any).activities as string[]).slice(0, 3)
+        : undefined;
       return {
         id: profile._id,
         name: profile.name,
         age: profile.age,
-        publishedLat: baseLat + offset.latOff,
-        publishedLng: baseLng + offset.lngOff,
-        publishedAt: Date.now() - index * 60 * 60 * 1000, // Stagger by hours
-        distance: offset.distance,
+        cellId: `demo:${index}`,
+        displayLat: dLat,
+        displayLng: dLng,
+        distanceBucket: offset.bucket,
         freshness: 'solid' as const,
+        // Phase-2.5: demo profiles are <24h old, so tag them recent.
+        freshnessLabel: 'recent' as const,
         photoUrl: getPrimaryPhotoUrl(profile.photos),
         isVerified: profile.isVerified ?? false,
         strongPrivacyMode: false,
         hideDistance: false,
+        tagline: demoTagline,
+        sharedInterests: demoInterests,
       };
     });
   }, [isDemo, bestLocation]);
@@ -1087,34 +1131,26 @@ export default function NearbyScreen() {
     let validCount = 0;
     let skippedCount = 0;
 
-    const processed = rawUsers
-      .filter((user) => {
-        // Skip invalid coordinates
-        if (!isValidMapCoordinate(user.publishedLat, user.publishedLng)) {
-          skippedCount++;
-          return false;
-        }
-        // Skip self (shouldn't happen but guard anyway)
-        if (user.id === userId) {
-          skippedCount++;
-          return false;
-        }
-        validCount++;
-        return true;
-      })
-      .map((user) => {
-        return {
-          ...user,
-          fuzzedLat: user.publishedLat,
-          fuzzedLng: user.publishedLng,
-        };
-      });
+    const processed: ProcessedNearbyUser[] = rawUsers.filter((user) => {
+      // Skip invalid coordinates. Only the per-request displayLat/displayLng
+      // is validated — the server does not send any other coord.
+      if (!isValidMapCoordinate(user.displayLat, user.displayLng)) {
+        skippedCount++;
+        return false;
+      }
+      // Skip self (shouldn't happen but guard anyway)
+      if (user.id === userId) {
+        skippedCount++;
+        return false;
+      }
+      validCount++;
+      return true;
+    });
 
-    // DEV-only logging
+    // DEV-only logging. Phase-2.5: counts only, never coords or cellIds, to
+    // avoid leaking even coarse location primitives into app logs.
     if (__DEV__) {
-      console.log('[NEARBY] Query count:', rawUsers.length);
-      console.log('[NEARBY] Rendered markers:', validCount);
-      console.log('[NEARBY] Skipped invalid:', skippedCount);
+      console.log('[NEARBY] markers: %d rendered, %d skipped', validCount, skippedCount);
     }
 
     return processed;
@@ -1125,26 +1161,57 @@ export default function NearbyScreen() {
   // Filtering is handled by the backend so every eligible user is represented
   // ---------------------------------------------------------------------------
   const mapUsers = useMemo(() => {
-    const sorted = [...processedNearbyUsers];
-
-    // Sort: verified users first, then by freshness, then by distance
-    sorted.sort((a, b) => {
-      // Verified first
-      if (a.isVerified && !b.isVerified) return -1;
-      if (!a.isVerified && b.isVerified) return 1;
-      // Fresh first
-      if (a.freshness === 'solid' && b.freshness === 'faded') return -1;
-      if (a.freshness === 'faded' && b.freshness === 'solid') return 1;
-      // Closer first
-      return (a.distance ?? 1000) - (b.distance ?? 1000);
-    });
-
-    return sorted;
+    // Phase-2.5: the server already orders the payload (verified →
+    // freshness → random tiebreak) AND does not expose numeric distance.
+    // The client must therefore not re-sort by distance; we preserve the
+    // server-provided order as-is so we don't reintroduce a precision
+    // signal via ranking. The original array is cloned so downstream
+    // mutations (if any) don't touch React state.
+    return [...processedNearbyUsers];
   }, [processedNearbyUsers]);
+
+  // Phase-3: soft fade-in whenever the visible marker set size changes.
+  // Uses a numeric state because react-native-maps <Marker> takes a plain
+  // `opacity` prop (not Animated). We drop to 0 synchronously and then
+  // schedule a single rAF hop to 1 so the native driver can interpolate on
+  // its own. No new native components are introduced.
+  const [markerFadeOpacity, setMarkerFadeOpacity] = useState(0);
+  useEffect(() => {
+    if (mapUsers.length === 0) {
+      setMarkerFadeOpacity(0);
+      return;
+    }
+    setMarkerFadeOpacity(0);
+    const raf = requestAnimationFrame(() => {
+      if (isMountedRef.current) {
+        setMarkerFadeOpacity(1);
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [mapUsers.length]);
+
+  // Phase-3: fire a single nearby_map_open analytics event the first time a
+  // non-loading payload is available after the tab gains focus. Guarded by
+  // a ref so repeated re-renders don't spam the event bus.
+  const nearbyMapOpenFiredRef = useRef(false);
+  useEffect(() => {
+    if (!isNearbyFocused) {
+      nearbyMapOpenFiredRef.current = false;
+      return;
+    }
+    if (nearbyMapOpenFiredRef.current) return;
+    if (!displayNearbyUsersResult) return;
+    nearbyMapOpenFiredRef.current = true;
+    trackEvent({
+      name: 'nearby_map_open',
+      userCount: mapUsers.length,
+      isDemo,
+    });
+  }, [isNearbyFocused, displayNearbyUsersResult, mapUsers.length, isDemo]);
 
   const clusterPoints = useMemo<Supercluster.PointFeature<UserPointProperties>[]>(() => {
     return mapUsers
-      .filter((user) => isValidMapCoordinate(user.fuzzedLat, user.fuzzedLng))
+      .filter((user) => isValidMapCoordinate(user.displayLat, user.displayLng))
       .map((user) => ({
         type: 'Feature' as const,
         properties: {
@@ -1153,7 +1220,7 @@ export default function NearbyScreen() {
         },
         geometry: {
           type: 'Point' as const,
-          coordinates: [user.fuzzedLng, user.fuzzedLat],
+          coordinates: [user.displayLng, user.displayLat],
         },
       }));
   }, [mapUsers]);
@@ -1268,23 +1335,16 @@ export default function NearbyScreen() {
     }
   }, [isEmptyStateCondition]);
 
-  // P2-FIX-3: Auto-hide empty-state card after ~3s. Direct unmount, no fade —
-  // card disappears cleanly and nothing stays over the map.
+  // Phase-1 UX fix: the empty-state card used to auto-dismiss after ~3s,
+  // which left users staring at an empty map with no explanation of why
+  // nobody was showing up. The card now stays visible for as long as the
+  // empty-state condition is true and is only cleared when new users
+  // actually appear (handled in the reset-on-recovery effect above).
   useEffect(() => {
-    if (!showEmptyState) return;
-
-    emptyStateAutoHideTimerRef.current = setTimeout(() => {
-      if (!isMountedRef.current) return;
-      hasAutoHiddenEmptyStateRef.current = true;
-      setShowEmptyState(false);
-    }, 3000);
-
-    return () => {
-      if (emptyStateAutoHideTimerRef.current) {
-        clearTimeout(emptyStateAutoHideTimerRef.current);
-        emptyStateAutoHideTimerRef.current = null;
-      }
-    };
+    if (emptyStateAutoHideTimerRef.current) {
+      clearTimeout(emptyStateAutoHideTimerRef.current);
+      emptyStateAutoHideTimerRef.current = null;
+    }
   }, [showEmptyState]);
 
   // P3-004: Subtle pulse loop while empty card is visible. Native driver,
@@ -1364,8 +1424,22 @@ export default function NearbyScreen() {
     safePush(router, '/(main)/verification' as any, 'nearby->verification');
   }, [router]);
 
+  // Phase-3: actionable empty state. When Nearby is empty the user can jump
+  // to the main discover feed or open their discovery preferences to widen
+  // filters — both are existing screens, we only add navigation entries.
+  const handleOpenDiscover = useCallback(() => {
+    safePush(router, '/(main)/discover' as any, 'nearby->discover');
+  }, [router]);
+
+  const handleOpenPreferences = useCallback(() => {
+    safePush(router, '/(main)/discovery-preferences' as any, 'nearby->preferences');
+  }, [router]);
+
   // ---------------------------------------------------------------------------
-  // Marker press handler - opens full profile
+  // Marker press handler — Phase-3: open the lightweight preview card first.
+  // The full profile is only opened after the user taps "View profile" on
+  // the preview. Everything shown in the preview is already in the payload
+  // (no extra query).
   // ---------------------------------------------------------------------------
   const handleMarkerPress = useCallback((user: ProcessedNearbyUser) => {
     if (!user?.id) {
@@ -1380,8 +1454,70 @@ export default function NearbyScreen() {
       // Haptics not available on device
     }
 
-    log.info('[NEARBY]', 'marker tapped, opening profile', { id: user.id, name: user.name });
-    safePush(router, `/(main)/profile/${user.id}` as any, 'nearby->profile');
+    trackEvent({
+      name: 'nearby_pin_tap',
+      targetUserId: user.id,
+      freshnessLabel: user.freshnessLabel,
+      distanceBucket: user.distanceBucket,
+    });
+
+    const preview: NearbyPreviewData = {
+      id: user.id,
+      name: user.name,
+      age: user.age,
+      photoUrl: user.photoUrl,
+      freshnessLabel: user.freshnessLabel,
+      tagline: user.tagline,
+      sharedInterests: user.sharedInterests,
+      isVerified: user.isVerified,
+    };
+    setPreviewUser(preview);
+    trackEvent({
+      name: 'nearby_preview_open',
+      targetUserId: user.id,
+      freshnessLabel: user.freshnessLabel,
+    });
+    log.info('[NEARBY]', 'marker tapped, opening preview', { id: user.id });
+  }, []);
+
+  const handleClosePreview = useCallback(() => {
+    setPreviewUser(null);
+  }, []);
+
+  const handlePreviewViewProfile = useCallback((user: NearbyPreviewData) => {
+    // Phase-2.5: pass coarse freshness label to the profile screen so it can
+    // show the small recency chip. No exact timestamp is passed — only the
+    // three-state label.
+    const freshnessParam = user.freshnessLabel
+      ? `?source=nearby&freshness=${user.freshnessLabel}`
+      : '?source=nearby';
+    trackEvent({
+      name: 'nearby_profile_open',
+      targetUserId: user.id,
+      via: 'preview',
+    });
+    setPreviewUser(null);
+    log.info('[NEARBY]', 'preview → profile', { id: user.id });
+    safePush(router, `/(main)/profile/${user.id}${freshnessParam}` as any, 'nearby->profile');
+  }, [router]);
+
+  const handlePreviewLike = useCallback((user: NearbyPreviewData) => {
+    // Micro-conversion hook: from the preview surface, "Like" takes the user
+    // into the full profile (which carries the swipe affordances). Liking
+    // without viewing the profile is intentionally not a standalone action
+    // here so we don't bypass the user's ability to read the bio / photos.
+    const freshnessParam = user.freshnessLabel
+      ? `?source=nearby&freshness=${user.freshnessLabel}&intent=like`
+      : '?source=nearby&intent=like';
+    trackEvent({ name: 'nearby_to_like', targetUserId: user.id });
+    trackEvent({
+      name: 'nearby_profile_open',
+      targetUserId: user.id,
+      via: 'preview',
+    });
+    setPreviewUser(null);
+    log.info('[NEARBY]', 'preview → like (profile)', { id: user.id });
+    safePush(router, `/(main)/profile/${user.id}${freshnessParam}` as any, 'nearby->profile-like');
   }, [router]);
 
   // ---------------------------------------------------------------------------
@@ -1887,6 +2023,7 @@ export default function NearbyScreen() {
                   anchor={{ x: 0.5, y: 1 }}
                   onPress={() => handleClusterPress(clusterFeature)}
                   image={clusterImage}
+                  opacity={markerFadeOpacity}
                   tracksViewChanges={false}
                 />
               );
@@ -1902,6 +2039,7 @@ export default function NearbyScreen() {
                   anchor={{ x: 0.5, y: 1 }}
                   onPress={() => handleMarkerPress(user)}
                   image={pinPink}
+                  opacity={markerFadeOpacity}
                   tracksViewChanges={false}
                 />
               );
@@ -1933,16 +2071,24 @@ export default function NearbyScreen() {
         )}
 
         {/* Query loading indicator - shown while fetching nearby users */}
-        {/* P3-003: Animated fade-in for premium feel */}
+        {/* P3-003 / Phase-3: Fade-in + lightweight shimmer placeholders so
+             the overlay reads as an active scan rather than a dead spinner. */}
         {showLoadingOverlay && !isDemo && (
           <Animated.View style={[styles.loadingOverlay, { opacity: loadingOpacity }]}>
             <View style={styles.loadingCard}>
-              <ActivityIndicator size="small" color={COLORS.primary} />
-              <Text style={styles.loadingText}>
-                {isRetrying || hasRetainedNearbyResult
-                  ? 'Refreshing Nearby…'
-                  : 'Searching nearby…'}
-              </Text>
+              <View style={styles.loadingRow}>
+                <ActivityIndicator size="small" color={COLORS.primary} />
+                <Text style={styles.loadingText}>
+                  {isRetrying || hasRetainedNearbyResult
+                    ? 'Refreshing Nearby…'
+                    : 'Searching nearby…'}
+                </Text>
+              </View>
+              <View style={styles.loadingSkeletonRow}>
+                <View style={[styles.loadingSkeletonDot, styles.loadingSkeletonDot1]} />
+                <View style={[styles.loadingSkeletonDot, styles.loadingSkeletonDot2]} />
+                <View style={[styles.loadingSkeletonDot, styles.loadingSkeletonDot3]} />
+              </View>
             </View>
           </Animated.View>
         )}
@@ -1986,7 +2132,7 @@ export default function NearbyScreen() {
                 <Text style={styles.emptySubtitle}>
                   Be the first in your area or check back later.
                 </Text>
-                <Text style={styles.emptyTrust}>Your location is live</Text>
+                <Text style={styles.emptyTrust}>Approximate area only — not live tracking</Text>
                 <Text style={styles.emptyHint}>Move the map to explore other areas</Text>
                 <View style={styles.emptyActionRow}>
                   <TouchableOpacity
@@ -2006,6 +2152,26 @@ export default function NearbyScreen() {
                     <Text style={styles.emptyActionText}>
                       {isRetrying ? 'Refreshing Nearby…' : 'Refresh'}
                     </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.emptyActionButton}
+                    onPress={handleOpenDiscover}
+                    activeOpacity={0.85}
+                    accessibilityLabel="Try Discover"
+                    accessibilityHint="Browse the full discover feed while Nearby is empty"
+                  >
+                    <Ionicons name="compass-outline" size={16} color={COLORS.primary} />
+                    <Text style={styles.emptyActionText}>Try Discover</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.emptyActionButton}
+                    onPress={handleOpenPreferences}
+                    activeOpacity={0.85}
+                    accessibilityLabel="Adjust preferences"
+                    accessibilityHint="Open discovery preferences to widen your search"
+                  >
+                    <Ionicons name="options-outline" size={16} color={COLORS.primary} />
+                    <Text style={styles.emptyActionText}>Adjust preferences</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.emptyActionButton}
@@ -2076,6 +2242,18 @@ export default function NearbyScreen() {
 
       {/* Content area - state-specific UI rendered below header */}
       {renderContent()}
+
+      {/* Phase-3: lightweight preview card shown on marker tap. Mounted at
+          the SafeAreaView root so the modal backdrop covers the whole tab
+          (including the header). No network call — data comes from the
+          already-fetched Nearby payload. */}
+      <NearbyPreviewCard
+        visible={previewUser !== null}
+        user={previewUser}
+        onClose={handleClosePreview}
+        onViewProfile={handlePreviewViewProfile}
+        onLike={handlePreviewLike}
+      />
     </SafeAreaView>
   );
 }
@@ -2209,7 +2387,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   loadingCard: {
-    flexDirection: 'row',
+    // Phase-3: stack the spinner row above the skeleton dots.
+    flexDirection: 'column',
     alignItems: 'center',
     backgroundColor: 'rgba(255, 255, 255, 0.95)',
     paddingHorizontal: 16,
@@ -2220,12 +2399,32 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 3,
+    gap: 6,
+  },
+  loadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
   },
   loadingText: {
     fontSize: 13,
     color: COLORS.textLight,
   },
+  loadingSkeletonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 2,
+  },
+  loadingSkeletonDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: `${COLORS.primary}66`,
+  },
+  loadingSkeletonDot1: { opacity: 0.55 },
+  loadingSkeletonDot2: { opacity: 0.8 },
+  loadingSkeletonDot3: { opacity: 1 },
   mapNoticeContainer: {
     position: 'absolute',
     top: 64,
