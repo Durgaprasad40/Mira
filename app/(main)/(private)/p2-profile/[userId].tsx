@@ -336,7 +336,7 @@ export default function Phase2FullProfileScreen() {
   const profile = useQuery(
     api.privateDiscover.getProfileByUserId,
     !isDemoMode && profileUserId && currentUserId
-      ? { userId: profileUserId as any, viewerId: currentUserId as any }
+      ? { userId: profileUserId as any, viewerAuthUserId: currentUserId }
       : 'skip'
   );
 

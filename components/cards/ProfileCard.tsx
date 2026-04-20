@@ -35,10 +35,12 @@ import Animated, {
   useAnimatedStyle,
   withTiming,
   withSpring,
+  withRepeat,
   FadeIn,
   FadeOut,
   Layout,
   runOnJS,
+  Easing,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 // P0-FIX: Haptic feedback for premium interactions
@@ -116,6 +118,12 @@ export interface ProfileCardProps {
   photoBlurEnabled?: boolean;
   /** Phase-2: per-photo blur slots aligned with `photos[]` indices (true = blurred). */
   photoBlurSlots?: boolean[];
+  /**
+   * P1-009: True when viewer and profile-owner have mutually matched in Deep Connect.
+   * When true, the card skips blur for this exact pair (never global).
+   * Only source: `isRevealed` field from Phase-2 discover queries.
+   */
+  isRevealed?: boolean;
   /** Face 2 only: intent category keys from PRIVATE_INTENT_CATEGORIES (array) */
   privateIntentKeys?: string[];
   /** Phase-2 only: desire tag keys from PRIVATE_DESIRE_TAGS */
@@ -289,6 +297,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   photoBlurred = false,
   photoBlurEnabled,
   photoBlurSlots,
+  isRevealed = false,
   privateIntentKeys,
   desireTagKeys,
   lookingFor,
@@ -316,7 +325,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       : phase === 'phase1'
         ? false
         : (Array.isArray(privateIntentKeys) && privateIntentKeys.length > 0);
-  const shouldBlurPhoto = isPhase2 ? (photoBlurEnabled === true) : photoBlurred === true;
+  // P1-009: When this pair has mutually revealed (matched in Deep Connect),
+  // force-disable blur for that pair only. `isRevealed` is scoped per-viewer
+  // and never leaks photos globally.
+  const effectivePhotoBlurEnabled = isRevealed ? false : photoBlurEnabled;
+  const effectivePhotoBlurred = isRevealed ? false : photoBlurred;
+  const effectivePhotoBlurSlots = isRevealed ? undefined : photoBlurSlots;
+  const shouldBlurPhoto = isPhase2 ? (effectivePhotoBlurEnabled === true) : effectivePhotoBlurred === true;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // IDENTITY SIMPLIFICATION: Single `name` field for all phases
@@ -1274,6 +1289,17 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     return label;
   }, [isPhase2, privateIntentKeys, name]);
 
+  const phase2IntentChips = useMemo(() => {
+    if (!isPhase2 || !privateIntentKeys || privateIntentKeys.length === 0) return [];
+    return privateIntentKeys
+      .map((key) => {
+        const category = PRIVATE_INTENT_CATEGORIES.find((item) => item.key === key);
+        return category ? { key, label: category.label } : null;
+      })
+      .filter(Boolean)
+      .slice(0, 2) as { key: string; label: string }[];
+  }, [isPhase2, privateIntentKeys]);
+
   // Phase-2: Lifestyle chips (height, smoking, drinking)
   const phase2Lifestyle = useMemo(() => {
     if (!isPhase2) return [];
@@ -1537,6 +1563,32 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // 3B-2: Safe access with clamping
   const safeIndex = Math.min(Math.max(0, photoIndex), Math.max(0, photoCount - 1));
   const currentPhoto = displayPhotos[safeIndex] || displayPhotos[0];
+  // P1-009: Use effective* flags so reveal short-circuits the lock-hint overlay too.
+  const currentPhotoLocked = isPhase2
+    ? (effectivePhotoBlurEnabled === true ? Boolean(effectivePhotoBlurSlots?.[safeIndex]) : effectivePhotoBlurred === true)
+    : false;
+  const blurHintSheen = useSharedValue(-140);
+
+  useEffect(() => {
+    if (!currentPhotoLocked) {
+      blurHintSheen.value = -140;
+      return;
+    }
+    blurHintSheen.value = -140;
+    blurHintSheen.value = withRepeat(
+      withTiming(140, {
+        duration: 2400,
+        easing: Easing.inOut(Easing.ease),
+      }),
+      -1,
+      false,
+    );
+  }, [blurHintSheen, currentPhotoLocked]);
+
+  const blurHintSheenStyle = useAnimatedStyle(() => ({
+    opacity: currentPhotoLocked ? 0.6 : 0,
+    transform: [{ translateX: blurHintSheen.value }],
+  }));
 
   const handleImageError = useCallback(() => {
     failedPhotoIndexesRef.current.add(safeIndex);
@@ -1664,8 +1716,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             photos={displayPhotos}
             activeIndex={safeIndex}
             photoBlurred={shouldBlurPhoto}
-            photoBlurEnabled={isPhase2 ? photoBlurEnabled : undefined}
-            photoBlurSlots={isPhase2 ? photoBlurSlots : undefined}
+            photoBlurEnabled={isPhase2 ? effectivePhotoBlurEnabled : undefined}
+            photoBlurSlots={isPhase2 ? effectivePhotoBlurSlots : undefined}
             onError={handleImageError}
             lookaheadCount={isPhase2 ? PHASE2_ACTIVE_CARD_LOOKAHEAD : PHASE1_ACTIVE_CARD_LOOKAHEAD}
             previousCount={isPhase2 ? PHASE2_ACTIVE_CARD_PREVIOUS : 0}
@@ -1768,6 +1820,29 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </View>
         )}
 
+        {isPhase2 && currentPhotoLocked && (
+          <View
+            style={[styles.phase2LockedHint, { bottom: arrowButtonBottom + 52 }]}
+            pointerEvents="none"
+          >
+            <Animated.View style={[styles.phase2LockedHintSheen, blurHintSheenStyle]}>
+              <LinearGradient
+                colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.24)', 'rgba(255,255,255,0)']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={StyleSheet.absoluteFill}
+              />
+            </Animated.View>
+            <View style={styles.phase2LockedHintRow}>
+              <Ionicons name="lock-closed" size={12} color="rgba(255,255,255,0.88)" />
+              <Text style={styles.phase2LockedHintTitle}>Unlocks on match</Text>
+            </View>
+            <Text style={styles.phase2LockedHintSubtitle}>
+              Private photos stay blurred until you both connect
+            </Text>
+          </View>
+        )}
+
         {/* Arrow button to open full profile */}
         {showCarousel && onOpenProfile && (
           <TouchableOpacity
@@ -1806,11 +1881,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                   />
                 </View>
               )}
-              {isVerified && (
-                <View style={styles.phase2VerifiedBadge}>
-                  <Ionicons name="checkmark" size={10} color={COLORS.white} />
-                </View>
-              )}
+              {isVerified ? (
+                <Ionicons name="checkmark-circle" size={16} color="#7dd3fc" style={styles.phase2VerifiedIcon} />
+              ) : null}
             </View>
 
             {/* LAYER B: PHOTO-1-ONLY METADATA - Presence + City */}
@@ -1845,6 +1918,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 )}
               </View>
             )}
+
+            {phase2IntentChips.length > 0 && (
+              <View style={styles.phase2IntentMetaRow}>
+                {phase2IntentChips.map((chip) => (
+                  <View key={chip.key} style={styles.phase2IntentMetaChip}>
+                    <Text style={styles.phase2IntentMetaText}>{chip.label}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
           </View>
 
           {/* ═══════════════════════════════════════════════════════════════════════════
@@ -1856,7 +1939,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               ═══════════════════════════════════════════════════════════════════════════ */}
 
           {/* Intent slot */}
-          {currentContentSlot === 'intent' && phase2IntentLabel && (
+          {currentContentSlot === 'intent' && phase2IntentLabel && photoIndex > 0 && (
             <Animated.View
               key={`intent-${photoIndex}`}
               entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
@@ -2854,6 +2937,44 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.15)',
   },
+  phase2LockedHint: {
+    position: 'absolute',
+    left: 16,
+    right: 70,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(7, 11, 24, 0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    zIndex: 14,
+  },
+  phase2LockedHintSheen: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: -60,
+    width: 72,
+  },
+  phase2LockedHintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  phase2LockedHintTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.92)',
+    letterSpacing: 0.2,
+  },
+  phase2LockedHintSubtitle: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.62)',
+    lineHeight: 15,
+    marginTop: 4,
+  },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE-2: Premium photo-index-based overlay styles
@@ -2881,13 +3002,11 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.75)',
     marginRight: 10,
   },
-  phase2VerifiedBadge: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#9b59b6',
-    alignItems: 'center',
-    justifyContent: 'center',
+  phase2VerifiedIcon: {
+    marginLeft: 2,
+    textShadowColor: 'rgba(0,0,0,0.35)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
   },
   // PHASE2_PARITY: Identity section wrapper
   phase2IdentitySection: {
@@ -2944,6 +3063,26 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '400',
     color: 'rgba(255,255,255,0.6)',
+  },
+  phase2IntentMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+  },
+  phase2IntentMetaChip: {
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  phase2IntentMetaText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.86)',
+    letterSpacing: 0.18,
   },
   phase2RevealSection: {
     marginTop: 4,
