@@ -118,6 +118,7 @@ export default function PhotoUploadScreen() {
   // Convex mutations
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
   const uploadVerificationReferencePhoto = useMutation(api.photos.uploadVerificationReferencePhoto);
+  const acceptConsent = useMutation(api.auth.acceptConsent);
 
   // C4 FIX: queryEnabled allows retry by toggling the query subscription
   const [queryEnabled, setQueryEnabled] = useState(true);
@@ -497,6 +498,16 @@ export default function PhotoUploadScreen() {
     console.log(`[PHOTO_GATE] Starting upload for userId=${userId}`);
 
     try {
+      // Step 0: Ensure consent is persisted before upload.
+      // ROOT CAUSE FIX: welcome.tsx shows "By continuing, you agree to our
+      // Terms of Service and Privacy Policy" (implicit consent), but the
+      // consent.tsx screen is not in the active onboarding flow, so
+      // consentAcceptedAt is never written. Backend PHOTO_GATE requires it.
+      // acceptConsent is idempotent (returns alreadyAccepted if set).
+      console.log('[PHOTO_GATE] Ensuring consent is persisted...');
+      await acceptConsent({ userId: userId as Id<'users'> });
+      console.log('[PHOTO_GATE] Consent confirmed');
+
       // Step 1: Upload photo to Convex storage
       console.log('[PHOTO_GATE] Getting upload URL...');
       const uploadUrl = await generateUploadUrl();
