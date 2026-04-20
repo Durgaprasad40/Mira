@@ -629,11 +629,14 @@ export const getDiscoverProfiles = query({
         historyFailCount++;
         continue;
       }
-      // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
-      if (conversationPartnerIds.has(user._id as string)) {
-        historyFailCount++;
-        continue;
-      }
+      // CONVERSATION PARTNER EXCLUSION — DISABLED:
+      // Users with an existing conversation are no longer hidden from Discover.
+      // Rationale: the exclusion caused matched / mid-chat / previously-messaged
+      // users to disappear from the primary feed while remaining visible on
+      // Nearby, which was surprising to users. Blocking / unmatching / reporting
+      // still exclude (handled above). conversationPartnerIds is still computed
+      // for debugging/analytics; the filter is intentionally a no-op here.
+      // (Deep Connect and Explore have the same change.)
 
       // Enforcement
       if (user.verificationEnforcementLevel === 'security_only') {
@@ -1458,7 +1461,9 @@ async function buildExploreCandidates(
       if (exclusions.matchedUserIds.has(candidateId)) continue;
       if (exclusions.blockedUserIds.has(candidateId)) continue;
       if (exclusions.viewerReportedIds.has(candidateId)) continue;
-      if (exclusions.conversationPartnerIds.has(candidateId)) continue;
+      // CONVERSATION PARTNER EXCLUSION — DISABLED (see getDiscoverProfiles):
+      // Users with an existing conversation are no longer hidden from Explore.
+      // Blocking / unmatching / reporting still exclude above.
 
       if (user.incognitoMode) {
         const canSeeIncognito = currentUser.gender === 'female' || currentUser.subscriptionTier === 'premium';

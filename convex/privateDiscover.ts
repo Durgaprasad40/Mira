@@ -215,8 +215,10 @@ export const getProfiles = query({
           p.isSetupComplete &&
           !blockedUserIds.has(p.userId as string) &&
           !deletedUserIds.has(p.userId as string) &&
-          // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
-          !conversationPartnerIds.has(p.userId as string) &&
+          // CONVERSATION PARTNER EXCLUSION — DISABLED (mirrors Discover/Explore):
+          // An existing conversation no longer hides the candidate. Phase-2
+          // `isSetupComplete`, blocks, deletion, and hideFromDeepConnect still
+          // apply. conversationPartnerIds is still computed for debugging.
           p.hideFromDeepConnect !== true &&
           (!requestedIntentKeySet ||
             profileIntentKeys.some((key) => requestedIntentKeySet.has(key)))
