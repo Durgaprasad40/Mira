@@ -399,14 +399,19 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   const phase1SupplementalTrustBadges = useMemo(() => {
     if (isPhase2 || !trustBadges || trustBadges.length === 0) return [];
-    // Exclude presence ('active'), identity-verified ('verified'), and the
-    // legacy "Face Verified" pill ('face_verified'). Product rule: only show a
-    // small verified tick next to name/age — never a separate Face Verified badge.
+    // Exclude presence ('active'), identity-verified ('verified'), the
+    // legacy "Face Verified" pill ('face_verified'), and the utility/status
+    // tags 'photos' (Photos Added) and 'complete' (Profile Complete) which
+    // are meta-completeness indicators, not trust signals shown on Discover.
+    // Product rule: only show a small verified tick next to name/age — never
+    // a separate Face Verified badge; never show meta profile-completeness pills.
     return trustBadges
       .filter((badge) =>
         badge.key !== 'active' &&
         badge.key !== 'verified' &&
-        badge.key !== 'face_verified'
+        badge.key !== 'face_verified' &&
+        badge.key !== 'photos' &&
+        badge.key !== 'complete'
       )
       .slice(0, 2);
   }, [isPhase2, trustBadges]);
