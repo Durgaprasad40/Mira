@@ -1,5 +1,4 @@
 import { v } from 'convex/values';
-import type { PaginationResult } from 'convex/server';
 import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_generated/server';
 import { Id, Doc } from './_generated/dataModel';
 import { softMaskText } from './softMask';
@@ -1237,51 +1236,57 @@ export const getConversations = query({
       }
     };
 
-    const participantPageSize = Math.min(Math.max(normalizedLimit * 2, 50), 100);
-    let participantCursor: string | null = null;
+    // CONVEX PAGINATION FIX: Convex allows only ONE .paginate() per function.
+    // This query returns a plain array (not a PaginationResult) so there is no
+    // client-facing cursor contract — we just need a bounded scan. Use .take()
+    // with a generous upper bound that comfortably exceeds any realistic
+    // per-user participant count. Candidates are still capped to
+    // `normalizedLimit` via pushCandidate, so memory stays bounded.
+    const MAX_PARTICIPANT_ROWS = 1000;
 
-    while (true) {
-      // TYPING-FIX: Annotate `participantPage` with the full PaginationResult
-      // type so downstream callback params don't collapse to `any`. Pure type
-      // annotation — no runtime behavior change.
-      const participantPage: PaginationResult<Doc<'conversationParticipants'>> = await ctx.db
-        .query('conversationParticipants')
-        .withIndex('by_user', (q) => q.eq('userId', userId))
-        .paginate({ cursor: participantCursor, numItems: participantPageSize });
+    const participantRows: Doc<'conversationParticipants'>[] = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .take(MAX_PARTICIPANT_ROWS);
 
-      if (participantPage.page.length === 0) {
-        break;
-      }
-
+    if (participantRows.length > 0) {
       // TYPING-FIX: Explicitly type the awaited array so consumers below see
       // `Doc<'conversations'> | null` instead of `any`.
-      const pageConversations: Array<Doc<'conversations'> | null> = await Promise.all(
-        participantPage.page.map((row: Doc<'conversationParticipants'>) => ctx.db.get(row.conversationId))
+      const participantConversations: Array<Doc<'conversations'> | null> = await Promise.all(
+        participantRows.map((row) => ctx.db.get(row.conversationId))
       );
 
-      const pageOtherUserIds = Array.from(
+      const participantOtherUserIds = Array.from(
         new Set(
-          pageConversations
-            .map((conversation: Doc<'conversations'> | null) =>
+          participantConversations
+            .map((conversation) =>
               conversation?.participants.find((id: Id<'users'>) => id !== userId) as string | undefined
             )
             .filter((id): id is string => Boolean(id))
         )
       );
 
-      const pageUsers = await Promise.all(
-        pageOtherUserIds.map((id: string) => ctx.db.get(id as Id<'users'>))
+      const participantUsers = await Promise.all(
+        participantOtherUserIds.map((id) => ctx.db.get(id as Id<'users'>))
       );
-      const pageUserMap = new Map(pageOtherUserIds.map((id, index) => [id, pageUsers[index]]));
+      const participantUserMap = new Map(
+        participantOtherUserIds.map((id, index) => [id, participantUsers[index]])
+      );
 
-      for (let index = 0; index < participantPage.page.length; index++) {
-        const row = participantPage.page[index];
-        const conversation: Doc<'conversations'> | null = pageConversations[index];
+      for (let index = 0; index < participantRows.length; index++) {
+        const row = participantRows[index];
+        const conversation = participantConversations[index];
         if (!conversation) continue;
 
         seenConversationIds.add(conversation._id as string);
 
         if (!conversation.participants.includes(userId)) continue;
+        // PHASE-1/CHAT-ROOMS ISOLATION: Chat Rooms private 1:1 DMs live in the
+        // `conversations` table with `connectionSource === 'room'` (see
+        // `getOrCreateDmThread` in convex/chatRooms.ts). They are surfaced by
+        // `getUnreadDmCountsByRoom` and the in-room DM UI — NOT by the Phase-1
+        // Messages tab. Skip them here so the inbox stays pure.
+        if (conversation.connectionSource === 'room') continue;
         if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
           continue;
         }
@@ -1290,7 +1295,7 @@ export const getConversations = query({
         if (!otherUserId) continue;
         if (blockedUserIds.has(otherUserId as string)) continue;
 
-        const otherUser = pageUserMap.get(otherUserId as string);
+        const otherUser = participantUserMap.get(otherUserId as string);
         if (!otherUser || !otherUser.isActive) continue;
 
         pushCandidate({
@@ -1299,42 +1304,28 @@ export const getConversations = query({
           unreadCount: row.unreadCount,
         });
       }
-
-      if (participantPage.isDone) {
-        break;
-      }
-
-      participantCursor = participantPage.continueCursor;
     }
 
     // Fallback for legacy conversations that may not have participant rows yet.
     // We scan only a bounded recent window from the recency index and still keep
     // the backend as the source of truth for unread counts on those conversations.
-    let fallbackCursor: string | null = null;
-    let fallbackScanned = 0;
+    //
+    // CONVEX PAGINATION FIX: Replaced cursor-based paginate() loop with a single
+    // bounded .take() since Convex only allows one paginate() per function and
+    // this query returns a plain array. The recency index already orders rows
+    // by `lastMessageAt` desc, so the first N rows are the most recent window.
     const MAX_FALLBACK_CONVERSATIONS = 500;
 
-    while (fallbackScanned < MAX_FALLBACK_CONVERSATIONS) {
-      const fallbackPageSize = Math.min(
-        participantPageSize,
-        MAX_FALLBACK_CONVERSATIONS - fallbackScanned
-      );
+    const fallbackConversations: Doc<'conversations'>[] = await ctx.db
+      .query('conversations')
+      .withIndex('by_last_message')
+      .order('desc')
+      .take(MAX_FALLBACK_CONVERSATIONS);
 
-      const fallbackPage = await ctx.db
-        .query('conversations')
-        .withIndex('by_last_message')
-        .order('desc')
-        .paginate({ cursor: fallbackCursor, numItems: fallbackPageSize });
-
-      if (fallbackPage.page.length === 0) {
-        break;
-      }
-
-      fallbackScanned += fallbackPage.page.length;
-
+    if (fallbackConversations.length > 0) {
       const fallbackOtherUserIds = Array.from(
         new Set(
-          fallbackPage.page
+          fallbackConversations
             .map((conversation) => conversation.participants.find((id) => id !== userId) as string | undefined)
             .filter((id): id is string => Boolean(id))
         )
@@ -1347,11 +1338,13 @@ export const getConversations = query({
         fallbackOtherUserIds.map((id, index) => [id, fallbackUsers[index]])
       );
 
-      for (const conversation of fallbackPage.page) {
+      for (const conversation of fallbackConversations) {
         if (seenConversationIds.has(conversation._id as string)) continue;
         seenConversationIds.add(conversation._id as string);
 
         if (!conversation.participants.includes(userId)) continue;
+        // PHASE-1/CHAT-ROOMS ISOLATION (fallback path): same reasoning as above.
+        if (conversation.connectionSource === 'room') continue;
         if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
           continue;
         }
@@ -1369,27 +1362,22 @@ export const getConversations = query({
           otherUserId,
           unreadCount,
         });
-      }
 
-      if (candidates.length === normalizedLimit) {
-        const oldestCandidate = candidates[candidates.length - 1];
-        const oldestFallbackPageItem = fallbackPage.page[fallbackPage.page.length - 1];
-
-        if (
-          oldestCandidate &&
-          oldestFallbackPageItem &&
-          getConversationSortTs(oldestFallbackPageItem) <=
-            getConversationSortTs(oldestCandidate.conversation)
-        ) {
-          break;
+        // Early-exit optimization preserved: once candidates are full AND this
+        // fallback conversation is older than the oldest candidate, every
+        // subsequent row in the `by_last_message desc` scan is also older, so
+        // it cannot improve the result set.
+        if (candidates.length === normalizedLimit) {
+          const oldestCandidate = candidates[candidates.length - 1];
+          if (
+            oldestCandidate &&
+            getConversationSortTs(conversation) <=
+              getConversationSortTs(oldestCandidate.conversation)
+          ) {
+            break;
+          }
         }
       }
-
-      if (fallbackPage.isDone) {
-        break;
-      }
-
-      fallbackCursor = fallbackPage.continueCursor;
     }
 
     if (candidates.length === 0) return [];
@@ -1541,9 +1529,25 @@ export const getUnreadCount = query({
       participantRows.map((row) => row.conversationId as string)
     );
 
+    // PHASE-1/CHAT-ROOMS ISOLATION: The Phase-1 Messages badge must NOT count
+    // Chat Rooms private 1:1 DMs (connectionSource === 'room'). Those are
+    // surfaced separately by `getUnreadDmCountsByRoom`. Resolve the owning
+    // conversation for every participant row that has unread so we can filter
+    // out room DMs before counting.
+    const rowsWithUnread = participantRows.filter((row) => row.unreadCount > 0);
+    const unreadConversationsForRows = await Promise.all(
+      rowsWithUnread.map((row) => ctx.db.get(row.conversationId))
+    );
+
     // BADGE-FIX: Count CONVERSATIONS with unread messages, not total messages
     // 2. Count conversations that have unreadCount > 0 (not sum of all unread)
-    let totalUnreadConversations = participantRows.filter((row) => row.unreadCount > 0).length;
+    //    …excluding Chat Rooms DMs.
+    let totalUnreadConversations = 0;
+    for (const conversation of unreadConversationsForRows) {
+      if (!conversation) continue;
+      if (conversation.connectionSource === 'room') continue;
+      totalUnreadConversations += 1;
+    }
 
     // 3. Bounded fallback: only check recent conversations (last 30 days) without participant rows
     // This replaces the unbounded .collect() that loaded ALL conversations
@@ -1559,6 +1563,8 @@ export const getUnreadCount = query({
     for (const conversation of recentConversations) {
       // Skip if not a participant
       if (!conversation.participants.includes(userId)) continue;
+      // PHASE-1/CHAT-ROOMS ISOLATION (fallback path): same reasoning as above.
+      if (conversation.connectionSource === 'room') continue;
       // Skip if already covered by participant row
       if (coveredConversationIds.has(conversation._id as string)) continue;
 
