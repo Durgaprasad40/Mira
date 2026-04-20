@@ -816,6 +816,18 @@ export default defineSchema({
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id']),
 
+  // Phase-2 Reveals table (Deep Connect mutual photo unblur)
+  // Created when a pair matches; used to short-circuit blur for that pair only.
+  // Sorted pair: userAId < userBId (same convention as privateMatches).
+  privateReveals: defineTable({
+    userAId: v.id('users'),
+    userBId: v.id('users'),
+    createdAt: v.number(),
+  })
+    .index('by_pair', ['userAId', 'userBId'])
+    .index('by_userA', ['userAId'])
+    .index('by_userB', ['userBId']),
+
   // Protected Media table (private storage references — never expose URLs)
   media: defineTable({
     chatId: v.id('conversations'),

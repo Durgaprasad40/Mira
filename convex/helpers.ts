@@ -428,3 +428,39 @@ export async function getPhase2DisplayName(
   // Fallback: return "Anonymous" to never leak real name
   return 'Anonymous';
 }
+
+/**
+ * P1-009: Check whether two Phase-2 users have mutually revealed photos.
+ *
+ * A reveal is recorded in `privateReveals` when the pair matches in Deep Connect.
+ * For backward compatibility with any pre-existing matches that predate the
+ * reveal table, we also treat a live match as implicit reveal.
+ *
+ * Uses the sorted-pair key (smaller ID first) — same convention as privateMatches.
+ *
+ * Returns true ONLY for that exact pair. Never exposes photos globally.
+ */
+export async function isRevealed(
+  ctx: QueryCtx | MutationCtx,
+  viewerId: Id<"users">,
+  otherUserId: Id<"users">
+): Promise<boolean> {
+  if (!viewerId || !otherUserId || viewerId === otherUserId) return false;
+
+  const userAId = viewerId < otherUserId ? viewerId : otherUserId;
+  const userBId = viewerId < otherUserId ? otherUserId : viewerId;
+
+  // Primary: look up explicit reveal record for this pair.
+  const reveal = await ctx.db
+    .query('privateReveals')
+    .withIndex('by_pair', (q) => q.eq('userAId', userAId).eq('userBId', userBId))
+    .first();
+  if (reveal) return true;
+
+  // Fallback: any pre-existing match implies reveal for that pair.
+  const match = await ctx.db
+    .query('privateMatches')
+    .withIndex('by_users', (q) => q.eq('user1Id', userAId).eq('user2Id', userBId))
+    .first();
+  return !!match;
+}

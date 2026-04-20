@@ -118,6 +118,12 @@ export interface ProfileCardProps {
   photoBlurEnabled?: boolean;
   /** Phase-2: per-photo blur slots aligned with `photos[]` indices (true = blurred). */
   photoBlurSlots?: boolean[];
+  /**
+   * P1-009: True when viewer and profile-owner have mutually matched in Deep Connect.
+   * When true, the card skips blur for this exact pair (never global).
+   * Only source: `isRevealed` field from Phase-2 discover queries.
+   */
+  isRevealed?: boolean;
   /** Face 2 only: intent category keys from PRIVATE_INTENT_CATEGORIES (array) */
   privateIntentKeys?: string[];
   /** Phase-2 only: desire tag keys from PRIVATE_DESIRE_TAGS */
@@ -291,6 +297,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   photoBlurred = false,
   photoBlurEnabled,
   photoBlurSlots,
+  isRevealed = false,
   privateIntentKeys,
   desireTagKeys,
   lookingFor,
@@ -318,7 +325,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       : phase === 'phase1'
         ? false
         : (Array.isArray(privateIntentKeys) && privateIntentKeys.length > 0);
-  const shouldBlurPhoto = isPhase2 ? (photoBlurEnabled === true) : photoBlurred === true;
+  // P1-009: When this pair has mutually revealed (matched in Deep Connect),
+  // force-disable blur for that pair only. `isRevealed` is scoped per-viewer
+  // and never leaks photos globally.
+  const effectivePhotoBlurEnabled = isRevealed ? false : photoBlurEnabled;
+  const effectivePhotoBlurred = isRevealed ? false : photoBlurred;
+  const effectivePhotoBlurSlots = isRevealed ? undefined : photoBlurSlots;
+  const shouldBlurPhoto = isPhase2 ? (effectivePhotoBlurEnabled === true) : effectivePhotoBlurred === true;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // IDENTITY SIMPLIFICATION: Single `name` field for all phases
@@ -1550,8 +1563,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // 3B-2: Safe access with clamping
   const safeIndex = Math.min(Math.max(0, photoIndex), Math.max(0, photoCount - 1));
   const currentPhoto = displayPhotos[safeIndex] || displayPhotos[0];
+  // P1-009: Use effective* flags so reveal short-circuits the lock-hint overlay too.
   const currentPhotoLocked = isPhase2
-    ? (photoBlurEnabled === true ? Boolean(photoBlurSlots?.[safeIndex]) : photoBlurred === true)
+    ? (effectivePhotoBlurEnabled === true ? Boolean(effectivePhotoBlurSlots?.[safeIndex]) : effectivePhotoBlurred === true)
     : false;
   const blurHintSheen = useSharedValue(-140);
 
@@ -1702,8 +1716,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             photos={displayPhotos}
             activeIndex={safeIndex}
             photoBlurred={shouldBlurPhoto}
-            photoBlurEnabled={isPhase2 ? photoBlurEnabled : undefined}
-            photoBlurSlots={isPhase2 ? photoBlurSlots : undefined}
+            photoBlurEnabled={isPhase2 ? effectivePhotoBlurEnabled : undefined}
+            photoBlurSlots={isPhase2 ? effectivePhotoBlurSlots : undefined}
             onError={handleImageError}
             lookaheadCount={isPhase2 ? PHASE2_ACTIVE_CARD_LOOKAHEAD : PHASE1_ACTIVE_CARD_LOOKAHEAD}
             previousCount={isPhase2 ? PHASE2_ACTIVE_CARD_PREVIOUS : 0}

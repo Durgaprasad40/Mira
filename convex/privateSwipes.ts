@@ -189,6 +189,21 @@ export const swipe = mutation({
           }
         }
 
+        // P1-009: Record mutual photo reveal for this matched pair.
+        // Sorted pair (userAId < userBId) — same convention as privateMatches.
+        // Idempotent: only insert if no reveal exists for this pair.
+        const existingReveal = await ctx.db
+          .query('privateReveals')
+          .withIndex('by_pair', (q) => q.eq('userAId', user1Id).eq('userBId', user2Id))
+          .first();
+        if (!existingReveal) {
+          await ctx.db.insert('privateReveals', {
+            userAId: user1Id,
+            userBId: user2Id,
+            createdAt: now,
+          });
+        }
+
         // ONE-PAIR-ONE-THREAD: Check if conversation already exists for this pair
         // This prevents duplicate threads when T/D or other paths already created one
         const sortedParticipants = [fromUserId, toUserId].sort() as [Id<'users'>, Id<'users'>];

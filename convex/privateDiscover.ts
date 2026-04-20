@@ -3,7 +3,7 @@ import { query, mutation } from './_generated/server';
 import type { Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, isRevealed } from './helpers';
 
 // Phase 3: Shadow mode imports
 import { shouldRunShadowComparison } from './ranking/rankingConfig';
@@ -365,6 +365,17 @@ export const getProfiles = query({
       }
     }
 
+    // P1-009: Batch-compute reveal status for each candidate against the viewer.
+    // Discover normally excludes conversation partners (who include matches), but we
+    // compute defensively so the field is always accurate.
+    const revealMap = new Map<string, boolean>();
+    await Promise.all(
+      limited.map(async ({ profile: p }) => {
+        const revealed = await isRevealed(ctx, viewerUserId as Id<'users'>, p.userId);
+        revealMap.set(p.userId as string, revealed);
+      })
+    );
+
     // Return only blurred data — never expose original photos
     // Cast to access optional schema fields that may not be in generated types yet
     return limited.map(({ profile: p }) => {
@@ -414,6 +425,8 @@ export const getProfiles = query({
         isSetupComplete: p.isSetupComplete,
         privateBio: p.privateBio,
         revealPolicy: p.revealPolicy ?? 'mutual_only',
+        // P1-009: mutual reveal for this pair — client uses to skip blur
+        isRevealed: revealMap.get(p.userId as string) ?? false,
         // Include hobbies and verification status if available
         hobbies: profile.hobbies ?? [],
         isVerified: profile.isVerified ?? false,
@@ -500,6 +513,9 @@ export const getProfileCard = query({
       }
     }
 
+    // P1-009: reveal check for this exact pair
+    const revealed = await isRevealed(ctx, args.viewerId, p.userId);
+
     return {
       _id: p._id,
       userId: p.userId,
@@ -515,6 +531,8 @@ export const getProfileCard = query({
       desireTagKeys: p.privateDesireTagKeys,
       privateBio: p.privateBio,
       revealPolicy: p.revealPolicy ?? 'mutual_only',
+      // P1-009: mutual reveal for this pair — client uses to skip blur
+      isRevealed: revealed,
       // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
@@ -604,6 +622,9 @@ export const getProfileByUserId = query({
       }
     }
 
+    // P1-009: reveal check for this exact pair
+    const revealed = await isRevealed(ctx, args.viewerId, args.userId);
+
     return {
       _id: p._id,
       userId: p.userId,
@@ -625,6 +646,8 @@ export const getProfileByUserId = query({
       desireTagKeys: p.privateDesireTagKeys,
       privateBio: p.privateBio,
       revealPolicy: p.revealPolicy ?? 'mutual_only',
+      // P1-009: mutual reveal for this pair — client uses to skip blur
+      isRevealed: revealed,
       // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
