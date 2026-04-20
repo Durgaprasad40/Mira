@@ -513,8 +513,8 @@ export const getProfileCard = query({
       }
     }
 
-    // P1-009: reveal check for this exact pair
-    const revealed = await isRevealed(ctx, args.viewerId, p.userId);
+    // P1-009: reveal check for this exact pair (viewerUserId is guaranteed defined above)
+    const revealed = await isRevealed(ctx, viewerUserId, p.userId);
 
     return {
       _id: p._id,
@@ -622,8 +622,8 @@ export const getProfileByUserId = query({
       }
     }
 
-    // P1-009: reveal check for this exact pair
-    const revealed = await isRevealed(ctx, args.viewerId, args.userId);
+    // P1-009: reveal check for this exact pair (viewerUserId is guaranteed defined above)
+    const revealed = await isRevealed(ctx, viewerUserId, args.userId);
 
     return {
       _id: p._id,
