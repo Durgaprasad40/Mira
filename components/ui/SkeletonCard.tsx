@@ -8,6 +8,7 @@
  */
 import React, { useEffect } from 'react';
 import { View, StyleSheet, Dimensions } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -43,30 +44,51 @@ function ShimmerBar({
   shimmer: SharedValue<number>;
 }) {
   const shimmerStyle = useAnimatedStyle(() => {
-    const opacity = interpolate(shimmer.value, [0, 0.5, 1], [0.3, 0.6, 0.3]);
-    return { opacity };
+    return {
+      opacity: interpolate(shimmer.value, [0, 0.5, 1], [0.12, 0.55, 0.12]),
+      transform: [{ translateX: interpolate(shimmer.value, [0, 1], [-72, 156]) }],
+    };
   });
 
-  const baseColor = dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
+  const baseColors = dark
+    ? ['rgba(255,255,255,0.04)', 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.04)']
+    : ['rgba(255,255,255,0.42)', 'rgba(255,255,255,0.62)', 'rgba(255,255,255,0.4)'];
+  const sheenColors = dark
+    ? ['rgba(255,255,255,0)', 'rgba(255,255,255,0.26)', 'rgba(255,255,255,0)']
+    : ['rgba(255,255,255,0)', 'rgba(255,255,255,0.9)', 'rgba(255,255,255,0)'];
 
   return (
-    <Animated.View
+    <View
       style={[
+        styles.shimmerBar,
         {
           width: width as any,
           height,
           borderRadius,
-          backgroundColor: baseColor,
+          backgroundColor: dark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.5)',
         },
-        shimmerStyle,
       ]}
-    />
+    >
+      <LinearGradient
+        colors={baseColors}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      <Animated.View style={[styles.shimmerSheen, shimmerStyle]}>
+        <LinearGradient
+          colors={sheenColors}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </Animated.View>
+    </View>
   );
 }
 
 export function SkeletonCard({ dark = false, includeActions = true }: SkeletonCardProps) {
   const insets = useSafeAreaInsets();
-  const C = dark ? INCOGNITO_COLORS : COLORS;
   const shimmer = useSharedValue(0);
 
   const cardWidth = SCREEN_WIDTH - 24;
@@ -74,7 +96,7 @@ export function SkeletonCard({ dark = false, includeActions = true }: SkeletonCa
 
   useEffect(() => {
     shimmer.value = withRepeat(
-      withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+      withTiming(1, { duration: 2500, easing: Easing.inOut(Easing.ease) }),
       -1,
       true
     );
@@ -84,6 +106,13 @@ export function SkeletonCard({ dark = false, includeActions = true }: SkeletonCa
     <View style={[styles.container, dark && styles.containerDark]}>
       {/* Card skeleton */}
       <View style={[styles.card, { width: cardWidth, height: cardHeight }, dark && styles.cardDark]}>
+        <LinearGradient
+          colors={dark ? ['#0e1220', '#181f34', '#0f1424'] : ['#fff8f3', '#fff1eb', '#fffaf7']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+
         {/* Photo area skeleton */}
         <View style={styles.photoArea}>
           <ShimmerBar width="100%" height={cardHeight * 0.7} borderRadius={0} dark={dark} shimmer={shimmer} />
@@ -154,6 +183,16 @@ const styles = StyleSheet.create({
   },
   cardDark: {
     backgroundColor: INCOGNITO_COLORS.surface,
+  },
+  shimmerBar: {
+    overflow: 'hidden',
+  },
+  shimmerSheen: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: -72,
+    width: 88,
   },
   photoArea: {
     width: '100%',

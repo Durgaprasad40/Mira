@@ -2240,5 +2240,14 @@ export default defineSchema({
     seenCount: v.number(),              // How many times shown to this viewer
   })
     .index('by_viewer', ['viewerId'])
+    .index('by_viewer_lastSeenAt', ['viewerId', 'lastSeenAt'])
     .index('by_pair', ['viewerId', 'viewedUserId']),
+
+  phase2ImpressionRateLimits: defineTable({
+    viewerId: v.id('users'),
+    windowStart: v.number(),
+    count: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_viewer', ['viewerId']),
 });

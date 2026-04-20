@@ -11,6 +11,11 @@ import { computeRankScore, logBatchRankingComparison, DEFAULT_RANKING_CONFIG } f
 
 // Suppression window: 4 hours in milliseconds
 const SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
+const MAX_BLOCK_ROWS = 5000;
+const MAX_CONVERSATION_ROWS = 500;
+const MAX_PENDING_DELETION_ROWS = 5000;
+const IMPRESSION_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
+const MAX_IMPRESSIONS_PER_WINDOW = 300;
 
 /** Haversine distance in km (rounded), matches users.getUserById / discover helpers */
 function distanceKmBetween(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -23,6 +28,53 @@ function distanceKmBetween(lat1: number, lon1: number, lat2: number, lon2: numbe
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return Math.round(R * c);
+}
+
+function getProfileIntentKeys(profile: { privateIntentKeys?: string[]; privateIntentKey?: string | null | undefined }): string[] {
+  return profile.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
+}
+
+async function isWithinDeepConnectImpressionRateLimit(
+  ctx: any,
+  viewerId: Id<'users'>,
+  increment: number
+): Promise<boolean> {
+  if (increment <= 0) return true;
+
+  const now = Date.now();
+  const existing = await ctx.db
+    .query('phase2ImpressionRateLimits')
+    .withIndex('by_viewer', (q: any) => q.eq('viewerId', viewerId))
+    .first();
+
+  if (!existing) {
+    await ctx.db.insert('phase2ImpressionRateLimits', {
+      viewerId,
+      windowStart: now,
+      count: increment,
+      updatedAt: now,
+    });
+    return true;
+  }
+
+  if (existing.windowStart < now - IMPRESSION_RATE_LIMIT_WINDOW_MS) {
+    await ctx.db.patch(existing._id, {
+      windowStart: now,
+      count: increment,
+      updatedAt: now,
+    });
+    return true;
+  }
+
+  if (existing.count + increment > MAX_IMPRESSIONS_PER_WINDOW) {
+    return false;
+  }
+
+  await ctx.db.patch(existing._id, {
+    count: existing.count + increment,
+    updatedAt: now,
+  });
+  return true;
 }
 
 // Get private discovery profiles (blurred photos only) with Phase-2 ranking
@@ -39,17 +91,33 @@ export const getProfiles = query({
   args: {
     // DL-013: userId is optional; prefer server-side auth resolution
     userId: v.optional(v.id('users')),
+    authUserId: v.optional(v.string()),
+    intentKeys: v.optional(v.array(v.string())),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
     const suppressionCutoff = now - SUPPRESSION_WINDOW_MS;
+    const requestedIntentKeys = (args.intentKeys ?? [])
+      .map((key) => key.trim())
+      .filter((key) => key.length > 0);
+    const requestedIntentKeySet =
+      requestedIntentKeys.length > 0 ? new Set(requestedIntentKeys) : null;
 
-    // DL-013: Resolve viewer from server-side auth, fall back to args.userId for backward compat
-    let viewerUserId = args.userId;
+    // DL-013: Resolve viewer from server-side auth, then legacy args.userId, then authUserId fallback
+    let viewerUserId = undefined;
     const identity = await ctx.auth.getUserIdentity();
     if (identity?.subject) {
       const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (resolvedId) {
+        viewerUserId = resolvedId;
+      }
+    }
+    if (!viewerUserId && args.userId) {
+      viewerUserId = args.userId;
+    }
+    if (!viewerUserId && args.authUserId?.trim()) {
+      const resolvedId = await resolveUserIdByAuthId(ctx, args.authUserId.trim());
       if (resolvedId) {
         viewerUserId = resolvedId;
       }
@@ -66,16 +134,16 @@ export const getProfiles = query({
       ctx.db
         .query('blocks')
         .withIndex('by_blocker', (q) => q.eq('blockerId', viewerUserId))
-        .collect(),
+        .take(MAX_BLOCK_ROWS),
       ctx.db
         .query('blocks')
         .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerUserId))
-        .collect(),
+        .take(MAX_BLOCK_ROWS),
       // CONVERSATION PARTNER EXCLUSION: Users with existing chats must not reappear
       ctx.db
         .query('conversationParticipants')
         .withIndex('by_user', (q) => q.eq('userId', viewerUserId))
-        .collect(),
+        .take(MAX_CONVERSATION_ROWS),
     ]);
 
     // Combine into a set of blocked user IDs
@@ -116,24 +184,18 @@ export const getProfiles = query({
     const deletionStates = await ctx.db
       .query('privateDeletionStates')
       .withIndex('by_status', (q) => q.eq('status', 'pending_deletion'))
-      .collect();
+      .take(MAX_PENDING_DELETION_ROWS);
     const deletedUserIds = new Set(deletionStates.map((d) => d.userId as string));
 
-    // Get all ranking metrics for efficient lookup
-    const allMetrics = await ctx.db
-      .query('phase2RankingMetrics')
-      .collect();
-    const metricsMap = new Map(allMetrics.map((m) => [m.userId as string, m]));
-
-    // Get viewer's recent impressions for suppression check
+    // Get viewer's recent impressions for suppression check via compound index
     const viewerImpressions = await ctx.db
       .query('phase2ViewerImpressions')
-      .withIndex('by_viewer', (q) => q.eq('viewerId', viewerUserId))
+      .withIndex('by_viewer_lastSeenAt', (q) =>
+        q.eq('viewerId', viewerUserId).gt('lastSeenAt', suppressionCutoff)
+      )
       .collect();
     const recentlySeen = new Set(
-      viewerImpressions
-        .filter((imp) => imp.lastSeenAt > suppressionCutoff)
-        .map((imp) => imp.viewedUserId as string)
+      viewerImpressions.map((imp) => imp.viewedUserId as string)
     );
 
     // Filter out:
@@ -144,14 +206,36 @@ export const getProfiles = query({
     // - Users who opted out of Deep Connect discovery (hideFromDeepConnect === true; missing = visible)
     // NOTE: Profiles without ranking metrics are still eligible (use fallback defaults)
     const eligible = profiles.filter(
-      (p) =>
-        p.userId !== viewerUserId &&
-        p.isSetupComplete &&
-        !blockedUserIds.has(p.userId as string) &&
-        !deletedUserIds.has(p.userId as string) &&
-        // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
-        !conversationPartnerIds.has(p.userId as string) &&
-        p.hideFromDeepConnect !== true
+      (p) => {
+        const profileIntentKeys = getProfileIntentKeys(
+          p as typeof p & { privateIntentKey?: string | null | undefined }
+        );
+        return (
+          p.userId !== viewerUserId &&
+          p.isSetupComplete &&
+          !blockedUserIds.has(p.userId as string) &&
+          !deletedUserIds.has(p.userId as string) &&
+          // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
+          !conversationPartnerIds.has(p.userId as string) &&
+          p.hideFromDeepConnect !== true &&
+          (!requestedIntentKeySet ||
+            profileIntentKeys.some((key) => requestedIntentKeySet.has(key)))
+        );
+      }
+    );
+
+    // Fetch ranking metrics only for the profiles we may score.
+    const metricEntries = await Promise.all(
+      eligible.map(async (profile) => ({
+        userId: profile.userId as string,
+        metrics: await ctx.db
+          .query('phase2RankingMetrics')
+          .withIndex('by_user', (q) => q.eq('userId', profile.userId))
+          .first(),
+      }))
+    );
+    const metricsMap = new Map(
+      metricEntries.flatMap(({ userId, metrics }) => (metrics ? [[userId, metrics] as const] : []))
     );
 
     // Compute scores and separate suppressed vs unsuppressed profiles
@@ -341,13 +425,33 @@ export const getProfiles = query({
 
 // Get a single private profile for viewing (blurred only)
 // Also checks blocks before returning
-// viewerId is REQUIRED to enforce block checking
+// viewer resolves from server auth first, then optional viewerId / viewerAuthUserId fallback
 export const getProfileCard = query({
   args: {
     profileId: v.id('userPrivateProfiles'),
-    viewerId: v.id('users'),
+    viewerId: v.optional(v.id('users')),
+    viewerAuthUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    let viewerUserId = undefined;
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (resolvedId) {
+        viewerUserId = resolvedId;
+      }
+    }
+    if (!viewerUserId && args.viewerId) {
+      viewerUserId = args.viewerId;
+    }
+    if (!viewerUserId && args.viewerAuthUserId?.trim()) {
+      const resolvedId = await resolveUserIdByAuthId(ctx, args.viewerAuthUserId.trim());
+      if (resolvedId) {
+        viewerUserId = resolvedId;
+      }
+    }
+    if (!viewerUserId) return null;
+
     const p = await ctx.db.get(args.profileId);
     if (!p || !p.isPrivateEnabled || !p.isSetupComplete) return null;
     const owner = await ctx.db.get(p.userId);
@@ -357,7 +461,7 @@ export const getProfileCard = query({
     const blockedByViewer = await ctx.db
       .query('blocks')
       .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', args.viewerId).eq('blockedUserId', p.userId)
+        q.eq('blockerId', viewerUserId).eq('blockedUserId', p.userId)
       )
       .first();
     if (blockedByViewer) return null;
@@ -366,7 +470,7 @@ export const getProfileCard = query({
     const blockedByOwner = await ctx.db
       .query('blocks')
       .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', p.userId).eq('blockedUserId', args.viewerId)
+        q.eq('blockerId', p.userId).eq('blockedUserId', viewerUserId)
       )
       .first();
     if (blockedByOwner) return null;
@@ -376,11 +480,11 @@ export const getProfileCard = query({
     // Backward compat: older records may only have privateIntentKey (single)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
-    const hideAgeFromViewer = profile.hideAge === true && args.viewerId !== p.userId;
+    const hideAgeFromViewer = profile.hideAge === true && viewerUserId !== p.userId;
 
     let distanceKm: number | undefined;
-    if (args.viewerId !== p.userId && profile.hideDistance !== true) {
-      const [viewerU, ownerU] = await Promise.all([ctx.db.get(args.viewerId), Promise.resolve(owner)]);
+    if (viewerUserId !== p.userId && profile.hideDistance !== true) {
+      const [viewerU, ownerU] = await Promise.all([ctx.db.get(viewerUserId), Promise.resolve(owner)]);
       if (
         viewerU?.latitude != null &&
         viewerU?.longitude != null &&
@@ -421,13 +525,33 @@ export const getProfileCard = query({
 
 // Get a Phase-2 profile by userId (for full profile view)
 // Returns full profile data including intentKeys for display
-// viewerId is REQUIRED to enforce block checking
+// viewer resolves from server auth first, then optional viewerId / viewerAuthUserId fallback
 export const getProfileByUserId = query({
   args: {
     userId: v.id('users'),
-    viewerId: v.id('users'),
+    viewerId: v.optional(v.id('users')),
+    viewerAuthUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    let viewerUserId = undefined;
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (resolvedId) {
+        viewerUserId = resolvedId;
+      }
+    }
+    if (!viewerUserId && args.viewerId) {
+      viewerUserId = args.viewerId;
+    }
+    if (!viewerUserId && args.viewerAuthUserId?.trim()) {
+      const resolvedId = await resolveUserIdByAuthId(ctx, args.viewerAuthUserId.trim());
+      if (resolvedId) {
+        viewerUserId = resolvedId;
+      }
+    }
+    if (!viewerUserId) return null;
+
     // Find the private profile for this user
     const p = await ctx.db
       .query('userPrivateProfiles')
@@ -440,7 +564,7 @@ export const getProfileByUserId = query({
     const blockedByViewer = await ctx.db
       .query('blocks')
       .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', args.viewerId).eq('blockedUserId', args.userId)
+        q.eq('blockerId', viewerUserId).eq('blockedUserId', args.userId)
       )
       .first();
     if (blockedByViewer) return null;
@@ -449,7 +573,7 @@ export const getProfileByUserId = query({
     const blockedByOwner = await ctx.db
       .query('blocks')
       .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', args.userId).eq('blockedUserId', args.viewerId)
+        q.eq('blockerId', args.userId).eq('blockedUserId', viewerUserId)
       )
       .first();
     if (blockedByOwner) return null;
@@ -460,11 +584,11 @@ export const getProfileByUserId = query({
     // Backward compat: older records may only have privateIntentKey (single), not privateIntentKeys (array)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
-    const hideAgeFromViewer = profile.hideAge === true && args.viewerId !== args.userId;
+    const hideAgeFromViewer = profile.hideAge === true && viewerUserId !== args.userId;
 
     let distanceKm: number | undefined;
-    if (args.viewerId !== args.userId && profile.hideDistance !== true) {
-      const [viewerU, ownerU] = await Promise.all([ctx.db.get(args.viewerId), ctx.db.get(args.userId)]);
+    if (viewerUserId !== args.userId && profile.hideDistance !== true) {
+      const [viewerU, ownerU] = await Promise.all([ctx.db.get(viewerUserId), ctx.db.get(args.userId)]);
       if (
         viewerU?.latitude != null &&
         viewerU?.longitude != null &&
@@ -529,20 +653,34 @@ export const getProfileByUserId = query({
 export const recordDeepConnectImpressions = mutation({
   args: {
     viewedUserIds: v.array(v.id('users')),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Resolve viewer from server-side auth (secure - not client-supplied)
+    // Resolve viewer from server-side auth first, then authUserId fallback.
+    let viewerId = undefined;
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) return;
-
-    const viewerId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (identity?.subject) {
+      viewerId = await resolveUserIdByAuthId(ctx, identity.subject);
+    }
+    if (!viewerId && args.authUserId?.trim()) {
+      viewerId = await resolveUserIdByAuthId(ctx, args.authUserId.trim());
+    }
     if (!viewerId) return;
+
+    const viewedUserIds = [...new Set(args.viewedUserIds)]
+      .filter((viewedUserId) => viewedUserId !== viewerId);
+    if (viewedUserIds.length === 0) return;
+
+    const allowed = await isWithinDeepConnectImpressionRateLimit(
+      ctx,
+      viewerId,
+      viewedUserIds.length
+    );
+    if (!allowed) return;
 
     const now = Date.now();
 
-    for (const viewedUserId of args.viewedUserIds) {
-      // Skip if viewer is viewing themselves (shouldn't happen but guard)
-      if (viewedUserId === viewerId) continue;
+    for (const viewedUserId of viewedUserIds) {
 
       // Update global metrics row (if exists)
       const metrics = await ctx.db

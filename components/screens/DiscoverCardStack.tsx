@@ -26,10 +26,7 @@ import {
   Dimensions,
   TouchableOpacity,
   InteractionManager,
-  ScrollView,
   Modal,
-  Easing,
-  Animated as RNAnimated, // Keep for star burst animation only
 } from "react-native";
 import { Image } from "expo-image";
 import Animated, {
@@ -47,6 +44,8 @@ import Animated, {
   FadeOut,
   FadeInUp,
   SlideInDown,
+  Easing,
+  type SharedValue,
 } from "react-native-reanimated";
 import { BlurView } from "expo-blur";
 import { LinearGradient } from "expo-linear-gradient";
@@ -135,13 +134,23 @@ const PHASE1_LOCATION_FOCUS_REVISIT_GAP_MS = 30 * 1000;
 /** Deep Connect (Phase-2): minimum skeleton smoothing only — empty results show right after this window */
 const DEEP_CONNECT_MIN_SKELETON_MS = 350;
 /** Deep Connect: show “searching” copy under skeleton after this delay (zero profiles) */
-const DEEP_CONNECT_SEARCHING_LABEL_MS = 300;
+const DEEP_CONNECT_SEARCHING_LABEL_MS = 700;
 /** Deep Connect: fade between skeleton / searching / empty */
 const DEEP_CONNECT_CONTENT_FADE_MS = 250;
+/** Deep Connect: switch to a recovery state if the live query stalls */
+const DEEP_CONNECT_QUERY_TIMEOUT_MS = 8500;
+/** Deep Connect: downward pull distance before the deck refreshes */
+const DEEP_CONNECT_PULL_REFRESH_MIN_DISTANCE = 92;
 
 // ── Star-burst animation for super-like ──
 const STAR_COUNT = 8;
 const STAR_COLORS = ['#FFD700', '#FFA500', '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
+const STAR_BURST_DURATION_MS = 760;
+const STAR_BURST_CONFIG = Array.from({ length: STAR_COUNT }, (_, i) => {
+  const angle = (i / STAR_COUNT) * 2 * Math.PI;
+  const distance = 78 + (i % 3) * 18;
+  return { angle, distance, delay: i * 0.07 };
+});
 
 
 interface StarBurstAnimationProps {
@@ -149,127 +158,136 @@ interface StarBurstAnimationProps {
   onComplete: () => void;
 }
 
+function StarBurstParticle({
+  color,
+  angle,
+  distance,
+  delay,
+  progress,
+}: {
+  color: string;
+  angle: number;
+  distance: number;
+  delay: number;
+  progress: SharedValue<number>;
+}) {
+  const particleStyle = useAnimatedStyle(() => {
+    const localProgress = Math.max(0, Math.min((progress.value - delay) / (1 - delay), 1));
+    const travel = interpolate(localProgress, [0, 0.72, 1], [0, 1, 1], Extrapolation.CLAMP);
+    const opacity = interpolate(localProgress, [0, 0.12, 0.7, 1], [0, 1, 0.95, 0], Extrapolation.CLAMP);
+    const scale = interpolate(localProgress, [0, 0.18, 0.72, 1], [0.25, 1, 1.08, 0.82], Extrapolation.CLAMP);
+
+    return {
+      opacity,
+      transform: [
+        { translateX: Math.cos(angle) * distance * travel },
+        { translateY: Math.sin(angle) * distance * travel },
+        { scale },
+        { rotate: `${Math.round((angle * 180) / Math.PI)}deg` },
+      ],
+    };
+  });
+
+  return (
+    <Animated.View style={[starBurstStyles.star, particleStyle]}>
+      <Ionicons name="star" size={24} color={color} />
+    </Animated.View>
+  );
+}
+
 function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
-  // P1-002 FIX: Track mounted state to prevent stale callback after unmount
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
-
-  const animations = useRef(
-    Array.from({ length: STAR_COUNT }, () => ({
-      scale: new RNAnimated.Value(0),
-      opacity: new RNAnimated.Value(1),
-      translateX: new RNAnimated.Value(0),
-      translateY: new RNAnimated.Value(0),
-    }))
-  ).current;
+  const burstProgress = useSharedValue(0);
+  const centerStarStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(burstProgress.value, [0, 0.15, 0.75, 1], [0, 1, 0.9, 0], Extrapolation.CLAMP),
+    transform: [
+      {
+        scale: interpolate(burstProgress.value, [0, 0.18, 0.75, 1], [0.5, 1.14, 1, 0.88], Extrapolation.CLAMP),
+      },
+    ],
+  }));
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible) {
+      burstProgress.value = 0;
+      return;
+    }
 
-    // Reset all animations
-    animations.forEach((anim) => {
-      anim.scale.setValue(0);
-      anim.opacity.setValue(1);
-      anim.translateX.setValue(0);
-      anim.translateY.setValue(0);
+    burstProgress.value = 0;
+    burstProgress.value = withTiming(1, {
+      duration: STAR_BURST_DURATION_MS,
+      easing: Easing.out(Easing.cubic),
     });
 
-    // Create staggered star burst
-    const starAnimations = animations.map((anim, i) => {
-      const angle = (i / STAR_COUNT) * 2 * Math.PI;
-      const distance = 80 + Math.random() * 40; // Random distance 80-120
-      const targetX = Math.cos(angle) * distance;
-      const targetY = Math.sin(angle) * distance;
+    const timer = setTimeout(() => {
+      onComplete();
+    }, STAR_BURST_DURATION_MS + 30);
 
-      return RNAnimated.sequence([
-        RNAnimated.delay(i * 30), // Stagger each star
-        RNAnimated.parallel([
-          RNAnimated.timing(anim.scale, {
-            toValue: 1,
-            duration: 150,
-            easing: Easing.out(Easing.back(2)),
-            useNativeDriver: true,
-          }),
-          RNAnimated.timing(anim.translateX, {
-            toValue: targetX,
-            duration: 500,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
-          }),
-          RNAnimated.timing(anim.translateY, {
-            toValue: targetY,
-            duration: 500,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
-          }),
-          RNAnimated.sequence([
-            RNAnimated.delay(200),
-            RNAnimated.timing(anim.opacity, {
-              toValue: 0,
-              duration: 300,
-              useNativeDriver: true,
-            }),
-          ]),
-        ]),
-      ]);
-    });
-
-    const compositeAnimation = RNAnimated.parallel(starAnimations);
-    compositeAnimation.start(() => {
-      // P1-002 FIX: Only call onComplete if still mounted
-      if (isMountedRef.current) {
-        onComplete();
-      }
-    });
-
-    // DL-014: Stop animation on unmount to prevent stale callback
-    return () => {
-      compositeAnimation.stop();
-    };
-  }, [visible, animations, onComplete]);
+    return () => clearTimeout(timer);
+  }, [visible, onComplete, burstProgress]);
 
   if (!visible) return null;
 
   return (
     <View style={starBurstStyles.container} pointerEvents="none">
-      {animations.map((anim, i) => (
-        <RNAnimated.View
+      {STAR_BURST_CONFIG.map((particle, i) => (
+        <StarBurstParticle
           key={i}
-          style={[
-            starBurstStyles.star,
-            {
-              backgroundColor: STAR_COLORS[i % STAR_COLORS.length],
-              opacity: anim.opacity,
-              transform: [
-                { translateX: anim.translateX },
-                { translateY: anim.translateY },
-                { scale: anim.scale },
-                { rotate: `${(i * 45)}deg` },
-              ],
-            },
-          ]}
-        >
-          <Ionicons name="star" size={24} color={STAR_COLORS[i % STAR_COLORS.length]} />
-        </RNAnimated.View>
+          color={STAR_COLORS[i % STAR_COLORS.length]}
+          angle={particle.angle}
+          distance={particle.distance}
+          delay={particle.delay}
+          progress={burstProgress}
+        />
       ))}
-      {/* Center star pulse */}
-      <RNAnimated.View
-        style={[
-          starBurstStyles.centerStar,
-          {
-            opacity: animations[0].opacity,
-            transform: [{ scale: animations[0].scale }],
-          },
-        ]}
-      >
+      <Animated.View style={[starBurstStyles.centerStar, centerStarStyle]}>
         <Ionicons name="star" size={48} color="#FFD700" />
-      </RNAnimated.View>
+      </Animated.View>
     </View>
+  );
+}
+
+function MatchCelebrationPulse() {
+  const pulse = useSharedValue(0);
+
+  useEffect(() => {
+    pulse.value = 0;
+    pulse.value = withRepeat(
+      withTiming(1, {
+        duration: 2200,
+        easing: Easing.inOut(Easing.ease),
+      }),
+      -1,
+      true,
+    );
+  }, [pulse]);
+
+  const haloStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(pulse.value, [0, 0.5, 1], [0.3, 0.62, 0.34], Extrapolation.CLAMP),
+    transform: [
+      {
+        scale: interpolate(pulse.value, [0, 0.5, 1], [0.96, 1.06, 0.98], Extrapolation.CLAMP),
+      },
+    ],
+  }));
+
+  const heartStyle = useAnimatedStyle(() => ({
+    transform: [
+      {
+        scale: interpolate(pulse.value, [0, 0.5, 1], [0.94, 1.08, 0.97], Extrapolation.CLAMP),
+      },
+      {
+        translateY: interpolate(pulse.value, [0, 0.5, 1], [2, -2, 2], Extrapolation.CLAMP),
+      },
+    ],
+  }));
+
+  return (
+    <>
+      <Animated.View style={[styles.p2MatchGlowRing, haloStyle]} />
+      <Animated.View style={[styles.p2MatchFloatingHeart, heartStyle]}>
+        <Ionicons name="heart" size={28} color="#ff9ac8" />
+      </Animated.View>
+    </>
   );
 }
 
@@ -296,6 +314,94 @@ const starBurstStyles = StyleSheet.create({
 });
 
 const HEADER_H = 44;
+const DEFAULT_PHASE2_INTENT_KEYS = ['go_with_the_flow'];
+
+function resolvePhase2IntentKeys(
+  profile: {
+    privateIntentKeys?: string[];
+    intentKeys?: string[];
+    privateIntentKey?: string | null | undefined;
+  },
+  fallbackIntentKeys: string[] = DEFAULT_PHASE2_INTENT_KEYS,
+): string[] {
+  const intentKeys =
+    profile.privateIntentKeys ??
+    profile.intentKeys ??
+    (profile.privateIntentKey && String(profile.privateIntentKey) !== 'undefined'
+      ? [profile.privateIntentKey]
+      : fallbackIntentKeys);
+  return Array.isArray(intentKeys) && intentKeys.length > 0
+    ? intentKeys
+    : fallbackIntentKeys;
+}
+
+function resolvePhase2CardName(displayName: unknown): string {
+  const trimmedName = typeof displayName === "string" ? displayName.trim() : "";
+  return trimmedName.length > 0 ? trimmedName : "Anonymous";
+}
+
+function mapPhase2CardProfile(input: {
+  profileId: string;
+  userId?: string;
+  displayName?: unknown;
+  age?: number;
+  city?: string;
+  distance?: number;
+  bio?: string;
+  photoUrls?: Array<string | null | undefined>;
+  activities?: string[];
+  isVerified?: boolean;
+  intentKeys?: string[];
+  fallbackIntentKeys?: string[];
+  desireTagKeys?: string[];
+  gender?: string;
+  photoBlurEnabled?: boolean;
+  photoBlurSlots?: boolean[];
+  isSetupComplete?: boolean;
+  hasPhotos?: boolean;
+  height?: number | null;
+  smoking?: string | null;
+  drinking?: string | null;
+  profilePrompts?: { question: string; answer: string }[];
+  lastActive?: number;
+  createdAt?: number;
+}): ProfileData {
+  const photoUrls = (input.photoUrls ?? []).filter(
+    (url): url is string => typeof url === "string" && url.length > 0
+  );
+  const intentKeys =
+    Array.isArray(input.intentKeys) && input.intentKeys.length > 0
+      ? input.intentKeys
+      : (input.fallbackIntentKeys ?? []);
+
+  return toProfileData({
+    _id: input.profileId,
+    userId: input.userId ?? input.profileId,
+    name: resolvePhase2CardName(input.displayName),
+    age: input.age,
+    city: input.city,
+    distance: input.distance,
+    bio: input.bio,
+    photos: photoUrls.map((url) => ({ url })),
+    activities: input.activities ?? [],
+    isVerified: input.isVerified ?? false,
+    privateIntentKeys: intentKeys,
+    privateIntentKey: intentKeys[0],
+    desireTagKeys: Array.isArray(input.desireTagKeys) ? input.desireTagKeys : [],
+    gender: input.gender,
+    photoBlurEnabled: input.photoBlurEnabled,
+    photoBlurSlots: input.photoBlurSlots,
+    photoBlurred: false,
+    isSetupComplete: input.isSetupComplete,
+    hasPhotos: input.hasPhotos ?? (photoUrls.length > 0),
+    height: input.height ?? null,
+    smoking: input.smoking ?? null,
+    drinking: input.drinking ?? null,
+    profilePrompts: input.profilePrompts ?? [],
+    lastActive: input.lastActive,
+    createdAt: input.createdAt,
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ANIMATED ACTION BUTTON - Micro-interaction feedback for action buttons
@@ -605,13 +711,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const releaseSwipeLock = useCallback((id: number): void => {
     if (swipeIdRef.current === id) {
       swipeLockRef.current = false;
-      // P2-001 FIX: Apply pending filter reset after swipe completes
-      if (pendingFilterResetRef.current) {
-        pendingFilterResetRef.current = false;
-        setIndex(0);
-        visibleQueueRef.current = [];
-        consumedIdsRef.current.clear();
-      }
     }
     // else: stale callback from old swipe — ignore silently
   }, []);
@@ -639,6 +738,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Phase-2 Deep Connect: minimum skeleton smoothing window only (no empty-result grace / no extra empty hold)
   const [p2MinSkeletonDone, setP2MinSkeletonDone] = useState(() => !isPhase2);
   const [p2SearchingLabelVisible, setP2SearchingLabelVisible] = useState(false);
+  const [phase2RefreshCycle, setPhase2RefreshCycle] = useState(0);
+  const [phase2QueryPaused, setPhase2QueryPaused] = useState(false);
+  const [isRefreshingPhase2Deck, setIsRefreshingPhase2Deck] = useState(false);
+  const [phase2QueryTimedOut, setPhase2QueryTimedOut] = useState(false);
 
   useEffect(() => {
     if (!isPhase2) {
@@ -654,7 +757,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     setP2MinSkeletonDone(false);
     const t = setTimeout(() => setP2MinSkeletonDone(true), DEEP_CONNECT_MIN_SKELETON_MS);
     return () => clearTimeout(t);
-  }, [isPhase2, isDemoMode, userId]);
+  }, [isPhase2, isDemoMode, userId, phase2RefreshCycle]);
 
   // Overlay refs + shared values (no React re-renders during drag)
   const overlayDirectionRef = useRef<"left" | "right" | "up" | null>(null);
@@ -962,15 +1065,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
   }
 
-  // P1-002 FIX: Only pass authUserId and limit - userId was removed from validator
+  // Deep Connect query args: auth fallback + server-side intent filtering.
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const privateDiscoverArgs = useMemo(
     () =>
-      !isDemoMode && convexUserId && !skipInternalQuery && isPhase2 && isAuthReadyForQuery
-        ? { limit: 50 }
+      convexUserId && !skipInternalQuery && isPhase2 && isAuthReadyForQuery && !phase2QueryPaused
+        ? {
+            limit: 50,
+            ...(typeof userId === "string" && userId.trim().length > 0 ? { authUserId: userId } : {}),
+            ...(intentFilters.length > 0 ? { intentKeys: intentFilters } : {}),
+          }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [convexUserId, userId, skipInternalQuery, retryKey, isPhase2, queryTrigger, isAuthReadyForQuery],
+    [convexUserId, userId, intentFilters, skipInternalQuery, isPhase2, isAuthReadyForQuery, phase2QueryPaused],
   );
 
   const phase2Profiles = useQuery(api.privateDiscover.getProfiles, privateDiscoverArgs);
@@ -1008,6 +1115,24 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const isPhase2QueryLoading =
     isPhase2 && !isDemoMode && privateDiscoverArgs !== "skip" && phase2Profiles === undefined;
 
+  useEffect(() => {
+    if (!isPhase2 || isDemoMode || privateDiscoverArgs === "skip" || !isAuthReadyForQuery) {
+      setPhase2QueryTimedOut(false);
+      return;
+    }
+    if (!isPhase2QueryLoading) {
+      setPhase2QueryTimedOut(false);
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      if (!mountedRef.current) return;
+      setPhase2QueryTimedOut(true);
+    }, DEEP_CONNECT_QUERY_TIMEOUT_MS);
+
+    return () => clearTimeout(timeoutId);
+  }, [isAuthReadyForQuery, isDemoMode, isPhase2, isPhase2QueryLoading, privateDiscoverArgs]);
+
   const effectiveConvexProfiles = convexProfiles;
 
   const profilesSafe = effectiveConvexProfiles ?? EMPTY_ARRAY;
@@ -1043,29 +1168,27 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (isDemoMode) {
       // Phase-2 demo mode: use DEMO_INCOGNITO_PROFILES (with privateIntentKeys)
       if (isPhase2) {
-        const DEFAULT_INTENT_KEYS = ['go_with_the_flow'];
         return DEMO_INCOGNITO_PROFILES
           .filter((p) => !excludedSet.has(p.id))
           .map((p) => {
-            // Resolve intent keys: privateIntentKeys > privateIntentKey > default
-            const intentKeys = p.privateIntentKeys ??
-              (p.privateIntentKey && String(p.privateIntentKey) !== 'undefined' ? [p.privateIntentKey] : DEFAULT_INTENT_KEYS);
+            const intentKeys = resolvePhase2IntentKeys(p);
             // DEV assertion: warn if profile has no valid intent keys
             if (__DEV__ && (!intentKeys || intentKeys.length === 0)) {
               console.warn('[demo] Missing privateIntentKeys for', p.id);
             }
-            return toProfileData({
-              _id: p.id,
-              name: p.username,
+            return mapPhase2CardProfile({
+              profileId: p.id,
+              userId: p.id,
+              displayName: p.username,
               age: p.age,
-              bio: p.bio,
               city: p.city,
               distance: p.distance,
-              isVerified: false,
-              photos: (p.photos ?? [p.photoUrl]).map(url => ({ url })),
+              bio: p.bio,
+              photoUrls: p.photos ?? [p.photoUrl],
               activities: p.interests ?? p.hobbies ?? [],
-              privateIntentKeys: intentKeys,
-              privateIntentKey: intentKeys[0],
+              isVerified: false,
+              intentKeys,
+              fallbackIntentKeys: DEFAULT_PHASE2_INTENT_KEYS,
               lastActive: Date.now() - 2 * 60 * 60 * 1000,
               createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
             });
@@ -1134,50 +1257,35 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       }
 
       return profilesSafe.map((p: any) => {
-        // SOFT_MATCH_FIX: If no photos, pass empty array - ProfileCard shows placeholder
         const photoUrls = p.blurredPhotoUrls ?? [];
-        const photos = photoUrls.map((url: string) => ({ url }));
-
-        const trimmedNickname =
-          typeof p.displayName === "string" ? p.displayName.trim() : "";
-        const resolvedPhase2Name =
-          trimmedNickname.length > 0 ? trimmedNickname : "Anonymous";
+        const resolvedPhase2Name = resolvePhase2CardName(p.displayName);
+        const intentKeys = resolvePhase2IntentKeys(p, []);
 
         if (__DEV__ && DEBUG_PHASE2) {
           console.log(`[P2_DATA] ${resolvedPhase2Name}(${p.userId?.slice?.(-6)}) ${photoUrls.length}p`);
         }
 
-        return toProfileData({
-          _id: p._id,
-          id: p.userId, // Phase-2 uses userId as the primary identifier for matching
+        return mapPhase2CardProfile({
+          profileId: p._id,
           userId: p.userId,
-          // P0-002 FIX: Use displayName only for Phase-2 profiles (trim; whitespace-only → Anonymous)
-          name: resolvedPhase2Name,
+          displayName: p.displayName,
           age: p.age,
           city: p.city,
           distance: typeof p.distanceKm === 'number' ? p.distanceKm : undefined,
           bio: p.privateBio,
-          photos,
+          photoUrls,
           activities: p.hobbies ?? [],
           isVerified: p.isVerified ?? false,
-          privateIntentKeys: p.privateIntentKeys ?? p.intentKeys ?? [],
-          privateIntentKey: (p.privateIntentKeys ?? p.intentKeys)?.[0],
+          intentKeys,
           desireTagKeys: Array.isArray(p.desireTagKeys) ? p.desireTagKeys : [],
-          // PHASE2_PARITY: Include gender for identity display
           gender: p.gender,
-          // Phase-2 blur is per-photo: photoBlurEnabled + photoBlurSlots
           photoBlurEnabled: p.photoBlurEnabled,
           photoBlurSlots: p.photoBlurSlots,
-          // Keep legacy boolean off for Phase-2 (do not force-blur all photos)
-          photoBlurred: false,
-          // SOFT_MATCH_FIX: Pass through completeness flags
           isSetupComplete: p.isSetupComplete ?? false,
           hasPhotos: p.hasPhotos ?? (photoUrls.length > 0),
-          // PREMIUM_CARD: Lifestyle data for photo-index reveal
           height: p.height ?? null,
           smoking: p.smoking ?? null,
           drinking: p.drinking ?? null,
-          // PREMIUM_CARD: Profile prompts for photo-index reveal
           profilePrompts: p.promptAnswers ?? [],
         });
       });
@@ -1185,7 +1293,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     // Phase-1 live results are already ranked/sorted by the backend.
     return profilesSafe.map(toProfileData);
-  }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, exploreCategoryId, isDemoMode, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
+  }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isDemoMode, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
 
   // Drop profiles with no valid primary photo — prevents blank Discover cards
   // SOFT_MATCH_FIX: For Phase-2, allow profiles without photos (ProfileCard shows placeholder)
@@ -1273,9 +1381,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     [profilesRaw, userId],
   );
 
-  // Phase-2 only: Filter profiles by intent categories (any match)
-  const filteredProfiles = useMemo(() => {
+  // Phase-2 fallback decks (demo/external) still need local filtering.
+  // Live Deep Connect results now arrive pre-filtered from the backend.
+  const phase2DeckProfiles = useMemo(() => {
     if (!isPhase2 || intentFilters.length === 0) return profiles;
+    if (!isDemoMode && !externalProfiles) return profiles;
     return profiles.filter((p) => {
       // Support: privateIntentKeys (new) > intentKeys > privateIntentKey (legacy)
       const profileKeys: string[] =
@@ -1285,7 +1395,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // Match if any profile intent is in the filter set
       return profileKeys.some(k => intentFilters.includes(k));
     });
-  }, [profiles, isPhase2, intentFilters]);
+  }, [profiles, isPhase2, intentFilters, isDemoMode, externalProfiles]);
 
   // Reset index when filter changes (always show first matching profile)
   const prevFilterRef = useRef<string>(JSON.stringify([]));
@@ -1294,8 +1404,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   useEffect(() => {
     const filterKey = JSON.stringify(intentFilters);
     if (isPhase2 && prevFilterRef.current !== filterKey) {
-      // DL-006: Skip index reset if swipe is in progress to prevent race condition
-      if (!swipeLockRef.current) {
+      const shouldDeferReset =
+        swipeLockRef.current ||
+        showPhaseTransition ||
+        navigatingRef.current;
+      if (!shouldDeferReset) {
         setIndex(0);
         // Also reset queue when filter changes
         visibleQueueRef.current = [];
@@ -1309,7 +1422,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
       prevFilterRef.current = filterKey;
     }
-  }, [intentFilters, isPhase2]);
+  }, [intentFilters, isPhase2, showPhaseTransition]);
 
   // ══════════════════════════════════════════════════════════════════════════
   // STABLE QUEUE MODEL: Prevents back card from changing during swipe animation
@@ -1355,7 +1468,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [externalProfiles, isDemoMode, isPhase2, phase1CacheResetKey]);
 
   // Source profiles for queue refill (preserve backend order for live Phase-2)
-  const baseProfiles = isPhase2 ? filteredProfiles : profiles;
+  const baseProfiles = isPhase2 ? phase2DeckProfiles : profiles;
   const sourceProfiles = baseProfiles;
 
   // Build a map from profile ID to profile data for O(1) lookup
@@ -1376,6 +1489,51 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       profileMapRef.current.set(p.id, p);
     }
   }, [sourceProfiles, isPhase2]);
+
+  const triggerPhase2Refresh = useCallback(
+    (source: "button" | "pull" = "button") => {
+      if (!isPhase2 || externalProfiles) return;
+
+      if (source === "button" || source === "pull") {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      }
+
+      if (isDemoMode) {
+        useDemoStore.getState().clearSwipedProfiles();
+        useDemoStore.getState().resetDiscoverPool();
+        visibleQueueRef.current = [];
+        consumedIdsRef.current.clear();
+        setIndex(0);
+        setQueueVersion((version) => version + 1);
+        return;
+      }
+
+      if (skipInternalQuery || !convexUserId || !isAuthReadyForQuery) {
+        return;
+      }
+
+      hasCommittedRef.current = false;
+      prevDeepConnectContentStateRef.current = null;
+      stableProfilesRef.current = [];
+      profileMapRef.current.clear();
+      visibleQueueRef.current = [];
+      consumedIdsRef.current.clear();
+      refetchRetryCountRef.current = 0;
+      setIndex(0);
+      setQueueVersion((version) => version + 1);
+      setP2SearchingLabelVisible(false);
+      setPhase2QueryTimedOut(false);
+      setIsRefreshingPhase2Deck(true);
+      setPhase2RefreshCycle((value) => value + 1);
+      setPhase2QueryPaused(true);
+
+      setTimeout(() => {
+        if (!mountedRef.current) return;
+        setPhase2QueryPaused(false);
+      }, 32);
+    },
+    [convexUserId, externalProfiles, isAuthReadyForQuery, isDemoMode, isPhase2, skipInternalQuery],
+  );
 
   const sanitizeQueue = useCallback(() => {
     if (isPhase2) return false;
@@ -1702,6 +1860,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     };
   });
 
+  const phase2RefreshHintAnimatedStyle = useAnimatedStyle(() => {
+    const activeY = activePanY.value;
+    const pullProgress = Math.max(0, Math.min(activeY / DEEP_CONNECT_PULL_REFRESH_MIN_DISTANCE, 1));
+    const restingOpacity = isRefreshingPhase2Deck ? 0.96 : pullProgress * 0.96;
+    const restingScale = isRefreshingPhase2Deck
+      ? 1
+      : interpolate(pullProgress, [0, 1], [0.92, 1], Extrapolation.CLAMP);
+    const restingTranslateY = isRefreshingPhase2Deck
+      ? 10
+      : interpolate(pullProgress, [0, 1], [-18, 10], Extrapolation.CLAMP);
+
+    return {
+      opacity: restingOpacity,
+      transform: [{ translateY: restingTranslateY }, { scale: restingScale }],
+    };
+  }, [isRefreshingPhase2Deck]);
+
   // Next card animated style - premium stack depth effect
   // Card behind scales up and moves up as top card is dragged away
   const nextCardAnimatedStyle = useAnimatedStyle(() => {
@@ -1926,8 +2101,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     recordImpressionsMutation({
       viewedUserIds: [currentViewedUserId],
-    }).catch(() => {
-      // Silently ignore errors - impression recording is non-critical
+      authUserId: userId,
+    }).catch((error) => {
+      if (__DEV__) {
+        console.warn('[DEEPCONNECT_IMPRESSION_FAIL]', error?.message ?? error);
+      }
     });
   }, [isPhase2, isDemoMode, userId, current?.userId, current?.id, recordImpressionsMutation]);
 
@@ -1941,6 +2119,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const openProfileCb = useCallback(() => {
     const c = currentRef.current;
     if (!c) return;
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
 
     // LOG_NOISE_FIX: Removed verbose profile open log
 
@@ -2472,8 +2652,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       openProfileCb();
       return;
     }
+
+    const isPullRefreshGesture =
+      isPhase2 &&
+      !showCardSkeleton &&
+      !showPhaseTransition &&
+      dy > DEEP_CONNECT_PULL_REFRESH_MIN_DISTANCE &&
+      dy > absX * 1.35 &&
+      vy > 0.1;
+
+    if (isPullRefreshGesture) {
+      resetPosition();
+      triggerPhase2Refresh("pull");
+      return;
+    }
+
     resetPosition();
-  }, [thresholdX, thresholdY, velocityX, velocityY, profileOpenMinDistance, profileOpenMaxDistance, profileOpenMinVelocity, resetPosition, hasReachedStandOutLimit, standOutsRemaining, openProfileCb]);
+  }, [thresholdX, thresholdY, velocityX, velocityY, profileOpenMinDistance, profileOpenMaxDistance, profileOpenMinVelocity, resetPosition, hasReachedStandOutLimit, standOutsRemaining, openProfileCb, isPhase2, showCardSkeleton, showPhaseTransition, triggerPhase2Refresh]);
 
   // P0-001 FIX: Keep handlePanEndRef in sync with latest handlePanEnd
   handlePanEndRef.current = handlePanEnd;
@@ -2594,17 +2789,67 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     visibleQueueRef.current.length === 0 &&
     consumedIdsRef.current.size === 0;
 
-  // Deep Connect (Phase-2): lock first stable non-loading state — prevents repeated skeleton phases
-  if (isPhase2 && !isDemoMode && !hasCommittedRef.current && !isDiscoverLoading) {
-    hasCommittedRef.current = true;
-  }
-
   const phase2MinHold = isPhase2 && !isDemoMode && !p2MinSkeletonDone;
   const loadingDrivesSkeleton =
     (!hasCommittedRef.current || !isPhase2 || isDemoMode) && (isDiscoverLoading && !usingStableCache);
 
   const showCardSkeleton =
     loadingDrivesSkeleton || isQueueBootstrapping || phase2MinHold;
+
+  useEffect(() => {
+    if (!isPhase2 || !pendingFilterResetRef.current) return;
+    if (swipeLockRef.current || showPhaseTransition || showCardSkeleton || navigatingRef.current) {
+      return;
+    }
+    pendingFilterResetRef.current = false;
+    setIndex(0);
+    visibleQueueRef.current = [];
+    consumedIdsRef.current.clear();
+  }, [isPhase2, showPhaseTransition, showCardSkeleton, sourceProfiles.length]);
+
+  const hasResolvedPhase2Query =
+    isPhase2 && !isDemoMode && privateDiscoverArgs !== "skip" && phase2Profiles !== undefined;
+  const isPhase2EmptySettled =
+    isPhase2 &&
+    !isDemoMode &&
+    !showPhaseTransition &&
+    p2MinSkeletonDone &&
+    !isAuthPending &&
+    hasResolvedPhase2Query &&
+    !usingStableCache &&
+    profiles.length === 0;
+  const isPhase2NetworkIssueSettled =
+    isPhase2 &&
+    !isDemoMode &&
+    !showPhaseTransition &&
+    p2MinSkeletonDone &&
+    !isAuthPending &&
+    phase2QueryTimedOut &&
+    profiles.length === 0;
+
+  // Deep Connect (Phase-2): commit only when cards exist or empty is truly settled.
+  if (
+    isPhase2 &&
+    !isDemoMode &&
+    !hasCommittedRef.current &&
+    (profiles.length > 0 || isPhase2EmptySettled || isPhase2NetworkIssueSettled)
+  ) {
+    hasCommittedRef.current = true;
+  }
+
+  useEffect(() => {
+    if (!isPhase2) {
+      setIsRefreshingPhase2Deck(false);
+      return;
+    }
+    if (privateDiscoverArgs === "skip") {
+      setIsRefreshingPhase2Deck(false);
+      return;
+    }
+    if (hasResolvedPhase2Query || isPhase2NetworkIssueSettled) {
+      setIsRefreshingPhase2Deck(false);
+    }
+  }, [hasResolvedPhase2Query, isPhase2, isPhase2NetworkIssueSettled, privateDiscoverArgs]);
 
   useEffect(() => {
     if (!isPhase2 || !showCardSkeleton || profilesSafe.length > 0) {
@@ -2622,12 +2867,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         return "skeleton";
       }
       if (profilesSafe.length > 0) return "cards";
+      if (isPhase2NetworkIssueSettled) return "network_issue";
       return "empty";
     }
     if (showCardSkeleton) return "skeleton";
     if (profilesSafe.length > 0) return "cards";
     return "empty";
-  }, [isPhase2, showCardSkeleton, profilesSafe.length, p2SearchingLabelVisible]);
+  }, [isPhase2, showCardSkeleton, profilesSafe.length, p2SearchingLabelVisible, isPhase2NetworkIssueSettled]);
 
   if (__DEV__ && isPhase2) {
     if (contentState !== prevDeepConnectContentStateRef.current) {
@@ -2635,6 +2881,54 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       console.log("[DEEPCONNECT_CONTENT_STATE]", contentState);
     }
   }
+
+  const phase2FilterLabels = useMemo(
+    () => intentFilters
+      .map((key) => PRIVATE_INTENT_CATEGORIES.find((category) => category.key === key)?.label ?? key)
+      .join(", "),
+    [intentFilters],
+  );
+
+  const phase2EmptyState = useMemo(() => {
+    if (!isPhase2) return null;
+
+    if (isPhase2NetworkIssueSettled) {
+      return {
+        icon: "cloud-offline-outline" as const,
+        iconColor: "rgba(125, 211, 252, 0.95)",
+        title: "Deep Connect hit a connection snag",
+        subtitle: "We couldn't refresh the deck just now. Pull down on the top card or try again in a moment.",
+        primaryAction: "retry" as const,
+        primaryLabel: "Try again",
+        secondaryAction: intentFilters.length > 0 ? ("clear_filters" as const) : null,
+        secondaryLabel: intentFilters.length > 0 ? "Clear filters" : null,
+      };
+    }
+
+    if (intentFilters.length > 0 && sourceProfiles.length === 0) {
+      return {
+        icon: "options-outline" as const,
+        iconColor: "rgba(255, 206, 102, 0.96)",
+        title: "Those filters are narrowing the room",
+        subtitle: `Nothing in Deep Connect matches ${phase2FilterLabels || "this filter set"} yet. Clear filters or try again for a wider pass.`,
+        primaryAction: "clear_filters" as const,
+        primaryLabel: "Clear filters",
+        secondaryAction: "retry" as const,
+        secondaryLabel: "Try again",
+      };
+    }
+
+    return {
+      icon: "sparkles-outline" as const,
+      iconColor: "rgba(233, 69, 96, 0.95)",
+      title: "Fresh faces are on the way",
+      subtitle: "Deep Connect refreshes as new nearby people finish setting up. Try again in a bit or widen your filters.",
+      primaryAction: "retry" as const,
+      primaryLabel: "Try again",
+      secondaryAction: intentFilters.length > 0 ? ("clear_filters" as const) : null,
+      secondaryLabel: intentFilters.length > 0 ? "Clear filters" : null,
+    };
+  }, [intentFilters, isPhase2, isPhase2NetworkIssueSettled, phase2FilterLabels, sourceProfiles.length]);
 
   const notificationPopover = showNotificationPopover ? (
     <NotificationPopover
@@ -2740,7 +3034,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 {/* Premium icon with multi-layer glow */}
                 <View style={styles.phase2IconOuter}>
                   <View style={styles.phase2IconInner}>
-                    <Ionicons name="sparkles" size={36} color="rgba(233, 69, 96, 0.95)" />
+                    <Ionicons
+                      name={phase2EmptyState?.icon ?? "sparkles-outline"}
+                      size={36}
+                      color={phase2EmptyState?.iconColor ?? "rgba(233, 69, 96, 0.95)"}
+                    />
                   </View>
                 </View>
 
@@ -2748,26 +3046,66 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   entering={FadeInUp.duration(350).delay(200)}
                   style={styles.phase2EmptyTitle}
                 >
-                  We're finding people for you
+                  {phase2EmptyState?.title ?? "Fresh faces are on the way"}
                 </Animated.Text>
                 <Animated.Text
                   entering={FadeInUp.duration(350).delay(280)}
                   style={styles.phase2EmptySubtitle}
                 >
-                  Try adjusting your preferences to see more profiles
+                  {phase2EmptyState?.subtitle ?? "Deep Connect refreshes as new nearby people finish setting up. Try again in a bit or widen your filters."}
                 </Animated.Text>
 
-                {isDemoMode && (
-                  <Animated.View entering={FadeIn.duration(300).delay(400)}>
+                <Animated.View entering={FadeIn.duration(300).delay(400)} style={styles.phase2EmptyActions}>
+                  {phase2EmptyState?.primaryLabel ? (
                     <TouchableOpacity
-                      style={styles.phase2ResetButton}
+                      style={styles.phase2PrimaryAction}
+                      activeOpacity={0.9}
+                      onPress={() => {
+                        if (phase2EmptyState.primaryAction === "clear_filters") {
+                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                          setPrivateIntentKeys([]);
+                          return;
+                        }
+                        triggerPhase2Refresh("button");
+                      }}
+                    >
+                      <Ionicons
+                        name={phase2EmptyState.primaryAction === "clear_filters" ? "funnel-outline" : "refresh"}
+                        size={16}
+                        color="rgba(255,255,255,0.92)"
+                        style={{ marginRight: 8 }}
+                      />
+                      <Text style={styles.phase2PrimaryActionText}>{phase2EmptyState.primaryLabel}</Text>
+                    </TouchableOpacity>
+                  ) : null}
+
+                  {phase2EmptyState?.secondaryLabel ? (
+                    <TouchableOpacity
+                      style={styles.phase2SecondaryAction}
+                      activeOpacity={0.82}
+                      onPress={() => {
+                        if (phase2EmptyState.secondaryAction === "clear_filters") {
+                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                          setPrivateIntentKeys([]);
+                          return;
+                        }
+                        triggerPhase2Refresh("button");
+                      }}
+                    >
+                      <Text style={styles.phase2SecondaryActionText}>{phase2EmptyState.secondaryLabel}</Text>
+                    </TouchableOpacity>
+                  ) : null}
+
+                  {isDemoMode && (
+                    <TouchableOpacity
+                      style={styles.phase2SecondaryAction}
+                      activeOpacity={0.82}
                       onPress={handleResetDemoSwipes}
                     >
-                      <Ionicons name="refresh" size={16} color="rgba(255,255,255,0.9)" style={{ marginRight: 8 }} />
-                      <Text style={styles.phase2ResetButtonText}>Reset Demo</Text>
+                      <Text style={styles.phase2SecondaryActionText}>Reset demo deck</Text>
                     </TouchableOpacity>
-                  </Animated.View>
-                )}
+                  )}
+                </Animated.View>
               </Animated.View>
             </>
           ) : (
@@ -2815,41 +3153,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           )}
         </View>
         {notificationPopover}
-      </View>
-    );
-  }
-
-  // Phase-2: Filter results in no matches
-  if (isPhase2 && intentFilters.length > 0 && filteredProfiles.length === 0) {
-    const filterLabels = intentFilters
-      .map(k => PRIVATE_INTENT_CATEGORIES.find((c) => c.key === k)?.label ?? k)
-      .join(', ');
-    return (
-      <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        {/* Header - always visible even when feed is empty */}
-        {!hideHeader && (
-          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
-              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-            </TouchableOpacity>
-            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-            <View style={styles.headerBtn} />
-          </View>
-        )}
-        <View style={[styles.center, { flex: 1 }]}>
-          <Text style={styles.emptyEmoji}>🔍</Text>
-          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No matching profiles</Text>
-          <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-            No profiles match "{filterLabels}". Try different intents or clear filters.
-          </Text>
-          <TouchableOpacity
-            style={[styles.resetButton, { marginTop: 24 }]}
-            onPress={() => setPrivateIntentKeys([])}
-          >
-            <Ionicons name="funnel-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-            <Text style={styles.resetButtonText}>Show All</Text>
-          </TouchableOpacity>
-        </View>
       </View>
     );
   }
@@ -2967,6 +3270,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   return (
     <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+      {isPhase2 && (
+        <>
+          <LinearGradient
+            colors={['#080913', '#101426', '#121c32', '#0d1427', '#080913']}
+            locations={[0, 0.28, 0.52, 0.76, 1]}
+            style={StyleSheet.absoluteFill}
+            pointerEvents="none"
+          />
+          <View pointerEvents="none" style={styles.phase2DeckGlowTop} />
+          <View pointerEvents="none" style={styles.phase2DeckGlowBottom} />
+        </>
+      )}
+
       {/* Compact Header */}
       {!hideHeader && (
         <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
@@ -3019,6 +3335,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
       {/* Card Area (fills between header and tab bar) */}
       <View style={[styles.cardArea, { top: cardTop, bottom: cardBottom }]} pointerEvents="box-none">
+        {isPhase2 && !showCardSkeleton && !showPhaseTransition ? (
+          <Animated.View style={[styles.phase2PullRefreshHint, phase2RefreshHintAnimatedStyle]} pointerEvents="none">
+            <View style={styles.phase2PullRefreshInner}>
+              <Ionicons
+                name={isRefreshingPhase2Deck ? "refresh" : "arrow-down-outline"}
+                size={14}
+                color="rgba(255,255,255,0.82)"
+                style={{ marginRight: 6 }}
+              />
+              <Text style={styles.phase2PullRefreshText}>
+                {isRefreshingPhase2Deck ? "Refreshing deck..." : "Pull for fresh faces"}
+              </Text>
+            </View>
+          </Animated.View>
+        ) : null}
+
         {showCardSkeleton ? (
           isPhase2 ? (
             <View style={styles.phase2SkeletonColumn} pointerEvents="box-none">
@@ -3259,21 +3591,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
             {/* Celebration content */}
             <Animated.View
-              entering={FadeIn.delay(150).duration(400)}
+              entering={FadeIn.delay(150).duration(420).springify().damping(18)}
               style={styles.p2MatchContent}
             >
-              {/* Decorative glow ring */}
-              <View style={styles.p2MatchGlowRing} />
-
               {/* Premium avatar composition */}
               <Animated.View
-                entering={FadeIn.delay(200).duration(500).springify()}
+                entering={FadeIn.delay(200).duration(520).springify().damping(16)}
                 style={styles.p2MatchAvatarSection}
               >
-                {/* Heart icon above */}
-                <View style={styles.p2MatchFloatingHeart}>
-                  <Ionicons name="heart" size={28} color="#9b59b6" />
-                </View>
+                <MatchCelebrationPulse />
 
                 {/* Profile photo with premium frame */}
                 <View style={styles.p2MatchPremiumFrame}>
@@ -3316,6 +3642,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   style={styles.p2MatchStartChatBtn}
                   activeOpacity={0.85}
                   onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
                     const convoId = phase2MatchCelebration.matchedProfile?.conversationId;
                     setPhase2MatchCelebration({ visible: false, matchedProfile: null });
                     if (convoId) {
@@ -3332,7 +3659,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 <TouchableOpacity
                   style={styles.p2MatchKeepExploringBtn}
                   activeOpacity={0.7}
-                  onPress={() => setPhase2MatchCelebration({ visible: false, matchedProfile: null })}
+                  onPress={() => {
+                    Haptics.selectionAsync().catch(() => {});
+                    setPhase2MatchCelebration({ visible: false, matchedProfile: null });
+                  }}
                 >
                   <Text style={styles.p2MatchKeepExploringText}>Keep Exploring</Text>
                 </TouchableOpacity>
@@ -3491,38 +3821,42 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     letterSpacing: 0.2,
   },
-  // Premium reset button (demo only)
-  phase2ResetButton: {
+  phase2EmptyActions: {
+    width: "100%",
+    marginTop: 28,
+    gap: 12,
+  },
+  phase2PrimaryAction: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(233, 69, 96, 0.15)',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 12,
-    marginTop: 32,
-    borderWidth: 1,
-    borderColor: 'rgba(233, 69, 96, 0.2)',
-  },
-  phase2ResetButtonText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: 'rgba(255, 255, 255, 0.85)',
-    letterSpacing: 0.3,
-  },
-  phase2EmptyPrimaryCta: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(236, 72, 153, 0.92)",
+    backgroundColor: 'rgba(233, 69, 96, 0.28)',
     paddingVertical: 14,
     paddingHorizontal: 20,
     borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
   },
-  phase2EmptyPrimaryCtaText: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#FFFFFF",
+  phase2PrimaryActionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: 'rgba(255, 255, 255, 0.92)',
+    letterSpacing: 0.3,
+  },
+  phase2SecondaryAction: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  phase2SecondaryActionText: {
+    fontSize: 14,
+    fontWeight: "500",
+    color: "rgba(255,255,255,0.78)",
   },
   // Phase-1 empty content container (mirrors Phase-2 structure)
   phase1EmptyContent: {
@@ -3719,6 +4053,55 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 0,
     right: 0,
+  },
+  phase2DeckGlowTop: {
+    position: "absolute",
+    top: -40,
+    right: -30,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: "rgba(104, 92, 255, 0.12)",
+    shadowColor: "#685cff",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.24,
+    shadowRadius: 120,
+  },
+  phase2DeckGlowBottom: {
+    position: "absolute",
+    left: -60,
+    bottom: 90,
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+    backgroundColor: "rgba(233, 69, 96, 0.08)",
+    shadowColor: "#e94560",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 140,
+  },
+  phase2PullRefreshHint: {
+    position: "absolute",
+    top: 10,
+    alignSelf: "center",
+    zIndex: 25,
+  },
+  phase2PullRefreshInner: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "rgba(10, 14, 28, 0.72)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  phase2PullRefreshText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.78)",
+    letterSpacing: 0.2,
   },
   card: {
     position: "absolute",
