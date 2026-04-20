@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useCallback } from "react";
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   Alert,
   ActivityIndicator,
+  BackHandler,
 } from "react-native";
 import { useRouter } from "expo-router";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -41,6 +42,17 @@ export default function VerificationScreen() {
   const createSession = useMutation(api.verification.createVerificationSession);
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
 
+  // Safe back navigation: verification is often entered via router.replace()
+  // (security gate), so there is no back stack. Fall back to home to avoid
+  // the "GO_BACK was not handled by any navigator" error.
+  const safeBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace("/(main)/(tabs)/home" as any);
+    }
+  }, [router]);
+
   // Determine if the user is locked (security_only) — hide dismiss/close in that case
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUser = useQuery(
@@ -54,6 +66,18 @@ export default function VerificationScreen() {
          verificationStatus: (currentUser.verificationStatus as any) || "unverified",
        }) === "security_only")
     : false;
+
+  // Android hardware back button handling — mirrors safeBack semantics.
+  // When the user is in security_only (isLocked), swallow hardware back so
+  // they can't bypass the security gate.
+  React.useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (isLocked) return true; // swallow — stay on screen
+      safeBack();
+      return true;
+    });
+    return () => sub.remove();
+  }, [safeBack, isLocked]);
 
   // Set initial state from backend
   React.useEffect(() => {
@@ -85,10 +109,12 @@ export default function VerificationScreen() {
       return;
     }
     try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.8,
-      });
-      if (photo) {
+      // Silence the shutter sound on iOS via `shutterSound: false`. Android
+      // uses the `mute` prop on CameraView (set below) — note some regions
+      // enforce shutter sound at the OS level regardless.
+      const options: any = { quality: 0.8, shutterSound: false };
+      const photo: any = await cameraRef.current.takePictureAsync(options);
+      if (photo && typeof photo.uri === "string" && photo.uri) {
         setCapturedUri(photo.uri);
       }
     } catch (error) {
@@ -203,7 +229,7 @@ export default function VerificationScreen() {
       {!isLocked && (
         <TouchableOpacity
           style={styles.secondaryButton}
-          onPress={() => router.back()}
+          onPress={safeBack}
           accessibilityLabel="Go back to your profile"
         >
           <Text style={styles.secondaryButtonText}>Maybe Later</Text>
@@ -245,12 +271,14 @@ export default function VerificationScreen() {
         </View>
       ) : (
         <>
-          <CameraView
-            ref={cameraRef}
-            style={styles.camera}
-            facing="front"
-          >
-            <View style={styles.faceGuide}>
+          <View style={styles.cameraWrapper}>
+            <CameraView
+              ref={cameraRef}
+              style={StyleSheet.absoluteFillObject}
+              facing="front"
+              mute
+            />
+            <View style={[StyleSheet.absoluteFillObject, styles.faceGuide]} pointerEvents="none">
               <View style={styles.faceOval} />
               <Text style={styles.guideText}>
                 Position your face in the oval
@@ -259,7 +287,7 @@ export default function VerificationScreen() {
                 Good lighting, face the camera
               </Text>
             </View>
-          </CameraView>
+          </View>
           <View style={styles.captureContainer}>
             <TouchableOpacity
               style={styles.captureButton}
@@ -300,7 +328,7 @@ export default function VerificationScreen() {
       {!isLocked && (
         <TouchableOpacity
           style={styles.primaryButton}
-          onPress={() => router.back()}
+          onPress={safeBack}
           accessibilityLabel="Back to profile"
         >
           <Text style={styles.primaryButtonText}>Back to Profile</Text>
@@ -327,11 +355,11 @@ export default function VerificationScreen() {
         style={[styles.primaryButton, { backgroundColor: COLORS.success }]}
         onPress={() => {
           // In security_only mode there's no stack to go back to (user was redirected here),
-          // so replace to home. Otherwise, just pop back to where the user came from.
+          // so replace to home. Otherwise, pop back if possible, else fall back to home.
           if (isLocked) {
             router.replace("/(main)/(tabs)/home" as any);
           } else {
-            router.back();
+            safeBack();
           }
         }}
         accessibilityLabel="Finish verification"
@@ -346,7 +374,7 @@ export default function VerificationScreen() {
       <View style={styles.header}>
         {!isLocked && (
           <TouchableOpacity
-            onPress={() => router.back()}
+            onPress={safeBack}
             style={styles.backBtn}
             accessibilityLabel="Close verification"
           >
@@ -443,6 +471,11 @@ const styles = StyleSheet.create({
   },
   cameraContainer: {
     flex: 1,
+  },
+  cameraWrapper: {
+    flex: 1,
+    overflow: "hidden",
+    backgroundColor: COLORS.black,
   },
   camera: {
     flex: 1,
