@@ -145,7 +145,7 @@ export function TextComposerModal({ visible, prompt, initialText, onClose, onSub
                   </View>
                   <Ionicons name="person-outline" size={16} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
                   <Text style={[styles.identityOptionText, identityMode === 'no_photo' && { color: C.primary }]}>
-                    No photo
+                    Blur photo
                   </Text>
                 </TouchableOpacity>
 

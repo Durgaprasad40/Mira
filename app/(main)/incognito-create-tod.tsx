@@ -182,7 +182,9 @@ export default function CreateTodScreen() {
   const cleanupPendingTodUploads = useMutation(api.truthDare.cleanupPendingTodUploads);
 
   const maxLength = 280;
-  const canSubmit = content.trim().length >= 10 && !isSubmitting && !!effectiveUserId;
+  const minLength = 30;
+  const trimmedLength = content.trim().length;
+  const canSubmit = trimmedLength >= minLength && !isSubmitting && !!effectiveUserId;
 
   // Synchronous lock to prevent double-tap race condition
   const isSubmittingRef = useRef(false);
@@ -499,7 +501,9 @@ export default function CreateTodScreen() {
             autoFocus
           />
           <Text style={styles.charCount}>
-            {content.length}/{maxLength}
+            {trimmedLength < minLength
+              ? `${minLength - trimmedLength} more characters needed (min ${minLength})`
+              : `${content.length}/${maxLength}`}
           </Text>
         </View>
 
@@ -548,7 +552,7 @@ export default function CreateTodScreen() {
                 color={visibility === 'no_photo' ? '#FFFFFF' : C.textLight}
               />
               <Text style={[styles.visibilityText, visibility === 'no_photo' && styles.visibilityTextActive]}>
-                No photo
+                Blur photo
               </Text>
             </TouchableOpacity>
           </View>
@@ -557,7 +561,7 @@ export default function CreateTodScreen() {
               ? 'Your identity is completely hidden'
               : visibility === 'public'
               ? 'Your profile photo is visible'
-              : 'Your name is visible, no photo'}
+              : 'Your name is visible, photo is blurred'}
           </Text>
 
           {/* POST button - directly under visibility options */}

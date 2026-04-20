@@ -127,7 +127,11 @@ function resolveThreadAnswerIdentity(
     isAnonymous,
     photoBlurMode: usesBlur ? 'blur' : 'none',
     authorName: isAnonymous ? 'Anonymous' : (authorName || 'User'),
-    authorPhotoUrl: isAnonymous || usesBlur ? null : (authorPhotoUrl || null),
+    // `usesBlur` (no_photo mode) must KEEP the photo URL so `TodAvatar` can
+    // actually blur it. Previously this returned `null`, which forced the
+    // renderer to show an empty/initial placeholder instead of the intended
+    // blurred photo. Only fully-anonymous answers should hide the photo.
+    authorPhotoUrl: isAnonymous ? null : (authorPhotoUrl || null),
     authorAge: isAnonymous ? undefined : authorAge,
     authorGender: isAnonymous ? undefined : authorGender,
   };
@@ -1183,9 +1187,13 @@ export default function PromptThreadScreen() {
       }
 
       const authorPhotoUrl = authorProfile.photoUrl;
+      // BLUR-PHOTO PARITY WITH CONFESS: `no_photo` mode needs the real photo
+      // URL on the server so the thread renderer can blur it. Previously this
+      // gated the upload on `!isNoPhoto`, which meant blur-mode answers had no
+      // source image and `TodAvatar` fell back to the initial placeholder.
+      // Anonymous mode still omits the photo entirely.
       const shouldAttachProfilePhoto =
         !isAnon &&
-        !isNoPhoto &&
         typeof authorPhotoUrl === 'string' &&
         authorPhotoUrl.length > 0;
 
@@ -1220,13 +1228,16 @@ export default function PromptThreadScreen() {
         viewMode: attachment ? 'tap' : undefined, // One-time tap to view for media
         // Author identity based on choice
         authorName: isAnon ? undefined : authorProfile.name,
+        // BLUR-PHOTO PARITY WITH CONFESS: send the real photo URL for `no_photo`
+        // too; the server stores it and the renderer applies blur on top. Only
+        // anonymous mode omits the photo entirely.
         authorPhotoUrl:
-          isAnon || isNoPhoto
+          isAnon
             ? undefined
             : (authorPhotoUrl?.startsWith('http://') || authorPhotoUrl?.startsWith('https://'))
               ? authorPhotoUrl
               : undefined,
-        authorPhotoStorageId: isAnon || isNoPhoto ? undefined : (authorPhotoStorageId as any),
+        authorPhotoStorageId: isAnon ? undefined : (authorPhotoStorageId as any),
         authorAge: isAnon ? undefined : authorProfile.age,
         authorGender: isAnon ? undefined : authorProfile.gender,
         photoBlurMode: photoBlurMode as 'none' | 'blur',

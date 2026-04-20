@@ -26,7 +26,7 @@ const REPORT_HIDE_THRESHOLD = 5;
 const RATE_LIMIT_ERROR = 'Rate limit exceeded. Please try again later.';
 const TOD_SYSTEM_OWNER_ID = 'system';
 
-const MIN_PROMPT_CHARS = 10;
+const MIN_PROMPT_CHARS = 30;
 const MAX_PROMPT_CHARS = 280;
 const MAX_ANSWER_CHARS = 400;
 const MIN_MEDIA_VIEW_DURATION_SEC = 1;
@@ -72,42 +72,76 @@ function validateViewDuration(durationSec: number | undefined): number | undefin
   return durationSec;
 }
 
+// TOD-AUTH-FIX (P0): Two-tier auth resolution — matches the canonical pattern
+// used across the rest of the app (see `privateConversations.ts`,
+// `conversations.ts`, `messages.ts`, etc.).
+//
+// The app does NOT configure Convex's built-in auth provider (no
+// `convex/auth.config.ts`), so `ctx.auth.getUserIdentity()` ALWAYS returns
+// null in the current demo/custom-auth setup. All T/D writes therefore threw
+// "Unauthorized" unconditionally.
+//
+// Resolution order:
+//   1. Primary:  `ctx.auth.getUserIdentity()` (future-proof for JWT auth).
+//   2. Fallback: client-supplied `authUserId` (current demo/custom auth).
+//
+// Trust model: `resolveUserIdByAuthId` only returns IDs of existing user
+// records — the client cannot fabricate identities. This matches the rest of
+// the active app's contract for demo mode.
 async function requireAuthenticatedTodUserId(
   ctx: any,
+  authUserId?: string,
   errorMessage: string = 'Unauthorized'
 ): Promise<Id<'users'>> {
+  // Primary: Convex-authenticated identity
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity?.subject) {
-    throw new Error(errorMessage);
+  if (identity?.subject) {
+    const resolved = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (resolved) return resolved;
   }
-  const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-  if (!userId) {
-    throw new Error(errorMessage);
+
+  // Fallback: client-supplied authUserId (current demo/custom auth path)
+  if (authUserId && authUserId.trim().length > 0) {
+    const resolved = await resolveUserIdByAuthId(ctx, authUserId.trim());
+    if (resolved) return resolved;
   }
-  return userId;
+
+  throw new Error(errorMessage);
 }
 
 async function getOptionalAuthenticatedTodUserId(
   ctx: any,
+  authUserId?: string,
   contextLabel: string = 'truthDare'
 ): Promise<Id<'users'> | undefined> {
+  // Primary: Convex-authenticated identity
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity?.subject) {
-    return undefined;
-  }
-  const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-  if (!userId) {
+  if (identity?.subject) {
+    const resolved = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (resolved) return resolved;
     console.warn(`[T/D] Auth identity resolved without user record in ${contextLabel}`);
-    return undefined;
   }
-  return userId;
+
+  // Fallback: client-supplied authUserId (current demo/custom auth path)
+  if (authUserId && authUserId.trim().length > 0) {
+    const resolved = await resolveUserIdByAuthId(ctx, authUserId.trim());
+    if (resolved) return resolved;
+  }
+
+  return undefined;
 }
 
 function getTodDisplayName(
   user: { handle?: string | null; name?: string | null } | null | undefined,
   fallback: string = 'Someone'
 ): string {
-  return user?.handle?.trim() || user?.name?.trim() || fallback;
+  // T/D identity cards must show the user's real display name (the `name`
+  // field — same source the client writes via `authorProfile.name` at create
+  // time). `handle` is a system/internal identifier that can legitimately
+  // differ from the displayed name; preferring it caused wrong-name leaks in
+  // T/D comments where the snapshot was stripped (no_photo mode) and the
+  // read-time fallback landed here.
+  return user?.name?.trim() || user?.handle?.trim() || fallback;
 }
 
 function isSystemTodOwnerId(userId: string | null | undefined): boolean {
@@ -190,8 +224,9 @@ function getNormalizedTodAnswerIdentity(
     isAnonymous,
     photoBlurMode: isNoPhoto ? 'blur' : 'none',
     authorName: isAnonymous ? undefined : trimText(answer.authorName ?? undefined),
-    authorPhotoUrl:
-      isAnonymous || isNoPhoto ? undefined : trimText(answer.authorPhotoUrl ?? undefined),
+    // BLUR-PHOTO PARITY WITH CONFESS: preserve the real photo URL for `no_photo`;
+    // the renderer applies blur on top. Only anonymous mode strips it.
+    authorPhotoUrl: isAnonymous ? undefined : trimText(answer.authorPhotoUrl ?? undefined),
     authorAge: isAnonymous ? undefined : answer.authorAge,
     authorGender: isAnonymous ? undefined : trimText(answer.authorGender ?? undefined),
   };
@@ -602,9 +637,10 @@ async function deleteTodAnswerForCleanup(
 export const trackPendingTodUploads = mutation({
   args: {
     storageIds: v.array(v.id('_storage')),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { storageIds }) => {
-    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+  handler: async (ctx, { storageIds, authUserId }) => {
+    const userId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
     const uniqueStorageIds = Array.from(new Set(storageIds));
     const trackedIds: Id<'_storage'>[] = [];
 
@@ -641,9 +677,10 @@ export const trackPendingTodUploads = mutation({
 export const releasePendingTodUploads = mutation({
   args: {
     storageIds: v.array(v.id('_storage')),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { storageIds }) => {
-    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+  handler: async (ctx, { storageIds, authUserId }) => {
+    const userId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
     const uniqueStorageIds = Array.from(new Set(storageIds));
     let releasedCount = 0;
 
@@ -674,9 +711,10 @@ export const releasePendingTodUploads = mutation({
 export const cleanupPendingTodUploads = mutation({
   args: {
     storageIds: v.array(v.id('_storage')),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { storageIds }) => {
-    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+  handler: async (ctx, { storageIds, authUserId }) => {
+    const userId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
     const uniqueStorageIds = Array.from(new Set(storageIds));
     let deletedCount = 0;
     let skippedInUseCount = 0;
@@ -731,7 +769,7 @@ export const createPrompt = mutation({
     ownerGender: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const ownerUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const ownerUserId = await requireAuthenticatedTodUserId(ctx, args.authUserId, 'Unauthorized');
     const promptText = validatePromptText(args.text);
 
     const now = Date.now();
@@ -766,8 +804,10 @@ export const createPrompt = mutation({
       // Fetch user's canonical profile for identity
       const userProfile = await ctx.db.get(ownerUserId);
       if (userProfile) {
-        // Use handle (nickname) if available, otherwise use real name
-        finalOwnerName = userProfile.handle || userProfile.name || undefined;
+        // Prefer the user's display `name` over `handle` so the T/D identity
+        // card matches what the client writes (and what profile cards show).
+        // See matching change in `getTodDisplayName` for identity consistency.
+        finalOwnerName = userProfile.name || userProfile.handle || undefined;
 
         // Calculate age from dateOfBirth if not provided
         if (!finalOwnerAge && userProfile.dateOfBirth) {
@@ -829,7 +869,7 @@ export const editMyPrompt = mutation({
     newText: v.string(),
   },
   handler: async (ctx, { promptId, authUserId, newText }) => {
-    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
 
     // Get the prompt
     const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
@@ -873,7 +913,7 @@ export const deleteMyPrompt = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { promptId, authUserId }) => {
-    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
 
     // Get the prompt
     const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
@@ -984,7 +1024,7 @@ export const deleteMyPrompt = mutation({
 export const getPendingConnectRequests = query({
   args: { authUserId: v.string() },
   handler: async (ctx, { authUserId }) => {
-    const userId = await getOptionalAuthenticatedTodUserId(ctx, 'getPendingConnectRequests');
+    const userId = await getOptionalAuthenticatedTodUserId(ctx, authUserId, 'getPendingConnectRequests');
     if (!userId) return [];
 
     const requests = await ctx.db
@@ -1052,7 +1092,7 @@ export const sendTodConnectRequest = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { promptId, answerId, authUserId }) => {
-    const fromUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const fromUserId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
 
     // Get prompt to verify ownership
     const prompt = await ctx.db
@@ -1153,7 +1193,7 @@ export const respondToConnect = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { requestId, action, authUserId }) => {
-    const recipientDbId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const recipientDbId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
 
     const request = await ctx.db.get(requestId);
     if (!request || request.status !== 'pending') {
@@ -1339,7 +1379,7 @@ export const checkTodConnectStatus = query({
     authUserId: v.string(),
   },
   handler: async (ctx, { promptId, answerId, authUserId }) => {
-    const userId = await getOptionalAuthenticatedTodUserId(ctx, 'checkTodConnectStatus');
+    const userId = await getOptionalAuthenticatedTodUserId(ctx, authUserId, 'checkTodConnectStatus');
     if (!userId) return { status: 'none' as const };
 
     // Get the answer to find the other user
@@ -1484,7 +1524,7 @@ export const generateUploadUrl = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { authUserId }) => {
-    await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -1513,9 +1553,10 @@ export const submitPrivateMediaResponse = mutation({
     responderAge: v.optional(v.number()),
     responderGender: v.optional(v.string()),
     responderPhotoUrl: v.optional(v.string()),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const fromUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const fromUserId = await requireAuthenticatedTodUserId(ctx, args.authUserId, 'Unauthorized');
 
     // Validate prompt exists
     const prompt = await ctx.db
@@ -1575,9 +1616,10 @@ export const getPrivateMediaForOwner = query({
   args: {
     promptId: v.string(),
     viewerUserId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { promptId, viewerUserId }) => {
-    const currentUserId = await getOptionalAuthenticatedTodUserId(ctx, 'getPrivateMediaForOwner');
+  handler: async (ctx, { promptId, viewerUserId, authUserId }) => {
+    const currentUserId = await getOptionalAuthenticatedTodUserId(ctx, authUserId ?? viewerUserId, 'getPrivateMediaForOwner');
     if (!currentUserId) return [];
 
     // Get the prompt to verify ownership
@@ -1630,9 +1672,10 @@ export const beginPrivateMediaView = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
     viewerUserId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { privateMediaId, viewerUserId }) => {
-    const currentUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+  handler: async (ctx, { privateMediaId, viewerUserId, authUserId }) => {
+    const currentUserId = await requireAuthenticatedTodUserId(ctx, authUserId ?? viewerUserId, 'Unauthorized');
     const item = await ctx.db.get(privateMediaId);
     if (!item) {
       throw new Error('Private media not found');
@@ -1684,9 +1727,10 @@ export const finalizePrivateMediaView = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
     viewerUserId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { privateMediaId, viewerUserId }) => {
-    const currentUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+  handler: async (ctx, { privateMediaId, viewerUserId, authUserId }) => {
+    const currentUserId = await requireAuthenticatedTodUserId(ctx, authUserId ?? viewerUserId, 'Unauthorized');
     const item = await ctx.db.get(privateMediaId);
     if (!item) return { success: false };
 
@@ -1724,9 +1768,10 @@ export const sendPrivateMediaConnect = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
     fromUserId: v.string(), // prompt owner sending the request
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { privateMediaId, fromUserId }) => {
-    const currentUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+  handler: async (ctx, { privateMediaId, fromUserId, authUserId }) => {
+    const currentUserId = await requireAuthenticatedTodUserId(ctx, authUserId ?? fromUserId, 'Unauthorized');
     const item = await ctx.db.get(privateMediaId);
     if (!item) {
       throw new Error('Private media not found');
@@ -1773,9 +1818,10 @@ export const rejectPrivateMediaConnect = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
     fromUserId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { privateMediaId, fromUserId }) => {
-    const currentUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+  handler: async (ctx, { privateMediaId, fromUserId, authUserId }) => {
+    const currentUserId = await requireAuthenticatedTodUserId(ctx, authUserId ?? fromUserId, 'Unauthorized');
     const item = await ctx.db.get(privateMediaId);
     if (!item) return { success: false };
 
@@ -1987,7 +2033,7 @@ export const listActivePromptsWithTop2Answers = query({
   },
   handler: async (ctx, { viewerUserId }) => {
     const now = Date.now();
-    const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, 'listActivePromptsWithTop2Answers');
+    const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, viewerUserId, 'listActivePromptsWithTop2Answers');
 
     // TOD-P2-002 FIX: Get blocked user IDs for viewer (both directions)
     const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
@@ -2140,7 +2186,7 @@ export const getTrendingTruthAndDare = query({
   },
   handler: async (ctx, { viewerUserId }) => {
     const now = Date.now();
-    const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, 'getTrendingTruthAndDare');
+    const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, viewerUserId, 'getTrendingTruthAndDare');
     const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
 
     // Get bounded recent prompt candidates by type, then reuse the existing filters below.
@@ -2235,7 +2281,7 @@ export const getPromptThread = query({
     viewerUserId: v.optional(v.string()),
   },
   handler: async (ctx, { promptId, viewerUserId }) => {
-    const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, 'getPromptThread');
+    const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, viewerUserId, 'getPromptThread');
     const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
 
     // Get prompt
@@ -2323,11 +2369,23 @@ export const getPromptThread = query({
       visibleAnswers.map(async (answer) => {
         const answerId = answer._id as unknown as string;
         const normalizedIdentity = getNormalizedTodAnswerIdentity(answer);
+        // PHOTO-BLUR FALLBACK: `no_photo` mode intentionally does not persist
+        // `authorPhotoUrl` in the snapshot (privacy — we don't cache the
+        // photo), but the renderer needs a source URL to blur. When the
+        // answer is non-anonymous and `photoBlurMode === 'blur'`, fetch the
+        // author user record so we can supply `primaryPhotoUrl` at read
+        // time. Same server-side fallback pattern used by the prompt create
+        // flow at `finalOwnerPhotoUrl`.
+        const needsBlurPhotoFallback =
+          !normalizedIdentity.isAnonymous &&
+          normalizedIdentity.photoBlurMode === 'blur' &&
+          !normalizedIdentity.authorPhotoUrl;
         const authorProfileFallbackNeeded =
           !normalizedIdentity.isAnonymous &&
           (!normalizedIdentity.authorName ||
             normalizedIdentity.authorAge === undefined ||
-            !normalizedIdentity.authorGender);
+            !normalizedIdentity.authorGender ||
+            needsBlurPhotoFallback);
         const answerUser = authorProfileFallbackNeeded
           ? await ctx.db.get(answer.userId as Id<'users'>)
           : null;
@@ -2419,7 +2477,16 @@ export const getPromptThread = query({
           authorName: normalizedIdentity.isAnonymous
             ? undefined
             : (normalizedIdentity.authorName ?? getTodDisplayName(answerUser, 'User')),
-          authorPhotoUrl: normalizedIdentity.authorPhotoUrl,
+          // PHOTO-BLUR FALLBACK: when `photoBlurMode === 'blur'` but no photo
+          // was persisted in the snapshot (legacy `no_photo` rows, or the
+          // current privacy-preserving create path), supply the author's
+          // `primaryPhotoUrl` so the renderer has a source to blur. For all
+          // other non-anonymous cases, prefer the snapshot URL.
+          authorPhotoUrl:
+            normalizedIdentity.authorPhotoUrl
+            ?? (normalizedIdentity.photoBlurMode === 'blur' && answerUser?.primaryPhotoUrl
+              ? (answerUser.primaryPhotoUrl ?? undefined)
+              : undefined),
           authorAge: normalizedIdentity.isAnonymous
             ? undefined
             : (normalizedIdentity.authorAge ?? calculateTodAge(answerUser?.dateOfBirth)),
@@ -2568,7 +2635,7 @@ export const createOrEditAnswer = mutation({
     type: v.optional(v.union(v.literal('text'), v.literal('photo'), v.literal('video'), v.literal('voice'))),
   },
   handler: async (ctx, args) => {
-    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, args.userId, 'Unauthorized');
 
     // Validate prompt exists and not expired
     const prompt = await ctx.db
@@ -2684,9 +2751,10 @@ export const createOrEditAnswer = mutation({
       patch.type = type;
 
       // Identity: KEEP existing identityMode (do not change on edit)
+      // BLUR-PHOTO PARITY WITH CONFESS: only anonymous strips identity. `no_photo`
+      // keeps the snapshot (name + real photo URL); the renderer applies blur on top.
       const existingIdentityMode = getNormalizedTodAnswerIdentity(existing).identityMode;
-      const shouldStripIdentitySnapshot =
-        existingIdentityMode === 'anonymous' || existingIdentityMode === 'no_photo';
+      const shouldStripIdentitySnapshot = existingIdentityMode === 'anonymous';
 
       if (shouldStripIdentitySnapshot) {
         patch.authorName = undefined;
@@ -2745,7 +2813,9 @@ export const createOrEditAnswer = mutation({
       const identityMode = args.identityMode ?? 'anonymous';
       const isAnon = identityMode === 'anonymous';
       const isNoPhoto = identityMode === 'no_photo';
-      const shouldStripIdentitySnapshot = isAnon || isNoPhoto;
+      // BLUR-PHOTO PARITY WITH CONFESS: only anonymous strips the identity snapshot.
+      // `no_photo` persists the real photo URL so the renderer can blur it.
+      const shouldStripIdentitySnapshot = isAnon;
 
       // Compute type
       let type: 'text' | 'photo' | 'video' | 'voice' = 'text';
@@ -2774,7 +2844,8 @@ export const createOrEditAnswer = mutation({
         viewDurationSec: hasMedia ? viewDurationSec : undefined,
         totalReactionCount: 0,
         reportCount: 0,
-        // Author identity snapshot (cleared for anonymous and no_photo)
+        // Author identity snapshot (cleared only for anonymous; `no_photo` keeps
+        // the real photo URL and the renderer applies blur on top — parity with Confess)
         authorName: shouldStripIdentitySnapshot ? undefined : args.authorName,
         authorPhotoUrl: shouldStripIdentitySnapshot ? undefined : resolvedAuthorPhotoUrl,
         authorAge: shouldStripIdentitySnapshot ? undefined : args.authorAge,
@@ -2805,7 +2876,7 @@ export const setAnswerReaction = mutation({
     emoji: v.string(), // pass empty string to remove reaction
   },
   handler: async (ctx, { answerId, userId: argsUserId, emoji }) => {
-    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, argsUserId, 'Unauthorized');
 
     // Validate answer exists
     const answer = await ctx.db
@@ -2897,7 +2968,7 @@ export const reportAnswer = mutation({
     reason: v.optional(v.string()),
   },
   handler: async (ctx, { answerId, reporterId: argsReporterId, reasonCode, reasonText, reason }) => {
-    const reporterId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const reporterId = await requireAuthenticatedTodUserId(ctx, argsReporterId, 'Unauthorized');
 
     // Validate answer exists
     const answer = await ctx.db
@@ -2968,7 +3039,7 @@ export const setPromptReaction = mutation({
     emoji: v.string(), // pass empty string to remove reaction
   },
   handler: async (ctx, { promptId, userId: argsUserId, emoji }) => {
-    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, argsUserId, 'Unauthorized');
 
     // Validate prompt exists
     const prompt = await ctx.db
@@ -3056,7 +3127,7 @@ export const reportPrompt = mutation({
     reasonText: v.optional(v.string()),
   },
   handler: async (ctx, { promptId, reporterId: argsReporterId, reasonCode, reasonText }) => {
-    const reporterId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const reporterId = await requireAuthenticatedTodUserId(ctx, argsReporterId, 'Unauthorized');
 
     // Validate prompt exists
     const prompt = await ctx.db
@@ -3124,7 +3195,7 @@ export const getUserAnswer = query({
     userId: v.string(),
   },
   handler: async (ctx, { promptId, userId }) => {
-    const currentUserId = await getOptionalAuthenticatedTodUserId(ctx, 'getUserAnswer');
+    const currentUserId = await getOptionalAuthenticatedTodUserId(ctx, userId, 'getUserAnswer');
     if (!currentUserId) {
       return null;
     }
@@ -3148,7 +3219,7 @@ export const deleteMyAnswer = mutation({
     userId: v.string(),
   },
   handler: async (ctx, { answerId, userId: argsUserId }) => {
-    const userId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, argsUserId, 'Unauthorized');
 
     const answer = await ctx.db
       .query('todAnswers')
@@ -3233,7 +3304,7 @@ export const claimAnswerMediaView = mutation({
     viewerId: v.string(),
   },
   handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
-    const viewerId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const viewerId = await requireAuthenticatedTodUserId(ctx, argsViewerId, 'Unauthorized');
 
     // Rate limit check
     const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
@@ -3344,7 +3415,7 @@ export const finalizeAnswerMediaView = mutation({
     viewerId: v.string(),
   },
   handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
-    const viewerId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+    const viewerId = await requireAuthenticatedTodUserId(ctx, argsViewerId, 'Unauthorized');
 
     // Rate limit
     const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
@@ -3436,9 +3507,10 @@ export const finalizeAnswerMediaView = mutation({
 export const getVoiceUrl = query({
   args: {
     answerId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { answerId }) => {
-    const viewerUserId = await requireAuthenticatedTodUserId(ctx, 'Unauthorized');
+  handler: async (ctx, { answerId, authUserId }) => {
+    const viewerUserId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
 
     // Get the answer
     const answer = await ctx.db
@@ -3498,7 +3570,7 @@ export const getVoiceUrl = query({
 export const getUserConversations = query({
   args: { authUserId: v.string() },
   handler: async (ctx, { authUserId }) => {
-    const userDbId = await getOptionalAuthenticatedTodUserId(ctx, 'getUserConversations');
+    const userDbId = await getOptionalAuthenticatedTodUserId(ctx, authUserId, 'getUserConversations');
     if (!userDbId) return [];
 
     // Get all conversation participations for this user

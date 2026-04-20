@@ -775,7 +775,7 @@ export function UnifiedAnswerComposer({
                     <Ionicons name="person-outline" size={16} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
                     <View style={styles.identityTextContainer}>
                       <Text style={[styles.identityText, identityMode === 'no_photo' && { color: C.primary }]}>
-                        Name only
+                        Blur photo
                       </Text>
                       <Text style={styles.identitySubtext}>Photo blurred</Text>
                     </View>
