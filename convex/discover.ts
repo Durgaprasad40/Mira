@@ -397,16 +397,17 @@ export const getDiscoverProfiles = query({
         .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
         .collect(),
       // Matches where I'm user1
+      // P1 EXCLUSION: include inactive/unmatched rows so previously-unmatched
+      // pairs never reappear. `matchedUserIds` below covers both active matches
+      // and ever-unmatched pairs with the same single `continue` check.
       ctx.db
         .query('matches')
         .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-        .filter((q) => q.eq(q.field('isActive'), true))
         .collect(),
       // Matches where I'm user2
       ctx.db
         .query('matches')
         .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-        .filter((q) => q.eq(q.field('isActive'), true))
         .collect(),
       // Blocks I created
       ctx.db
@@ -1125,13 +1126,106 @@ function createEmptyExploreCounts(): Record<string, number> {
   return Object.fromEntries(EXPLORE_CATEGORY_IDS.map((id) => [id, 0]));
 }
 
+// ---------------------------------------------------------------------------
+// Exclusive Explore bucketing
+// ---------------------------------------------------------------------------
+// Product rule: a single profile belongs to exactly ONE Explore category at a
+// time. Without an ordering, counts and listings overlap (e.g. an online,
+// nearby profile that stated "just_friends" and tagged "coffee" used to appear
+// in 6 tiles). The rule is applied consistently by:
+//   1. `assignExploreCategory` → deterministically picks the single owning
+//      category for a candidate.
+//   2. `countExploreCategories` → increments exactly one counter per candidate.
+//   3. `getExploreCategoryProfiles` → uses the same assignment when listing
+//      profiles for a tile, so counts and listings stay in lockstep.
+//
+// Priority (highest wins, first match in this list is the assignment):
+//   A. INTERESTS (12) — user-authored activity tags are the strongest
+//      self-declared signal. Assigning these first also fixes the "Interests
+//      section empty" bug: previously any interest-tagged profile that was
+//      also nearby/online/had an intent was double-counted elsewhere, so the
+//      interest tiles shared their population with everything else.
+//   B. `free_tonight` — activity opt-in.
+//   C. RELATIONSHIP INTENT (9) — user-stated dating intent.
+//   D. RIGHT NOW (3: nearby → online_now → active_today) — derived/contextual
+//      "residual" bucket. Only candidates that did not match an explicit
+//      activity or intent land here, so Right Now tiles keep surfacing fresh
+//      profiles that wouldn't otherwise show up.
+//
+// NOTE: order matters; do not reorder without product review.
+const EXPLORE_ASSIGNMENT_PRIORITY: readonly ExploreCategoryId[] = [
+  // A. Interests (most specific)
+  'coffee_date',
+  'sports',
+  'nature_lovers',
+  'binge_watchers',
+  'foodie',
+  'travel',
+  'art_culture',
+  'gaming',
+  'fitness',
+  'music',
+  'nightlife',
+  'brunch',
+  // B. Free tonight (activity opt-in)
+  'free_tonight',
+  // C. Relationship intent
+  'serious_vibes',
+  'keep_it_casual',
+  'exploring_vibes',
+  'see_where_it_goes',
+  'open_to_vibes',
+  'just_friends',
+  'open_to_anything',
+  'single_parent',
+  'new_to_dating',
+  // D. Right Now (residual)
+  'nearby',
+  'online_now',
+  'active_today',
+];
+
+// Invariant: priority list must cover every category exactly once.
+// Enforced at module load so tests/codegen fail fast on drift.
+(() => {
+  const priorityIds = new Set<string>(EXPLORE_ASSIGNMENT_PRIORITY);
+  if (priorityIds.size !== EXPLORE_ASSIGNMENT_PRIORITY.length) {
+    throw new Error('EXPLORE_ASSIGNMENT_PRIORITY has duplicate entries');
+  }
+  if (priorityIds.size !== EXPLORE_CATEGORY_IDS.length) {
+    throw new Error(
+      `EXPLORE_ASSIGNMENT_PRIORITY covers ${priorityIds.size} ids but EXPLORE_CATEGORY_IDS has ${EXPLORE_CATEGORY_IDS.length}`,
+    );
+  }
+  for (const id of EXPLORE_CATEGORY_IDS) {
+    if (!priorityIds.has(id)) {
+      throw new Error(`EXPLORE_ASSIGNMENT_PRIORITY is missing category: ${id}`);
+    }
+  }
+})();
+
+/**
+ * Returns the single Explore category that owns this candidate, or `null` if
+ * the candidate matches no Explore category. Callers MUST use this helper
+ * wherever an exclusive assignment is required (counts, listings, analytics).
+ */
+function assignExploreCategory(
+  candidate: ExploreCandidateBase,
+): ExploreCategoryId | null {
+  for (const categoryId of EXPLORE_ASSIGNMENT_PRIORITY) {
+    if (matchesExploreCategory(candidate, categoryId)) {
+      return categoryId;
+    }
+  }
+  return null;
+}
+
 function countExploreCategories(candidates: ExploreCandidateBase[]): Record<string, number> {
   const counts = createEmptyExploreCounts();
   for (const candidate of candidates) {
-    for (const categoryId of EXPLORE_CATEGORY_IDS) {
-      if (matchesExploreCategory(candidate, categoryId)) {
-        counts[categoryId] += 1;
-      }
+    const assigned = assignExploreCategory(candidate);
+    if (assigned) {
+      counts[assigned] += 1;
     }
   }
   return counts;
@@ -1168,15 +1262,15 @@ async function loadExploreExclusions(
       .query('likes')
       .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
       .collect(),
+    // P1 EXCLUSION: include inactive/unmatched rows so ever-unmatched pairs
+    // stay excluded from Explore (same semantics as Discover).
     ctx.db
       .query('matches')
       .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-      .filter((q) => q.eq(q.field('isActive'), true))
       .collect(),
     ctx.db
       .query('matches')
       .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-      .filter((q) => q.eq(q.field('isActive'), true))
       .collect(),
     ctx.db
       .query('blocks')
@@ -1428,7 +1522,12 @@ async function buildExploreCandidates(
         displayPrimaryPhotoUrl: user.displayPrimaryPhotoUrl,
       };
 
-      if (activeCategoryId && !matchesExploreCategory(candidate, activeCategoryId)) continue;
+      if (activeCategoryId) {
+        // Exclusive bucketing: listing uses the same assignment the counts use,
+        // so tapping a tile shows only candidates whose OWNING category is this
+        // one. A profile will never appear in more than one tile.
+        if (assignExploreCategory(candidate) !== activeCategoryId) continue;
+      }
       candidates.push(candidate);
     }
   }
