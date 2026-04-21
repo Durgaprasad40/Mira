@@ -201,6 +201,15 @@ export default function MessagesScreen() {
   // FOCUS-GUARD: Prevent repeated markLikesOpened calls on tab focus
   const hasMarkedLikesOpenedRef = useRef(false);
 
+  // P0/P1 MESSAGES_ENTRY: Track which (focus=likes + profileId) instance we
+  // already consumed. When the user taps a notification with
+  // focus=likes&profileId=X, Expo Router keeps those params attached to this
+  // route. Without a guard, every subsequent tab re-focus would re-trigger
+  // the auto-switch to the Likes view — which is the exact bug this guards
+  // against. We consume each param instance ONCE and thereafter ignore the
+  // stale params on later focuses.
+  const consumedFocusKeyRef = useRef<string>('');
+
   // Demo store — seed on mount, read mutable matches/likes
   const demoMatches = useDemoStore((s) => s.matches);
   const demoLikesRaw = useDemoStore((s) => s.likes);
@@ -217,11 +226,64 @@ export default function MessagesScreen() {
     }
   }, [isDemoMode, hasHydrated, demoSeed]);
 
-  // Handle focus param from notification deep link
+  // P0/P1 MESSAGES_ENTRY — Messages tab default entry behavior.
+  //
+  // Product rule: tapping the Messages tab must ALWAYS land on the Messages
+  // home/thread list. "Who liked us" (the Likes in-place view) may only open:
+  //   (a) on the very first focus after a notification deep link that carried
+  //       ?focus=likes&profileId=X, OR
+  //   (b) when the user explicitly taps the heart toggle / Likes CTA.
+  //
+  // Two guards are layered (see separate effects below):
+  //   1. `consumedFocusKeyRef` — only consume each (focus,profileId) URL
+  //      param instance once. Subsequent re-focuses of the same route (e.g.
+  //      user tabs away and returns) will see the stale params but skip the
+  //      auto-switch because the ref already stored that key. (this effect)
+  //   2. Blur-reset effect — see the effect right below this one. On blur
+  //      (tab switch / push to a sub-route) it resets activeView to
+  //      'messages' so the next focus always lands on home.
+  //
+  // `activeView` is DELIBERATELY NOT in this effect's deps: including it
+  // would cause the cleanup to fire whenever the user toggles the heart,
+  // which would undo their manual tap. We use a ref (`activeViewRef` below)
+  // purely for log snapshotting.
+  const activeViewRef = useRef<'messages' | 'likes'>('messages');
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
+
   useFocusEffect(
     useCallback(() => {
-      if (focus === 'likes') {
+      const focusParam = typeof focus === 'string' ? focus : null;
+      const profileParam = typeof profileId === 'string' ? profileId : null;
+      const currentKey = focusParam === 'likes' ? `likes:${profileParam ?? ''}` : '';
+
+      if (__DEV__) {
+        console.log('[MESSAGES_ENTRY][focus]', {
+          focus: focusParam,
+          profileId: profileParam,
+          currentKey,
+          consumedKey: consumedFocusKeyRef.current,
+          activeView: activeViewRef.current,
+        });
+      }
+
+      const shouldApplyLikesFocus =
+        currentKey !== '' && consumedFocusKeyRef.current !== currentKey;
+
+      if (shouldApplyLikesFocus) {
+        consumedFocusKeyRef.current = currentKey;
+        if (__DEV__) {
+          console.log('[MESSAGES_ENTRY][auto_redirect]', {
+            target: 'likes',
+            reason: 'notification_deeplink_focus_likes',
+            triggeredByUserAction: false,
+            focus: focusParam,
+            profileId: profileParam,
+          });
+        }
         setActiveView('likes');
+
         // LIFECYCLE: Mark likes as opened when arriving via deep link
         // FOCUS-GUARD: Only call once per session to avoid repeated API calls
         if (!isDemoMode && token && !hasMarkedLikesOpenedRef.current) {
@@ -232,8 +294,9 @@ export default function MessagesScreen() {
             log.warn('[MESSAGES]', 'markLikesOpened (deeplink) failed', { error: err });
           });
         }
+
         // If profileId is provided, scroll to that like after render
-        if (profileId && likesListRef.current) {
+        if (profileParam && likesListRef.current) {
           // Stability fix: clear any pending scroll timeout
           if (scrollTimeoutRef.current) {
             clearTimeout(scrollTimeoutRef.current);
@@ -242,7 +305,7 @@ export default function MessagesScreen() {
             // Guard: ensure list ref still exists after timeout
             if (!likesListRef.current) return;
 
-            const idx = demoLikesRaw.findIndex((l) => l.userId === profileId);
+            const idx = demoLikesRaw.findIndex((l) => l.userId === profileParam);
             // BUGFIX #5: Bounds checks before scrollToIndex to prevent crash
             // 1) idx must be >= 0 (findIndex returns -1 if not found)
             // 2) Row index must be within bounds (2-column grid)
@@ -252,7 +315,7 @@ export default function MessagesScreen() {
 
             if (idx < 0) {
               // Profile not found — likely deleted, scroll to top instead
-              log.warn('[MESSAGES]', 'scrollToIndex: profile not found', { profileId });
+              log.warn('[MESSAGES]', 'scrollToIndex: profile not found', { profileId: profileParam });
               likesListRef.current?.scrollToOffset({ offset: 0, animated: true });
               return;
             }
@@ -275,9 +338,28 @@ export default function MessagesScreen() {
             likesListRef.current?.scrollToIndex({ index: rowIndex, animated: true });
           }, 150); // Slightly longer delay to allow layout
         }
+      } else if (currentKey !== '' && __DEV__) {
+        // Stale URL param from a prior deep link — deliberately ignored.
+        console.log('[MESSAGES_ENTRY][route_restore]', {
+          reason: 'stale_focus_param_ignored',
+          currentKey,
+          consumedKey: consumedFocusKeyRef.current,
+          activeView: activeViewRef.current,
+        });
       }
 
-      // Cleanup: clear pending scroll timeout on blur/unmount
+      if (__DEV__) {
+        console.log('[MESSAGES_ENTRY][final_screen]', {
+          activeView: shouldApplyLikesFocus ? 'likes' : activeViewRef.current,
+          appliedDeepLink: shouldApplyLikesFocus,
+        });
+      }
+
+      // Cleanup: clear pending scroll timeout on blur/unmount.
+      // NOTE: the activeView reset lives in the separate blur-reset effect
+      // below so that it does NOT fire on dep-driven re-registrations of
+      // this effect (otherwise it would clobber the very setActiveView
+      // call we just made).
       return () => {
         if (scrollTimeoutRef.current) {
           clearTimeout(scrollTimeoutRef.current);
@@ -285,6 +367,24 @@ export default function MessagesScreen() {
         }
       };
     }, [focus, profileId, demoLikesRaw])
+  );
+
+  // Blur-reset effect: on blur (tab switch / push to a sub-route) reset
+  // activeView to 'messages'. Empty deps → never re-registers → cleanup
+  // fires only on genuine blur/unmount, not on dep changes.
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        if (__DEV__) {
+          console.log('[MESSAGES_ENTRY][tab_press]', {
+            event: 'blur_or_unmount',
+            priorActiveView: activeViewRef.current,
+            resetTo: 'messages',
+          });
+        }
+        setActiveView('messages');
+      };
+    }, [])
   );
 
   // Android back button handler — if in Likes view, go back to Messages home
