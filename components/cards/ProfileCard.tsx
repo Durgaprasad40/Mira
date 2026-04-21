@@ -1342,6 +1342,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // Photo count needed for distribution logic
   const photoCount = displayPhotos.length;
 
+  if (__DEV__) {
+    // [PHOTO_DEBUG] P0: verify backendCount === renderCount in ProfileCard
+    // (used by Discover & Explore card surfaces). Remove after validation.
+    console.log('[PHOTO_DEBUG][profile-card]', {
+      backendCount: Array.isArray(photos) ? photos.length : 0,
+      renderCount: displayPhotos.length,
+    });
+  }
+
   // Get content for current photo (consumption-based, no repetition)
   // Note: phase1PhotoContents handles all slot distribution - no separate phase1ContentSlot needed
   const currentPhotoContent = phase1PhotoContents[photoIndex] || {

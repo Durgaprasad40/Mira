@@ -62,9 +62,11 @@ export type RenderableProfilePhoto = {
 export function getRenderableProfilePhotos(photos: unknown): RenderableProfilePhoto[] {
   if (!Array.isArray(photos)) return EMPTY_PHOTOS;
 
-  // Dedupe by URL, preserving first-occurrence order. Prevents duplicate
-  // photos from rendering when the backend returns overlapping variants.
-  const seen = new Set<string>();
+  // P0: Dedupe by photo _id/id (never by URL), preserving order.
+  // Rationale: two distinct photo rows may legitimately share a URL
+  // (e.g., verification reference reused as a display photo). URL-based
+  // dedupe caused N→N-1 photo loss on the profile screen.
+  const seenIds = new Set<string>();
   const result: RenderableProfilePhoto[] = [];
 
   for (const photo of photos as any[]) {
@@ -80,8 +82,12 @@ export function getRenderableProfilePhotos(photos: unknown): RenderableProfilePh
       id = typeof photo?.id === "string" ? photo.id : undefined;
     }
 
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
+    if (!url) continue; // drop only truly empty entries
+    const key = _id ?? id;
+    if (key) {
+      if (seenIds.has(key)) continue;
+      seenIds.add(key);
+    }
     result.push({ url, _id, id });
   }
 

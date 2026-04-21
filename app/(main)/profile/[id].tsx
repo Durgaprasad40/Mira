@@ -461,6 +461,17 @@ export default function ViewProfileScreen() {
     () => (isConfessPreview ? displayPhotos.slice(0, 2) : displayPhotos),
     [displayPhotos, isConfessPreview],
   );
+  if (__DEV__) {
+    // [PHOTO_DEBUG] P0: verify backendCount === renderCount on profile screen.
+    // Remove after validation.
+    console.log('[PHOTO_DEBUG][profile]', {
+      userId: profile?.id,
+      backendCount: Array.isArray(profile?.photos) ? profile.photos.length : 0,
+      renderCount: displayPhotos.length,
+      visibleCount: visiblePhotos.length,
+      isConfessPreview,
+    });
+  }
   const distanceLabel = useMemo(() => formatDiscoverDistanceKm(profile?.distance), [profile?.distance]);
   const verificationBadge = useMemo(
     () => getVerificationBadgeState({

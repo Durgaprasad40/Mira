@@ -44,6 +44,11 @@ import { rankCandidates as sharedRankCandidates, logBatchRankingComparison } fro
 import { convexLog, convexError } from './_logging';
 import type { Phase1DiscoverEmptyReason } from '../lib/phase1DiscoverQuery';
 
+// P0 TEMPORARY: per-stage audit logging for one-way Discover visibility bug.
+// Flip to `false` (or remove all gated logs) once reverse-visibility is
+// validated on both test devices. See [DISCOVER_AUDIT] tags below.
+const DISCOVER_AUDIT_ENABLED = false;
+
 // ---------------------------------------------------------------------------
 // Phase-1 Discover: structured empty result (Step 8 — distinguish empty reasons)
 // ---------------------------------------------------------------------------
@@ -549,40 +554,128 @@ export const getDiscoverProfiles = query({
     /** Users who passed preferences but were excluded by swipes/matches/blocks/etc. */
     let historyFailCount = 0;
 
+    if (DISCOVER_AUDIT_ENABLED) {
+      console.log('[DISCOVER_AUDIT][raw]', {
+        viewer: currentUser._id,
+        viewerGender: currentUser.gender,
+        viewerOrientation: currentUser.orientation,
+        viewerLookingFor: currentUser.lookingFor,
+        viewerMinAge: currentUser.minAge,
+        viewerMaxAge: currentUser.maxAge,
+        viewerMaxDistance: currentUser.maxDistance,
+        viewerHasCoords: !!(currentUser.latitude && currentUser.longitude),
+        rawPoolSize: allUsers.length,
+        rawCandidateIds: allUsers.map((u) => u._id),
+      });
+    }
+
     for (const user of allUsers) {
       if (user._id === userId) continue;
-      if (!user.isActive || user.isBanned) continue;
-      if (isEffectivelyHiddenFromDiscover(user)) continue;
+      if (!user.isActive || user.isBanned) {
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][visibility] inactive_or_banned', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            isActive: user.isActive,
+            isBanned: user.isBanned,
+          });
+        }
+        continue;
+      }
+      if (isEffectivelyHiddenFromDiscover(user)) {
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][visibility] hidden_from_discover', {
+            viewer: currentUser._id,
+            candidate: user._id,
+          });
+        }
+        continue;
+      }
 
       // Align with likes.swipe: like/super_like require target verificationStatus === 'verified'
       const targetVerificationStatus = user.verificationStatus || 'unverified';
-      if (targetVerificationStatus !== 'verified') continue;
+      if (targetVerificationStatus !== 'verified') {
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][visibility] not_verified', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            candidateVerificationStatus: targetVerificationStatus,
+          });
+        }
+        continue;
+      }
 
       // Incognito check
       if (user.incognitoMode) {
         const canSee = currentUser.gender === 'female' || currentUser.subscriptionTier === 'premium';
-        if (!canSee) continue;
+        if (!canSee) {
+          if (DISCOVER_AUDIT_ENABLED) {
+            console.log('[DISCOVER_AUDIT][visibility] incognito_not_allowed', {
+              viewer: currentUser._id,
+              candidate: user._id,
+              viewerGender: currentUser.gender,
+              viewerTier: currentUser.subscriptionTier,
+            });
+          }
+          continue;
+        }
       }
 
-      // Orientation preference match (viewer → candidate)
+      // Orientation preference match (RECIPROCAL: viewer ↔ candidate)
+      // P0 one-way-visibility fix: previously only the viewer's orientation
+      // was checked against the candidate's gender. That made the gate
+      // asymmetric — if the candidate's orientation excluded the viewer's
+      // gender but the viewer's did not, the viewer would still see the
+      // candidate (and vice versa). Now both sides must agree.
       if (
         !orientationAllowsCandidateGender({
           viewerGender: currentUser.gender,
           viewerOrientation: currentUser.orientation ?? undefined,
           candidateGender: user.gender,
+        }) ||
+        !orientationAllowsCandidateGender({
+          viewerGender: user.gender,
+          viewerOrientation: user.orientation ?? undefined,
+          candidateGender: currentUser.gender,
         })
       ) {
         prefFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][compatibility] orientation', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            viewerGender: currentUser.gender,
+            viewerOrientation: currentUser.orientation,
+            candidateGender: user.gender,
+            candidateOrientation: user.orientation,
+          });
+        }
         continue;
       }
 
       // Gender preference match (both ways)
       if (!currentUser.lookingFor.includes(user.gender)) {
         prefFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][compatibility] viewer_lookingFor_excludes_candidate', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            viewerLookingFor: currentUser.lookingFor,
+            candidateGender: user.gender,
+          });
+        }
         continue;
       }
       if (!user.lookingFor.includes(currentUser.gender)) {
         prefFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][compatibility] candidate_lookingFor_excludes_viewer', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            candidateLookingFor: user.lookingFor,
+            viewerGender: currentUser.gender,
+          });
+        }
         continue;
       }
 
@@ -590,11 +683,29 @@ export const getDiscoverProfiles = query({
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < currentUser.minAge || userAge > currentUser.maxAge) {
         prefFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][compatibility] candidate_age_out_of_viewer_range', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            candidateAge: userAge,
+            viewerMinAge: currentUser.minAge,
+            viewerMaxAge: currentUser.maxAge,
+          });
+        }
         continue;
       }
       const myAge = calculateAge(currentUser.dateOfBirth);
       if (myAge < user.minAge || myAge > user.maxAge) {
         prefFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][compatibility] viewer_age_out_of_candidate_range', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            viewerAge: myAge,
+            candidateMinAge: user.minAge,
+            candidateMaxAge: user.maxAge,
+          });
+        }
         continue;
       }
 
@@ -607,6 +718,14 @@ export const getDiscoverProfiles = query({
         );
         if (!isDistanceAllowed(distance, currentUser.maxDistance)) {
           prefFailCount++;
+          if (DISCOVER_AUDIT_ENABLED) {
+            console.log('[DISCOVER_AUDIT][compatibility] distance_exceeds_viewer_max', {
+              viewer: currentUser._id,
+              candidate: user._id,
+              distanceKm: distance,
+              viewerMaxDistance: currentUser.maxDistance,
+            });
+          }
           continue;
         }
       }
@@ -614,19 +733,43 @@ export const getDiscoverProfiles = query({
       // PERF #8: O(1) Set lookups instead of database queries
       if (swipedUserIds.has(user._id as string)) {
         historyFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][limits] already_swiped', {
+            viewer: currentUser._id,
+            candidate: user._id,
+          });
+        }
         continue;
       }
       if (matchedUserIds.has(user._id as string)) {
         historyFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][limits] already_matched', {
+            viewer: currentUser._id,
+            candidate: user._id,
+          });
+        }
         continue;
       }
       if (blockedUserIds.has(user._id as string)) {
         historyFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][limits] blocked', {
+            viewer: currentUser._id,
+            candidate: user._id,
+          });
+        }
         continue;
       }
       // TRUST: Viewer-specific report exclusion (hard filter)
       if (viewerReportedIds.has(user._id as string)) {
         historyFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][limits] viewer_reported_candidate', {
+            viewer: currentUser._id,
+            candidate: user._id,
+          });
+        }
         continue;
       }
       // CONVERSATION PARTNER EXCLUSION — DISABLED:
@@ -641,6 +784,12 @@ export const getDiscoverProfiles = query({
       // Enforcement
       if (user.verificationEnforcementLevel === 'security_only') {
         historyFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][limits] enforcement_security_only', {
+            viewer: currentUser._id,
+            candidate: user._id,
+          });
+        }
         continue;
       }
       if (
@@ -648,10 +797,28 @@ export const getDiscoverProfiles = query({
         reducedReachExcludeThisCandidate(userId as string, user._id as string, discoverDayNumber)
       ) {
         historyFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][limits] enforcement_reduced_reach', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            discoverDayNumber,
+          });
+        }
         continue;
       }
 
       filteredCandidates.push({ user, distance });
+    }
+
+    if (DISCOVER_AUDIT_ENABLED) {
+      console.log('[DISCOVER_AUDIT][compatibility] after_filter_loop', {
+        viewer: currentUser._id,
+        rawPoolSize: allUsers.length,
+        passedFilterCount: filteredCandidates.length,
+        passedFilterIds: filteredCandidates.map((c) => c.user._id),
+        prefFailCount,
+        historyFailCount,
+      });
     }
 
     // PERF #8: Only fetch photos for candidates that passed all filters
@@ -671,15 +838,24 @@ export const getDiscoverProfiles = query({
       const { user, distance } = filteredCandidates[i];
       const photos = photoResults[i];
 
-      const safePublicPhotos = photos.filter(
-        (p) => !p.isNsfw && p.photoType !== 'verification_reference',
-      );
-      if (safePublicPhotos.length === 0) continue; // at least 1 public-safe photo required
+      // P0: include ALL photos for the user (reference, normal, secure).
+      // Do NOT drop verification_reference — single source of truth with profile view.
+      const safePublicPhotos = photos.filter((p) => !p.isNsfw);
+      if (safePublicPhotos.length === 0) {
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][visibility] no_public_safe_photos', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            rawPhotoCount: photos.length,
+          });
+        }
+        continue; // at least 1 public-safe photo required
+      }
 
       // Photo ordering: mirror full-profile contract (convex/users.ts:427-431) so
       // the user's chosen primary photo is always at position 0 on the swipe card.
-      // Prepend isPrimary photo, then sort the rest by `order`. NSFW and
-      // verification_reference filtering above is unchanged.
+      // Prepend isPrimary photo, then sort the rest by `order`. NSFW filtering
+      // above is unchanged.
       const primaryPhoto = safePublicPhotos.find((p) => p.isPrimary === true);
       const nonPrimaryPhotos = safePublicPhotos
         .filter((p) => p._id !== primaryPhoto?._id)
@@ -932,6 +1108,16 @@ export const getDiscoverProfiles = query({
 
       const window = result.slice(offset, offset + limit);
       const mappedRecommended = window.map(mapDiscoverProfileRow);
+      if (DISCOVER_AUDIT_ENABLED) {
+        console.log('[DISCOVER_AUDIT][final] recommended', {
+          viewer: currentUser._id,
+          rankedTotal: result.length,
+          offset,
+          limit,
+          returnedCount: mappedRecommended.length,
+          returnedIds: mappedRecommended.map((p: any) => p.id),
+        });
+      }
       if (mappedRecommended.length > 0) {
         return { profiles: mappedRecommended };
       }
@@ -943,6 +1129,12 @@ export const getDiscoverProfiles = query({
         filteredLenForEmpty,
         candidatesLenForEmpty,
       );
+      if (DISCOVER_AUDIT_ENABLED) {
+        console.log('[DISCOVER_AUDIT][final] recommended_empty', {
+          viewer: currentUser._id,
+          reason: emptyReasonRecommended,
+        });
+      }
       return phase1DiscoverEmpty(emptyReasonRecommended);
     } else {
       candidates.sort((a, b) => {
@@ -962,6 +1154,17 @@ export const getDiscoverProfiles = query({
 
     const window = candidates.slice(offset, offset + limit);
     const mappedSort = window.map(mapDiscoverProfileRow);
+    if (DISCOVER_AUDIT_ENABLED) {
+      console.log('[DISCOVER_AUDIT][final] sorted', {
+        viewer: currentUser._id,
+        sortBy,
+        totalCandidates: candidates.length,
+        offset,
+        limit,
+        returnedCount: mappedSort.length,
+        returnedIds: mappedSort.map((p: any) => p.id),
+      });
+    }
     if (mappedSort.length > 0) {
       return { profiles: mappedSort };
     }
@@ -973,6 +1176,12 @@ export const getDiscoverProfiles = query({
       filteredLenForEmpty,
       candidatesLenForEmpty,
     );
+    if (DISCOVER_AUDIT_ENABLED) {
+      console.log('[DISCOVER_AUDIT][final] sorted_empty', {
+        viewer: currentUser._id,
+        reason: emptyReasonSort,
+      });
+    }
     return phase1DiscoverEmpty(emptyReasonSort);
   },
 });
@@ -1584,11 +1793,10 @@ async function hydrateExploreProfiles(
       const candidate = chunk[index];
       // Photo ordering: mirror full-profile contract (convex/users.ts:427-431) so
       // the user's chosen primary photo is always at position 0 on Explore cards.
-      // Prepend isPrimary photo, then sort the rest by `order`. NSFW and
-      // verification_reference filtering is unchanged.
-      const safePhotos = chunkPhotos[index].filter(
-        (photo) => !photo.isNsfw && photo.photoType !== 'verification_reference',
-      );
+      // Prepend isPrimary photo, then sort the rest by `order`. NSFW filtering
+      // is unchanged.
+      // P0: include ALL photos (reference included). Mirror profile-view contract.
+      const safePhotos = chunkPhotos[index].filter((photo) => !photo.isNsfw);
       const primaryPhoto = safePhotos.find((p) => p.isPrimary === true);
       const nonPrimaryPhotos = safePhotos
         .filter((p) => p._id !== primaryPhoto?._id)

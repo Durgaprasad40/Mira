@@ -2056,6 +2056,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     return urls.length > 0 ? urls : EMPTY_STRING_ARRAY;
   }, [isPhase2, current]);
 
+  if (__DEV__ && current) {
+    // [PHOTO_DEBUG] P0: verify backendCount === renderCount on Discover cards.
+    // Remove after validation.
+    const rendered = getRenderableProfilePhotos(current.photos);
+    console.log('[PHOTO_DEBUG][discover]', {
+      userId: current.id,
+      backendCount: Array.isArray(current.photos) ? current.photos.length : 0,
+      renderCount: rendered.length,
+      photoCountField: (current as any).photoCount,
+    });
+  }
+
   useEffect(() => {
     if (currentFullPhotoUrls.length === 0) return;
     for (const url of currentFullPhotoUrls) {

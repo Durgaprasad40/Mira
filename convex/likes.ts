@@ -833,7 +833,7 @@ export const getSwipeHistory = query({
 // The exported shape preserves the legacy `{ id, name, avatarUrl, disambiguator }`
 // fields so existing callers continue to work; `matchType` is an additive new
 // field.
-const MENTION_RULE_AUDIT_ENABLED = true;
+const MENTION_RULE_AUDIT_ENABLED = false;
 
 export const getLikedUsers = query({
   args: {
