@@ -587,18 +587,23 @@ const styles = StyleSheet.create({
     paddingBottom: 14,
     marginHorizontal: 12,
     marginVertical: 6,
-    // Shadow for iOS
+    // Crisp hairline border for refined definition on white backgrounds —
+    // replaces the cheap outline-only look with a premium editorial edge.
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(17, 24, 39, 0.06)',
+    // Layered neutral shadow — deeper spread, lower opacity = more lift,
+    // less cheap bloom. No colored shadow bleed.
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    // Elevation for Android (proper cross-platform shadow)
-    elevation: 3,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 2,
   },
   cardHighlighted: {
-    // Keep white background, add subtle left accent only
-    borderLeftWidth: HAIRLINE * 3,
+    // Single-edge accent — quiet, authorial. No full outline.
+    borderLeftWidth: 3,
     borderLeftColor: COLORS.primary,
+    paddingLeft: 18 - 3 + StyleSheet.hairlineWidth,
   },
   forYouBadge: {
     flexDirection: 'row',

@@ -939,7 +939,7 @@ export default function ConfessionsScreen() {
         >
           {/* Trending badge */}
           <View style={styles.trendingBadge}>
-            <Ionicons name="trending-up" size={12} color="#3B82F6" />
+            <Ionicons name="trending-up" size={12} color="#B8860B" />
             <Text style={styles.trendingBadgeText}>Trending</Text>
           </View>
 
@@ -1592,7 +1592,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.white,
   },
-  // Trending card - Premium with deep blue accent
+  // Trending card — editorial warm-gold left accent, crisp hairline, elevated
+  // neutral shadow. No full colored outline, no colored shadow bleed. Reads
+  // "featured / premium pick" without competing with the brand pink.
   trendingCard: {
     marginHorizontal: 10,
     marginTop: 8,
@@ -1601,14 +1603,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 14,
     paddingBottom: 12,
+    paddingLeft: 16 - 3 + StyleSheet.hairlineWidth,
     backgroundColor: COLORS.background,
-    borderWidth: 1.5,
-    borderColor: 'rgba(59, 130, 246, 0.3)',
-    shadowColor: '#3B82F6',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    elevation: 3,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(17, 24, 39, 0.06)',
+    borderLeftWidth: 3,
+    borderLeftColor: '#B8860B',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 14,
+    elevation: 4,
   },
   genderSymbol: {
     fontSize: 14,
@@ -1620,7 +1625,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     alignSelf: 'flex-start',
     gap: 4,
-    backgroundColor: 'rgba(59, 130, 246, 0.08)',
+    backgroundColor: 'rgba(184, 134, 11, 0.09)',
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 8,
@@ -1629,9 +1634,9 @@ const styles = StyleSheet.create({
   trendingBadgeText: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#3B82F6',
+    color: '#B8860B',
     textTransform: 'uppercase',
-    letterSpacing: 0.3,
+    letterSpacing: 0.5,
   },
   trendingAuthorRow: {
     flexDirection: 'row',
@@ -1742,7 +1747,8 @@ const styles = StyleSheet.create({
   fabDisabled: {
     opacity: 0.65,
   },
-  // My Confession card - Same style as normal cards, with subtle border highlight
+  // My Confession card — brand-primary left accent + hairline + neutral shadow.
+  // Single-edge cue signals authorship quietly without a loud full outline.
   myConfessionCard: {
     marginHorizontal: 10,
     marginTop: 4,
@@ -1751,14 +1757,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 14,
     paddingBottom: 12,
+    paddingLeft: 16 - 3 + StyleSheet.hairlineWidth,
     backgroundColor: COLORS.background,
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,107,107,0.25)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(17, 24, 39, 0.06)',
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.primary,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 2,
   },
   myConfessionAuthorRow: {
     flexDirection: 'row',
