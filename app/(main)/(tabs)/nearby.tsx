@@ -295,8 +295,12 @@ type ClusterFeature = Supercluster.ClusterFeature<any> | Supercluster.PointFeatu
 const DEFAULT_LATITUDE_DELTA = 0.004; // ~2x closer than original 0.008
 const DEFAULT_LONGITUDE_DELTA = 0.004;
 
-// Rate limiting constants for crossed paths detection
-const DETECTION_MIN_MOVEMENT_METERS = 60; // Only scan if moved 60m+
+// Rate limiting constants for crossed paths detection.
+// PRODUCT FIX: unified with server MIN_MOVEMENT_FOR_CROSSING_METERS (25m).
+// Prior 60m client / 30m server mismatch meant the server value never applied.
+// 25m is permissive enough to catch real crossings on short walks between
+// shops/cafes while still filtering stationary GPS jitter.
+const DETECTION_MIN_MOVEMENT_METERS = 25; // Aligned with server; catches real crossings
 const DETECTION_MIN_INTERVAL_MS = 30000; // Only scan every 30s+
 const PUBLISH_REFRESH_INTERVAL_MS = 30000; // Refresh publishedAt at least every 30s while Nearby is active
 
@@ -614,7 +618,26 @@ export default function NearbyScreen() {
   // Track query loading state for error detection
   const isQueryActive = shouldRunNearbyUsersQuery;
   const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
-  const shouldShowLoadingState = (isQueryLoading || isRetrying) && !isDemo;
+  // NEARBY_ENTRY fix: when we still have a previous good result retained in
+  // state, a focus-triggered refresh must stay silent — we keep showing the
+  // retained data instead of flashing the loading overlay. Only a true cold
+  // start (no retained data) may show it.
+  const hasRetainedGoodResult =
+    retainedNearbyUsersResult != null && retainedNearbyUsersResult.status === 'ok';
+  const shouldShowLoadingState =
+    (isQueryLoading || isRetrying) && !isDemo && !hasRetainedGoodResult;
+
+  // [NEARBY_ENTRY] loading_state trace — emitted whenever the decision changes.
+  useEffect(() => {
+    if (!__DEV__) return;
+    console.log('[NEARBY_ENTRY][loading_state]', {
+      isQueryLoading,
+      isRetrying,
+      hasRetainedGoodResult,
+      shouldShowLoadingState,
+      mode: hasRetainedGoodResult && isQueryLoading ? 'background_refresh' : (shouldShowLoadingState ? 'cold_start_loader' : 'idle'),
+    });
+  }, [isQueryLoading, isRetrying, hasRetainedGoodResult, shouldShowLoadingState]);
 
   useEffect(() => {
     if (userId) {
@@ -1172,22 +1195,38 @@ export default function NearbyScreen() {
 
   // Phase-3: soft fade-in whenever the visible marker set size changes.
   // Uses a numeric state because react-native-maps <Marker> takes a plain
-  // `opacity` prop (not Animated). We drop to 0 synchronously and then
-  // schedule a single rAF hop to 1 so the native driver can interpolate on
-  // its own. No new native components are introduced.
+  // `opacity` prop (not Animated). We only force a fade when markers first
+  // appear (empty -> non-empty). For subsequent count changes on refreshed
+  // data we leave opacity at 1 to avoid a visible blink on background refresh.
   const [markerFadeOpacity, setMarkerFadeOpacity] = useState(0);
+  const prevMapUsersLenRef = useRef(0);
   useEffect(() => {
-    if (mapUsers.length === 0) {
+    const prevLen = prevMapUsersLenRef.current;
+    const nextLen = mapUsers.length;
+    prevMapUsersLenRef.current = nextLen;
+
+    if (nextLen === 0) {
+      // No markers to show — keep opacity at 0 so the next empty->non-empty
+      // transition can fade in cleanly.
       setMarkerFadeOpacity(0);
       return;
     }
-    setMarkerFadeOpacity(0);
-    const raf = requestAnimationFrame(() => {
-      if (isMountedRef.current) {
-        setMarkerFadeOpacity(1);
-      }
-    });
-    return () => cancelAnimationFrame(raf);
+
+    // Only fade in on the initial empty -> non-empty transition.
+    if (prevLen === 0) {
+      setMarkerFadeOpacity(0);
+      const raf = requestAnimationFrame(() => {
+        if (isMountedRef.current) {
+          setMarkerFadeOpacity(1);
+        }
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+
+    // Subsequent recomputations on already-visible markers: stay fully
+    // opaque. This prevents a flash on focus/background refresh when the
+    // same or refreshed user set is returned.
+    setMarkerFadeOpacity(1);
   }, [mapUsers.length]);
 
   // Phase-3: fire a single nearby_map_open analytics event the first time a
@@ -1579,12 +1618,27 @@ export default function NearbyScreen() {
       setIsNearbyFocused(true);
       requestNearbyRefresh({ force: true });
       log.info('[NEARBY]', 'screen focused, starting location tracking');
+      if (__DEV__) {
+        console.log('[NEARBY_ENTRY][focus]', {
+          event: 'enter',
+          hasRetained:
+            retainedNearbyUsersResult != null &&
+            retainedNearbyUsersResult.status === 'ok',
+          retainedUserCount:
+            retainedNearbyUsersResult?.status === 'ok'
+              ? retainedNearbyUsersResult.users.length
+              : 0,
+        });
+      }
       startLocationTracking();
 
       // Cleanup: stop tracking when leaving Nearby tab (battery optimization)
       return () => {
         setIsNearbyFocused(false);
         log.info('[NEARBY]', 'screen unfocused, stopping location tracking');
+        if (__DEV__) {
+          console.log('[NEARBY_ENTRY][focus]', { event: 'leave' });
+        }
         stopLocationTracking();
       };
     }, [requestNearbyRefresh, startLocationTracking, stopLocationTracking])
