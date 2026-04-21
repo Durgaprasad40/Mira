@@ -811,7 +811,30 @@ export const getSwipeHistory = query({
   },
 });
 
-// Get users that the current user has liked (for confession tagging)
+// Get users eligible for Confess mention (single source of truth).
+//
+// P0/P1 MENTION_RULE:
+// A can mention B if either:
+//   (1) A has liked/right-swiped B (outgoing 'like' / 'super_like' / 'text' row
+//       in `likes` with fromUserId=A, toUserId=B), OR
+//   (2) A and B are in an active mutual match (row in `matches` with
+//       isActive=true and {user1Id,user2Id} = {A,B}).
+//
+// Reverse one-way unlock is NOT supported: if B liked A but A did not like B
+// and no mutual match exists, B is NOT eligible for A to mention.
+//
+// Candidates from (1) and (2) are merged (union by user id), de-duplicated,
+// annotated with `matchType` ('mutual_match' | 'liked_only'), and sorted on
+// the server:
+//   - 'mutual_match' first
+//   - 'liked_only' second
+//   - then stable alphabetical by name (case-insensitive)
+//
+// The exported shape preserves the legacy `{ id, name, avatarUrl, disambiguator }`
+// fields so existing callers continue to work; `matchType` is an additive new
+// field.
+const MENTION_RULE_AUDIT_ENABLED = true;
+
 export const getLikedUsers = query({
   args: {
     userId: v.id('users'),
@@ -819,7 +842,7 @@ export const getLikedUsers = query({
   handler: async (ctx, args) => {
     const { userId } = args;
 
-    // Get all likes from this user (like or super_like, not pass)
+    // (1) Outgoing likes by viewer
     const likes = await ctx.db
       .query('likes')
       .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
@@ -832,37 +855,103 @@ export const getLikedUsers = query({
       )
       .collect();
 
-    const result = [];
-    for (const like of likes) {
-      const likedUser = await ctx.db.get(like.toUserId);
-      if (!likedUser || !likedUser.isActive) continue;
+    const likedUserIds = new Set<string>();
+    for (const like of likes) likedUserIds.add(like.toUserId as unknown as string);
 
-      // Get primary photo
+    // (2) Active mutual matches (viewer is user1 OR user2)
+    const [matchesAsUser1, matchesAsUser2] = await Promise.all([
+      ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+      ctx.db
+        .query('matches')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+    ]);
+
+    const matchedUserIds = new Set<string>();
+    for (const m of matchesAsUser1) matchedUserIds.add(m.user2Id as unknown as string);
+    for (const m of matchesAsUser2) matchedUserIds.add(m.user1Id as unknown as string);
+
+    // Union (de-duped by id)
+    const candidateIds = new Set<string>([...likedUserIds, ...matchedUserIds]);
+
+    if (MENTION_RULE_AUDIT_ENABLED) {
+      console.log('[MENTION_RULE][source] raw', {
+        viewer: userId,
+        likedCount: likedUserIds.size,
+        matchedCount: matchedUserIds.size,
+        unionCount: candidateIds.size,
+      });
+    }
+
+    type Row = {
+      id: any;
+      name: string;
+      avatarUrl: string | null;
+      disambiguator: string;
+      matchType: 'mutual_match' | 'liked_only';
+    };
+
+    const result: Row[] = [];
+
+    for (const idStr of candidateIds) {
+      const candidateId = idStr as any;
+      const candidate = await ctx.db.get(candidateId);
+      if (!candidate || !(candidate as any).isActive) continue;
+
       const photo = await ctx.db
         .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', like.toUserId))
+        .withIndex('by_user', (q) => q.eq('userId', candidateId))
         .filter((q) => q.eq(q.field('isPrimary'), true))
         .first();
 
       // Build disambiguator: prefer bio snippet, then school, then age, then masked userId
       let disambiguator = '';
-      if (likedUser.bio && likedUser.bio.length > 0) {
-        disambiguator = likedUser.bio.slice(0, 30) + (likedUser.bio.length > 30 ? '...' : '');
-      } else if (likedUser.school) {
-        disambiguator = likedUser.school;
-      } else if (likedUser.dateOfBirth) {
-        disambiguator = `${calculateAge(likedUser.dateOfBirth)} years old`;
+      const c: any = candidate;
+      if (c.bio && c.bio.length > 0) {
+        disambiguator = c.bio.slice(0, 30) + (c.bio.length > 30 ? '...' : '');
+      } else if (c.school) {
+        disambiguator = c.school;
+      } else if (c.dateOfBirth) {
+        disambiguator = `${calculateAge(c.dateOfBirth)} years old`;
       } else {
-        // Masked userId (last 4 chars)
-        const idStr = like.toUserId.toString();
-        disambiguator = `ID: ...${idStr.slice(-4)}`;
+        disambiguator = `ID: ...${String(candidateId).slice(-4)}`;
       }
 
+      const matchType: 'mutual_match' | 'liked_only' = matchedUserIds.has(idStr)
+        ? 'mutual_match'
+        : 'liked_only';
+
       result.push({
-        id: like.toUserId,
-        name: likedUser.name,
+        id: candidateId,
+        name: c.name,
         avatarUrl: photo?.url || null,
         disambiguator,
+        matchType,
+      });
+    }
+
+    // Sort: mutual_match (0) before liked_only (1), then case-insensitive name
+    result.sort((a, b) => {
+      const rank = (t: Row['matchType']) => (t === 'mutual_match' ? 0 : 1);
+      const r = rank(a.matchType) - rank(b.matchType);
+      if (r !== 0) return r;
+      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+    });
+
+    if (MENTION_RULE_AUDIT_ENABLED) {
+      const mutualCount = result.filter((r) => r.matchType === 'mutual_match').length;
+      const likedOnlyCount = result.filter((r) => r.matchType === 'liked_only').length;
+      console.log('[MENTION_RULE][eligible] final', {
+        viewer: userId,
+        total: result.length,
+        mutualCount,
+        likedOnlyCount,
+        orderedIds: result.map((r) => r.id),
       });
     }
 

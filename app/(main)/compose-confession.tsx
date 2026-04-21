@@ -39,20 +39,28 @@ const IDENTITY_OPTIONS: { key: IdentityMode; label: string; description: string;
   { key: 'open_to_all', label: 'Open to All', description: 'Name and photo visible', icon: 'person-outline' },
 ];
 
+// P0/P1 MENTION_RULE:
+// Mention eligibility for user A = union(
+//   users A liked/right-swiped,
+//   users A is mutually matched with
+// ). Each candidate is tagged with matchType so we can:
+//   - sort mutual_match above liked_only (done server-side)
+//   - optionally render a visual hint
 type LikedUser = {
   id: string;
   name: string;
   avatarUrl: string | null;
   age?: number;
   disambiguator: string;
+  matchType?: 'mutual_match' | 'liked_only';
 };
 
 const DEMO_LIKED_USERS: LikedUser[] = [
-  { id: 'demo_profile_2', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=5', age: 24, disambiguator: 'Loves coffee' },
-  { id: 'demo_profile_3', name: 'Rahul', avatarUrl: 'https://i.pravatar.cc/150?img=12', age: 27, disambiguator: 'Tech enthusiast' },
-  { id: 'demo_profile_4', name: 'Ananya', avatarUrl: 'https://i.pravatar.cc/150?img=9', age: 25, disambiguator: 'Mumbai' },
-  { id: 'demo_profile_5', name: 'Vikram', avatarUrl: 'https://i.pravatar.cc/150?img=11', age: 29, disambiguator: 'Photographer' },
-  { id: 'demo_profile_6', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=16', age: 22, disambiguator: 'Yoga instructor' },
+  { id: 'demo_profile_2', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=5', age: 24, disambiguator: 'Loves coffee', matchType: 'mutual_match' },
+  { id: 'demo_profile_3', name: 'Rahul', avatarUrl: 'https://i.pravatar.cc/150?img=12', age: 27, disambiguator: 'Tech enthusiast', matchType: 'liked_only' },
+  { id: 'demo_profile_4', name: 'Ananya', avatarUrl: 'https://i.pravatar.cc/150?img=9', age: 25, disambiguator: 'Mumbai', matchType: 'liked_only' },
+  { id: 'demo_profile_5', name: 'Vikram', avatarUrl: 'https://i.pravatar.cc/150?img=11', age: 29, disambiguator: 'Photographer', matchType: 'liked_only' },
+  { id: 'demo_profile_6', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=16', age: 22, disambiguator: 'Yoga instructor', matchType: 'liked_only' },
 ];
 
 function computeAge(dateOfBirth: string | undefined): number | undefined {
@@ -202,12 +210,65 @@ export default function ComposeConfessionScreen() {
   }, [convexCurrentUser, demoCurrentUser]);
 
   const tagSuggestions = useMemo(() => {
-    if (!tagInput || tagInput.length < 3 || taggedUser) return [];
-    const input = tagInput.toLowerCase().trim();
-    return likedUsers
-      .filter((user) => user.name.length > 7)
-      .filter((user) => user.name.toLowerCase().startsWith(input))
+    // P0/P1 MENTION_RULE + P1 Confess autocomplete:
+    // - `likedUsers` is the single source of truth returned by the server.
+    //   It already encodes: union(liked, mutual_match), de-duped by user id,
+    //   sorted with mutual_match first then liked_only then alphabetical.
+    // - Client-side behaviour:
+    //   * Gate on 3+ typed chars.
+    //   * Trim + lowercase query before compare.
+    //   * Prefix match against candidate name (startsWith).
+    //   * DO NOT filter by candidate name length (legacy bug).
+    //   * DO NOT re-sort — preserve server-provided matchType order.
+    if (!tagInput) {
+      if (__DEV__) {
+        console.log('[CONFESS_SEARCH][input] empty', { tagInput, taggedUserId: taggedUser?.id });
+      }
+      return [];
+    }
+    const normalized = tagInput.toLowerCase().trim();
+    if (normalized.length < 3 || taggedUser) {
+      if (__DEV__) {
+        console.log('[CONFESS_SEARCH][dropdown] hidden', {
+          reason: taggedUser ? 'already_tagged' : 'below_min_length',
+          tagInput,
+          normalized,
+          normalizedLength: normalized.length,
+        });
+      }
+      return [];
+    }
+    const sourceCount = likedUsers.length;
+    const mutualCount = likedUsers.filter((u) => u.matchType === 'mutual_match').length;
+    const likedOnlyCount = likedUsers.filter((u) => u.matchType === 'liked_only').length;
+    const matched = likedUsers
+      .filter((user) => user.name.trim().toLowerCase().startsWith(normalized))
       .slice(0, 5);
+    if (__DEV__) {
+      console.log('[MENTION_RULE][source]', {
+        sourceCount,
+        mutualCount,
+        likedOnlyCount,
+      });
+      console.log('[MENTION_RULE][search]', {
+        query: tagInput,
+        normalized,
+        matchCount: matched.length,
+        matches: matched.map((u) => ({ id: u.id, name: u.name, matchType: u.matchType })),
+      });
+      console.log('[CONFESS_SEARCH][source]', { sourceCount });
+      console.log('[CONFESS_SEARCH][filtered]', {
+        tagInput,
+        normalized,
+        matchCount: matched.length,
+        matchedNames: matched.map((u) => u.name),
+      });
+      console.log('[CONFESS_SEARCH][dropdown]', {
+        willShow: matched.length > 0 && !taggedUser,
+        shownCount: matched.length,
+      });
+    }
+    return matched;
   }, [likedUsers, tagInput, taggedUser]);
 
   const handleClose = useCallback(() => {
@@ -492,6 +553,13 @@ export default function ComposeConfessionScreen() {
                         key={user.id}
                         style={styles.suggestionRow}
                         onPress={() => {
+                          if (__DEV__) {
+                            console.log('[MENTION_RULE][selected]', {
+                              id: user.id,
+                              name: user.name,
+                              matchType: user.matchType,
+                            });
+                          }
                           setTaggedUser(user);
                           setTagInput(user.name);
                         }}
@@ -567,6 +635,14 @@ export default function ComposeConfessionScreen() {
                     key={user.id}
                     style={styles.duplicateRow}
                     onPress={() => {
+                      if (__DEV__) {
+                        console.log('[MENTION_RULE][selected]', {
+                          id: user.id,
+                          name: user.name,
+                          matchType: user.matchType,
+                          via: 'duplicate_picker',
+                        });
+                      }
                       setTaggedUser(user);
                       setTagInput(user.name);
                       setShowDuplicatePicker(false);
