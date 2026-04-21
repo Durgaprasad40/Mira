@@ -260,39 +260,35 @@ export default function ProfileScreen() {
   }, [logout, currentUserData, router, token]);
 
   // MAIN PHOTO SOURCE OF TRUTH:
-  // - Live mode: Use effectivePhotos (api.photos.getUserPhotos with hydration guard)
-  // - Demo mode: Use first photo from demoStore
-  // HYDRATION FIX: effectivePhotos uses cached data during loading
+  // PRIMARY PHOTO = api.photos.getUserPhotos()[0]
+  //
+  // This is the EXACT same expression Confess comment identity uses. No
+  // filtering, no reordering, no `isPrimary` re-selection, and — crucially —
+  // no hydration-cache indirection. The previous implementation routed this
+  // through `effectivePhotos`, which falls back to `lastValidPhotosRef.current`
+  // during subscription transitions; that cache can hold a STALE photo URL
+  // when the user has changed their primary photo, causing Profile UI to
+  // diverge from Confess comments. Reading `backendPhotos[0]` directly keeps
+  // Profile in lockstep with Convex and with Confess.
   const mainPhotoUrl = React.useMemo(() => {
     if (isDemoMode) {
-      // Demo mode: use first photo from demoStore
       return currentUser?.photos?.[0]?.url || null;
     }
-    // Live mode: Use effectivePhotos (cached during loading, real when loaded)
-    // CRITICAL: Only return null if we truly have no photos (not during loading)
-    if (!effectivePhotos?.length) {
-      // No photos available - but check if we're loading with no cache
-      if (isPhotosLoading && !hasCachedPhotos) {
-        // First load with no cache - keep previous mainPhotoUrl (handled by memo)
-        return null;
-      }
-      return null;
-    }
-    // SINGLE SOURCE OF TRUTH: First photo (index 0) is always main
-    // Photos are ordered by `order` field, with order=0 being main
-    const mainPhoto = effectivePhotos[0];
+
+    const mainPhoto = backendPhotos?.[0];
 
     if (__DEV__) {
-      console.log('[ProfileTab] 📸 Main photo (index 0):', {
-        selectedUrl: mainPhoto?.url?.slice(-30),
-        totalPhotos: effectivePhotos.length,
-        isPhotosLoading,
-        usingCachedData: isPhotosLoading && hasCachedPhotos,
+      console.log('[PROFILE_MAIN_PHOTO_DEBUG]', {
+        selectedPhotoId: (mainPhoto as any)?._id ?? null,
+        selectedPhotoUrl: mainPhoto?.url ? mainPhoto.url.slice(-30) : null,
+        sourceUsed: 'api.photos.getUserPhotos[0]',
+        indexUsed: 0,
+        totalPhotos: backendPhotos?.length ?? 0,
       });
     }
 
     return mainPhoto?.url || null;
-  }, [isDemoMode, currentUser?.photos, effectivePhotos, isPhotosLoading, hasCachedPhotos]);
+  }, [isDemoMode, currentUser?.photos, backendPhotos]);
 
   // PER-PHOTO BLUR CHECK: Read from backend photo.isBlurred field (source of truth)
   // Edit Profile persists blur state to Convex on Save via api.photos.setPhotosBlur
