@@ -1199,10 +1199,31 @@ export const recordLocationBatch = mutation({
       return { success: false, accepted: 0, reason: 'user_not_found' };
     }
 
-    // Phase-1 opt-in gate — background writes are strictly opt-in. The gate
-    // is checked server-side so a stale / spoofed client can never write
-    // background samples without the user having flipped the toggle.
-    if (user.backgroundLocationEnabled !== true) {
+    // Platform-specific opt-in gates. Background writes are strictly opt-in
+    // and the gate is checked server-side so a stale / spoofed client can
+    // never write background samples without the user's consent flag.
+    //
+    //   source='slc' : iOS Significant Location Change — requires
+    //                  backgroundLocationEnabled === true.
+    //   source='bg'  : Android Discovery Mode — requires
+    //                  discoveryModeEnabled === true AND
+    //                  discoveryModeExpiresAt > now. Expired windows are
+    //                  rejected so a client whose timer failed to stop
+    //                  cannot keep writing.
+    //   source='fg'  : foreground mirror writes — still require at least
+    //                  one of the background toggles to be on, matching
+    //                  the Phase-1 semantics (fg mirroring from
+    //                  recordLocation already bypasses this mutation).
+    const sources = new Set(args.samples.map((s) => s.source));
+    const hasSlc = sources.has('slc');
+    const hasBg = sources.has('bg');
+    const bgLocationOn = user.backgroundLocationEnabled === true;
+    const discoveryOn =
+      user.discoveryModeEnabled === true &&
+      typeof user.discoveryModeExpiresAt === 'number' &&
+      user.discoveryModeExpiresAt > now;
+
+    if (hasSlc && !bgLocationOn) {
       if (BG_LOCATION_AUDIT_ENABLED) {
         console.log('[BG_LOCATION][dropped]', {
           userId,
@@ -1211,6 +1232,34 @@ export const recordLocationBatch = mutation({
         });
       }
       return { success: false, accepted: 0, reason: 'background_not_enabled' };
+    }
+
+    if (hasBg && !discoveryOn) {
+      // Intentionally logged under ANDROID_DISCOVERY so Phase-2 telemetry
+      // is separable from Phase-1 iOS logs.
+      console.log('[ANDROID_DISCOVERY][dropped]', {
+        userId,
+        reason: 'discovery_mode_not_active',
+        discoveryModeEnabled: user.discoveryModeEnabled ?? false,
+        discoveryModeExpiresAt: user.discoveryModeExpiresAt ?? null,
+        now,
+        sampleCount: args.samples.length,
+      });
+      return { success: false, accepted: 0, reason: 'discovery_mode_not_active' };
+    }
+
+    // If the batch has neither slc nor bg sources, fall back to checking that
+    // at least one of the background opt-ins is on (defensive; shouldn't
+    // happen in practice because recordLocation handles fg mirror writes).
+    if (!hasSlc && !hasBg && !bgLocationOn && !discoveryOn) {
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][dropped]', {
+          userId,
+          reason: 'no_opt_in',
+          sampleCount: args.samples.length,
+        });
+      }
+      return { success: false, accepted: 0, reason: 'no_opt_in' };
     }
 
     // Mirror the opt-out gates from recordLocation so background samples

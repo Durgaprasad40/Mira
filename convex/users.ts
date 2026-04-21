@@ -219,6 +219,12 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
     recordCrossedPaths: user.recordCrossedPaths,
     // Phase-1 Background Crossed Paths: iOS-only opt-in (default false).
     backgroundLocationEnabled: user.backgroundLocationEnabled,
+    // Phase-2 Android Discovery Mode — expose to the client so the toggle
+    // can render live countdown / stop button. Both fields can be undefined
+    // if the user has never enabled Discovery Mode.
+    discoveryModeEnabled: user.discoveryModeEnabled,
+    discoveryModeExpiresAt: user.discoveryModeExpiresAt,
+    discoveryModeStartedAt: user.discoveryModeStartedAt,
     // NOTE: nearbyVisibilityMode retained in schema for back-compat but no
     // longer surfaced to clients — UI was removed in Phase-1 and backend
     // stopped reading it in Phase-2.
@@ -971,6 +977,88 @@ export const updateNearbySettings = mutation({
       await ctx.db.patch(userId, cleanUpdates);
     }
 
+    return { success: true };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Phase-2 Android Discovery Mode
+// ---------------------------------------------------------------------------
+// Discovery Mode is a user-initiated, time-limited background location window
+// for Android. Unlike the iOS SLC path (which is always-on once enabled),
+// Discovery Mode auto-expires so Android stays off 24/7 tracking.
+//
+// Server-side contract:
+//   * startDiscoveryMode — records the window; client then starts the
+//     foreground-service-backed location task locally.
+//   * stopDiscoveryMode — clears the window; client then stops the task.
+//   * recordLocationBatch enforces (discoveryModeEnabled && discoveryModeExpiresAt > now)
+//     for source='bg' samples, so an expired-but-still-running client
+//     cannot keep writing.
+// ---------------------------------------------------------------------------
+
+/** Default Discovery Mode window. Keep in sync with the client hook's
+ *  default. 4 hours matches the product spec ("not 24/7 background"). */
+const DISCOVERY_MODE_DEFAULT_DURATION_MS = 4 * 60 * 60 * 1000;
+/** Upper bound on the Discovery Mode window. Prevents clients from asking
+ *  for multi-day windows that would break the "time-limited" guarantee. */
+const DISCOVERY_MODE_MAX_DURATION_MS = 8 * 60 * 60 * 1000;
+
+export const startDiscoveryMode = mutation({
+  args: {
+    authUserId: v.string(),
+    // Optional: client can ask for a shorter window. Anything above the
+    // MAX is clamped; anything <=0 or missing gets the default.
+    durationMs: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error('User not found');
+
+    const now = Date.now();
+    const requested =
+      typeof args.durationMs === 'number' && args.durationMs > 0
+        ? args.durationMs
+        : DISCOVERY_MODE_DEFAULT_DURATION_MS;
+    const clamped = Math.min(requested, DISCOVERY_MODE_MAX_DURATION_MS);
+    const expiresAt = now + clamped;
+
+    await ctx.db.patch(userId, {
+      discoveryModeEnabled: true,
+      discoveryModeStartedAt: now,
+      discoveryModeExpiresAt: expiresAt,
+    });
+
+    // Intentionally not a dev-only log — server-side audit of Discovery
+    // Mode start is useful for support. Keep it compact.
+    console.log('[ANDROID_DISCOVERY][server_start]', {
+      userId,
+      startedAt: now,
+      expiresAt,
+      durationMs: clamped,
+    });
+
+    return { success: true, startedAt: now, expiresAt, durationMs: clamped };
+  },
+});
+
+export const stopDiscoveryMode = mutation({
+  args: { authUserId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+    await ctx.db.patch(userId, {
+      discoveryModeEnabled: false,
+      discoveryModeExpiresAt: undefined,
+      // discoveryModeStartedAt intentionally left intact for diagnostics.
+    });
+    console.log('[ANDROID_DISCOVERY][server_stop]', { userId, at: Date.now() });
     return { success: true };
   },
 });

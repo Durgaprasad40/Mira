@@ -58,6 +58,16 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "READ_MEDIA_VIDEO",
       "ACCESS_FINE_LOCATION",
       "ACCESS_COARSE_LOCATION",
+      // Phase-2 Android Discovery Mode: user-initiated, time-limited
+      // background location. ACCESS_BACKGROUND_LOCATION is required for
+      // location updates while the app is not in the foreground. The
+      // foreground-service permissions are required by Android 14+ for
+      // location-typed foreground services. POST_NOTIFICATIONS (Android
+      // 13+) lets the ongoing foreground-service notification render.
+      "ACCESS_BACKGROUND_LOCATION",
+      "FOREGROUND_SERVICE",
+      "FOREGROUND_SERVICE_LOCATION",
+      "POST_NOTIFICATIONS",
       "VIBRATE",
     ],
     config: {
@@ -105,14 +115,19 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       {
         locationWhenInUsePermission:
           "Allow Mira to use your location to show people near you while you're using the app.",
-        // Phase-1 Background Crossed Paths: iOS ONLY for now.
-        // The Always permission + UIBackgroundModes are required so that
+        // iOS Phase-1: Always permission + UIBackgroundModes so that
         // Significant Location Change wakes the app when it's terminated.
-        // Android background location stays OFF in Phase 1 — see design doc.
+        // Android Phase-2: Discovery Mode. Background permission is
+        // requested only when the user opts into Discovery Mode, which is
+        // time-limited (default 4h) and surfaces a persistent foreground-
+        // service notification. This is NOT always-on Android tracking.
         locationAlwaysAndWhenInUsePermission:
           "Allow Mira to detect people you cross paths with even when the app is closed. Your location is never shared in real time.",
         isIosBackgroundLocationEnabled: true,
-        isAndroidBackgroundLocationEnabled: false,
+        isAndroidBackgroundLocationEnabled: true,
+            // Android 14+ foreground-service requirements. expo-location's
+            // native foreground service is used when startLocationUpdatesAsync
+            // is called with a `foregroundService` options block (Task 4).
       },
     ],
     "@react-native-community/datetimepicker",

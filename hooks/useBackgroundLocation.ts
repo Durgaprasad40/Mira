@@ -1,15 +1,16 @@
 /**
- * useBackgroundLocation — Phase-1 Background Crossed Paths (iOS only).
+ * useBackgroundLocation — Background Crossed Paths client orchestration.
  *
- * Thin client-side orchestration around:
- *   1. enableBackgroundLocation() — request Always permission + start SLC
- *   2. api.users.updateNearbySettings({ backgroundLocationEnabled: true })
+ * iOS Phase-1: enable()/disable() drive Significant Location Change.
+ * Android Phase-2: enableDiscoveryMode()/disableDiscoveryMode() drive the
+ *                  time-limited, foreground-service-backed window.
  *
- * Both must succeed for the feature to be "on". If the permission prompt
- * is denied, we never set the server flag, so recordLocationBatch calls
- * from a stale client will be rejected server-side.
+ * Both paths keep the OS-level task state and the server flag in lock-step.
+ * If either half of the pair fails, the hook rolls back the other half so
+ * we never end up with "OS task running but server says off" (which would
+ * make recordLocationBatch silently drop every sample) or its inverse.
  *
- * DEBUG TAG: [BG_LOCATION]
+ * DEBUG TAGS: [BG_LOCATION] (iOS), [ANDROID_DISCOVERY] (Android)
  */
 
 import { useCallback, useState } from 'react';
@@ -19,7 +20,11 @@ import { api } from '@/convex/_generated/api';
 import {
   enableBackgroundLocation as enableTask,
   disableBackgroundLocation as disableTask,
+  enableAndroidDiscoveryMode as enableDiscoveryTask,
+  disableAndroidDiscoveryMode as disableDiscoveryTask,
   isBackgroundLocationRunning,
+  readAndroidDiscoveryExpiry,
+  DISCOVERY_MODE_DEFAULT_DURATION_MS,
 } from '@/tasks/backgroundLocationTask';
 
 type EnableResult =
@@ -36,12 +41,32 @@ type EnableResult =
       err?: string;
     };
 
+type EnableDiscoveryResult =
+  | { ok: true; expiresAt: number; durationMs: number }
+  | {
+      ok: false;
+      reason:
+        | 'not_android'
+        | 'foreground_denied'
+        | 'background_denied'
+        | 'start_failed'
+        | 'no_auth'
+        | 'server_failed';
+      err?: string;
+    };
+
 export function useBackgroundLocation(authUserId: string | null) {
   const updateNearbySettings = useMutation(api.users.updateNearbySettings);
+  const startDiscoveryMode = useMutation(api.users.startDiscoveryMode);
+  const stopDiscoveryMode = useMutation(api.users.stopDiscoveryMode);
   const [isWorking, setIsWorking] = useState(false);
 
+  // -------------------------------------------------------------------------
+  // iOS Phase-1 — Background SLC (always-on once enabled).
+  // -------------------------------------------------------------------------
+
   /**
-   * enable — The full opt-in flow. Must be called in direct response to a
+   * enable — iOS SLC opt-in flow. Must be called in direct response to a
    * user tap (the iOS permission prompt requires a foreground user gesture).
    */
   const enable = useCallback(async (): Promise<EnableResult> => {
@@ -95,7 +120,7 @@ export function useBackgroundLocation(authUserId: string | null) {
   }, [authUserId, updateNearbySettings]);
 
   /**
-   * disable — Turn off the task and unset the server flag. Idempotent.
+   * disable — Turn off SLC and unset the iOS server flag. Idempotent.
    */
   const disable = useCallback(async (): Promise<void> => {
     setIsWorking(true);
@@ -121,10 +146,118 @@ export function useBackgroundLocation(authUserId: string | null) {
     }
   }, [authUserId, updateNearbySettings]);
 
+  // -------------------------------------------------------------------------
+  // Android Phase-2 — Discovery Mode (user-initiated, time-limited).
+  // -------------------------------------------------------------------------
+
+  /**
+   * enableDiscoveryMode — Android opt-in flow.
+   *
+   * Order of operations matters:
+   *   1. Start the foreground-service task (triggers OS permission prompts).
+   *   2. If the task started, persist the discovery window server-side.
+   *   3. If the server call fails, stop the task so we don't run a
+   *      foreground service whose samples the server will reject.
+   *
+   * durationMs is optional; defaults to the 4h product window.
+   */
+  const enableDiscoveryMode = useCallback(
+    async (
+      durationMs: number = DISCOVERY_MODE_DEFAULT_DURATION_MS,
+    ): Promise<EnableDiscoveryResult> => {
+      if (Platform.OS !== 'android') {
+        return { ok: false, reason: 'not_android' };
+      }
+      if (!authUserId) {
+        return { ok: false, reason: 'no_auth' };
+      }
+
+      setIsWorking(true);
+      try {
+        const taskResult = await enableDiscoveryTask(durationMs);
+        if (!taskResult.ok) {
+          if (__DEV__) {
+            console.log('[ANDROID_DISCOVERY][enable]', {
+              ok: false,
+              reason: taskResult.reason,
+            });
+          }
+          return taskResult;
+        }
+
+        try {
+          await startDiscoveryMode({
+            authUserId,
+            durationMs: taskResult.durationMs,
+          });
+        } catch (e) {
+          if (__DEV__) {
+            console.log('[ANDROID_DISCOVERY][enable]', {
+              ok: false,
+              stage: 'server',
+              err: String(e),
+            });
+          }
+          // Rollback: stop the foreground service since the server won't
+          // accept samples. Otherwise the user sees a persistent
+          // notification for a feature that's silently inactive.
+          await disableDiscoveryTask();
+          return { ok: false, reason: 'server_failed', err: String(e) };
+        }
+
+        if (__DEV__) {
+          console.log('[ANDROID_DISCOVERY][enable]', {
+            ok: true,
+            expiresAt: taskResult.expiresAt,
+            durationMs: taskResult.durationMs,
+          });
+        }
+        return {
+          ok: true,
+          expiresAt: taskResult.expiresAt,
+          durationMs: taskResult.durationMs,
+        };
+      } finally {
+        setIsWorking(false);
+      }
+    },
+    [authUserId, startDiscoveryMode],
+  );
+
+  /**
+   * disableDiscoveryMode — Stop the task + clear server window. Idempotent.
+   */
+  const disableDiscoveryMode = useCallback(async (): Promise<void> => {
+    setIsWorking(true);
+    try {
+      await disableDiscoveryTask();
+      if (authUserId) {
+        try {
+          await stopDiscoveryMode({ authUserId });
+        } catch (e) {
+          if (__DEV__) {
+            console.log('[ANDROID_DISCOVERY][disable]', {
+              stage: 'server',
+              err: String(e),
+            });
+          }
+        }
+      }
+    } finally {
+      setIsWorking(false);
+    }
+  }, [authUserId, stopDiscoveryMode]);
+
   return {
+    // iOS Phase-1
     enable,
     disable,
+    // Android Phase-2
+    enableDiscoveryMode,
+    disableDiscoveryMode,
+    // Introspection
     isWorking,
     isRunning: isBackgroundLocationRunning,
+    readAndroidDiscoveryExpiry,
   };
 }

@@ -244,9 +244,20 @@ export default defineSchema({
     recordCrossedPaths: v.optional(v.boolean()),      // Phase-2: separate opt-in for crossed-paths pipeline (default true when undefined)
     // Phase-1 Background Crossed Paths: iOS-only opt-in for Significant Location
     // Change-driven background sampling. Default is OFF; must be explicitly
-    // enabled by the user via enableBackgroundLocation(). Android is not
-    // supported in Phase 1 — this flag stays false for Android users.
+    // enabled by the user via enableBackgroundLocation(). Android does NOT
+    // use this flag — Android uses Discovery Mode (below) instead.
     backgroundLocationEnabled: v.optional(v.boolean()),
+    // Phase-2 Android Discovery Mode: user-initiated, time-limited background
+    // sampling backed by a foreground-service notification. Semantics:
+    //   - discoveryModeEnabled === true  AND
+    //   - discoveryModeExpiresAt > Date.now()
+    //     → source='bg' batches from this user are accepted
+    //   - otherwise background batches are dropped server-side.
+    // discoveryModeStartedAt is kept purely for diagnostics/analytics.
+    // iOS ignores these fields; iOS uses backgroundLocationEnabled.
+    discoveryModeEnabled: v.optional(v.boolean()),
+    discoveryModeExpiresAt: v.optional(v.number()),
+    discoveryModeStartedAt: v.optional(v.number()),
     nearbyPausedUntil: v.optional(v.number()),        // pause nearby visibility until timestamp
     nearbyVisibilityMode: v.optional(v.union(         // DEPRECATED (Phase-1 removed UI, Phase-2 stops reading it); kept to preserve existing data, no live code-path depends on it
       v.literal('always'),
