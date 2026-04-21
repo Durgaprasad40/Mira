@@ -491,13 +491,16 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       const currentReplies = state.replies[confessionId] || [];
       const newReplies = [...currentReplies, reply];
 
-      // Only count top-level replies (those without parentReplyId) in replyCount
+      // Only count OUTSIDE-USER top-level replies. Owner replies (threaded or
+      // hypothetical top-level self-comments) must not inflate engagement.
+      const ownerId = state.confessions.find((c) => c.id === confessionId)?.userId;
       const topLevelReplies = newReplies.filter((r) => !r.parentReplyId);
+      const countableReplies = topLevelReplies.filter((r) => r.userId !== ownerId);
 
       // Update the confession's replyCount and replyPreviews
       const updatedConfessions = state.confessions.map((c) => {
         if (c.id !== confessionId) return c;
-        // Preview only shows top-level replies
+        // Preview only shows top-level replies (visible history, all authors)
         const replyPreviews = topLevelReplies.slice(-2).map((r) => ({
           text: r.text,
           isAnonymous: r.isAnonymous,
@@ -506,7 +509,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
         }));
         return {
           ...c,
-          replyCount: topLevelReplies.length, // Only count top-level replies
+          replyCount: countableReplies.length,
           replyPreviews,
         };
       });
@@ -525,13 +528,16 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       // Also delete any child replies that have this reply as parent
       const newReplies = currentReplies.filter((r) => r.id !== replyId && r.parentReplyId !== replyId);
 
-      // Only count top-level replies (those without parentReplyId) in replyCount
+      // Only count OUTSIDE-USER top-level replies. Owner replies (threaded or
+      // hypothetical top-level self-comments) must not inflate engagement.
+      const ownerId = state.confessions.find((c) => c.id === confessionId)?.userId;
       const topLevelReplies = newReplies.filter((r) => !r.parentReplyId);
+      const countableReplies = topLevelReplies.filter((r) => r.userId !== ownerId);
 
       // Update the confession's replyCount and replyPreviews
       const updatedConfessions = state.confessions.map((c) => {
         if (c.id !== confessionId) return c;
-        // Preview only shows top-level replies
+        // Preview only shows top-level replies (visible history, all authors)
         const replyPreviews = topLevelReplies.slice(-2).map((r) => ({
           text: r.text,
           isAnonymous: r.isAnonymous,
@@ -540,7 +546,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
         }));
         return {
           ...c,
-          replyCount: topLevelReplies.length, // Only count top-level replies
+          replyCount: countableReplies.length,
           replyPreviews,
         };
       });

@@ -1777,22 +1777,59 @@ export default defineSchema({
     .index('by_reporter', ['reporterId'])
     .index('by_status', ['status']),
 
+  // Confession Reply Reports table (for moderation of individual comments)
+  confessionReplyReports: defineTable({
+    replyId: v.id('confessionReplies'),
+    confessionId: v.id('confessions'),
+    reporterId: v.id('users'),
+    reportedUserId: v.id('users'),
+    reason: v.union(
+      v.literal('spam'),
+      v.literal('harassment'),
+      v.literal('hate'),
+      v.literal('sexual'),
+      v.literal('other')
+    ),
+    description: v.optional(v.string()),
+    status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('actioned')),
+    createdAt: v.number(),
+  })
+    .index('by_reply', ['replyId'])
+    .index('by_reporter', ['reporterId'])
+    .index('by_status', ['status']),
+
   // Confession Replies table
   confessionReplies: defineTable({
     confessionId: v.id('confessions'),
     userId: v.id('users'),
     text: v.string(),
     isAnonymous: v.boolean(),
-    identityMode: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur'))), // legacy reply identity flag; isAnonymous is the active source of truth
+    // Canonical reply identity mode. New rows write 'anonymous' | 'blur_photo' | 'open'.
+    // Legacy 'blur' literal kept in the union so historical rows still validate; serializer
+    // normalizes 'blur' -> 'blur_photo' on read.
+    identityMode: v.optional(v.union(
+      v.literal('anonymous'),
+      v.literal('open'),
+      v.literal('blur'),
+      v.literal('blur_photo')
+    )),
     hasActiveConnectRequest: v.optional(v.boolean()), // legacy flag ignored by current Confessions UI/backend contract
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
-    parentReplyId: v.optional(v.id('confessionReplies')), // For reply-to-reply (OP responding to anonymous reply)
+    parentReplyId: v.optional(v.id('confessionReplies')), // OP-only reply to a comment
+    // Author display snapshot (omitted for anonymous mode). Mirrors the snapshotting pattern
+    // used by the confessions table so the thread can render Anonymous / Blurred photo / Open.
+    authorName: v.optional(v.string()),
+    authorPhotoUrl: v.optional(v.string()),
+    authorAge: v.optional(v.number()),
+    authorGender: v.optional(v.string()),
+    editedAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index('by_confession', ['confessionId'])
-    .index('by_user', ['userId']),
+    .index('by_user', ['userId'])
+    .index('by_confession_user', ['confessionId', 'userId']),
 
   // Confession Reactions table (free emoji — one emoji per user per confession)
   confessionReactions: defineTable({

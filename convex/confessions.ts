@@ -39,6 +39,84 @@ type SerializedConfession = {
   isExpired?: boolean;
 };
 
+// Canonical reply identity mode used by the current product contract.
+// Legacy 'blur' literal maps to 'blur_photo'; unknown/missing maps using isAnonymous.
+type ReplyIdentityMode = 'anonymous' | 'blur_photo' | 'open';
+
+function canonicalIdentityMode(
+  raw: string | undefined,
+  isAnonymousFallback: boolean
+): ReplyIdentityMode {
+  switch (raw) {
+    case 'anonymous':
+      return 'anonymous';
+    case 'blur':
+    case 'blur_photo':
+      return 'blur_photo';
+    case 'open':
+      return 'open';
+    default:
+      return isAnonymousFallback ? 'anonymous' : 'open';
+  }
+}
+
+type SerializedReply = {
+  _id: Id<'confessionReplies'>;
+  _creationTime: number;
+  confessionId: Id<'confessions'>;
+  userId: Id<'users'>;
+  text: string;
+  isAnonymous: boolean;
+  identityMode: ReplyIdentityMode;
+  type?: 'text' | 'voice';
+  voiceUrl?: string;
+  voiceDurationSec?: number;
+  parentReplyId?: Id<'confessionReplies'>;
+  authorName?: string;
+  authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
+  editedAt?: number;
+  createdAt: number;
+  isOwnReply?: boolean;
+};
+
+function serializeReply(
+  reply: Doc<'confessionReplies'>,
+  options?: { viewerId?: Id<'users'> | null }
+): SerializedReply {
+  const identityMode = canonicalIdentityMode(reply.identityMode, reply.isAnonymous);
+  const base: SerializedReply = {
+    _id: reply._id,
+    _creationTime: reply._creationTime,
+    confessionId: reply.confessionId,
+    userId: reply.userId,
+    text: reply.text,
+    isAnonymous: identityMode === 'anonymous',
+    identityMode,
+    type: reply.type,
+    voiceUrl: reply.voiceUrl,
+    voiceDurationSec: reply.voiceDurationSec,
+    parentReplyId: reply.parentReplyId,
+    editedAt: reply.editedAt,
+    createdAt: reply.createdAt,
+  };
+
+  // Gate author display fields by identity mode. Anonymous must never leak identity.
+  if (identityMode !== 'anonymous') {
+    base.authorName = reply.authorName;
+    base.authorPhotoUrl = reply.authorPhotoUrl;
+    base.authorAge = reply.authorAge;
+    base.authorGender = reply.authorGender;
+  }
+
+  if (options?.viewerId) {
+    base.isOwnReply = reply.userId === options.viewerId;
+  }
+
+  return base;
+}
+
 function serializeConfession(
   confession: Doc<'confessions'>,
   options?: {
@@ -368,16 +446,32 @@ export const getConfession = query({
 });
 
 // Create a reply to a confession (text or voice only — no images/videos/gifs)
+// Rules:
+//  - Top-level comments (no parentReplyId): one per user per confession.
+//  - Threaded replies (parentReplyId set): only the confession owner may create them,
+//    and the parent must belong to the same confession.
+//  - identityMode is the canonical source of truth for render mode. isAnonymous is
+//    derived from it and kept in sync for backward compatibility.
 export const createReply = mutation({
   args: {
     confessionId: v.id('confessions'),
     userId: v.union(v.id('users'), v.string()),
     text: v.string(),
     isAnonymous: v.boolean(),
+    identityMode: v.optional(v.union(
+      v.literal('anonymous'),
+      v.literal('open'),
+      v.literal('blur_photo')
+    )),
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
-    parentReplyId: v.optional(v.id('confessionReplies')), // For OP reply-to-reply
+    parentReplyId: v.optional(v.id('confessionReplies')), // OP-only reply to a comment
+    // Author display snapshot (ignored for anonymous mode).
+    authorName: v.optional(v.string()),
+    authorPhotoUrl: v.optional(v.string()),
+    authorAge: v.optional(v.number()),
+    authorGender: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
@@ -394,6 +488,41 @@ export const createReply = mutation({
     const nowMs = Date.now();
     if (parent.expiresAt !== undefined && parent.expiresAt <= nowMs) {
       throw new Error('This confession has expired.');
+    }
+
+    // Normalize identity mode. The request-provided value wins; otherwise derive
+    // from the legacy isAnonymous boolean for backward compatibility with older clients.
+    const identityMode = canonicalIdentityMode(args.identityMode, args.isAnonymous);
+    const effectiveIsAnonymous = identityMode === 'anonymous';
+
+    // Threaded reply rules (OP-only).
+    if (args.parentReplyId !== undefined) {
+      if (parent.userId !== userId) {
+        throw new Error('Only the confession owner can reply to comments.');
+      }
+      const parentReply = await ctx.db.get(args.parentReplyId);
+      if (!parentReply) {
+        throw new Error('Parent comment not found.');
+      }
+      if (parentReply.confessionId !== args.confessionId) {
+        throw new Error('Parent comment does not belong to this confession.');
+      }
+      // Don't allow deeply nested replies (reply-to-reply-to-reply).
+      if (parentReply.parentReplyId !== undefined) {
+        throw new Error('Cannot reply to a reply.');
+      }
+    } else {
+      // Top-level: enforce one comment per user per confession.
+      const existingTopLevel = await ctx.db
+        .query('confessionReplies')
+        .withIndex('by_confession_user', (q) =>
+          q.eq('confessionId', args.confessionId).eq('userId', userId)
+        )
+        .filter((q) => q.eq(q.field('parentReplyId'), undefined))
+        .first();
+      if (existingTopLevel) {
+        throw new Error('You have already commented on this confession.');
+      }
     }
 
     const replyType = args.type || 'text';
@@ -415,20 +544,32 @@ export const createReply = mutation({
       confessionId: args.confessionId,
       userId: userId,
       text: args.text.trim(),
-      isAnonymous: args.isAnonymous,
+      isAnonymous: effectiveIsAnonymous,
+      identityMode,
       type: replyType,
       voiceUrl: args.voiceUrl,
       voiceDurationSec: args.voiceDurationSec,
       parentReplyId: args.parentReplyId,
-      createdAt: Date.now(),
+      // Snapshot author display fields only when the mode may reveal them.
+      authorName: effectiveIsAnonymous ? undefined : args.authorName,
+      authorPhotoUrl: effectiveIsAnonymous ? undefined : args.authorPhotoUrl,
+      authorAge: effectiveIsAnonymous ? undefined : args.authorAge,
+      authorGender: effectiveIsAnonymous ? undefined : args.authorGender,
+      createdAt: nowMs,
     });
 
-    // Increment reply count (and voice reply count if applicable)
-    const confession = await ctx.db.get(args.confessionId);
-    if (confession) {
-      const patch: any = { replyCount: confession.replyCount + 1 };
+    // Engagement count — only OUTSIDE-USER top-level comments count.
+    // Owner replies to comments (parentReplyId set) and any owner self-authored
+    // reply must NOT increment replyCount / voiceReplyCount, otherwise the
+    // confession owner could artificially inflate trending by replying to
+    // every comment on their own post.
+    const isCountableReply =
+      args.parentReplyId === undefined && parent.userId !== userId;
+
+    if (isCountableReply) {
+      const patch: any = { replyCount: parent.replyCount + 1 };
       if (replyType === 'voice') {
-        patch.voiceReplyCount = (confession.voiceReplyCount || 0) + 1;
+        patch.voiceReplyCount = (parent.voiceReplyCount || 0) + 1;
       }
       await ctx.db.patch(args.confessionId, patch);
     }
@@ -437,7 +578,97 @@ export const createReply = mutation({
   },
 });
 
-// Delete own reply
+// Update own reply. Owner-only. Allows editing text and/or identityMode.
+// When switching to anonymous, author snapshot fields are cleared.
+// When switching to a non-anonymous mode, the caller may pass fresh snapshot fields
+// so display stays consistent with the new mode.
+export const updateReply = mutation({
+  args: {
+    replyId: v.id('confessionReplies'),
+    userId: v.union(v.id('users'), v.string()),
+    text: v.optional(v.string()),
+    identityMode: v.optional(v.union(
+      v.literal('anonymous'),
+      v.literal('open'),
+      v.literal('blur_photo')
+    )),
+    authorName: v.optional(v.string()),
+    authorPhotoUrl: v.optional(v.string()),
+    authorAge: v.optional(v.number()),
+    authorGender: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    const reply = await ctx.db.get(args.replyId);
+    if (!reply) throw new Error('Reply not found.');
+    if (reply.userId !== userId) throw new Error('You can only edit your own replies.');
+
+    // Refuse edits on replies whose parent confession is gone/expired.
+    const parent = await ctx.db.get(reply.confessionId);
+    if (!parent || parent.isDeleted) {
+      throw new Error('This confession is no longer available.');
+    }
+    const nowMs = Date.now();
+    if (parent.expiresAt !== undefined && parent.expiresAt <= nowMs) {
+      throw new Error('This confession has expired.');
+    }
+
+    const patch: Partial<Doc<'confessionReplies'>> = {};
+
+    // Text edit — only meaningful for text replies.
+    if (args.text !== undefined) {
+      if (reply.type === 'voice') {
+        throw new Error('Voice replies cannot be edited.');
+      }
+      const trimmed = args.text.trim();
+      if (trimmed.length < 1) {
+        throw new Error('Reply cannot be empty.');
+      }
+      if (PHONE_PATTERN.test(trimmed)) {
+        throw new Error('Do not include phone numbers.');
+      }
+      if (EMAIL_PATTERN.test(trimmed)) {
+        throw new Error('Do not include email addresses.');
+      }
+      patch.text = trimmed;
+    }
+
+    // Identity mode switch.
+    if (args.identityMode !== undefined) {
+      const nextMode = canonicalIdentityMode(args.identityMode, false);
+      patch.identityMode = nextMode;
+      patch.isAnonymous = nextMode === 'anonymous';
+      if (nextMode === 'anonymous') {
+        // Clear leakable fields.
+        patch.authorName = undefined;
+        patch.authorPhotoUrl = undefined;
+        patch.authorAge = undefined;
+        patch.authorGender = undefined;
+      } else {
+        // Accept fresh snapshot if caller provided one; otherwise keep existing.
+        if (args.authorName !== undefined) patch.authorName = args.authorName;
+        if (args.authorPhotoUrl !== undefined) patch.authorPhotoUrl = args.authorPhotoUrl;
+        if (args.authorAge !== undefined) patch.authorAge = args.authorAge;
+        if (args.authorGender !== undefined) patch.authorGender = args.authorGender;
+      }
+    }
+
+    if (Object.keys(patch).length === 0) {
+      // Nothing to do — treat as a no-op rather than an error.
+      return { success: true, noChange: true };
+    }
+
+    patch.editedAt = nowMs;
+
+    await ctx.db.patch(args.replyId, patch);
+
+    return { success: true, noChange: false };
+  },
+});
+
+// Delete own reply. Fails closed when the parent confession is missing/deleted/expired
+// so comment actions never outlive the parent.
 export const deleteReply = mutation({
   args: {
     replyId: v.id('confessionReplies'),
@@ -451,16 +682,30 @@ export const deleteReply = mutation({
     if (!reply) throw new Error('Reply not found.');
     if (reply.userId !== userId) throw new Error('You can only delete your own replies.');
 
+    // Fail closed — no comment action should succeed on a dead/expired confession.
+    const parent = await ctx.db.get(reply.confessionId);
+    if (!parent || parent.isDeleted) {
+      throw new Error('This confession is no longer available.');
+    }
+    const nowMs = Date.now();
+    if (parent.expiresAt !== undefined && parent.expiresAt <= nowMs) {
+      throw new Error('This confession has expired.');
+    }
+
     await ctx.db.delete(args.replyId);
 
-    // Decrement reply count
-    const confession = await ctx.db.get(reply.confessionId);
-    if (confession) {
+    // Mirror the createReply counting rule: only decrement if THIS reply was
+    // itself counted (an outside-user top-level comment). Owner replies were
+    // never counted, so deleting them must not drift the count downward.
+    const wasCounted =
+      reply.parentReplyId === undefined && reply.userId !== parent.userId;
+
+    if (wasCounted) {
       const patch: any = {
-        replyCount: Math.max(0, confession.replyCount - 1),
+        replyCount: Math.max(0, parent.replyCount - 1),
       };
       if (reply.type === 'voice') {
-        patch.voiceReplyCount = Math.max(0, (confession.voiceReplyCount || 0) - 1);
+        patch.voiceReplyCount = Math.max(0, (parent.voiceReplyCount || 0) - 1);
       }
       await ctx.db.patch(reply.confessionId, patch);
     }
@@ -471,33 +716,65 @@ export const deleteReply = mutation({
 
 // Get replies for a confession
 // P0-2: Fail closed — returns [] if parent missing, deleted, or expired
+// If viewerId is supplied, each reply carries isOwnReply for convenient client gating.
+// Author identity fields are only returned for non-anonymous rows.
 export const getReplies = query({
-  args: { confessionId: v.id('confessions') },
-  handler: async (ctx, { confessionId }) => {
+  args: {
+    confessionId: v.id('confessions'),
+    viewerId: v.optional(v.union(v.id('users'), v.string())),
+  },
+  handler: async (ctx, { confessionId, viewerId }) => {
     const parent = await ctx.db.get(confessionId);
     if (!parent) return [];
     if (parent.isDeleted) return [];
     const now = Date.now();
     if (parent.expiresAt !== undefined && parent.expiresAt <= now) return [];
 
+    // Resolve viewer (optional; null if unknown). Read-only lookup — never create a user here.
+    let resolvedViewerId: Id<'users'> | null = null;
+    if (viewerId) {
+      resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
+    }
+
     const replies = await ctx.db
       .query('confessionReplies')
       .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
       .order('asc')
       .collect();
-    return replies.map((reply) => ({
-      _id: reply._id,
-      _creationTime: reply._creationTime,
-      confessionId: reply.confessionId,
-      userId: reply.userId,
-      text: reply.text,
-      isAnonymous: reply.isAnonymous,
-      type: reply.type,
-      voiceUrl: reply.voiceUrl,
-      voiceDurationSec: reply.voiceDurationSec,
-      parentReplyId: reply.parentReplyId,
-      createdAt: reply.createdAt,
-    }));
+
+    return replies.map((reply) => serializeReply(reply, { viewerId: resolvedViewerId }));
+  },
+});
+
+// Return the viewer's own top-level reply (if any) on this confession.
+// Used by the composer to decide between "new comment" and "edit your comment" UX.
+// Fails closed like getReplies: returns null when the confession is missing/deleted/expired,
+// or when the viewer has no top-level comment on this confession.
+export const getMyReplyForConfession = query({
+  args: {
+    confessionId: v.id('confessions'),
+    viewerId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, { confessionId, viewerId }) => {
+    const parent = await ctx.db.get(confessionId);
+    if (!parent) return null;
+    if (parent.isDeleted) return null;
+    const now = Date.now();
+    if (parent.expiresAt !== undefined && parent.expiresAt <= now) return null;
+
+    const resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
+    if (!resolvedViewerId) return null;
+
+    const own = await ctx.db
+      .query('confessionReplies')
+      .withIndex('by_confession_user', (q) =>
+        q.eq('confessionId', confessionId).eq('userId', resolvedViewerId)
+      )
+      .filter((q) => q.eq(q.field('parentReplyId'), undefined))
+      .first();
+
+    if (!own) return null;
+    return serializeReply(own, { viewerId: resolvedViewerId });
   },
 });
 
@@ -729,6 +1006,61 @@ export const reportConfession = mutation({
       confessionId: args.confessionId,
       reporterId: reporterId,
       reportedUserId: confession.userId,
+      reason: args.reason,
+      description: args.description,
+      status: 'pending',
+      createdAt: Date.now(),
+    });
+
+    return { success: true, alreadyReported: false };
+  },
+});
+
+// Report a specific comment/reply
+// Creates a record in confessionReplyReports for moderation review.
+// Idempotent per (reporter, reply) — repeat reports short-circuit to success.
+export const reportReply = mutation({
+  args: {
+    replyId: v.id('confessionReplies'),
+    reporterId: v.union(v.id('users'), v.string()),
+    reason: v.union(
+      v.literal('spam'),
+      v.literal('harassment'),
+      v.literal('hate'),
+      v.literal('sexual'),
+      v.literal('other')
+    ),
+    description: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const reporterId = await ensureUserByAuthId(ctx, args.reporterId as string);
+
+    const reply = await ctx.db.get(args.replyId);
+    if (!reply) {
+      throw new Error('Comment not found.');
+    }
+
+    // Users cannot report their own comments.
+    if (reply.userId === reporterId) {
+      throw new Error('You cannot report your own comment.');
+    }
+
+    // Idempotency — same reporter + same reply is a no-op.
+    const existing = await ctx.db
+      .query('confessionReplyReports')
+      .withIndex('by_reply', (q) => q.eq('replyId', args.replyId))
+      .filter((q) => q.eq(q.field('reporterId'), reporterId))
+      .first();
+
+    if (existing) {
+      return { success: true, alreadyReported: true };
+    }
+
+    await ctx.db.insert('confessionReplyReports', {
+      replyId: args.replyId,
+      confessionId: reply.confessionId,
+      reporterId,
+      reportedUserId: reply.userId,
       reason: args.reason,
       description: args.description,
       status: 'pending',
