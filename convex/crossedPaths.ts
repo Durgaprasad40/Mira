@@ -100,10 +100,14 @@ async function prefetchSwipes(
 const NEARBY_MIN_METERS = 0;    // No minimum floor; co-located users remain eligible
 const NEARBY_MAX_METERS = 1000; // Maximum distance for nearby map
 
-// Crossed paths: 100m - 750m range (kept as-is; crossed paths is a separate
-// notification pipeline and not subject to Nearby's persistence rules)
-const CROSSED_MIN_METERS = 100;  // Minimum distance to trigger crossing
-const CROSSED_MAX_METERS = 750;  // Maximum distance for crossed paths
+// Crossed paths: 0m - 1000m range.
+// PRODUCT FIX: the previous 100m floor silently rejected co-located users
+// (the strongest real-world crossing signal). We now allow anything from 0m
+// upward, with a small anti-jitter floor applied post-hoc only if needed.
+// The upper bound is widened slightly to match Nearby visibility (1km) so
+// the two surfaces tell a consistent "we were near each other" story.
+const CROSSED_MIN_METERS = 0;    // No minimum floor; co-located is the strongest crossing
+const CROSSED_MAX_METERS = 1000; // Aligned with Nearby map upper bound
 
 // Location update gate
 const LOCATION_UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
@@ -185,8 +189,12 @@ const MAX_NOTIFICATIONS_PER_DAY = 3; // Maximum notifications per day per user
 /** Maximum acceptable accuracy in meters for crossed-path detection */
 const MAX_ACCURACY_FOR_CROSSING_METERS = 80;
 
-/** Minimum movement in meters to trigger crossed-path detection */
-const MIN_MOVEMENT_FOR_CROSSING_METERS = 30;
+/** Minimum movement in meters to trigger crossed-path detection.
+ * PRODUCT FIX: unified to 25m across client + server. Previous 30m server
+ * vs 60m client mismatch meant the server value was never actually reached
+ * in normal flows. 25m is permissive enough to catch real crossings while
+ * still filtering obvious stationary jitter. */
+const MIN_MOVEMENT_FOR_CROSSING_METERS = 25;
 
 /** Maximum realistic speed in meters per second for sanity check (~200 km/h) */
 const MAX_SPEED_MPS = 55;
@@ -494,6 +502,11 @@ export const recordLocation = mutation({
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return { success: false };
 
+    // [CROSSED_PATHS_AUDIT] dev-only gate — emits structured logs so we can
+    // trace every accepted/rejected candidate during QA. Can be flipped to
+    // false to silence without removing the logging blocks.
+    const CROSSED_PATHS_AUDIT_ENABLED = true;
+
     // P1-1: Caller opt-out — if the user has disabled Nearby or paused it,
     // we must NOT record any location/crossings for them. The UI promises
     // "Show me in Nearby" and "Pause Nearby" include both map visibility
@@ -620,35 +633,46 @@ export const recordLocation = mutation({
       viewerReportedIds,
     } = await loadDiscoveryExclusions(ctx, userId);
 
+    if (CROSSED_PATHS_AUDIT_ENABLED) {
+      console.log('[CROSSED_PATHS_AUDIT][trigger]', {
+        viewer: userId,
+        poolSize: verifiedUsers.length,
+        minM: CROSSED_MIN_METERS,
+        maxM: CROSSED_MAX_METERS,
+        movementGateM: MIN_MOVEMENT_FOR_CROSSING_METERS,
+      });
+    }
+
     // First pass: collect candidate user IDs that pass basic filters
     const candidateUserIds: string[] = [];
     type UserWithDistance = (typeof verifiedUsers)[0] & { distance: number };
     const candidateUsers: UserWithDistance[] = [];
+    const preFilterRejects: Array<{ candidate: string; reason: string; distance?: number }> = [];
 
     for (const user of verifiedUsers) {
       if (user._id === userId) continue;
-      if (!user.isActive) continue;
-      if (!user.latitude || !user.longitude) continue;
+      if (!user.isActive) { preFilterRejects.push({ candidate: user._id as string, reason: 'inactive' }); continue; }
+      if (!user.latitude || !user.longitude) { preFilterRejects.push({ candidate: user._id as string, reason: 'no_location' }); continue; }
 
       // Incognito mode: Skip users who are hidden (but they can still BE detected for crossings)
       // Note: Incognito users can still trigger crossings, they just don't appear on map
       // This is intentional per spec: "Incognito: hidden from map, but crossed-path detection may still happen"
 
       // Nearby visibility opt-out: Skip users who opted out of nearby
-      if (user.nearbyEnabled === false) continue;
+      if (user.nearbyEnabled === false) { preFilterRejects.push({ candidate: user._id as string, reason: 'nearby_disabled' }); continue; }
 
       // Phase-2: skip users who opted out of crossed-paths recording.
       // Both sides must have recordCrossedPaths !== false for a crossing to
       // be persisted. undefined is treated as opted-in (default true) so
       // existing accounts are unaffected.
-      if (user.recordCrossedPaths === false) continue;
+      if (user.recordCrossedPaths === false) { preFilterRejects.push({ candidate: user._id as string, reason: 'other_opted_out' }); continue; }
 
       // Basic info completeness
-      if (!user.name || !user.bio || !user.dateOfBirth) continue;
+      if (!user.name || !user.bio || !user.dateOfBirth) { preFilterRejects.push({ candidate: user._id as string, reason: 'profile_incomplete' }); continue; }
 
       // Location freshness check
       const userLocationUpdatedAt = user.lastLocationUpdatedAt ?? user.lastActive;
-      if (now - userLocationUpdatedAt > FADED_WINDOW_MS) continue;
+      if (now - userLocationUpdatedAt > FADED_WINDOW_MS) { preFilterRejects.push({ candidate: user._id as string, reason: 'location_stale' }); continue; }
 
       const distance = calculateDistanceMeters(
         latitude,
@@ -657,11 +681,23 @@ export const recordLocation = mutation({
         user.longitude,
       );
 
-      // Within crossed paths range (100m - 750m)?
+      // Within crossed paths range (0m - 1000m)?
       if (distance >= CROSSED_MIN_METERS && distance <= CROSSED_MAX_METERS) {
         candidateUserIds.push(user._id as string);
         candidateUsers.push({ ...user, distance });
+      } else {
+        preFilterRejects.push({ candidate: user._id as string, reason: 'out_of_range', distance });
       }
+    }
+
+    if (CROSSED_PATHS_AUDIT_ENABLED) {
+      console.log('[CROSSED_PATHS_AUDIT][candidate_set]', {
+        viewer: userId,
+        candidateCount: candidateUsers.length,
+        candidateIds: candidateUsers.map((u) => u._id),
+        preFilterRejectCount: preFilterRejects.length,
+        preFilterRejects: preFilterRejects.slice(0, 10), // cap log size
+      });
     }
 
     // STABILITY FIX: Fetch photo counts only for candidates (not all users)
@@ -676,24 +712,63 @@ export const recordLocation = mutation({
     }
 
     // Record crossed paths + history
+    let writtenCount = 0;
+    let cooldownSkipCount = 0;
     for (const nearbyUser of nearbyUsers) {
+      const candidateId = nearbyUser._id as string;
+
+      if (CROSSED_PATHS_AUDIT_ENABLED) {
+        console.log('[CROSSED_PATHS_AUDIT][distance_check]', {
+          pair: [userId, candidateId],
+          distanceM: Math.round(nearbyUser.distance),
+          inBand: true,
+        });
+      }
+
       // Age filtering (both directions)
       const otherAge = calculateAge(nearbyUser.dateOfBirth);
-      if (myAge < nearbyUser.minAge || myAge > nearbyUser.maxAge) continue;
-      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
+      if (myAge < nearbyUser.minAge || myAge > nearbyUser.maxAge) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'age_out_of_other_range' });
+        continue;
+      }
+      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'age_out_of_viewer_range' });
+        continue;
+      }
 
       // Gender/orientation preference match (both directions)
-      if (!currentUser.lookingFor.includes(nearbyUser.gender)) continue;
-      if (!nearbyUser.lookingFor.includes(currentUser.gender)) continue;
+      if (!currentUser.lookingFor.includes(nearbyUser.gender)) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'viewer_not_into_other_gender' });
+        continue;
+      }
+      if (!nearbyUser.lookingFor.includes(currentUser.gender)) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'other_not_into_viewer_gender' });
+        continue;
+      }
 
       // STABILITY FIX S6/C2: Check if blocked using pre-fetched set (O(1) lookup)
-      if (blockedIds.has(nearbyUser._id as string)) continue;
+      if (blockedIds.has(candidateId)) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'blocked' });
+        continue;
+      }
       // P1 EXCLUSION: skip unmatched pairs (bidirectional) and reporter-hidden
       // users before recording a crossed-paths entry.
-      if (unmatchedUserIds.has(nearbyUser._id as string)) continue;
-      if (viewerReportedIds.has(nearbyUser._id as string)) continue;
+      if (unmatchedUserIds.has(candidateId)) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'unmatched_pair' });
+        continue;
+      }
+      if (viewerReportedIds.has(candidateId)) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'viewer_reported' });
+        continue;
+      }
 
-      // --- COMPATIBILITY GATE: At least ONE common element required ---
+      // --- COMPATIBILITY (metadata / ranking signal, NO LONGER A HARD GATE) ---
+      // PRODUCT FIX: Crossed Paths means "we were physically near each other".
+      // It is based on proximity + recency, not compatibility. Compatibility
+      // is still computed so we can store reasonTags and preserve the
+      // "You both enjoy coffee"-style context line when one exists. When
+      // there is no overlap, we fall back to a neutral "nearby" tag and
+      // still write the crossing.
       const compatibility = computeCompatibility(
         {
           activities: currentUser.activities,
@@ -706,9 +781,9 @@ export const recordLocation = mutation({
           profilePrompts: nearbyUser.profilePrompts,
         },
       );
-
-      // Skip if no compatibility (no shared interests/intent/prompts)
-      if (!compatibility.isCompatible) continue;
+      const reasonTags = compatibility.isCompatible
+        ? compatibility.reasonTags
+        : ['nearby'];
 
       // Order user IDs for consistent lookup
       const user1Id = userId < nearbyUser._id ? userId : nearbyUser._id;
@@ -725,7 +800,17 @@ export const recordLocation = mutation({
 
       if (crossedPath) {
         // 1-hour cooldown per pair (faster notification for better UX)
-        if (now - crossedPath.lastCrossedAt < NOTIFICATION_COOLDOWN_MS) continue;
+        if (now - crossedPath.lastCrossedAt < NOTIFICATION_COOLDOWN_MS) {
+          if (CROSSED_PATHS_AUDIT_ENABLED) {
+            console.log('[CROSSED_PATHS_AUDIT][reject]', {
+              pair: [userId, candidateId],
+              reason: 'pair_cooldown',
+              msSinceLastCrossed: now - crossedPath.lastCrossedAt,
+            });
+          }
+          cooldownSkipCount++;
+          continue;
+        }
 
         const newCount = crossedPath.count + 1;
         const updates: Record<string, unknown> = {
@@ -779,6 +864,14 @@ export const recordLocation = mutation({
 
       if (existingHistory && now - existingHistory.createdAt < NOTIFICATION_COOLDOWN_MS) {
         // Already have a recent history entry for this pair — skip
+        if (CROSSED_PATHS_AUDIT_ENABLED) {
+          console.log('[CROSSED_PATHS_AUDIT][reject]', {
+            pair: [userId, candidateId],
+            reason: 'history_cooldown',
+            msSinceLastHistory: now - existingHistory.createdAt,
+          });
+        }
+        cooldownSkipCount++;
         continue;
       }
 
@@ -797,10 +890,20 @@ export const recordLocation = mutation({
         areaName,
         crossedLatApprox: approxLocation.lat,
         crossedLngApprox: approxLocation.lng,
-        reasonTags: compatibility.reasonTags,
+        reasonTags,
         createdAt: now,
         expiresAt: now + HISTORY_EXPIRY_MS,
       });
+
+      if (CROSSED_PATHS_AUDIT_ENABLED) {
+        console.log('[CROSSED_PATHS_AUDIT][write]', {
+          pair: [userId, candidateId],
+          historyCreated: true,
+          distanceM: Math.round(nearbyUser.distance),
+          reasonTags,
+        });
+      }
+      writtenCount++;
 
       // BUGFIX #28: Re-query to detect concurrent insert race condition for history
       const recentHistories = await ctx.db
@@ -866,7 +969,7 @@ export const recordLocation = mutation({
 
         // Generate dynamic notification text based on crossing count
         const crossingCount = currentCrossedPath.count;
-        const reasonText = formatReasonForNotification(compatibility.reasonTags[0] ?? 'common');
+        const reasonText = formatReasonForNotification(reasonTags[0] ?? 'common');
 
         // Dynamic title and body based on state
         let title: string;
@@ -969,7 +1072,594 @@ export const recordLocation = mutation({
       await trimHistoryForUser(ctx, userId);
     }
 
+    if (CROSSED_PATHS_AUDIT_ENABLED) {
+      console.log('[CROSSED_PATHS_AUDIT][summary]', {
+        viewer: userId,
+        nearbyCount: nearbyUsers.length,
+        historyWritten: writtenCount,
+        cooldownSkipped: cooldownSkipCount,
+      });
+    }
+
+    // Phase-1 Background Crossed Paths: mirror this foreground sample into the
+    // short-lived locationSamples ring-buffer so the background ±10min
+    // detection path can find foreground users too. Snapped to privacy grid
+    // before write — same grid used for crossPathHistory.
+    try {
+      const snapped = roundToGrid(latitude, longitude);
+      await ctx.db.insert('locationSamples', {
+        userId,
+        lat: snapped.lat,
+        lng: snapped.lng,
+        capturedAt: now,
+        source: 'fg',
+        accuracy,
+        expiresAt: now + LOCATION_SAMPLE_TTL_MS,
+      });
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][sample_written]', {
+          userId,
+          source: 'fg',
+          capturedAt: now,
+        });
+      }
+    } catch (err) {
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][dropped]', {
+          userId,
+          source: 'fg',
+          reason: 'insert_failed',
+          err: String(err),
+        });
+      }
+    }
+
     return { success: true, nearbyCount: nearbyUsers.length };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Phase-1 Background Crossed Paths: constants + helpers
+// ---------------------------------------------------------------------------
+
+/** Window around a sample's capturedAt used by background detection. Samples
+ * in other users' locationSamples that fall within ±10 minutes of the current
+ * sample's capturedAt are treated as potentially co-present. */
+const SAMPLE_TIME_WINDOW_MS = 10 * 60 * 1000; // ±10 minutes
+
+/** TTL for locationSamples rows (swept by cron). Matches the 6-hour retention
+ * already used for crossedEvents / short-term crossed-path state. */
+const LOCATION_SAMPLE_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** Minimum time between two accepted background samples from the same user.
+ * Prevents batch payloads from hammering the table with near-duplicate rows
+ * when the OS wakes the app multiple times for the same coarse cell. */
+const SAMPLE_DEDUPE_MIN_GAP_MS = 60 * 1000; // 1 minute
+
+/** Max samples accepted per batch (prevents abuse from a compromised client). */
+const MAX_SAMPLES_PER_BATCH = 20;
+
+/** [BG_LOCATION] audit log master switch. Mirrors [CROSSED_PATHS_AUDIT]. */
+const BG_LOCATION_AUDIT_ENABLED = true;
+
+// ---------------------------------------------------------------------------
+// recordLocationBatch — Phase-1 Background Crossed Paths entry point
+//
+// Called from the iOS Significant Location Change background task with one or
+// more accumulated samples. Each sample is validated, privacy-snapped, and
+// written to locationSamples. The latest sample also updates the user's
+// lastLocationUpdatedAt + latitude/longitude so Nearby map stays coherent,
+// and triggers a ±10min windowed detection pass.
+//
+// Rules (all-or-nothing per batch — we never half-apply):
+//   - Caller must be a verified user
+//   - Caller must be opted in (recordCrossedPaths !== false)
+//   - Caller must have backgroundLocationEnabled === true
+//   - Caller must not be in an active Nearby pause
+// ---------------------------------------------------------------------------
+
+export const recordLocationBatch = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+    samples: v.array(
+      v.object({
+        lat: v.number(),
+        lng: v.number(),
+        capturedAt: v.number(),
+        accuracy: v.optional(v.number()),
+        source: v.union(v.literal('bg'), v.literal('fg'), v.literal('slc')),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      return { success: false, accepted: 0, reason: 'user_not_found' };
+    }
+    const userId = resolvedUserId;
+    const now = Date.now();
+
+    if (BG_LOCATION_AUDIT_ENABLED) {
+      console.log('[BG_LOCATION][sample_received]', {
+        userId,
+        sampleCount: args.samples.length,
+        sources: args.samples.map((s) => s.source),
+      });
+    }
+
+    if (args.samples.length === 0) {
+      return { success: true, accepted: 0, reason: 'empty_batch' };
+    }
+    if (args.samples.length > MAX_SAMPLES_PER_BATCH) {
+      return { success: false, accepted: 0, reason: 'batch_too_large' };
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return { success: false, accepted: 0, reason: 'user_not_found' };
+    }
+
+    // Phase-1 opt-in gate — background writes are strictly opt-in. The gate
+    // is checked server-side so a stale / spoofed client can never write
+    // background samples without the user having flipped the toggle.
+    if (user.backgroundLocationEnabled !== true) {
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][dropped]', {
+          userId,
+          reason: 'background_not_enabled',
+          sampleCount: args.samples.length,
+        });
+      }
+      return { success: false, accepted: 0, reason: 'background_not_enabled' };
+    }
+
+    // Mirror the opt-out gates from recordLocation so background samples
+    // respect the same Nearby / crossed-paths toggles.
+    if (user.nearbyEnabled === false) {
+      return { success: true, accepted: 0, reason: 'disabled_or_paused' };
+    }
+    if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
+      return { success: true, accepted: 0, reason: 'disabled_or_paused' };
+    }
+    if (user.recordCrossedPaths === false) {
+      return { success: true, accepted: 0, reason: 'crossed_paths_opt_out' };
+    }
+
+    const currentStatus = user.verificationStatus || 'unverified';
+    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+    if (currentStatus !== 'verified' && !isDevBypass) {
+      return { success: true, accepted: 0, reason: 'unverified' };
+    }
+
+    // Sort incoming samples by capturedAt ascending so downstream dedupe +
+    // "latest sample wins" semantics are deterministic.
+    const sortedSamples = [...args.samples].sort((a, b) => a.capturedAt - b.capturedAt);
+
+    // Pre-fetch this user's most recent sample for dedupe.
+    const mostRecentExisting = await ctx.db
+      .query('locationSamples')
+      .withIndex('by_user_capturedAt', (q) => q.eq('userId', userId))
+      .order('desc')
+      .first();
+    let lastAcceptedAt = mostRecentExisting ? mostRecentExisting.capturedAt : 0;
+
+    let accepted = 0;
+    let droppedStale = 0;
+    let droppedFuture = 0;
+    let droppedDedupe = 0;
+    let droppedInvalid = 0;
+    let latestAcceptedSample: { lat: number; lng: number; capturedAt: number; accuracy?: number } | null = null;
+
+    for (const raw of sortedSamples) {
+      // Basic coord validity (reject NaN / out-of-range).
+      if (
+        !Number.isFinite(raw.lat) || !Number.isFinite(raw.lng) ||
+        raw.lat < -90 || raw.lat > 90 ||
+        raw.lng < -180 || raw.lng > 180 ||
+        !Number.isFinite(raw.capturedAt)
+      ) {
+        droppedInvalid++;
+        if (BG_LOCATION_AUDIT_ENABLED) {
+          console.log('[BG_LOCATION][dropped]', { userId, reason: 'invalid_coord', source: raw.source });
+        }
+        continue;
+      }
+      // Reject samples older than the TTL — can't detect crossings we'd
+      // immediately sweep out anyway.
+      if (now - raw.capturedAt > LOCATION_SAMPLE_TTL_MS) {
+        droppedStale++;
+        continue;
+      }
+      // Reject samples dated in the future (clock skew / replay).
+      if (raw.capturedAt > now + 5 * 60 * 1000) {
+        droppedFuture++;
+        continue;
+      }
+      // Dedupe against last accepted sample for this user.
+      if (raw.capturedAt - lastAcceptedAt < SAMPLE_DEDUPE_MIN_GAP_MS) {
+        droppedDedupe++;
+        continue;
+      }
+
+      const snapped = roundToGrid(raw.lat, raw.lng);
+      await ctx.db.insert('locationSamples', {
+        userId,
+        lat: snapped.lat,
+        lng: snapped.lng,
+        capturedAt: raw.capturedAt,
+        source: raw.source,
+        accuracy: raw.accuracy,
+        expiresAt: raw.capturedAt + LOCATION_SAMPLE_TTL_MS,
+      });
+
+      lastAcceptedAt = raw.capturedAt;
+      accepted++;
+      latestAcceptedSample = {
+        lat: snapped.lat,
+        lng: snapped.lng,
+        capturedAt: raw.capturedAt,
+        accuracy: raw.accuracy,
+      };
+
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][sample_written]', {
+          userId,
+          source: raw.source,
+          capturedAt: raw.capturedAt,
+        });
+      }
+    }
+
+    // Only continue to user-doc update + detection if at least one sample
+    // was accepted. Otherwise the batch is effectively a no-op.
+    if (!latestAcceptedSample) {
+      return {
+        success: true,
+        accepted: 0,
+        droppedStale,
+        droppedFuture,
+        droppedDedupe,
+        droppedInvalid,
+      };
+    }
+
+    // Update the user doc's last-known coordinate + activity timestamp using
+    // the latest accepted (snapped) sample. This keeps Nearby map visibility
+    // coherent without requiring the user to open the app. We only update
+    // when the background sample is newer than what's already stored.
+    const userLastUpdated = user.lastLocationUpdatedAt ?? 0;
+    if (latestAcceptedSample.capturedAt > userLastUpdated) {
+      await ctx.db.patch(userId, {
+        latitude: latestAcceptedSample.lat,
+        longitude: latestAcceptedSample.lng,
+        lastActive: Math.max(user.lastActive ?? 0, latestAcceptedSample.capturedAt),
+        lastLocationUpdatedAt: latestAcceptedSample.capturedAt,
+      });
+    }
+
+    // Run windowed detection using the latest accepted sample as the anchor.
+    // Detection looks at locationSamples from other users with capturedAt
+    // within ±10min of this sample. All existing opt-out / block / compat
+    // rules apply.
+    const detection = await detectCrossingsForSample(ctx, {
+      viewerId: userId,
+      viewer: user,
+      lat: latestAcceptedSample.lat,
+      lng: latestAcceptedSample.lng,
+      sampleTime: latestAcceptedSample.capturedAt,
+      accuracy: latestAcceptedSample.accuracy,
+    });
+
+    return {
+      success: true,
+      accepted,
+      droppedStale,
+      droppedFuture,
+      droppedDedupe,
+      droppedInvalid,
+      crossingsWritten: detection.crossingsWritten,
+    };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// detectCrossingsForSample — shared helper used by recordLocationBatch.
+//
+// Looks for other users whose most recent locationSamples row falls within
+// ±SAMPLE_TIME_WINDOW_MS of the anchor sample AND within CROSSED_MAX_METERS
+// of the anchor coordinate. Applies the same opt-out / block / age /
+// orientation / compat rules as recordLocation, then upserts
+// crossedPaths + crossPathHistory and emits in-app notifications.
+//
+// Kept deliberately separate from the recordLocation loop so the foreground
+// path remains untouched (Phase-1 rule: do NOT break existing logic).
+// ---------------------------------------------------------------------------
+
+async function detectCrossingsForSample(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  args: {
+    viewerId: Id<'users'>;
+    viewer: Doc<'users'>;
+    lat: number;
+    lng: number;
+    sampleTime: number;
+    accuracy?: number;
+  },
+): Promise<{ crossingsWritten: number }> {
+  const { viewerId, viewer, lat, lng, sampleTime, accuracy } = args;
+  const now = Date.now();
+  const windowStart = sampleTime - SAMPLE_TIME_WINDOW_MS;
+  const windowEnd = sampleTime + SAMPLE_TIME_WINDOW_MS;
+
+  // GPS quality short-circuit (same thresholds as recordLocation).
+  if (accuracy !== undefined && accuracy > MAX_ACCURACY_FOR_CROSSING_METERS) {
+    if (BG_LOCATION_AUDIT_ENABLED) {
+      console.log('[BG_LOCATION][dropped]', {
+        userId: viewerId,
+        reason: 'accuracy_too_low',
+        accuracy,
+      });
+    }
+    return { crossingsWritten: 0 };
+  }
+
+  // 1) Pull recent samples from every OTHER user within the time window.
+  //    The by_capturedAt index lets us scan only rows inside the window.
+  const windowedSamples = await ctx.db
+    .query('locationSamples')
+    .withIndex('by_capturedAt', (q: any) => q.gte('capturedAt', windowStart))
+    .filter((q: any) => q.lte(q.field('capturedAt'), windowEnd))
+    .collect();
+
+  // Keep only the latest sample per peer (excluding self).
+  type SampleRow = Doc<'locationSamples'>;
+  const latestByPeer = new Map<string, SampleRow>();
+  for (const s of windowedSamples as SampleRow[]) {
+    const peerId = s.userId as string;
+    if (peerId === (viewerId as string)) continue;
+    const prev = latestByPeer.get(peerId);
+    if (!prev || s.capturedAt > prev.capturedAt) {
+      latestByPeer.set(peerId, s);
+    }
+  }
+
+  if (BG_LOCATION_AUDIT_ENABLED) {
+    console.log('[BG_LOCATION][window_scan]', {
+      viewer: viewerId,
+      windowStart,
+      windowEnd,
+      peerCount: latestByPeer.size,
+    });
+  }
+
+  if (latestByPeer.size === 0) {
+    return { crossingsWritten: 0 };
+  }
+
+  // 2) Distance pre-filter against each peer's latest sample.
+  type Candidate = { peerId: string; peerSample: SampleRow; distance: number };
+  const candidates: Candidate[] = [];
+  for (const [peerId, peerSample] of latestByPeer) {
+    const distance = calculateDistanceMeters(lat, lng, peerSample.lat, peerSample.lng);
+    if (distance >= CROSSED_MIN_METERS && distance <= CROSSED_MAX_METERS) {
+      candidates.push({ peerId, peerSample, distance });
+    }
+  }
+  if (candidates.length === 0) {
+    return { crossingsWritten: 0 };
+  }
+
+  // 3) Exclusion set + my basic gates (same as recordLocation).
+  const {
+    blockedUserIds: blockedIds,
+    unmatchedUserIds,
+    viewerReportedIds,
+  } = await loadDiscoveryExclusions(ctx, viewerId);
+  const myAge = calculateAge(viewer.dateOfBirth);
+
+  // 4) Per-peer full-gate loop (age, orientation, opt-outs, compat, cooldown).
+  let crossingsWritten = 0;
+  for (const { peerId, distance } of candidates) {
+    const peerUser = await ctx.db.get(peerId as Id<'users'>);
+    if (!peerUser) continue;
+    if (!peerUser.isActive) continue;
+    if (peerUser.nearbyEnabled === false) continue;
+    if (peerUser.recordCrossedPaths === false) continue;
+    if (!peerUser.name || !peerUser.bio || !peerUser.dateOfBirth) continue;
+
+    // Verification parity with recordLocation (DEV bypass respected).
+    const peerStatus = peerUser.verificationStatus || 'unverified';
+    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+    if (peerStatus !== 'verified' && !isDevBypass) continue;
+
+    // Age / gender filters (bi-directional).
+    const peerAge = calculateAge(peerUser.dateOfBirth);
+    if (myAge < peerUser.minAge || myAge > peerUser.maxAge) continue;
+    if (peerAge < viewer.minAge || peerAge > viewer.maxAge) continue;
+    if (!viewer.lookingFor.includes(peerUser.gender)) continue;
+    if (!peerUser.lookingFor.includes(viewer.gender)) continue;
+
+    // Negative-relationship exclusions.
+    if (blockedIds.has(peerId)) continue;
+    if (unmatchedUserIds.has(peerId)) continue;
+    if (viewerReportedIds.has(peerId)) continue;
+
+    // Compatibility (metadata only — same product-fix rule as recordLocation).
+    const compatibility = computeCompatibility(
+      {
+        activities: viewer.activities,
+        relationshipIntent: viewer.relationshipIntent,
+        profilePrompts: viewer.profilePrompts,
+      },
+      {
+        activities: peerUser.activities,
+        relationshipIntent: peerUser.relationshipIntent,
+        profilePrompts: peerUser.profilePrompts,
+      },
+    );
+    const reasonTags = compatibility.isCompatible ? compatibility.reasonTags : ['nearby'];
+
+    const user1Id = (viewerId as string) < (peerUser._id as string) ? viewerId : peerUser._id;
+    const user2Id = (viewerId as string) < (peerUser._id as string) ? peerUser._id : viewerId;
+
+    // Upsert crossedPaths with per-pair cooldown.
+    let crossedPath = await ctx.db
+      .query('crossedPaths')
+      .withIndex('by_users', (q: any) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+      .first();
+
+    if (crossedPath) {
+      if (now - crossedPath.lastCrossedAt < NOTIFICATION_COOLDOWN_MS) {
+        continue; // pair cooldown
+      }
+      await ctx.db.patch(crossedPath._id, {
+        count: crossedPath.count + 1,
+        lastCrossedAt: now,
+        crossingLatitude: lat,
+        crossingLongitude: lng,
+      });
+    } else {
+      await ctx.db.insert('crossedPaths', {
+        user1Id,
+        user2Id,
+        count: 1,
+        lastCrossedAt: now,
+      });
+    }
+
+    // History cooldown (same pattern as recordLocation).
+    const existingHistory = await ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_users', (q: any) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+      .order('desc')
+      .first();
+    if (existingHistory && now - existingHistory.createdAt < NOTIFICATION_COOLDOWN_MS) {
+      continue;
+    }
+
+    const areaName = peerUser.city ? `Near ${peerUser.city}` : 'Nearby area';
+    const approxLocation = roundToGrid(lat, lng);
+    await ctx.db.insert('crossPathHistory', {
+      user1Id,
+      user2Id,
+      areaName,
+      crossedLatApprox: approxLocation.lat,
+      crossedLngApprox: approxLocation.lng,
+      reasonTags,
+      createdAt: now,
+      expiresAt: now + HISTORY_EXPIRY_MS,
+    });
+
+    crossingsWritten++;
+    if (BG_LOCATION_AUDIT_ENABLED) {
+      console.log('[BG_LOCATION][crossing_detected]', {
+        pair: [viewerId, peerId],
+        distanceM: Math.round(distance),
+        reasonTags,
+        sampleTime,
+      });
+    }
+
+    // In-app notification (upsert — same pattern as recordLocation).
+    const currentCrossedPath = await ctx.db
+      .query('crossedPaths')
+      .withIndex('by_users', (q: any) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+      .first();
+    if (!currentCrossedPath) continue;
+
+    const canNotify = !currentCrossedPath.lastNotifiedAt ||
+      now - currentCrossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS;
+    if (!canNotify) continue;
+
+    await ctx.db.patch(currentCrossedPath._id, { lastNotifiedAt: now });
+
+    const reasonText = formatReasonForNotification(reasonTags[0] ?? 'common');
+    const crossingCount = currentCrossedPath.count;
+    let title: string;
+    let body: string;
+    if (crossingCount === 1) {
+      title = 'Someone crossed your path';
+      body = `${reasonText}`;
+    } else if (crossingCount < 5) {
+      title = 'Someone interesting crossed your path';
+      body = `You've crossed paths ${crossingCount} times. ${reasonText}`;
+    } else {
+      title = 'You keep crossing paths with someone';
+      body = `${crossingCount} times now! ${reasonText}. Maybe say hi?`;
+    }
+    const pairDedupeKey = makeCrossedPathsDedupeKey(user1Id, user2Id, now);
+
+    for (const [recipient, other] of [
+      [user1Id, user2Id],
+      [user2Id, user1Id],
+    ] as const) {
+      const existing = await ctx.db
+        .query('notifications')
+        .withIndex('by_user_dedupe', (q: any) =>
+          q.eq('userId', recipient).eq('dedupeKey', pairDedupeKey))
+        .first();
+      const recentCount = (
+        await ctx.db
+          .query('notifications')
+          .withIndex('by_user', (q: any) => q.eq('userId', recipient))
+          .filter((q: any) =>
+            q.and(
+              q.eq(q.field('type'), 'crossed_paths'),
+              q.gt(q.field('createdAt'), now - 24 * 60 * 60 * 1000),
+            ),
+          )
+          .collect()
+      ).length;
+      const shouldNotify = recentCount < MAX_NOTIFICATIONS_PER_DAY &&
+        (!existing || now - existing.createdAt >= NOTIFICATION_COOLDOWN_MS);
+      if (!shouldNotify) continue;
+      if (existing) {
+        await ctx.db.patch(existing._id, {
+          title,
+          body,
+          data: { userId: other as string, pairKey: pairDedupeKey },
+          createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+          readAt: undefined,
+        });
+      } else {
+        await ctx.db.insert('notifications', {
+          userId: recipient,
+          type: 'crossed_paths' as const,
+          title,
+          body,
+          data: { userId: other as string, pairKey: pairDedupeKey },
+          dedupeKey: pairDedupeKey,
+          createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
+      }
+    }
+
+    await trimHistoryForUser(ctx, viewerId);
+  }
+
+  return { crossingsWritten };
+}
+
+// ---------------------------------------------------------------------------
+// cleanupExpiredLocationSamples — TTL sweep for the samples ring-buffer.
+// Referenced by the 'cleanup-expired-location-samples' cron (6h cadence).
+// ---------------------------------------------------------------------------
+
+export const cleanupExpiredLocationSamples = internalMutation({
+  handler: async (ctx) => {
+    const now = Date.now();
+    const expired = await ctx.db
+      .query('locationSamples')
+      .withIndex('by_expires')
+      .filter((q) => q.lt(q.field('expiresAt'), now))
+      .collect();
+    for (const row of expired) {
+      await ctx.db.delete(row._id);
+    }
+    return { deleted: expired.length };
   },
 });
 
@@ -1508,6 +2198,14 @@ export const getCrossPathHistory = query({
     results.sort((a, b) => {
       if (b.crossingCount !== a.crossingCount) return b.crossingCount - a.crossingCount;
       return b.createdAt - a.createdAt;
+    });
+
+    // [CROSSED_PATHS_AUDIT] ui — what the client-side list receives.
+    console.log('[CROSSED_PATHS_AUDIT][ui]', {
+      viewer: userId,
+      entriesReturned: results.length,
+      hasReasonOverlap: results.filter((r) => (r.reasonTags?.[0] ?? '') !== 'nearby').length,
+      nearbyOnly: results.filter((r) => (r.reasonTags?.[0] ?? '') === 'nearby').length,
     });
 
     return results;
@@ -2482,6 +3180,14 @@ function formatReasonForNotification(reasonTag: string): string {
 
   if (type === 'prompt') {
     return `You both mentioned ${value}`;
+  }
+
+  // PRODUCT FIX: 'nearby' is the neutral tag written when two users crossed
+  // paths in the real world without any detected shared interest/intent.
+  // Previously crossings were silently rejected in this case; now we keep
+  // the crossing and show a honest, simple context line.
+  if (reasonTag === 'nearby' || type === 'nearby') {
+    return 'You were near each other';
   }
 
   return 'You have something in common';

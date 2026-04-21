@@ -217,6 +217,8 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
     nearbyPausedUntil: user.nearbyPausedUntil,
     // Phase-2: separate crossed-paths opt-in (undefined treated as true).
     recordCrossedPaths: user.recordCrossedPaths,
+    // Phase-1 Background Crossed Paths: iOS-only opt-in (default false).
+    backgroundLocationEnabled: user.backgroundLocationEnabled,
     // NOTE: nearbyVisibilityMode retained in schema for back-compat but no
     // longer surfaced to clients — UI was removed in Phase-1 and backend
     // stopped reading it in Phase-2.
@@ -928,6 +930,10 @@ export const updateNearbySettings = mutation({
     // Phase-2: independent opt-in for crossed-paths recording.
     // Separate from nearbyEnabled (which now only controls map visibility).
     recordCrossedPaths: v.optional(v.boolean()),
+    // Phase-1 Background Crossed Paths: iOS-only opt-in. Server-side gate
+    // for recordLocationBatch. Client UI should only allow toggling this
+    // on iOS after the user has granted Always location authorization.
+    backgroundLocationEnabled: v.optional(v.boolean()),
     // NOTE: nearbyVisibilityMode is deprecated — the old always/app_open/recent
     // UI was removed in Phase-1 and the backend stopped reading it in Phase-2.
     // The field is intentionally NOT accepted by this mutation anymore.

@@ -26,6 +26,12 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         "Mira needs microphone access for video recording.",
       NSLocationWhenInUseUsageDescription:
         "Mira uses your location to show people near you.",
+      // Phase-1 Background Crossed Paths (iOS): Always + When-in-Use is only
+      // requested after the user explicitly opts into background Crossed Paths
+      // in settings. Text is user-facing and framed around the exact benefit.
+      NSLocationAlwaysAndWhenInUseUsageDescription:
+        "Allow Mira to detect people you cross paths with even when the app is closed. Your location is never shared in real time.",
+      UIBackgroundModes: ["location", "fetch"],
       NSFaceIDUsageDescription: "Use Face ID for secure login.",
     },
     config: {
@@ -99,6 +105,14 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       {
         locationWhenInUsePermission:
           "Allow Mira to use your location to show people near you while you're using the app.",
+        // Phase-1 Background Crossed Paths: iOS ONLY for now.
+        // The Always permission + UIBackgroundModes are required so that
+        // Significant Location Change wakes the app when it's terminated.
+        // Android background location stays OFF in Phase 1 — see design doc.
+        locationAlwaysAndWhenInUsePermission:
+          "Allow Mira to detect people you cross paths with even when the app is closed. Your location is never shared in real time.",
+        isIosBackgroundLocationEnabled: true,
+        isAndroidBackgroundLocationEnabled: false,
       },
     ],
     "@react-native-community/datetimepicker",

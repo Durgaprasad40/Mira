@@ -144,6 +144,15 @@ crons.hourly(
   internal.crossedPaths.cleanupExpiredCrossedEvents
 );
 
+// Phase-1 Background Crossed Paths: Cleanup expired location samples every hour
+// Removes rows from the short-lived locationSamples ring-buffer past their
+// 6-hour TTL so background writes cannot grow the table unboundedly.
+crons.hourly(
+  'cleanup-expired-location-samples',
+  { minuteUTC: 25 },
+  internal.crossedPaths.cleanupExpiredLocationSamples
+);
+
 // Phase-2 Ranking: Cleanup old viewer impressions daily
 // Removes impressions older than 7 days to prevent unbounded table growth
 crons.daily(

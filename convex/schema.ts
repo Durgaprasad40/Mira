@@ -242,6 +242,11 @@ export default defineSchema({
     nearbyEnabled: v.optional(v.boolean()),           // user opt-in toggle (default true) — gates map visibility
     crossedPathsEnabled: v.optional(v.boolean()),     // LEGACY: superseded by recordCrossedPaths in Phase-2; kept for back-compat and migrations only, no longer read
     recordCrossedPaths: v.optional(v.boolean()),      // Phase-2: separate opt-in for crossed-paths pipeline (default true when undefined)
+    // Phase-1 Background Crossed Paths: iOS-only opt-in for Significant Location
+    // Change-driven background sampling. Default is OFF; must be explicitly
+    // enabled by the user via enableBackgroundLocation(). Android is not
+    // supported in Phase 1 — this flag stays false for Android users.
+    backgroundLocationEnabled: v.optional(v.boolean()),
     nearbyPausedUntil: v.optional(v.number()),        // pause nearby visibility until timestamp
     nearbyVisibilityMode: v.optional(v.union(         // DEPRECATED (Phase-1 removed UI, Phase-2 stops reading it); kept to preserve existing data, no live code-path depends on it
       v.literal('always'),
@@ -982,6 +987,27 @@ export default defineSchema({
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
     .index('by_users', ['user1Id', 'user2Id'])
+    .index('by_expires', ['expiresAt']),
+
+  // Phase-1 Background Crossed Paths: short-lived ring-buffer of location
+  // samples (foreground, background, SLC). Used by recordLocationBatch +
+  // time-windowed crossed-path detection. Not exposed to any client query.
+  // TTL: 6 hours (cron sweeps expired rows).
+  locationSamples: defineTable({
+    userId: v.id('users'),
+    lat: v.number(),           // snapped to privacy grid before write
+    lng: v.number(),           // snapped to privacy grid before write
+    capturedAt: v.number(),    // client-reported capture timestamp (ms)
+    source: v.union(           // which wake path produced this sample
+      v.literal('fg'),
+      v.literal('bg'),
+      v.literal('slc'),
+    ),
+    accuracy: v.optional(v.number()), // meters, if known
+    expiresAt: v.number(),     // capturedAt + 6h for TTL sweep
+  })
+    .index('by_user_capturedAt', ['userId', 'capturedAt'])
+    .index('by_capturedAt', ['capturedAt'])
     .index('by_expires', ['expiresAt']),
 
   // Dares table (Truth or Dare feature)
