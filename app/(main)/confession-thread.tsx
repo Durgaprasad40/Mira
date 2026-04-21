@@ -2,15 +2,28 @@
  * CONFESSION THREAD - PREMIUM UI
  * Matches the visual language of the Confession homepage.
  * Uses same colors, spacing, typography, and card styling patterns.
+ *
+ * Comment identity model (matches confession posting):
+ *   - anonymous   : no photo, no name, no age, no gender
+ *   - blur_photo  : blurred photo + name + age + gender symbol
+ *   - open        : full photo + name + age + gender symbol
+ *
+ * Expiry rule: comments must never outlive their parent confession.
+ * When the confession is missing/deleted/expired, the thread is rendered as
+ * closed: no composer, no edit controls, no owner-reply affordance.
  */
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  Pressable,
   StyleSheet,
   Text,
   TextInput,
@@ -24,11 +37,27 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 
 import { api } from '@/convex/_generated/api';
+import { asUserId } from '@/convex/id';
 import { COLORS, moderateScale } from '@/lib/constants';
 import { isContentClean } from '@/lib/contentFilter';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
+
+type IdentityMode = 'anonymous' | 'blur_photo' | 'open';
+
+type IdentityOption = {
+  key: IdentityMode;
+  label: string;
+  description: string;
+  icon: keyof typeof Ionicons.glyphMap;
+};
+
+const IDENTITY_OPTIONS: IdentityOption[] = [
+  { key: 'anonymous',  label: 'Anonymous',    description: 'No name, no photo', icon: 'eye-off-outline' },
+  { key: 'blur_photo', label: 'Blurred photo', description: 'Name visible, photo blurred', icon: 'contrast-outline' },
+  { key: 'open',       label: 'Open to all',  description: 'Name and photo visible', icon: 'person-outline' },
+];
 
 type Reply = {
   _id: string;
@@ -36,10 +65,18 @@ type Reply = {
   userId: string;
   text: string;
   isAnonymous: boolean;
+  identityMode?: IdentityMode | string;
   type?: string;
   voiceUrl?: string;
   voiceDurationSec?: number;
+  parentReplyId?: string;
+  authorName?: string;
+  authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
+  editedAt?: number;
   createdAt: number;
+  isOwnReply?: boolean;
 };
 
 type Confession = {
@@ -57,11 +94,18 @@ type Confession = {
   reactionCount: number;
   createdAt: number;
   expiresAt?: number;
+  isDeleted?: boolean;
 };
 
 // Match homepage avatar size
 const AVATAR_SIZE = moderateScale(22, 0.3);
-const AVATAR_SIZE_LARGE = moderateScale(36, 0.3);
+const REPLY_AVATAR_SIZE = moderateScale(22, 0.3);
+const BLUR_PHOTO_RADIUS = 20;
+
+// Destructive action color for the Delete button in the comment action modal.
+// Distinct from COLORS.primary (brand coral) so Edit and Delete read as
+// different roles at a glance.
+const MENU_DANGER = '#DC2626';
 
 function formatTimeAgo(timestamp: number): string {
   const now = Date.now();
@@ -76,6 +120,45 @@ function formatTimeAgo(timestamp: number): string {
   return `${days}d ago`;
 }
 
+function computeAge(dateOfBirth: string | undefined): number | undefined {
+  if (!dateOfBirth) return undefined;
+  const dob = new Date(dateOfBirth);
+  if (Number.isNaN(dob.getTime())) return undefined;
+  const now = new Date();
+  let age = now.getFullYear() - dob.getFullYear();
+  const m = now.getMonth() - dob.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < dob.getDate())) age -= 1;
+  return age >= 0 ? age : undefined;
+}
+
+// Normalize identityMode from any source (new backend, legacy 'blur', or missing field).
+function canonicalMode(raw: string | undefined, isAnonymousFallback: boolean): IdentityMode {
+  switch (raw) {
+    case 'anonymous':
+      return 'anonymous';
+    case 'blur':
+    case 'blur_photo':
+      return 'blur_photo';
+    case 'open':
+      return 'open';
+    default:
+      return isAnonymousFallback ? 'anonymous' : 'open';
+  }
+}
+
+// Gender symbol rendering — male blue, female pink, everything else neutral.
+function GenderSymbol({ gender }: { gender?: string }) {
+  if (!gender) return null;
+  const lower = gender.toLowerCase();
+  if (lower === 'male') {
+    return <Ionicons name="male" size={12} color="#3B82F6" style={styles.genderIcon} />;
+  }
+  if (lower === 'female' || lower === 'lesbian') {
+    return <Ionicons name="female" size={12} color="#EC4899" style={styles.genderIcon} />;
+  }
+  return null;
+}
+
 export default function ConfessionThreadScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -87,6 +170,7 @@ export default function ConfessionThreadScreen() {
   const demoConfessions = useConfessionStore((s) => s.confessions);
   const demoReplies = useConfessionStore((s) => s.replies);
   const demoAddReply = useConfessionStore((s) => s.addReply);
+  const demoDeleteReply = useConfessionStore((s) => s.deleteReply);
 
   // Convex queries - only run in non-demo mode
   const convexConfession = useQuery(
@@ -95,15 +179,75 @@ export default function ConfessionThreadScreen() {
   );
   const convexReplies = useQuery(
     api.confessions.getReplies,
-    !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+    !isDemoMode && confessionId
+      ? { confessionId: confessionId as any, viewerId: currentUserId ?? undefined }
+      : 'skip'
+  );
+  const convexMyReply = useQuery(
+    api.confessions.getMyReplyForConfession,
+    !isDemoMode && confessionId && currentUserId
+      ? { confessionId: confessionId as any, viewerId: currentUserId }
+      : 'skip'
+  );
+  const convexCurrentUser = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && currentUserId
+      ? { userId: asUserId(currentUserId) ?? currentUserId }
+      : 'skip'
+  );
+  // Primary-display-photo source of truth.
+  //
+  // This is the SAME query the Profile tab uses (see
+  // app/(main)/(tabs)/profile.tsx `backendPhotos`). Profile treats the
+  // first element of the returned array (`effectivePhotos[0]?.url`) as the
+  // user's main display photo — no client-side filtering, re-sorting, or
+  // `isPrimary` re-selection. Confess comments must mirror that exactly so
+  // `blur_photo` and `open` render the same image the profile grid shows at
+  // index 0.
+  const primaryPhotos = useQuery(
+    api.photos.getUserPhotos,
+    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
   );
   const createReplyMutation = useMutation(api.confessions.createReply);
+  const updateReplyMutation = useMutation(api.confessions.updateReply);
+  const deleteReplyMutation = useMutation(api.confessions.deleteReply);
+  const reportReplyMutation = useMutation(api.confessions.reportReply);
 
-  // Local state
+  // Composer state
   const [replyText, setReplyText] = useState('');
-  const [isAnonymousReply, setIsAnonymousReply] = useState(true);
+  const [identityMode, setIdentityMode] = useState<IdentityMode>('anonymous');
+  const [composerMode, setComposerMode] = useState<'create' | 'edit' | 'owner-reply'>('create');
+  const [editingReplyId, setEditingReplyId] = useState<string | null>(null);
+  const [replyingToReplyId, setReplyingToReplyId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const inputRef = useRef<TextInput>(null);
+
+  // Long-press menu state (viewer's own comment).
+  const [menuReplyId, setMenuReplyId] = useState<string | null>(null);
+  const menuVisible = !!menuReplyId;
+  const menuOpacity = useRef(new Animated.Value(0)).current;
+  const menuScale = useRef(new Animated.Value(0.92)).current;
+  useEffect(() => {
+    if (menuVisible) {
+      menuOpacity.setValue(0);
+      menuScale.setValue(0.92);
+      Animated.parallel([
+        Animated.timing(menuOpacity, {
+          toValue: 1,
+          duration: 160,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.spring(menuScale, {
+          toValue: 1,
+          damping: 18,
+          stiffness: 220,
+          mass: 0.6,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [menuVisible, menuOpacity, menuScale]);
 
   // Get confession data
   const confession: Confession | null = isDemoMode
@@ -118,21 +262,122 @@ export default function ConfessionThreadScreen() {
         userId: r.userId,
         text: r.text,
         isAnonymous: r.isAnonymous,
+        identityMode: r.identityMode,
         type: r.type,
         voiceUrl: r.voiceUrl,
         voiceDurationSec: r.voiceDurationSec,
         createdAt: r.createdAt,
       }))
-    : (convexReplies ?? []);
+    : ((convexReplies ?? []) as Reply[]);
+
+  const myExistingReply: Reply | null = isDemoMode
+    ? (replies.find((r) => r.userId === currentUserId && !r.parentReplyId) ?? null)
+    : ((convexMyReply ?? null) as Reply | null);
 
   const isLoading = !isDemoMode && (convexConfession === undefined || convexReplies === undefined);
+
+  // Group replies into top-level comments and owner-reply children keyed by
+  // their parent reply id. Owner replies (with parentReplyId) are rendered
+  // INLINE inside the parent comment card — they never appear in the main
+  // FlatList as standalone cards.
+  const { topLevelReplies, childrenByParent } = useMemo(() => {
+    const top: Reply[] = [];
+    const byParent: Record<string, Reply[]> = {};
+    for (const r of replies) {
+      if (r.parentReplyId) {
+        const list = byParent[r.parentReplyId] ?? [];
+        list.push(r);
+        byParent[r.parentReplyId] = list;
+      } else {
+        top.push(r);
+      }
+    }
+    // Chronological order for children (oldest first).
+    for (const k of Object.keys(byParent)) {
+      byParent[k]!.sort((a, b) => a.createdAt - b.createdAt);
+    }
+    return { topLevelReplies: top, childrenByParent: byParent };
+  }, [replies]);
+
+  // Expiry gate — every comment action must fail closed when the parent is gone.
+  const isOwner = !!confession && confession.userId === currentUserId;
+  const now = Date.now();
+  const isThreadClosed =
+    !confession ||
+    !!confession.isDeleted ||
+    (confession.expiresAt !== undefined && confession.expiresAt <= now);
+
+  // If the thread closes mid-session (e.g. 2-minute expiry fires), drop any active
+  // composer state so no stale edit/reply UI remains on screen.
+  useEffect(() => {
+    if (isThreadClosed) {
+      setComposerMode('create');
+      setEditingReplyId(null);
+      setReplyingToReplyId(null);
+      setReplyText('');
+      setMenuReplyId(null);
+    }
+  }, [isThreadClosed]);
 
   const handleBack = useCallback(() => {
     router.back();
   }, [router]);
 
+  // Snapshot author info.
+  //
+  // Single source of truth for the primary display photo:
+  // Use `primaryPhotos[0]` directly from `api.photos.getUserPhotos` — the
+  // EXACT same query and EXACT same index the Profile tab uses to pick its
+  // main display photo. No filtering, no re-sorting, no `isPrimary`
+  // re-selection. Whatever the profile grid renders at index 0, Confess
+  // comments must store for `blur_photo` / `open` rendering.
+  const getAuthorInfo = useCallback(
+    (mode: IdentityMode) => {
+      if (mode === 'anonymous') return {};
+      if (!isDemoMode && convexCurrentUser) {
+        const mainPhoto = primaryPhotos?.[0];
+        const photoUrl = (mainPhoto as any)?.url as string | undefined;
+
+        if (__DEV__) {
+          console.log('[CONFESS_PHOTO_DEBUG]', {
+            selectedPhotoId: (mainPhoto as any)?._id ?? null,
+            selectedPhotoUrl: photoUrl ? photoUrl.slice(-30) : null,
+            sourceUsed: 'api.photos.getUserPhotos[0]',
+            indexUsed: 0,
+            totalPhotos: primaryPhotos?.length ?? 0,
+            identityMode: mode,
+          });
+        }
+
+        return {
+          authorName: (convexCurrentUser as any).name as string | undefined,
+          authorPhotoUrl: photoUrl,
+          authorAge: computeAge((convexCurrentUser as any).dateOfBirth),
+          authorGender: (convexCurrentUser as any).gender as string | undefined,
+        };
+      }
+      return {};
+    },
+    [convexCurrentUser, isDemoMode, primaryPhotos]
+  );
+
+  const resetComposer = useCallback(() => {
+    setComposerMode('create');
+    setEditingReplyId(null);
+    setReplyingToReplyId(null);
+    setReplyText('');
+    setIdentityMode('anonymous');
+  }, []);
+
+  // ────────────────────────────────────────────────────────────
+  // Composer actions
+  // ────────────────────────────────────────────────────────────
   const handleSubmitReply = useCallback(async () => {
     if (!currentUserId || !confessionId || submitting) return;
+    if (isThreadClosed) {
+      Alert.alert('Thread closed', 'This confession is no longer available.');
+      return;
+    }
 
     const trimmed = replyText.trim();
     if (trimmed.length < 1) {
@@ -149,97 +394,442 @@ export default function ConfessionThreadScreen() {
     Keyboard.dismiss();
 
     try {
-      if (isDemoMode) {
-        demoAddReply(confessionId, {
-          id: `reply_${Date.now()}`,
-          confessionId,
-          userId: currentUserId,
-          text: trimmed,
-          isAnonymous: isAnonymousReply,
-          type: 'text',
-          createdAt: Date.now(),
-        });
+      if (composerMode === 'edit' && editingReplyId) {
+        if (isDemoMode) {
+          // Demo fallback: best-effort local update is out of scope; keep parity with live.
+          Alert.alert('Not available in demo', 'Editing comments is available in live mode.');
+        } else {
+          const authorInfo = getAuthorInfo(identityMode);
+          await updateReplyMutation({
+            replyId: editingReplyId as any,
+            userId: currentUserId,
+            text: trimmed,
+            identityMode,
+            ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+            ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+            ...(authorInfo.authorAge !== undefined ? { authorAge: authorInfo.authorAge } : {}),
+            ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+          });
+        }
       } else {
-        await createReplyMutation({
-          confessionId: confessionId as any,
-          userId: currentUserId,
-          text: trimmed,
-          isAnonymous: isAnonymousReply,
-          type: 'text',
-        });
+        const authorInfo = getAuthorInfo(identityMode);
+        if (isDemoMode) {
+          demoAddReply(confessionId, {
+            id: `reply_${Date.now()}`,
+            confessionId,
+            userId: currentUserId,
+            text: trimmed,
+            isAnonymous: identityMode === 'anonymous',
+            identityMode,
+            type: 'text',
+            createdAt: Date.now(),
+          } as any);
+        } else {
+          await createReplyMutation({
+            confessionId: confessionId as any,
+            userId: currentUserId,
+            text: trimmed,
+            isAnonymous: identityMode === 'anonymous',
+            identityMode,
+            type: 'text',
+            ...(composerMode === 'owner-reply' && replyingToReplyId
+              ? { parentReplyId: replyingToReplyId as any }
+              : {}),
+            ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+            ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+            ...(authorInfo.authorAge !== undefined ? { authorAge: authorInfo.authorAge } : {}),
+            ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+          });
+        }
       }
 
-      setReplyText('');
+      resetComposer();
     } catch (error: any) {
       Alert.alert('Error', error?.message || 'Failed to post reply');
     } finally {
       setSubmitting(false);
     }
   }, [
+    composerMode,
     confessionId,
     createReplyMutation,
     currentUserId,
     demoAddReply,
-    isAnonymousReply,
+    editingReplyId,
+    getAuthorInfo,
+    identityMode,
+    isThreadClosed,
     replyText,
+    replyingToReplyId,
+    resetComposer,
     submitting,
+    updateReplyMutation,
   ]);
 
-  const renderReplyItem = useCallback(({ item }: { item: Reply }) => {
-    const isOwnReply = item.userId === currentUserId;
+  // The specific reply targeted by an open long-press menu. Ownership drives
+  // whether the menu shows Edit/Delete (own) or Report (someone else's).
+  const menuTargetReply: Reply | null = useMemo(() => {
+    if (!menuReplyId) return null;
+    return replies.find((r) => r._id === menuReplyId) ?? null;
+  }, [menuReplyId, replies]);
 
-    return (
-      <View style={[styles.replyCard, isOwnReply && styles.replyCardOwn]}>
-        <View style={styles.replyHeader}>
-          <View style={[styles.replyAvatar, isOwnReply && styles.replyAvatarOwn]}>
-            <Ionicons
-              name={item.isAnonymous ? 'eye-off' : 'person'}
-              size={10}
-              color={isOwnReply ? COLORS.primary : COLORS.textMuted}
-            />
-          </View>
-          <Text style={[styles.replyAuthor, isOwnReply && styles.replyAuthorOwn]}>
-            {item.isAnonymous ? 'Anonymous' : 'Someone'}
-            {isOwnReply && ' (You)'}
-          </Text>
-          <Text style={styles.replyTime}>{formatTimeAgo(item.createdAt)}</Text>
+  const menuTargetIsOwn =
+    !!menuTargetReply &&
+    !!currentUserId &&
+    (menuTargetReply.userId === currentUserId || !!menuTargetReply.isOwnReply);
+
+  const handleBeginEdit = useCallback(() => {
+    if (!menuTargetReply || isThreadClosed) return;
+    setComposerMode('edit');
+    setEditingReplyId(menuTargetReply._id);
+    setReplyingToReplyId(null);
+    setReplyText(menuTargetReply.text);
+    setIdentityMode(
+      canonicalMode(
+        menuTargetReply.identityMode as string | undefined,
+        !!menuTargetReply.isAnonymous
+      )
+    );
+    setMenuReplyId(null);
+    // Let the system focus the input on next tick.
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }, [isThreadClosed, menuTargetReply]);
+
+  const handleDelete = useCallback(async () => {
+    if (!currentUserId || !menuTargetReply || isThreadClosed) return;
+    const targetId = menuTargetReply._id;
+    // Derive ownership from the reply itself so a stale/null myExistingReply
+    // query can never swallow the composer reset.
+    const targetIsMine =
+      menuTargetReply.userId === currentUserId || !!menuTargetReply.isOwnReply;
+    const targetIsMyTopLevel = targetIsMine && !menuTargetReply.parentReplyId;
+    const targetIsBeingEdited = editingReplyId === targetId;
+    setMenuReplyId(null);
+    Alert.alert(
+      'Delete comment',
+      'Are you sure you want to delete your comment? You can comment again after deleting.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (isDemoMode) {
+                // Demo parity with live — actually remove the row locally so
+                // myExistingReply (derived from replies[]) becomes null and
+                // the "already commented" footer disappears.
+                if (confessionId) {
+                  demoDeleteReply(confessionId as string, targetId);
+                }
+              } else {
+                await deleteReplyMutation({
+                  replyId: targetId as any,
+                  userId: currentUserId,
+                });
+              }
+              // Unconditionally clear composer state when the deleted reply
+              // was mine (whether top-level or inline owner-reply) OR was the
+              // one currently being edited. This guarantees the user can post
+              // again immediately — no reliance on passive query refresh to
+              // clear stale edit/reply/"already commented" UI.
+              if (targetIsMyTopLevel || targetIsBeingEdited || targetIsMine) {
+                resetComposer();
+              }
+            } catch (error: any) {
+              Alert.alert('Error', error?.message || 'Failed to delete comment');
+            }
+          },
+        },
+      ]
+    );
+  }, [
+    confessionId,
+    currentUserId,
+    deleteReplyMutation,
+    demoDeleteReply,
+    editingReplyId,
+    isThreadClosed,
+    menuTargetReply,
+    resetComposer,
+  ]);
+
+  const handleReport = useCallback(() => {
+    if (!currentUserId || !menuTargetReply || isThreadClosed) return;
+    const targetId = menuTargetReply._id;
+    setMenuReplyId(null);
+    Alert.alert(
+      'Report this comment?',
+      'This comment will be submitted for moderation review. You can cancel before it is sent.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Report',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (isDemoMode) {
+                Alert.alert('Reported', 'Thanks — our team will review this comment.');
+                return;
+              }
+              const result = await reportReplyMutation({
+                replyId: targetId as any,
+                reporterId: currentUserId,
+                reason: 'other',
+              });
+              Alert.alert(
+                result.alreadyReported ? 'Already reported' : 'Reported',
+                result.alreadyReported
+                  ? 'You have already reported this comment.'
+                  : 'Thanks — our team will review this comment.'
+              );
+            } catch (error: any) {
+              Alert.alert('Error', error?.message || 'Failed to report comment');
+            }
+          },
+        },
+      ]
+    );
+  }, [currentUserId, isThreadClosed, menuTargetReply, reportReplyMutation]);
+
+  const handleBeginOwnerReply = useCallback(
+    (parentReply: Reply) => {
+      if (!isOwner || isThreadClosed || !confession) return;
+      // Owner reply always inherits the confession's identity mode — the user
+      // does NOT choose a new identity per reply. Whatever visibility the
+      // confession was posted with is reused here.
+      const confessionVisibility =
+        (confession.authorVisibility as string | undefined) ||
+        (confession.isAnonymous ? 'anonymous' : 'open');
+      const inheritedMode: IdentityMode = canonicalMode(
+        confessionVisibility,
+        !!confession.isAnonymous
+      );
+      setComposerMode('owner-reply');
+      setEditingReplyId(null);
+      setReplyingToReplyId(parentReply._id);
+      setReplyText('');
+      setIdentityMode(inheritedMode);
+      setTimeout(() => inputRef.current?.focus(), 50);
+    },
+    [confession, isOwner, isThreadClosed]
+  );
+
+  // ────────────────────────────────────────────────────────────
+  // Render helpers
+  // ────────────────────────────────────────────────────────────
+  const replyingToParent: Reply | null = useMemo(() => {
+    if (composerMode !== 'owner-reply' || !replyingToReplyId) return null;
+    return replies.find((r) => r._id === replyingToReplyId) ?? null;
+  }, [composerMode, replies, replyingToReplyId]);
+
+  const renderReplyAvatar = useCallback((mode: IdentityMode, photoUrl?: string) => {
+    if (mode === 'anonymous') {
+      return (
+        <View style={[styles.replyAvatar, styles.replyAvatarAnon]}>
+          <Ionicons name="eye-off" size={12} color={COLORS.textMuted} />
         </View>
-        <Text style={styles.replyText}>{item.text}</Text>
+      );
+    }
+    if (mode === 'blur_photo' && photoUrl) {
+      return (
+        <Image
+          source={{ uri: photoUrl }}
+          style={styles.replyAvatarImage}
+          contentFit="cover"
+          blurRadius={BLUR_PHOTO_RADIUS}
+        />
+      );
+    }
+    if (mode === 'open' && photoUrl) {
+      return (
+        <Image
+          source={{ uri: photoUrl }}
+          style={styles.replyAvatarImage}
+          contentFit="cover"
+        />
+      );
+    }
+    return (
+      <View style={styles.replyAvatar}>
+        <Ionicons name="person" size={12} color={COLORS.primary} />
       </View>
     );
-  }, [currentUserId]);
+  }, []);
 
+  // Render an inline owner reply that appears INSIDE the parent comment card.
+  // This is never a standalone FlatList row — it's a nested block only.
+  const renderInlineOwnerReply = useCallback(
+    (child: Reply) => {
+      const ownChild = child.userId === currentUserId || !!child.isOwnReply;
+      const mode = canonicalMode(child.identityMode as string | undefined, !!child.isAnonymous);
+      const displayName =
+        mode === 'anonymous' ? 'Anonymous' : child.authorName ? child.authorName : 'Someone';
+
+      // Long-press is available for everyone — own replies get Edit/Delete,
+      // others get Report. Closed threads are frozen.
+      const onLongPress = !isThreadClosed ? () => setMenuReplyId(child._id) : undefined;
+
+      return (
+        <Pressable
+          key={child._id}
+          onLongPress={onLongPress}
+          delayLongPress={350}
+          style={({ pressed }) => [
+            styles.inlineReplyRow,
+            pressed && ownChild && styles.replyCardPressed,
+          ]}
+        >
+          <View style={styles.inlineReplyConnector} />
+          <View style={styles.inlineReplyContent}>
+            <View style={styles.inlineReplyHeaderRow}>
+              {renderReplyAvatar(mode, child.authorPhotoUrl)}
+              <Text
+                style={[
+                  styles.inlineReplyAuthor,
+                  mode === 'anonymous' && styles.replyAuthorAnon,
+                ]}
+                numberOfLines={1}
+              >
+                {displayName}
+                {mode !== 'anonymous' && child.authorAge ? `, ${child.authorAge}` : ''}
+              </Text>
+              {mode !== 'anonymous' ? <GenderSymbol gender={child.authorGender} /> : null}
+              <View style={styles.inlineAuthorBadge}>
+                <Text style={styles.inlineAuthorBadgeText}>Author</Text>
+              </View>
+              <Text style={styles.inlineReplyTime}>
+                {formatTimeAgo(child.createdAt)}
+                {child.editedAt ? ' · edited' : ''}
+              </Text>
+            </View>
+            <Text style={styles.inlineReplyText}>{child.text}</Text>
+          </View>
+        </Pressable>
+      );
+    },
+    [currentUserId, isThreadClosed, renderReplyAvatar]
+  );
+
+  const renderReplyItem = useCallback(
+    ({ item }: { item: Reply }) => {
+      const ownReply = item.userId === currentUserId || !!item.isOwnReply;
+      const mode = canonicalMode(item.identityMode as string | undefined, !!item.isAnonymous);
+
+      const displayName =
+        mode === 'anonymous'
+          ? 'Anonymous'
+          : item.authorName
+          ? item.authorName
+          : 'Someone';
+
+      // Long-press works on every comment — own vs others is branched in the
+      // modal (Edit/Delete vs Report). Closed threads are frozen.
+      const onLongPress = !isThreadClosed ? () => setMenuReplyId(item._id) : undefined;
+
+      const children = childrenByParent[item._id] ?? [];
+      const hasOwnerReply = children.length > 0;
+
+      // One reply per comment: hide the Reply button once the owner has replied.
+      const showOwnerReplyButton =
+        isOwner &&
+        !ownReply &&
+        !isThreadClosed &&
+        !hasOwnerReply &&
+        composerMode !== 'edit';
+
+      return (
+        <Pressable
+          onLongPress={onLongPress}
+          delayLongPress={350}
+          style={({ pressed }) => [
+            styles.replyCard,
+            ownReply && styles.replyCardOwn,
+            pressed && ownReply && styles.replyCardPressed,
+          ]}
+        >
+          <View style={styles.replyHeader}>
+            {renderReplyAvatar(mode, item.authorPhotoUrl)}
+            <View style={styles.replyAuthorBlock}>
+              <View style={styles.replyAuthorRow}>
+                <Text
+                  style={[
+                    styles.replyAuthor,
+                    ownReply && styles.replyAuthorOwn,
+                    mode === 'anonymous' && styles.replyAuthorAnon,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {displayName}
+                  {mode !== 'anonymous' && item.authorAge ? `, ${item.authorAge}` : ''}
+                </Text>
+                {mode !== 'anonymous' ? <GenderSymbol gender={item.authorGender} /> : null}
+                {ownReply ? <Text style={styles.replyYouTag}> (You)</Text> : null}
+              </View>
+              <Text style={styles.replyTime}>
+                {formatTimeAgo(item.createdAt)}
+                {item.editedAt ? ' · edited' : ''}
+              </Text>
+            </View>
+
+            {showOwnerReplyButton ? (
+              <TouchableOpacity
+                style={styles.headerReplyBtn}
+                onPress={() => handleBeginOwnerReply(item)}
+                activeOpacity={0.7}
+                hitSlop={6}
+              >
+                <Ionicons name="return-down-back-outline" size={13} color={COLORS.primary} />
+                <Text style={styles.headerReplyBtnText}>Reply</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+
+          <Text style={styles.replyText}>{item.text}</Text>
+
+          {hasOwnerReply ? (
+            <View style={styles.inlineReplyGroup}>
+              {children.map((child) => renderInlineOwnerReply(child))}
+            </View>
+          ) : null}
+        </Pressable>
+      );
+    },
+    [
+      childrenByParent,
+      composerMode,
+      currentUserId,
+      handleBeginOwnerReply,
+      isOwner,
+      isThreadClosed,
+      renderInlineOwnerReply,
+      renderReplyAvatar,
+    ]
+  );
+
+  // ────────────────────────────────────────────────────────────
+  // Header (hero confession)
+  // ────────────────────────────────────────────────────────────
   const renderHeader = useCallback(() => {
     if (!confession) return null;
 
-    // Determine effective visibility mode (same logic as ConfessionCard)
-    const effectiveVisibility = confession.authorVisibility || (confession.isAnonymous ? 'anonymous' : 'open');
+    const effectiveVisibility =
+      confession.authorVisibility || (confession.isAnonymous ? 'anonymous' : 'open');
     const isFullyAnonymous = effectiveVisibility === 'anonymous';
-    const isBlurPhoto = effectiveVisibility === 'blur_photo' || (effectiveVisibility as string) === 'blur';
+    const isBlurPhoto =
+      effectiveVisibility === 'blur_photo' || (effectiveVisibility as string) === 'blur';
 
-    // Build display name with age and gender (same logic as ConfessionCard)
     const getDisplayName = (): string => {
       if (isFullyAnonymous) return 'Anonymous';
       if (!confession.authorName) return 'Someone';
       let name = confession.authorName;
-      if (confession.authorAge) {
-        name += `, ${confession.authorAge}`;
-      }
-      if (confession.authorGender) {
-        const genderLabel = confession.authorGender === 'male' ? 'M'
-          : confession.authorGender === 'female' ? 'F'
-          : confession.authorGender === 'non_binary' ? 'NB'
-          : confession.authorGender === 'lesbian' ? 'F' : '';
-        if (genderLabel) name += ` ${genderLabel}`;
-      }
+      if (confession.authorAge) name += `, ${confession.authorAge}`;
       return name;
     };
 
     return (
       <View style={styles.headerSection}>
-        {/* Hero confession card - matches ConfessionCard component styling */}
         <View style={styles.confessionCard}>
-          {/* Author row - matches homepage card */}
           <View style={styles.authorRow}>
             {isFullyAnonymous ? (
               <View style={[styles.avatar, styles.avatarAnonymous]}>
@@ -250,7 +840,7 @@ export default function ConfessionThreadScreen() {
                 source={{ uri: confession.authorPhotoUrl }}
                 style={styles.avatarImage}
                 contentFit="cover"
-                blurRadius={20}
+                blurRadius={BLUR_PHOTO_RADIUS}
               />
             ) : confession.authorPhotoUrl ? (
               <Image
@@ -266,38 +856,50 @@ export default function ConfessionThreadScreen() {
             <Text style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>
               {getDisplayName()}
             </Text>
+            {!isFullyAnonymous ? <GenderSymbol gender={confession.authorGender} /> : null}
             <Text style={styles.timeAgo}>{formatTimeAgo(confession.createdAt)}</Text>
           </View>
 
-          {/* Confession body - matches homepage text styling */}
           <Text style={styles.confessionText}>{confession.text}</Text>
 
-          {/* Stats row - matches homepage metadata styling */}
           <View style={styles.statsRow}>
             <View style={styles.statItem}>
               <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
               <Text style={styles.statCount}>{confession.replyCount}</Text>
-              <Text style={styles.statLabel}>{confession.replyCount === 1 ? 'Reply' : 'Replies'}</Text>
+              <Text style={styles.statLabel}>
+                {confession.replyCount === 1 ? 'Reply' : 'Replies'}
+              </Text>
             </View>
             <View style={styles.statItem}>
               <Ionicons name="heart-outline" size={14} color={COLORS.textMuted} />
               <Text style={styles.statCount}>{confession.reactionCount}</Text>
-              <Text style={styles.statLabel}>{confession.reactionCount === 1 ? 'Reaction' : 'Reactions'}</Text>
+              <Text style={styles.statLabel}>
+                {confession.reactionCount === 1 ? 'Reaction' : 'Reactions'}
+              </Text>
             </View>
           </View>
         </View>
 
-        {/* Replies section header */}
-        {replies.length > 0 && (
-          <View style={styles.repliesSectionHeader}>
-            <Text style={styles.repliesSectionTitle}>
-              {replies.length} {replies.length === 1 ? 'Reply' : 'Replies'}
+        {isThreadClosed ? (
+          <View style={styles.closedBanner}>
+            <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
+            <Text style={styles.closedBannerText}>
+              This confession has expired. Comments are closed.
             </Text>
           </View>
-        )}
+        ) : null}
+
+        {topLevelReplies.length > 0 ? (
+          <View style={styles.repliesSectionHeader}>
+            <Text style={styles.repliesSectionTitle}>
+              {topLevelReplies.length}{' '}
+              {topLevelReplies.length === 1 ? 'Reply' : 'Replies'}
+            </Text>
+          </View>
+        ) : null}
       </View>
     );
-  }, [confession, replies.length]);
+  }, [confession, isThreadClosed, topLevelReplies.length]);
 
   const renderEmpty = useCallback(() => {
     if (isLoading) return null;
@@ -306,13 +908,21 @@ export default function ConfessionThreadScreen() {
         <View style={styles.emptyIconWrap}>
           <Ionicons name="chatbubbles-outline" size={40} color={COLORS.textMuted} />
         </View>
-        <Text style={styles.emptyTitle}>No replies yet</Text>
-        <Text style={styles.emptySubtitle}>Be the first to share your thoughts</Text>
+        <Text style={styles.emptyTitle}>
+          {isThreadClosed ? 'Thread closed' : 'No replies yet'}
+        </Text>
+        <Text style={styles.emptySubtitle}>
+          {isThreadClosed
+            ? 'This confession has expired.'
+            : 'Be the first to share your thoughts'}
+        </Text>
       </View>
     );
-  }, [isLoading]);
+  }, [isLoading, isThreadClosed]);
 
-  // Loading state
+  // ────────────────────────────────────────────────────────────
+  // Loading / not-found states
+  // ────────────────────────────────────────────────────────────
   if (isLoading) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
@@ -331,7 +941,6 @@ export default function ConfessionThreadScreen() {
     );
   }
 
-  // Error state - confession not found
   if (!confession) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
@@ -347,7 +956,9 @@ export default function ConfessionThreadScreen() {
             <Ionicons name="alert-circle-outline" size={48} color={COLORS.textMuted} />
           </View>
           <Text style={styles.errorTitle}>Not Found</Text>
-          <Text style={styles.errorSubtitle}>This confession may have expired or been removed.</Text>
+          <Text style={styles.errorSubtitle}>
+            This confession may have expired or been removed.
+          </Text>
           <TouchableOpacity style={styles.errorButton} onPress={handleBack}>
             <Text style={styles.errorButtonText}>Go Back</Text>
           </TouchableOpacity>
@@ -356,6 +967,189 @@ export default function ConfessionThreadScreen() {
     );
   }
 
+  // ────────────────────────────────────────────────────────────
+  // Composer sub-sections
+  // ────────────────────────────────────────────────────────────
+  const renderIdentitySelector = () => (
+    <View style={styles.identitySelectorRow}>
+      {IDENTITY_OPTIONS.map((opt) => {
+        const selected = identityMode === opt.key;
+        return (
+          <TouchableOpacity
+            key={opt.key}
+            style={[styles.identityChip, selected && styles.identityChipSelected]}
+            onPress={() => setIdentityMode(opt.key)}
+            activeOpacity={0.8}
+          >
+            <Ionicons
+              name={opt.icon}
+              size={14}
+              color={selected ? COLORS.white : COLORS.textLight}
+            />
+            <Text
+              style={[styles.identityChipLabel, selected && styles.identityChipLabelSelected]}
+              numberOfLines={1}
+            >
+              {opt.label}
+            </Text>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+
+  const renderActiveComposer = () => {
+    const description =
+      IDENTITY_OPTIONS.find((o) => o.key === identityMode)?.description ?? '';
+
+    let placeholder = 'Write a comment...';
+    if (composerMode === 'edit') placeholder = 'Edit your comment...';
+    else if (composerMode === 'owner-reply') placeholder = 'Reply as the author...';
+    else if (identityMode === 'anonymous') placeholder = 'Comment anonymously...';
+
+    return (
+      <View style={[styles.composerContainer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+        {composerMode === 'owner-reply' && replyingToParent ? (
+          <View style={styles.replyingToBar}>
+            <Ionicons name="return-down-forward-outline" size={13} color={COLORS.textMuted} />
+            <Text style={styles.replyingToText} numberOfLines={1}>
+              Replying to{' '}
+              {canonicalMode(
+                replyingToParent.identityMode as string | undefined,
+                !!replyingToParent.isAnonymous
+              ) === 'anonymous'
+                ? 'Anonymous'
+                : replyingToParent.authorName ?? 'Someone'}
+            </Text>
+            <TouchableOpacity onPress={resetComposer} hitSlop={8}>
+              <Ionicons name="close" size={14} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {composerMode === 'edit' ? (
+          <View style={styles.replyingToBar}>
+            <Ionicons name="create-outline" size={13} color={COLORS.textMuted} />
+            <Text style={styles.replyingToText} numberOfLines={1}>
+              Editing your comment
+            </Text>
+            <TouchableOpacity onPress={resetComposer} hitSlop={8}>
+              <Ionicons name="close" size={14} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {composerMode !== 'owner-reply' ? renderIdentitySelector() : null}
+
+        <View style={styles.composerRow}>
+          <TextInput
+            ref={inputRef}
+            style={styles.textInput}
+            placeholder={placeholder}
+            placeholderTextColor={COLORS.textMuted}
+            value={replyText}
+            onChangeText={setReplyText}
+            multiline
+            maxLength={500}
+          />
+          <TouchableOpacity
+            style={[
+              styles.sendButton,
+              (!replyText.trim() || submitting) && styles.sendButtonDisabled,
+            ]}
+            onPress={handleSubmitReply}
+            disabled={!replyText.trim() || submitting}
+            activeOpacity={0.8}
+          >
+            {submitting ? (
+              <ActivityIndicator size="small" color={COLORS.white} />
+            ) : (
+              <Ionicons
+                name={composerMode === 'edit' ? 'checkmark' : 'arrow-up'}
+                size={18}
+                color={COLORS.white}
+              />
+            )}
+          </TouchableOpacity>
+        </View>
+
+        <Text style={styles.composerHint}>{description}</Text>
+      </View>
+    );
+  };
+
+  const renderAlreadyCommentedFooter = () => {
+    if (!myExistingReply) return null;
+    return (
+      <View
+        style={[
+          styles.alreadyCommentedContainer,
+          { paddingBottom: Math.max(insets.bottom, 8) },
+        ]}
+      >
+        <View style={styles.alreadyCommentedRow}>
+          <View style={styles.alreadyCommentedIcon}>
+            <Ionicons name="checkmark-circle-outline" size={18} color={COLORS.primary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.alreadyCommentedTitle}>You already commented</Text>
+            <Text style={styles.alreadyCommentedSub} numberOfLines={1}>
+              Long-press your comment to edit or delete
+            </Text>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
+  const renderClosedFooter = () => (
+    <View style={[styles.ownerNotice, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+      <View style={styles.ownerNoticeInner}>
+        <View style={styles.ownerNoticeIcon}>
+          <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
+        </View>
+        <Text style={styles.ownerNoticeText}>
+          This confession has expired. Comments are closed.
+        </Text>
+      </View>
+    </View>
+  );
+
+  const renderOwnerIdleFooter = () => (
+    <View style={[styles.ownerNotice, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+      <View style={styles.ownerNoticeInner}>
+        <View style={styles.ownerNoticeIcon}>
+          <Ionicons name="eye-outline" size={14} color={COLORS.textMuted} />
+        </View>
+        <Text style={styles.ownerNoticeText}>
+          This is your confession. Tap Reply on any comment to respond as the author.
+        </Text>
+      </View>
+    </View>
+  );
+
+  // ────────────────────────────────────────────────────────────
+  // Footer selector — choose which composer (or closed notice) to show
+  // ────────────────────────────────────────────────────────────
+  let footer: React.ReactNode;
+  if (isThreadClosed) {
+    footer = renderClosedFooter();
+  } else if (composerMode === 'edit') {
+    // Edit must beat the isOwner branch so owners editing their own inline
+    // replies still see the edit composer (otherwise the idle-owner notice
+    // swallows it and there is no way to save the edit).
+    footer = renderActiveComposer();
+  } else if (isOwner) {
+    footer = composerMode === 'owner-reply' ? renderActiveComposer() : renderOwnerIdleFooter();
+  } else if (myExistingReply) {
+    footer = renderAlreadyCommentedFooter();
+  } else {
+    footer = renderActiveComposer();
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Main render
+  // ────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <KeyboardAvoidingView
@@ -363,7 +1157,6 @@ export default function ConfessionThreadScreen() {
         style={styles.keyboardContainer}
         keyboardVerticalOffset={0}
       >
-        {/* Header - matches homepage style */}
         <View style={styles.header}>
           <TouchableOpacity onPress={handleBack} hitSlop={8}>
             <Ionicons name="chevron-back" size={24} color={COLORS.text} />
@@ -372,9 +1165,8 @@ export default function ConfessionThreadScreen() {
           <View style={{ width: 24 }} />
         </View>
 
-        {/* Replies list with confession as header */}
         <FlatList
-          data={replies}
+          data={topLevelReplies}
           keyExtractor={(item) => item._id}
           renderItem={renderReplyItem}
           ListHeaderComponent={renderHeader}
@@ -384,73 +1176,87 @@ export default function ConfessionThreadScreen() {
             { paddingBottom: insets.bottom + 96 },
           ]}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
         />
 
-        {/* Reply input - hidden for confession owner */}
-        {confession.userId === currentUserId ? (
-          <View style={[styles.ownerNotice, { paddingBottom: Math.max(insets.bottom, 16) }]}>
-            <View style={styles.ownerNoticeInner}>
-              <View style={styles.ownerNoticeIcon}>
-                <Ionicons name="eye-outline" size={14} color={COLORS.textMuted} />
-              </View>
-              <Text style={styles.ownerNoticeText}>
-                This is your confession. You can view replies but cannot respond.
-              </Text>
-            </View>
-          </View>
-        ) : (
-          <View style={[styles.composerContainer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
-            <View style={styles.composerRow}>
-              {/* Anonymous toggle */}
-              <TouchableOpacity
-                style={[styles.anonToggle, isAnonymousReply && styles.anonToggleActive]}
-                onPress={() => setIsAnonymousReply(!isAnonymousReply)}
-                activeOpacity={0.7}
-              >
-                <Ionicons
-                  name={isAnonymousReply ? 'eye-off' : 'eye'}
-                  size={16}
-                  color={isAnonymousReply ? COLORS.white : COLORS.textMuted}
-                />
-              </TouchableOpacity>
-
-              {/* Text input */}
-              <TextInput
-                ref={inputRef}
-                style={styles.textInput}
-                placeholder={isAnonymousReply ? 'Reply anonymously...' : 'Write a reply...'}
-                placeholderTextColor={COLORS.textMuted}
-                value={replyText}
-                onChangeText={setReplyText}
-                multiline
-                maxLength={500}
-              />
-
-              {/* Send button */}
-              <TouchableOpacity
-                style={[
-                  styles.sendButton,
-                  (!replyText.trim() || submitting) && styles.sendButtonDisabled,
-                ]}
-                onPress={handleSubmitReply}
-                disabled={!replyText.trim() || submitting}
-                activeOpacity={0.8}
-              >
-                {submitting ? (
-                  <ActivityIndicator size="small" color={COLORS.white} />
-                ) : (
-                  <Ionicons name="arrow-up" size={18} color={COLORS.white} />
-                )}
-              </TouchableOpacity>
-            </View>
-
-            {/* Anonymous hint */}
-            <Text style={styles.composerHint}>
-              {isAnonymousReply ? 'Replying anonymously' : 'Your name will be visible'}
-            </Text>
-          </View>
-        )}
+        {footer}
       </KeyboardAvoidingView>
+
+      {/* Long-press action modal for own comment — compact centered card */}
+      <Modal
+        visible={menuVisible}
+        transparent
+        animationType="none"
+        onRequestClose={() => setMenuReplyId(null)}
+      >
+        <Animated.View style={[styles.menuBackdrop, { opacity: menuOpacity }]}>
+          <Pressable style={styles.menuBackdropPress} onPress={() => setMenuReplyId(null)}>
+            <Animated.View
+              style={[
+                styles.menuCard,
+                { opacity: menuOpacity, transform: [{ scale: menuScale }] },
+              ]}
+              // Stop touches on the card from closing the modal.
+              onStartShouldSetResponder={() => true}
+            >
+              <Text style={styles.menuTitle}>
+                {menuTargetIsOwn ? 'Manage Comment' : 'Comment Actions'}
+              </Text>
+
+              {menuTargetIsOwn ? (
+                <View style={styles.menuRow}>
+                  <TouchableOpacity
+                    style={[styles.menuBtn, styles.menuBtnEdit]}
+                    onPress={handleBeginEdit}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="create-outline" size={18} color={COLORS.primary} />
+                    <Text style={[styles.menuBtnText, styles.menuBtnTextEdit]}>Edit</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.menuBtn, styles.menuBtnDelete]}
+                    onPress={handleDelete}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="trash-outline" size={18} color={MENU_DANGER} />
+                    <Text style={[styles.menuBtnText, styles.menuBtnTextDelete]}>Delete</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.menuBtn, styles.menuBtnCancel]}
+                    onPress={() => setMenuReplyId(null)}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="close-outline" size={18} color={COLORS.textMuted} />
+                    <Text style={[styles.menuBtnText, styles.menuBtnTextCancel]}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.menuRow}>
+                  <TouchableOpacity
+                    style={[styles.menuBtn, styles.menuBtnReport]}
+                    onPress={handleReport}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="flag-outline" size={18} color={MENU_DANGER} />
+                    <Text style={[styles.menuBtnText, styles.menuBtnTextReport]}>Report</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.menuBtn, styles.menuBtnCancel]}
+                    onPress={() => setMenuReplyId(null)}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="close-outline" size={18} color={COLORS.textMuted} />
+                    <Text style={[styles.menuBtnText, styles.menuBtnTextCancel]}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </Animated.View>
+          </Pressable>
+        </Animated.View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -461,7 +1267,7 @@ const styles = StyleSheet.create({
   // ─────────────────────────────────────────────────────────────
   container: {
     flex: 1,
-    backgroundColor: COLORS.backgroundDark, // Same as homepage
+    backgroundColor: COLORS.backgroundDark,
   },
   keyboardContainer: {
     flex: 1,
@@ -470,9 +1276,7 @@ const styles = StyleSheet.create({
     paddingTop: 8,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Header - matches homepage header style
-  // ─────────────────────────────────────────────────────────────
+  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -489,9 +1293,7 @@ const styles = StyleSheet.create({
     color: COLORS.text,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Loading State
-  // ─────────────────────────────────────────────────────────────
+  // Loading
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -503,9 +1305,7 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Error State
-  // ─────────────────────────────────────────────────────────────
+  // Error
   errorContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -546,16 +1346,12 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Header Section
-  // ─────────────────────────────────────────────────────────────
+  // Header section
   headerSection: {
     paddingBottom: 4,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Confession Card - matches ConfessionCard component exactly
-  // ─────────────────────────────────────────────────────────────
+  // Confession card (hero)
   confessionCard: {
     backgroundColor: COLORS.background,
     borderRadius: 16,
@@ -564,12 +1360,10 @@ const styles = StyleSheet.create({
     paddingBottom: 14,
     marginHorizontal: 12,
     marginVertical: 6,
-    // Shadow for iOS - matches homepage
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
     shadowRadius: 8,
-    // Elevation for Android
     elevation: 3,
   },
   authorRow: {
@@ -640,9 +1434,26 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Replies Section Header
-  // ─────────────────────────────────────────────────────────────
+  // Closed banner
+  closedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 12,
+    marginTop: 6,
+    marginBottom: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(153,153,153,0.10)',
+    borderRadius: 12,
+  },
+  closedBannerText: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    flex: 1,
+  },
+
+  // Replies section header
   repliesSectionHeader: {
     paddingHorizontal: 20,
     paddingVertical: 14,
@@ -655,9 +1466,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Reply Cards - similar card styling as homepage
-  // ─────────────────────────────────────────────────────────────
+  // Reply cards
   replyCard: {
     backgroundColor: COLORS.background,
     borderRadius: 16,
@@ -666,17 +1475,18 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     marginHorizontal: 12,
     marginBottom: 8,
-    // Shadow for iOS
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
     shadowRadius: 4,
-    // Elevation for Android
     elevation: 2,
   },
   replyCardOwn: {
     borderLeftWidth: 3,
     borderLeftColor: COLORS.primary,
+  },
+  replyCardPressed: {
+    opacity: 0.85,
   },
   replyHeader: {
     flexDirection: 'row',
@@ -685,39 +1495,138 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   replyAvatar: {
-    width: moderateScale(18, 0.3),
-    height: moderateScale(18, 0.3),
-    borderRadius: moderateScale(9, 0.3),
-    backgroundColor: 'rgba(153,153,153,0.12)',
+    width: REPLY_AVATAR_SIZE,
+    height: REPLY_AVATAR_SIZE,
+    borderRadius: REPLY_AVATAR_SIZE / 2,
+    backgroundColor: 'rgba(255,107,107,0.12)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  replyAvatarOwn: {
-    backgroundColor: 'rgba(255,107,107,0.12)',
+  replyAvatarAnon: {
+    backgroundColor: 'rgba(153,153,153,0.12)',
+  },
+  replyAvatarImage: {
+    width: REPLY_AVATAR_SIZE,
+    height: REPLY_AVATAR_SIZE,
+    borderRadius: REPLY_AVATAR_SIZE / 2,
+  },
+  replyAuthorBlock: {
+    flex: 1,
+  },
+  replyAuthorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   replyAuthor: {
     fontSize: 13,
     fontWeight: '600',
-    color: COLORS.textLight,
-    flex: 1,
+    color: COLORS.text,
   },
   replyAuthorOwn: {
     color: COLORS.primary,
   },
-  replyTime: {
+  replyAuthorAnon: {
+    color: COLORS.textLight,
+  },
+  replyYouTag: {
     fontSize: 12,
     color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+  genderIcon: {
+    marginLeft: 2,
+  },
+  replyTime: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 2,
   },
   replyText: {
     fontSize: 15,
     lineHeight: 22,
     color: COLORS.text,
-    paddingLeft: moderateScale(26, 0.3),
+    paddingLeft: REPLY_AVATAR_SIZE + 8,
+  },
+  // Header-right compact Reply button (inline with name/time).
+  headerReplyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    backgroundColor: 'rgba(255,107,107,0.10)',
+    borderRadius: 10,
+  },
+  headerReplyBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.primary,
+    letterSpacing: 0.1,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Empty State - matches homepage empty state styling
-  // ─────────────────────────────────────────────────────────────
+  // Inline owner reply — rendered INSIDE the parent comment card.
+  inlineReplyGroup: {
+    marginTop: 10,
+    marginLeft: REPLY_AVATAR_SIZE + 8,
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  inlineReplyRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 8,
+    paddingVertical: 2,
+  },
+  inlineReplyConnector: {
+    width: 2,
+    backgroundColor: 'rgba(255,107,107,0.35)',
+    borderRadius: 1,
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  inlineReplyContent: {
+    flex: 1,
+  },
+  inlineReplyHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+    flexWrap: 'wrap',
+  },
+  inlineReplyAuthor: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  inlineAuthorBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    backgroundColor: 'rgba(255,107,107,0.14)',
+    borderRadius: 6,
+  },
+  inlineAuthorBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: COLORS.primary,
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+  },
+  inlineReplyTime: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    marginLeft: 'auto',
+  },
+  inlineReplyText: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: COLORS.text,
+    paddingLeft: REPLY_AVATAR_SIZE + 6,
+  },
+
+  // Empty state
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -746,9 +1655,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Owner Notice - styled as subtle info card
-  // ─────────────────────────────────────────────────────────────
+  // Owner notice
   ownerNotice: {
     backgroundColor: COLORS.background,
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -779,9 +1686,7 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
 
-  // ─────────────────────────────────────────────────────────────
-  // Reply Composer - matches homepage styling
-  // ─────────────────────────────────────────────────────────────
+  // Composer
   composerContainer: {
     backgroundColor: COLORS.background,
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -789,21 +1694,55 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 10,
   },
+  replyingToBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(153,153,153,0.10)',
+    borderRadius: 10,
+  },
+  replyingToText: {
+    flex: 1,
+    fontSize: 12,
+    color: COLORS.textLight,
+  },
+  identitySelectorRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginBottom: 10,
+  },
+  identityChip: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    borderRadius: 14,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  identityChipSelected: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.primary,
+  },
+  identityChipLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textLight,
+  },
+  identityChipLabelSelected: {
+    color: COLORS.white,
+  },
   composerRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 8,
-  },
-  anonToggle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: COLORS.backgroundDark,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  anonToggleActive: {
-    backgroundColor: COLORS.primary,
   },
   textInput: {
     flex: 1,
@@ -822,7 +1761,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    // Shadow for depth
     shadowColor: COLORS.primary,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.25,
@@ -838,7 +1776,127 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: COLORS.textMuted,
     marginTop: 6,
-    marginLeft: 46,
     marginBottom: 2,
+    textAlign: 'center',
+  },
+
+  // Already-commented footer — compact; distinct from the full composer.
+  alreadyCommentedContainer: {
+    backgroundColor: COLORS.background,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+  },
+  alreadyCommentedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    backgroundColor: 'rgba(255,107,107,0.08)',
+    borderRadius: 12,
+  },
+  alreadyCommentedIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: COLORS.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alreadyCommentedTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  alreadyCommentedSub: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 1,
+  },
+  // Long-press compact action modal (centered card)
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  menuBackdropPress: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  menuCard: {
+    width: '100%',
+    maxWidth: 340,
+    backgroundColor: COLORS.background,
+    borderRadius: 20,
+    paddingTop: 18,
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+    shadowColor: '#000',
+    shadowOpacity: 0.28,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 16,
+  },
+  menuTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
+    textAlign: 'center',
+    marginBottom: 16,
+    letterSpacing: 0.2,
+  },
+  menuRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 10,
+  },
+  menuBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: 12,
+    paddingHorizontal: 6,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  menuBtnEdit: {
+    backgroundColor: 'rgba(255, 107, 107, 0.10)',
+    borderColor: 'rgba(255, 107, 107, 0.28)',
+  },
+  menuBtnDelete: {
+    backgroundColor: 'rgba(220, 38, 38, 0.08)',
+    borderColor: 'rgba(220, 38, 38, 0.25)',
+  },
+  menuBtnReport: {
+    flex: 2,
+    backgroundColor: 'rgba(220, 38, 38, 0.08)',
+    borderColor: 'rgba(220, 38, 38, 0.25)',
+  },
+  menuBtnCancel: {
+    backgroundColor: COLORS.backgroundDark,
+    borderColor: COLORS.border,
+  },
+  menuBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.1,
+  },
+  menuBtnTextEdit: {
+    color: COLORS.primary,
+  },
+  menuBtnTextDelete: {
+    color: MENU_DANGER,
+  },
+  menuBtnTextReport: {
+    color: MENU_DANGER,
+  },
+  menuBtnTextCancel: {
+    color: COLORS.textMuted,
   },
 });
