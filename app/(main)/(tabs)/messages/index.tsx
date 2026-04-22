@@ -1674,7 +1674,7 @@ const styles = StyleSheet.create({
   countBadge: {
     backgroundColor: COLORS.superLike + '20',
     paddingHorizontal: moderateScale(6, 0.25),
-    paddingVertical: 1,
+    paddingVertical: moderateScale(1, 0.25),
     borderRadius: SIZES.radius.sm,
   },
   countBadgeText: {

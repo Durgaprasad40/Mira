@@ -290,7 +290,7 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
                     style={[
                       styles.waveBar,
                       {
-                        height: 8 + Math.random() * 32,
+                        height: moderateScale(8 + Math.random() * 32, 0.3),
                         transform: [{ scaleY: pulseAnim }],
                       },
                     ]}
@@ -475,13 +475,13 @@ const styles = StyleSheet.create({
   postRow: { flexDirection: 'row', gap: SPACING.base, alignItems: 'center' },
   retryBtn: {
     flexDirection: 'row', alignItems: 'center', gap: SPACING.sm - 2,
-    paddingHorizontal: SPACING.base, paddingVertical: SPACING.md - 2, borderRadius: SIZES.radius.xl,
+    paddingHorizontal: SPACING.base, paddingVertical: moderateScale(10, 0.5), borderRadius: SIZES.radius.xl,
     backgroundColor: C.surface,
   },
   retryText: { fontSize: FONT_SIZE.body, lineHeight: lineHeight(FONT_SIZE.body, 1.2), fontWeight: '600', color: C.text },
   postBtn: {
     flexDirection: 'row', alignItems: 'center', gap: SPACING.sm - 2,
-    backgroundColor: C.primary, paddingHorizontal: SPACING.xl, paddingVertical: SPACING.md - 2, borderRadius: SIZES.radius.xl,
+    backgroundColor: C.primary, paddingHorizontal: SPACING.xl, paddingVertical: moderateScale(10, 0.5), borderRadius: SIZES.radius.xl,
     minWidth: moderateScale(90, 0.25), justifyContent: 'center',
   },
   postBtnDisabled: { opacity: 0.6 },

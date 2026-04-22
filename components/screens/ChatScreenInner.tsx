@@ -2494,7 +2494,7 @@ const styles = StyleSheet.create({
   headerStatus: {
     fontSize: FONT_SIZE.sm,
     color: COLORS.textLight,
-    marginTop: 1,
+    marginTop: moderateScale(1, 0.25),
     lineHeight: lineHeight(FONT_SIZE.sm, 1.35),
   },
   // Right section container for T/D button and menu

@@ -622,7 +622,7 @@ export function UnifiedAnswerComposer({
                       {Array.from({ length: 12 }).map((_, i) => (
                         <View
                           key={i}
-                          style={[styles.audioBar, { height: 6 + (i % 4) * 5 }]}
+                          style={[styles.audioBar, { height: moderateScale(6 + (i % 4) * 5, 0.3) }]}
                         />
                       ))}
                     </View>
@@ -1033,7 +1033,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: SPACING.sm + SPACING.xs,
     backgroundColor: C.surface,
-    borderRadius: SIZES.radius.sm + 2,
+    borderRadius: moderateScale(10, 0.25),
     padding: moderateScale(10, 0.35),
   },
   audioPlayBtn: { padding: moderateScale(2, 0.25) },
@@ -1096,7 +1096,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: SPACING.sm + SPACING.xs,
     backgroundColor: '#F4433620',
-    borderRadius: SIZES.radius.sm + 2,
+    borderRadius: moderateScale(10, 0.25),
     padding: SPACING.md,
     marginBottom: SPACING.md,
   },
@@ -1129,14 +1129,14 @@ const styles = StyleSheet.create({
     gap: SPACING.xs,
     paddingVertical: moderateScale(10, 0.35),
     backgroundColor: C.surface,
-    borderRadius: SIZES.radius.sm + 2,
+    borderRadius: moderateScale(10, 0.25),
   },
   attachBtnText: { fontSize: FONT_SIZE.sm, lineHeight: lineHeight(FONT_SIZE.sm, 1.2), fontWeight: '600', color: C.text },
 
   // Identity picker
   identitySection: {
     backgroundColor: C.surface,
-    borderRadius: SIZES.radius.sm + 2,
+    borderRadius: moderateScale(10, 0.25),
     padding: moderateScale(10, 0.35),
     marginBottom: SPACING.sm,
   },
@@ -1320,7 +1320,7 @@ const styles = StyleSheet.create({
   mediaConfirmCancelBtn: {
     flex: 1,
     paddingVertical: SPACING.md,
-    borderRadius: SIZES.radius.sm + 2,
+    borderRadius: moderateScale(10, 0.25),
     backgroundColor: C.surface,
     alignItems: 'center',
   },
@@ -1334,7 +1334,7 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     paddingVertical: SPACING.md,
-    borderRadius: SIZES.radius.sm + 2,
+    borderRadius: moderateScale(10, 0.25),
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
