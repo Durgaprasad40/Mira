@@ -33,12 +33,26 @@ import {
   INTEREST_CATEGORIES,
 } from "@/components/explore/exploreCategories";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
-import { COLORS } from "@/lib/constants";
+import { COLORS, FONT_SIZE, SPACING, SIZES, lineHeight, moderateScale } from "@/lib/constants";
 
-const GRID_PADDING = 16;
-const GRID_GAP = 14; // Slightly more breathing room
-const TILE_BORDER_RADIUS = 20; // Consistent rounded corners
-const TILE_MAX_WIDTH = 280;
+const GRID_PADDING = SPACING.base;
+const GRID_GAP = SPACING.md;
+const TILE_BORDER_RADIUS = SIZES.radius.lg;
+const TILE_MAX_WIDTH = moderateScale(280, 0.25);
+const TEXT_MAX_SCALE = 1.2;
+const TEXT_PROPS = { maxFontSizeMultiplier: TEXT_MAX_SCALE } as const;
+const HEADER_ACTION_SIZE = moderateScale(36, 0.25);
+const EMPTY_STATE_ICON_SIZE = moderateScale(48, 0.3);
+const TILE_BADGE_HORIZONTAL_PADDING = moderateScale(10, 0.25);
+const TILE_BADGE_VERTICAL_PADDING = moderateScale(5, 0.25);
+const TILE_BADGE_MIN_WIDTH = moderateScale(28, 0.25);
+const TILE_STATUS_BADGE_MAX_WIDTH = moderateScale(110, 0.25);
+const TILE_TITLE_SIZE = moderateScale(15, 0.4);
+const RETURN_HOOK_CATEGORY_SIZE = moderateScale(15, 0.4);
+const RETRY_BUTTON_TEXT_SIZE = moderateScale(15, 0.4);
+const SKELETON_TITLE_HEIGHT = moderateScale(18, 0.25);
+const SKELETON_BADGE_WIDTH = moderateScale(36, 0.25);
+const SKELETON_BADGE_HEIGHT = moderateScale(24, 0.25);
 
 // ══════════════════════════════════════════════════════════════════════════
 // SKELETON LOADING CARD
@@ -187,24 +201,33 @@ const ExploreTile = React.memo(function ExploreTile({
           <View style={styles.tileContent}>
             {/* Icon with subtle background */}
             <View style={styles.tileIconContainer}>
-              <Text style={styles.tileIcon}>{category.icon}</Text>
+              <Text {...TEXT_PROPS} style={styles.tileIcon}>
+                {category.icon}
+              </Text>
             </View>
 
             {/* Count badge (top-right) */}
             {statusLabel ? (
               <View style={[styles.tileBadge, styles.tileStatusBadge]}>
-                <Text style={[styles.tileBadgeText, styles.tileStatusBadgeText]}>{statusLabel}</Text>
+                <Text
+                  {...TEXT_PROPS}
+                  style={[styles.tileBadgeText, styles.tileStatusBadgeText]}
+                >
+                  {statusLabel}
+                </Text>
               </View>
             ) : typeof count === "number" && count > 0 ? (
               <View style={styles.tileBadge}>
-                <Text style={styles.tileBadgeText}>{count}</Text>
+                <Text {...TEXT_PROPS} style={styles.tileBadgeText}>
+                  {count}
+                </Text>
               </View>
             ) : null
             }
 
             {/* Title at bottom with proper spacing */}
             <View style={styles.tileTitleContainer}>
-              <Text style={styles.tileTitle} numberOfLines={2}>
+              <Text {...TEXT_PROPS} style={styles.tileTitle} numberOfLines={2}>
                 {category.label}
               </Text>
             </View>
@@ -458,9 +481,11 @@ export default function ExploreScreen() {
   // Empty state
   const renderEmptyState = () => (
     <View style={styles.emptyContainer}>
-      <Ionicons name="sparkles-outline" size={52} color={COLORS.textLight} />
-      <Text style={styles.emptyTitle}>Explore is getting ready</Text>
-      <Text style={styles.emptySubtitle}>
+      <Ionicons name="sparkles-outline" size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
+      <Text {...TEXT_PROPS} style={styles.emptyTitle}>
+        Explore is getting ready
+      </Text>
+      <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
         We&apos;re preparing the next set of Explore categories. Check back in a bit.
       </Text>
     </View>
@@ -468,15 +493,19 @@ export default function ExploreScreen() {
 
   const renderZeroProfilesState = () => (
     <View style={styles.emptyContainer}>
-      <Ionicons name="people-outline" size={52} color={COLORS.textLight} />
-      <Text style={styles.emptyTitle}>No new people right now</Text>
-      <Text style={styles.emptySubtitle}>
+      <Ionicons name="people-outline" size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
+      <Text {...TEXT_PROPS} style={styles.emptyTitle}>
+        No new people right now
+      </Text>
+      <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
         {nearbyUnavailable
           ? "Fresh Explore profiles are quiet right now. Enable location for Nearby and check back soon."
           : "Fresh Explore profiles are quiet right now. Check back soon for new people."}
       </Text>
       <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
-        <Text style={styles.retryButtonText}>Refresh Explore</Text>
+        <Text {...TEXT_PROPS} style={styles.retryButtonText}>
+          Refresh Explore
+        </Text>
       </TouchableOpacity>
     </View>
   );
@@ -485,8 +514,10 @@ export default function ExploreScreen() {
   const renderLoadingState = () => (
     <View style={styles.loadingContainer}>
       <View style={styles.loadingCopyContainer}>
-        <Text style={styles.emptyTitle}>Refreshing Explore</Text>
-        <Text style={styles.emptySubtitle}>
+        <Text {...TEXT_PROPS} style={styles.emptyTitle}>
+          Refreshing Explore
+        </Text>
+        <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
           Pulling in fresh people, nearby energy, and the latest category counts.
         </Text>
       </View>
@@ -505,25 +536,35 @@ export default function ExploreScreen() {
 
   const renderErrorState = () => (
     <View style={styles.emptyContainer}>
-      <Ionicons name="alert-circle-outline" size={52} color={COLORS.textLight} />
-      <Text style={styles.emptyTitle}>Couldn&apos;t refresh Explore</Text>
-      <Text style={styles.emptySubtitle}>
+      <Ionicons name="alert-circle-outline" size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
+      <Text {...TEXT_PROPS} style={styles.emptyTitle}>
+        Couldn&apos;t refresh Explore
+      </Text>
+      <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
         {error ?? 'We hit a snag while refreshing Explore. Try again in a moment.'}
       </Text>
       <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
-        <Text style={styles.retryButtonText}>Refresh Explore</Text>
+        <Text {...TEXT_PROPS} style={styles.retryButtonText}>
+          Refresh Explore
+        </Text>
       </TouchableOpacity>
     </View>
   );
 
   const renderUnavailableState = (title: string, subtitle: string, iconName: React.ComponentProps<typeof Ionicons>["name"]) => (
     <View style={styles.emptyContainer}>
-      <Ionicons name={iconName} size={52} color={COLORS.textLight} />
-      <Text style={styles.emptyTitle}>{title}</Text>
-      <Text style={styles.emptySubtitle}>{subtitle}</Text>
+      <Ionicons name={iconName} size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
+      <Text {...TEXT_PROPS} style={styles.emptyTitle}>
+        {title}
+      </Text>
+      <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
+        {subtitle}
+      </Text>
       {countsStatus === "viewer_missing" && (
         <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
-          <Text style={styles.retryButtonText}>Try again</Text>
+          <Text {...TEXT_PROPS} style={styles.retryButtonText}>
+            Try again
+          </Text>
         </TouchableOpacity>
       )}
     </View>
@@ -533,7 +574,9 @@ export default function ExploreScreen() {
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       {/* Header - Always renders immediately (shell UI pattern) */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Explore</Text>
+        <Text {...TEXT_PROPS} style={styles.headerTitle}>
+          Explore
+        </Text>
         <TouchableOpacity
           accessibilityRole="button"
           accessibilityLabel="Refresh Explore"
@@ -544,7 +587,7 @@ export default function ExploreScreen() {
           {isLoading && hasLoadedDataOnceRef.current ? (
             <ActivityIndicator size="small" color={COLORS.primary} />
           ) : (
-            <Ionicons name="refresh" size={20} color={COLORS.text} />
+            <Ionicons name="refresh" size={SIZES.icon.md} color={COLORS.text} />
           )}
         </TouchableOpacity>
       </View>
@@ -552,14 +595,18 @@ export default function ExploreScreen() {
       {/* Return Hook */}
       {showReturnHook && returnCategory && (
         <TouchableOpacity style={styles.returnHook} onPress={handleReturnHookPress}>
-          <Text style={styles.returnHookIcon}>{returnCategory.icon}</Text>
+          <Text {...TEXT_PROPS} style={styles.returnHookIcon}>
+            {returnCategory.icon}
+          </Text>
           <View style={styles.returnHookTextContainer}>
-            <Text style={styles.returnHookLabel}>Pick up where you left off</Text>
-            <Text style={styles.returnHookCategory}>
+            <Text {...TEXT_PROPS} style={styles.returnHookLabel}>
+              Pick up where you left off
+            </Text>
+            <Text {...TEXT_PROPS} style={styles.returnHookCategory}>
               {returnCategory.title ?? returnCategory.label}
             </Text>
           </View>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
+          <Ionicons name="chevron-forward" size={SIZES.icon.md} color={COLORS.primary} />
         </TouchableOpacity>
       )}
 
@@ -597,8 +644,12 @@ export default function ExploreScreen() {
           {relationshipItems.length > 0 && (
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
-                <Text style={styles.sectionIcon}>❤️</Text>
-                <Text style={styles.sectionTitle}>Relationship</Text>
+                <Text {...TEXT_PROPS} style={styles.sectionIcon}>
+                  ❤️
+                </Text>
+                <Text {...TEXT_PROPS} style={styles.sectionTitle}>
+                  Relationship
+                </Text>
               </View>
               <View style={[styles.sectionGrid, sectionGridStyle]}>
                 {renderSectionGrid(relationshipItems)}
@@ -610,11 +661,15 @@ export default function ExploreScreen() {
           {rightNowItems.length > 0 && (
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
-                <Text style={styles.sectionIcon}>⚡</Text>
-                <Text style={styles.sectionTitle}>Right Now</Text>
+                <Text {...TEXT_PROPS} style={styles.sectionIcon}>
+                  ⚡
+                </Text>
+                <Text {...TEXT_PROPS} style={styles.sectionTitle}>
+                  Right Now
+                </Text>
               </View>
               {nearbyUnavailable && (
-                <Text style={styles.sectionHelperText}>
+                <Text {...TEXT_PROPS} style={styles.sectionHelperText}>
                   {nearbyStatus === "verification_required"
                     ? "Verify your profile to use Nearby."
                     : "Enable location access for Mira to use Nearby."}
@@ -630,8 +685,12 @@ export default function ExploreScreen() {
           {interestItems.length > 0 && (
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
-                <Text style={styles.sectionIcon}>🎯</Text>
-                <Text style={styles.sectionTitle}>Interests</Text>
+                <Text {...TEXT_PROPS} style={styles.sectionIcon}>
+                  🎯
+                </Text>
+                <Text {...TEXT_PROPS} style={styles.sectionTitle}>
+                  Interests
+                </Text>
               </View>
               <View style={[styles.sectionGrid, sectionGridStyle]}>
                 {renderSectionGrid(interestItems)}
@@ -656,19 +715,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: GRID_PADDING,
-    paddingTop: 8,
-    paddingBottom: 12,
+    paddingTop: SPACING.sm,
+    paddingBottom: SPACING.md,
   },
   headerTitle: {
-    fontSize: 28,
+    fontSize: FONT_SIZE.h2,
     fontWeight: "700",
     color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.h2, 1.2),
     letterSpacing: -0.5,
   },
   headerActionButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: HEADER_ACTION_SIZE,
+    height: HEADER_ACTION_SIZE,
+    borderRadius: SIZES.radius.full,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: COLORS.card,
@@ -680,29 +740,31 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "rgba(255, 107, 107, 0.08)",
     marginHorizontal: GRID_PADDING,
-    marginBottom: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 12,
+    marginBottom: SPACING.md,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.md,
+    borderRadius: SIZES.radius.md,
     borderWidth: 1,
     borderColor: "rgba(255, 107, 107, 0.15)",
   },
   returnHookIcon: {
-    fontSize: 24,
-    marginRight: 12,
+    fontSize: FONT_SIZE.title,
+    marginRight: SPACING.md,
   },
   returnHookTextContainer: {
     flex: 1,
   },
   returnHookLabel: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
   },
   returnHookCategory: {
-    fontSize: 15,
+    fontSize: RETURN_HOOK_CATEGORY_SIZE,
     fontWeight: "600",
     color: COLORS.text,
-    marginTop: 2,
+    lineHeight: lineHeight(RETURN_HOOK_CATEGORY_SIZE, 1.2),
+    marginTop: SPACING.xxs,
   },
 
   // ScrollView Layout
@@ -711,32 +773,34 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     paddingHorizontal: GRID_PADDING,
-    paddingBottom: 100,
+    paddingBottom: SPACING.xxxl * 2,
   },
 
   // Section Layout
   section: {
-    marginTop: 20,
+    marginTop: SPACING.lg,
   },
   sectionHeader: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 14,
-    gap: 8,
+    marginBottom: SPACING.md,
+    gap: SPACING.sm,
   },
   sectionIcon: {
-    fontSize: 20,
+    fontSize: FONT_SIZE.xxl,
   },
   sectionTitle: {
-    fontSize: 20,
+    fontSize: FONT_SIZE.xxl,
     fontWeight: "700",
     color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.xxl, 1.2),
     letterSpacing: -0.3,
   },
   sectionHelperText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textMuted,
-    marginBottom: 10,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
+    marginBottom: SPACING.sm,
   },
   sectionGrid: {
     alignSelf: "center",
@@ -778,60 +842,62 @@ const styles = StyleSheet.create({
   },
   tileContent: {
     flex: 1,
-    padding: 16,
+    padding: SPACING.base,
     justifyContent: "space-between",
   },
   // Icon container with subtle frosted background
   tileIconContainer: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
+    width: SIZES.button.md,
+    height: SIZES.button.md,
+    borderRadius: SIZES.radius.md,
     backgroundColor: COLORS.overlayLight,
     justifyContent: "center",
     alignItems: "center",
   },
   tileIcon: {
-    fontSize: 26,
+    fontSize: SIZES.icon.lg,
   },
   // Premium badge styling
   tileBadge: {
     position: "absolute",
-    top: 16,
-    right: 16,
+    top: SPACING.base,
+    right: SPACING.base,
     backgroundColor: COLORS.overlayMedium,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-    minWidth: 28,
+    paddingHorizontal: TILE_BADGE_HORIZONTAL_PADDING,
+    paddingVertical: TILE_BADGE_VERTICAL_PADDING,
+    borderRadius: SIZES.radius.md,
+    minWidth: TILE_BADGE_MIN_WIDTH,
     alignItems: "center",
     // Subtle inner glow effect
     borderWidth: 1,
     borderColor: COLORS.overlaySubtle,
   },
   tileStatusBadge: {
-    maxWidth: 110,
-    paddingHorizontal: 8,
+    maxWidth: TILE_STATUS_BADGE_MAX_WIDTH,
+    paddingHorizontal: SPACING.sm,
   },
   tileBadgeText: {
     color: COLORS.white,
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: "700",
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.2),
     letterSpacing: 0.3,
   },
   tileStatusBadgeText: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
     letterSpacing: 0,
   },
   // Title container with proper bottom spacing
   tileTitleContainer: {
     marginTop: "auto",
-    paddingTop: 8,
+    paddingTop: SPACING.sm,
   },
   tileTitle: {
     color: COLORS.white,
-    fontSize: 15,
+    fontSize: TILE_TITLE_SIZE,
     fontWeight: "700",
-    lineHeight: 20,
+    lineHeight: lineHeight(TILE_TITLE_SIZE, 1.2),
     letterSpacing: 0.2,
     // Strong text shadow for readability
     textShadowColor: COLORS.overlay,
@@ -841,11 +907,11 @@ const styles = StyleSheet.create({
 
   loadingContainer: {
     flex: 1,
-    paddingTop: 8,
+    paddingTop: SPACING.sm,
   },
   loadingCopyContainer: {
     paddingHorizontal: GRID_PADDING,
-    paddingBottom: 18,
+    paddingBottom: SPACING.lg,
   },
 
   // Empty State
@@ -853,37 +919,39 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 40,
-    paddingTop: 60,
+    paddingHorizontal: SPACING.xxl,
+    paddingTop: SPACING.xxxl,
   },
   emptyEmoji: {
-    fontSize: 48,
-    marginBottom: 16,
+    fontSize: FONT_SIZE.h1,
+    marginBottom: SPACING.base,
   },
   emptyTitle: {
-    fontSize: 18,
+    fontSize: FONT_SIZE.xl,
     fontWeight: "600",
     color: COLORS.text,
-    marginBottom: 8,
+    lineHeight: lineHeight(FONT_SIZE.xl, 1.2),
+    marginBottom: SPACING.sm,
     textAlign: "center",
   },
   emptySubtitle: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: COLORS.textMuted,
     textAlign: "center",
-    lineHeight: 21,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
   },
   retryButton: {
-    marginTop: 16,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 12,
+    marginTop: SPACING.base,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm + SPACING.xs,
+    borderRadius: SIZES.radius.md,
     backgroundColor: COLORS.primary,
   },
   retryButtonText: {
     color: COLORS.white,
-    fontSize: 15,
+    fontSize: RETRY_BUTTON_TEXT_SIZE,
     fontWeight: "600",
+    lineHeight: lineHeight(RETRY_BUTTON_TEXT_SIZE, 1.2),
   },
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -897,7 +965,7 @@ const styles = StyleSheet.create({
   skeletonTile: {
     backgroundColor: COLORS.backgroundDark,
     borderRadius: TILE_BORDER_RADIUS,
-    padding: 16,
+    padding: SPACING.base,
     marginBottom: GRID_GAP,
     justifyContent: "space-between",
     // Match real tile shadow (lighter for skeleton)
@@ -908,25 +976,25 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   skeletonIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
+    width: SIZES.button.md,
+    height: SIZES.button.md,
+    borderRadius: SIZES.radius.md,
     backgroundColor: COLORS.border,
   },
   skeletonTitle: {
     width: "65%",
-    height: 18,
-    borderRadius: 6,
+    height: SKELETON_TITLE_HEIGHT,
+    borderRadius: SIZES.radius.xs,
     backgroundColor: COLORS.border,
     marginTop: "auto",
   },
   skeletonBadge: {
     position: "absolute",
-    top: 16,
-    right: 16,
-    width: 36,
-    height: 24,
-    borderRadius: 12,
+    top: SPACING.base,
+    right: SPACING.base,
+    width: SKELETON_BADGE_WIDTH,
+    height: SKELETON_BADGE_HEIGHT,
+    borderRadius: SIZES.radius.md,
     backgroundColor: COLORS.border,
   },
 });
