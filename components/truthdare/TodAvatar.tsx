@@ -3,6 +3,9 @@ import { Platform, StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-na
 import { BlurView } from 'expo-blur';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+import { FONT_SIZE } from '@/lib/constants';
+
+const TEXT_MAX_SCALE = 1.2;
 
 type TodAvatarProps = {
   size: number;
@@ -42,7 +45,7 @@ export const TodAvatar = React.memo(function TodAvatar({
     borderColor,
     backgroundColor,
   } as const;
-  const resolvedIconSize = iconSize ?? Math.max(14, Math.round(size * 0.4));
+  const resolvedIconSize = iconSize ?? Math.max(FONT_SIZE.body, Math.round(size * 0.38));
   const initial = label?.trim()?.charAt(0)?.toUpperCase() ?? '?';
   const showBlur = !isAnonymous && photoBlurMode === 'blur' && !!photoUrl;
 
@@ -65,7 +68,10 @@ export const TodAvatar = React.memo(function TodAvatar({
           )}
         </>
       ) : label?.trim() ? (
-        <Text style={[styles.initial, { color: textColor, fontSize: Math.max(14, Math.round(size * 0.34)) }]}>
+        <Text
+          maxFontSizeMultiplier={TEXT_MAX_SCALE}
+          style={[styles.initial, { color: textColor, fontSize: Math.max(FONT_SIZE.body, Math.round(size * 0.34)) }]}
+        >
           {initial}
         </Text>
       ) : (

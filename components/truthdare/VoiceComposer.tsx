@@ -2,12 +2,34 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Modal, Animated, Alert, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
-import { INCOGNITO_COLORS } from '@/lib/constants';
+import {
+  FONT_SIZE,
+  INCOGNITO_COLORS,
+  SPACING,
+  SIZES,
+  lineHeight,
+  moderateScale,
+} from '@/lib/constants';
 import { useTodIdentityStore, TodIdentityChoice } from '@/stores/todIdentityStore';
 import type { TodPrompt, TodProfileVisibility } from '@/types';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const C = INCOGNITO_COLORS;
 const MAX_DURATION_SEC = 60; // 60 seconds max
+const TEXT_MAX_SCALE = 1.2;
+const HEADER_ICON_SIZE = moderateScale(22, 0.25);
+const PREVIEW_ICON_SIZE = moderateScale(58, 0.25);
+const EMPTY_MIC_ICON_SIZE = moderateScale(44, 0.25);
+const STOP_ICON_SIZE = moderateScale(28, 0.25);
+const ACTION_ICON_SIZE = SIZES.icon.md;
+const ACTION_SEND_ICON_SIZE = moderateScale(18, 0.25);
+const RECORD_BUTTON_SIZE = moderateScale(68, 0.25);
+const RECORD_INNER_SIZE = moderateScale(52, 0.25);
+const STOP_BUTTON_SIZE = moderateScale(60, 0.25);
+const WAVEFORM_HEIGHT = moderateScale(76, 0.25);
+const WAVEFORM_BAR_HEIGHT = moderateScale(46, 0.25);
+const SHEET_RADIUS = moderateScale(20, 0.25);
+const TIMER_SIZE = moderateScale(30, 0.35);
 
 interface VoiceComposerProps {
   visible: boolean;
@@ -33,6 +55,7 @@ function modeToStoreChoice(mode: IdentityMode): TodIdentityChoice {
 }
 
 export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploading }: VoiceComposerProps) {
+  const insets = useSafeAreaInsets();
   const [isRecording, setIsRecording] = useState(false);
   const [hasRecording, setHasRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
@@ -245,15 +268,17 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
       <View style={styles.overlay}>
-        <View style={styles.sheet}>
+        <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, SPACING.base) + SPACING.base }]}>
           <View style={styles.header}>
-            <Text style={styles.title}>Voice Answer</Text>
+            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.title}>Voice Answer</Text>
             <TouchableOpacity onPress={handleClose}>
-              <Ionicons name="close" size={22} color={C.textLight} />
+              <Ionicons name="close" size={HEADER_ICON_SIZE} color={C.textLight} />
             </TouchableOpacity>
           </View>
 
-          <Text style={styles.promptText} numberOfLines={2}>{prompt.text}</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.promptText} numberOfLines={2}>
+            {prompt.text}
+          </Text>
 
           {/* Waveform area */}
           <View style={styles.waveformArea}>
@@ -275,23 +300,23 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
             )}
             {!isRecording && hasRecording && (
               <TouchableOpacity onPress={playPreview} style={styles.previewPlayBtn}>
-                <Ionicons name={isPlaying ? 'pause-circle' : 'play-circle'} size={64} color={C.primary} />
+                <Ionicons name={isPlaying ? 'pause-circle' : 'play-circle'} size={PREVIEW_ICON_SIZE} color={C.primary} />
               </TouchableOpacity>
             )}
             {!isRecording && !hasRecording && (
-              <Ionicons name="mic-outline" size={48} color={C.textLight} />
+              <Ionicons name="mic-outline" size={EMPTY_MIC_ICON_SIZE} color={C.textLight} />
             )}
           </View>
 
-          <Text style={styles.timer}>{formatTime(seconds)}</Text>
-          <Text style={styles.maxLabel}>Max {MAX_DURATION_SEC}s</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.timer}>{formatTime(seconds)}</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.maxLabel}>Max {MAX_DURATION_SEC}s</Text>
 
           {/* Identity Mode Picker - only show if no stored choice */}
           {!hasStoredChoice && (
             <View style={styles.identitySection}>
               <View style={styles.identityHeader}>
-                <Ionicons name="person-outline" size={14} color={C.textLight} />
-                <Text style={styles.identityTitle}>Your identity</Text>
+                <Ionicons name="person-outline" size={SIZES.icon.xs} color={C.textLight} />
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identityTitle}>Your identity</Text>
               </View>
               <View style={styles.identityOptions}>
                 {/* Option 1: Anonymous (DEFAULT) */}
@@ -302,12 +327,12 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
                   <View style={styles.radioOuter}>
                     {identityMode === 'anonymous' && <View style={styles.radioInner} />}
                   </View>
-                  <Ionicons name="eye-off" size={16} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
-                  <Text style={[styles.identityOptionText, identityMode === 'anonymous' && { color: C.primary }]}>
+                  <Ionicons name="eye-off" size={SIZES.icon.sm} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.identityOptionText, identityMode === 'anonymous' && { color: C.primary }]}>
                     Anonymous
                   </Text>
                   <View style={styles.recommendedBadge}>
-                    <Text style={styles.recommendedBadgeText}>Default</Text>
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.recommendedBadgeText}>Default</Text>
                   </View>
                 </TouchableOpacity>
 
@@ -319,8 +344,8 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
                   <View style={styles.radioOuter}>
                     {identityMode === 'no_photo' && <View style={styles.radioInner} />}
                   </View>
-                  <Ionicons name="person-outline" size={16} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
-                  <Text style={[styles.identityOptionText, identityMode === 'no_photo' && { color: C.primary }]}>
+                  <Ionicons name="person-outline" size={SIZES.icon.sm} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.identityOptionText, identityMode === 'no_photo' && { color: C.primary }]}>
                     Blur photo
                   </Text>
                 </TouchableOpacity>
@@ -333,8 +358,8 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
                   <View style={styles.radioOuter}>
                     {identityMode === 'show_profile' && <View style={styles.radioInner} />}
                   </View>
-                  <Ionicons name="person" size={16} color={identityMode === 'show_profile' ? C.primary : C.textLight} />
-                  <Text style={[styles.identityOptionText, identityMode === 'show_profile' && { color: C.primary }]}>
+                  <Ionicons name="person" size={SIZES.icon.sm} color={identityMode === 'show_profile' ? C.primary : C.textLight} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.identityOptionText, identityMode === 'show_profile' && { color: C.primary }]}>
                     Show profile
                   </Text>
                 </TouchableOpacity>
@@ -351,14 +376,14 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
             )}
             {isRecording && (
               <TouchableOpacity style={styles.stopBtn} onPress={stopRecording}>
-                <Ionicons name="stop" size={32} color="#FFF" />
+                <Ionicons name="stop" size={STOP_ICON_SIZE} color="#FFF" />
               </TouchableOpacity>
             )}
             {!isRecording && hasRecording && (
               <View style={styles.postRow}>
                 <TouchableOpacity style={styles.retryBtn} onPress={startRecording}>
-                  <Ionicons name="refresh" size={20} color={C.text} />
-                  <Text style={styles.retryText}>Redo</Text>
+                  <Ionicons name="refresh" size={ACTION_ICON_SIZE} color={C.text} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.retryText}>Redo</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.postBtn, isUploading && styles.postBtnDisabled]}
@@ -369,8 +394,8 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
                     <ActivityIndicator size="small" color="#FFF" />
                   ) : (
                     <>
-                      <Ionicons name="send" size={18} color="#FFF" />
-                      <Text style={styles.postText}>Post</Text>
+                      <Ionicons name="send" size={ACTION_SEND_ICON_SIZE} color="#FFF" />
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.postText}>Post</Text>
                     </>
                   )}
                 </TouchableOpacity>
@@ -381,8 +406,8 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
           {/* One-time view info */}
           {hasRecording && (
             <View style={styles.viewModeInfo}>
-              <Ionicons name="eye-outline" size={14} color={C.textLight} />
-              <Text style={styles.viewModeText}>Tap to view</Text>
+              <Ionicons name="eye-outline" size={SIZES.icon.xs} color={C.textLight} />
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.viewModeText}>Tap to view</Text>
             </View>
           )}
         </View>
@@ -394,76 +419,76 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
 const styles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: {
-    backgroundColor: C.background, borderTopLeftRadius: 20, borderTopRightRadius: 20,
-    padding: 20, paddingBottom: 40, alignItems: 'center',
+    backgroundColor: C.background, borderTopLeftRadius: SHEET_RADIUS, borderTopRightRadius: SHEET_RADIUS,
+    padding: SPACING.lg, alignItems: 'center',
   },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    width: '100%', marginBottom: 12,
+    width: '100%', marginBottom: SPACING.md,
   },
-  title: { fontSize: 17, fontWeight: '700', color: C.text },
-  promptText: { fontSize: 13, color: C.textLight, textAlign: 'center', marginBottom: 20 },
+  title: { fontSize: FONT_SIZE.xl, fontWeight: '700', lineHeight: lineHeight(FONT_SIZE.xl, 1.2), color: C.text },
+  promptText: { fontSize: FONT_SIZE.body2, lineHeight: lineHeight(FONT_SIZE.body2, 1.35), color: C.textLight, textAlign: 'center', marginBottom: SPACING.lg },
   waveformArea: {
-    height: 80, justifyContent: 'center', alignItems: 'center', marginBottom: 12,
+    height: WAVEFORM_HEIGHT, justifyContent: 'center', alignItems: 'center', marginBottom: SPACING.md,
   },
-  waveformBars: { flexDirection: 'row', alignItems: 'center', gap: 3, height: 48 },
-  waveBar: { width: 3, borderRadius: 1.5, backgroundColor: C.primary },
-  previewPlayBtn: { padding: 8 },
-  timer: { fontSize: 32, fontWeight: '700', color: C.text, marginBottom: 4 },
-  maxLabel: { fontSize: 11, color: C.textLight, marginBottom: 16 },
+  waveformBars: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs - 1, height: WAVEFORM_BAR_HEIGHT },
+  waveBar: { width: moderateScale(3, 0.25), borderRadius: moderateScale(1.5, 0.25), backgroundColor: C.primary },
+  previewPlayBtn: { padding: SPACING.sm },
+  timer: { fontSize: TIMER_SIZE, fontWeight: '700', lineHeight: lineHeight(TIMER_SIZE, 1.2), color: C.text, marginBottom: SPACING.xs },
+  maxLabel: { fontSize: FONT_SIZE.sm, lineHeight: lineHeight(FONT_SIZE.sm, 1.2), color: C.textLight, marginBottom: SPACING.base },
   // Identity picker
   identitySection: {
-    backgroundColor: C.surface, borderRadius: 10,
-    padding: 12, marginBottom: 16, width: '100%',
+    backgroundColor: C.surface, borderRadius: SIZES.radius.md,
+    padding: SPACING.md, marginBottom: SPACING.base, width: '100%',
   },
   identityHeader: {
-    flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10,
+    flexDirection: 'row', alignItems: 'center', gap: SPACING.sm - 2, marginBottom: SPACING.sm + SPACING.xs,
   },
-  identityTitle: { fontSize: 12, fontWeight: '600', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.3 },
-  identityOptions: { gap: 6 },
+  identityTitle: { fontSize: FONT_SIZE.caption, fontWeight: '600', lineHeight: lineHeight(FONT_SIZE.caption, 1.2), color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.3 },
+  identityOptions: { gap: SPACING.sm - 2 },
   identityOption: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    paddingVertical: 8, paddingHorizontal: 8, borderRadius: 8,
+    flexDirection: 'row', alignItems: 'center', gap: SPACING.sm + SPACING.xs,
+    paddingVertical: SPACING.sm, paddingHorizontal: SPACING.sm, borderRadius: SIZES.radius.sm,
   },
   identityOptionActive: { backgroundColor: C.primary + '10' },
-  identityOptionText: { flex: 1, fontSize: 13, color: C.text, fontWeight: '500' },
+  identityOptionText: { flex: 1, fontSize: FONT_SIZE.body2, lineHeight: lineHeight(FONT_SIZE.body2, 1.35), color: C.text, fontWeight: '500' },
   radioOuter: {
-    width: 18, height: 18, borderRadius: 9,
+    width: moderateScale(18, 0.25), height: moderateScale(18, 0.25), borderRadius: SIZES.radius.full,
     borderWidth: 2, borderColor: C.textLight,
     alignItems: 'center', justifyContent: 'center',
   },
-  radioInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.primary },
+  radioInner: { width: moderateScale(10, 0.25), height: moderateScale(10, 0.25), borderRadius: SIZES.radius.full, backgroundColor: C.primary },
   recommendedBadge: {
-    backgroundColor: C.primary + '20', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6,
+    backgroundColor: C.primary + '20', paddingHorizontal: SPACING.sm - 2, paddingVertical: SPACING.xxs, borderRadius: SIZES.radius.xs + 2,
   },
-  recommendedBadgeText: { fontSize: 9, fontWeight: '700', color: C.primary },
-  controls: { alignItems: 'center', marginBottom: 12 },
+  recommendedBadgeText: { fontSize: FONT_SIZE.xxs, lineHeight: lineHeight(FONT_SIZE.xxs, 1.2), fontWeight: '700', color: C.primary },
+  controls: { alignItems: 'center', marginBottom: SPACING.md },
   recordBtn: {
-    width: 72, height: 72, borderRadius: 36, borderWidth: 3, borderColor: C.primary,
+    width: RECORD_BUTTON_SIZE, height: RECORD_BUTTON_SIZE, borderRadius: RECORD_BUTTON_SIZE / 2, borderWidth: moderateScale(3, 0.2), borderColor: C.primary,
     alignItems: 'center', justifyContent: 'center',
   },
-  recordInner: { width: 56, height: 56, borderRadius: 28, backgroundColor: C.primary },
+  recordInner: { width: RECORD_INNER_SIZE, height: RECORD_INNER_SIZE, borderRadius: RECORD_INNER_SIZE / 2, backgroundColor: C.primary },
   stopBtn: {
-    width: 64, height: 64, borderRadius: 32, backgroundColor: '#F44336',
+    width: STOP_BUTTON_SIZE, height: STOP_BUTTON_SIZE, borderRadius: STOP_BUTTON_SIZE / 2, backgroundColor: '#F44336',
     alignItems: 'center', justifyContent: 'center',
   },
-  postRow: { flexDirection: 'row', gap: 16, alignItems: 'center' },
+  postRow: { flexDirection: 'row', gap: SPACING.base, alignItems: 'center' },
   retryBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20,
+    flexDirection: 'row', alignItems: 'center', gap: SPACING.sm - 2,
+    paddingHorizontal: SPACING.base, paddingVertical: SPACING.md - 2, borderRadius: SIZES.radius.xl,
     backgroundColor: C.surface,
   },
-  retryText: { fontSize: 14, fontWeight: '600', color: C.text },
+  retryText: { fontSize: FONT_SIZE.body, lineHeight: lineHeight(FONT_SIZE.body, 1.2), fontWeight: '600', color: C.text },
   postBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: C.primary, paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20,
-    minWidth: 90, justifyContent: 'center',
+    flexDirection: 'row', alignItems: 'center', gap: SPACING.sm - 2,
+    backgroundColor: C.primary, paddingHorizontal: SPACING.xl, paddingVertical: SPACING.md - 2, borderRadius: SIZES.radius.xl,
+    minWidth: moderateScale(90, 0.25), justifyContent: 'center',
   },
   postBtnDisabled: { opacity: 0.6 },
-  postText: { fontSize: 14, fontWeight: '600', color: '#FFF' },
+  postText: { fontSize: FONT_SIZE.body, lineHeight: lineHeight(FONT_SIZE.body, 1.2), fontWeight: '600', color: '#FFF' },
   viewModeInfo: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingVertical: 8, paddingHorizontal: 12, backgroundColor: C.surface, borderRadius: 8,
+    flexDirection: 'row', alignItems: 'center', gap: SPACING.sm - 2,
+    paddingVertical: SPACING.sm, paddingHorizontal: SPACING.md, backgroundColor: C.surface, borderRadius: SIZES.radius.sm,
   },
-  viewModeText: { fontSize: 12, color: C.textLight },
+  viewModeText: { fontSize: FONT_SIZE.caption, lineHeight: lineHeight(FONT_SIZE.caption, 1.2), color: C.textLight },
 });

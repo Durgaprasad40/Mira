@@ -5,21 +5,27 @@ import {
   StyleSheet,
   FlatList,
   TouchableOpacity,
-  Platform,
   Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS } from '@/lib/constants';
+import { COLORS, FONT_SIZE, SPACING, SIZES, lineHeight, moderateScale } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+const TEXT_MAX_SCALE = 1.2;
+const HEADER_ICON_SIZE = SIZES.icon.lg;
+const EMPTY_ICON_SIZE = moderateScale(60, 0.25);
+const CARD_ICON_SIZE = SIZES.icon.lg;
 
 export default function DaresScreen() {
   const router = useRouter();
   const { userId } = useAuthStore();
+  const insets = useSafeAreaInsets();
 
   const pendingDares = useQuery(
     api.dares.getPendingDares,
@@ -95,28 +101,37 @@ export default function DaresScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + SPACING.base }]}>
         <TouchableOpacity onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+          <Ionicons name="arrow-back" size={HEADER_ICON_SIZE} color={COLORS.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Truth or Dare</Text>
-        <View style={{ width: 24 }} />
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.headerTitle}>
+          Truth or Dare
+        </Text>
+        <View style={{ width: HEADER_ICON_SIZE }} />
       </View>
 
       <View style={styles.tabs}>
-        <Text style={styles.tabTitle}>Pending Dares</Text>
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.tabTitle}>
+          Pending Dares
+        </Text>
       </View>
 
       <FlatList
         data={pendingDares || []}
         keyExtractor={(item) => item.id}
+        contentContainerStyle={[styles.listContent, { paddingBottom: Math.max(insets.bottom, SPACING.base) + SPACING.base }]}
         renderItem={({ item }) => (
           <View style={styles.dareCard}>
             <View style={styles.dareHeader}>
-              <Ionicons name="dice" size={24} color={COLORS.secondary} />
-              <Text style={styles.dareTitle}>Anonymous Dare</Text>
+              <Ionicons name="dice" size={CARD_ICON_SIZE} color={COLORS.secondary} />
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.dareTitle}>
+                Anonymous Dare
+              </Text>
             </View>
-            <Text style={styles.dareContent}>{item.content}</Text>
+            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.dareContent}>
+              {item.content}
+            </Text>
             <View style={styles.dareActions}>
               <Button
                 title="Decline"
@@ -135,9 +150,11 @@ export default function DaresScreen() {
         )}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
-            <Ionicons name="dice-outline" size={64} color={COLORS.textLight} />
-            <Text style={styles.emptyTitle}>No pending dares</Text>
-            <Text style={styles.emptySubtitle}>
+            <Ionicons name="dice-outline" size={EMPTY_ICON_SIZE} color={COLORS.textLight} />
+            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.emptyTitle}>
+              No pending dares
+            </Text>
+            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.emptySubtitle}>
               Dares you receive will appear here
             </Text>
           </View>
@@ -156,55 +173,63 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
+    paddingHorizontal: SPACING.base,
+    paddingBottom: SPACING.base,
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
   headerTitle: {
-    fontSize: 20,
+    fontSize: FONT_SIZE.xxl,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.xxl, 1.2),
     color: COLORS.text,
   },
   tabs: {
-    padding: 16,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.base,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
   tabTitle: {
-    fontSize: 18,
+    fontSize: FONT_SIZE.xl,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.xl, 1.2),
     color: COLORS.text,
+  },
+  listContent: {
+    paddingTop: SPACING.xs,
   },
   dareCard: {
     backgroundColor: COLORS.backgroundDark,
-    margin: 16,
-    padding: 20,
-    borderRadius: 16,
+    marginHorizontal: SPACING.base,
+    marginTop: SPACING.base,
+    padding: SPACING.lg,
+    borderRadius: SIZES.radius.lg,
     borderWidth: 1,
     borderColor: COLORS.border,
   },
   dareHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: SPACING.md,
   },
   dareTitle: {
-    fontSize: 18,
+    fontSize: FONT_SIZE.xl,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.xl, 1.2),
     color: COLORS.text,
-    marginLeft: 12,
+    marginLeft: SPACING.md,
   },
   dareContent: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     color: COLORS.text,
-    lineHeight: 24,
-    marginBottom: 20,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
+    marginBottom: SPACING.lg,
   },
   dareActions: {
     flexDirection: 'row',
-    gap: 12,
+    gap: SPACING.md,
   },
   declineButton: {
     flex: 1,
@@ -216,19 +241,21 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 40,
+    paddingHorizontal: SPACING.xxl,
+    paddingVertical: SPACING.xxxl,
   },
   emptyTitle: {
-    fontSize: 20,
+    fontSize: FONT_SIZE.xxl,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.xxl, 1.2),
     color: COLORS.text,
-    marginTop: 16,
-    marginBottom: 8,
+    marginTop: SPACING.base,
+    marginBottom: SPACING.sm,
   },
   emptySubtitle: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
   },
 });

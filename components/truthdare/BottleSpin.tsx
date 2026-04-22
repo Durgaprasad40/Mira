@@ -31,14 +31,14 @@ import {
   StyleSheet,
   Animated,
   Easing,
-  Dimensions,
+  useWindowDimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
-import { INCOGNITO_COLORS } from '@/lib/constants';
+import { FONT_SIZE, INCOGNITO_COLORS, SPACING, SIZES, lineHeight, moderateScale } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const TEXT_MAX_SCALE = 1.2;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -64,9 +64,6 @@ export interface BottleSpinProps {
 const SPIN_DURATION = 2500; // ms
 const MIN_ROTATIONS = 3;    // Minimum full rotations
 const MAX_ROTATIONS = 5;    // Maximum full rotations
-const BOTTLE_SIZE = 100;
-const AVATAR_SIZE = 64;
-const ARENA_SIZE = SCREEN_WIDTH - 80;
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -76,8 +73,24 @@ export function BottleSpin({
   onSpinEnd,
   isSpinning,
 }: BottleSpinProps) {
+  const { width: windowWidth } = useWindowDimensions();
   const rotationAnim = useRef(new Animated.Value(0)).current;
   const hasSpunRef = useRef(false);
+  const arenaSize = Math.min(windowWidth * 0.72, moderateScale(304, 0.25));
+  const arenaHeight = arenaSize * 0.6;
+  const arenaRingSize = arenaSize * 0.7;
+  const bottleSize = Math.min(windowWidth * 0.26, moderateScale(98, 0.25));
+  const bottleNeckWidth = Math.max(moderateScale(7, 0.25), Math.round(bottleSize * 0.08));
+  const bottleNeckHeight = Math.round(bottleSize * 0.3);
+  const bottleBodyWidth = Math.round(bottleSize * 0.5);
+  const bottleBodyHeight = Math.round(bottleSize * 0.6);
+  const bottleIconSize = Math.max(SIZES.icon.lg, Math.round(bottleBodyWidth * 0.64));
+  const avatarSize = Math.min(Math.max(windowWidth * 0.16, moderateScale(56, 0.25)), moderateScale(68, 0.25));
+  const winnerOutlineWidth = moderateScale(3, 0.2);
+  const avatarRingSize = avatarSize + winnerOutlineWidth * 2;
+  const avatarIconSize = Math.max(SIZES.icon.lg, Math.round(avatarSize * 0.44));
+  const winnerBadgeSize = moderateScale(24, 0.25);
+  const winnerBadgeIconSize = SIZES.icon.xs;
 
   /**
    * Calculate final rotation angle to land on winner.
@@ -149,40 +162,83 @@ export function BottleSpin({
     <View style={styles.container}>
       {/* Top User */}
       <View style={styles.userSlot}>
-        <UserAvatar user={topUser} isWinner={winnerId === topUser.id && !isSpinning && hasSpunRef.current} />
-        <Text style={styles.userName}>{topUser.name}</Text>
+        <UserAvatar
+          user={topUser}
+          avatarSize={avatarSize}
+          avatarIconSize={avatarIconSize}
+          avatarRingSize={avatarRingSize}
+          winnerBadgeSize={winnerBadgeSize}
+          winnerBadgeIconSize={winnerBadgeIconSize}
+          isWinner={winnerId === topUser.id && !isSpinning && hasSpunRef.current}
+        />
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.userName}>{topUser.name}</Text>
       </View>
 
       {/* Spin Arena */}
-      <View style={styles.arena}>
+      <View style={[styles.arena, { width: arenaSize, height: arenaHeight }]}>
         {/* Center Bottle */}
         <Animated.View style={[styles.bottleContainer, rotateStyle]}>
           <View style={styles.bottle}>
             {/* Bottle neck (points up by default) */}
-            <View style={styles.bottleNeck} />
+            <View
+              style={[
+                styles.bottleNeck,
+                {
+                  width: bottleNeckWidth,
+                  height: bottleNeckHeight,
+                  borderTopLeftRadius: bottleNeckWidth / 2,
+                  borderTopRightRadius: bottleNeckWidth / 2,
+                },
+              ]}
+            />
             {/* Bottle body */}
-            <View style={styles.bottleBody}>
-              <Ionicons name="wine" size={32} color={C.primary} />
+            <View
+              style={[
+                styles.bottleBody,
+                {
+                  width: bottleBodyWidth,
+                  height: bottleBodyHeight,
+                },
+              ]}
+            >
+              <Ionicons name="wine" size={bottleIconSize} color={C.primary} />
             </View>
           </View>
         </Animated.View>
 
         {/* Decorative ring */}
-        <View style={styles.arenaRing} />
+        <View
+          style={[
+            styles.arenaRing,
+            {
+              width: arenaRingSize,
+              height: arenaRingSize,
+              borderRadius: arenaRingSize / 2,
+            },
+          ]}
+        />
       </View>
 
       {/* Bottom User */}
       <View style={styles.userSlot}>
-        <UserAvatar user={bottomUser} isWinner={winnerId === bottomUser.id && !isSpinning && hasSpunRef.current} />
-        <Text style={styles.userName}>{bottomUser.name}</Text>
+        <UserAvatar
+          user={bottomUser}
+          avatarSize={avatarSize}
+          avatarIconSize={avatarIconSize}
+          avatarRingSize={avatarRingSize}
+          winnerBadgeSize={winnerBadgeSize}
+          winnerBadgeIconSize={winnerBadgeIconSize}
+          isWinner={winnerId === bottomUser.id && !isSpinning && hasSpunRef.current}
+        />
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.userName}>{bottomUser.name}</Text>
       </View>
 
       {/* Instructions */}
       {!isSpinning && !hasSpunRef.current && (
-        <Text style={styles.instructions}>Tap to spin the bottle</Text>
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.instructions}>Tap to spin the bottle</Text>
       )}
       {isSpinning && (
-        <Text style={styles.spinningText}>Spinning...</Text>
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.spinningText}>Spinning...</Text>
       )}
     </View>
   );
@@ -190,24 +246,58 @@ export function BottleSpin({
 
 // ─── User Avatar Sub-component ───────────────────────────────────────────────
 
-function UserAvatar({ user, isWinner }: { user: BottleSpinUser; isWinner: boolean }) {
+function UserAvatar({
+  user,
+  isWinner,
+  avatarSize,
+  avatarIconSize,
+  avatarRingSize,
+  winnerBadgeSize,
+  winnerBadgeIconSize,
+}: {
+  user: BottleSpinUser;
+  isWinner: boolean;
+  avatarSize: number;
+  avatarIconSize: number;
+  avatarRingSize: number;
+  winnerBadgeSize: number;
+  winnerBadgeIconSize: number;
+}) {
   return (
-    <View style={[styles.avatarContainer, isWinner && styles.avatarWinner]}>
+    <View
+      style={[
+        styles.avatarContainer,
+        isWinner && styles.avatarWinner,
+        isWinner && {
+          borderRadius: avatarRingSize / 2,
+          padding: moderateScale(3, 0.2),
+        },
+      ]}
+    >
       {user.avatarUrl ? (
         <Image
           source={{ uri: user.avatarUrl }}
-          style={styles.avatar}
+          style={[styles.avatar, { width: avatarSize, height: avatarSize, borderRadius: avatarSize / 2 }]}
           contentFit="cover"
           blurRadius={8}
         />
       ) : (
-        <View style={[styles.avatar, styles.avatarPlaceholder]}>
-          <Ionicons name="person" size={28} color={C.textLight} />
+        <View style={[styles.avatar, styles.avatarPlaceholder, { width: avatarSize, height: avatarSize, borderRadius: avatarSize / 2 }]}>
+          <Ionicons name="person" size={avatarIconSize} color={C.textLight} />
         </View>
       )}
       {isWinner && (
-        <View style={styles.winnerBadge}>
-          <Ionicons name="arrow-forward" size={12} color="#FFF" />
+        <View
+          style={[
+            styles.winnerBadge,
+            {
+              width: winnerBadgeSize,
+              height: winnerBadgeSize,
+              borderRadius: winnerBadgeSize / 2,
+            },
+          ]}
+        >
+          <Ionicons name="arrow-forward" size={winnerBadgeIconSize} color="#FFF" />
         </View>
       )}
     </View>
@@ -220,19 +310,20 @@ const styles = StyleSheet.create({
   container: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 20,
+    paddingVertical: SPACING.lg,
   },
 
   // User slots
   userSlot: {
     alignItems: 'center',
-    marginVertical: 16,
+    marginVertical: SPACING.base,
   },
   userName: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
     color: C.text,
-    marginTop: 8,
+    marginTop: SPACING.sm,
   },
 
   // Avatar
@@ -240,9 +331,6 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   avatar: {
-    width: AVATAR_SIZE,
-    height: AVATAR_SIZE,
-    borderRadius: AVATAR_SIZE / 2,
     backgroundColor: C.surface,
   },
   avatarPlaceholder: {
@@ -250,39 +338,29 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   avatarWinner: {
-    borderWidth: 3,
+    borderWidth: moderateScale(3, 0.2),
     borderColor: C.primary,
-    borderRadius: (AVATAR_SIZE + 6) / 2,
-    padding: 3,
   },
   winnerBadge: {
     position: 'absolute',
-    bottom: -4,
-    right: -4,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    bottom: -SPACING.xs,
+    right: -SPACING.xs,
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
+    borderWidth: moderateScale(2, 0.2),
     borderColor: C.background,
   },
 
   // Spin Arena
   arena: {
-    width: ARENA_SIZE,
-    height: ARENA_SIZE * 0.6,
     alignItems: 'center',
     justifyContent: 'center',
     position: 'relative',
   },
   arenaRing: {
     position: 'absolute',
-    width: ARENA_SIZE * 0.7,
-    height: ARENA_SIZE * 0.7,
-    borderRadius: (ARENA_SIZE * 0.7) / 2,
-    borderWidth: 2,
+    borderWidth: moderateScale(2, 0.2),
     borderColor: C.surface,
     borderStyle: 'dashed',
   },
@@ -296,36 +374,32 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   bottleNeck: {
-    width: 8,
-    height: 30,
     backgroundColor: C.primary,
-    borderTopLeftRadius: 4,
-    borderTopRightRadius: 4,
   },
   bottleBody: {
-    width: BOTTLE_SIZE * 0.5,
-    height: BOTTLE_SIZE * 0.6,
     backgroundColor: C.surface,
-    borderRadius: 12,
+    borderRadius: SIZES.radius.md,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
+    borderWidth: moderateScale(2, 0.2),
     borderColor: C.primary,
-    marginTop: -2,
+    marginTop: -SPACING.xxs,
   },
 
   // Text
   instructions: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
     color: C.textLight,
-    marginTop: 20,
+    marginTop: SPACING.lg,
     fontStyle: 'italic',
   },
   spinningText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
     color: C.primary,
-    marginTop: 20,
+    marginTop: SPACING.lg,
   },
 });
 

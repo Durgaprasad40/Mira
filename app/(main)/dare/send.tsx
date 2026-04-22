@@ -5,7 +5,6 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Platform,
   Alert,
   TextInput,
 } from 'react-native';
@@ -13,9 +12,15 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS } from '@/lib/constants';
+import { COLORS, FONT_SIZE, SPACING, SIZES, lineHeight, moderateScale } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+const TEXT_MAX_SCALE = 1.2;
+const HEADER_ICON_SIZE = SIZES.icon.lg;
+const ALERT_ICON_SIZE = moderateScale(44, 0.25);
+const CATEGORY_CHEVRON_SIZE = SIZES.icon.md;
 
 const DARE_CATEGORIES = [
   {
@@ -64,6 +69,7 @@ export default function SendDareScreen() {
   const { userId } = useLocalSearchParams<{ userId: string }>();
   const router = useRouter();
   const { userId: currentUserId } = useAuthStore();
+  const insets = useSafeAreaInsets();
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [customDare, setCustomDare] = useState('');
 
@@ -73,10 +79,10 @@ export default function SendDareScreen() {
   if (!userId) {
     return (
       <View style={[styles.container, styles.errorContainer]}>
-        <Ionicons name="alert-circle-outline" size={48} color={COLORS.textMuted} />
-        <Text style={styles.errorText}>User not found</Text>
+        <Ionicons name="alert-circle-outline" size={ALERT_ICON_SIZE} color={COLORS.textMuted} />
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.errorText}>User not found</Text>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Text style={styles.backButtonText}>Go Back</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.backButtonText}>Go Back</Text>
         </TouchableOpacity>
       </View>
     );
@@ -101,23 +107,27 @@ export default function SendDareScreen() {
   };
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      <View style={styles.header}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, SPACING.base) + SPACING.base }}
+      showsVerticalScrollIndicator={false}
+    >
+      <View style={[styles.header, { paddingTop: insets.top + SPACING.base }]}>
         <TouchableOpacity onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+          <Ionicons name="arrow-back" size={HEADER_ICON_SIZE} color={COLORS.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Send a Dare</Text>
-        <View style={{ width: 24 }} />
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.headerTitle}>Send a Dare</Text>
+        <View style={{ width: HEADER_ICON_SIZE }} />
       </View>
 
       <View style={styles.content}>
-        <Text style={styles.description}>
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.description}>
           Send a dare to this person. If they accept, both of your identities will be revealed and
           you'll automatically match!
         </Text>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Dare Categories</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.sectionTitle}>Dare Categories</Text>
           {DARE_CATEGORIES.map((category) => (
             <View key={category.id} style={styles.category}>
               <TouchableOpacity
@@ -126,10 +136,10 @@ export default function SendDareScreen() {
                   setSelectedCategory(selectedCategory === category.id ? null : category.id)
                 }
               >
-                <Text style={styles.categoryTitle}>{category.title}</Text>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.categoryTitle}>{category.title}</Text>
                 <Ionicons
                   name={selectedCategory === category.id ? 'chevron-up' : 'chevron-down'}
-                  size={20}
+                  size={CATEGORY_CHEVRON_SIZE}
                   color={COLORS.textLight}
                 />
               </TouchableOpacity>
@@ -141,8 +151,8 @@ export default function SendDareScreen() {
                       style={styles.dareItem}
                       onPress={() => handleSendDare(dare)}
                     >
-                      <Text style={styles.dareText}>{dare}</Text>
-                      <Ionicons name="arrow-forward" size={20} color={COLORS.primary} />
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.dareText}>{dare}</Text>
+                      <Ionicons name="arrow-forward" size={CATEGORY_CHEVRON_SIZE} color={COLORS.primary} />
                     </TouchableOpacity>
                   ))}
                 </View>
@@ -152,18 +162,19 @@ export default function SendDareScreen() {
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Custom Dare</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.sectionTitle}>Custom Dare</Text>
           <TextInput
             style={styles.customInput}
             placeholder="Write your own dare..."
             placeholderTextColor={COLORS.textLight}
+            maxFontSizeMultiplier={TEXT_MAX_SCALE}
             value={customDare}
             onChangeText={setCustomDare}
             multiline
             numberOfLines={4}
             maxLength={200}
           />
-          <Text style={styles.charCount}>{customDare.length}/200</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.charCount}>{customDare.length}/200</Text>
           <Button
             title="Send Custom Dare"
             variant="primary"
@@ -190,50 +201,53 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
+    paddingHorizontal: SPACING.base,
+    paddingBottom: SPACING.base,
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
   headerTitle: {
-    fontSize: 20,
+    fontSize: FONT_SIZE.xxl,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.xxl, 1.2),
     color: COLORS.text,
   },
   content: {
-    padding: 16,
+    padding: SPACING.base,
   },
   description: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: COLORS.textLight,
-    lineHeight: 20,
-    marginBottom: 24,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
+    marginBottom: SPACING.xl,
   },
   section: {
-    marginBottom: 32,
+    marginBottom: SPACING.xxl,
   },
   sectionTitle: {
-    fontSize: 18,
+    fontSize: FONT_SIZE.xl,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.xl, 1.2),
     color: COLORS.text,
-    marginBottom: 16,
+    marginBottom: SPACING.base,
   },
   category: {
-    marginBottom: 12,
+    marginBottom: SPACING.md,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 12,
+    borderRadius: SIZES.radius.md,
     overflow: 'hidden',
   },
   categoryHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 16,
+    padding: SPACING.base,
   },
   categoryTitle: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
     color: COLORS.text,
   },
   daresList: {
@@ -244,55 +258,61 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 16,
+    padding: SPACING.base,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
   dareText: {
     flex: 1,
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: COLORS.text,
-    marginRight: 12,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
+    marginRight: SPACING.md,
   },
   customInput: {
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 12,
-    padding: 16,
-    fontSize: 15,
+    borderRadius: SIZES.radius.md,
+    padding: SPACING.base,
+    fontSize: FONT_SIZE.md,
     color: COLORS.text,
-    minHeight: 100,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
+    minHeight: moderateScale(96, 0.25),
     textAlignVertical: 'top',
-    marginBottom: 8,
+    marginBottom: SPACING.sm,
   },
   charCount: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textLight,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.2),
     textAlign: 'right',
-    marginBottom: 16,
+    marginBottom: SPACING.base,
   },
   sendButton: {
-    marginTop: 8,
+    marginTop: SPACING.sm,
   },
   errorContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.xxl,
   },
   errorText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     color: COLORS.textMuted,
-    marginTop: 12,
-    marginBottom: 20,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
+    marginTop: SPACING.md,
+    marginBottom: SPACING.lg,
   },
   backButton: {
-    paddingHorizontal: 24,
-    paddingVertical: 12,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
     backgroundColor: COLORS.primary,
-    borderRadius: 8,
+    borderRadius: SIZES.radius.sm,
   },
   backButtonText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
     color: COLORS.white,
   },
 });

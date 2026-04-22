@@ -15,13 +15,39 @@ import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { INCOGNITO_COLORS } from '@/lib/constants';
+import {
+  FONT_SIZE,
+  INCOGNITO_COLORS,
+  SPACING,
+  SIZES,
+  lineHeight,
+  moderateScale,
+} from '@/lib/constants';
 import { InAppMediaCamera, MediaCaptureResult } from './InAppMediaCamera';
 import type { TodPrompt } from '@/types';
 
 const C = INCOGNITO_COLORS;
 const MAX_TEXT_CHARS = 400;
 const MAX_AUDIO_SEC = 60;
+const TEXT_MAX_SCALE = 1.2;
+const HEADER_ICON_SIZE = moderateScale(22, 0.25);
+const AUDIO_PREVIEW_ICON_SIZE = moderateScale(34, 0.25);
+const AUDIO_REMOVE_ICON_SIZE = SIZES.icon.lg;
+const MEDIA_OVERLAY_ICON_SIZE = SIZES.icon.lg;
+const VIDEO_OVERLAY_ICON_SIZE = moderateScale(44, 0.25);
+const LOCK_ICON_SIZE = SIZES.icon.sm;
+const REMOVE_MEDIA_ICON_SIZE = moderateScale(26, 0.25);
+const RECORD_STOP_ICON_SIZE = SIZES.icon.md;
+const ATTACH_ICON_SIZE = moderateScale(22, 0.25);
+const IDENTITY_HEADER_ICON_SIZE = SIZES.icon.xs;
+const IDENTITY_OPTION_ICON_SIZE = SIZES.icon.sm;
+const VISIBILITY_ICON_SIZE = SIZES.icon.xs;
+const FOOTER_ICON_SIZE = SIZES.icon.xs;
+const SUBMIT_ICON_SIZE = moderateScale(18, 0.25);
+const FULLSCREEN_CLOSE_ICON_SIZE = moderateScale(26, 0.25);
+const CONFIRM_ICON_SIZE = SIZES.icon.xl;
+const SHEET_RADIUS = moderateScale(20, 0.25);
+const MODAL_RADIUS = moderateScale(16, 0.25);
 
 // P2-001: Media file size limits (in bytes)
 const MAX_PHOTO_SIZE_MB = 10;
@@ -551,15 +577,15 @@ export function UnifiedAnswerComposer({
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
       >
-        <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+        <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, SPACING.base) + SPACING.base }]}>
           {/* Header */}
           <View style={styles.header}>
             <View style={[styles.badge, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
-              <Text style={styles.badgeText}>{isTruth ? 'TRUTH' : 'DARE'}</Text>
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.badgeText}>{isTruth ? 'TRUTH' : 'DARE'}</Text>
             </View>
-            <Text style={styles.promptPreview} numberOfLines={1}>{prompt.text}</Text>
+            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.promptPreview} numberOfLines={1}>{prompt.text}</Text>
             <TouchableOpacity onPress={handleClose}>
-              <Ionicons name="close" size={22} color={C.textLight} />
+              <Ionicons name="close" size={HEADER_ICON_SIZE} color={C.textLight} />
             </TouchableOpacity>
           </View>
 
@@ -573,11 +599,12 @@ export function UnifiedAnswerComposer({
               onChangeText={setText}
               multiline
               maxLength={MAX_TEXT_CHARS}
+              maxFontSizeMultiplier={TEXT_MAX_SCALE}
               autoComplete="off"
               textContentType="none"
               importantForAutofill="noExcludeDescendants"
             />
-            <Text style={styles.charCount}>{text.length}/{MAX_TEXT_CHARS}</Text>
+            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.charCount}>{text.length}/{MAX_TEXT_CHARS}</Text>
 
             {/* Attachment Preview */}
             {attachment && (
@@ -587,7 +614,7 @@ export function UnifiedAnswerComposer({
                     <TouchableOpacity onPress={playAudioPreview} style={styles.audioPlayBtn}>
                       <Ionicons
                         name={isPlayingPreview ? 'pause-circle' : 'play-circle'}
-                        size={36}
+                        size={AUDIO_PREVIEW_ICON_SIZE}
                         color={C.primary}
                       />
                     </TouchableOpacity>
@@ -599,11 +626,11 @@ export function UnifiedAnswerComposer({
                         />
                       ))}
                     </View>
-                    <Text style={styles.audioDuration}>
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.audioDuration}>
                       {formatTime(Math.ceil((attachment.durationMs || 0) / 1000))}
                     </Text>
                     <TouchableOpacity onPress={removeAttachment} style={styles.removeBtn}>
-                      <Ionicons name="close-circle" size={24} color={C.textLight} />
+                      <Ionicons name="close-circle" size={AUDIO_REMOVE_ICON_SIZE} color={C.textLight} />
                     </TouchableOpacity>
                   </View>
                 )}
@@ -620,17 +647,17 @@ export function UnifiedAnswerComposer({
                     >
                       <Image source={{ uri: attachment.uri }} style={[styles.mediaThumbnail, shouldUnmirror && styles.unmirrorMedia]} />
                       <View style={styles.mediaOverlay}>
-                        <Ionicons name="expand-outline" size={24} color="#FFF" />
-                        <Text style={styles.mediaLabel}>Tap to preview</Text>
+                        <Ionicons name="expand-outline" size={MEDIA_OVERLAY_ICON_SIZE} color="#FFF" />
+                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.mediaLabel}>Tap to preview</Text>
                       </View>
                       {/* VISUAL MEDIA LOCK: Show lock icon instead of remove when locked */}
                       {visualMediaLocked ? (
                         <View style={styles.lockedMediaBadge}>
-                          <Ionicons name="lock-closed" size={16} color="#FFF" />
+                          <Ionicons name="lock-closed" size={LOCK_ICON_SIZE} color="#FFF" />
                         </View>
                       ) : (
                         <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
-                          <Ionicons name="close-circle" size={28} color="#FFF" />
+                          <Ionicons name="close-circle" size={REMOVE_MEDIA_ICON_SIZE} color="#FFF" />
                         </TouchableOpacity>
                       )}
                     </TouchableOpacity>
@@ -655,17 +682,17 @@ export function UnifiedAnswerComposer({
                         isMuted
                       />
                       <View style={styles.mediaOverlay}>
-                        <Ionicons name="play-circle" size={48} color="#FFF" />
-                        <Text style={styles.mediaLabel}>Tap to preview</Text>
+                        <Ionicons name="play-circle" size={VIDEO_OVERLAY_ICON_SIZE} color="#FFF" />
+                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.mediaLabel}>Tap to preview</Text>
                       </View>
                       {/* VISUAL MEDIA LOCK: Show lock icon instead of remove when locked */}
                       {visualMediaLocked ? (
                         <View style={styles.lockedMediaBadge}>
-                          <Ionicons name="lock-closed" size={16} color="#FFF" />
+                          <Ionicons name="lock-closed" size={LOCK_ICON_SIZE} color="#FFF" />
                         </View>
                       ) : (
                         <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
-                          <Ionicons name="close-circle" size={28} color="#FFF" />
+                          <Ionicons name="close-circle" size={REMOVE_MEDIA_ICON_SIZE} color="#FFF" />
                         </TouchableOpacity>
                       )}
                     </TouchableOpacity>
@@ -678,9 +705,9 @@ export function UnifiedAnswerComposer({
             {isRecording && (
               <View style={styles.recordingIndicator}>
                 <View style={styles.recordingDot} />
-                <Text style={styles.recordingText}>Recording... {formatTime(recordSeconds)}</Text>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.recordingText}>Recording... {formatTime(recordSeconds)}</Text>
                 <TouchableOpacity onPress={stopRecording} style={styles.stopRecordBtn}>
-                  <Ionicons name="stop" size={20} color="#FFF" />
+                  <Ionicons name="stop" size={RECORD_STOP_ICON_SIZE} color="#FFF" />
                 </TouchableOpacity>
               </View>
             )}
@@ -688,8 +715,8 @@ export function UnifiedAnswerComposer({
             {/* VISUAL MEDIA LOCK: Warning when photo/video is locked */}
             {visualMediaLocked && attachment && (attachment.kind === 'photo' || attachment.kind === 'video') && (
               <View style={styles.mediaLockedWarning}>
-                <Ionicons name="lock-closed" size={14} color="#F59E0B" />
-                <Text style={styles.mediaLockedText}>
+                <Ionicons name="lock-closed" size={LOCK_ICON_SIZE} color="#F59E0B" />
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.mediaLockedText}>
                   Photo/video already viewed and locked. You can still edit text or audio.
                 </Text>
               </View>
@@ -702,18 +729,18 @@ export function UnifiedAnswerComposer({
                 {!visualMediaLocked && (
                   <>
                     <TouchableOpacity style={styles.attachBtn} onPress={pickFromGallery}>
-                      <Ionicons name="images-outline" size={22} color="#00B894" />
-                      <Text style={styles.attachBtnText}>Gallery</Text>
+                      <Ionicons name="images-outline" size={ATTACH_ICON_SIZE} color="#00B894" />
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Gallery</Text>
                     </TouchableOpacity>
                     <TouchableOpacity style={styles.attachBtn} onPress={openMediaCamera}>
-                      <Ionicons name="camera-outline" size={22} color="#E94560" />
-                      <Text style={styles.attachBtnText}>Camera</Text>
+                      <Ionicons name="camera-outline" size={ATTACH_ICON_SIZE} color="#E94560" />
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Camera</Text>
                     </TouchableOpacity>
                   </>
                 )}
                 <TouchableOpacity style={styles.attachBtn} onPress={startRecording}>
-                  <Ionicons name="mic-outline" size={22} color="#FF9800" />
-                  <Text style={styles.attachBtnText}>Voice</Text>
+                  <Ionicons name="mic-outline" size={ATTACH_ICON_SIZE} color="#FF9800" />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Voice</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -723,8 +750,8 @@ export function UnifiedAnswerComposer({
             {isNewAnswer && (
               <View style={styles.identitySection}>
                 <View style={styles.identityHeader}>
-                  <Ionicons name="person-outline" size={14} color={C.textLight} />
-                  <Text style={styles.identityTitle}>Your identity</Text>
+                  <Ionicons name="person-outline" size={IDENTITY_HEADER_ICON_SIZE} color={C.textLight} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identityTitle}>Your identity</Text>
                 </View>
                 <View style={styles.identityOptions}>
                   {/* Anonymous (DEFAULT) - P1-003: Clearer description */}
@@ -735,15 +762,15 @@ export function UnifiedAnswerComposer({
                     <View style={styles.radioOuter}>
                       {identityMode === 'anonymous' && <View style={styles.radioInner} />}
                     </View>
-                    <Ionicons name="eye-off" size={16} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
+                    <Ionicons name="eye-off" size={IDENTITY_OPTION_ICON_SIZE} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
                     <View style={styles.identityTextContainer}>
-                      <Text style={[styles.identityText, identityMode === 'anonymous' && { color: C.primary }]}>
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.identityText, identityMode === 'anonymous' && { color: C.primary }]}>
                         Anonymous
                       </Text>
-                      <Text style={styles.identitySubtext}>Hidden identity</Text>
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identitySubtext}>Hidden identity</Text>
                     </View>
                     <View style={styles.defaultBadge}>
-                      <Text style={styles.defaultBadgeText}>Default</Text>
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.defaultBadgeText}>Default</Text>
                     </View>
                   </TouchableOpacity>
 
@@ -755,12 +782,12 @@ export function UnifiedAnswerComposer({
                     <View style={styles.radioOuter}>
                       {identityMode === 'profile' && <View style={styles.radioInner} />}
                     </View>
-                    <Ionicons name="person" size={16} color={identityMode === 'profile' ? C.primary : C.textLight} />
+                    <Ionicons name="person" size={IDENTITY_OPTION_ICON_SIZE} color={identityMode === 'profile' ? C.primary : C.textLight} />
                     <View style={styles.identityTextContainer}>
-                      <Text style={[styles.identityText, identityMode === 'profile' && { color: C.primary }]}>
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.identityText, identityMode === 'profile' && { color: C.primary }]}>
                         Show profile
                       </Text>
-                      <Text style={styles.identitySubtext}>Name, age, photo visible</Text>
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identitySubtext}>Name, age, photo visible</Text>
                     </View>
                   </TouchableOpacity>
 
@@ -772,12 +799,12 @@ export function UnifiedAnswerComposer({
                     <View style={styles.radioOuter}>
                       {identityMode === 'no_photo' && <View style={styles.radioInner} />}
                     </View>
-                    <Ionicons name="person-outline" size={16} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
+                    <Ionicons name="person-outline" size={IDENTITY_OPTION_ICON_SIZE} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
                     <View style={styles.identityTextContainer}>
-                      <Text style={[styles.identityText, identityMode === 'no_photo' && { color: C.primary }]}>
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.identityText, identityMode === 'no_photo' && { color: C.primary }]}>
                         Blur photo
                       </Text>
-                      <Text style={styles.identitySubtext}>Photo blurred</Text>
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identitySubtext}>Photo blurred</Text>
                     </View>
                   </TouchableOpacity>
                 </View>
@@ -787,11 +814,11 @@ export function UnifiedAnswerComposer({
                 {/* P1-002 FIX: Clearer labels with icons */}
                 {attachment && (
                   <View style={styles.visibilitySection}>
-                    <View style={styles.visibilitySeparator} />
-                    <View style={styles.visibilityHeader}>
-                      <Ionicons name="eye-outline" size={14} color={C.textLight} />
-                      <Text style={styles.visibilityTitle}>Who can view your {attachment.kind === 'audio' ? 'voice message' : attachment.kind}?</Text>
-                    </View>
+                  <View style={styles.visibilitySeparator} />
+                  <View style={styles.visibilityHeader}>
+                      <Ionicons name="eye-outline" size={VISIBILITY_ICON_SIZE} color={C.textLight} />
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.visibilityTitle}>Who can view your {attachment.kind === 'audio' ? 'voice message' : attachment.kind}?</Text>
+                  </View>
                     <View style={styles.visibilitySegmented}>
                       <TouchableOpacity
                         style={[
@@ -802,11 +829,11 @@ export function UnifiedAnswerComposer({
                       >
                         <Ionicons
                           name="lock-closed"
-                          size={14}
+                          size={VISIBILITY_ICON_SIZE}
                           color={mediaVisibility === 'private' ? '#FFF' : C.textLight}
                           style={styles.segmentIcon}
                         />
-                        <Text style={[
+                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[
                           styles.segmentBtnText,
                           mediaVisibility === 'private' && styles.segmentBtnTextActive,
                         ]}>Just them</Text>
@@ -820,17 +847,17 @@ export function UnifiedAnswerComposer({
                       >
                         <Ionicons
                           name="people"
-                          size={14}
+                          size={VISIBILITY_ICON_SIZE}
                           color={mediaVisibility === 'public' ? '#FFF' : C.textLight}
                           style={styles.segmentIcon}
                         />
-                        <Text style={[
+                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[
                           styles.segmentBtnText,
                           mediaVisibility === 'public' && styles.segmentBtnTextActive,
                         ]}>Everyone</Text>
                       </TouchableOpacity>
                     </View>
-                    <Text style={styles.visibilityHelperText}>
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.visibilityHelperText}>
                       {mediaVisibility === 'private'
                         ? 'Only the prompt creator can view this'
                         : 'Anyone viewing this thread can see it'}
@@ -844,8 +871,8 @@ export function UnifiedAnswerComposer({
           {/* Footer */}
           <View style={styles.footer}>
             <View style={styles.viewModeHint}>
-              <Ionicons name="eye-outline" size={14} color={C.textLight} />
-              <Text style={styles.viewModeText}>Tap to view</Text>
+              <Ionicons name="eye-outline" size={FOOTER_ICON_SIZE} color={C.textLight} />
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.viewModeText}>Tap to view</Text>
             </View>
             <TouchableOpacity
               style={[styles.submitBtn, !canSubmit && styles.submitBtnDisabled]}
@@ -856,8 +883,8 @@ export function UnifiedAnswerComposer({
                 <ActivityIndicator size="small" color="#FFF" />
               ) : (
                 <>
-                  <Ionicons name="send" size={18} color="#FFF" />
-                  <Text style={styles.submitText}>Post</Text>
+                  <Ionicons name="send" size={SUBMIT_ICON_SIZE} color="#FFF" />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.submitText}>Post</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -873,10 +900,10 @@ export function UnifiedAnswerComposer({
         >
           <View style={styles.fullscreenOverlay}>
             <TouchableOpacity
-              style={styles.fullscreenClose}
+              style={[styles.fullscreenClose, { top: insets.top + SPACING.md }]}
               onPress={() => setFullscreenMedia(null)}
             >
-              <Ionicons name="close" size={28} color="#FFF" />
+              <Ionicons name="close" size={FULLSCREEN_CLOSE_ICON_SIZE} color="#FFF" />
             </TouchableOpacity>
 
             {fullscreenMedia?.type === 'photo' && (() => {
@@ -925,14 +952,14 @@ export function UnifiedAnswerComposer({
               <View style={styles.mediaConfirmHeader}>
                 <Ionicons
                   name={mediaVisibility === 'private' ? 'lock-closed' : 'people'}
-                  size={32}
+                  size={CONFIRM_ICON_SIZE}
                   color={mediaVisibility === 'private' ? '#00B894' : '#E94560'}
                 />
               </View>
-              <Text style={styles.mediaConfirmTitle}>
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.mediaConfirmTitle}>
                 {mediaVisibility === 'private' ? 'Send to prompt creator?' : 'Share with everyone?'}
               </Text>
-              <Text style={styles.mediaConfirmMessage}>
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.mediaConfirmMessage}>
                 {mediaVisibility === 'private'
                   ? 'Only the prompt creator will be able to view your media. They can view it once.'
                   : 'Anyone viewing this thread will be able to see your media. Each person can view it once.'}
@@ -942,7 +969,7 @@ export function UnifiedAnswerComposer({
                   style={styles.mediaConfirmCancelBtn}
                   onPress={() => setShowMediaConfirmModal(false)}
                 >
-                  <Text style={styles.mediaConfirmCancelText}>Cancel</Text>
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.mediaConfirmCancelText}>Cancel</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[
@@ -951,8 +978,8 @@ export function UnifiedAnswerComposer({
                   ]}
                   onPress={handleMediaConfirmSend}
                 >
-                  <Ionicons name="send" size={16} color="#FFF" style={{ marginRight: 6 }} />
-                  <Text style={styles.mediaConfirmSendText}>Send</Text>
+                  <Ionicons name="send" size={SIZES.icon.sm} color="#FFF" style={{ marginRight: SPACING.sm - 2 }} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.mediaConfirmSendText}>Send</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -967,55 +994,57 @@ const styles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: {
     backgroundColor: C.background,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    borderTopLeftRadius: SHEET_RADIUS,
+    borderTopRightRadius: SHEET_RADIUS,
     maxHeight: '90%',
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    padding: 16,
+    gap: SPACING.sm + SPACING.xs,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.base,
     borderBottomWidth: 1,
     borderBottomColor: C.surface,
   },
-  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 },
-  badgeText: { fontSize: 10, fontWeight: '700', color: '#FFF' },
-  promptPreview: { flex: 1, fontSize: 13, color: C.textLight },
+  badge: { paddingHorizontal: moderateScale(10, 0.35), paddingVertical: SPACING.xs, borderRadius: SIZES.radius.md },
+  badgeText: { fontSize: FONT_SIZE.xs, lineHeight: lineHeight(FONT_SIZE.xs, 1.2), fontWeight: '700', color: '#FFF' },
+  promptPreview: { flex: 1, fontSize: FONT_SIZE.body2, lineHeight: lineHeight(FONT_SIZE.body2, 1.35), color: C.textLight },
 
-  content: { paddingHorizontal: 16, paddingVertical: 12 },
+  content: { paddingHorizontal: SPACING.base, paddingVertical: SPACING.md },
 
   textInput: {
     backgroundColor: C.surface,
-    borderRadius: 12,
-    padding: 12,
-    fontSize: 15,
+    borderRadius: SIZES.radius.md,
+    padding: SPACING.md,
+    fontSize: FONT_SIZE.md,
     color: C.text,
-    minHeight: 80,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
+    minHeight: moderateScale(80, 0.25),
     textAlignVertical: 'top',
   },
-  charCount: { fontSize: 11, color: C.textLight, textAlign: 'right', marginTop: 2, marginBottom: 8 },
+  charCount: { fontSize: FONT_SIZE.sm, lineHeight: lineHeight(FONT_SIZE.sm, 1.2), color: C.textLight, textAlign: 'right', marginTop: SPACING.xxs, marginBottom: SPACING.sm },
 
   // Attachment preview
-  attachmentPreview: { marginBottom: 8 },
+  attachmentPreview: { marginBottom: SPACING.sm },
 
   audioPreview: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: SPACING.sm + SPACING.xs,
     backgroundColor: C.surface,
-    borderRadius: 10,
-    padding: 10,
+    borderRadius: SIZES.radius.sm + 2,
+    padding: moderateScale(10, 0.35),
   },
-  audioPlayBtn: { padding: 2 },
-  audioWaveform: { flexDirection: 'row', alignItems: 'center', gap: 2, flex: 1 },
-  audioBar: { width: 3, borderRadius: 1.5, backgroundColor: C.primary },
-  audioDuration: { fontSize: 12, fontWeight: '600', color: C.textLight },
-  removeBtn: { padding: 2 },
+  audioPlayBtn: { padding: moderateScale(2, 0.25) },
+  audioWaveform: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xxs, flex: 1 },
+  audioBar: { width: moderateScale(3, 0.25), borderRadius: moderateScale(1.5, 0.25), backgroundColor: C.primary },
+  audioDuration: { fontSize: FONT_SIZE.caption, lineHeight: lineHeight(FONT_SIZE.caption, 1.2), fontWeight: '600', color: C.textLight },
+  removeBtn: { padding: moderateScale(2, 0.25) },
 
   mediaPreview: {
-    height: 100,
-    borderRadius: 12,
+    height: moderateScale(100, 0.25),
+    borderRadius: SIZES.radius.md,
     overflow: 'hidden',
     position: 'relative',
   },
@@ -1028,17 +1057,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  mediaLabel: { fontSize: 13, color: '#FFF', fontWeight: '600', marginTop: 4 },
-  removeMediaBtn: { position: 'absolute', top: 8, right: 8 },
+  mediaLabel: { fontSize: FONT_SIZE.body2, lineHeight: lineHeight(FONT_SIZE.body2, 1.2), color: '#FFF', fontWeight: '600', marginTop: SPACING.xs },
+  removeMediaBtn: { position: 'absolute', top: SPACING.sm, right: SPACING.sm },
 
   // VISUAL MEDIA LOCK: Locked badge and warning styles
   lockedMediaBadge: {
     position: 'absolute',
-    top: 8,
-    right: 8,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    top: SPACING.sm,
+    right: SPACING.sm,
+    width: moderateScale(28, 0.25),
+    height: moderateScale(28, 0.25),
+    borderRadius: SIZES.radius.full,
     backgroundColor: 'rgba(245,158,11,0.9)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1046,16 +1075,17 @@ const styles = StyleSheet.create({
   mediaLockedWarning: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: SPACING.sm,
     backgroundColor: 'rgba(245,158,11,0.15)',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginBottom: 8,
+    borderRadius: SIZES.radius.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: moderateScale(10, 0.35),
+    marginBottom: SPACING.sm,
   },
   mediaLockedText: {
     flex: 1,
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: '#F59E0B',
     fontWeight: '500',
   },
@@ -1064,23 +1094,23 @@ const styles = StyleSheet.create({
   recordingIndicator: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: SPACING.sm + SPACING.xs,
     backgroundColor: '#F4433620',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 12,
+    borderRadius: SIZES.radius.sm + 2,
+    padding: SPACING.md,
+    marginBottom: SPACING.md,
   },
   recordingDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
+    width: moderateScale(12, 0.25),
+    height: moderateScale(12, 0.25),
+    borderRadius: SIZES.radius.full,
     backgroundColor: '#F44336',
   },
-  recordingText: { flex: 1, fontSize: 14, fontWeight: '600', color: '#F44336' },
+  recordingText: { flex: 1, fontSize: FONT_SIZE.body, lineHeight: lineHeight(FONT_SIZE.body, 1.2), fontWeight: '600', color: '#F44336' },
   stopRecordBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: moderateScale(32, 0.25),
+    height: moderateScale(32, 0.25),
+    borderRadius: SIZES.radius.full,
     backgroundColor: '#F44336',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1089,103 +1119,104 @@ const styles = StyleSheet.create({
   // Attachment buttons
   attachmentButtons: {
     flexDirection: 'row',
-    gap: 8,
-    marginBottom: 8,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
   },
   attachBtn: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
-    paddingVertical: 10,
+    gap: SPACING.xs,
+    paddingVertical: moderateScale(10, 0.35),
     backgroundColor: C.surface,
-    borderRadius: 10,
+    borderRadius: SIZES.radius.sm + 2,
   },
-  attachBtnText: { fontSize: 11, fontWeight: '600', color: C.text },
+  attachBtnText: { fontSize: FONT_SIZE.sm, lineHeight: lineHeight(FONT_SIZE.sm, 1.2), fontWeight: '600', color: C.text },
 
   // Identity picker
   identitySection: {
     backgroundColor: C.surface,
-    borderRadius: 10,
-    padding: 10,
-    marginBottom: 8,
+    borderRadius: SIZES.radius.sm + 2,
+    padding: moderateScale(10, 0.35),
+    marginBottom: SPACING.sm,
   },
   identityHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: 6,
+    gap: SPACING.sm - 2,
+    marginBottom: SPACING.sm - 2,
   },
-  identityTitle: { fontSize: 12, fontWeight: '600', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.3 },
-  identityOptions: { gap: 4 },
+  identityTitle: { fontSize: FONT_SIZE.caption, lineHeight: lineHeight(FONT_SIZE.caption, 1.2), fontWeight: '600', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.3 },
+  identityOptions: { gap: SPACING.xs },
   identityOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 6,
-    borderRadius: 8,
+    gap: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.sm - 2,
+    borderRadius: SIZES.radius.sm,
   },
   identityOptionActive: { backgroundColor: C.primary + '10' },
   // P1-003 FIX: Added container for text + subtext
   identityTextContainer: { flex: 1 },
-  identityText: { fontSize: 13, color: C.text, fontWeight: '500' },
-  identitySubtext: { fontSize: 11, color: C.textLight, marginTop: 1 },
+  identityText: { fontSize: FONT_SIZE.body2, lineHeight: lineHeight(FONT_SIZE.body2, 1.2), color: C.text, fontWeight: '500' },
+  identitySubtext: { fontSize: FONT_SIZE.sm, lineHeight: lineHeight(FONT_SIZE.sm, 1.35), color: C.textLight, marginTop: moderateScale(1, 0.25) },
   radioOuter: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    width: moderateScale(18, 0.25),
+    height: moderateScale(18, 0.25),
+    borderRadius: SIZES.radius.full,
     borderWidth: 2,
     borderColor: C.textLight,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  radioInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.primary },
+  radioInner: { width: moderateScale(10, 0.25), height: moderateScale(10, 0.25), borderRadius: SIZES.radius.full, backgroundColor: C.primary },
   defaultBadge: {
     backgroundColor: C.primary + '20',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
+    paddingHorizontal: SPACING.sm - 2,
+    paddingVertical: SPACING.xxs,
+    borderRadius: SIZES.radius.xs + 2,
   },
-  defaultBadgeText: { fontSize: 9, fontWeight: '700', color: C.primary },
+  defaultBadgeText: { fontSize: FONT_SIZE.xxs, lineHeight: lineHeight(FONT_SIZE.xxs, 1.2), fontWeight: '700', color: C.primary },
 
   // Media visibility selector (segmented control)
   // P1-002 FIX: Added header styles for clearer visibility section
-  visibilitySection: { marginTop: 4 },
+  visibilitySection: { marginTop: SPACING.xs },
   visibilitySeparator: {
     height: 1,
     backgroundColor: C.background,
-    marginVertical: 8,
+    marginVertical: SPACING.sm,
   },
   visibilityHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: 8,
+    gap: SPACING.sm - 2,
+    marginBottom: SPACING.sm,
   },
-  visibilityTitle: { fontSize: 12, fontWeight: '600', color: C.textLight },
+  visibilityTitle: { fontSize: FONT_SIZE.caption, lineHeight: lineHeight(FONT_SIZE.caption, 1.2), fontWeight: '600', color: C.textLight },
   visibilitySegmented: {
     flexDirection: 'row',
-    gap: 8,
+    gap: SPACING.sm,
   },
   segmentBtn: {
     flex: 1,
     flexDirection: 'row',
-    paddingVertical: 10,
-    borderRadius: 8,
+    paddingVertical: moderateScale(10, 0.35),
+    borderRadius: SIZES.radius.sm,
     borderWidth: 1,
     borderColor: C.textLight + '40',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: SPACING.sm - 2,
   },
-  segmentIcon: { marginRight: 2 },
+  segmentIcon: { marginRight: moderateScale(2, 0.25) },
   segmentBtnActive: {
     backgroundColor: C.primary,
     borderColor: C.primary,
   },
   segmentBtnText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.2),
     fontWeight: '600',
     color: C.textLight,
   },
@@ -1193,10 +1224,11 @@ const styles = StyleSheet.create({
     color: '#FFF',
   },
   visibilityHelperText: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.35),
     color: C.textLight,
     textAlign: 'center',
-    marginTop: 6,
+    marginTop: SPACING.sm - 2,
   },
 
   // Footer
@@ -1204,24 +1236,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
-    paddingBottom: 32,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.base,
+    paddingBottom: SPACING.base,
     borderTopWidth: 1,
     borderTopColor: C.surface,
   },
-  viewModeHint: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  viewModeText: { fontSize: 12, color: C.textLight },
+  viewModeHint: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm - 2 },
+  viewModeText: { fontSize: FONT_SIZE.caption, lineHeight: lineHeight(FONT_SIZE.caption, 1.2), color: C.textLight },
   submitBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: SPACING.sm - 2,
     backgroundColor: C.primary,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 20,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
+    borderRadius: SIZES.radius.xl,
   },
   submitBtnDisabled: { opacity: 0.5 },
-  submitText: { fontSize: 14, fontWeight: '600', color: '#FFF' },
+  submitText: { fontSize: FONT_SIZE.body, lineHeight: lineHeight(FONT_SIZE.body, 1.2), fontWeight: '600', color: '#FFF' },
 
   // Fullscreen media preview
   fullscreenOverlay: {
@@ -1232,11 +1265,10 @@ const styles = StyleSheet.create({
   },
   fullscreenClose: {
     position: 'absolute',
-    top: 50,
-    right: 20,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    right: SPACING.lg,
+    width: SIZES.touchTarget,
+    height: SIZES.touchTarget,
+    borderRadius: SIZES.radius.full,
     backgroundColor: 'rgba(255,255,255,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1253,54 +1285,56 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.7)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 24,
+    padding: SPACING.xl,
   },
   mediaConfirmSheet: {
     backgroundColor: C.background,
-    borderRadius: 16,
-    padding: 24,
+    borderRadius: MODAL_RADIUS,
+    padding: SPACING.xl,
     width: '100%',
     maxWidth: 320,
   },
   mediaConfirmHeader: {
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: SPACING.md,
   },
   mediaConfirmTitle: {
-    fontSize: 18,
+    fontSize: FONT_SIZE.xl,
     fontWeight: '700',
+    lineHeight: lineHeight(FONT_SIZE.xl, 1.2),
     color: C.text,
     textAlign: 'center',
-    marginBottom: 12,
+    marginBottom: SPACING.md,
   },
   mediaConfirmMessage: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: C.textLight,
     textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 24,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
+    marginBottom: SPACING.xl,
   },
   mediaConfirmButtons: {
     flexDirection: 'row',
-    gap: 12,
+    gap: SPACING.md,
   },
   mediaConfirmCancelBtn: {
     flex: 1,
-    paddingVertical: 12,
-    borderRadius: 10,
+    paddingVertical: SPACING.md,
+    borderRadius: SIZES.radius.sm + 2,
     backgroundColor: C.surface,
     alignItems: 'center',
   },
   mediaConfirmCancelText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
     color: C.text,
   },
   mediaConfirmSendBtn: {
     flex: 1,
     flexDirection: 'row',
-    paddingVertical: 12,
-    borderRadius: 10,
+    paddingVertical: SPACING.md,
+    borderRadius: SIZES.radius.sm + 2,
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1310,8 +1344,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#00B894',
   },
   mediaConfirmSendText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
     color: '#FFF',
   },
 });
