@@ -61,7 +61,7 @@ import {
   Platform,
   Animated,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import MapView, { Region, Marker } from 'react-native-maps';
 import Supercluster from 'supercluster';
@@ -71,7 +71,15 @@ import { api } from '@/convex/_generated/api';
 import { useLocationStore, useBestLocation } from '@/stores/locationStore';
 import { useAuthStore } from '@/stores/authStore';
 import { safePush } from '@/lib/safeRouter';
-import { COLORS } from '@/lib/constants';
+import {
+  COLORS,
+  SPACING,
+  SIZES,
+  FONT_SIZE,
+  FONT_WEIGHT,
+  lineHeight,
+  moderateScale,
+} from '@/lib/constants';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
 import { log } from '@/utils/logger';
@@ -116,13 +124,13 @@ class MapErrorBoundary extends Component<
     if (this.state.hasError) {
       return (
         <View style={mapErrorStyles.container}>
-          <Ionicons name="map-outline" size={48} color={COLORS.textLight} />
-          <Text style={mapErrorStyles.title}>Map unavailable</Text>
-          <Text style={mapErrorStyles.subtitle}>
+          <Ionicons name="map-outline" size={moderateScale(48, 0.3)} color={COLORS.textLight} />
+          <Text style={mapErrorStyles.title} maxFontSizeMultiplier={1.2}>Map unavailable</Text>
+          <Text style={mapErrorStyles.subtitle} maxFontSizeMultiplier={1.2}>
             Something went wrong loading the map
           </Text>
           <TouchableOpacity style={mapErrorStyles.retryButton} onPress={this.handleRetry}>
-            <Text style={mapErrorStyles.retryText}>Try Again</Text>
+            <Text style={mapErrorStyles.retryText} maxFontSizeMultiplier={1.2}>Try Again</Text>
           </TouchableOpacity>
         </View>
       );
@@ -136,32 +144,35 @@ const mapErrorStyles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 32,
+    padding: SPACING.xxl,
     backgroundColor: COLORS.background,
   },
   title: {
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.xl,
+    lineHeight: lineHeight(FONT_SIZE.xl, 1.2),
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.text,
-    marginTop: 16,
+    marginTop: SPACING.base,
   },
   subtitle: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
     color: COLORS.textLight,
     textAlign: 'center',
-    marginTop: 8,
+    marginTop: SPACING.sm,
   },
   retryButton: {
-    marginTop: 20,
+    marginTop: SPACING.lg,
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 20,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
+    borderRadius: moderateScale(20, 0.25),
   },
   retryText: {
     color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
+    fontSize: moderateScale(15, 0.4),
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
+    fontWeight: FONT_WEIGHT.semibold,
   },
 });
 
@@ -401,6 +412,7 @@ function getBoundingBox(region: Region): [number, number, number, number] {
 export default function NearbyScreen() {
   const router = useRouter();
   const isDemo = isDemoMode;
+  const insets = useSafeAreaInsets();
 
   // Map ref for programmatic control
   const mapRef = useRef<MapView>(null);
@@ -1885,13 +1897,13 @@ export default function NearbyScreen() {
     if (locationUIState === 'denied_needs_settings') {
       return (
         <View style={styles.centered}>
-          <Ionicons name="navigate-circle-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Turn on location for Nearby</Text>
-          <Text style={styles.subtitle}>
+          <Ionicons name="navigate-circle-outline" size={moderateScale(64, 0.3)} color={COLORS.textLight} />
+          <Text style={styles.title} maxFontSizeMultiplier={1.2}>Turn on location for Nearby</Text>
+          <Text style={styles.subtitle} maxFontSizeMultiplier={1.2}>
             Nearby needs location access to place your map and show people around you.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
-            <Text style={styles.primaryButtonText}>Turn On Location</Text>
+            <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.2}>Turn On Location</Text>
           </TouchableOpacity>
         </View>
       );
@@ -1901,9 +1913,9 @@ export default function NearbyScreen() {
     if (locationUIState === 'restricted') {
       return (
         <View style={styles.centered}>
-          <Ionicons name="lock-closed-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Location isn't available here</Text>
-          <Text style={styles.subtitle}>
+          <Ionicons name="lock-closed-outline" size={moderateScale(64, 0.3)} color={COLORS.textLight} />
+          <Text style={styles.title} maxFontSizeMultiplier={1.2}>Location isn't available here</Text>
+          <Text style={styles.subtitle} maxFontSizeMultiplier={1.2}>
             This device is preventing location access, possibly because of parental controls or device management.
           </Text>
         </View>
@@ -1914,13 +1926,13 @@ export default function NearbyScreen() {
     if (locationUIState === 'services_disabled') {
       return (
         <View style={styles.centered}>
-          <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Enable Location Services</Text>
-          <Text style={styles.subtitle}>
+          <Ionicons name="location-outline" size={moderateScale(64, 0.3)} color={COLORS.textLight} />
+          <Text style={styles.title} maxFontSizeMultiplier={1.2}>Enable Location Services</Text>
+          <Text style={styles.subtitle} maxFontSizeMultiplier={1.2}>
             Turn on Location Services to keep Nearby live and up to date.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
-            <Text style={styles.primaryButtonText}>Open Settings</Text>
+            <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.2}>Open Settings</Text>
           </TouchableOpacity>
         </View>
       );
@@ -1930,13 +1942,13 @@ export default function NearbyScreen() {
     if (locationUIState === 'error') {
       return (
         <View style={styles.centered}>
-          <Ionicons name="warning-outline" size={64} color={COLORS.warning} />
-          <Text style={styles.title}>We couldn't update your location yet</Text>
-          <Text style={styles.subtitle}>
+          <Ionicons name="warning-outline" size={moderateScale(64, 0.3)} color={COLORS.warning} />
+          <Text style={styles.title} maxFontSizeMultiplier={1.2}>We couldn't update your location yet</Text>
+          <Text style={styles.subtitle} maxFontSizeMultiplier={1.2}>
             {blockingLocationErrorMessage || 'Try again in a moment or move somewhere with a clearer GPS signal.'}
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={handleRetryLocation}>
-            <Text style={styles.primaryButtonText}>Try Again</Text>
+            <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.2}>Try Again</Text>
           </TouchableOpacity>
         </View>
       );
@@ -1945,13 +1957,13 @@ export default function NearbyScreen() {
     if (nearbyQueryStatus === 'viewer_unverified') {
       return (
         <View style={styles.centered}>
-          <Ionicons name="shield-checkmark-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Verify to use Nearby</Text>
-          <Text style={styles.subtitle}>
+          <Ionicons name="shield-checkmark-outline" size={moderateScale(64, 0.3)} color={COLORS.textLight} />
+          <Text style={styles.title} maxFontSizeMultiplier={1.2}>Verify to use Nearby</Text>
+          <Text style={styles.subtitle} maxFontSizeMultiplier={1.2}>
             Finish verification to unlock Nearby and browse people who meet the same trust rules.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={handleOpenVerification}>
-            <Text style={styles.primaryButtonText}>Verify Now</Text>
+            <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.2}>Verify Now</Text>
           </TouchableOpacity>
         </View>
       );
@@ -1961,13 +1973,13 @@ export default function NearbyScreen() {
     if (shouldShowBlockingQueryError) {
       return (
         <View style={styles.centered}>
-          <Ionicons name="cloud-offline-outline" size={64} color={COLORS.warning} />
-          <Text style={styles.title}>Nearby needs a moment</Text>
-          <Text style={styles.subtitle}>
+          <Ionicons name="cloud-offline-outline" size={moderateScale(64, 0.3)} color={COLORS.warning} />
+          <Text style={styles.title} maxFontSizeMultiplier={1.2}>Nearby needs a moment</Text>
+          <Text style={styles.subtitle} maxFontSizeMultiplier={1.2}>
             {queryError}
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={handleRetryQuery}>
-            <Text style={styles.primaryButtonText}>Refresh Nearby</Text>
+            <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.2}>Refresh Nearby</Text>
           </TouchableOpacity>
         </View>
       );
@@ -2106,7 +2118,7 @@ export default function NearbyScreen() {
           <View style={styles.mapBootOverlay} pointerEvents="none">
             <View style={styles.mapBootCard}>
               <ActivityIndicator size="small" color={COLORS.primary} />
-              <Text style={styles.mapBootText}>Loading your map…</Text>
+              <Text style={styles.mapBootText} maxFontSizeMultiplier={1.2}>Loading your map…</Text>
             </View>
           </View>
         )}
@@ -2114,10 +2126,10 @@ export default function NearbyScreen() {
         {mapNotice && (
           <View style={styles.mapNoticeContainer} pointerEvents="box-none">
             <View style={styles.mapNoticeCard}>
-              <Text style={styles.mapNoticeText}>{mapNotice.message}</Text>
+              <Text style={styles.mapNoticeText} maxFontSizeMultiplier={1.2}>{mapNotice.message}</Text>
               {mapNotice.actionLabel && mapNotice.onPress ? (
                 <TouchableOpacity onPress={mapNotice.onPress} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                  <Text style={styles.mapNoticeAction}>{mapNotice.actionLabel}</Text>
+                  <Text style={styles.mapNoticeAction} maxFontSizeMultiplier={1.2}>{mapNotice.actionLabel}</Text>
                 </TouchableOpacity>
               ) : null}
             </View>
@@ -2132,7 +2144,7 @@ export default function NearbyScreen() {
             <View style={styles.loadingCard}>
               <View style={styles.loadingRow}>
                 <ActivityIndicator size="small" color={COLORS.primary} />
-                <Text style={styles.loadingText}>
+                <Text style={styles.loadingText} maxFontSizeMultiplier={1.2}>
                   {isRetrying || hasRetainedNearbyResult
                     ? 'Refreshing Nearby…'
                     : 'Searching nearby…'}
@@ -2168,7 +2180,13 @@ export default function NearbyScreen() {
         {/* P2-FIX-3: pointerEvents="box-none" lets taps on the surrounding
              overlay strip pass through to the map; only the card itself is tappable. */}
         {showEmptyState && (
-          <View style={styles.emptyOverlay} pointerEvents="box-none">
+          <View
+            style={[
+              styles.emptyOverlay,
+              { bottom: Math.max(insets.bottom, SPACING.md) + SPACING.sm },
+            ]}
+            pointerEvents="box-none"
+          >
             <Animated.View
               style={[
                 styles.emptyCardWrap,
@@ -2180,14 +2198,14 @@ export default function NearbyScreen() {
             >
               <View style={styles.emptyCard}>
                 <View style={styles.emptyIconBubble}>
-                  <Ionicons name="people-outline" size={26} color={COLORS.primary} />
+                  <Ionicons name="people-outline" size={SIZES.icon.lg} color={COLORS.primary} />
                 </View>
-                <Text style={styles.emptyTitle}>You&apos;re early — check back soon</Text>
-                <Text style={styles.emptySubtitle}>
+                <Text style={styles.emptyTitle} maxFontSizeMultiplier={1.2}>You&apos;re early — check back soon</Text>
+                <Text style={styles.emptySubtitle} maxFontSizeMultiplier={1.2}>
                   Be the first in your area or check back later.
                 </Text>
-                <Text style={styles.emptyTrust}>Approximate area only — not live tracking</Text>
-                <Text style={styles.emptyHint}>Move the map to explore other areas</Text>
+                <Text style={styles.emptyTrust} maxFontSizeMultiplier={1.2}>Approximate area only — not live tracking</Text>
+                <Text style={styles.emptyHint} maxFontSizeMultiplier={1.2}>Move the map to explore other areas</Text>
                 <View style={styles.emptyActionRow}>
                   <TouchableOpacity
                     style={[styles.emptyActionButton, isRetrying && styles.emptyActionButtonDisabled]}
@@ -2201,9 +2219,9 @@ export default function NearbyScreen() {
                     {isRetrying ? (
                       <ActivityIndicator size="small" color={COLORS.primary} />
                     ) : (
-                      <Ionicons name="refresh" size={16} color={COLORS.primary} />
+                      <Ionicons name="refresh" size={SIZES.icon.sm} color={COLORS.primary} />
                     )}
-                    <Text style={styles.emptyActionText}>
+                    <Text style={styles.emptyActionText} maxFontSizeMultiplier={1.2}>
                       {isRetrying ? 'Refreshing Nearby…' : 'Refresh'}
                     </Text>
                   </TouchableOpacity>
@@ -2214,8 +2232,8 @@ export default function NearbyScreen() {
                     accessibilityLabel="Try Discover"
                     accessibilityHint="Browse the full discover feed while Nearby is empty"
                   >
-                    <Ionicons name="compass-outline" size={16} color={COLORS.primary} />
-                    <Text style={styles.emptyActionText}>Try Discover</Text>
+                    <Ionicons name="compass-outline" size={SIZES.icon.sm} color={COLORS.primary} />
+                    <Text style={styles.emptyActionText} maxFontSizeMultiplier={1.2}>Try Discover</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.emptyActionButton}
@@ -2224,16 +2242,16 @@ export default function NearbyScreen() {
                     accessibilityLabel="Adjust preferences"
                     accessibilityHint="Open discovery preferences to widen your search"
                   >
-                    <Ionicons name="options-outline" size={16} color={COLORS.primary} />
-                    <Text style={styles.emptyActionText}>Adjust preferences</Text>
+                    <Ionicons name="options-outline" size={SIZES.icon.sm} color={COLORS.primary} />
+                    <Text style={styles.emptyActionText} maxFontSizeMultiplier={1.2}>Adjust preferences</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.emptyActionButton}
                     onPress={handleOpenCrossedPaths}
                     activeOpacity={0.85}
                   >
-                    <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
-                    <Text style={styles.emptyActionText}>Crossed Paths</Text>
+                    <Ionicons name="footsteps-outline" size={SIZES.icon.sm} color={COLORS.primary} />
+                    <Text style={styles.emptyActionText} maxFontSizeMultiplier={1.2}>Crossed Paths</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -2243,16 +2261,21 @@ export default function NearbyScreen() {
 
         {/* My location button (static, tap-once recenter) */}
         {/* P3-002: Animated scale on press for premium feel */}
+        {/* Cross-device: bottom offset clears gesture/nav area on OnePlus
+            while remaining stable on Samsung. */}
         {permissionStatus === 'granted' && bestLocation && (
           <Animated.View style={{ transform: [{ scale: recenterScale }] }}>
             <TouchableOpacity
-              style={styles.myLocationButton}
+              style={[
+                styles.myLocationButton,
+                { bottom: Math.max(insets.bottom, SPACING.md) + SPACING.sm },
+              ]}
               onPress={handleRecenterToMyLocation}
               onPressIn={handleRecenterPressIn}
               onPressOut={handleRecenterPressOut}
               activeOpacity={1}
             >
-              <Ionicons name="locate" size={22} color={COLORS.primary} />
+              <Ionicons name="locate" size={SIZES.icon.md} color={COLORS.primary} />
             </TouchableOpacity>
           </Animated.View>
         )}
@@ -2270,8 +2293,8 @@ export default function NearbyScreen() {
       {/* Nearby settings entry is intentionally NOT here — users access
           Nearby settings only via Profile → Privacy → Nearby settings. */}
       <View style={styles.header}>
-        <View style={{ width: 24 }} />
-        <Text style={styles.headerTitle}>Nearby</Text>
+        <View style={{ width: SIZES.icon.lg }} />
+        <Text style={styles.headerTitle} maxFontSizeMultiplier={1.2}>Nearby</Text>
         <View style={styles.headerIcons}>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
@@ -2280,7 +2303,7 @@ export default function NearbyScreen() {
             accessibilityHint="View people you've crossed paths with"
           >
             <View>
-              <Ionicons name="footsteps-outline" size={24} color={COLORS.text} />
+              <Ionicons name="footsteps-outline" size={SIZES.icon.lg} color={COLORS.text} />
               {hasNewCrossedPaths && (
                 <Badge dot animate style={styles.crossedPathsBadge} />
               )}
@@ -2289,7 +2312,7 @@ export default function NearbyScreen() {
         </View>
         {isDemo && (
           <View style={styles.demoBadge}>
-            <Text style={styles.demoBadgeText}>DEMO</Text>
+            <Text style={styles.demoBadgeText} maxFontSizeMultiplier={1.2}>DEMO</Text>
           </View>
         )}
       </View>
@@ -2325,72 +2348,76 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 18,
-    paddingVertical: 14,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.md,
     backgroundColor: COLORS.background,
     // No shadow / elevation / border — header and SafeArea share the
     // same background so the top of the screen reads as one continuous
     // premium surface. Visual hierarchy comes from typography + spacing.
   },
   headerTitle: {
-    fontSize: 22,
-    fontWeight: '700',
+    fontSize: moderateScale(22, 0.4),
+    lineHeight: lineHeight(moderateScale(22, 0.4), 1.2),
+    fontWeight: FONT_WEIGHT.bold,
     color: COLORS.text,
     letterSpacing: -0.3,
   },
   headerIcons: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: SPACING.md,
   },
   crossedPathsBadge: {
     position: 'absolute',
-    top: -2,
-    right: -4,
+    top: -SPACING.xxs,
+    right: -SPACING.xs,
   },
   demoBadge: {
     position: 'absolute',
-    right: 16,
+    right: SPACING.base,
     backgroundColor: COLORS.warning,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 4,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xxs,
+    borderRadius: SIZES.radius.xs,
   },
   demoBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
+    fontSize: FONT_SIZE.xs,
+    lineHeight: lineHeight(FONT_SIZE.xs, 1.2),
+    fontWeight: FONT_WEIGHT.bold,
     color: '#fff',
   },
   centered: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 40,
+    paddingHorizontal: moderateScale(40, 0.5),
   },
   title: {
-    fontSize: 22,
-    fontWeight: '700',
+    fontSize: moderateScale(22, 0.4),
+    lineHeight: lineHeight(moderateScale(22, 0.4), 1.2),
+    fontWeight: FONT_WEIGHT.bold,
     color: COLORS.text,
-    marginTop: 16,
+    marginTop: SPACING.base,
     textAlign: 'center',
   },
   subtitle: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.45),
     color: COLORS.textLight,
     textAlign: 'center',
-    marginTop: 8,
-    lineHeight: 22,
+    marginTop: SPACING.sm,
   },
   primaryButton: {
-    marginTop: 24,
+    marginTop: SPACING.xl,
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 32,
-    paddingVertical: 14,
-    borderRadius: 25,
+    paddingHorizontal: SPACING.xxl,
+    paddingVertical: SPACING.md,
+    borderRadius: SIZES.radius.xl,
   },
   primaryButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.lg,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
+    fontWeight: FONT_WEIGHT.semibold,
     color: '#fff',
   },
   mapContainer: {
@@ -2410,16 +2437,16 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 24,
+    paddingHorizontal: SPACING.xl,
   },
   mapBootCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: SPACING.sm,
     backgroundColor: 'rgba(255, 255, 255, 0.96)',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 20,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.md,
+    borderRadius: moderateScale(20, 0.25),
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
@@ -2427,7 +2454,8 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   mapBootText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
     color: COLORS.textLight,
   },
   // NOTE: Cluster markers use image={pinPink} for Android reliability.
@@ -2435,9 +2463,9 @@ const styles = StyleSheet.create({
   // Overlay styles
   loadingOverlay: {
     position: 'absolute',
-    top: 16,
-    left: 16,
-    right: 16,
+    top: SPACING.base,
+    left: SPACING.base,
+    right: SPACING.base,
     alignItems: 'center',
   },
   loadingCard: {
@@ -2445,35 +2473,36 @@ const styles = StyleSheet.create({
     flexDirection: 'column',
     alignItems: 'center',
     backgroundColor: 'rgba(255, 255, 255, 0.95)',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
+    borderRadius: moderateScale(20, 0.25),
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 3,
-    gap: 6,
+    gap: SPACING.xs,
   },
   loadingRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: SPACING.sm,
   },
   loadingText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
     color: COLORS.textLight,
   },
   loadingSkeletonRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    marginTop: 2,
+    gap: SPACING.xs,
+    marginTop: SPACING.xxs,
   },
   loadingSkeletonDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    width: moderateScale(6, 0.5),
+    height: moderateScale(6, 0.5),
+    borderRadius: moderateScale(3, 0.25),
     backgroundColor: `${COLORS.primary}66`,
   },
   loadingSkeletonDot1: { opacity: 0.55 },
@@ -2481,20 +2510,20 @@ const styles = StyleSheet.create({
   loadingSkeletonDot3: { opacity: 1 },
   mapNoticeContainer: {
     position: 'absolute',
-    top: 64,
-    left: 16,
-    right: 16,
+    top: moderateScale(64, 0.5),
+    left: SPACING.base,
+    right: SPACING.base,
     alignItems: 'center',
   },
   mapNoticeCard: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 12,
+    gap: SPACING.md,
     backgroundColor: 'rgba(255, 255, 255, 0.97)',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 16,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.lg,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -2503,28 +2532,32 @@ const styles = StyleSheet.create({
   },
   mapNoticeText: {
     flex: 1,
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
     color: COLORS.text,
   },
   mapNoticeAction: {
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.primary,
   },
   emptyOverlay: {
     position: 'absolute',
-    bottom: 24,
-    left: 16,
-    right: 16,
+    // Bottom is overridden inline with safe-area-aware value;
+    // this static fallback is used when insets aren't yet available.
+    bottom: SPACING.xl,
+    left: SPACING.base,
+    right: SPACING.base,
     alignItems: 'center',
   },
   emptyCard: {
     flexDirection: 'column',
     alignItems: 'center',
     backgroundColor: 'rgba(255, 255, 255, 0.98)',
-    paddingHorizontal: 28,
-    paddingVertical: 24,
-    borderRadius: 20,
+    paddingHorizontal: moderateScale(28, 0.5),
+    paddingVertical: SPACING.xl,
+    borderRadius: moderateScale(20, 0.25),
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1,
@@ -2532,68 +2565,71 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   emptyIconBubble: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: moderateScale(52, 0.4),
+    height: moderateScale(52, 0.4),
+    borderRadius: moderateScale(26, 0.4),
     backgroundColor: COLORS.primarySubtle,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 4,
+    marginBottom: SPACING.xs,
   },
   emptyTitle: {
-    fontSize: 17,
-    fontWeight: '700',
+    fontSize: moderateScale(17, 0.4),
+    lineHeight: lineHeight(moderateScale(17, 0.4), 1.25),
+    fontWeight: FONT_WEIGHT.bold,
     color: COLORS.text,
-    marginTop: 12,
+    marginTop: SPACING.md,
     textAlign: 'center',
     letterSpacing: -0.2,
   },
   emptySubtitle: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.45),
     color: COLORS.textLight,
     textAlign: 'center',
-    marginTop: 6,
-    lineHeight: 19,
-    paddingHorizontal: 4,
+    marginTop: SPACING.xs,
+    paddingHorizontal: SPACING.xs,
   },
   emptyCardWrap: {
     alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.10)',
-    borderRadius: 24,
-    padding: 6,
+    borderRadius: SIZES.radius.xl,
+    padding: moderateScale(6, 0.5),
   },
   emptyTrust: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.35),
     color: COLORS.textLight,
     textAlign: 'center',
-    marginTop: 8,
+    marginTop: SPACING.sm,
     opacity: 0.75,
-    fontWeight: '500',
+    fontWeight: FONT_WEIGHT.medium,
   },
   emptyHint: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: COLORS.textLight,
     textAlign: 'center',
-    marginTop: 10,
+    marginTop: SPACING.sm,
     opacity: 0.85,
   },
   emptyActionRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    marginTop: 16,
+    gap: SPACING.sm,
+    marginTop: SPACING.base,
     flexWrap: 'wrap',
   },
   emptyActionButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 22,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
+    borderRadius: moderateScale(22, 0.25),
     backgroundColor: `${COLORS.primary}15`,
-    gap: 6,
-    minWidth: 110,
+    gap: SPACING.xs,
+    minWidth: moderateScale(110, 0.5),
     justifyContent: 'center',
   },
   emptyActionButtonDisabled: {
@@ -2609,24 +2645,27 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   emptyPulseDot: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: moderateScale(48, 0.4),
+    height: moderateScale(48, 0.4),
+    borderRadius: SIZES.radius.xl,
     backgroundColor: COLORS.primary,
   },
   emptyActionText: {
-    fontSize: 13,
-    fontWeight: '500',
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
+    fontWeight: FONT_WEIGHT.medium,
     color: COLORS.primary,
   },
   // My location button (static, tap-once recenter)
+  // Bottom is overridden inline with safe-area-aware value; this static
+  // fallback ensures the button never sits flush with the tab bar.
   myLocationButton: {
     position: 'absolute',
-    bottom: 24,
-    right: 16,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    bottom: SPACING.xl,
+    right: SPACING.base,
+    width: SIZES.touchTarget,
+    height: SIZES.touchTarget,
+    borderRadius: SIZES.touchTarget / 2,
     backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
