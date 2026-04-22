@@ -53,7 +53,16 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
-import { COLORS, INCOGNITO_COLORS, SWIPE_CONFIG } from "@/lib/constants";
+import {
+  COLORS,
+  FONT_SIZE,
+  INCOGNITO_COLORS,
+  SIZES,
+  SPACING,
+  SWIPE_CONFIG,
+  lineHeight,
+  moderateScale,
+} from "@/lib/constants";
 import { PRIVATE_INTENT_CATEGORIES } from "@/lib/privateConstants";
 import { getTrustBadges } from "@/lib/trustBadges";
 import { useAuthStore } from "@/stores/authStore";
@@ -190,7 +199,7 @@ function StarBurstParticle({
 
   return (
     <Animated.View style={[starBurstStyles.star, particleStyle]}>
-      <Ionicons name="star" size={24} color={color} />
+      <Ionicons name="star" size={SIZES.icon.lg} color={color} />
     </Animated.View>
   );
 }
@@ -240,7 +249,7 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
         />
       ))}
       <Animated.View style={[starBurstStyles.centerStar, centerStarStyle]}>
-        <Ionicons name="star" size={48} color="#FFD700" />
+        <Ionicons name="star" size={DISCOVER_MATCH_AVATAR_ICON_SIZE} color="#FFD700" />
       </Animated.View>
     </View>
   );
@@ -285,7 +294,7 @@ function MatchCelebrationPulse() {
     <>
       <Animated.View style={[styles.p2MatchGlowRing, haloStyle]} />
       <Animated.View style={[styles.p2MatchFloatingHeart, heartStyle]}>
-        <Ionicons name="heart" size={28} color="#ff9ac8" />
+        <Ionicons name="heart" size={DISCOVER_ACTION_ICON_SIZE} color="#ff9ac8" />
       </Animated.View>
     </>
   );
@@ -300,8 +309,8 @@ const starBurstStyles = StyleSheet.create({
   },
   star: {
     position: 'absolute',
-    width: 24,
-    height: 24,
+    width: SIZES.icon.lg,
+    height: SIZES.icon.lg,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'transparent',
@@ -314,6 +323,27 @@ const starBurstStyles = StyleSheet.create({
 });
 
 const HEADER_H = 44;
+const DISCOVER_TEXT_MAX_SCALE = 1.2;
+const DISCOVER_TEXT_PROPS = { maxFontSizeMultiplier: DISCOVER_TEXT_MAX_SCALE } as const;
+const DISCOVER_FONT_15 = moderateScale(15, 0.4);
+const DISCOVER_FONT_17 = moderateScale(17, 0.4);
+const DISCOVER_FONT_21 = moderateScale(21, 0.4);
+const DISCOVER_FONT_22 = moderateScale(22, 0.4);
+const DISCOVER_FONT_26 = moderateScale(26, 0.4);
+const DISCOVER_EMOJI_SIZE = moderateScale(72, 0.3);
+const DISCOVER_PHASE2_EMPTY_ICON_SIZE = moderateScale(36, 0.3);
+const DISCOVER_LIMIT_ICON_SIZE = moderateScale(80, 0.3);
+const DISCOVER_MATCH_AVATAR_ICON_SIZE = moderateScale(48, 0.3);
+const DISCOVER_ACTION_ICON_SIZE = moderateScale(28, 0.3);
+const DISCOVER_STANDOUT_ICON_SIZE = moderateScale(22, 0.3);
+const DISCOVER_ACTION_BUTTON_SIZE = moderateScale(62, 0.25);
+const DISCOVER_ACTION_BUTTON_COMPACT_SIZE = moderateScale(54, 0.25);
+const DISCOVER_BADGE_SIZE = SIZES.badgeSize + SPACING.xxs;
+const DISCOVER_CARD_HORIZONTAL_INSET = SPACING.sm + SPACING.xxs;
+const DISCOVER_EMPTY_CONTENT_MAX_WIDTH = moderateScale(320, 0.25);
+const DISCOVER_EMPTY_CARD_MAX_WIDTH = moderateScale(340, 0.25);
+const DISCOVER_ACTION_BAR_CLEARANCE = DISCOVER_ACTION_BUTTON_SIZE + SPACING.md + SPACING.xs;
+const DISCOVER_TRANSITION_HINT_MIN_BOTTOM = SIZES.button.lg + SPACING.lg;
 const DEFAULT_PHASE2_INTENT_KEYS = ['go_with_the_flow'];
 
 function resolvePhase2IntentKeys(
@@ -2616,6 +2646,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Minimum upward velocity for intentional gesture
   const profileOpenMinVelocity = 0.3;
 
+  // Loading state — non-demo only; skip when using external profiles
+  // P1-003 FIX: Phase-2 uses isPhase2QueryLoading only while useQuery is undefined (resolved [] is not loading)
+  // AUTH_READY_FIX: Show loading when auth is not ready (userId / stable auth gate) in Phase-2
+  const isAuthPending = isPhase2 && !isDemoMode && (!userId || !isAuthReadyForQuery);
+  const isDiscoverLoading = !isDemoMode && !externalProfiles && (!effectiveConvexProfiles || isPhase2QueryLoading || isAuthPending);
+  const isQueueBootstrapping =
+    profiles.length > 0 &&
+    visibleQueueRef.current.length === 0 &&
+    consumedIdsRef.current.size === 0;
+
+  const phase2MinHold = isPhase2 && !isDemoMode && !p2MinSkeletonDone;
+  const loadingDrivesSkeleton =
+    (!hasCommittedRef.current || !isPhase2 || isDemoMode) && (isDiscoverLoading && !usingStableCache);
+
+  const showCardSkeleton =
+    loadingDrivesSkeleton || isQueueBootstrapping || phase2MinHold;
+
   // JS callbacks to be called from UI thread via runOnJS
   const updateOverlayDirection = useCallback((newDir: "left" | "right" | "up" | null) => {
     if (overlayDirectionRef.current !== newDir) {
@@ -2791,23 +2838,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     });
   }, [standOutResult, acquireSwipeLock, releaseSwipeLock, overlayOpacity, panAY, panBY]);
 
-  // Loading state — non-demo only; skip when using external profiles
-  // P1-003 FIX: Phase-2 uses isPhase2QueryLoading only while useQuery is undefined (resolved [] is not loading)
-  // AUTH_READY_FIX: Show loading when auth is not ready (userId / stable auth gate) in Phase-2
-  const isAuthPending = isPhase2 && !isDemoMode && (!userId || !isAuthReadyForQuery);
-  const isDiscoverLoading = !isDemoMode && !externalProfiles && (!effectiveConvexProfiles || isPhase2QueryLoading || isAuthPending);
-  const isQueueBootstrapping =
-    profiles.length > 0 &&
-    visibleQueueRef.current.length === 0 &&
-    consumedIdsRef.current.size === 0;
-
-  const phase2MinHold = isPhase2 && !isDemoMode && !p2MinSkeletonDone;
-  const loadingDrivesSkeleton =
-    (!hasCommittedRef.current || !isPhase2 || isDemoMode) && (isDiscoverLoading && !usingStableCache);
-
-  const showCardSkeleton =
-    loadingDrivesSkeleton || isQueueBootstrapping || phase2MinHold;
-
   useEffect(() => {
     if (!isPhase2 || !pendingFilterResetRef.current) return;
     if (swipeLockRef.current || showPhaseTransition || showCardSkeleton || navigatingRef.current) {
@@ -2946,7 +2976,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     <NotificationPopover
       visible
       onClose={() => setShowNotificationPopover(false)}
-      anchorTop={insets.top + HEADER_H + 8}
+      anchorTop={insets.top + HEADER_H + SPACING.sm}
     />
   ) : null;
 
@@ -2986,7 +3016,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               top: 0,
               left: 0,
               right: 0,
-              height: 140,
+              height: moderateScale(140, 0.25),
               zIndex: 1,
             }}
             pointerEvents="none"
@@ -3007,9 +3037,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               ]}
               onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}
             >
-              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              <Ionicons name="options-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
-            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            <Text {...DISCOVER_TEXT_PROPS} style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
             <TouchableOpacity
               style={[
                 styles.headerBtn,
@@ -3017,10 +3047,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               ]}
               onPress={() => setShowNotificationPopover(true)}
             >
-              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              <Ionicons name="notifications-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
               {unseenCount > 0 && (
                 <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
                 </View>
               )}
             </TouchableOpacity>
@@ -3048,19 +3078,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   <View style={styles.phase2IconInner}>
                     <Ionicons
                       name={phase2EmptyState?.icon ?? "sparkles-outline"}
-                      size={36}
+                      size={DISCOVER_PHASE2_EMPTY_ICON_SIZE}
                       color={phase2EmptyState?.iconColor ?? "rgba(233, 69, 96, 0.95)"}
                     />
                   </View>
                 </View>
 
                 <Animated.Text
+                  {...DISCOVER_TEXT_PROPS}
                   entering={FadeInUp.duration(350).delay(200)}
                   style={styles.phase2EmptyTitle}
                 >
                   {phase2EmptyState?.title ?? "Fresh faces are on the way"}
                 </Animated.Text>
                 <Animated.Text
+                  {...DISCOVER_TEXT_PROPS}
                   entering={FadeInUp.duration(350).delay(280)}
                   style={styles.phase2EmptySubtitle}
                 >
@@ -3083,11 +3115,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     >
                       <Ionicons
                         name={phase2EmptyState.primaryAction === "clear_filters" ? "funnel-outline" : "refresh"}
-                        size={16}
+                        size={SIZES.icon.sm}
                         color="rgba(255,255,255,0.92)"
-                        style={{ marginRight: 8 }}
+                        style={{ marginRight: SPACING.sm }}
                       />
-                      <Text style={styles.phase2PrimaryActionText}>{phase2EmptyState.primaryLabel}</Text>
+                      <Text {...DISCOVER_TEXT_PROPS} style={styles.phase2PrimaryActionText}>{phase2EmptyState.primaryLabel}</Text>
                     </TouchableOpacity>
                   ) : null}
 
@@ -3104,7 +3136,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                         triggerPhase2Refresh("button");
                       }}
                     >
-                      <Text style={styles.phase2SecondaryActionText}>{phase2EmptyState.secondaryLabel}</Text>
+                      <Text {...DISCOVER_TEXT_PROPS} style={styles.phase2SecondaryActionText}>{phase2EmptyState.secondaryLabel}</Text>
                     </TouchableOpacity>
                   ) : null}
 
@@ -3114,7 +3146,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                       activeOpacity={0.82}
                       onPress={handleResetDemoSwipes}
                     >
-                      <Text style={styles.phase2SecondaryActionText}>Reset demo deck</Text>
+                      <Text {...DISCOVER_TEXT_PROPS} style={styles.phase2SecondaryActionText}>Reset demo deck</Text>
                     </TouchableOpacity>
                   )}
                 </Animated.View>
@@ -3132,17 +3164,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 {/* Premium icon with multi-layer glow - light theme */}
                 <View style={styles.phase1IconOuter}>
                   <View style={styles.phase1IconInner}>
-                    <Ionicons name="sparkles" size={32} color={COLORS.primary} />
+                    <Ionicons name="sparkles" size={SIZES.icon.xl} color={COLORS.primary} />
                   </View>
                 </View>
 
                 <Animated.Text
+                  {...DISCOVER_TEXT_PROPS}
                   entering={FadeInUp.duration(350).delay(200)}
                   style={styles.phase1EmptyTitle}
                 >
                   {phase1EmptyMessaging.title}
                 </Animated.Text>
                 <Animated.Text
+                  {...DISCOVER_TEXT_PROPS}
                   entering={FadeInUp.duration(350).delay(280)}
                   style={styles.phase1EmptySubtitle}
                 >
@@ -3155,8 +3189,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                       style={styles.phase1ResetButton}
                       onPress={handleResetDemoSwipes}
                     >
-                      <Ionicons name="refresh" size={16} color="#FFFFFF" style={{ marginRight: 8 }} />
-                      <Text style={styles.phase1ResetButtonText}>Reset Demo</Text>
+                      <Ionicons name="refresh" size={SIZES.icon.sm} color="#FFFFFF" style={{ marginRight: SPACING.sm }} />
+                      <Text {...DISCOVER_TEXT_PROPS} style={styles.phase1ResetButtonText}>Reset Demo</Text>
                     </TouchableOpacity>
                   </Animated.View>
                 )}
@@ -3187,23 +3221,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         {!hideHeader && (
           <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
             <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
-              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              <Ionicons name="options-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
-            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            <Text {...DISCOVER_TEXT_PROPS} style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
             <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              <Ionicons name="notifications-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
               {unseenCount > 0 && (
                 <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
                 </View>
               )}
             </TouchableOpacity>
           </View>
         )}
         <View style={[styles.center, { flex: 1 }]}>
-          <Text style={styles.emptyEmoji}>🎉</Text>
-          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>You've seen everyone</Text>
-          <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+          <Text {...DISCOVER_TEXT_PROPS} style={styles.emptyEmoji}>🎉</Text>
+          <Text {...DISCOVER_TEXT_PROPS} style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>You've seen everyone</Text>
+          <Text {...DISCOVER_TEXT_PROPS} style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
             {isDemoMode
               ? "Great job! Reset the deck or adjust your preferences to see more."
               : "Check back soon for new people, or try different preferences."}
@@ -3211,18 +3245,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           {isDemoMode && (
             <>
               <TouchableOpacity
-                style={[styles.resetButton, { marginTop: 24 }]}
+                style={[styles.resetButton, { marginTop: SPACING.xl }]}
                 onPress={handleResetDeck}
               >
-                <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                <Text style={styles.resetButtonText}>Reset Demo Deck</Text>
+                <Ionicons name="refresh" size={SIZES.icon.md} color="#FFFFFF" style={{ marginRight: SPACING.sm }} />
+                <Text {...DISCOVER_TEXT_PROPS} style={styles.resetButtonText}>Reset Demo Deck</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.secondaryButton, { marginTop: 12 }]}
+                style={[styles.secondaryButton, { marginTop: SPACING.md }]}
                 onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
               >
-                <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
-                <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
+                <Ionicons name="options-outline" size={SIZES.icon.md} color={C.primary} style={{ marginRight: SPACING.sm }} />
+                <Text {...DISCOVER_TEXT_PROPS} style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
               </TouchableOpacity>
             </>
           )}
@@ -3239,14 +3273,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         {!hideHeader && (
           <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
             <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
-              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              <Ionicons name="options-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
-            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            <Text {...DISCOVER_TEXT_PROPS} style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
             <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              <Ionicons name="notifications-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
               {unseenCount > 0 && (
                 <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
                 </View>
               )}
             </TouchableOpacity>
@@ -3254,15 +3288,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         )}
 
         <View style={styles.limitContainer}>
-          <Ionicons name="heart-circle-outline" size={80} color={COLORS.primary} />
-          <Text style={[styles.limitTitle, dark && { color: INCOGNITO_COLORS.text }]}>You've used today's likes!</Text>
-          <Text style={[styles.limitSubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Likes refresh at midnight</Text>
+          <Ionicons name="heart-circle-outline" size={DISCOVER_LIMIT_ICON_SIZE} color={COLORS.primary} />
+          <Text {...DISCOVER_TEXT_PROPS} style={[styles.limitTitle, dark && { color: INCOGNITO_COLORS.text }]}>You've used today's likes!</Text>
+          <Text {...DISCOVER_TEXT_PROPS} style={[styles.limitSubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Likes refresh at midnight</Text>
           <TouchableOpacity
             style={styles.limitButton}
             onPress={() => router.push("/(main)/likes" as any)}
           >
-            <Ionicons name="heart" size={18} color={COLORS.white} />
-            <Text style={styles.limitButtonText}>Check who liked you</Text>
+            <Ionicons name="heart" size={SIZES.icon.md} color={COLORS.white} />
+            <Text {...DISCOVER_TEXT_PROPS} style={styles.limitButtonText}>Check who liked you</Text>
           </TouchableOpacity>
         </View>
         {notificationPopover}
@@ -3272,10 +3306,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // FIX 10: Layout with safe area compliance across devices
   const cardTop = hideHeader ? 0 : insets.top + HEADER_H;
-  // Ensure minimum 16px from bottom edge, respecting safe areas (Samsung, OnePlus, etc.)
-  const actionRowBottom = Math.max(insets.bottom, 16);
-  // Leave room for action bar so card content isn't hidden (76px for larger buttons)
-  const cardBottom = actionRowBottom + 76;
+  // Keep the action row consistently above the gesture area while preserving existing interactions.
+  const actionRowBottom = Math.max(insets.bottom, SPACING.md) + SPACING.sm;
+  // Leave room for the action bar so card content isn't hidden behind the floating controls.
+  const cardBottom = actionRowBottom + DISCOVER_ACTION_BAR_CLEARANCE;
+  const floatingPillTop = cardTop + SPACING.sm;
+  const phaseTransitionHintBottom = Math.max(insets.bottom + SPACING.xl, DISCOVER_TRANSITION_HINT_MIN_BOTTOM);
 
   const likesLeft = likesRemaining();
   const standOutsLeft = standOutsRemaining();
@@ -3299,14 +3335,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       {!hideHeader && (
         <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
           <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
-            <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            <Ionicons name="options-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
-          <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+          <Text {...DISCOVER_TEXT_PROPS} style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
           <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            <Ionicons name="notifications-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             {unseenCount > 0 && (
               <View style={styles.bellBadge}>
-                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
               </View>
             )}
           </TouchableOpacity>
@@ -3315,16 +3351,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
       {/* GROWTH: Daily swipe counter - shows remaining likes with scarcity urgency */}
       {!isPhase2 && likesLeft < 25 && (
-        <View style={[styles.swipeCounterPill, { top: cardTop + 8, right: 16 }]}>
+        <View style={[styles.swipeCounterPill, { top: floatingPillTop, right: SPACING.base }]}>
           <Ionicons
             name={likesLeft <= 5 ? "flame" : "heart"}
-            size={12}
+            size={SIZES.icon.xs}
             color={likesLeft <= 5 ? "#EF4444" : "#EC4899"}
           />
-          <Text style={[
-            styles.swipeCounterText,
-            likesLeft <= 5 && styles.swipeCounterTextUrgent
-          ]}>
+          <Text
+            {...DISCOVER_TEXT_PROPS}
+            style={[
+              styles.swipeCounterText,
+              likesLeft <= 5 && styles.swipeCounterTextUrgent,
+            ]}
+          >
             {likesLeft <= 5 ? `Only ${likesLeft} left!` : `${likesLeft} profiles left`}
           </Text>
         </View>
@@ -3333,11 +3372,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       {/* Match Reminder - Phase-2 only, shows if user has existing Deep Connects */}
       {isPhase2 && conversationCount > 0 && (
         <TouchableOpacity
-          style={[styles.matchReminderPill, { top: cardTop + 8 }]}
+          style={[styles.matchReminderPill, { top: floatingPillTop }]}
           onPress={() => router.push("/(main)/(private)/(tabs)/chats" as any)}
           activeOpacity={0.6}
         >
-          <Text style={styles.matchReminderText}>
+          <Text {...DISCOVER_TEXT_PROPS} style={styles.matchReminderText}>
             {conversationCount === 1
               ? "You have a Deep Connect waiting"
               : `${conversationCount} Deep Connects waiting`}
@@ -3352,11 +3391,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <View style={styles.phase2PullRefreshInner}>
               <Ionicons
                 name={isRefreshingPhase2Deck ? "refresh" : "arrow-down-outline"}
-                size={14}
+                size={moderateScale(14, 0.3)}
                 color="rgba(255,255,255,0.82)"
-                style={{ marginRight: 6 }}
+                style={{ marginRight: SPACING.sm - SPACING.xxs }}
               />
-              <Text style={styles.phase2PullRefreshText}>
+              <Text {...DISCOVER_TEXT_PROPS} style={styles.phase2PullRefreshText}>
                 {isRefreshingPhase2Deck ? "Refreshing deck..." : "Pull for fresh faces"}
               </Text>
             </View>
@@ -3369,7 +3408,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               <SkeletonCard dark={dark} includeActions={false} />
               {profilesSafe.length === 0 && p2SearchingLabelVisible ? (
                 <Animated.View entering={FadeIn.duration(DEEP_CONNECT_CONTENT_FADE_MS)} style={styles.phase2SearchingLabelWrap}>
-                  <Text style={[styles.phase2SearchingLabel, dark && { color: INCOGNITO_COLORS.textLight }]}>
+                  <Text {...DISCOVER_TEXT_PROPS} style={[styles.phase2SearchingLabel, dark && { color: INCOGNITO_COLORS.textLight }]}>
                     Looking for people nearby...
                   </Text>
                 </Animated.View>
@@ -3483,7 +3522,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           PREMIUM 3-BUTTON ACTION BAR
           Floating, semi-transparent, with premium shadows and spacing
           ══════════════════════════════════════════════════════════════════════════ */}
-      <View style={[styles.actions, styles.premiumActions, { bottom: Math.max(actionRowBottom, 16) }]} pointerEvents="box-none">
+      <View style={[styles.actions, styles.premiumActions, { bottom: actionRowBottom }]} pointerEvents="box-none">
         {/* Skip (X) - Light feedback */}
         <AnimatedActionButton
           style={[styles.actionButton, styles.premiumSkipBtn, (showCardSkeleton || !current) && styles.premiumBtnDisabled]}
@@ -3492,7 +3531,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           feedbackScale={0.92}
           hapticType="light"
         >
-          <Ionicons name="close" size={28} color="#F44336" />
+          <Ionicons name="close" size={DISCOVER_ACTION_ICON_SIZE} color="#F44336" />
         </AnimatedActionButton>
 
         {/* Stand Out (star) - Medium feedback */}
@@ -3512,9 +3551,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           feedbackScale={0.9}
           hapticType="medium"
         >
-          <Ionicons name="star" size={22} color={COLORS.white} />
+          <Ionicons name="star" size={DISCOVER_STANDOUT_ICON_SIZE} color={COLORS.white} />
           <View style={styles.premiumStandOutBadge}>
-            <Text style={styles.premiumStandOutBadgeText}>{standOutsLeft}</Text>
+            <Text {...DISCOVER_TEXT_PROPS} style={styles.premiumStandOutBadgeText}>{standOutsLeft}</Text>
           </View>
         </AnimatedActionButton>
 
@@ -3526,7 +3565,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           feedbackScale={0.9}
           hapticType="medium"
         >
-          <Ionicons name="heart" size={28} color={COLORS.white} />
+          <Ionicons name="heart" size={DISCOVER_ACTION_ICON_SIZE} color={COLORS.white} />
         </AnimatedActionButton>
       </View>
 
@@ -3556,12 +3595,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               style={styles.phaseTransitionContent}
             >
               <Animated.Text
+                {...DISCOVER_TEXT_PROPS}
                 entering={FadeIn.delay(120).duration(350)}
                 style={styles.phaseTransitionTitle}
               >
                 Deep Connect
               </Animated.Text>
               <Animated.Text
+                {...DISCOVER_TEXT_PROPS}
                 entering={FadeIn.delay(220).duration(350)}
                 style={styles.phaseTransitionSubtitle}
               >
@@ -3571,8 +3612,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
             {/* Subtle tap hint */}
             <Animated.Text
+              {...DISCOVER_TEXT_PROPS}
               entering={FadeIn.delay(600).duration(400)}
-              style={styles.phaseTransitionSkipHint}
+              style={[styles.phaseTransitionSkipHint, { bottom: phaseTransitionHintBottom }]}
             >
               tap to continue
             </Animated.Text>
@@ -3625,7 +3667,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                       />
                     ) : (
                       <View style={[styles.p2MatchPremiumAvatar, styles.p2MatchAvatarPlaceholder]}>
-                        <Ionicons name="person" size={48} color="rgba(255,255,255,0.4)" />
+                        <Ionicons name="person" size={DISCOVER_MATCH_AVATAR_ICON_SIZE} color="rgba(255,255,255,0.4)" />
                       </View>
                     )}
                   </View>
@@ -3639,8 +3681,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 entering={FadeIn.delay(350).duration(400)}
                 style={styles.p2MatchTextSection}
               >
-                <Text style={styles.p2MatchPremiumTitle}>It's a connection 🔥</Text>
-                <Text style={styles.p2MatchPremiumSubtitle}>
+                <Text {...DISCOVER_TEXT_PROPS} style={styles.p2MatchPremiumTitle}>It's a connection 🔥</Text>
+                <Text {...DISCOVER_TEXT_PROPS} style={styles.p2MatchPremiumSubtitle}>
                   You and {phase2MatchCelebration.matchedProfile.name} share a connection
                 </Text>
               </Animated.View>
@@ -3663,8 +3705,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   }}
                 >
                   <View style={styles.p2MatchBtnGradient}>
-                    <Ionicons name="chatbubble-ellipses" size={20} color="#FFF" />
-                    <Text style={styles.p2MatchStartChatText}>Start Chat</Text>
+                    <Ionicons name="chatbubble-ellipses" size={SIZES.icon.md} color="#FFF" />
+                    <Text {...DISCOVER_TEXT_PROPS} style={styles.p2MatchStartChatText}>Start Chat</Text>
                   </View>
                 </TouchableOpacity>
 
@@ -3676,7 +3718,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     setPhase2MatchCelebration({ visible: false, matchedProfile: null });
                   }}
                 >
-                  <Text style={styles.p2MatchKeepExploringText}>Keep Exploring</Text>
+                  <Text {...DISCOVER_TEXT_PROPS} style={styles.p2MatchKeepExploringText}>Keep Exploring</Text>
                 </TouchableOpacity>
               </Animated.View>
             </Animated.View>
@@ -3717,33 +3759,36 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
     alignItems: "center",
     justifyContent: "center",
-    padding: 24,
+    padding: SPACING.xl,
   },
   loadingText: {
-    marginTop: 16,
-    fontSize: 16,
+    marginTop: SPACING.base,
+    fontSize: FONT_SIZE.lg,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
     color: COLORS.textLight,
   },
   // FIX 9: Premium empty state styles - minimal and polished
   emptyEmoji: {
-    fontSize: 72,
-    marginBottom: 24,
+    fontSize: DISCOVER_EMOJI_SIZE,
+    lineHeight: lineHeight(DISCOVER_EMOJI_SIZE, 1.2),
+    marginBottom: SPACING.xl,
   },
   emptyTitle: {
-    fontSize: 26,
+    fontSize: DISCOVER_FONT_26,
     fontWeight: "700",
+    lineHeight: lineHeight(DISCOVER_FONT_26, 1.2),
     color: COLORS.text,
-    marginBottom: 12,
+    marginBottom: SPACING.md,
     textAlign: "center",
     letterSpacing: -0.5,
   },
   emptySubtitle: {
-    fontSize: 15,
+    fontSize: DISCOVER_FONT_15,
     color: COLORS.textLight,
     textAlign: "center",
-    lineHeight: 24,
-    paddingHorizontal: 32,
-    maxWidth: 320,
+    lineHeight: lineHeight(DISCOVER_FONT_15, 1.35),
+    paddingHorizontal: SPACING.xxl,
+    maxWidth: DISCOVER_EMPTY_CONTENT_MAX_WIDTH,
   },
 
   // Deep Connect (Phase-2): skeleton → searching label → empty (same screen)
@@ -3754,29 +3799,29 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   phase2SearchingLabelWrap: {
-    marginTop: 20,
-    paddingHorizontal: 28,
+    marginTop: SPACING.lg,
+    paddingHorizontal: SPACING.xl + SPACING.xs,
   },
   phase2SearchingLabel: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: "500",
     textAlign: "center",
     letterSpacing: 0.2,
-    lineHeight: 22,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
   },
   phase2EmptyContent: {
     alignItems: "center",
     width: "100%",
-    maxWidth: 320,
-    paddingHorizontal: 28,
+    maxWidth: DISCOVER_EMPTY_CONTENT_MAX_WIDTH,
+    paddingHorizontal: SPACING.xl + SPACING.xs,
     zIndex: 2,
   },
   // Subtle radial glow overlay for depth
   phase2RadialGlow: {
     position: 'absolute',
-    width: 400,
-    height: 400,
-    borderRadius: 200,
+    width: moderateScale(400, 0.25),
+    height: moderateScale(400, 0.25),
+    borderRadius: moderateScale(200, 0.25),
     backgroundColor: 'rgba(233, 69, 96, 0.03)',
     top: '30%',
     alignSelf: 'center',
@@ -3787,13 +3832,13 @@ const styles = StyleSheet.create({
   },
   // Premium outer glow ring
   phase2IconOuter: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: moderateScale(100, 0.25),
+    height: moderateScale(100, 0.25),
+    borderRadius: moderateScale(50, 0.25),
     backgroundColor: 'rgba(233, 69, 96, 0.04)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 32,
+    marginBottom: SPACING.xxl,
     // Soft outer glow
     shadowColor: '#E94560',
     shadowOffset: { width: 0, height: 0 },
@@ -3802,9 +3847,9 @@ const styles = StyleSheet.create({
   },
   // Inner icon container with tighter glow
   phase2IconInner: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: moderateScale(72, 0.25),
+    height: moderateScale(72, 0.25),
+    borderRadius: moderateScale(36, 0.25),
     backgroundColor: 'rgba(233, 69, 96, 0.08)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -3816,66 +3861,68 @@ const styles = StyleSheet.create({
   },
   // Premium title typography
   phase2EmptyTitle: {
-    fontSize: 21,
+    fontSize: DISCOVER_FONT_21,
     fontWeight: '600',
     color: 'rgba(255, 255, 255, 0.95)',
     textAlign: 'center',
     letterSpacing: 0.3,
-    lineHeight: 28,
+    lineHeight: lineHeight(DISCOVER_FONT_21, 1.2),
   },
   // Softer subtitle typography
   phase2EmptySubtitle: {
-    fontSize: 15,
+    fontSize: DISCOVER_FONT_15,
     fontWeight: '400',
     color: 'rgba(255, 255, 255, 0.5)',
     textAlign: 'center',
-    marginTop: 10,
-    lineHeight: 22,
+    marginTop: SPACING.sm + SPACING.xxs,
+    lineHeight: lineHeight(DISCOVER_FONT_15, 1.35),
     letterSpacing: 0.2,
   },
   phase2EmptyActions: {
     width: "100%",
-    marginTop: 28,
-    gap: 12,
+    marginTop: SPACING.xxl - SPACING.xs,
+    gap: SPACING.md,
   },
   phase2PrimaryAction: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(233, 69, 96, 0.28)',
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 14,
+    paddingVertical: SPACING.md + SPACING.xxs,
+    paddingHorizontal: SPACING.lg,
+    borderRadius: SIZES.radius.md + SPACING.xxs,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
   },
   phase2PrimaryActionText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
     color: 'rgba(255, 255, 255, 0.92)',
     letterSpacing: 0.3,
   },
   phase2SecondaryAction: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 14,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.lg,
+    borderRadius: SIZES.radius.md + SPACING.xxs,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
     backgroundColor: "rgba(255,255,255,0.04)",
   },
   phase2SecondaryActionText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: "500",
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
     color: "rgba(255,255,255,0.78)",
   },
   // Phase-1 empty content container (mirrors Phase-2 structure)
   phase1EmptyContent: {
     alignItems: "center",
     width: "100%",
-    maxWidth: 340,
-    paddingHorizontal: 24,
+    maxWidth: DISCOVER_EMPTY_CARD_MAX_WIDTH,
+    paddingHorizontal: SPACING.xl,
     zIndex: 2,
   },
   // ══════════════════════════════════════════════════════════════════════════════
@@ -3886,13 +3933,13 @@ const styles = StyleSheet.create({
   phase1EmptyCard: {
     alignItems: "center",
     width: "100%",
-    maxWidth: 340,
-    paddingVertical: 48,
-    paddingHorizontal: 32,
+    maxWidth: DISCOVER_EMPTY_CARD_MAX_WIDTH,
+    paddingVertical: SPACING.xxxl,
+    paddingHorizontal: SPACING.xxl,
     backgroundColor: "#FFFFFF",
-    borderRadius: 24,
+    borderRadius: SIZES.radius.xl,
     // Natural vertical positioning (not stuck to center)
-    marginTop: -40,
+    marginTop: -moderateScale(40, 0.25),
     // Premium subtle shadow
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 8 },
@@ -3907,9 +3954,9 @@ const styles = StyleSheet.create({
   // Subtle radial glow for Phase-1 (light version - visible but soft)
   phase1RadialGlow: {
     position: "absolute",
-    width: 320,
-    height: 320,
-    borderRadius: 160,
+    width: moderateScale(320, 0.25),
+    height: moderateScale(320, 0.25),
+    borderRadius: moderateScale(160, 0.25),
     backgroundColor: "rgba(255, 107, 107, 0.07)",
     top: "22%",
     alignSelf: "center",
@@ -3920,13 +3967,13 @@ const styles = StyleSheet.create({
   },
   // Premium icon container (outer glow ring - light theme)
   phase1IconOuter: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
+    width: moderateScale(96, 0.25),
+    height: moderateScale(96, 0.25),
+    borderRadius: moderateScale(48, 0.25),
     backgroundColor: "rgba(255, 107, 107, 0.06)",
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 28,
+    marginBottom: SPACING.xxl - SPACING.xs,
     // Soft outer glow
     shadowColor: COLORS.primary,
     shadowOffset: { width: 0, height: 4 },
@@ -3935,9 +3982,9 @@ const styles = StyleSheet.create({
   },
   // Inner icon container with tighter styling
   phase1IconInner: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
+    width: moderateScale(68, 0.25),
+    height: moderateScale(68, 0.25),
+    borderRadius: moderateScale(34, 0.25),
     backgroundColor: "rgba(255, 107, 107, 0.10)",
     alignItems: "center",
     justifyContent: "center",
@@ -3949,23 +3996,23 @@ const styles = StyleSheet.create({
   },
   // Premium title typography (Phase-1)
   phase1EmptyTitle: {
-    fontSize: 22,
+    fontSize: DISCOVER_FONT_22,
     fontWeight: "700",
     color: COLORS.text,
     textAlign: "center",
     letterSpacing: -0.3,
-    lineHeight: 28,
+    lineHeight: lineHeight(DISCOVER_FONT_22, 1.2),
   },
   // Softer subtitle typography (Phase-1)
   phase1EmptySubtitle: {
-    fontSize: 15,
+    fontSize: DISCOVER_FONT_15,
     fontWeight: "400",
     color: "#8E8E93",
     textAlign: "center",
-    marginTop: 10,
-    lineHeight: 22,
+    marginTop: SPACING.sm + SPACING.xxs,
+    lineHeight: lineHeight(DISCOVER_FONT_15, 1.35),
     letterSpacing: 0.1,
-    paddingHorizontal: 8,
+    paddingHorizontal: SPACING.sm,
   },
   // Premium reset button (Phase-1, demo only)
   phase1ResetButton: {
@@ -3973,10 +4020,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: COLORS.primary,
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    borderRadius: 14,
-    marginTop: 28,
+    paddingVertical: SPACING.md + SPACING.xxs,
+    paddingHorizontal: SPACING.xl,
+    borderRadius: SIZES.radius.md + SPACING.xxs,
+    marginTop: SPACING.xxl - SPACING.xs,
     // Soft shadow for depth
     shadowColor: COLORS.primary,
     shadowOffset: { width: 0, height: 4 },
@@ -3985,8 +4032,9 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   phase1ResetButtonText: {
-    fontSize: 15,
+    fontSize: DISCOVER_FONT_15,
     fontWeight: "600",
+    lineHeight: lineHeight(DISCOVER_FONT_15, 1.35),
     color: "#FFFFFF",
     letterSpacing: 0.2,
   },
@@ -3995,19 +4043,19 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-end",
     justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingBottom: 12,
+    paddingHorizontal: SPACING.lg,
+    paddingBottom: SPACING.md,
     backgroundColor: "transparent",
     zIndex: 10,
   },
   // Header button with subtle background
   phase1HeaderBtn: {
-    width: 44,
-    height: 44,
+    width: SIZES.touchTarget,
+    height: SIZES.touchTarget,
     alignItems: "center",
     justifyContent: "center",
     position: "relative",
-    borderRadius: 22,
+    borderRadius: SIZES.touchTarget / 2,
     backgroundColor: "rgba(0, 0, 0, 0.03)",
   },
 
@@ -4016,36 +4064,36 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-end",
     justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingBottom: 10,
+    paddingHorizontal: SPACING.lg,
+    paddingBottom: SPACING.sm + SPACING.xxs,
     backgroundColor: COLORS.background,
     zIndex: 10,
   },
   headerBtn: {
-    width: 44,
-    height: 44,
+    width: SIZES.touchTarget,
+    height: SIZES.touchTarget,
     alignItems: "center",
     justifyContent: "center",
     position: "relative",
-    borderRadius: 22,
+    borderRadius: SIZES.touchTarget / 2,
   },
   headerLogo: {
-    fontSize: 24,
+    fontSize: FONT_SIZE.title,
     fontWeight: "800",
     color: COLORS.primary,
     letterSpacing: 1.5,
   },
   bellBadge: {
     position: "absolute",
-    top: 2,
+    top: SPACING.xxs,
     right: 0,
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
+    minWidth: DISCOVER_BADGE_SIZE,
+    height: DISCOVER_BADGE_SIZE,
+    borderRadius: DISCOVER_BADGE_SIZE / 2,
     backgroundColor: COLORS.error,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 4,
+    paddingHorizontal: SPACING.xs,
     borderWidth: 2,
     borderColor: COLORS.background,
     shadowColor: COLORS.error,
@@ -4055,8 +4103,9 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   bellBadgeText: {
-    fontSize: 10,
+    fontSize: FONT_SIZE.xs,
     fontWeight: "700",
+    lineHeight: lineHeight(FONT_SIZE.xs, 1.2),
     color: COLORS.white,
   },
 
@@ -4068,11 +4117,11 @@ const styles = StyleSheet.create({
   },
   phase2DeckGlowTop: {
     position: "absolute",
-    top: -40,
-    right: -30,
-    width: 260,
-    height: 260,
-    borderRadius: 130,
+    top: -moderateScale(40, 0.25),
+    right: -moderateScale(30, 0.25),
+    width: moderateScale(260, 0.25),
+    height: moderateScale(260, 0.25),
+    borderRadius: moderateScale(130, 0.25),
     backgroundColor: "rgba(104, 92, 255, 0.12)",
     shadowColor: "#685cff",
     shadowOffset: { width: 0, height: 0 },
@@ -4081,11 +4130,11 @@ const styles = StyleSheet.create({
   },
   phase2DeckGlowBottom: {
     position: "absolute",
-    left: -60,
-    bottom: 90,
-    width: 280,
-    height: 280,
-    borderRadius: 140,
+    left: -moderateScale(60, 0.25),
+    bottom: moderateScale(90, 0.25),
+    width: moderateScale(280, 0.25),
+    height: moderateScale(280, 0.25),
+    borderRadius: moderateScale(140, 0.25),
     backgroundColor: "rgba(233, 69, 96, 0.08)",
     shadowColor: "#e94560",
     shadowOffset: { width: 0, height: 0 },
@@ -4094,7 +4143,7 @@ const styles = StyleSheet.create({
   },
   phase2PullRefreshHint: {
     position: "absolute",
-    top: 10,
+    top: SPACING.md - SPACING.xxs,
     alignSelf: "center",
     zIndex: 25,
   },
@@ -4102,26 +4151,27 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.full,
     backgroundColor: "rgba(10, 14, 28, 0.72)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.08)",
   },
   phase2PullRefreshText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: "600",
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: "rgba(255,255,255,0.78)",
     letterSpacing: 0.2,
   },
   card: {
     position: "absolute",
-    top: 8,
-    left: 10,
-    right: 10,
-    bottom: 8,
-    borderRadius: 16,
+    top: SPACING.sm,
+    left: DISCOVER_CARD_HORIZONTAL_INSET,
+    right: DISCOVER_CARD_HORIZONTAL_INSET,
+    bottom: SPACING.sm,
+    borderRadius: SIZES.radius.lg,
     overflow: "hidden",
   },
 
@@ -4133,7 +4183,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "center",
     alignItems: "center",
-    gap: 20,
+    gap: SPACING.lg,
     zIndex: 50,
   },
   actionButton: {
@@ -4192,14 +4242,14 @@ const styles = StyleSheet.create({
   // ══════════════════════════════════════════════════════════════════════════════
   // FIX 4: Improved button positioning and feel
   premiumActions: {
-    gap: 28,
-    paddingHorizontal: 24,
-    paddingBottom: 4, // Raise buttons slightly
+    gap: SPACING.xxl - SPACING.xs,
+    paddingHorizontal: SPACING.xl,
+    paddingBottom: SPACING.xs,
   },
   premiumSkipBtn: {
-    width: 62,
-    height: 62,
-    borderRadius: 31,
+    width: DISCOVER_ACTION_BUTTON_SIZE,
+    height: DISCOVER_ACTION_BUTTON_SIZE,
+    borderRadius: DISCOVER_ACTION_BUTTON_SIZE / 2,
     backgroundColor: "rgba(255,255,255,0.95)",
     // Softer shadow
     shadowColor: "#000",
@@ -4211,9 +4261,9 @@ const styles = StyleSheet.create({
     borderColor: "rgba(244,67,54,0.12)",
   },
   premiumStandOutBtn: {
-    width: 54,
-    height: 54,
-    borderRadius: 27,
+    width: DISCOVER_ACTION_BUTTON_COMPACT_SIZE,
+    height: DISCOVER_ACTION_BUTTON_COMPACT_SIZE,
+    borderRadius: DISCOVER_ACTION_BUTTON_COMPACT_SIZE / 2,
     backgroundColor: "#2196F3",
     position: "relative",
     // Softer colored shadow
@@ -4224,9 +4274,9 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   premiumLikeBtn: {
-    width: 62,
-    height: 62,
-    borderRadius: 31,
+    width: DISCOVER_ACTION_BUTTON_SIZE,
+    height: DISCOVER_ACTION_BUTTON_SIZE,
+    borderRadius: DISCOVER_ACTION_BUTTON_SIZE / 2,
     backgroundColor: COLORS.primary,
     // Softer colored shadow
     shadowColor: COLORS.primary,
@@ -4241,11 +4291,11 @@ const styles = StyleSheet.create({
   },
   premiumStandOutBadge: {
     position: "absolute",
-    top: -6,
-    right: -6,
-    minWidth: 22,
-    height: 22,
-    borderRadius: 11,
+    top: -SPACING.sm + SPACING.xxs,
+    right: -SPACING.sm + SPACING.xxs,
+    minWidth: moderateScale(22, 0.25),
+    height: moderateScale(22, 0.25),
+    borderRadius: moderateScale(11, 0.25),
     backgroundColor: COLORS.white,
     alignItems: "center",
     justifyContent: "center",
@@ -4258,8 +4308,9 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   premiumStandOutBadgeText: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     fontWeight: "800",
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
     color: "#2196F3",
   },
 
@@ -4268,47 +4319,51 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    padding: 32,
+    padding: SPACING.xxl,
   },
   limitTitle: {
-    fontSize: 22,
+    fontSize: DISCOVER_FONT_22,
     fontWeight: "700",
+    lineHeight: lineHeight(DISCOVER_FONT_22, 1.2),
     color: COLORS.text,
-    marginTop: 16,
-    marginBottom: 8,
+    marginTop: SPACING.base,
+    marginBottom: SPACING.sm,
     textAlign: "center",
   },
   limitSubtitle: {
-    fontSize: 15,
+    fontSize: DISCOVER_FONT_15,
     color: COLORS.textLight,
-    marginBottom: 24,
+    lineHeight: lineHeight(DISCOVER_FONT_15, 1.35),
+    marginBottom: SPACING.xl,
     textAlign: "center",
   },
   limitButton: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: SPACING.sm,
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 24,
-    paddingVertical: 14,
-    borderRadius: 28,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md + SPACING.xxs,
+    borderRadius: SIZES.radius.xl + SPACING.xs,
   },
   limitButtonText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: "600",
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
     color: COLORS.white,
   },
   resetButton: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 24,
-    paddingVertical: 14,
-    borderRadius: 28,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md + SPACING.xxs,
+    borderRadius: SIZES.radius.xl + SPACING.xs,
   },
   resetButtonText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: "600",
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
     color: COLORS.white,
   },
   // STEP 2.7: Empty state secondary button styles
@@ -4316,23 +4371,24 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "transparent",
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 28,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
+    borderRadius: SIZES.radius.xl + SPACING.xs,
     borderWidth: 1,
     borderColor: COLORS.primary,
   },
   secondaryButtonText: {
-    fontSize: 15,
+    fontSize: DISCOVER_FONT_15,
     fontWeight: "600",
+    lineHeight: lineHeight(DISCOVER_FONT_15, 1.35),
   },
   tipText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textLight,
     textAlign: "center",
-    marginTop: 20,
-    paddingHorizontal: 32,
-    lineHeight: 18,
+    marginTop: SPACING.lg,
+    paddingHorizontal: SPACING.xxl,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
   },
 
   // Random Match Popup (F2-D)
@@ -4512,117 +4568,120 @@ const styles = StyleSheet.create({
   p2MatchContent: {
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 32,
-    paddingVertical: 48,
+    paddingHorizontal: SPACING.xxl,
+    paddingVertical: SPACING.xxxl,
     width: "100%",
-    maxWidth: 340,
+    maxWidth: DISCOVER_EMPTY_CARD_MAX_WIDTH,
   },
   p2MatchGlowRing: {
     position: "absolute",
-    width: 280,
-    height: 280,
-    borderRadius: 140,
+    width: moderateScale(280, 0.25),
+    height: moderateScale(280, 0.25),
+    borderRadius: moderateScale(140, 0.25),
     backgroundColor: "transparent",
     borderWidth: 2,
     borderColor: "rgba(155, 89, 182, 0.15)",
     top: "50%",
-    marginTop: -140,
+    marginTop: -moderateScale(140, 0.25),
   },
   p2MatchAvatarSection: {
     alignItems: "center",
-    marginBottom: 28,
+    marginBottom: SPACING.xxl,
   },
   p2MatchFloatingHeart: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: DISCOVER_MATCH_AVATAR_ICON_SIZE,
+    height: DISCOVER_MATCH_AVATAR_ICON_SIZE,
+    borderRadius: DISCOVER_MATCH_AVATAR_ICON_SIZE / 2,
     backgroundColor: "rgba(155, 89, 182, 0.2)",
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 16,
+    marginBottom: SPACING.base,
   },
   p2MatchPremiumFrame: {
-    width: 140,
-    height: 140,
-    borderRadius: 70,
+    width: moderateScale(140, 0.25),
+    height: moderateScale(140, 0.25),
+    borderRadius: moderateScale(70, 0.25),
     backgroundColor: "rgba(155, 89, 182, 0.15)",
     alignItems: "center",
     justifyContent: "center",
     position: "relative",
   },
   p2MatchInnerFrame: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
+    width: moderateScale(120, 0.25),
+    height: moderateScale(120, 0.25),
+    borderRadius: moderateScale(60, 0.25),
     backgroundColor: INCOGNITO_COLORS.surface,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
   },
   p2MatchPremiumAvatar: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
+    width: moderateScale(120, 0.25),
+    height: moderateScale(120, 0.25),
+    borderRadius: moderateScale(60, 0.25),
   },
   p2MatchAccentRing: {
     position: "absolute",
-    width: 148,
-    height: 148,
-    borderRadius: 74,
+    width: moderateScale(148, 0.25),
+    height: moderateScale(148, 0.25),
+    borderRadius: moderateScale(74, 0.25),
     borderWidth: 2,
     borderColor: "rgba(155, 89, 182, 0.4)",
     borderStyle: "dashed",
   },
   p2MatchTextSection: {
     alignItems: "center",
-    marginBottom: 32,
+    marginBottom: SPACING.xxl,
   },
   p2MatchPremiumTitle: {
-    fontSize: 28,
+    fontSize: FONT_SIZE.h2,
     fontWeight: "700",
     color: "#FFFFFF",
     letterSpacing: -0.5,
-    marginBottom: 10,
+    lineHeight: lineHeight(FONT_SIZE.h2, 1.2),
+    marginBottom: SPACING.sm + SPACING.xxs,
     textAlign: "center",
   },
   p2MatchPremiumSubtitle: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     color: "rgba(255, 255, 255, 0.7)",
     textAlign: "center",
-    lineHeight: 24,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
   },
   p2MatchPremiumActions: {
     width: "100%",
-    gap: 14,
+    gap: SPACING.md + SPACING.xxs,
   },
   p2MatchStartChatBtn: {
     width: "100%",
-    borderRadius: 16,
+    borderRadius: SIZES.radius.lg,
     overflow: "hidden",
   },
   p2MatchBtnGradient: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 10,
+    gap: SPACING.sm + SPACING.xxs,
     backgroundColor: "#9b59b6",
-    paddingVertical: 16,
-    paddingHorizontal: 32,
+    paddingVertical: SPACING.base,
+    paddingHorizontal: SPACING.xxl,
   },
   p2MatchStartChatText: {
-    fontSize: 17,
+    fontSize: DISCOVER_FONT_17,
     fontWeight: "700",
+    lineHeight: lineHeight(DISCOVER_FONT_17, 1.35),
     color: "#FFFFFF",
     letterSpacing: 0.3,
   },
   p2MatchKeepExploringBtn: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 14,
+    paddingVertical: SPACING.md + SPACING.xxs,
   },
   p2MatchKeepExploringText: {
-    fontSize: 15,
+    fontSize: DISCOVER_FONT_15,
     fontWeight: "500",
+    lineHeight: lineHeight(DISCOVER_FONT_15, 1.35),
     color: "rgba(255, 255, 255, 0.6)",
   },
 
@@ -4632,15 +4691,16 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "rgba(0, 0, 0, 0.5)",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-    gap: 4,
+    paddingHorizontal: SPACING.sm + SPACING.xxs,
+    paddingVertical: SPACING.xs + SPACING.xxs,
+    borderRadius: SIZES.radius.md,
+    gap: SPACING.xs,
     zIndex: 5,
   },
   swipeCounterText: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     fontWeight: "600",
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
     color: "#F472B6",
   },
   swipeCounterTextUrgent: {
@@ -4658,8 +4718,9 @@ const styles = StyleSheet.create({
     zIndex: 5,
   },
   matchReminderText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: "500",
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: "rgba(255, 255, 255, 0.4)",
     letterSpacing: 0.2,
   },
@@ -4687,25 +4748,27 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   phaseTransitionTitle: {
-    fontSize: 32,
+    fontSize: FONT_SIZE.h1,
     fontWeight: "300",
     color: "#FFFFFF",
     letterSpacing: 1.5,
-    marginBottom: 12,
+    lineHeight: lineHeight(FONT_SIZE.h1, 1.2),
+    marginBottom: SPACING.md,
     textAlign: "center",
   },
   phaseTransitionSubtitle: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: "400",
     color: "rgba(255, 255, 255, 0.55)",
     letterSpacing: 0.5,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
     textAlign: "center",
   },
   phaseTransitionSkipHint: {
     position: "absolute",
-    bottom: 80,
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: "400",
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: "rgba(255, 255, 255, 0.25)",
     letterSpacing: 0.3,
   },
