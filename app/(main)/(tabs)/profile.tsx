@@ -12,14 +12,15 @@ import {
   Alert,
   Modal,
   Pressable,
+  useWindowDimensions,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { safePush, safeReplace } from '@/lib/safeRouter';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS } from '@/lib/constants';
+import { COLORS, FONT_SIZE, SPACING, SIZES, lineHeight, moderateScale } from '@/lib/constants';
 import { Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -53,12 +54,62 @@ function calculateAge(dob: string | undefined | null): number | null {
   return age;
 }
 
+const TEXT_MAX_SCALE = 1.2;
+const TEXT_PROPS = { maxFontSizeMultiplier: TEXT_MAX_SCALE } as const;
+const HEADER_TITLE_SIZE = FONT_SIZE.h2;
+const PROFILE_NAME_SIZE = FONT_SIZE.title;
+const PROFILE_BIO_SIZE = moderateScale(15, 0.4);
+const MODAL_BODY_SIZE = moderateScale(15, 0.4);
+const STATUS_BUTTON_TEXT_SIZE = FONT_SIZE.body2;
+const MENU_TEXT_SIZE = FONT_SIZE.lg;
+const FAILURE_ICON_SIZE = moderateScale(44, 0.3);
+const PROFILE_ICON_SIZE = SIZES.icon.lg;
+const CHEVRON_ICON_SIZE = SIZES.icon.md;
+const STATUS_ICON_SIZE = SIZES.icon.sm;
+const MODAL_STATUS_ICON_SIZE = SIZES.icon.xl;
+const PHOTO_PREVIEW_CLOSE_ICON_SIZE = moderateScale(28, 0.25);
+const AVATAR_BORDER_WIDTH = moderateScale(4, 0.25);
+const LOADING_AVATAR_SIZE = moderateScale(96, 0.25);
+const VERIFICATION_MODAL_RADIUS = moderateScale(20, 0.25);
+const VERIFICATION_MODAL_MAX_WIDTH = moderateScale(340, 0.25);
+const VERIFICATION_MODAL_ICON_SIZE = moderateScale(60, 0.25);
+
 export default function ProfileScreen() {
   useScreenTrace("PROFILE");
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
   const logout = useAuthStore((s) => s.logout);
+  const avatarSize = useMemo(
+    () => Math.max(
+      moderateScale(112, 0.25),
+      Math.min(windowWidth * 0.32, moderateScale(124, 0.25))
+    ),
+    [windowWidth]
+  );
+  const avatarStyle = useMemo(
+    () => ({
+      width: avatarSize,
+      height: avatarSize,
+      borderRadius: avatarSize / 2,
+    }),
+    [avatarSize]
+  );
+  const scrollContentStyle = useMemo(
+    () => ({
+      paddingBottom: SPACING.xxxl + insets.bottom,
+    }),
+    [insets.bottom]
+  );
+  const photoPreviewCloseButtonStyle = useMemo(
+    () => ({
+      top: Math.max(insets.top + SPACING.base, SPACING.xl),
+      right: SPACING.base,
+    }),
+    [insets.top]
+  );
 
   // PERF: Track screen focus time for photo load measurement
   const focusTimeRef = React.useRef(0);
@@ -498,7 +549,7 @@ export default function ProfileScreen() {
       <SafeAreaView edges={['top']} style={styles.container}>
         <View style={styles.loadingContainer}>
           <View style={styles.loadingAvatar} />
-          <Text style={styles.loadingText}>Loading your profile...</Text>
+          <Text {...TEXT_PROPS} style={styles.loadingText}>Loading your profile...</Text>
         </View>
       </SafeAreaView>
     );
@@ -510,8 +561,8 @@ export default function ProfileScreen() {
     return (
       <SafeAreaView edges={['top']} style={styles.container}>
         <View style={styles.loadingContainer}>
-          <Ionicons name="person-circle-outline" size={44} color={COLORS.textMuted} />
-          <Text style={styles.loadingText}>
+          <Ionicons name="person-circle-outline" size={FAILURE_ICON_SIZE} color={COLORS.textMuted} />
+          <Text {...TEXT_PROPS} style={styles.loadingText}>
             {needsAuthRecovery
               ? 'Please sign in again to open your profile.'
               : 'We couldn’t load your profile right now. Please try again.'}
@@ -522,14 +573,14 @@ export default function ProfileScreen() {
             accessibilityRole="button"
             accessibilityLabel="Retry loading profile"
           >
-            <Text style={styles.profileRetryButtonText}>Retry</Text>
+            <Text {...TEXT_PROPS} style={styles.profileRetryButtonText}>Retry</Text>
           </TouchableOpacity>
           <TouchableOpacity
             onPress={handleProfileRecovery}
             accessibilityRole="button"
             accessibilityLabel={needsAuthRecovery ? 'Go to Sign In' : 'Go Home'}
           >
-            <Text style={styles.profileRecoveryText}>
+            <Text {...TEXT_PROPS} style={styles.profileRecoveryText}>
               {needsAuthRecovery ? 'Go to Sign In' : 'Go Home'}
             </Text>
           </TouchableOpacity>
@@ -543,7 +594,7 @@ export default function ProfileScreen() {
       <SafeAreaView edges={['top']} style={styles.container}>
         <View style={styles.loadingContainer}>
           <View style={styles.loadingAvatar} />
-          <Text style={styles.loadingText}>Loading your profile...</Text>
+          <Text {...TEXT_PROPS} style={styles.loadingText}>Loading your profile...</Text>
         </View>
       </SafeAreaView>
     );
@@ -554,18 +605,18 @@ export default function ProfileScreen() {
   return (
     <SafeAreaView edges={['top']} style={styles.container}>
     <ScrollView
-      style={{ flex: 1 }}
+      style={styles.scrollView}
       showsVerticalScrollIndicator={false}
-      contentContainerStyle={{ paddingBottom: 100 }}
+      contentContainerStyle={scrollContentStyle}
     >
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Profile</Text>
+        <Text {...TEXT_PROPS} style={styles.headerTitle}>Profile</Text>
         <TouchableOpacity
           onPress={() => safePush(router, '/(main)/edit-profile', 'profile->edit')}
           accessibilityRole="button"
           accessibilityLabel="Edit profile"
         >
-          <Ionicons name="create-outline" size={24} color={COLORS.primary} />
+          <Ionicons name="create-outline" size={PROFILE_ICON_SIZE} color={COLORS.primary} />
         </TouchableOpacity>
       </View>
 
@@ -583,7 +634,7 @@ export default function ProfileScreen() {
           >
             <Image
               source={{ uri: mainPhotoUrl }}
-              style={styles.avatar}
+              style={[styles.avatar, avatarStyle]}
               contentFit="cover"
               transition={200}
               blurRadius={0}
@@ -603,13 +654,13 @@ export default function ProfileScreen() {
           </TouchableOpacity>
         ) : (
           <View style={styles.avatarContainer}>
-            <Avatar size={120} />
+            <Avatar size={Math.round(avatarSize)} />
           </View>
         )}
 
         {/* Name + Age + Verified Badge (always visible, interactive) */}
         <View style={styles.nameRow}>
-          <Text style={styles.name}>
+          <Text {...TEXT_PROPS} style={styles.name}>
             {currentUser.name}{age !== null ? `, ${age}` : ''}
           </Text>
           <TouchableOpacity
@@ -624,10 +675,10 @@ export default function ProfileScreen() {
             ]}>
               <Ionicons
                 name={verificationStatusInfo.icon as any}
-                size={16}
+                size={STATUS_ICON_SIZE}
                 color={verificationStatusInfo.color}
               />
-              <Text style={[
+              <Text {...TEXT_PROPS} style={[
                 styles.verifiedInlineText,
                 { color: verificationStatusInfo.color }
               ]}>
@@ -639,7 +690,7 @@ export default function ProfileScreen() {
         </View>
 
         {/* Bio */}
-        {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
+        {currentUser.bio && <Text {...TEXT_PROPS} style={styles.bio}>{currentUser.bio}</Text>}
 
         {/* REMOVED: Interests Section - per user request, interests should NOT appear on profile homepage */}
         {/* Interests are only shown/edited in the Edit Profile screen */}
@@ -657,7 +708,7 @@ export default function ProfileScreen() {
                     : COLORS.textMuted
               }
             ]} />
-            <Text style={styles.verificationStatusLabel}>
+            <Text {...TEXT_PROPS} style={styles.verificationStatusLabel}>
               {verificationStatusInfo.label}
             </Text>
           </View>
@@ -671,7 +722,7 @@ export default function ProfileScreen() {
             accessibilityRole="button"
             accessibilityLabel={verificationStatusInfo.buttonLabel}
           >
-            <Text style={[
+            <Text {...TEXT_PROPS} style={[
               styles.verificationActionButtonText,
               verificationStatusInfo.status === 'verified' && styles.verificationActionButtonTextSecondary
             ]}>
@@ -696,8 +747,6 @@ export default function ProfileScreen() {
           isVerified: currentUser.isVerified,
           faceVerificationPassed: (currentUser as any).faceVerificationPassed,
           photos: isDemoMode ? currentUser.photos : effectivePhotos,
-          lookingFor: (currentUser as any).lookingFor,
-          relationshipIntent: (currentUser as any).relationshipIntent,
           bio: currentUser.bio,
           profilePrompts: (currentUser as any).profilePrompts,
           education: (currentUser as any).education,
@@ -724,9 +773,9 @@ export default function ProfileScreen() {
           accessibilityRole="button"
           accessibilityLabel="Edit Profile"
         >
-          <Ionicons name="create-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Edit Profile</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+          <Ionicons name="create-outline" size={PROFILE_ICON_SIZE} color={COLORS.text} />
+          <Text {...TEXT_PROPS} style={styles.menuText}>Edit Profile</Text>
+          <Ionicons name="chevron-forward" size={CHEVRON_ICON_SIZE} color={COLORS.textLight} />
         </TouchableOpacity>
 
         {/* 2. Privacy */}
@@ -736,9 +785,9 @@ export default function ProfileScreen() {
           accessibilityRole="button"
           accessibilityLabel="Privacy settings"
         >
-          <Ionicons name="lock-closed-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Privacy</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+          <Ionicons name="lock-closed-outline" size={PROFILE_ICON_SIZE} color={COLORS.text} />
+          <Text {...TEXT_PROPS} style={styles.menuText}>Privacy</Text>
+          <Ionicons name="chevron-forward" size={CHEVRON_ICON_SIZE} color={COLORS.textLight} />
         </TouchableOpacity>
 
         {/* 3. Notifications */}
@@ -748,9 +797,9 @@ export default function ProfileScreen() {
           accessibilityRole="button"
           accessibilityLabel="Notification settings"
         >
-          <Ionicons name="notifications-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Notifications</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+          <Ionicons name="notifications-outline" size={PROFILE_ICON_SIZE} color={COLORS.text} />
+          <Text {...TEXT_PROPS} style={styles.menuText}>Notifications</Text>
+          <Ionicons name="chevron-forward" size={CHEVRON_ICON_SIZE} color={COLORS.textLight} />
         </TouchableOpacity>
 
         {/* 4. Safety */}
@@ -760,9 +809,9 @@ export default function ProfileScreen() {
           accessibilityRole="button"
           accessibilityLabel="Safety settings"
         >
-          <Ionicons name="shield-checkmark-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Safety</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+          <Ionicons name="shield-checkmark-outline" size={PROFILE_ICON_SIZE} color={COLORS.text} />
+          <Text {...TEXT_PROPS} style={styles.menuText}>Safety</Text>
+          <Ionicons name="chevron-forward" size={CHEVRON_ICON_SIZE} color={COLORS.textLight} />
         </TouchableOpacity>
 
         {/* 5. Account */}
@@ -772,9 +821,9 @@ export default function ProfileScreen() {
           accessibilityRole="button"
           accessibilityLabel="Account settings"
         >
-          <Ionicons name="person-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Account</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+          <Ionicons name="person-outline" size={PROFILE_ICON_SIZE} color={COLORS.text} />
+          <Text {...TEXT_PROPS} style={styles.menuText}>Account</Text>
+          <Ionicons name="chevron-forward" size={CHEVRON_ICON_SIZE} color={COLORS.textLight} />
         </TouchableOpacity>
 
         {/* 6. Support & FAQ */}
@@ -784,9 +833,9 @@ export default function ProfileScreen() {
           accessibilityRole="button"
           accessibilityLabel="Support and FAQ"
         >
-          <Ionicons name="help-circle-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Support & FAQ</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+          <Ionicons name="help-circle-outline" size={PROFILE_ICON_SIZE} color={COLORS.text} />
+          <Text {...TEXT_PROPS} style={styles.menuText}>Support & FAQ</Text>
+          <Ionicons name="chevron-forward" size={CHEVRON_ICON_SIZE} color={COLORS.textLight} />
         </TouchableOpacity>
 
         {/* 7. Log Out */}
@@ -797,9 +846,9 @@ export default function ProfileScreen() {
           accessibilityLabel="Log out"
           accessibilityHint="Signs you out of Mira on this device."
         >
-          <Ionicons name="log-out-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Log Out</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+          <Ionicons name="log-out-outline" size={PROFILE_ICON_SIZE} color={COLORS.text} />
+          <Text {...TEXT_PROPS} style={styles.menuText}>Log Out</Text>
+          <Ionicons name="chevron-forward" size={CHEVRON_ICON_SIZE} color={COLORS.textLight} />
         </TouchableOpacity>
 
         {isAdmin && (
@@ -808,17 +857,17 @@ export default function ProfileScreen() {
               style={[styles.menuItem, styles.adminMenuItem]}
               onPress={() => safePush(router, '/(main)/admin/verification', 'profile->adminVerification')}
             >
-              <Ionicons name="shield-outline" size={24} color={COLORS.primary} />
-              <Text style={[styles.menuText, { color: COLORS.primary }]}>Admin: Verification Queue</Text>
-              <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
+              <Ionicons name="shield-outline" size={PROFILE_ICON_SIZE} color={COLORS.primary} />
+              <Text {...TEXT_PROPS} style={[styles.menuText, { color: COLORS.primary }]}>Admin: Verification Queue</Text>
+              <Ionicons name="chevron-forward" size={CHEVRON_ICON_SIZE} color={COLORS.primary} />
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.menuItem, styles.adminMenuItem]}
               onPress={() => safePush(router, '/(main)/admin/logs', 'profile->adminLogs')}
             >
-              <Ionicons name="document-text-outline" size={24} color={COLORS.primary} />
-              <Text style={[styles.menuText, { color: COLORS.primary }]}>Admin: Audit Logs</Text>
-              <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
+              <Ionicons name="document-text-outline" size={PROFILE_ICON_SIZE} color={COLORS.primary} />
+              <Text {...TEXT_PROPS} style={[styles.menuText, { color: COLORS.primary }]}>Admin: Audit Logs</Text>
+              <Ionicons name="chevron-forward" size={CHEVRON_ICON_SIZE} color={COLORS.primary} />
             </TouchableOpacity>
           </>
         )}
@@ -850,11 +899,11 @@ export default function ProfileScreen() {
             )}
           </TouchableOpacity>
           <TouchableOpacity
-            style={styles.photoPreviewCloseButton}
+            style={[styles.photoPreviewCloseButton, photoPreviewCloseButtonStyle]}
             onPress={() => setShowPhotoPreview(false)}
             accessibilityLabel="Close full screen photo"
           >
-            <Ionicons name="close" size={28} color={COLORS.white} />
+            <Ionicons name="close" size={PHOTO_PREVIEW_CLOSE_ICON_SIZE} color={COLORS.white} />
           </TouchableOpacity>
         </View>
       </Modal>
@@ -880,11 +929,11 @@ export default function ProfileScreen() {
               ]}>
                 <Ionicons
                   name={verificationStatusInfo.icon as any}
-                  size={32}
+                  size={MODAL_STATUS_ICON_SIZE}
                   color={verificationStatusInfo.color}
                 />
               </View>
-              <Text style={styles.verificationModalTitle}>
+              <Text {...TEXT_PROPS} style={styles.verificationModalTitle}>
                 {verificationStatusInfo.status === 'verified' ? 'Face Verified' :
                  verificationStatusInfo.status === 'pending' ? 'Verification Pending' :
                  'Not Yet Verified'}
@@ -895,13 +944,13 @@ export default function ProfileScreen() {
             <View style={styles.verificationModalBody}>
               {verificationStatusInfo.status === 'verified' && (
                 <>
-                  <Text style={styles.verificationModalText}>
+                  <Text {...TEXT_PROPS} style={styles.verificationModalText}>
                     Your face has been verified. This badge helps build trust with other users.
                   </Text>
                   {verificationStatusInfo.date && (
                     <View style={styles.verificationModalRow}>
-                      <Ionicons name="calendar-outline" size={16} color={COLORS.textLight} />
-                      <Text style={styles.verificationModalRowText}>
+                      <Ionicons name="calendar-outline" size={STATUS_ICON_SIZE} color={COLORS.textLight} />
+                      <Text {...TEXT_PROPS} style={styles.verificationModalRowText}>
                         Verified: {verificationStatusInfo.date}
                       </Text>
                     </View>
@@ -909,12 +958,12 @@ export default function ProfileScreen() {
                 </>
               )}
               {verificationStatusInfo.status === 'pending' && (
-                <Text style={styles.verificationModalText}>
+                <Text {...TEXT_PROPS} style={styles.verificationModalText}>
                   We're reviewing your verification. This usually takes less than 24 hours. You'll be notified once complete.
                 </Text>
               )}
               {verificationStatusInfo.status === 'unverified' && (
-                <Text style={styles.verificationModalText}>
+                <Text {...TEXT_PROPS} style={styles.verificationModalText}>
                   Verify your face to get a badge, unlock full visibility, and build trust with matches.
                 </Text>
               )}
@@ -933,7 +982,7 @@ export default function ProfileScreen() {
               activeOpacity={0.7}
               accessibilityLabel={verificationStatusInfo.buttonLabel}
             >
-              <Text style={[
+              <Text {...TEXT_PROPS} style={[
                 styles.verificationModalButtonText,
                 verificationStatusInfo.status === 'verified' && styles.verificationModalButtonTextSecondary
               ]}>
@@ -947,7 +996,7 @@ export default function ProfileScreen() {
               onPress={() => setShowVerificationModal(false)}
               accessibilityLabel="Close verification details"
             >
-              <Text style={styles.verificationModalCloseText}>Close</Text>
+              <Text {...TEXT_PROPS} style={styles.verificationModalCloseText}>Close</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
@@ -964,42 +1013,49 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background,
   },
+  scrollView: {
+    flex: 1,
+  },
   loadingContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.background,
-    padding: 24,
+    padding: SPACING.xl,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '500',
     color: COLORS.textMuted,
-    marginTop: 12,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
+    marginTop: SPACING.md,
+    textAlign: 'center',
   },
   loadingAvatar: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: LOADING_AVATAR_SIZE,
+    height: LOADING_AVATAR_SIZE,
+    borderRadius: SIZES.radius.full,
     backgroundColor: COLORS.backgroundDark,
   },
   profileRetryButton: {
-    marginTop: 16,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 999,
+    marginTop: SPACING.base,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm + SPACING.xs,
+    borderRadius: SIZES.radius.full,
     backgroundColor: COLORS.primary,
   },
   profileRetryButtonText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600',
     color: COLORS.white,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
   },
   profileRecoveryText: {
-    marginTop: 12,
-    fontSize: 14,
+    marginTop: SPACING.md,
+    fontSize: FONT_SIZE.body,
     fontWeight: '500',
     color: COLORS.primary,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1009,14 +1065,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.md,
     backgroundColor: COLORS.background,
   },
   headerTitle: {
-    fontSize: 32,
+    fontSize: HEADER_TITLE_SIZE,
     fontWeight: '700',
     color: COLORS.text,
+    lineHeight: lineHeight(HEADER_TITLE_SIZE, 1.2),
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1024,12 +1081,12 @@ const styles = StyleSheet.create({
   // ═══════════════════════════════════════════════════════════════════════════
   profileSection: {
     alignItems: 'center',
-    paddingTop: 28,
-    paddingHorizontal: 24,
-    paddingBottom: 28,
+    paddingTop: SPACING.xl,
+    paddingHorizontal: SPACING.xl,
+    paddingBottom: SPACING.xl,
   },
   avatarContainer: {
-    marginBottom: 20,
+    marginBottom: SPACING.lg,
     // Premium shadow
     shadowColor: COLORS.primary,
     shadowOffset: { width: 0, height: 6 },
@@ -1038,10 +1095,7 @@ const styles = StyleSheet.create({
     elevation: 10,
   },
   avatar: {
-    width: 130,
-    height: 130,
-    borderRadius: 65,
-    borderWidth: 4,
+    borderWidth: AVATAR_BORDER_WIDTH,
     borderColor: COLORS.white,
     backgroundColor: COLORS.backgroundDark,
   },
@@ -1050,63 +1104,66 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     flexWrap: 'wrap',
-    gap: 10,
-    marginBottom: 8,
+    gap: moderateScale(10, 0.25),
+    marginBottom: SPACING.sm,
   },
   name: {
-    fontSize: 26,
+    fontSize: PROFILE_NAME_SIZE,
     fontWeight: '700',
     color: COLORS.text,
+    lineHeight: lineHeight(PROFILE_NAME_SIZE, 1.2),
   },
   verifiedInline: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: SPACING.xs,
     backgroundColor: COLORS.primarySubtle,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
+    paddingHorizontal: moderateScale(10, 0.25),
+    paddingVertical: SPACING.xs,
+    borderRadius: SIZES.radius.md,
   },
   verifiedInlineText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.primary,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.2),
   },
   bio: {
-    fontSize: 15,
+    fontSize: PROFILE_BIO_SIZE,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 22,
-    marginBottom: 14,
-    paddingHorizontal: 20,
-    maxWidth: 300,
+    lineHeight: lineHeight(PROFILE_BIO_SIZE, 1.35),
+    marginBottom: SPACING.md,
+    paddingHorizontal: SPACING.lg,
+    maxWidth: moderateScale(300, 0.25),
   },
   interestsContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'center',
-    gap: 8,
-    marginBottom: 14,
-    paddingHorizontal: 20,
+    gap: SPACING.sm,
+    marginBottom: SPACING.md,
+    paddingHorizontal: SPACING.lg,
   },
   interestChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: moderateScale(6, 0.25),
+    borderRadius: SIZES.radius.lg,
     backgroundColor: COLORS.primarySubtle,
     borderWidth: 1,
     borderColor: COLORS.primary + '40',
   },
   interestChipText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.primary,
     fontWeight: '500',
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.2),
   },
   // ═══════════════════════════════════════════════════════════════════════════
   // SECTION DIVIDER - Subtle separation
   // ═══════════════════════════════════════════════════════════════════════════
   sectionDivider: {
-    height: 8,
+    height: SPACING.sm,
     backgroundColor: COLORS.backgroundDark,
   },
 
@@ -1115,43 +1172,46 @@ const styles = StyleSheet.create({
   // ═══════════════════════════════════════════════════════════════════════════
   statsCard: {
     backgroundColor: COLORS.backgroundDark,
-    margin: 16,
-    padding: 16,
-    borderRadius: 16,
+    margin: SPACING.base,
+    padding: SPACING.base,
+    borderRadius: SIZES.radius.lg,
   },
   statsTitle: {
-    fontSize: 18,
+    fontSize: FONT_SIZE.xl,
     fontWeight: '600',
     color: COLORS.text,
-    marginBottom: 12,
+    lineHeight: lineHeight(FONT_SIZE.xl, 1.2),
+    marginBottom: SPACING.md,
   },
   statsRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 8,
+    marginBottom: SPACING.sm,
   },
   statsLabel: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: COLORS.textLight,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
   },
   statsValue: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600',
     color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // MENU SECTION - Clean settings list
   // ═══════════════════════════════════════════════════════════════════════════
   menuSection: {
-    paddingTop: 8,
+    paddingTop: SPACING.sm,
   },
   menuItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    minHeight: 56,
+    paddingVertical: SPACING.base,
+    paddingHorizontal: SPACING.lg,
+    minHeight: SIZES.button.lg,
     backgroundColor: COLORS.background,
   },
   adminMenuItem: {
@@ -1159,10 +1219,11 @@ const styles = StyleSheet.create({
   },
   menuText: {
     flex: 1,
-    fontSize: 16,
+    fontSize: MENU_TEXT_SIZE,
     fontWeight: '500',
     color: COLORS.text,
-    marginLeft: 14,
+    lineHeight: lineHeight(MENU_TEXT_SIZE, 1.35),
+    marginLeft: moderateScale(14, 0.25),
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1186,11 +1247,9 @@ const styles = StyleSheet.create({
   },
   photoPreviewCloseButton: {
     position: 'absolute',
-    top: 50,
-    right: 20,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: SIZES.button.md,
+    height: SIZES.button.md,
+    borderRadius: SIZES.radius.full,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
@@ -1204,36 +1263,37 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    marginTop: 16,
-    marginBottom: 12,
+    borderRadius: SIZES.radius.md,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.base,
+    marginTop: SPACING.base,
+    marginBottom: SPACING.md,
     width: '100%',
-    maxWidth: 340,
+    maxWidth: moderateScale(340, 0.25),
   },
   verificationStatusLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: moderateScale(10, 0.25),
     flex: 1,
   },
   verificationStatusDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: moderateScale(10, 0.25),
+    height: moderateScale(10, 0.25),
+    borderRadius: SIZES.radius.full,
   },
   verificationStatusLabel: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '500',
     color: COLORS.text,
     flex: 1,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
   },
   verificationActionButton: {
     backgroundColor: COLORS.primary,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 16,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: moderateScale(14, 0.25),
+    borderRadius: SIZES.radius.lg,
   },
   verificationActionButtonSecondary: {
     backgroundColor: 'transparent',
@@ -1241,9 +1301,10 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   verificationActionButtonText: {
-    fontSize: 13,
+    fontSize: STATUS_BUTTON_TEXT_SIZE,
     fontWeight: '600',
     color: COLORS.white,
+    lineHeight: lineHeight(STATUS_BUTTON_TEXT_SIZE, 1.2),
   },
   verificationActionButtonTextSecondary: {
     color: COLORS.text,
@@ -1257,67 +1318,69 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 24,
+    padding: SPACING.xl,
   },
   verificationModalContent: {
     backgroundColor: COLORS.background,
-    borderRadius: 20,
-    padding: 24,
+    borderRadius: VERIFICATION_MODAL_RADIUS,
+    padding: SPACING.xl,
     width: '100%',
-    maxWidth: 340,
+    maxWidth: VERIFICATION_MODAL_MAX_WIDTH,
     alignItems: 'center',
   },
   verificationModalHeader: {
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: SPACING.base,
   },
   verificationModalIcon: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+    width: VERIFICATION_MODAL_ICON_SIZE,
+    height: VERIFICATION_MODAL_ICON_SIZE,
+    borderRadius: SIZES.radius.full,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: SPACING.md,
   },
   verificationModalTitle: {
-    fontSize: 20,
+    fontSize: FONT_SIZE.xxl,
     fontWeight: '700',
     color: COLORS.text,
     textAlign: 'center',
+    lineHeight: lineHeight(FONT_SIZE.xxl, 1.2),
   },
   verificationModalBody: {
     width: '100%',
-    marginBottom: 20,
+    marginBottom: SPACING.lg,
   },
   verificationModalText: {
-    fontSize: 15,
+    fontSize: MODAL_BODY_SIZE,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 22,
+    lineHeight: lineHeight(MODAL_BODY_SIZE, 1.35),
   },
   verificationModalRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    marginTop: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    gap: SPACING.sm,
+    marginTop: SPACING.md,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 8,
+    borderRadius: SIZES.radius.sm,
   },
   verificationModalRowText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: COLORS.textLight,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
   },
   verificationModalButton: {
     backgroundColor: COLORS.primary,
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    borderRadius: 24,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.xl,
+    borderRadius: SIZES.radius.xl,
     width: '100%',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: SPACING.md,
   },
   verificationModalButtonSecondary: {
     backgroundColor: 'transparent',
@@ -1325,19 +1388,21 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   verificationModalButtonText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '600',
     color: COLORS.white,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
   },
   verificationModalButtonTextSecondary: {
     color: COLORS.text,
   },
   verificationModalClose: {
-    paddingVertical: 8,
+    paddingVertical: SPACING.sm,
   },
   verificationModalCloseText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: COLORS.textMuted,
     fontWeight: '500',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
   },
 });
