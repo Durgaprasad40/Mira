@@ -31,7 +31,7 @@ import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS } from '@/lib/constants';
+import { COLORS, FONT_SIZE, SPACING, SIZES, lineHeight, moderateScale } from '@/lib/constants';
 import { MessageBubble, MessageInput, ProtectedMediaViewer, ReportModal, BottleSpinGame, TruthDareInviteCard } from '@/components/chat';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
@@ -173,6 +173,25 @@ const getErrorMessage = (error: unknown, fallback: string) =>
 
 const isAbortError = (error: unknown) =>
   error instanceof Error && error.name === 'AbortError';
+
+const TEXT_MAX_SCALE = 1.2;
+const TEXT_PROPS = { maxFontSizeMultiplier: TEXT_MAX_SCALE } as const;
+const HEADER_NAME_SIZE = FONT_SIZE.lg;
+const EMPTY_CHAT_TEXT_SIZE = moderateScale(15, 0.4);
+const TD_BUTTON_LABEL_SIZE = FONT_SIZE.sm;
+const TD_INVITE_BODY_SIZE = moderateScale(15, 0.4);
+const BANNER_TEXT_SIZE = FONT_SIZE.body2;
+const LOADING_ICON_SIZE = moderateScale(48, 0.3);
+const EMPTY_CHAT_ICON_SIZE = moderateScale(40, 0.3);
+const TD_MODAL_ICON_SIZE = moderateScale(28, 0.25);
+const HEADER_ICON_SIZE = SIZES.icon.lg;
+const TD_ICON_SIZE = moderateScale(18, 0.25);
+const BANNER_ICON_SIZE = SIZES.icon.sm;
+const STATUS_ICON_SIZE = moderateScale(14, 0.25);
+const HEADER_AVATAR_SIZE = SIZES.avatar.md;
+const HEADER_PRESENCE_DOT_SIZE = moderateScale(10, 0.25);
+const TD_INVITE_MODAL_RADIUS = moderateScale(18, 0.25);
+const TD_INVITE_MAX_WIDTH = moderateScale(320, 0.25);
 
 export default function ChatScreenInner({ conversationId, source }: ChatScreenInnerProps) {
   const router = useRouter();
@@ -1853,17 +1872,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         {isLoading ? (
           <>
             <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.loadingText}>Opening your conversation...</Text>
+            <Text {...TEXT_PROPS} style={styles.loadingText}>Opening your conversation...</Text>
           </>
         ) : (
           <>
-            <Ionicons name="chatbubble-ellipses-outline" size={48} color={COLORS.textLight} />
-            <Text style={styles.loadingText}>This chat is no longer available.</Text>
+            <Ionicons name="chatbubble-ellipses-outline" size={LOADING_ICON_SIZE} color={COLORS.textLight} />
+            <Text {...TEXT_PROPS} style={styles.loadingText}>This chat is no longer available.</Text>
             <TouchableOpacity
               style={styles.errorBackButton}
               onPress={handleBack}
             >
-              <Text style={styles.errorBackText}>Go back</Text>
+              <Text {...TEXT_PROPS} style={styles.errorBackText}>Go back</Text>
             </TouchableOpacity>
           </>
         )}
@@ -1878,7 +1897,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Syncing your conversation...</Text>
+        <Text {...TEXT_PROPS} style={styles.loadingText}>Syncing your conversation...</Text>
       </View>
     );
   }
@@ -1892,8 +1911,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const activeMatchId = !isDemo ? conversation?.matchId : undefined;
 
   const composerBottomPadding = source === 'messages'
-    ? (Platform.OS === 'android' ? 8 : 6)
-    : Math.max(insets.bottom, Platform.OS === 'android' ? 10 : 8);
+    ? Math.max(insets.bottom, Platform.OS === 'android' ? SPACING.sm : moderateScale(6, 0.25))
+    : Math.max(insets.bottom, Platform.OS === 'android' ? SPACING.md - SPACING.xxs : SPACING.sm);
+  const pendingInviteBottom = composerHeight + composerBottomPadding + SPACING.sm;
 
   const canSendCustom = isDemo
     ? true
@@ -1909,7 +1929,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       {/* Header — sits above KAV (does not move when keyboard opens) */}
       <View style={[styles.header, { paddingTop: insets.top }]}>
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
-          <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+          <Ionicons name="arrow-back" size={HEADER_ICON_SIZE} color={COLORS.text} />
         </TouchableOpacity>
         {/* Avatar with presence dot - tappable to open profile */}
         <TouchableOpacity
@@ -1925,7 +1945,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               />
             ) : (
               <View style={styles.headerAvatarPlaceholder}>
-                <Text style={styles.headerAvatarInitials}>{avatarInitials}</Text>
+                <Text {...TEXT_PROPS} style={styles.headerAvatarInitials}>{avatarInitials}</Text>
               </View>
             )}
             {/* PRESENCE-DOT: Online indicator on avatar */}
@@ -1947,11 +1967,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           activeOpacity={0.7}
         >
           {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
-          <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
+          <Text {...TEXT_PROPS} style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
             {otherUserName}
           </Text>
           {/* ONLINE-STATUS-FIX: Show "Online" for very recent activity */}
-          <Text style={styles.headerStatus}>
+          <Text {...TEXT_PROPS} style={styles.headerStatus}>
             {(() => {
               const diff = Date.now() - otherUserLastActive;
               // Online: within 1 minute (likely still in app)
@@ -1983,8 +2003,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               // Dim button during cooldown
               !isDemo && gameSession?.state === 'cooldown' && styles.truthDareButtonCooldown,
             ]}>
-              <Ionicons name="wine" size={18} color={COLORS.white} />
-              <Text style={styles.truthDareLabel}>
+              <Ionicons name="wine" size={TD_ICON_SIZE} color={COLORS.white} />
+              <Text {...TEXT_PROPS} style={styles.truthDareLabel}>
                 {/* Show status on button */}
                 {!isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId
                   ? 'Wait'
@@ -2002,7 +2022,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           hitSlop={8}
           style={styles.moreButton}
         >
-          <Ionicons name="ellipsis-vertical" size={20} color={COLORS.textLight} />
+          <Ionicons name="ellipsis-vertical" size={SIZES.icon.md} color={COLORS.textLight} />
         </TouchableOpacity>
         </View>
       </View>
@@ -2010,8 +2030,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       {/* T/D Cooldown inline message (replaces Alert spam) */}
       {showCooldownMessage && (
         <View style={styles.cooldownBanner}>
-          <Ionicons name="timer-outline" size={16} color={COLORS.warning} />
-          <Text style={styles.cooldownBannerText}>
+          <Ionicons name="timer-outline" size={BANNER_ICON_SIZE} color={COLORS.warning} />
+          <Text {...TEXT_PROPS} style={styles.cooldownBannerText}>
             Cooldown: wait {cooldownRemainingMin} min{cooldownRemainingMin !== 1 ? 's' : ''} before playing again
           </Text>
         </View>
@@ -2020,16 +2040,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       {/* Expired chat banner */}
       {isExpiredChat && (
         <View style={styles.expiredBanner}>
-          <Ionicons name="time-outline" size={16} color={COLORS.textMuted} />
-          <Text style={styles.expiredBannerText}>This chat has expired.</Text>
+          <Ionicons name="time-outline" size={BANNER_ICON_SIZE} color={COLORS.textMuted} />
+          <Text {...TEXT_PROPS} style={styles.expiredBannerText}>This chat has expired.</Text>
         </View>
       )}
 
       {/* Just unblocked banner - one-time indicator */}
       {showJustUnblockedBanner && (
         <View style={styles.justUnblockedBanner}>
-          <Ionicons name="checkmark-circle" size={16} color={COLORS.success} />
-          <Text style={styles.justUnblockedBannerText}>Unblocked just now</Text>
+          <Ionicons name="checkmark-circle" size={BANNER_ICON_SIZE} color={COLORS.success} />
+          <Text {...TEXT_PROPS} style={styles.justUnblockedBannerText}>Unblocked just now</Text>
         </View>
       )}
 
@@ -2092,8 +2112,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                     // SECURE-MEDIA-FIX: Use merged protectedMedia with backend viewMode
                     protectedMedia: mergedProtectedMedia,
                     isExpired: item.isExpired,
-                    timerEndsAt: item.timerEndsAt,
-                    expiredAt: item.expiredAt,
+                    timerEndsAt: item.timerEndsAt ?? undefined,
+                    expiredAt: item.expiredAt ?? undefined,
                     viewedAt: item.viewedAt,
                     systemSubtype: item.systemSubtype,
                     mediaId: item.mediaId,
@@ -2103,7 +2123,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                     // VOICE-FIX: Pass both demo and production audio fields
                     audioUri: item.audioUri,
                     durationMs: item.durationMs,
-                    audioUrl: item.audioUrl,
+                    audioUrl: item.audioUrl ?? undefined,
                     audioDurationMs: item.audioDurationMs,
                   }}
                   isOwn={isMessageOwn}
@@ -2125,18 +2145,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 {isMessageOwn && optimisticStatus === 'sending' && (
                   <View style={styles.optimisticStatusRow}>
                     <ActivityIndicator size="small" color={COLORS.textLight} />
-                    <Text style={styles.optimisticStatusText}>Sending...</Text>
+                    <Text {...TEXT_PROPS} style={styles.optimisticStatusText}>Sending...</Text>
                   </View>
                 )}
                 {isMessageOwn && optimisticStatus === 'failed' && (
                   <TouchableOpacity
                     style={[styles.optimisticStatusRow, styles.optimisticFailedRow]}
-                    onPress={() => handleRetryOptimisticTextMessage(item.clientMessageId)}
+                    onPress={() => {
+                      if (item.clientMessageId) {
+                        handleRetryOptimisticTextMessage(item.clientMessageId);
+                      }
+                    }}
                     disabled={isSending}
                     activeOpacity={0.8}
                   >
-                    <Ionicons name="alert-circle-outline" size={14} color={COLORS.error} />
-                    <Text style={[styles.optimisticStatusText, styles.optimisticFailedText]}>
+                    <Ionicons name="alert-circle-outline" size={STATUS_ICON_SIZE} color={COLORS.error} />
+                    <Text {...TEXT_PROPS} style={[styles.optimisticStatusText, styles.optimisticFailedText]}>
                       {item.errorMessage ? `${item.errorMessage} Tap to retry.` : 'Failed to send. Tap to retry.'}
                     </Text>
                   </TouchableOpacity>
@@ -2146,8 +2170,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           }}
           ListEmptyComponent={
             <View style={styles.emptyChat}>
-              <Ionicons name="chatbubble-outline" size={40} color={COLORS.border} />
-              <Text style={styles.emptyChatText}>
+              <Ionicons name="chatbubble-outline" size={EMPTY_CHAT_ICON_SIZE} color={COLORS.border} />
+              <Text {...TEXT_PROPS} style={styles.emptyChatText}>
                 Start the conversation with {otherUserName}.
               </Text>
             </View>
@@ -2155,8 +2179,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           contentContainerStyle={{
             flexGrow: 1,
             justifyContent: displayMessages.length > 0 ? 'flex-end' as const : 'center' as const,
-            paddingTop: 8,
-            paddingHorizontal: 12,
+            paddingTop: SPACING.sm,
+            paddingHorizontal: SPACING.md,
             paddingBottom: composerHeight + composerBottomPadding,
           }}
           onScroll={onScroll}
@@ -2284,11 +2308,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           <View style={styles.tdInviteContainer}>
             <View style={styles.tdInviteHeader}>
               <View style={styles.tdInviteIconContainer}>
-                <Ionicons name="wine" size={28} color={COLORS.white} />
+                <Ionicons name="wine" size={TD_MODAL_ICON_SIZE} color={COLORS.white} />
               </View>
-              <Text style={styles.tdInviteTitle}>Truth or Dare</Text>
+              <Text {...TEXT_PROPS} style={styles.tdInviteTitle}>Truth or Dare</Text>
             </View>
-            <Text style={styles.tdInviteMessage}>
+            <Text {...TEXT_PROPS} style={styles.tdInviteMessage}>
               Invite {otherUserName} to play Truth or Dare?
             </Text>
             <View style={styles.tdInviteActions}>
@@ -2296,13 +2320,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 style={[styles.tdInviteButton, styles.tdInviteCancelButton]}
                 onPress={() => setShowTruthDareInvite(false)}
               >
-                <Text style={styles.tdInviteCancelText}>Cancel</Text>
+                <Text {...TEXT_PROPS} style={styles.tdInviteCancelText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.tdInviteButton, styles.tdInviteSendButton]}
                 onPress={handleSendInvite}
               >
-                <Text style={styles.tdInviteSendText}>Invite</Text>
+                <Text {...TEXT_PROPS} style={styles.tdInviteSendText}>Invite</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -2311,7 +2335,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
       {/* Truth/Dare Pending Invite Card (for invitee) */}
       {gameSession?.state === 'pending' && gameSession?.inviteeId === userId && (
-        <View style={styles.tdPendingInviteWrapper}>
+        <View style={[styles.tdPendingInviteWrapper, { bottom: pendingInviteBottom }]}>
           <TruthDareInviteCard
             inviterName={otherUserName}
             isInvitee={true}
@@ -2356,34 +2380,37 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     color: COLORS.textLight,
-    marginTop: 12,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
+    marginTop: SPACING.md,
   },
   errorBackButton: {
-    marginTop: 20,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
+    marginTop: SPACING.lg,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.sm + SPACING.xxs,
+    borderRadius: SIZES.radius.full,
     backgroundColor: COLORS.primary,
   },
   errorBackText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600' as const,
     color: COLORS.white,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
   },
   optimisticStatusRow: {
     alignSelf: 'flex-end' as const,
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
-    gap: 6,
-    marginTop: -4,
-    marginBottom: 6,
-    paddingHorizontal: 10,
+    gap: moderateScale(6, 0.25),
+    marginTop: -SPACING.xs,
+    marginBottom: moderateScale(6, 0.25),
+    paddingHorizontal: SPACING.sm + SPACING.xxs,
   },
   optimisticStatusText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textLight,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
   },
   optimisticFailedRow: {
     maxWidth: '82%',
@@ -2394,21 +2421,21 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.sm,
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
   backButton: {
-    marginRight: 4,
-    width: 40,
-    height: 40,
+    marginRight: SPACING.xs,
+    width: SIZES.button.md,
+    height: SIZES.button.md,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
   avatarButton: {
-    marginRight: 8,
+    marginRight: SPACING.sm,
   },
   // PRESENCE-DOT: Container for avatar + dot overlay
   avatarContainer: {
@@ -2416,32 +2443,33 @@ const styles = StyleSheet.create({
   },
   // AVATAR-ENLARGE: Increased from 36 to 40 for better visibility
   headerAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: HEADER_AVATAR_SIZE,
+    height: HEADER_AVATAR_SIZE,
+    borderRadius: SIZES.radius.full,
     backgroundColor: COLORS.backgroundDark,
   },
   headerAvatarPlaceholder: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: HEADER_AVATAR_SIZE,
+    height: HEADER_AVATAR_SIZE,
+    borderRadius: SIZES.radius.full,
     backgroundColor: COLORS.primary,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
   headerAvatarInitials: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600' as const,
     color: COLORS.white,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
   },
   // PRESENCE-DOT: Small indicator dot on avatar
   presenceDot: {
     position: 'absolute' as const,
     bottom: 0,
     right: 0,
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: HEADER_PRESENCE_DOT_SIZE,
+    height: HEADER_PRESENCE_DOT_SIZE,
+    borderRadius: SIZES.radius.full,
     borderWidth: 2,
     borderColor: COLORS.background,
   },
@@ -2455,19 +2483,19 @@ const styles = StyleSheet.create({
   headerInfo: {
     flex: 1,
     minWidth: 0, // Required for text truncation in flexbox
-    marginRight: 8,
+    marginRight: SPACING.sm,
   },
   headerName: {
-    fontSize: 16,
+    fontSize: HEADER_NAME_SIZE,
     fontWeight: '600' as const,
     color: COLORS.text,
-    lineHeight: 20,
+    lineHeight: lineHeight(HEADER_NAME_SIZE, 1.2),
   },
   headerStatus: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     color: COLORS.textLight,
     marginTop: 1,
-    lineHeight: 14,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.35),
   },
   // Right section container for T/D button and menu
   headerRightSection: {
@@ -2476,9 +2504,9 @@ const styles = StyleSheet.create({
     flexShrink: 0, // Prevent right section from shrinking
   },
   gameButton: {
-    padding: 4,
-    width: 44,
-    height: 44,
+    padding: SPACING.xs,
+    width: SIZES.button.md,
+    height: SIZES.button.md,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
@@ -2486,26 +2514,27 @@ const styles = StyleSheet.create({
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
     backgroundColor: COLORS.secondary,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    borderRadius: 14,
-    gap: 4,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: moderateScale(6, 0.25),
+    borderRadius: SIZES.radius.md + SPACING.xxs,
+    gap: SPACING.xs,
   },
   truthDareLabel: {
-    fontSize: 11,
+    fontSize: TD_BUTTON_LABEL_SIZE,
     fontWeight: '700' as const,
     color: COLORS.white,
+    lineHeight: lineHeight(TD_BUTTON_LABEL_SIZE, 1.2),
   },
   truthDareButtonWithBadge: {
     position: 'relative' as const,
   },
   truthDareBadge: {
     position: 'absolute' as const,
-    top: -4,
-    right: -4,
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    top: -SPACING.xs,
+    right: -SPACING.xs,
+    width: HEADER_PRESENCE_DOT_SIZE,
+    height: HEADER_PRESENCE_DOT_SIZE,
+    borderRadius: SIZES.radius.full,
     backgroundColor: COLORS.error,
     borderWidth: 2,
     borderColor: COLORS.background,
@@ -2522,15 +2551,16 @@ const styles = StyleSheet.create({
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
-    gap: 8,
+    gap: SPACING.sm,
     backgroundColor: 'rgba(255, 152, 0, 0.12)',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingVertical: SPACING.sm + SPACING.xxs,
+    paddingHorizontal: SPACING.base,
   },
   cooldownBannerText: {
-    fontSize: 13,
+    fontSize: BANNER_TEXT_SIZE,
     fontWeight: '500' as const,
     color: COLORS.warning || '#FF9800',
+    lineHeight: lineHeight(BANNER_TEXT_SIZE, 1.35),
   },
   // Truth/Dare Invite Modal styles
   tdInviteOverlay: {
@@ -2538,50 +2568,51 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
     justifyContent: 'center' as const,
     alignItems: 'center' as const,
-    padding: 24,
+    padding: SPACING.xl,
   },
   tdInviteContainer: {
     backgroundColor: COLORS.background,
-    borderRadius: 18,
-    padding: 24,
+    borderRadius: TD_INVITE_MODAL_RADIUS,
+    padding: SPACING.xl,
     width: '90%',
-    maxWidth: 320,
+    maxWidth: TD_INVITE_MAX_WIDTH,
     alignItems: 'center' as const,
   },
   tdInviteHeader: {
     alignItems: 'center' as const,
-    marginBottom: 16,
+    marginBottom: SPACING.base,
   },
   tdInviteIconContainer: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: SIZES.avatar.lg,
+    height: SIZES.avatar.lg,
+    borderRadius: SIZES.radius.full,
     backgroundColor: COLORS.secondary,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
-    marginBottom: 12,
+    marginBottom: SPACING.md,
   },
   tdInviteTitle: {
-    fontSize: 20,
+    fontSize: FONT_SIZE.xxl,
     fontWeight: '700' as const,
     color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.xxl, 1.2),
   },
   tdInviteMessage: {
-    fontSize: 15,
+    fontSize: TD_INVITE_BODY_SIZE,
     color: COLORS.textLight,
     textAlign: 'center' as const,
-    marginBottom: 24,
-    lineHeight: 22,
+    marginBottom: SPACING.xl,
+    lineHeight: lineHeight(TD_INVITE_BODY_SIZE, 1.35),
   },
   tdInviteActions: {
     flexDirection: 'row' as const,
-    gap: 12,
+    gap: SPACING.md,
     width: '100%',
   },
   tdInviteButton: {
     flex: 1,
-    paddingVertical: 12,
-    borderRadius: 24,
+    paddingVertical: SPACING.md,
+    borderRadius: SIZES.radius.xl,
     alignItems: 'center' as const,
   },
   tdInviteCancelButton: {
@@ -2593,65 +2624,69 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   tdInviteCancelText: {
-    fontSize: 15,
+    fontSize: TD_INVITE_BODY_SIZE,
     fontWeight: '600' as const,
     color: COLORS.text,
+    lineHeight: lineHeight(TD_INVITE_BODY_SIZE, 1.2),
   },
   tdInviteSendText: {
-    fontSize: 15,
+    fontSize: TD_INVITE_BODY_SIZE,
     fontWeight: '600' as const,
     color: COLORS.white,
+    lineHeight: lineHeight(TD_INVITE_BODY_SIZE, 1.2),
   },
   tdPendingInviteWrapper: {
     position: 'absolute' as const,
-    bottom: 80,
     left: 0,
     right: 0,
     zIndex: 100,
   },
   moreButton: {
-    padding: 4,
-    minWidth: 44,
-    minHeight: 44,
+    padding: SPACING.xs,
+    minWidth: SIZES.button.md,
+    minHeight: SIZES.button.md,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
   emptyChat: {
     alignItems: 'center',
-    padding: 24,
+    padding: SPACING.xl,
   },
   emptyChatText: {
-    fontSize: 15,
+    fontSize: EMPTY_CHAT_TEXT_SIZE,
     color: COLORS.textMuted,
-    marginTop: 12,
+    marginTop: SPACING.md,
     textAlign: 'center',
+    lineHeight: lineHeight(EMPTY_CHAT_TEXT_SIZE, 1.35),
   },
   expiredBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
+    gap: SPACING.sm,
     backgroundColor: 'rgba(153,153,153,0.12)',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingVertical: SPACING.sm + SPACING.xxs,
+    paddingHorizontal: SPACING.base,
   },
   expiredBannerText: {
-    fontSize: 13,
+    fontSize: BANNER_TEXT_SIZE,
     fontWeight: '500',
     color: COLORS.textMuted,
+    lineHeight: lineHeight(BANNER_TEXT_SIZE, 1.35),
   },
   justUnblockedBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
+    gap: SPACING.sm,
     backgroundColor: 'rgba(76, 175, 80, 0.12)',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingVertical: SPACING.sm + SPACING.xxs,
+    paddingHorizontal: SPACING.base,
   },
   justUnblockedBannerText: {
-    fontSize: 13,
+    fontSize: BANNER_TEXT_SIZE,
     fontWeight: '500',
     color: COLORS.success,
+    lineHeight: lineHeight(BANNER_TEXT_SIZE, 1.35),
   },
 });

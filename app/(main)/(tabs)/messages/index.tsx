@@ -25,10 +25,9 @@ import { Image } from 'expo-image';
 import { useQuery, useMutation, useConvex } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS } from '@/lib/constants';
+import { COLORS, FONT_SIZE, SPACING as UI_SPACING, SIZES, lineHeight, moderateScale } from '@/lib/constants';
 import { ConversationItem } from '@/components/chat';
 import { Ionicons } from '@expo/vector-icons';
-import { Badge } from '@/components/ui';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import { getDemoCurrentUser, DEMO_PROFILES } from '@/lib/demoData';
@@ -48,24 +47,33 @@ import {
 import { log } from '@/utils/logger';
 import { useScreenTrace } from '@/lib/devTrace';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-const CARD_WIDTH = (SCREEN_WIDTH - 48) / 2;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// RESPONSIVE SPACING SYSTEM - Consistent across devices
-// ═══════════════════════════════════════════════════════════════════════════
-// Base scale factor: smaller phones get slightly tighter spacing
-const SCALE_FACTOR = Math.min(SCREEN_WIDTH / 375, 1.1); // Cap at 1.1x for large phones
-
-// Section spacing (compact top sections, more room for messages)
-const SPACING = {
-  sectionTop: Math.round(8 * SCALE_FACTOR),        // Top padding of sections
-  titleToRow: Math.round(6 * SCALE_FACTOR),        // Title to avatar row
-  sectionGap: Math.round(8 * SCALE_FACTOR),        // Between Super Likes and New Matches
-  beforeMessages: Math.round(12 * SCALE_FACTOR),   // Before Messages list
-  avatarSize: Math.round(56 * SCALE_FACTOR),       // Avatar circle size
-  avatarGap: Math.round(12 * SCALE_FACTOR),        // Gap between avatars
-};
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const CARD_WIDTH = (SCREEN_WIDTH - UI_SPACING.base * 3) / 2;
+const TEXT_MAX_SCALE = 1.2;
+const TEXT_PROPS = { maxFontSizeMultiplier: TEXT_MAX_SCALE } as const;
+const SECTION_SPACING = {
+  sectionTop: UI_SPACING.sm,
+  titleToRow: moderateScale(6, 0.25),
+  sectionGap: UI_SPACING.sm,
+  avatarSize: SIZES.avatar.lg,
+  avatarGap: UI_SPACING.md,
+} as const;
+const TITLE_FONT_SIZE = FONT_SIZE.h2;
+const LIKE_CARD_NAME_SIZE = moderateScale(15, 0.4);
+const PREVIEW_TEXT_SIZE = moderateScale(15, 0.4);
+const MODAL_TITLE_SIZE = FONT_SIZE.h1;
+const MODAL_BODY_SIZE = FONT_SIZE.lg;
+const MATCH_MODAL_ICON_SIZE = moderateScale(56, 0.3);
+const EMPTY_STATE_ICON_SIZE = moderateScale(56, 0.3);
+const HEADER_ICON_SIZE = SIZES.icon.lg;
+const MINI_BADGE_ICON_SIZE = SIZES.icon.sm;
+const COMPACT_BADGE_ICON_SIZE = SIZES.icon.xs;
+const ACTION_ICON_SIZE = SIZES.icon.md;
+const MATCH_MODAL_PHOTO_SIZE = moderateScale(96, 0.25);
+const LIKES_BADGE_SIZE = moderateScale(18, 0.25);
+const BADGE_HORIZONTAL_PADDING = UI_SPACING.xs;
+const NEW_BADGE_VERTICAL_PADDING = moderateScale(3, 0.25);
+const LIKE_CARD_CONTENT_PADDING = moderateScale(10, 0.25);
 
 // Recency threshold: 24 hours
 const RECENCY_THRESHOLD_MS = 24 * 60 * 60 * 1000;
@@ -123,11 +131,25 @@ function getConversationRouteId(item: InboxConversationRow): string | undefined 
   return getNonEmptyString(item.conversationId) ?? getNonEmptyString(item.id);
 }
 
+function getInboxMatchId(item: InboxConversationRow): string | undefined {
+  return getNonEmptyString('matchId' in item ? item.matchId : undefined);
+}
+
+function getNormalizedInboxOtherUser(item: InboxConversationRow) {
+  if (!item.otherUser) return undefined;
+
+  return {
+    ...item.otherUser,
+    id: getNonEmptyString(item.otherUser.id),
+    lastActive: item.otherUser.lastActive ?? 0,
+  };
+}
+
 function getInboxConversationKey(item: InboxConversationRow, index: number): string {
   const directId = getConversationRouteId(item);
   if (directId) return directId;
 
-  const matchId = getNonEmptyString(item.matchId);
+  const matchId = getInboxMatchId(item);
   if (matchId) return `match-${matchId}`;
 
   const otherUserId = getNonEmptyString(item.otherUser?.id);
@@ -859,22 +881,22 @@ export default function MessagesScreen() {
             />
             {isSuperLike && (
               <View style={styles.superLikeBadge}>
-                <Ionicons name="star" size={12} color={COLORS.white} />
+                <Ionicons name="star" size={MINI_BADGE_ICON_SIZE} color={COLORS.white} />
               </View>
             )}
             {isRecent && (
               <View style={styles.newBadge}>
-                <Text style={styles.newBadgeText}>NEW</Text>
+                <Text {...TEXT_PROPS} style={styles.newBadgeText}>NEW</Text>
               </View>
             )}
           </View>
 
           {/* Info */}
           <View style={styles.likeCardInfo}>
-            <Text style={styles.likeCardName} numberOfLines={1}>
+            <Text {...TEXT_PROPS} style={styles.likeCardName} numberOfLines={1}>
               {like.name || 'Someone'}, {like.age || '?'}
             </Text>
-            <Text style={styles.likeCardTime}>
+            <Text {...TEXT_PROPS} style={styles.likeCardTime}>
               {formatRelativeTime(like.createdAt || Date.now())}
             </Text>
           </View>
@@ -882,7 +904,7 @@ export default function MessagesScreen() {
           {/* Standout message (if present) */}
           {like.message && (
             <View style={styles.standoutMessageContainer}>
-              <Text style={styles.standoutMessageText} numberOfLines={2}>
+              <Text {...TEXT_PROPS} style={styles.standoutMessageText} numberOfLines={2}>
                 "{like.message}"
               </Text>
             </View>
@@ -896,14 +918,14 @@ export default function MessagesScreen() {
             onPress={() => handlePass(like)}
             activeOpacity={0.7}
           >
-            <Ionicons name="close" size={20} color="#F44336" />
+            <Ionicons name="close" size={ACTION_ICON_SIZE} color="#F44336" />
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.likeBackButton}
             onPress={() => handleLikeBack(like)}
             activeOpacity={0.7}
           >
-            <Ionicons name="heart" size={20} color={COLORS.white} />
+            <Ionicons name="heart" size={ACTION_ICON_SIZE} color={COLORS.white} />
           </TouchableOpacity>
         </View>
       </View>
@@ -920,10 +942,12 @@ export default function MessagesScreen() {
     return (
       <View style={styles.superLikesSection}>
         <View style={styles.compactSectionHeader}>
-          <Ionicons name="star" size={16} color={COLORS.superLike} />
-          <Text style={styles.compactSectionTitle}>Super Likes</Text>
+          <Ionicons name="star" size={SIZES.icon.sm} color={COLORS.superLike} />
+          <Text {...TEXT_PROPS} style={styles.compactSectionTitle}>Super Likes</Text>
           <View style={[styles.countBadge, { backgroundColor: COLORS.superLike + '20' }]}>
-            <Text style={[styles.countBadgeText, { color: COLORS.superLike }]}>{superLikeMatches.length}</Text>
+            <Text {...TEXT_PROPS} style={[styles.countBadgeText, { color: COLORS.superLike }]}>
+              {superLikeMatches.length}
+            </Text>
           </View>
         </View>
         <FlatList
@@ -952,13 +976,15 @@ export default function MessagesScreen() {
                     />
                   ) : (
                     <View style={[styles.compactMatchAvatar, styles.placeholderAvatar]}>
-                      <Text style={styles.compactAvatarInitial}>{item.otherUser?.name?.[0] || '?'}</Text>
+                      <Text {...TEXT_PROPS} style={styles.compactAvatarInitial}>
+                        {item.otherUser?.name?.[0] || '?'}
+                      </Text>
                     </View>
                   )}
                 </View>
                 {/* Super Like star badge */}
                 <View style={styles.compactSuperLikeBadge}>
-                  <Ionicons name="star" size={8} color={COLORS.white} />
+                  <Ionicons name="star" size={COMPACT_BADGE_ICON_SIZE} color={COLORS.white} />
                 </View>
               </View>
             </TouchableOpacity>
@@ -980,10 +1006,12 @@ export default function MessagesScreen() {
     return (
       <View style={styles.newMatchesSection}>
         <View style={styles.compactSectionHeader}>
-          <Ionicons name="heart-circle" size={16} color={COLORS.primary} />
-          <Text style={styles.compactSectionTitle}>New Matches</Text>
+          <Ionicons name="heart-circle" size={SIZES.icon.sm} color={COLORS.primary} />
+          <Text {...TEXT_PROPS} style={styles.compactSectionTitle}>New Matches</Text>
           <View style={[styles.countBadge, { backgroundColor: COLORS.primary + '20' }]}>
-            <Text style={[styles.countBadgeText, { color: COLORS.primary }]}>{newMatches.length}</Text>
+            <Text {...TEXT_PROPS} style={[styles.countBadgeText, { color: COLORS.primary }]}>
+              {newMatches.length}
+            </Text>
           </View>
         </View>
         <FlatList
@@ -1012,7 +1040,9 @@ export default function MessagesScreen() {
                     />
                   ) : (
                     <View style={[styles.compactMatchAvatar, styles.placeholderAvatar]}>
-                      <Text style={styles.compactAvatarInitial}>{item.otherUser?.name?.[0] || '?'}</Text>
+                      <Text {...TEXT_PROPS} style={styles.compactAvatarInitial}>
+                        {item.otherUser?.name?.[0] || '?'}
+                      </Text>
                     </View>
                   )}
                 </View>
@@ -1039,12 +1069,14 @@ export default function MessagesScreen() {
       >
         <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
           <View style={styles.header}>
-            <Text style={styles.title}>Messages</Text>
+            <Text {...TEXT_PROPS} style={styles.title}>Messages</Text>
           </View>
           <View style={styles.loadingContainer}>
             <View style={styles.loadingStatus}>
               <ActivityIndicator size="small" color={COLORS.primary} />
-              <Text style={styles.helperText}>Bringing your conversations up to date...</Text>
+              <Text {...TEXT_PROPS} style={styles.helperText}>
+                Bringing your conversations up to date...
+              </Text>
             </View>
             <View style={styles.loadingList}>
               {Array.from({ length: INBOX_LOADING_PLACEHOLDER_COUNT }, (_, index) => (
@@ -1083,9 +1115,9 @@ export default function MessagesScreen() {
               onPress={handleBackToMessages}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
-              <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+              <Ionicons name="arrow-back" size={HEADER_ICON_SIZE} color={COLORS.text} />
             </TouchableOpacity>
-            <Text style={styles.title}>
+            <Text {...TEXT_PROPS} style={styles.title}>
               {pendingLikesCount} {pendingLikesCount === 1 ? 'Like' : 'Likes'}
             </Text>
             <View style={styles.headerPlaceholder} />
@@ -1093,7 +1125,7 @@ export default function MessagesScreen() {
         ) : (
           // Messages view header
           <>
-            <Text style={styles.title}>Messages</Text>
+            <Text {...TEXT_PROPS} style={styles.title}>Messages</Text>
             <View style={styles.headerRight}>
               {/* Likes icon with badge */}
               <TouchableOpacity
@@ -1116,12 +1148,12 @@ export default function MessagesScreen() {
               >
                 <Ionicons
                   name="heart"
-                  size={24}
+                  size={HEADER_ICON_SIZE}
                   color={pendingLikesCount > 0 ? COLORS.primary : COLORS.textLight}
                 />
                 {pendingLikesCount > 0 && (
                   <View style={styles.likesBadge}>
-                    <Text style={styles.likesBadgeText}>
+                    <Text {...TEXT_PROPS} style={styles.likesBadgeText}>
                       {pendingLikesCount > 99 ? '99+' : pendingLikesCount}
                     </Text>
                   </View>
@@ -1175,9 +1207,9 @@ export default function MessagesScreen() {
           }}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <Ionicons name="heart-outline" size={64} color={COLORS.textLight} />
-              <Text style={styles.emptyTitle}>No likes waiting right now</Text>
-              <Text style={styles.emptySubtitle}>
+              <Ionicons name="heart-outline" size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
+              <Text {...TEXT_PROPS} style={styles.emptyTitle}>No likes waiting right now</Text>
+              <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
                 New likes and super likes will show up here.
               </Text>
             </View>
@@ -1215,8 +1247,8 @@ export default function MessagesScreen() {
             keyExtractor={(item, index) => getInboxConversationKey(item as InboxConversationRow, index)}
             renderItem={({ item }: { item: InboxConversationRow }) => (
               <ConversationItem
-                id={item.id || item.conversationId || item.matchId || 'conversation'}
-                otherUser={item.otherUser}
+                id={item.id || item.conversationId || getInboxMatchId(item) || 'conversation'}
+                otherUser={getNormalizedInboxOtherUser(item)}
                 lastMessage={item.lastMessage}
                 unreadCount={item.unreadCount ?? 0}
                 isPreMatch={item.isPreMatch ?? false}
@@ -1227,9 +1259,9 @@ export default function MessagesScreen() {
             )}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
-                <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
-                <Text style={styles.emptyTitle}>Your inbox is quiet for now</Text>
-                <Text style={styles.emptySubtitle}>
+                <Ionicons name="chatbubbles-outline" size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
+                <Text {...TEXT_PROPS} style={styles.emptyTitle}>Your inbox is quiet for now</Text>
+                <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
                   When you match with someone or accept a confession, your conversations will appear here.
                 </Text>
               </View>
@@ -1262,13 +1294,13 @@ export default function MessagesScreen() {
               colors={[COLORS.primary, COLORS.secondary]}
               style={styles.modalGradient}
             >
-              <Text style={styles.modalTitle}>It's a Match!</Text>
-              <Text style={styles.modalSubtitle}>
+              <Text {...TEXT_PROPS} style={styles.modalTitle}>It's a Match!</Text>
+              <Text {...TEXT_PROPS} style={styles.modalSubtitle}>
                 You and {matchedProfile?.name} liked each other
               </Text>
 
               <Animated.View style={[styles.modalHeart, { transform: [{ scale: heartScale }] }]}>
-                <Ionicons name="heart" size={60} color={COLORS.white} />
+                <Ionicons name="heart" size={MATCH_MODAL_ICON_SIZE} color={COLORS.white} />
               </Animated.View>
 
               {matchedProfile?.photoUrl && (
@@ -1283,13 +1315,13 @@ export default function MessagesScreen() {
                   style={styles.sayHiButton}
                   onPress={handleSayHi}
                 >
-                  <Text style={styles.sayHiText}>Say Hi 👋</Text>
+                  <Text {...TEXT_PROPS} style={styles.sayHiText}>Say Hi 👋</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.keepDiscoveringButton}
                   onPress={handleKeepDiscovering}
                 >
-                  <Text style={styles.keepDiscoveringText}>Keep Discovering</Text>
+                  <Text {...TEXT_PROPS} style={styles.keepDiscoveringText}>Keep Discovering</Text>
                 </TouchableOpacity>
               </View>
             </LinearGradient>
@@ -1324,32 +1356,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: UI_SPACING.base,
+    paddingVertical: UI_SPACING.md,
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
   title: {
-    fontSize: 28,
+    fontSize: TITLE_FONT_SIZE,
     fontWeight: '700',
     color: COLORS.text,
+    lineHeight: lineHeight(TITLE_FONT_SIZE, 1.2),
     flex: 1,
   },
   backButton: {
-    marginRight: 12,
+    marginRight: UI_SPACING.md,
   },
   headerPlaceholder: {
-    width: 40,
+    width: SIZES.button.md,
   },
   headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: UI_SPACING.md,
   },
   likesButton: {
-    padding: 8,
-    borderRadius: 20,
+    padding: UI_SPACING.sm,
+    borderRadius: SIZES.radius.full,
     position: 'relative',
   },
   likesButtonHighlight: {
@@ -1360,33 +1393,34 @@ const styles = StyleSheet.create({
     top: 0,
     right: 0,
     backgroundColor: COLORS.primary,
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
+    minWidth: LIKES_BADGE_SIZE,
+    height: LIKES_BADGE_SIZE,
+    borderRadius: SIZES.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 4,
+    paddingHorizontal: BADGE_HORIZONTAL_PADDING,
   },
   likesBadgeText: {
-    fontSize: 10,
+    fontSize: FONT_SIZE.xs,
     fontWeight: '700',
     color: COLORS.white,
+    lineHeight: lineHeight(FONT_SIZE.xs, 1.2),
   },
 
   // Likes list
   likesListContent: {
-    padding: 16,
+    padding: UI_SPACING.base,
   },
   likesColumnWrapper: {
-    gap: 12,
-    marginBottom: 12,
+    gap: UI_SPACING.md,
+    marginBottom: UI_SPACING.md,
   },
 
   // Like Card
   likeCard: {
     flex: 1,
     maxWidth: CARD_WIDTH,
-    borderRadius: 16,
+    borderRadius: SIZES.radius.lg,
     overflow: 'hidden',
     backgroundColor: COLORS.backgroundDark,
     borderWidth: 2,
@@ -1413,63 +1447,66 @@ const styles = StyleSheet.create({
   },
   superLikeBadge: {
     position: 'absolute',
-    top: 8,
-    right: 8,
+    top: UI_SPACING.sm,
+    right: UI_SPACING.sm,
     backgroundColor: COLORS.superLike,
-    borderRadius: 12,
-    padding: 5,
+    borderRadius: SIZES.radius.md,
+    padding: moderateScale(5, 0.25),
   },
   newBadge: {
     position: 'absolute',
-    top: 8,
-    left: 8,
+    top: UI_SPACING.sm,
+    left: UI_SPACING.sm,
     backgroundColor: COLORS.primary,
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    borderRadius: SIZES.radius.sm,
+    paddingHorizontal: UI_SPACING.sm,
+    paddingVertical: NEW_BADGE_VERTICAL_PADDING,
   },
   newBadgeText: {
-    fontSize: 10,
+    fontSize: FONT_SIZE.xs,
     fontWeight: '700',
     color: COLORS.white,
+    lineHeight: lineHeight(FONT_SIZE.xs, 1.2),
   },
   likeCardInfo: {
-    padding: 10,
-    paddingBottom: 6,
+    padding: LIKE_CARD_CONTENT_PADDING,
+    paddingBottom: moderateScale(6, 0.25),
   },
   likeCardName: {
-    fontSize: 15,
+    fontSize: LIKE_CARD_NAME_SIZE,
     fontWeight: '600',
     color: COLORS.text,
+    lineHeight: lineHeight(LIKE_CARD_NAME_SIZE, 1.2),
   },
   likeCardTime: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textLight,
-    marginTop: 2,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
+    marginTop: UI_SPACING.xxs,
   },
   // Standout message display
   standoutMessageContainer: {
-    paddingHorizontal: 10,
-    paddingBottom: 8,
+    paddingHorizontal: LIKE_CARD_CONTENT_PADDING,
+    paddingBottom: UI_SPACING.sm,
   },
   standoutMessageText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontStyle: 'italic',
     color: COLORS.superLike,
-    lineHeight: 16,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
   },
   likeCardActions: {
     flexDirection: 'row',
-    paddingHorizontal: 10,
-    paddingBottom: 10,
-    gap: 10,
+    paddingHorizontal: LIKE_CARD_CONTENT_PADDING,
+    paddingBottom: LIKE_CARD_CONTENT_PADDING,
+    gap: LIKE_CARD_CONTENT_PADDING,
   },
   passButton: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 40,
-    borderRadius: 10,
+    minHeight: SIZES.button.md,
+    borderRadius: SIZES.radius.sm + UI_SPACING.xxs,
     borderWidth: 1.5,
     borderColor: '#F44336',
     backgroundColor: COLORS.background,
@@ -1478,8 +1515,8 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 40,
-    borderRadius: 10,
+    minHeight: SIZES.button.md,
+    borderRadius: SIZES.radius.sm + UI_SPACING.xxs,
     backgroundColor: COLORS.primary,
   },
 
@@ -1487,31 +1524,32 @@ const styles = StyleSheet.create({
   likesPreview: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 16,
-    marginHorizontal: 16,
-    marginTop: 12,
+    padding: UI_SPACING.base,
+    marginHorizontal: UI_SPACING.base,
+    marginTop: UI_SPACING.md,
     backgroundColor: COLORS.primary + '10',
-    borderRadius: 12,
-    gap: 12,
+    borderRadius: SIZES.radius.md,
+    gap: UI_SPACING.md,
   },
   likesPreviewLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
-    gap: 8,
+    gap: UI_SPACING.sm,
   },
   likesPreviewText: {
-    fontSize: 15,
+    fontSize: PREVIEW_TEXT_SIZE,
     fontWeight: '600',
     color: COLORS.primary,
+    lineHeight: lineHeight(PREVIEW_TEXT_SIZE, 1.2),
   },
   likesPreviewAvatars: {
     flexDirection: 'row',
   },
   likesPreviewAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: SIZES.avatar.sm,
+    height: SIZES.avatar.sm,
+    borderRadius: SIZES.radius.full,
     borderWidth: 2,
     borderColor: COLORS.background,
   },
@@ -1522,62 +1560,64 @@ const styles = StyleSheet.create({
 
   // Super Likes section (compact)
   superLikesSection: {
-    paddingTop: SPACING.sectionTop,
+    paddingTop: SECTION_SPACING.sectionTop,
     paddingBottom: 0,
   },
 
   // New Matches Section (compact)
   newMatchesSection: {
-    paddingTop: SPACING.sectionGap,
-    paddingBottom: SPACING.sectionGap,
+    paddingTop: SECTION_SPACING.sectionGap,
+    paddingBottom: SECTION_SPACING.sectionGap,
   },
 
   // Compact section header (shared)
   compactSectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: SPACING.titleToRow,
-    gap: 6,
+    paddingHorizontal: UI_SPACING.base,
+    marginBottom: SECTION_SPACING.titleToRow,
+    gap: moderateScale(6, 0.25),
   },
   compactSectionTitle: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600',
     color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
   },
 
   // Compact avatar list
   compactMatchesList: {
-    paddingLeft: 16,
-    paddingRight: 16,
+    paddingLeft: UI_SPACING.base,
+    paddingRight: UI_SPACING.base,
   },
   compactMatchItem: {
-    marginRight: SPACING.avatarGap,
+    marginRight: SECTION_SPACING.avatarGap,
     alignItems: 'center',
   },
   compactAvatarContainer: {
     position: 'relative',
   },
   compactMatchRing: {
-    width: SPACING.avatarSize + 8,
-    height: SPACING.avatarSize + 8,
-    borderRadius: (SPACING.avatarSize + 8) / 2,
+    width: SECTION_SPACING.avatarSize + UI_SPACING.sm,
+    height: SECTION_SPACING.avatarSize + UI_SPACING.sm,
+    borderRadius: SIZES.radius.full,
     borderWidth: 2,
     borderColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 2,
+    padding: UI_SPACING.xxs,
   },
   compactMatchAvatar: {
-    width: SPACING.avatarSize,
-    height: SPACING.avatarSize,
-    borderRadius: SPACING.avatarSize / 2,
+    width: SECTION_SPACING.avatarSize,
+    height: SECTION_SPACING.avatarSize,
+    borderRadius: SIZES.radius.full,
     backgroundColor: COLORS.backgroundDark,
   },
   compactAvatarInitial: {
-    fontSize: 18,
+    fontSize: FONT_SIZE.xl,
     fontWeight: '600',
     color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.xl, 1.2),
   },
 
   // Compact Super Like badge
@@ -1586,9 +1626,9 @@ const styles = StyleSheet.create({
     bottom: 0,
     right: 0,
     backgroundColor: COLORS.superLike,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
+    width: SIZES.icon.sm,
+    height: SIZES.icon.sm,
+    borderRadius: SIZES.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1.5,
@@ -1597,49 +1637,51 @@ const styles = StyleSheet.create({
 
   // Legacy styles (kept for compatibility)
   matchesList: {
-    paddingLeft: 16,
-    paddingRight: 24,
+    paddingLeft: UI_SPACING.base,
+    paddingRight: UI_SPACING.xl,
   },
   matchItem: {
-    marginRight: 16,
+    marginRight: UI_SPACING.base,
     alignItems: 'center',
-    width: 72,
+    width: moderateScale(72, 0.25),
   },
   matchAvatarContainer: {
-    marginBottom: 6,
+    marginBottom: moderateScale(6, 0.25),
   },
   matchRing: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
+    width: moderateScale(68, 0.25),
+    height: moderateScale(68, 0.25),
+    borderRadius: SIZES.radius.full,
     borderWidth: 2.5,
     borderColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 2,
+    padding: UI_SPACING.xxs,
   },
   matchAvatar: {
-    width: 58,
-    height: 58,
-    borderRadius: 29,
+    width: moderateScale(58, 0.25),
+    height: moderateScale(58, 0.25),
+    borderRadius: SIZES.radius.full,
     backgroundColor: COLORS.backgroundDark,
   },
   matchName: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.text,
     fontWeight: '500',
     textAlign: 'center',
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.2),
   },
   countBadge: {
     backgroundColor: COLORS.superLike + '20',
-    paddingHorizontal: 6,
+    paddingHorizontal: moderateScale(6, 0.25),
     paddingVertical: 1,
-    borderRadius: 8,
+    borderRadius: SIZES.radius.sm,
   },
   countBadgeText: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     fontWeight: '600',
     color: COLORS.superLike,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
   },
   // Placeholder avatar
   placeholderAvatar: {
@@ -1647,72 +1689,73 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   avatarInitial: {
-    fontSize: 22,
+    fontSize: FONT_SIZE.title,
     fontWeight: '600',
     color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.title, 1.2),
   },
 
   // Loading
   loadingContainer: {
     flex: 1,
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 24,
+    paddingHorizontal: UI_SPACING.base,
+    paddingTop: UI_SPACING.base,
+    paddingBottom: UI_SPACING.xl,
   },
   loadingStatus: {
     alignItems: 'center',
-    gap: 12,
-    marginBottom: 18,
+    gap: UI_SPACING.md,
+    marginBottom: UI_SPACING.lg,
   },
   loadingList: {
-    gap: 2,
+    gap: UI_SPACING.xxs,
   },
   loadingConversationRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 14,
+    paddingVertical: UI_SPACING.md,
   },
   loadingAvatar: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    marginRight: 14,
+    width: moderateScale(52, 0.25),
+    height: moderateScale(52, 0.25),
+    borderRadius: SIZES.radius.full,
+    marginRight: UI_SPACING.md,
     backgroundColor: COLORS.backgroundDark,
   },
   loadingConversationBody: {
     flex: 1,
-    gap: 10,
+    gap: LIKE_CARD_CONTENT_PADDING,
   },
   loadingConversationHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 12,
+    gap: UI_SPACING.md,
   },
   loadingNameBar: {
     width: '40%',
-    height: 16,
-    borderRadius: 8,
+    height: SIZES.icon.sm,
+    borderRadius: SIZES.radius.sm,
     backgroundColor: COLORS.backgroundDark,
   },
   loadingTimeBar: {
-    width: 42,
-    height: 12,
-    borderRadius: 6,
+    width: moderateScale(42, 0.25),
+    height: FONT_SIZE.caption,
+    borderRadius: moderateScale(6, 0.25),
     backgroundColor: COLORS.backgroundDark,
   },
   loadingPreviewBar: {
     width: '72%',
-    height: 14,
-    borderRadius: 7,
+    height: FONT_SIZE.body,
+    borderRadius: moderateScale(7, 0.25),
     backgroundColor: COLORS.backgroundDark,
   },
   helperText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 20,
-    maxWidth: 280,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
+    maxWidth: moderateScale(280, 0.25),
   },
 
   // Empty states
@@ -1720,24 +1763,25 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 40,
+    padding: UI_SPACING.xxl,
   },
   emptyListContainer: {
     flexGrow: 1,
   },
   emptyTitle: {
-    fontSize: 20,
+    fontSize: FONT_SIZE.xxl,
     fontWeight: '600',
     color: COLORS.text,
-    marginTop: 16,
-    marginBottom: 8,
+    lineHeight: lineHeight(FONT_SIZE.xxl, 1.2),
+    marginTop: UI_SPACING.base,
+    marginBottom: UI_SPACING.sm,
   },
   emptySubtitle: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 20,
-    maxWidth: 300,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
+    maxWidth: moderateScale(300, 0.25),
   },
 
   // Match Modal
@@ -1748,60 +1792,64 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   modalContent: {
-    width: SCREEN_WIDTH - 48,
-    borderRadius: 24,
+    width: SCREEN_WIDTH - UI_SPACING.xxxl,
+    borderRadius: SIZES.radius.xl,
     overflow: 'hidden',
   },
   modalGradient: {
-    padding: 24,
+    padding: UI_SPACING.xl,
     alignItems: 'center',
   },
   modalTitle: {
-    fontSize: 32,
+    fontSize: MODAL_TITLE_SIZE,
     fontWeight: '700',
     color: COLORS.white,
-    marginBottom: 8,
+    lineHeight: lineHeight(MODAL_TITLE_SIZE, 1.2),
+    marginBottom: UI_SPACING.sm,
   },
   modalSubtitle: {
-    fontSize: 16,
+    fontSize: MODAL_BODY_SIZE,
     color: COLORS.white,
     opacity: 0.9,
-    marginBottom: 24,
+    marginBottom: UI_SPACING.xl,
     textAlign: 'center',
+    lineHeight: lineHeight(MODAL_BODY_SIZE, 1.35),
   },
   modalHeart: {
-    marginBottom: 24,
+    marginBottom: UI_SPACING.xl,
   },
   modalPhoto: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: MATCH_MODAL_PHOTO_SIZE,
+    height: MATCH_MODAL_PHOTO_SIZE,
+    borderRadius: SIZES.radius.full,
     borderWidth: 4,
     borderColor: COLORS.white,
-    marginBottom: 24,
+    marginBottom: UI_SPACING.xl,
   },
   modalActions: {
     width: '100%',
-    gap: 12,
+    gap: UI_SPACING.md,
   },
   sayHiButton: {
     backgroundColor: COLORS.white,
-    paddingVertical: 14,
-    borderRadius: 30,
+    paddingVertical: UI_SPACING.md,
+    borderRadius: SIZES.radius.full,
     alignItems: 'center',
   },
   sayHiText: {
-    fontSize: 16,
+    fontSize: MODAL_BODY_SIZE,
     fontWeight: '600',
     color: COLORS.primary,
+    lineHeight: lineHeight(MODAL_BODY_SIZE, 1.2),
   },
   keepDiscoveringButton: {
-    paddingVertical: 14,
+    paddingVertical: UI_SPACING.md,
     alignItems: 'center',
   },
   keepDiscoveringText: {
-    fontSize: 16,
+    fontSize: MODAL_BODY_SIZE,
     fontWeight: '500',
     color: COLORS.white,
+    lineHeight: lineHeight(MODAL_BODY_SIZE, 1.2),
   },
 });
