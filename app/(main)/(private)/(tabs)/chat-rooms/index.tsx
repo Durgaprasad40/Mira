@@ -19,7 +19,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
-import { INCOGNITO_COLORS } from '@/lib/constants';
+import {
+  INCOGNITO_COLORS,
+  FONT_SIZE,
+  SPACING,
+  SIZES,
+  lineHeight,
+  moderateScale,
+} from '@/lib/constants';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useAuthStore } from '@/stores/authStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
@@ -30,6 +37,19 @@ import ChatRoomIdentitySetup from '@/components/chatroom/ChatRoomIdentitySetup';
 import PasswordEntryModal from '@/components/chatroom/PasswordEntryModal';
 
 const C = INCOGNITO_COLORS;
+const TEXT_MAX_SCALE = 1.2;
+const ROOM_ICON_SIZE = moderateScale(46, 0.25);
+const ROOM_ACTIVE_DOT_SIZE = moderateScale(12, 0.25);
+const SEARCH_ICON_SIZE = moderateScale(18, 0.3);
+const EMPTY_STATE_ICON_SIZE = moderateScale(44, 0.25);
+const CTA_ICON_SIZE = moderateScale(18, 0.3);
+const SMALL_BADGE_ICON_SIZE = moderateScale(10, 0.3);
+const ROOM_CARD_RADIUS = moderateScale(14, 0.25);
+const CTA_CONTAINER_SIZE = moderateScale(24, 0.25);
+const PRIVATE_BADGE_SIZE = moderateScale(20, 0.25);
+const UNREAD_BADGE_HEIGHT = moderateScale(18, 0.25);
+const LIVE_INDICATOR_SIZE = moderateScale(6, 0.25);
+const HEADER_BOTTOM_PADDING = moderateScale(18, 0.4);
 
 // P3-004: Navigation guard delay - prevents double-tap race conditions
 const NAV_SETTLE_DELAY_MS = 500;
@@ -136,6 +156,23 @@ interface ChatRoom {
   role?: 'owner' | 'admin' | 'member'; // PRIVATE-ROOM-ACCESS-FIX: User's role in room
 }
 
+type RoomCategory = 'language' | 'general';
+type RoomRole = 'owner' | 'admin' | 'member';
+
+interface ConvexListedRoom {
+  _id: string;
+  name: string;
+  slug: string;
+  category: RoomCategory;
+  onlineCount?: number;
+  lastMessageText?: string;
+}
+
+interface ConvexPrivateRoom extends ConvexListedRoom {
+  isMember?: boolean;
+  role?: RoomRole;
+}
+
 function AccessPrefetcher({ roomId, authUserId }: { roomId: string; authUserId: string | null }) {
   const access = useQuery(
     api.chatRooms.checkRoomAccess,
@@ -154,6 +191,7 @@ function AccessPrefetcher({ roomId, authUserId }: { roomId: string; authUserId: 
 export default function ChatRoomsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const footerBottomSpacing = Math.max(insets.bottom, SPACING.md);
   const [refreshing, setRefreshing] = useState(false);
   const [countSmoothing, setCountSmoothing] = useState<{
     fromRoomId: string | null;
@@ -393,14 +431,14 @@ export default function ChatRoomsScreen() {
   );
 
   // Convex query for public rooms
-  const convexRooms = useQuery(api.chatRooms.listRooms, {});
+  const convexRooms = useQuery(api.chatRooms.listRooms, {}) as ConvexListedRoom[] | undefined;
 
   // Phase-2: Query for user's private rooms
   // AUTH FIX: Pass authUserId so query can authenticate in real mode
   const myPrivateRooms = useQuery(
     api.chatRooms.getMyPrivateRooms,
     userId ? { authUserId: userId } : 'skip'
-  );
+  ) as ConvexPrivateRoom[] | undefined;
 
   // Phase-2: Mutations for private rooms
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
@@ -445,7 +483,7 @@ export default function ChatRoomsScreen() {
   // PRIVATE-ROOM-ACCESS-FIX: Include role for owner bypass
   const privateRooms: ChatRoom[] = useMemo(() => {
     if (!myPrivateRooms) return [];
-    return myPrivateRooms.map((r) => ({
+    return myPrivateRooms.map((r: ConvexPrivateRoom) => ({
       id: r._id,
       name: r.name,
       slug: r.slug,
@@ -481,7 +519,7 @@ export default function ChatRoomsScreen() {
   // LIVE PRESENCE: Use activeUserCount for display (real-time presence count)
   const rooms: ChatRoom[] = useMemo(() => {
     // Always use backend rooms
-    const backendRooms = (convexRooms ?? []).map((r) => ({
+    const backendRooms = (convexRooms ?? []).map((r: ConvexListedRoom) => ({
       id: r._id,
       name: r.name,
       slug: r.slug,
@@ -489,7 +527,7 @@ export default function ChatRoomsScreen() {
       activeUserCount: getSmoothedCount(r._id, r.onlineCount ?? 0),
       lastMessageText: r.lastMessageText,
       iconKey: r.slug,
-    })).filter((r) => r.name.toLowerCase() !== 'english');
+    })).filter((r: ChatRoom) => r.name.toLowerCase() !== 'english');
 
     // If backend returns empty, use fallback to ensure UI never shows empty
     // Fallback rooms displayed but tapping is disabled (see handleOpenRoom)
@@ -771,7 +809,7 @@ export default function ChatRoomsScreen() {
             <View style={[styles.roomIcon, { backgroundColor: bgColor, borderColor }]}>
               <Ionicons
                 name={categoryIsGeneral ? 'globe' : 'chatbubbles'}
-                size={24}
+                size={SIZES.icon.lg}
                 color={iconColor}
               />
             </View>
@@ -798,11 +836,12 @@ export default function ChatRoomsScreen() {
             <View style={styles.roomNameRow}>
               {isPrivateRoom && (
                 <View style={styles.privateBadge}>
-                  <Ionicons name="lock-closed" size={10} color="#A78BFA" />
+                  <Ionicons name="lock-closed" size={SMALL_BADGE_ICON_SIZE} color="#A78BFA" />
                 </View>
               )}
               {/* P1-002 FIX: Add numberOfLines for consistent truncation */}
               <Text
+                maxFontSizeMultiplier={TEXT_MAX_SCALE}
                 style={[styles.roomName, isGeneral && styles.roomNameGeneral]}
                 numberOfLines={1}
               >
@@ -810,7 +849,9 @@ export default function ChatRoomsScreen() {
               </Text>
               {unreadCount > 0 && (
                 <View style={styles.unreadBadge}>
-                  <Text style={styles.unreadText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.unreadText}>
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </Text>
                 </View>
               )}
             </View>
@@ -818,7 +859,10 @@ export default function ChatRoomsScreen() {
             {/* Activity status */}
             <View style={styles.activityRow}>
               <View style={[styles.liveIndicator, isActive && styles.liveIndicatorActive]} />
-              <Text style={[styles.activityText, isActive && styles.activityTextActive]}>
+              <Text
+                maxFontSizeMultiplier={TEXT_MAX_SCALE}
+                style={[styles.activityText, isActive && styles.activityTextActive]}
+              >
                 {getActivityCopy()}
               </Text>
             </View>
@@ -827,7 +871,7 @@ export default function ChatRoomsScreen() {
           {/* CTA arrow */}
           <View style={styles.ctaArrow}>
             {/* P2-009: Improved chevron contrast */}
-            <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.45)" />
+            <Ionicons name="chevron-forward" size={CTA_ICON_SIZE} color="rgba(255,255,255,0.45)" />
           </View>
         </Pressable>
       );
@@ -876,11 +920,15 @@ export default function ChatRoomsScreen() {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Chat Rooms</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.headerTitle}>
+            Chat Rooms
+          </Text>
         </View>
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={C.primary} />
-          <Text style={styles.loadingText}>Loading rooms...</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.loadingText}>
+            Loading rooms...
+          </Text>
         </View>
       </View>
     );
@@ -918,18 +966,23 @@ export default function ChatRoomsScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* PREMIUM: Refined header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Chat Rooms</Text>
-        <Text style={styles.headerSubtitle}>Join the conversation</Text>
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.headerTitle}>
+          Chat Rooms
+        </Text>
+        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.headerSubtitle}>
+          Join the conversation
+        </Text>
       </View>
 
       {/* ROOM SEARCH: Search bar */}
       <View style={styles.searchContainer}>
         <View style={styles.searchInputWrapper}>
-          <Ionicons name="search" size={18} color="rgba(255,255,255,0.4)" />
+          <Ionicons name="search" size={SEARCH_ICON_SIZE} color="rgba(255,255,255,0.4)" />
           <TextInput
             style={styles.searchInput}
             placeholder="Search rooms..."
             placeholderTextColor="rgba(255,255,255,0.35)"
+            maxFontSizeMultiplier={TEXT_MAX_SCALE}
             value={searchQuery}
             onChangeText={setSearchQuery}
             autoCorrect={false}
@@ -938,7 +991,7 @@ export default function ChatRoomsScreen() {
           />
           {searchQuery.length > 0 && (
             <Pressable onPress={() => setSearchQuery('')} hitSlop={8}>
-              <Ionicons name="close-circle" size={18} color="rgba(255,255,255,0.4)" />
+              <Ionicons name="close-circle" size={SEARCH_ICON_SIZE} color="rgba(255,255,255,0.4)" />
             </Pressable>
           )}
         </View>
@@ -952,18 +1005,26 @@ export default function ChatRoomsScreen() {
             {/* EMPTY STATE: No search results */}
             {isSearchActive && !hasSearchResults && (
               <View style={styles.emptyStateContainer}>
-                <Ionicons name="search-outline" size={48} color="rgba(255,255,255,0.2)" />
-                <Text style={styles.emptyStateTitle}>No results found</Text>
-                <Text style={styles.emptyStateSubtitle}>Try a different search term</Text>
+                <Ionicons name="search-outline" size={EMPTY_STATE_ICON_SIZE} color="rgba(255,255,255,0.2)" />
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.emptyStateTitle}>
+                  No results found
+                </Text>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.emptyStateSubtitle}>
+                  Try a different search term
+                </Text>
               </View>
             )}
 
             {/* EMPTY STATE: No rooms at all */}
             {!isSearchActive && rooms.length === 0 && (
               <View style={styles.emptyStateContainer}>
-                <Ionicons name="chatbubbles-outline" size={48} color="rgba(255,255,255,0.2)" />
-                <Text style={styles.emptyStateTitle}>No rooms yet</Text>
-                <Text style={styles.emptyStateSubtitle}>Create a private room to get started</Text>
+                <Ionicons name="chatbubbles-outline" size={EMPTY_STATE_ICON_SIZE} color="rgba(255,255,255,0.2)" />
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.emptyStateTitle}>
+                  No rooms yet
+                </Text>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.emptyStateSubtitle}>
+                  Create a private room to get started
+                </Text>
               </View>
             )}
 
@@ -972,7 +1033,9 @@ export default function ChatRoomsScreen() {
               <>
                 <View style={styles.sectionHeader}>
                   <View style={styles.sectionDot} />
-                  <Text style={styles.sectionTitle}>Featured</Text>
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.sectionTitle}>
+                    Featured
+                  </Text>
                 </View>
                 {generalRooms.map((room) => (
                   <React.Fragment key={room.id}>
@@ -988,7 +1051,9 @@ export default function ChatRoomsScreen() {
               <>
                 <View style={styles.sectionHeader}>
                   <View style={[styles.sectionDot, styles.sectionDotLanguage]} />
-                  <Text style={styles.sectionTitle}>Languages</Text>
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.sectionTitle}>
+                    Languages
+                  </Text>
                 </View>
                 {languageRooms.map((room) => (
                   <React.Fragment key={room.id}>
@@ -1010,14 +1075,18 @@ export default function ChatRoomsScreen() {
                   onPress={handleCreateRoom}
                 >
                   <View style={styles.addRoomIcon}>
-                    <Ionicons name="add" size={24} color="#A78BFA" />
+                    <Ionicons name="add" size={SIZES.icon.lg} color="#A78BFA" />
                   </View>
                   <View style={styles.addRoomContent}>
-                    <Text style={styles.addRoomText}>Create Private Room</Text>
-                    <Text style={styles.addRoomHint}>Invite-only conversation</Text>
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.addRoomText}>
+                      Create Private Room
+                    </Text>
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.addRoomHint}>
+                      Invite-only conversation
+                    </Text>
                   </View>
                   <View style={styles.ctaArrow}>
-                    <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.45)" />
+                    <Ionicons name="chevron-forward" size={CTA_ICON_SIZE} color="rgba(255,255,255,0.45)" />
                   </View>
                 </Pressable>
               </View>
@@ -1028,7 +1097,9 @@ export default function ChatRoomsScreen() {
               <>
                 <View style={styles.sectionHeader}>
                   <View style={[styles.sectionDot, styles.sectionDotPrivate]} />
-                  <Text style={styles.sectionTitle}>Your Private Rooms</Text>
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.sectionTitle}>
+                    Your Private Rooms
+                  </Text>
                 </View>
                 {filteredPrivateRooms.map((room) => (
                   <React.Fragment key={room.id}>
@@ -1040,7 +1111,7 @@ export default function ChatRoomsScreen() {
             )}
           </>
         }
-        ListFooterComponent={<View style={styles.footerSpacer} />}
+        ListFooterComponent={<View style={[styles.footerSpacer, { height: footerBottomSpacing + SPACING.base }]} />}
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} />
@@ -1069,29 +1140,31 @@ const styles = StyleSheet.create({
   },
   // ─── HEADER ───
   header: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 18,
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.base,
+    paddingBottom: HEADER_BOTTOM_PADDING,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255,255,255,0.06)',
     backgroundColor: '#111116', // Slightly elevated
   },
   headerTitle: {
-    fontSize: 32,
+    fontSize: FONT_SIZE.h1,
     fontWeight: '700',
+    lineHeight: lineHeight(FONT_SIZE.h1, 1.2),
     color: '#FFFFFF',
     letterSpacing: -0.5,
   },
   headerSubtitle: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '500',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
     color: 'rgba(255,255,255,0.45)',
-    marginTop: 4,
+    marginTop: SPACING.xs,
   },
   // ─── SEARCH BAR ───
   searchContainer: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.md,
     backgroundColor: '#111116',
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255,255,255,0.04)',
@@ -1100,14 +1173,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(255,255,255,0.06)',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 8,
+    borderRadius: SIZES.radius.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: moderateScale(10, 0.4),
+    gap: SPACING.sm,
   },
   searchInput: {
     flex: 1,
-    fontSize: 15,
+    fontSize: FONT_SIZE.md,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
     color: '#FFFFFF',
     padding: 0,
   },
@@ -1115,37 +1189,39 @@ const styles = StyleSheet.create({
   emptyStateContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 60,
-    paddingHorizontal: 32,
+    paddingVertical: SPACING.xxxl + SPACING.sm,
+    paddingHorizontal: SPACING.xxl,
   },
   emptyStateTitle: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
     color: 'rgba(255,255,255,0.6)',
-    marginTop: 16,
+    marginTop: SPACING.base,
   },
   emptyStateSubtitle: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
     color: 'rgba(255,255,255,0.35)',
-    marginTop: 6,
+    marginTop: moderateScale(6, 0.3),
     textAlign: 'center',
   },
   listContent: {
-    paddingBottom: 32,
+    paddingBottom: SPACING.md,
   },
   // ─── SECTION HEADERS ───
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 24,
-    paddingBottom: 12,
-    gap: 8,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.xl,
+    paddingBottom: SPACING.md,
+    gap: SPACING.sm,
   },
   sectionDot: {
-    width: 4,
-    height: 4,
-    borderRadius: 2,
+    width: SPACING.xs,
+    height: SPACING.xs,
+    borderRadius: SIZES.radius.xs,
     backgroundColor: '#818CF8', // Indigo for featured
   },
   sectionDotLanguage: {
@@ -1155,8 +1231,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#A78BFA', // Purple for private
   },
   sectionTitle: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
     color: 'rgba(255,255,255,0.5)',
     textTransform: 'uppercase',
     letterSpacing: 1.2,
@@ -1166,12 +1243,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#1A1A1F', // Slightly lighter surface
-    marginHorizontal: 12,
-    marginBottom: 8,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    gap: 12,
+    marginHorizontal: SPACING.md,
+    marginBottom: SPACING.sm,
+    borderRadius: ROOM_CARD_RADIUS,
+    paddingHorizontal: moderateScale(14, 0.4),
+    paddingVertical: moderateScale(14, 0.4),
+    gap: SPACING.md,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.05)',
   },
@@ -1183,7 +1260,7 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   privateRoomCard: {
-    paddingVertical: 12,
+    paddingVertical: SPACING.md,
     backgroundColor: '#1A1A22',
     borderColor: 'rgba(167,139,250,0.08)',
   },
@@ -1192,17 +1269,17 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   roomIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
+    width: ROOM_ICON_SIZE,
+    height: ROOM_ICON_SIZE,
+    borderRadius: SIZES.radius.md,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
   },
   roomIconImage: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
+    width: ROOM_ICON_SIZE,
+    height: ROOM_ICON_SIZE,
+    borderRadius: SIZES.radius.md,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
   },
@@ -1210,77 +1287,81 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: -1,
     right: -1,
-    width: 12,
-    height: 12,
-    borderRadius: 6,
+    width: ROOM_ACTIVE_DOT_SIZE,
+    height: ROOM_ACTIVE_DOT_SIZE,
+    borderRadius: SIZES.radius.full,
     backgroundColor: '#22C55E',
     borderWidth: 2,
     borderColor: '#0F0F14',
   },
   roomInfo: {
     flex: 1,
-    gap: 4,
+    gap: SPACING.xs,
   },
   roomNameRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: SPACING.sm,
   },
   roomName: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
     color: '#FFFFFF',
     letterSpacing: -0.2,
     // P1-002 FIX: Enable text shrinking for truncation
     flexShrink: 1,
   },
   roomNameGeneral: {
-    fontSize: 17,
+    fontSize: moderateScale(17, 0.4),
     fontWeight: '700',
+    lineHeight: lineHeight(moderateScale(17, 0.4), 1.2),
   },
   // P2-016: Improved private room badge - slightly larger for visibility
   privateBadge: {
-    width: 20,
-    height: 20,
-    borderRadius: 6,
+    width: PRIVATE_BADGE_SIZE,
+    height: PRIVATE_BADGE_SIZE,
+    borderRadius: SIZES.radius.sm,
     backgroundColor: 'rgba(167,139,250,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   // ─── UNREAD BADGE ───
   unreadBadge: {
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
+    minWidth: UNREAD_BADGE_HEIGHT,
+    height: UNREAD_BADGE_HEIGHT,
+    borderRadius: SIZES.radius.full,
     backgroundColor: '#EC4899',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 5,
+    paddingHorizontal: moderateScale(5, 0.3),
   },
   unreadText: {
-    fontSize: 10,
+    fontSize: FONT_SIZE.xs,
     fontWeight: '700',
+    lineHeight: lineHeight(FONT_SIZE.xs, 1.2),
     color: '#FFFFFF',
   },
   // ─── ACTIVITY STATUS ───
   activityRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: moderateScale(6, 0.3),
   },
   // P2-017: Improved section dots - slightly larger for visibility
   liveIndicator: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    width: LIVE_INDICATOR_SIZE,
+    height: LIVE_INDICATOR_SIZE,
+    borderRadius: SIZES.radius.full,
     backgroundColor: 'rgba(255,255,255,0.25)',
   },
   liveIndicatorActive: {
     backgroundColor: '#22C55E',
   },
   activityText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '500',
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
     color: 'rgba(255,255,255,0.4)',
   },
   activityTextActive: {
@@ -1288,26 +1369,26 @@ const styles = StyleSheet.create({
   },
   // P2-009: Improved chevron contrast
   ctaArrow: {
-    width: 24,
-    height: 24,
-    borderRadius: 6,
+    width: CTA_CONTAINER_SIZE,
+    height: CTA_CONTAINER_SIZE,
+    borderRadius: SIZES.radius.sm,
     backgroundColor: 'rgba(255,255,255,0.05)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   footerSection: {
-    paddingTop: 16,
-    paddingHorizontal: 12,
+    paddingTop: SPACING.base,
+    paddingHorizontal: SPACING.md,
   },
   // P2-018: Footer spacer using safe area aware value
   footerSpacer: {
-    height: 40, // Slightly taller for better bottom padding
+    height: 0,
   },
   // ─── CREATE PRIVATE SECTION ───
   createPrivateSection: {
-    paddingTop: 20,
-    paddingHorizontal: 12,
-    paddingBottom: 8,
+    paddingTop: SPACING.lg,
+    paddingHorizontal: SPACING.md,
+    paddingBottom: SPACING.sm,
   },
   privateRoomsSectionHeader: {
     flexDirection: 'row',
@@ -1318,15 +1399,16 @@ const styles = StyleSheet.create({
   resetPrivateRoomsButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 8,
+    gap: SPACING.xs,
+    paddingVertical: moderateScale(6, 0.3),
+    paddingHorizontal: moderateScale(10, 0.4),
+    borderRadius: SIZES.radius.sm,
     backgroundColor: 'rgba(167,139,250,0.1)',
   },
   resetPrivateRoomsText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.2),
     color: '#A78BFA',
   },
   // ─── ADD ROOM BUTTON ───
@@ -1334,10 +1416,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#1A1A22',
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    gap: 12,
+    borderRadius: ROOM_CARD_RADIUS,
+    paddingHorizontal: moderateScale(14, 0.4),
+    paddingVertical: moderateScale(14, 0.4),
+    gap: SPACING.md,
     borderWidth: 1,
     borderColor: 'rgba(167,139,250,0.12)',
     borderStyle: 'dashed',
@@ -1346,9 +1428,9 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   addRoomIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
+    width: ROOM_ICON_SIZE,
+    height: ROOM_ICON_SIZE,
+    borderRadius: SIZES.radius.md,
     backgroundColor: 'rgba(167,139,250,0.08)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1357,17 +1439,19 @@ const styles = StyleSheet.create({
   },
   addRoomContent: {
     flex: 1,
-    gap: 2,
+    gap: SPACING.xxs,
   },
   addRoomText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
     color: '#A78BFA',
     letterSpacing: -0.2,
   },
   addRoomHint: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: '500',
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: 'rgba(167,139,250,0.6)',
   },
   // ─── LOADING STATE ───
@@ -1375,11 +1459,12 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    gap: 12,
+    gap: SPACING.md,
     backgroundColor: '#0F0F14',
   },
   loadingText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
     color: 'rgba(255,255,255,0.5)',
   },
   // Phase-2: Private rooms styles
@@ -1387,104 +1472,109 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 24,
-    marginHorizontal: 12,
+    gap: SPACING.sm,
+    paddingVertical: SPACING.xl,
+    marginHorizontal: SPACING.md,
     backgroundColor: C.surface,
-    borderRadius: 12,
-    marginBottom: 8,
+    borderRadius: SIZES.radius.md,
+    marginBottom: SPACING.sm,
   },
   emptyPrivateText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
     color: C.textLight,
   },
   createPrivateButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    marginHorizontal: 12,
-    marginBottom: 16,
+    gap: moderateScale(6, 0.3),
+    paddingVertical: SPACING.md,
+    marginHorizontal: SPACING.md,
+    marginBottom: SPACING.base,
   },
   createPrivateText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '500',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
     color: C.primary,
   },
   createRoomRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8,
-    gap: 8,
+    marginBottom: SPACING.sm,
+    gap: SPACING.sm,
   },
   createRoomInput: {
     flex: 1,
-    height: 44,
+    height: SIZES.button.md,
     backgroundColor: C.accent,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    fontSize: 15,
+    borderRadius: SIZES.radius.md,
+    paddingHorizontal: moderateScale(14, 0.4),
+    fontSize: FONT_SIZE.md,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
     color: C.text,
   },
   createRoomButton: {
-    width: 44,
-    height: 44,
+    width: SIZES.button.md,
+    height: SIZES.button.md,
     backgroundColor: C.primary,
-    borderRadius: 10,
+    borderRadius: SIZES.radius.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
   createRoomCancel: {
-    width: 44,
-    height: 44,
+    width: SIZES.button.md,
+    height: SIZES.button.md,
     backgroundColor: C.surface,
-    borderRadius: 10,
+    borderRadius: SIZES.radius.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
   // Phase-2: Create room with password styles
   createRoomContainer: {
-    marginHorizontal: 12,
-    marginBottom: 16,
+    marginHorizontal: SPACING.md,
+    marginBottom: SPACING.base,
     backgroundColor: C.surface,
-    borderRadius: 12,
-    padding: 12,
+    borderRadius: SIZES.radius.md,
+    padding: SPACING.md,
   },
   showPasswordButton: {
-    width: 40,
-    height: 44,
+    width: moderateScale(40, 0.25),
+    height: SIZES.button.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
   createRoomActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginTop: 4,
+    gap: SPACING.sm,
+    marginTop: SPACING.xs,
   },
   createRoomSubmit: {
     flex: 1,
-    height: 44,
+    height: SIZES.button.md,
     backgroundColor: C.primary,
-    borderRadius: 10,
+    borderRadius: SIZES.radius.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
   createRoomSubmitText: {
-    fontSize: 15,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.md, 1.2),
     color: '#FFF',
   },
   createRoomCancelBtn: {
-    paddingHorizontal: 16,
-    height: 44,
+    paddingHorizontal: SPACING.base,
+    height: SIZES.button.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
   createRoomCancelText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.body,
     fontWeight: '500',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
     color: C.textLight,
   },
 });

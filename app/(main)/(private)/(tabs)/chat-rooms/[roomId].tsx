@@ -21,12 +21,12 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useConvex, useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { Id } from '@/convex/_generated/dataModel';
+import { Doc, Id } from '@/convex/_generated/dataModel';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
-import { INCOGNITO_COLORS } from '@/lib/constants';
+import { INCOGNITO_COLORS, FONT_SIZE, lineHeight, moderateScale } from '@/lib/constants';
 // P2-001/002: Import responsive utilities
-import { CHAT_FONTS, SPACING, SIZES } from '@/lib/responsive';
+import { SPACING, SIZES } from '@/lib/responsive';
 // THEME: Import chat theme store
 import { useChatThemeColors } from '@/stores/chatThemeStore';
 import {
@@ -79,6 +79,13 @@ import { shouldShowTimestamp } from '@/utils/chatTime';
 
 const C = INCOGNITO_COLORS;
 const EMPTY_MESSAGES: DemoChatMessage[] = [];
+const TEXT_MAX_SCALE = 1.2;
+const ROOM_STATUS_ICON_SIZE = moderateScale(38, 0.25);
+const EMPTY_STATE_ICON_SIZE = moderateScale(28, 0.25);
+const FAILED_STATUS_TEXT_SIZE = FONT_SIZE.caption;
+const MENTION_INDICATOR_SIZE = moderateScale(36, 0.25);
+const MENTION_INDICATOR_OFFSET = moderateScale(34, 0.25);
+const EMPTY_ICON_WRAPPER_SIZE = moderateScale(68, 0.25);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CONVEX-BACKED PERSISTENCE (Room muting + Reports)
@@ -168,6 +175,94 @@ interface ConvexRoomListMessage {
     startIndex: number;
     endIndex: number;
   }>;
+}
+
+type RoomRole = 'owner' | 'admin' | 'member';
+
+interface ConvexMessagesPage {
+  messages: ConvexRoomListMessage[];
+  hasMore: boolean;
+  nextCursor?: { createdAt: number; creationTime: number } | null;
+}
+
+interface ConvexRoomPresenceEntry {
+  id: string;
+  displayName: string;
+  avatar?: string;
+  age: number;
+  gender: string;
+  bio?: string;
+  role: RoomRole;
+  lastHeartbeatAt: number;
+  joinedAt: number;
+}
+
+interface ConvexRoomPresenceResult {
+  online: ConvexRoomPresenceEntry[];
+  recentlyLeft: ConvexRoomPresenceEntry[];
+  onlineCount?: number;
+}
+
+interface ConvexMemberWithProfile {
+  id: string;
+  displayName: string;
+  avatar?: string;
+  avatarVersion?: number;
+  age: number;
+  gender: string;
+  bio?: string;
+  joinedAt: number;
+  role: RoomRole;
+  isOnline: boolean;
+  lastActive: number;
+}
+
+interface CanonicalRoomIdentity {
+  nickname: string;
+  avatarUrl: string | null;
+  bio: string | null;
+  age?: number;
+  gender?: string;
+}
+
+interface CanonicalRoomIdentityResult {
+  selfUserId: string | null;
+  byUserId: Record<string, CanonicalRoomIdentity>;
+}
+
+interface ConvexDmThread {
+  id: string;
+  peerId: string;
+  peerName: string;
+  peerAvatar?: string;
+  peerGender?: 'male' | 'female' | 'other';
+  lastMessage: string;
+  lastMessageAt: number;
+  unreadCount: number;
+}
+
+interface ConvexReaction {
+  emoji: string;
+  count: number;
+  userIds: string[];
+}
+
+type ConvexReactionsByMessage = Record<string, ConvexReaction[]>;
+
+interface EffectiveUserIdResult {
+  userId: string | null;
+}
+
+interface PresenceUserView {
+  id: string;
+  displayName: string;
+  avatar?: string;
+  age?: number;
+  gender?: 'male' | 'female' | 'other' | '';
+  bio?: string;
+  role: RoomRole;
+  lastHeartbeatAt: number;
+  joinedAt: number;
 }
 
 function toUiChatMessage(message: ConvexRoomListMessage): DemoChatMessage {
@@ -289,6 +384,7 @@ export default function ChatRoomScreen() {
   const router = useRouter();
   const convex = useConvex();
   const insets = useSafeAreaInsets();
+  const footerInsetSpacing = Math.max(insets.bottom, SPACING.md);
 
   // ─────────────────────────────────────────────────────────────────────────
   // P0 FIX: Normalize and validate roomId before any usage
@@ -405,6 +501,22 @@ export default function ChatRoomScreen() {
   );
   // Phase-2: Route param is the earliest reliable public/private hint (set by the list screen).
   const isPublicFromRoute = routeIsPrivate === '0';
+
+  // Core room doc: only call getRoom with sane id + auth (never rely on membership gate here;
+  // backend returns null for no access — avoids invalid id reaching Convex)
+  const convexRoom = useQuery(
+    api.chatRooms.getRoom,
+    isValidRoomId && authUserId
+      ? { roomId: roomIdStr, authUserId }
+      : 'skip'
+  ) as Doc<'chatRooms'> | null | undefined;
+  const convexMessagesResult = useQuery(
+    api.chatRooms.listMessages,
+    canLoadMessages
+      ? { roomId: roomIdStr, authUserId, limit: 50 }
+      : 'skip'
+  ) as ConvexMessagesPage | undefined;
+
   const isPublicFromQuery = !!convexRoom && convexRoom.isPublic === true;
   const isPublicRoom = isPublicFromQuery || isPublicFromRoute;
 
@@ -428,21 +540,6 @@ export default function ChatRoomScreen() {
   // Protected queries require membership - skip until access confirmed
   // This prevents "must join first" errors during the join race condition
   const shouldSkipProtectedQueries = shouldSkipConvex || !hasMemberAccess;
-
-  // Core room doc: only call getRoom with sane id + auth (never rely on membership gate here;
-  // backend returns null for no access — avoids invalid id reaching Convex)
-  const convexRoom = useQuery(
-    api.chatRooms.getRoom,
-    isValidRoomId && authUserId
-      ? { roomId: roomIdStr, authUserId }
-      : 'skip'
-  );
-  const convexMessagesResult = useQuery(
-    api.chatRooms.listMessages,
-    canLoadMessages
-      ? { roomId: roomIdStr, authUserId, limit: 50 }
-      : 'skip'
-  );
 
   // Convex mutations
   const sendMessageMutation = useMutation(api.chatRooms.sendMessage);
@@ -485,7 +582,7 @@ export default function ChatRoomScreen() {
   const roomPresenceQuery = useQuery(
     api.chatRooms.getRoomPresence,
     shouldSkipPresence ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
-  );
+  ) as ConvexRoomPresenceResult | undefined;
   const roomOnlineCount = roomPresenceQuery?.onlineCount ?? roomPresenceQuery?.online.length ?? 0;
 
   // Skip queries that require userId in demo mode (no real user identity)
@@ -517,14 +614,14 @@ export default function ChatRoomScreen() {
   const convexMembersWithProfiles = useQuery(
     api.chatRooms.listMembersWithProfiles,
     shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
-  );
+  ) as ConvexMemberWithProfile[] | undefined;
 
   const canonicalRoomIdentities = useQuery(
     api.chatRooms.getRoomUserIdentities,
     !isDemoMode && authUserId && hasValidRoomId
       ? { roomId: roomIdStr, authUserId }
       : 'skip'
-  );
+  ) as CanonicalRoomIdentityResult | undefined;
 
   const selfUserIdFromCanonical = !isDemoMode
     ? ((canonicalRoomIdentities as any)?.selfUserId as string | null | undefined) ?? null
@@ -540,18 +637,6 @@ export default function ChatRoomScreen() {
       });
     }
   }, [chatRoomProfile, isDemoMode, isPublicRoom, myAvatarUrl, roomIdStr, selfUserIdFromCanonical]);
-
-  useEffect(() => {
-    if (__DEV__) console.log('CHATROOM_EFFECTIVE_USER_ID_REASON', {
-      roomId: roomIdStr,
-      authUserIdPresent: !!authUserId,
-      effectiveUserId: effectiveUserId ? String(effectiveUserId).slice(0, 12) : null,
-      canonicalSelfUserId: selfUserIdFromCanonical ? selfUserIdFromCanonical.slice(0, 12) : null,
-      hasCurrentUserChatProfile: !!chatRoomProfile,
-      currentUserNickname: myNickname,
-      currentUserHasAvatar: !!myAvatarUrl,
-    });
-  }, [authUserId, chatRoomProfile, effectiveUserId, myAvatarUrl, myNickname, roomIdStr, selfUserIdFromCanonical]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // PER-USER MUTING: Query muted users from Convex (persistent, per-room)
@@ -580,8 +665,20 @@ export default function ChatRoomScreen() {
         ? { isDemo: true, demoUserId: authUserId }
         : { isDemo: false }) // Non-demo: backend uses ctx.auth.getUserIdentity()
       : 'skip'
-  );
+  ) as EffectiveUserIdResult | undefined;
   const effectiveUserId = effectiveUserIdQuery?.userId ?? null;
+
+  useEffect(() => {
+    if (__DEV__) console.log('CHATROOM_EFFECTIVE_USER_ID_REASON', {
+      roomId: roomIdStr,
+      authUserIdPresent: !!authUserId,
+      effectiveUserId: effectiveUserId ? String(effectiveUserId).slice(0, 12) : null,
+      canonicalSelfUserId: selfUserIdFromCanonical ? selfUserIdFromCanonical.slice(0, 12) : null,
+      hasCurrentUserChatProfile: !!chatRoomProfile,
+      currentUserNickname: myNickname,
+      currentUserHasAvatar: !!myAvatarUrl,
+    });
+  }, [authUserId, chatRoomProfile, effectiveUserId, myAvatarUrl, myNickname, roomIdStr, selfUserIdFromCanonical]);
 
   // Phase-2: Check if current user is the room creator (use effectiveUserId for demo mode)
   const isRoomCreator = effectiveUserId
@@ -917,7 +1014,7 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   const liveMessages: DemoChatMessage[] = useMemo(() => {
     if (isDemoMode) return demoMessages;
-    const convexMsgs = convexMessagesResult?.messages ?? [];
+    const convexMsgs: ConvexRoomListMessage[] = convexMessagesResult?.messages ?? [];
 
     // Build set of pending clientIds for dedup (text + media)
     const pendingClientIds = new Set(
@@ -926,9 +1023,11 @@ export default function ChatRoomScreen() {
 
     // SEND-FLICKER-FIX: Check which pending messages now have server equivalents
     // Remove pending messages whose server message has arrived
-    const serverClientIds = new Set(convexMsgs.filter(m => m.clientId).map(m => m.clientId!));
+    const serverClientIds = new Set(
+      convexMsgs.filter((m) => m.clientId).map((m) => m.clientId!)
+    );
     const arrivedClientIds: string[] = [];
-    pendingClientIds.forEach(clientId => {
+    pendingClientIds.forEach((clientId) => {
       if (serverClientIds.has(clientId)) {
         arrivedClientIds.push(clientId);
       }
@@ -993,7 +1092,7 @@ export default function ChatRoomScreen() {
     !isDemoMode && messageIdsForReactions.length > 0 && !shouldSkipProtectedQueries
       ? { roomId: roomIdStr as Id<'chatRooms'>, messageIds: messageIdsForReactions, authUserId: authUserId! }
       : 'skip'
-  );
+  ) as ConvexReactionsByMessage | undefined;
 
   // P0-FIX: Create a map of reactions by message ID for efficient lookup
   // P3-FIX: Include isUserReaction for proper typing
@@ -1048,7 +1147,7 @@ export default function ChatRoomScreen() {
         roomId: roomIdStr,
         authUserId,
         limit: 50,
-      });
+      }) as ConvexMessagesPage;
 
       const converted = page.messages.map((message) =>
         toUiChatMessage(message)
@@ -1620,7 +1719,7 @@ export default function ChatRoomScreen() {
     didLogAgeTraceRef.current = true;
   }, [convexMembersWithProfiles, isDemoMode, roomIdentityByUserId, roomMembers]);
 
-  const presenceUsers = useMemo(() => {
+  const presenceUsers: { online: PresenceUserView[]; recentlyLeft: PresenceUserView[] } = useMemo(() => {
     // CHATROOM_IMMEDIATE_USER_BOOTSTRAP: Use presence data directly for immediate render
     // Don't wait for convexMembersWithProfiles to load - presence entries have complete data
     if (isDemoMode) {
@@ -1643,7 +1742,7 @@ export default function ChatRoomScreen() {
     });
 
     // Build member lookup map (may be empty if not loaded yet)
-    const memberByUserId = new Map(
+    const memberByUserId = new Map<string, ConvexMemberWithProfile>(
       (convexMembersWithProfiles ?? []).map((member) => [String(member.id), member])
     );
 
@@ -1820,7 +1919,7 @@ export default function ChatRoomScreen() {
         const gender = rawGender ? (rawGender as 'male' | 'female' | 'other') : undefined;
 
         // Role: prefer member data, fallback to presence entry data
-        const role = member?.role ?? (entry as any).role ?? 'member';
+        const role: RoomRole = member?.role ?? entry.role ?? 'member';
 
         // CHATROOM_IDENTITY_SYNC_RESULT: Log sync result
         console.log('CHATROOM_IDENTITY_SYNC_RESULT', {
@@ -1843,7 +1942,7 @@ export default function ChatRoomScreen() {
           avatar: finalAvatar,
           age: finalAge,
           gender,
-          bio: chatRoomBioValue, // ONLY from chat-room profile (Convex or store)
+          bio: chatRoomBioValue ?? undefined, // ONLY from chat-room profile (Convex or store)
           role,
           lastHeartbeatAt: entry.lastHeartbeatAt,
           joinedAt: entry.joinedAt,
@@ -1894,8 +1993,8 @@ export default function ChatRoomScreen() {
   const dmThreadsQuery = useQuery(
     api.chatRooms.getDmThreads,
     authUserId && hasMemberAccess ? { authUserId } : 'skip'
-  );
-  const dmThreads = dmThreadsQuery ?? [];
+  ) as ConvexDmThread[] | undefined;
+  const dmThreads: ConvexDmThread[] = dmThreadsQuery ?? [];
   const unreadDMs = dmThreads.filter((dm) => dm.unreadCount > 0).length;
 
   // DM-ID-FIX: Convert Convex DM threads to format compatible with MessagesPopover
@@ -2458,6 +2557,7 @@ export default function ChatRoomScreen() {
 
       const labelMap = { image: 'Photo', video: 'Video', doodle: 'Doodle' };
       const uploadTypeMap = { image: 'photo' as const, video: 'video' as const, doodle: 'doodle' as const };
+      let pendingClientId: string | undefined;
 
       try {
         if (isDemoMode) {
@@ -2490,6 +2590,7 @@ export default function ChatRoomScreen() {
           // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
           if (!authUserId || !hasValidRoomId) return;
           const clientId = generateUUID();
+          pendingClientId = clientId;
           const pendingId = `pending_${clientId}`;
           const createdAtLocal = Date.now();
 
@@ -2597,7 +2698,7 @@ export default function ChatRoomScreen() {
             setPendingMediaMessages((prev) =>
               prev.map((m) => {
                 const cid = (m as any)._clientId as string | undefined;
-                return cid === clientId ? ({ ...(m as any), uploadStatus: 'upload_failed' as const } as any) : m;
+                return cid === pendingClientId ? ({ ...(m as any), uploadStatus: 'upload_failed' as const } as any) : m;
               })
             );
           }
@@ -2606,7 +2707,7 @@ export default function ChatRoomScreen() {
             setPendingMediaMessages((prev) =>
               prev.map((m) => {
                 const cid = (m as any)._clientId as string | undefined;
-                return cid === clientId ? ({ ...(m as any), uploadStatus: 'send_failed' as const } as any) : m;
+                return cid === pendingClientId ? ({ ...(m as any), uploadStatus: 'send_failed' as const } as any) : m;
               })
             );
           }
@@ -3413,9 +3514,13 @@ export default function ChatRoomScreen() {
         return (
           <Pressable onPress={() => handleRetryMessage(msg)}>
             {messageElement}
-            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', paddingRight: 16, marginTop: -4, marginBottom: 8 }}>
-              <Text style={{ fontSize: 12, color: '#EF4444', marginRight: 4 }}>Failed to send</Text>
-              <Text style={{ fontSize: 12, color: '#3B82F6' }}>Tap to retry</Text>
+            <View style={styles.failedMessageStatus}>
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.failedMessageText}>
+                Failed to send
+              </Text>
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.failedRetryText}>
+                Tap to retry
+              </Text>
             </View>
           </Pressable>
         );
@@ -3449,8 +3554,10 @@ export default function ChatRoomScreen() {
       <View style={styles.container}>
         <ChatRoomsHeader title="Invalid Room" hideLeftButton topInset={insets.top} />
         <View style={styles.notFound}>
-          <Ionicons name="alert-circle-outline" size={40} color={C.textLight} />
-          <Text style={styles.notFoundText}>Room ID is missing</Text>
+          <Ionicons name="alert-circle-outline" size={ROOM_STATUS_ICON_SIZE} color={C.textLight} />
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.notFoundText}>
+            Room ID is missing
+          </Text>
         </View>
       </View>
     );
@@ -3463,8 +3570,10 @@ export default function ChatRoomScreen() {
       <View style={styles.container}>
         <ChatRoomsHeader title="Invalid Room" hideLeftButton topInset={insets.top} />
         <View style={styles.notFound}>
-          <Ionicons name="alert-circle-outline" size={40} color={C.textLight} />
-          <Text style={styles.notFoundText}>Invalid Room ID</Text>
+          <Ionicons name="alert-circle-outline" size={ROOM_STATUS_ICON_SIZE} color={C.textLight} />
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.notFoundText}>
+            Invalid Room ID
+          </Text>
         </View>
       </View>
     );
@@ -3546,12 +3655,16 @@ export default function ChatRoomScreen() {
         <View style={styles.notFound}>
           <Ionicons
             name={isAccessDenied ? 'lock-closed-outline' : 'search-outline'}
-            size={40}
+            size={ROOM_STATUS_ICON_SIZE}
             color={C.textLight}
           />
-          <Text style={styles.notFoundText}>{errorMessage}</Text>
+          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.notFoundText}>
+            {errorMessage}
+          </Text>
           <TouchableOpacity style={styles.backToRoomsBtn} onPress={handleBackToRooms}>
-            <Text style={styles.backToRoomsBtnText}>Back to Chat Rooms</Text>
+            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.backToRoomsBtnText}>
+              Back to Chat Rooms
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -3611,7 +3724,10 @@ export default function ChatRoomScreen() {
             avatar: u.avatar, // This is chat-room avatar (fixed in presenceUsers computation)
             isOnline: true,
             joinedAt: u.joinedAt,
-            gender: u.gender,
+            gender:
+              u.gender === 'male' || u.gender === 'female' || u.gender === 'other'
+                ? u.gender
+                : undefined,
             // NO age - removed per rule 7
           }));
         } else if (convexMembersWithProfiles && convexMembersWithProfiles.length > 0) {
@@ -3720,10 +3836,14 @@ export default function ChatRoomScreen() {
           {messages.length === 0 ? (
             <View style={styles.emptyContainer}>
               <View style={styles.emptyIconWrapper}>
-                <Ionicons name="chatbubble-outline" size={28} color={C.textLight} />
+                <Ionicons name="chatbubble-outline" size={EMPTY_STATE_ICON_SIZE} color={C.textLight} />
               </View>
-              <Text style={styles.emptyText}>No messages yet</Text>
-              <Text style={styles.emptySubtext}>Be the first to say something</Text>
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.emptyText}>
+                No messages yet
+              </Text>
+              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.emptySubtext}>
+                Be the first to say something
+              </Text>
             </View>
           ) : (
             <FlatList
@@ -3737,9 +3857,9 @@ export default function ChatRoomScreen() {
               inverted={true}
               contentContainerStyle={{
                 flexGrow: 1,
-                paddingHorizontal: 6,
+                paddingHorizontal: SPACING.xs + SPACING.xxs,
                 paddingTop: isPrivateChatOpen ? 0 : composerHeight,
-                paddingBottom: 4,
+                paddingBottom: SPACING.xs,
               }}
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
@@ -3787,10 +3907,14 @@ export default function ChatRoomScreen() {
                         onPress={() => void handleLoadOlderMessages()}
                         activeOpacity={0.7}
                       >
-                        <Text style={styles.retryOlderText}>Retry older messages</Text>
+                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.retryOlderText}>
+                          Retry older messages
+                        </Text>
                       </TouchableOpacity>
                     ) : (
-                      <Text style={styles.olderMessagesHint}>Older messages available</Text>
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.olderMessagesHint}>
+                        Older messages available
+                      </Text>
                     )}
                   </View>
                 ) : null
@@ -3801,7 +3925,7 @@ export default function ChatRoomScreen() {
           {/* ─── COMPOSER ─── Hidden when Private Chat sheet is open */}
           {!isPrivateChatOpen && (
             <View
-              style={styles.composerWrapper}
+              style={[styles.composerWrapper, { paddingBottom: footerInsetSpacing }]}
               onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
             >
               {/* MENTION-INDICATOR: Shows when user has unread mentions in this room */}
@@ -3813,15 +3937,17 @@ export default function ChatRoomScreen() {
                   activeOpacity={0.7}
                   hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                 >
-                  <Ionicons name="at" size={20} color="#FFFFFF" />
+                  <Ionicons name="at" size={SIZES.icon.md} color="#FFFFFF" />
                 </TouchableOpacity>
               )}
 
               {/* Phase-2: Show send-blocked notice if user has penalty */}
               {hasSendPenalty ? (
                 <View style={styles.readOnlyNotice}>
-                  <Ionicons name="lock-closed" size={16} color={C.textLight} />
-                  <Text style={styles.readOnlyText}>Read-only (24h)</Text>
+                  <Ionicons name="lock-closed" size={SIZES.icon.sm} color={C.textLight} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.readOnlyText}>
+                    Read-only (24h)
+                  </Text>
                 </View>
               ) : (
                 <ChatComposer
@@ -4046,31 +4172,52 @@ const styles = StyleSheet.create({
     // Ensure composer is always at bottom of chatArea, never overlapping tab bar
     flexShrink: 0,
   },
+  failedMessageStatus: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    paddingRight: SPACING.base,
+    marginTop: -SPACING.xs,
+    marginBottom: SPACING.sm,
+  },
+  failedMessageText: {
+    fontSize: FAILED_STATUS_TEXT_SIZE,
+    fontWeight: '500',
+    lineHeight: lineHeight(FAILED_STATUS_TEXT_SIZE, 1.35),
+    color: '#EF4444',
+    marginRight: SPACING.xs,
+  },
+  failedRetryText: {
+    fontSize: FAILED_STATUS_TEXT_SIZE,
+    fontWeight: '500',
+    lineHeight: lineHeight(FAILED_STATUS_TEXT_SIZE, 1.35),
+    color: '#3B82F6',
+  },
   notFound: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 32,
+    gap: SPACING.md,
+    paddingHorizontal: SPACING.xxl,
   },
   notFoundText: {
-    // P2-001: Use responsive typography
-    fontSize: CHAT_FONTS.emptyTitle,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
     color: C.textLight,
     textAlign: 'center',
   },
   backToRoomsBtn: {
-    // P2-002: Use SPACING constants
     marginTop: SPACING.base,
     paddingHorizontal: SPACING.xl,
     paddingVertical: SPACING.md,
     backgroundColor: '#6D28D9',
-    borderRadius: SIZES.radius.sm + 2,
+    borderRadius: SIZES.radius.md,
   },
   backToRoomsBtnText: {
-    fontSize: CHAT_FONTS.buttonText,
+    fontSize: FONT_SIZE.body,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
     color: '#FFFFFF',
   },
   dateSeparator: {
@@ -4086,8 +4233,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.1)',
   },
   dateLabel: {
-    // P2-001: Use responsive typography
-    fontSize: CHAT_FONTS.dateSeparator,
+    fontSize: FONT_SIZE.caption,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: C.textLight,
     marginHorizontal: SPACING.md,
   },
@@ -4096,13 +4243,13 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    gap: SPACING.md,
+    gap: SPACING.sm,
     paddingHorizontal: SPACING.xxl,
   },
   emptyIconWrapper: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: EMPTY_ICON_WRAPPER_SIZE,
+    height: EMPTY_ICON_WRAPPER_SIZE,
+    borderRadius: EMPTY_ICON_WRAPPER_SIZE / 2,
     backgroundColor: C.surface,
     alignItems: 'center',
     justifyContent: 'center',
@@ -4112,18 +4259,17 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(109, 40, 217, 0.2)',
   },
   emptyText: {
-    // P2-001: Use responsive typography
-    fontSize: CHAT_FONTS.emptyTitle,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
     color: C.text,
     textAlign: 'center',
   },
   emptySubtext: {
-    // P2-001: Use responsive typography with proper line height
-    fontSize: CHAT_FONTS.emptySubtitle,
+    fontSize: FONT_SIZE.body2,
     color: C.textLight,
     textAlign: 'center',
-    lineHeight: Math.round(CHAT_FONTS.emptySubtitle * 1.5),
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
   },
   olderMessagesStatus: {
     alignItems: 'center',
@@ -4131,28 +4277,30 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.md,
   },
   olderMessagesHint: {
-    fontSize: CHAT_FONTS.secondary,
+    fontSize: FONT_SIZE.caption,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: C.textLight,
   },
   retryOlderButton: {
     paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.xs,
-    borderRadius: 8,
+    borderRadius: SIZES.radius.sm,
     backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.accent,
   },
   retryOlderText: {
-    fontSize: CHAT_FONTS.secondary,
+    fontSize: FONT_SIZE.caption,
     color: C.text,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.2),
   },
   // P2-012: Improved read-only notice styling
   readOnlyNotice: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: SPACING.md + 2,
+    paddingVertical: SPACING.md,
     paddingHorizontal: SPACING.base,
     gap: SPACING.sm,
     // P2-012: More serious appearance
@@ -4161,20 +4309,21 @@ const styles = StyleSheet.create({
     borderTopColor: 'rgba(255, 152, 0, 0.2)',
   },
   readOnlyText: {
-    fontSize: CHAT_FONTS.buttonText,
+    fontSize: FONT_SIZE.body,
     // P2-012: More visible warning color
     color: '#FF9800',
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
   },
   // MENTION-INDICATOR: Clean circular button showing only @ symbol
   // MENTION-UI-CLEAN: Minimal, easy-to-tap, premium appearance
   mentionIndicator: {
     position: 'absolute',
-    top: -38,
+    top: -MENTION_INDICATOR_OFFSET,
     right: SPACING.md,
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: MENTION_INDICATOR_SIZE,
+    height: MENTION_INDICATOR_SIZE,
+    borderRadius: SIZES.radius.full,
     backgroundColor: '#6D28D9',
     alignItems: 'center',
     justifyContent: 'center',
