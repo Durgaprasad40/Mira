@@ -16,6 +16,7 @@ import {
   Linking,
   ActivityIndicator,
   AppState,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -26,7 +27,7 @@ import {
   useCameraPermission,
 } from 'react-native-vision-camera';
 import Animated, { useAnimatedStyle, withTiming, useSharedValue } from 'react-native-reanimated';
-import { COLORS } from '@/lib/constants';
+import { COLORS, FONT_SIZE, SPACING, SIZES, lineHeight, moderateScale } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -46,6 +47,14 @@ import { useScreenTrace } from '@/lib/devTrace';
 
 const FRAME_COUNT = 3;
 const CAPTURE_INTERVAL_MS = 800; // ~2.4s total for 3 frames
+const FACE_GUIDE_ASPECT_RATIO = 1.28;
+const FACE_GUIDE_WIDTH_RATIO = 0.65;
+const FACE_GUIDE_MAX_WIDTH = moderateScale(280, 0.25);
+const FACE_GUIDE_MAX_HEIGHT_RATIO = 0.46;
+const TEXT_MAX_SCALE = 1.2;
+const TEXT_PROPS = { maxFontSizeMultiplier: TEXT_MAX_SCALE } as const;
+const LARGE_ICON_SIZE = moderateScale(64, 0.3);
+const RESULT_ICON_SIZE = moderateScale(80, 0.3);
 
 // =============================================================================
 // Types
@@ -69,6 +78,15 @@ export default function FaceVerificationScreen() {
   const { userId, token, faceVerificationPassed, faceVerificationPending, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+
+  const faceGuideWidth = Math.min(
+    windowWidth * FACE_GUIDE_WIDTH_RATIO,
+    FACE_GUIDE_MAX_WIDTH,
+    (windowHeight * FACE_GUIDE_MAX_HEIGHT_RATIO) / FACE_GUIDE_ASPECT_RATIO,
+  );
+  const faceGuideHeight = faceGuideWidth * FACE_GUIDE_ASPECT_RATIO;
+  const faceGuideBorderRadius = faceGuideWidth / 2;
 
   // M6 FIX: queryEnabled allows retry by toggling the query subscription
   const [queryEnabled, setQueryEnabled] = useState(true);
@@ -646,19 +664,19 @@ export default function FaceVerificationScreen() {
         <View style={styles.centered}>
           {backendLoadTimedOut ? (
             <>
-              <Ionicons name="cloud-offline-outline" size={48} color={COLORS.textLight} />
-              <Text style={styles.loadingText}>Unable to load profile data</Text>
+              <Ionicons name="cloud-offline-outline" size={SIZES.icon.xl + SPACING.base} color={COLORS.textLight} />
+              <Text {...TEXT_PROPS} style={styles.loadingText}>Unable to load profile data</Text>
               <Button
                 title="Try Again"
                 variant="outline"
                 onPress={handleBackendRetry}
-                style={{ marginTop: 16 }}
+                style={styles.buttonTopSpacing}
               />
             </>
           ) : (
             <>
               <ActivityIndicator size="large" color={COLORS.primary} />
-              <Text style={styles.loadingText}>Loading...</Text>
+              <Text {...TEXT_PROPS} style={styles.loadingText}>Loading...</Text>
             </>
           )}
         </View>
@@ -675,7 +693,7 @@ export default function FaceVerificationScreen() {
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Checking camera permission...</Text>
+          <Text {...TEXT_PROPS} style={styles.loadingText}>Checking camera permission...</Text>
         </View>
       </SafeAreaView>
     );
@@ -689,9 +707,9 @@ export default function FaceVerificationScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.centered}>
-          <Ionicons name="camera-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Camera Permission Required</Text>
-          <Text style={styles.subtitle}>
+          <Ionicons name="camera-outline" size={LARGE_ICON_SIZE} color={COLORS.textLight} />
+          <Text {...TEXT_PROPS} style={styles.title}>Camera Permission Required</Text>
+          <Text {...TEXT_PROPS} style={styles.subtitle}>
             We need camera access to verify your identity with a selfie.
           </Text>
           <Button
@@ -713,9 +731,9 @@ export default function FaceVerificationScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.centered}>
-          <Ionicons name="warning-outline" size={64} color={COLORS.error} />
-          <Text style={styles.title}>No Camera Found</Text>
-          <Text style={styles.subtitle}>
+          <Ionicons name="warning-outline" size={LARGE_ICON_SIZE} color={COLORS.error} />
+          <Text {...TEXT_PROPS} style={styles.title}>No Camera Found</Text>
+          <Text {...TEXT_PROPS} style={styles.subtitle}>
             Unable to find a front camera on this device.
           </Text>
         </View>
@@ -754,8 +772,8 @@ export default function FaceVerificationScreen() {
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <OnboardingProgressHeader />
       <View style={styles.content}>
-        <Text style={styles.title}>Face Verification</Text>
-        <Text style={styles.subtitle}>{getSubtitle()}</Text>
+        <Text {...TEXT_PROPS} style={styles.title}>Face Verification</Text>
+        <Text {...TEXT_PROPS} style={styles.subtitle}>{getSubtitle()}</Text>
 
         {/* Camera View */}
         <View style={styles.cameraContainer}>
@@ -773,16 +791,26 @@ export default function FaceVerificationScreen() {
               ) : (
                 <View style={styles.cameraPlaceholder}>
                   <ActivityIndicator size="large" color={COLORS.primary} />
-                  <Text style={styles.placeholderText}>Preparing camera...</Text>
+                  <Text {...TEXT_PROPS} style={styles.placeholderText}>Preparing camera...</Text>
                 </View>
               )}
               {/* Overlay with circular guide */}
               <View style={styles.overlay} pointerEvents="none">
-                <Animated.View style={[styles.faceGuide, circleColor]} />
+                <Animated.View
+                  style={[
+                    styles.faceGuide,
+                    {
+                      width: faceGuideWidth,
+                      height: faceGuideHeight,
+                      borderRadius: faceGuideBorderRadius,
+                    },
+                    circleColor,
+                  ]}
+                />
                 {verificationState === 'capturing' && (
                   <View style={styles.captureIndicator}>
                     <ActivityIndicator size="small" color={COLORS.white} />
-                    <Text style={styles.captureText}>
+                    <Text {...TEXT_PROPS} style={styles.captureText}>
                       {framesCaptured}/{FRAME_COUNT}
                     </Text>
                   </View>
@@ -793,34 +821,34 @@ export default function FaceVerificationScreen() {
             <View style={styles.resultContainer}>
               {verificationState === 'success' && (
                 <>
-                  <Ionicons name="checkmark-circle" size={80} color={COLORS.success} />
-                  <Text style={styles.resultText}>
+                  <Ionicons name="checkmark-circle" size={RESULT_ICON_SIZE} color={COLORS.success} />
+                  <Text {...TEXT_PROPS} style={styles.resultText}>
                     {isDemoMode ? 'Verified (Demo)' : 'Identity Verified!'}
                   </Text>
                   {matchScore !== null && !isDemoMode && (
-                    <Text style={styles.scoreText}>Match confidence: {matchScore.toFixed(0)}%</Text>
+                    <Text {...TEXT_PROPS} style={styles.scoreText}>Match confidence: {matchScore.toFixed(0)}%</Text>
                   )}
                   {isDemoMode && (
-                    <Text style={styles.scoreText}>Demo mode - auto-approved</Text>
+                    <Text {...TEXT_PROPS} style={styles.scoreText}>Demo mode - auto-approved</Text>
                   )}
                 </>
               )}
               {verificationState === 'pending' && (
                 <>
-                  <Ionicons name="time-outline" size={80} color={COLORS.warning || '#FFA500'} />
-                  <Text style={styles.resultText}>Verification Pending</Text>
-                  <Text style={styles.errorText}>
+                  <Ionicons name="time-outline" size={RESULT_ICON_SIZE} color={COLORS.warning || '#FFA500'} />
+                  <Text {...TEXT_PROPS} style={styles.resultText}>Verification Pending</Text>
+                  <Text {...TEXT_PROPS} style={styles.errorText}>
                     Your profile is under verification.{'\n'}You can continue using the app while we review your selfie.
                   </Text>
                 </>
               )}
               {verificationState === 'failed' && (
                 <>
-                  <Ionicons name="close-circle" size={80} color={COLORS.error} />
-                  <Text style={styles.resultText}>Verification Failed</Text>
-                  <Text style={styles.errorText}>{errorMessage}</Text>
+                  <Ionicons name="close-circle" size={RESULT_ICON_SIZE} color={COLORS.error} />
+                  <Text {...TEXT_PROPS} style={styles.resultText}>Verification Failed</Text>
+                  <Text {...TEXT_PROPS} style={styles.errorText}>{errorMessage}</Text>
                   {matchScore !== null && matchScore > 0 && (
-                    <Text style={styles.scoreText}>Match score: {matchScore.toFixed(0)}%</Text>
+                    <Text {...TEXT_PROPS} style={styles.scoreText}>Match score: {matchScore.toFixed(0)}%</Text>
                   )}
                 </>
               )}
@@ -830,8 +858,8 @@ export default function FaceVerificationScreen() {
           {verificationState === 'verifying' && (
             <View style={styles.verifyingOverlay}>
               <ActivityIndicator size="large" color={COLORS.white} />
-              <Text style={styles.verifyingText}>Submitting selfie...</Text>
-              <Text style={styles.verifyingSubtext}>This may take a few seconds</Text>
+              <Text {...TEXT_PROPS} style={styles.verifyingText}>Submitting selfie...</Text>
+              <Text {...TEXT_PROPS} style={styles.verifyingSubtext}>This may take a few seconds</Text>
             </View>
           )}
         </View>
@@ -841,18 +869,18 @@ export default function FaceVerificationScreen() {
           {verificationState === 'waiting' && (
             <>
               <View style={styles.instructions}>
-                <Text style={styles.instructionTitle}>Tips for best results:</Text>
-                <Text style={styles.instructionText}>
-                  <Ionicons name="sunny" size={14} color={COLORS.textLight} /> Good lighting - face the light source
+                <Text {...TEXT_PROPS} style={styles.instructionTitle}>Tips for best results:</Text>
+                <Text {...TEXT_PROPS} style={styles.instructionText}>
+                  <Ionicons name="sunny" size={SIZES.icon.xs + 2} color={COLORS.textLight} /> Good lighting - face the light source
                 </Text>
-                <Text style={styles.instructionText}>
-                  <Ionicons name="person" size={14} color={COLORS.textLight} /> Face the camera directly
+                <Text {...TEXT_PROPS} style={styles.instructionText}>
+                  <Ionicons name="person" size={SIZES.icon.xs + 2} color={COLORS.textLight} /> Face the camera directly
                 </Text>
-                <Text style={styles.instructionText}>
-                  <Ionicons name="glasses-outline" size={14} color={COLORS.textLight} /> Remove sunglasses/hats
+                <Text {...TEXT_PROPS} style={styles.instructionText}>
+                  <Ionicons name="glasses-outline" size={SIZES.icon.xs + 2} color={COLORS.textLight} /> Remove sunglasses/hats
                 </Text>
-                <Text style={styles.instructionText}>
-                  <Ionicons name="ellipse-outline" size={14} color={COLORS.textLight} /> Keep your face in the circle
+                <Text {...TEXT_PROPS} style={styles.instructionText}>
+                  <Ionicons name="ellipse-outline" size={SIZES.icon.xs + 2} color={COLORS.textLight} /> Keep your face in the circle
                 </Text>
               </View>
               <Button
@@ -860,11 +888,11 @@ export default function FaceVerificationScreen() {
                 variant="primary"
                 onPress={startCapture}
                 fullWidth
-                style={{ marginTop: 16 }}
+                style={styles.buttonTopSpacing}
               />
               {/* DEMO AUTH MODE: Show demo approve button */}
               {isDemoAuthMode && (
-                <View style={{ marginTop: 12 }}>
+                <View style={styles.secondaryButtonContainer}>
                   <Button
                     title={isDemoApproving ? "Approving..." : "Demo Approve (Dev Only)"}
                     variant="outline"
@@ -873,12 +901,7 @@ export default function FaceVerificationScreen() {
                     disabled={isDemoApproving}
                     fullWidth
                   />
-                  <Text style={{
-                    textAlign: 'center',
-                    marginTop: 8,
-                    fontSize: 12,
-                    color: COLORS.textLight,
-                  }}>
+                  <Text {...TEXT_PROPS} style={styles.demoHintText}>
                     Demo mode: Approve verification without selfie
                   </Text>
                 </View>
@@ -889,11 +912,11 @@ export default function FaceVerificationScreen() {
           {verificationState === 'failed' && (
             <>
               <View style={styles.failedHint}>
-                <Text style={styles.failedHintText}>
+                <Text {...TEXT_PROPS} style={styles.failedHintText}>
                   Make sure your selfie matches your profile photo. Try better lighting or a different angle.
                 </Text>
                 {/* PHASE-1 RESTRUCTURE: Show attempt count */}
-                <Text style={styles.attemptCountText}>
+                <Text {...TEXT_PROPS} style={styles.attemptCountText}>
                   Attempt {verificationAttempts} of {MAX_VERIFICATION_ATTEMPTS}
                 </Text>
               </View>
@@ -912,7 +935,7 @@ export default function FaceVerificationScreen() {
                     onPress={handleSkipVerification}
                     fullWidth
                   />
-                  <Text style={styles.skipHintText}>
+                  <Text {...TEXT_PROPS} style={styles.skipHintText}>
                     You can verify later in your profile settings
                   </Text>
                 </View>
@@ -924,7 +947,7 @@ export default function FaceVerificationScreen() {
             <>
               {/* PHASE-1 RESTRUCTURE: Allow users to continue with pending verification */}
               <View style={styles.pendingInfo}>
-                <Text style={styles.pendingInfoText}>
+                <Text {...TEXT_PROPS} style={styles.pendingInfoText}>
                   Your verification is under manual review. You can continue setting up your profile while we process your request.
                 </Text>
               </View>
@@ -970,38 +993,41 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
-    padding: 24,
-    paddingTop: 10,
+    paddingHorizontal: SPACING.xl,
+    paddingBottom: SPACING.xl,
+    paddingTop: SPACING.sm + SPACING.xxs,
   },
   centered: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 24,
+    padding: SPACING.xl,
   },
   title: {
-    fontSize: 26,
+    fontSize: moderateScale(26, 0.4),
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 6,
+    lineHeight: lineHeight(moderateScale(26, 0.4), 1.2),
+    marginBottom: SPACING.sm - SPACING.xxs,
     textAlign: 'center',
     letterSpacing: -0.5,
   },
   subtitle: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
     color: COLORS.textLight,
-    marginBottom: 18,
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
+    marginBottom: SPACING.base + SPACING.xxs,
     textAlign: 'center',
-    lineHeight: 22,
   },
   loadingText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     color: COLORS.textLight,
-    marginTop: 16,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
+    marginTop: SPACING.base,
   },
   cameraContainer: {
     flex: 1,
-    borderRadius: 24,
+    borderRadius: SIZES.radius.xl,
     overflow: 'hidden',
     backgroundColor: COLORS.backgroundDark,
   },
@@ -1016,8 +1042,9 @@ const styles = StyleSheet.create({
   },
   placeholderText: {
     color: COLORS.textMuted,
-    fontSize: 14,
-    marginTop: 14,
+    fontSize: FONT_SIZE.md,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
+    marginTop: SPACING.md + SPACING.xxs,
   },
   overlay: {
     position: 'absolute',
@@ -1029,28 +1056,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   faceGuide: {
-    width: 250,
-    height: 320,
-    borderRadius: 125,
     borderWidth: 4,
     borderColor: COLORS.primary,
     backgroundColor: 'transparent',
   },
   captureIndicator: {
     position: 'absolute',
-    bottom: 44,
+    bottom: SIZES.touchTarget,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.65)',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 24,
-    gap: 10,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.sm + SPACING.xxs,
+    borderRadius: SIZES.radius.xl,
+    gap: SPACING.sm + SPACING.xxs,
   },
   captureText: {
     color: COLORS.white,
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
+    lineHeight: lineHeight(FONT_SIZE.md, 1.2),
     letterSpacing: 0.2,
   },
   verifyingOverlay: {
@@ -1065,110 +1090,130 @@ const styles = StyleSheet.create({
   },
   verifyingText: {
     color: COLORS.white,
-    fontSize: 17,
+    fontSize: moderateScale(17, 0.4),
     fontWeight: '600',
-    marginTop: 14,
+    lineHeight: lineHeight(moderateScale(17, 0.4), 1.2),
+    marginTop: SPACING.md + SPACING.xxs,
     letterSpacing: -0.2,
   },
   verifyingSubtext: {
     color: COLORS.white,
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
     opacity: 0.75,
-    marginTop: 6,
+    marginTop: SPACING.sm - SPACING.xxs,
   },
   resultContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    paddingHorizontal: SPACING.lg,
   },
   resultText: {
-    fontSize: 22,
+    fontSize: FONT_SIZE.xxl,
     fontWeight: '600',
     color: COLORS.text,
-    marginTop: 18,
+    lineHeight: lineHeight(FONT_SIZE.xxl, 1.2),
+    marginTop: SPACING.base + SPACING.xxs,
     letterSpacing: -0.3,
+    textAlign: 'center',
   },
   scoreText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     color: COLORS.textLight,
-    marginTop: 6,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
+    marginTop: SPACING.sm - SPACING.xxs,
+    textAlign: 'center',
   },
   errorText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     color: COLORS.textLight,
-    marginTop: 10,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
+    marginTop: SPACING.sm + SPACING.xxs,
     textAlign: 'center',
-    paddingHorizontal: 24,
-    lineHeight: 20,
+    paddingHorizontal: SPACING.xl,
   },
   footer: {
-    paddingTop: 18,
+    paddingTop: SPACING.base + SPACING.xxs,
   },
   instructions: {
     backgroundColor: COLORS.backgroundDark,
-    padding: 16,
-    borderRadius: 14,
-    gap: 8,
+    padding: SPACING.base,
+    borderRadius: SIZES.radius.md + SPACING.xxs,
+    gap: SPACING.sm,
   },
   instructionTitle: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
     color: COLORS.text,
-    marginBottom: 6,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.2),
+    marginBottom: SPACING.sm - SPACING.xxs,
     letterSpacing: -0.2,
   },
   instructionText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textLight,
-    lineHeight: 19,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.45),
   },
   failedHint: {
     backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    padding: 16,
-    borderRadius: 14,
-    marginBottom: 14,
+    padding: SPACING.base,
+    borderRadius: SIZES.radius.md + SPACING.xxs,
+    marginBottom: SPACING.md + SPACING.xxs,
     borderWidth: 1,
     borderColor: 'rgba(239, 68, 68, 0.2)',
   },
   failedHintText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.error,
     textAlign: 'center',
-    lineHeight: 19,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.45),
     fontWeight: '500',
   },
   pendingInfo: {
     backgroundColor: 'rgba(255, 165, 0, 0.1)',
-    padding: 16,
-    borderRadius: 14,
-    marginBottom: 14,
+    padding: SPACING.base,
+    borderRadius: SIZES.radius.md + SPACING.xxs,
+    marginBottom: SPACING.md + SPACING.xxs,
     borderWidth: 1,
     borderColor: 'rgba(255, 165, 0, 0.2)',
   },
   pendingInfoText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: '#B8860B',
     textAlign: 'center',
-    lineHeight: 19,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.45),
   },
   // PHASE-1 RESTRUCTURE: New styles for non-blocking verification
   secondaryButtonContainer: {
-    marginTop: 12,
+    marginTop: SPACING.md,
   },
   attemptCountText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
     textAlign: 'center',
-    marginTop: 8,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
+    marginTop: SPACING.sm,
   },
   skipHintText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
     textAlign: 'center',
-    marginTop: 8,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
+    marginTop: SPACING.sm,
   },
   permissionButton: {
-    marginTop: 28,
-    minWidth: 200,
+    marginTop: SPACING.xxl - SPACING.xs,
+    minWidth: moderateScale(200, 0.35),
+  },
+  buttonTopSpacing: {
+    marginTop: SPACING.base,
+  },
+  demoHintText: {
+    textAlign: 'center',
+    marginTop: SPACING.sm,
+    fontSize: FONT_SIZE.caption,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
+    color: COLORS.textLight,
   },
 });
