@@ -10,7 +10,14 @@ import {
   ViewStyle,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
+import {
+  COLORS,
+  SPACING,
+  SIZES,
+  FONT_SIZE,
+  FONT_WEIGHT,
+  lineHeight,
+} from '@/lib/constants';
 
 interface InputProps extends TextInputProps {
   label?: string;
@@ -70,7 +77,11 @@ export const Input = forwardRef<InputRef, InputProps>(({
 
   return (
     <View style={[styles.container, containerStyle]}>
-      {label && <Text style={styles.label}>{label}</Text>}
+      {label && (
+        <Text style={styles.label} maxFontSizeMultiplier={1.2}>
+          {label}
+        </Text>
+      )}
 
       {/* Pressable wrapper ensures tapping anywhere in the box focuses the input */}
       <Pressable onPress={handleContainerPress}>
@@ -84,7 +95,7 @@ export const Input = forwardRef<InputRef, InputProps>(({
           {leftIcon && (
             <Ionicons
               name={leftIcon}
-              size={20}
+              size={SIZES.icon.md}
               color={error ? COLORS.error : isFocused ? COLORS.primary : COLORS.textMuted}
               style={styles.leftIcon}
             />
@@ -97,6 +108,7 @@ export const Input = forwardRef<InputRef, InputProps>(({
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
             secureTextEntry={isPassword && !showPassword}
+            maxFontSizeMultiplier={1.2}
             {...props}
             // HARD BLOCK: Autofill settings applied AFTER props spread to override any passed values
             // Only auth screens (onboarding email, login email) may use allowAuthAutofill={true}
@@ -113,7 +125,7 @@ export const Input = forwardRef<InputRef, InputProps>(({
             >
               <Ionicons
                 name={showPassword ? 'eye-off' : 'eye'}
-                size={20}
+                size={SIZES.icon.md}
                 color={COLORS.textMuted}
               />
             </TouchableOpacity>
@@ -125,14 +137,22 @@ export const Input = forwardRef<InputRef, InputProps>(({
               style={styles.rightIconButton}
               disabled={!onRightIconPress}
             >
-              <Ionicons name={rightIcon} size={20} color={COLORS.textMuted} />
+              <Ionicons name={rightIcon} size={SIZES.icon.md} color={COLORS.textMuted} />
             </TouchableOpacity>
           )}
         </View>
       </Pressable>
 
-      {error && <Text style={styles.error}>{error}</Text>}
-      {hint && !error && <Text style={styles.hint}>{hint}</Text>}
+      {error && (
+        <Text style={styles.error} maxFontSizeMultiplier={1.2}>
+          {error}
+        </Text>
+      )}
+      {hint && !error && (
+        <Text style={styles.hint} maxFontSizeMultiplier={1.2}>
+          {hint}
+        </Text>
+      )}
     </View>
   );
 });
@@ -142,18 +162,20 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   label: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.md,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: SPACING.sm,
   },
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 12,
+    borderRadius: SIZES.radius.md,
     borderWidth: 2,
     borderColor: 'transparent',
+    minHeight: SIZES.touchTarget,
   },
   inputContainerFocused: {
     borderColor: COLORS.primary,
@@ -164,28 +186,31 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
     color: COLORS.text,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.base,
   },
   inputWithLeftIcon: {
     paddingLeft: 0,
   },
   leftIcon: {
-    marginLeft: 16,
+    marginLeft: SPACING.base,
   },
   rightIconButton: {
-    padding: 12,
+    padding: SPACING.md,
   },
   error: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: COLORS.error,
-    marginTop: 4,
+    marginTop: SPACING.xs,
   },
   hint: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
     color: COLORS.textMuted,
-    marginTop: 4,
+    marginTop: SPACING.xs,
   },
 });
