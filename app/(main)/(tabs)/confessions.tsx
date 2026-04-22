@@ -27,7 +27,7 @@ import EmojiPicker from 'rn-emoji-keyboard';
 import { safePush } from '@/lib/safeRouter';
 import { api } from '@/convex/_generated/api';
 import { asUserId } from '@/convex/id';
-import { COLORS } from '@/lib/constants';
+import { COLORS, FONT_SIZE, SPACING, lineHeight, moderateScale } from '@/lib/constants';
 import { isContentClean } from '@/lib/contentFilter';
 import { isProbablyEmoji } from '@/lib/utils';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -940,7 +940,7 @@ export default function ConfessionsScreen() {
           {/* Trending badge */}
           <View style={styles.trendingBadge}>
             <Ionicons name="trending-up" size={12} color="#B8860B" />
-            <Text style={styles.trendingBadgeText}>Trending</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.trendingBadgeText}>Trending</Text>
           </View>
 
           {/* Author row - shows identity with gender symbol */}
@@ -967,33 +967,33 @@ export default function ConfessionsScreen() {
                 <Ionicons name="person" size={10} color={COLORS.primary} />
               </View>
             )}
-            <Text style={[styles.trendingAuthorName, !trendingIsAnonymous && styles.trendingAuthorNamePublic]}>
+            <Text maxFontSizeMultiplier={1.2} style={[styles.trendingAuthorName, !trendingIsAnonymous && styles.trendingAuthorNamePublic]}>
               {trendingIsAnonymous ? 'Anonymous' : (
                 <>
                   {trendingHero.authorName || 'Someone'}
                   {trendingHero.authorAge ? `, ${trendingHero.authorAge}` : ''}
                   {getGenderSymbol(trendingHero.authorGender) && (
-                    <Text style={{ color: getGenderSymbol(trendingHero.authorGender)!.color }}> {getGenderSymbol(trendingHero.authorGender)!.symbol}</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={{ color: getGenderSymbol(trendingHero.authorGender)!.color }}> {getGenderSymbol(trendingHero.authorGender)!.symbol}</Text>
                   )}
                 </>
               )}
             </Text>
             <View style={{ flex: 1 }} />
-            <Text style={styles.trendingTime}>{getTimeAgoSimple(trendingHero.createdAt)}</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.trendingTime}>{getTimeAgoSimple(trendingHero.createdAt)}</Text>
           </View>
 
           {/* Confession text */}
-          <Text style={styles.trendingText} numberOfLines={3}>{trendingHero.text}</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.trendingText} numberOfLines={3}>{trendingHero.text}</Text>
 
           {/* Meta row */}
           <View style={styles.trendingMeta}>
             <View style={styles.trendingMetaItem}>
               <Ionicons name="chatbubble-outline" size={12} color={COLORS.textMuted} />
-              <Text style={styles.trendingMetaText}>{trendingHero.replyCount}</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.trendingMetaText}>{trendingHero.replyCount}</Text>
             </View>
             <View style={styles.trendingMetaItem}>
               <Ionicons name="heart-outline" size={12} color={COLORS.textMuted} />
-              <Text style={styles.trendingMetaText}>{trendingHero.reactionCount}</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.trendingMetaText}>{trendingHero.reactionCount}</Text>
             </View>
           </View>
         </TouchableOpacity>
@@ -1043,23 +1043,23 @@ export default function ConfessionsScreen() {
                 <Ionicons name="person" size={10} color={COLORS.primary} />
               </View>
             )}
-            <Text style={[styles.myConfessionAuthorName, !myIsAnonymous && styles.myConfessionAuthorNamePublic]}>
+            <Text maxFontSizeMultiplier={1.2} style={[styles.myConfessionAuthorName, !myIsAnonymous && styles.myConfessionAuthorNamePublic]}>
               {myIsAnonymous ? 'Anonymous' : (
                 <>
                   {(myLatestConfession as any).authorName || 'You'}
                   {(myLatestConfession as any).authorAge ? `, ${(myLatestConfession as any).authorAge}` : ''}
                   {getGenderSymbol((myLatestConfession as any).authorGender) && (
-                    <Text style={{ color: getGenderSymbol((myLatestConfession as any).authorGender)!.color }}> {getGenderSymbol((myLatestConfession as any).authorGender)!.symbol}</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={{ color: getGenderSymbol((myLatestConfession as any).authorGender)!.color }}> {getGenderSymbol((myLatestConfession as any).authorGender)!.symbol}</Text>
                   )}
                 </>
               )}
             </Text>
             <View style={{ flex: 1 }} />
-            <Text style={styles.myConfessionTime}>{getTimeAgoSimple(myLatestConfession.createdAt)}</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.myConfessionTime}>{getTimeAgoSimple(myLatestConfession.createdAt)}</Text>
           </View>
 
           {/* Confession text */}
-          <Text style={styles.myConfessionText} numberOfLines={2}>
+          <Text maxFontSizeMultiplier={1.2} style={styles.myConfessionText} numberOfLines={2}>
             {myLatestConfession.text}
           </Text>
 
@@ -1067,11 +1067,11 @@ export default function ConfessionsScreen() {
           <View style={styles.myConfessionMeta}>
             <View style={styles.myConfessionMetaItem}>
               <Ionicons name="chatbubble-outline" size={12} color={COLORS.textMuted} />
-              <Text style={styles.myConfessionMetaText}>{myLatestConfession.replyCount ?? 0}</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.myConfessionMetaText}>{myLatestConfession.replyCount ?? 0}</Text>
             </View>
             <View style={styles.myConfessionMetaItem}>
               <Ionicons name="heart-outline" size={12} color={COLORS.textMuted} />
-              <Text style={styles.myConfessionMetaText}>{myLatestConfession.reactionCount ?? 0}</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.myConfessionMetaText}>{myLatestConfession.reactionCount ?? 0}</Text>
             </View>
           </View>
         </TouchableOpacity>
@@ -1082,7 +1082,7 @@ export default function ConfessionsScreen() {
       {!canPostNow && countdownMs > 0 && (
         <View style={styles.countdownNotice}>
           <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
-          <Text style={styles.countdownText}>
+          <Text maxFontSizeMultiplier={1.2} style={styles.countdownText}>
             Next confession in {formatCountdown(countdownMs)}
           </Text>
         </View>
@@ -1093,10 +1093,10 @@ export default function ConfessionsScreen() {
         <TouchableOpacity style={styles.taggedRow} onPress={handleOpenTaggedSection} activeOpacity={0.8}>
           <View style={styles.taggedRowLeft}>
             <Ionicons name="heart" size={18} color={COLORS.primary} />
-            <Text style={styles.taggedRowText}>Tagged for you</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.taggedRowText}>Tagged for you</Text>
             {taggedBadgeCount > 0 && (
               <View style={styles.badge}>
-                <Text style={styles.badgeText}>{taggedBadgeCount}</Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.badgeText}>{taggedBadgeCount}</Text>
               </View>
             )}
           </View>
@@ -1111,11 +1111,11 @@ export default function ConfessionsScreen() {
       <SafeAreaView style={styles.container} edges={['top']}>
         <View style={styles.header}>
           <Ionicons name="megaphone" size={16} color={COLORS.primary} />
-          <Text style={styles.headerTitle}>Confess</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.headerTitle}>Confess</Text>
         </View>
         <View style={styles.loadingState}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Loading confessions...</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.loadingText}>Loading confessions...</Text>
         </View>
       </SafeAreaView>
     );
@@ -1125,7 +1125,7 @@ export default function ConfessionsScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
         <Ionicons name="megaphone" size={16} color={COLORS.primary} />
-        <Text style={styles.headerTitle}>Confess</Text>
+        <Text maxFontSizeMultiplier={1.2} style={styles.headerTitle}>Confess</Text>
         <View style={{ flex: 1 }} />
         <TouchableOpacity
           onPress={handleOpenMyConfessions}
@@ -1136,7 +1136,7 @@ export default function ConfessionsScreen() {
         </TouchableOpacity>
       </View>
 
-      <Text style={styles.topHint}>Choose how you want to be seen</Text>
+      <Text maxFontSizeMultiplier={1.2} style={styles.topHint}>Choose how you want to be seen</Text>
 
       <FlatList
         data={filteredConfessions}
@@ -1187,11 +1187,11 @@ export default function ConfessionsScreen() {
           // Only show empty state if NO confessions exist at all (not just filtered list)
           confessions.length === 0 ? (
             <View style={styles.emptyState}>
-              <Text style={styles.emptyEmoji}>💬</Text>
-              <Text style={styles.emptyTitle}>No confessions yet</Text>
-              <Text style={styles.emptySubtitle}>Be the first to share something</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.emptyEmoji}>💬</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.emptyTitle}>No confessions yet</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.emptySubtitle}>Be the first to share something</Text>
               <TouchableOpacity style={styles.emptyButton} onPress={handleOpenComposer}>
-                <Text style={styles.emptyButtonText}>Post a Confession</Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.emptyButtonText}>Post a Confession</Text>
               </TouchableOpacity>
             </View>
           ) : null
@@ -1201,7 +1201,7 @@ export default function ConfessionsScreen() {
       {showToast && (
         <Animated.View style={[styles.toast, { opacity: toastOpacity }]}>
           <Ionicons name="checkmark-circle" size={18} color="#34C759" />
-          <Text style={styles.toastText}>{toastMessage}</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.toastText}>{toastMessage}</Text>
         </Animated.View>
       )}
 
@@ -1250,7 +1250,7 @@ export default function ConfessionsScreen() {
                   <TouchableOpacity onPress={handleCloseComposer}>
                     <Ionicons name="close" size={24} color={COLORS.text} />
                   </TouchableOpacity>
-                  <Text style={styles.sheetTitle}>New Confession</Text>
+                  <Text maxFontSizeMultiplier={1.2} style={styles.sheetTitle}>New Confession</Text>
                   <TouchableOpacity
                     onPress={handleSubmitComposer}
                     disabled={composerSubmitting || composerText.trim().length < 10}
@@ -1272,7 +1272,7 @@ export default function ConfessionsScreen() {
 
                 <View style={styles.sheetBanner}>
                   <Ionicons name="shield-checkmark" size={14} color={COLORS.primary} />
-                  <Text style={styles.sheetBannerText}>Don&apos;t include phone numbers or personal details.</Text>
+                  <Text maxFontSizeMultiplier={1.2} style={styles.sheetBannerText}>Don&apos;t include phone numbers or personal details.</Text>
                 </View>
 
                 <TextInput
@@ -1289,16 +1289,16 @@ export default function ConfessionsScreen() {
 
                 <View style={styles.composerToolbar}>
                   <TouchableOpacity onPress={() => setShowComposerEmoji(true)}>
-                    <Text style={styles.toolbarEmoji}>🙂</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.toolbarEmoji}>🙂</Text>
                   </TouchableOpacity>
                   <View style={{ flex: 1 }} />
-                  <Text style={styles.charCount}>{composerText.length}/500</Text>
+                  <Text maxFontSizeMultiplier={1.2} style={styles.charCount}>{composerText.length}/500</Text>
                 </View>
 
                 <View style={styles.tagSection}>
                   <View style={styles.tagHeader}>
                     <Ionicons name="heart-outline" size={18} color={COLORS.primary} />
-                    <Text style={styles.tagTitle}>Mention username (optional)</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.tagTitle}>Mention username (optional)</Text>
                   </View>
 
                   {taggedUser ? (
@@ -1311,10 +1311,10 @@ export default function ConfessionsScreen() {
                         </View>
                       )}
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.tagName}>
+                        <Text maxFontSizeMultiplier={1.2} style={styles.tagName}>
                           {taggedUser.name}{taggedUser.age ? `, ${taggedUser.age}` : ''}
                         </Text>
-                        <Text style={styles.tagHint}>{taggedUser.disambiguator}</Text>
+                        <Text maxFontSizeMultiplier={1.2} style={styles.tagHint}>{taggedUser.disambiguator}</Text>
                       </View>
                       <TouchableOpacity onPress={() => {
                         setTaggedUser(null);
@@ -1332,7 +1332,7 @@ export default function ConfessionsScreen() {
                         value={tagInput}
                         onChangeText={handleTagInputChange}
                       />
-                      <Text style={styles.tagHint}>
+                      <Text maxFontSizeMultiplier={1.2} style={styles.tagHint}>
                         {likedUsers.length > 0 ? 'You can only tag people you liked.' : 'Like someone first to confess to them.'}
                       </Text>
                     </>
@@ -1360,8 +1360,8 @@ export default function ConfessionsScreen() {
                             <Ionicons name="person" size={14} color={COLORS.white} />
                           </View>
                           <View style={{ flex: 1 }}>
-                            <Text style={styles.suggestionName}>{user.name}</Text>
-                            <Text style={styles.suggestionHint}>{user.disambiguator}</Text>
+                            <Text maxFontSizeMultiplier={1.2} style={styles.suggestionName}>{user.name}</Text>
+                            <Text maxFontSizeMultiplier={1.2} style={styles.suggestionHint}>{user.disambiguator}</Text>
                           </View>
                         </TouchableOpacity>
                       ))}
@@ -1377,8 +1377,8 @@ export default function ConfessionsScreen() {
                       color={composerAnonymous ? COLORS.textMuted : COLORS.primary}
                     />
                     <View>
-                      <Text style={styles.visibilityTitle}>{composerAnonymous ? 'Anonymous' : 'Open to all'}</Text>
-                      <Text style={styles.visibilitySubtitle}>
+                      <Text maxFontSizeMultiplier={1.2} style={styles.visibilityTitle}>{composerAnonymous ? 'Anonymous' : 'Open to all'}</Text>
+                      <Text maxFontSizeMultiplier={1.2} style={styles.visibilitySubtitle}>
                         {composerAnonymous ? 'Your identity stays hidden' : 'Your profile will be visible'}
                       </Text>
                     </View>
@@ -1409,8 +1409,8 @@ export default function ConfessionsScreen() {
           <View style={styles.duplicateOverlay}>
             <TouchableWithoutFeedback>
               <View style={styles.duplicateSheet}>
-                <Text style={styles.duplicateTitle}>Multiple people named &quot;{tagInput}&quot;</Text>
-                <Text style={styles.duplicateSubtitle}>Choose who you want to confess to.</Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.duplicateTitle}>Multiple people named &quot;{tagInput}&quot;</Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.duplicateSubtitle}>Choose who you want to confess to.</Text>
                 {duplicateCandidates.map((user) => (
                   <TouchableOpacity
                     key={user.id}
@@ -1437,10 +1437,10 @@ export default function ConfessionsScreen() {
                       </View>
                     )}
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.duplicateName}>
+                      <Text maxFontSizeMultiplier={1.2} style={styles.duplicateName}>
                         {user.name}{user.age ? `, ${user.age}` : ''}
                       </Text>
-                      <Text style={styles.duplicateHint}>{user.disambiguator}</Text>
+                      <Text maxFontSizeMultiplier={1.2} style={styles.duplicateHint}>{user.disambiguator}</Text>
                     </View>
                     <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
                   </TouchableOpacity>
@@ -1458,11 +1458,11 @@ export default function ConfessionsScreen() {
               <TouchableOpacity onPress={() => setShowTaggedSection(false)}>
                 <Ionicons name="chevron-back" size={24} color={COLORS.text} />
               </TouchableOpacity>
-              <Text style={styles.taggedSheetTitle}>Tagged for you</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.taggedSheetTitle}>Tagged for you</Text>
               <View style={{ width: 24 }} />
             </View>
 
-            <Text style={styles.taggedSheetHint}>Someone confessed their feelings to you 💌</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.taggedSheetHint}>Someone confessed their feelings to you 💌</Text>
 
             <FlatList
               data={taggedConfessions}
@@ -1476,33 +1476,33 @@ export default function ConfessionsScreen() {
                   onPress={() => handleSelectTaggedConfession(item)}
                 >
                   <View style={styles.taggedCardHeader}>
-                    <Text style={styles.taggedCardAuthor}>Anonymous</Text>
-                    <Text style={styles.taggedCardTime}>{getTimeAgoSimple(item.confessionCreatedAt)}</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.taggedCardAuthor}>Anonymous</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.taggedCardTime}>{getTimeAgoSimple(item.confessionCreatedAt)}</Text>
                     {!item.seen && !item.isExpired && <View style={styles.unseenDot} />}
                     {item.isExpired && (
                       <View style={styles.expiredPill}>
-                        <Text style={styles.expiredPillText}>Expired</Text>
+                        <Text maxFontSizeMultiplier={1.2} style={styles.expiredPillText}>Expired</Text>
                       </View>
                     )}
                   </View>
-                  <Text style={[styles.taggedCardText, item.isExpired && styles.taggedCardTextExpired]} numberOfLines={4}>
+                  <Text maxFontSizeMultiplier={1.2} style={[styles.taggedCardText, item.isExpired && styles.taggedCardTextExpired]} numberOfLines={4}>
                     {item.confessionText}
                   </Text>
                   <View style={styles.taggedMetaRow}>
                     <View style={styles.taggedMetaItem}>
                       <Ionicons name="heart" size={12} color={COLORS.primary} />
-                      <Text style={styles.taggedMetaText}>Confess-to: You</Text>
+                      <Text maxFontSizeMultiplier={1.2} style={styles.taggedMetaText}>Confess-to: You</Text>
                     </View>
                     <View style={styles.taggedMetaItem}>
                       <Ionicons name="chatbubble-outline" size={12} color={COLORS.textMuted} />
-                      <Text style={styles.taggedMetaCount}>{item.replyCount}</Text>
+                      <Text maxFontSizeMultiplier={1.2} style={styles.taggedMetaCount}>{item.replyCount}</Text>
                     </View>
                   </View>
                 </TouchableOpacity>
               )}
               ListEmptyComponent={
                 <View style={styles.taggedEmptyState}>
-                  <Text style={styles.taggedEmptyText}>No tagged confessions yet</Text>
+                  <Text maxFontSizeMultiplier={1.2} style={styles.taggedEmptyText}>No tagged confessions yet</Text>
                 </View>
               }
             />
@@ -1521,60 +1521,60 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    gap: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
   headerTitle: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
     fontWeight: '700',
     color: COLORS.text,
   },
   headerButton: {
-    padding: 4,
+    padding: SPACING.xs,
   },
   topHint: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textLight,
     textAlign: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 6,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.sm,
+    paddingBottom: SPACING.xs,
   },
   listContent: {
-    paddingBottom: 96,
+    paddingBottom: moderateScale(80, 0.5),
   },
   loadingState: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    gap: 12,
+    gap: SPACING.md,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     color: COLORS.textLight,
   },
   taggedRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginHorizontal: 10,
-    marginTop: 8,
-    marginBottom: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    marginHorizontal: SPACING.sm,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
     borderRadius: 14,
     backgroundColor: 'rgba(255,107,107,0.08)',
   },
   taggedRowLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: SPACING.sm,
   },
   taggedRowText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
     color: COLORS.text,
   },
@@ -1582,13 +1582,13 @@ const styles = StyleSheet.create({
     minWidth: 18,
     height: 18,
     borderRadius: 9,
-    paddingHorizontal: 5,
+    paddingHorizontal: SPACING.xs,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.primary,
   },
   badgeText: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     fontWeight: '700',
     color: COLORS.white,
   },
@@ -1596,13 +1596,13 @@ const styles = StyleSheet.create({
   // neutral shadow. No full colored outline, no colored shadow bleed. Reads
   // "featured / premium pick" without competing with the brand pink.
   trendingCard: {
-    marginHorizontal: 10,
-    marginTop: 8,
-    marginBottom: 8,
+    marginHorizontal: SPACING.sm,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.sm,
     borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 12,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.md,
     paddingLeft: 16 - 3 + StyleSheet.hairlineWidth,
     backgroundColor: COLORS.background,
     borderWidth: StyleSheet.hairlineWidth,
@@ -1616,23 +1616,23 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   genderSymbol: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
-    marginLeft: 4,
+    marginLeft: SPACING.xs,
   },
   trendingBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'flex-start',
-    gap: 4,
+    gap: SPACING.xs,
     backgroundColor: 'rgba(184, 134, 11, 0.09)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xxs,
     borderRadius: 8,
-    marginBottom: 10,
+    marginBottom: SPACING.sm,
   },
   trendingBadgeText: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     fontWeight: '700',
     color: '#B8860B',
     textTransform: 'uppercase',
@@ -1641,8 +1641,8 @@ const styles = StyleSheet.create({
   trendingAuthorRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
   },
   trendingAvatar: {
     width: 20,
@@ -1661,7 +1661,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   trendingAuthorName: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.textLight,
     flex: 1,
@@ -1670,62 +1670,62 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
   trendingTime: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
   },
   trendingText: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: moderateScale(15, 0.4),
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
     fontWeight: '500',
     color: COLORS.text,
-    marginBottom: 10,
+    marginBottom: SPACING.sm,
   },
   trendingMeta: {
     flexDirection: 'row',
-    gap: 14,
+    gap: SPACING.md,
   },
   trendingMetaItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: SPACING.xs,
   },
   trendingMetaText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: '500',
     color: COLORS.textMuted,
   },
   emptyState: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 40,
-    paddingTop: 84,
+    paddingHorizontal: moderateScale(32, 0.5),
+    paddingTop: moderateScale(64, 0.5),
   },
   emptyEmoji: {
-    fontSize: 56,
-    marginBottom: 16,
+    fontSize: moderateScale(56, 0.4),
+    marginBottom: SPACING.base,
   },
   emptyTitle: {
-    fontSize: 22,
+    fontSize: moderateScale(22, 0.4),
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: SPACING.sm,
     textAlign: 'center',
   },
   emptySubtitle: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: moderateScale(15, 0.4),
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
     color: COLORS.textLight,
     textAlign: 'center',
-    marginBottom: 24,
+    marginBottom: SPACING.xl,
   },
   emptyButton: {
     borderRadius: 24,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
     backgroundColor: COLORS.primary,
   },
   emptyButtonText: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
     fontWeight: '600',
     color: COLORS.white,
   },
@@ -1750,13 +1750,13 @@ const styles = StyleSheet.create({
   // My Confession card — brand-primary left accent + hairline + neutral shadow.
   // Single-edge cue signals authorship quietly without a loud full outline.
   myConfessionCard: {
-    marginHorizontal: 10,
-    marginTop: 4,
-    marginBottom: 8,
+    marginHorizontal: SPACING.sm,
+    marginTop: SPACING.xs,
+    marginBottom: SPACING.sm,
     borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 12,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.md,
     paddingLeft: 16 - 3 + StyleSheet.hairlineWidth,
     backgroundColor: COLORS.background,
     borderWidth: StyleSheet.hairlineWidth,
@@ -1772,8 +1772,8 @@ const styles = StyleSheet.create({
   myConfessionAuthorRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
   },
   myConfessionAvatar: {
     width: 20,
@@ -1792,7 +1792,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   myConfessionAuthorName: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.textLight,
   },
@@ -1800,27 +1800,27 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
   myConfessionTime: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
   },
   myConfessionText: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: moderateScale(15, 0.4),
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
     fontWeight: '500',
     color: COLORS.text,
-    marginBottom: 10,
+    marginBottom: SPACING.sm,
   },
   myConfessionMeta: {
     flexDirection: 'row',
-    gap: 14,
+    gap: SPACING.md,
   },
   myConfessionMetaItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: SPACING.xs,
   },
   myConfessionMetaText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: '500',
     color: COLORS.textMuted,
   },
@@ -1829,16 +1829,16 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    marginHorizontal: 10,
-    marginBottom: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
+    gap: SPACING.xs,
+    marginHorizontal: SPACING.sm,
+    marginBottom: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
     borderRadius: 10,
     backgroundColor: 'rgba(153,153,153,0.08)',
   },
   countdownText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textMuted,
     fontWeight: '500',
   },
@@ -1850,9 +1850,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.md,
     borderRadius: 12,
     backgroundColor: COLORS.white,
     shadowColor: '#000',
@@ -1863,7 +1863,7 @@ const styles = StyleSheet.create({
     zIndex: 20,
   },
   toastText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
     color: COLORS.text,
   },
@@ -1883,35 +1883,35 @@ const styles = StyleSheet.create({
     height: 4,
     borderRadius: 2,
     alignSelf: 'center',
-    marginTop: 10,
-    marginBottom: 6,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.xs,
     backgroundColor: COLORS.border,
   },
   sheetHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
   sheetTitle: {
-    fontSize: 17,
+    fontSize: moderateScale(17, 0.4),
     fontWeight: '700',
     color: COLORS.text,
   },
   postButton: {
     borderRadius: 18,
-    paddingHorizontal: 18,
-    paddingVertical: 8,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
     backgroundColor: COLORS.primary,
   },
   postButtonDisabled: {
     backgroundColor: COLORS.border,
   },
   postButtonText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '700',
     color: COLORS.white,
   },
@@ -1921,75 +1921,75 @@ const styles = StyleSheet.create({
   sheetBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    gap: SPACING.xs,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
     backgroundColor: 'rgba(255,107,107,0.06)',
   },
   sheetBannerText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
     fontWeight: '500',
   },
   composerInput: {
     minHeight: 110,
     maxHeight: 180,
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    fontSize: 16,
-    lineHeight: 24,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.md,
+    fontSize: FONT_SIZE.lg,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
     color: COLORS.text,
   },
   composerToolbar: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
   toolbarEmoji: {
-    fontSize: 20,
+    fontSize: FONT_SIZE.xxl,
   },
   charCount: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
   },
   tagSection: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
   tagHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
   },
   tagTitle: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
     color: COLORS.text,
   },
   tagInput: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     color: COLORS.text,
     borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
     backgroundColor: COLORS.backgroundDark,
   },
   tagHint: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
-    marginTop: 6,
+    marginTop: SPACING.xs,
   },
   selectedTagRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    padding: 10,
+    gap: SPACING.sm,
+    padding: SPACING.sm,
     borderRadius: 10,
     backgroundColor: 'rgba(255,107,107,0.08)',
   },
@@ -2007,12 +2007,12 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   tagName: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
     color: COLORS.text,
   },
   suggestionList: {
-    marginTop: 8,
+    marginTop: SPACING.sm,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: COLORS.border,
@@ -2022,9 +2022,9 @@ const styles = StyleSheet.create({
   suggestionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
@@ -2037,69 +2037,69 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   suggestionName: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
     color: COLORS.text,
   },
   suggestionHint: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     color: COLORS.textMuted,
   },
   visibilityRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.md,
   },
   visibilityInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: SPACING.md,
     flex: 1,
   },
   visibilityTitle: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
     fontWeight: '600',
     color: COLORS.text,
   },
   visibilitySubtitle: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
-    marginTop: 2,
+    marginTop: SPACING.xxs,
   },
   duplicateOverlay: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
+    padding: SPACING.xl,
     backgroundColor: 'rgba(0,0,0,0.5)',
   },
   duplicateSheet: {
     width: '100%',
     maxWidth: 340,
     borderRadius: 16,
-    padding: 20,
+    padding: SPACING.lg,
     backgroundColor: COLORS.white,
   },
   duplicateTitle: {
-    fontSize: 17,
+    fontSize: moderateScale(17, 0.4),
     fontWeight: '700',
     color: COLORS.text,
     textAlign: 'center',
-    marginBottom: 4,
+    marginBottom: SPACING.xs,
   },
   duplicateSubtitle: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textMuted,
     textAlign: 'center',
-    marginBottom: 16,
+    marginBottom: SPACING.base,
   },
   duplicateRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingVertical: 12,
+    gap: SPACING.md,
+    paddingVertical: SPACING.md,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.border,
   },
@@ -2117,18 +2117,18 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   duplicateName: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
     fontWeight: '600',
     color: COLORS.text,
   },
   duplicateHint: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
-    marginTop: 2,
+    marginTop: SPACING.xxs,
   },
   taggedSheet: {
     flex: 1,
-    marginTop: 96,
+    marginTop: moderateScale(80, 0.5),
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     backgroundColor: COLORS.white,
@@ -2137,32 +2137,32 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
   taggedSheetTitle: {
-    fontSize: 17,
+    fontSize: moderateScale(17, 0.4),
     fontWeight: '700',
     color: COLORS.text,
   },
   taggedSheetHint: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textLight,
     textAlign: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 10,
-    paddingBottom: 12,
+    paddingHorizontal: SPACING.xl,
+    paddingTop: SPACING.sm,
+    paddingBottom: SPACING.md,
   },
   taggedList: {
-    paddingHorizontal: 12,
-    paddingBottom: 24,
+    paddingHorizontal: SPACING.md,
+    paddingBottom: SPACING.xl,
   },
   taggedCard: {
     borderRadius: 16,
-    padding: 14,
-    marginBottom: 10,
+    padding: SPACING.md,
+    marginBottom: SPACING.sm,
     backgroundColor: COLORS.backgroundDark,
   },
   taggedCardExpired: {
@@ -2171,16 +2171,16 @@ const styles = StyleSheet.create({
   taggedCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
   },
   taggedCardAuthor: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.text,
   },
   taggedCardTime: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
   },
   unseenDot: {
@@ -2190,21 +2190,21 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   expiredPill: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+    paddingHorizontal: SPACING.xs,
+    paddingVertical: SPACING.xxs,
     borderRadius: 6,
     backgroundColor: 'rgba(153,153,153,0.15)',
   },
   expiredPillText: {
-    fontSize: 10,
+    fontSize: FONT_SIZE.xs,
     fontWeight: '700',
     color: COLORS.textMuted,
   },
   taggedCardText: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: moderateScale(15, 0.4),
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
     color: COLORS.text,
-    marginBottom: 10,
+    marginBottom: SPACING.sm,
   },
   taggedCardTextExpired: {
     color: COLORS.textLight,
@@ -2217,25 +2217,25 @@ const styles = StyleSheet.create({
   taggedMetaItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: SPACING.xs,
   },
   taggedMetaText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: '600',
     color: COLORS.primary,
   },
   taggedMetaCount: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: '600',
     color: COLORS.textMuted,
   },
   taggedEmptyState: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingTop: 80,
+    paddingTop: moderateScale(64, 0.5),
   },
   taggedEmptyText: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
     color: COLORS.textLight,
   },
 });

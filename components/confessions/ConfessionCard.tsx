@@ -28,6 +28,7 @@ import {
   FONT_WEIGHT,
   HAIRLINE,
   moderateScale,
+  lineHeight,
 } from '@/lib/constants';
 import { ConfessionMood, ConfessionAuthorVisibility } from '@/types';
 import ReactionBar, { EmojiCount } from './ReactionBar';
@@ -370,7 +371,7 @@ export default function ConfessionCard({
           <Ionicons name="person" size={SIZES.icon.xs} color={COLORS.primary} />
         </View>
       )}
-      <Text style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>{displayName}</Text>
+      <Text maxFontSizeMultiplier={1.2} style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>{displayName}</Text>
       {/* Blur indicator badge */}
       {isBlurPhoto && (
         <View style={styles.blurBadge}>
@@ -405,16 +406,16 @@ export default function ConfessionCard({
             {renderAuthorIdentity()}
           </View>
         )}
-        <Text style={styles.timeAgo}>{getTimeAgo(createdAt)}</Text>
+        <Text maxFontSizeMultiplier={1.2} style={styles.timeAgo}>{getTimeAgo(createdAt)}</Text>
         {isTaggedForMe && (
           <View style={styles.forYouBadge}>
             <Ionicons name="heart" size={FONT_SIZE.xxs} color={COLORS.primary} />
-            <Text style={styles.forYouText}>For you</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.forYouText}>For you</Text>
           </View>
         )}
         {isExpired && (
           <View style={styles.expiredBadge}>
-            <Text style={styles.expiredText}>Expired</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.expiredText}>Expired</Text>
           </View>
         )}
       </View>
@@ -441,7 +442,7 @@ export default function ConfessionCard({
               disabled={isSaving}
               activeOpacity={0.7}
             >
-              <Text style={styles.editButtonCancelText}>Cancel</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.editButtonCancelText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.editButton, styles.editButtonSave, isSaving && styles.editButtonDisabled]}
@@ -452,14 +453,14 @@ export default function ConfessionCard({
               {isSaving ? (
                 <ActivityIndicator size="small" color={COLORS.white} />
               ) : (
-                <Text style={styles.editButtonSaveText}>Save</Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.editButtonSaveText}>Save</Text>
               )}
             </TouchableOpacity>
           </View>
         </View>
       ) : (
         // NORMAL VIEW MODE
-        <Text style={styles.confessionText} numberOfLines={4}>
+        <Text maxFontSizeMultiplier={1.2} style={styles.confessionText} numberOfLines={4}>
           {text}
           {hasTag && (
             <>
@@ -493,8 +494,8 @@ export default function ConfessionCard({
               activeOpacity={onTagPress ? 0.7 : 1}
             >
               <Ionicons name="heart" size={SIZES.icon.xs} color={COLORS.primary} />
-              <Text style={styles.taggedLabel}>Confess-to:</Text>
-              <Text style={[styles.taggedName, onTagPress && styles.taggedNameTappable]}>{tagDisplayText}</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.taggedLabel}>Confess-to:</Text>
+              <Text maxFontSizeMultiplier={1.2} style={[styles.taggedName, onTagPress && styles.taggedNameTappable]}>{tagDisplayText}</Text>
             </TouchableOpacity>
           )}
 
@@ -514,7 +515,7 @@ export default function ConfessionCard({
                 size={16}
                 color={previewUsed ? COLORS.textMuted : COLORS.primary}
               />
-              <Text style={[styles.viewProfileText, previewUsed && styles.viewProfileTextUsed]}>
+              <Text maxFontSizeMultiplier={1.2} style={[styles.viewProfileText, previewUsed && styles.viewProfileTextUsed]}>
                 {previewUsed ? 'Profile preview used' : 'View Profile'}
               </Text>
             </TouchableOpacity>
@@ -540,7 +541,7 @@ export default function ConfessionCard({
                   <View style={styles.replyPreviewAvatar}>
                     <Ionicons name="chatbubble" size={8} color={COLORS.textMuted} />
                   </View>
-                  <Text style={styles.replyPreviewText} numberOfLines={1}>
+                  <Text maxFontSizeMultiplier={1.2} style={styles.replyPreviewText} numberOfLines={1}>
                     {r.type === 'voice' ? '🎙️ Voice reply' : r.text}
                   </Text>
                 </View>
@@ -553,7 +554,7 @@ export default function ConfessionCard({
                     tapHandler?.();
                   }}
                 >
-                  <Text style={styles.viewAllReplies}>
+                  <Text maxFontSizeMultiplier={1.2} style={styles.viewAllReplies}>
                     View all {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
                   </Text>
                 </TouchableOpacity>
@@ -566,8 +567,8 @@ export default function ConfessionCard({
             <View style={styles.footer}>
               <View style={styles.footerButton} pointerEvents="none">
                 <Ionicons name="chatbubble-outline" size={SIZES.icon.sm - 2} color={COLORS.textMuted} />
-                <Text style={styles.footerCount}>{replyCount}</Text>
-                <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.footerCount}>{replyCount}</Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
               </View>
             </View>
           )}
@@ -582,11 +583,11 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: COLORS.background,
     borderRadius: 16,
-    paddingHorizontal: 18,
-    paddingTop: 16,
-    paddingBottom: 14,
-    marginHorizontal: 12,
-    marginVertical: 6,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.md,
+    marginHorizontal: SPACING.md,
+    marginVertical: SPACING.xs,
     // Crisp hairline border for refined definition on white backgrounds —
     // replaces the cheap outline-only look with a premium editorial edge.
     borderWidth: StyleSheet.hairlineWidth,
@@ -625,8 +626,8 @@ const styles = StyleSheet.create({
   authorRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
     minHeight: 26,
   },
   avatar: {
@@ -661,7 +662,7 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   authorName: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.textLight,
     flexShrink: 1,
@@ -670,13 +671,13 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
   blurBadge: {
-    marginLeft: 6,
-    padding: 3,
+    marginLeft: SPACING.xs,
+    padding: SPACING.xxs,
     backgroundColor: 'rgba(153,153,153,0.12)',
     borderRadius: 4,
   },
   timeAgo: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
     flexShrink: 0,
     marginLeft: 'auto', // Push to right side
@@ -694,11 +695,11 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
   confessionText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '500',
-    lineHeight: 24,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
     color: COLORS.text,
-    marginBottom: 14,
+    marginBottom: SPACING.md,
     letterSpacing: 0.1,
     // Text wrapping safety - works with card padding for proper line length
   },
@@ -776,8 +777,8 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
   reactionBarWrap: {
-    marginBottom: 8,
-    marginTop: 2,
+    marginBottom: SPACING.sm,
+    marginTop: SPACING.xxs,
   },
   replyPreviewSection: {
     marginBottom: SPACING.xs + 2,
@@ -812,26 +813,26 @@ const styles = StyleSheet.create({
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 16,
+    gap: SPACING.base,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
-    paddingTop: 12,
-    marginTop: 6,
+    paddingTop: SPACING.sm,
+    marginTop: SPACING.xs,
   },
   footerButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingVertical: 4,
-    paddingHorizontal: 2,
+    gap: SPACING.xs,
+    paddingVertical: SPACING.xs,
+    paddingHorizontal: SPACING.xxs,
   },
   footerCount: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textMuted,
     fontWeight: '500',
   },
   footerLabel: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textMuted,
   },
 
@@ -839,17 +840,17 @@ const styles = StyleSheet.create({
   // INLINE EDIT MODE STYLES
   // ═══════════════════════════════════════════════════════════════════════════
   editModeContainer: {
-    gap: 12,
+    gap: SPACING.md,
   },
   editTextInput: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '500',
-    lineHeight: 24,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
     color: COLORS.text,
     backgroundColor: COLORS.backgroundDark,
     borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
     minHeight: 100,
     maxHeight: 200,
     textAlignVertical: 'top',
@@ -859,11 +860,11 @@ const styles = StyleSheet.create({
   editActionsRow: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
-    gap: 10,
+    gap: SPACING.sm,
   },
   editButton: {
-    paddingVertical: 10,
-    paddingHorizontal: 20,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
     borderRadius: 10,
     minWidth: 80,
     alignItems: 'center',
@@ -875,7 +876,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   editButtonCancelText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
     color: COLORS.textMuted,
   },
@@ -883,7 +884,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   editButtonSaveText: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     fontWeight: '600',
     color: COLORS.white,
   },

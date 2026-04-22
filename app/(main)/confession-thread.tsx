@@ -38,7 +38,7 @@ import { Image } from 'expo-image';
 
 import { api } from '@/convex/_generated/api';
 import { asUserId } from '@/convex/id';
-import { COLORS, moderateScale } from '@/lib/constants';
+import { COLORS, FONT_SIZE, SPACING, lineHeight, moderateScale } from '@/lib/constants';
 import { isContentClean } from '@/lib/contentFilter';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
@@ -696,14 +696,14 @@ export default function ConfessionThreadScreen() {
               </Text>
               {mode !== 'anonymous' ? <GenderSymbol gender={child.authorGender} /> : null}
               <View style={styles.inlineAuthorBadge}>
-                <Text style={styles.inlineAuthorBadgeText}>Author</Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.inlineAuthorBadgeText}>Author</Text>
               </View>
-              <Text style={styles.inlineReplyTime}>
+              <Text maxFontSizeMultiplier={1.2} style={styles.inlineReplyTime}>
                 {formatTimeAgo(child.createdAt)}
                 {child.editedAt ? ' · edited' : ''}
               </Text>
             </View>
-            <Text style={styles.inlineReplyText}>{child.text}</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.inlineReplyText}>{child.text}</Text>
           </View>
         </Pressable>
       );
@@ -764,9 +764,9 @@ export default function ConfessionThreadScreen() {
                   {mode !== 'anonymous' && item.authorAge ? `, ${item.authorAge}` : ''}
                 </Text>
                 {mode !== 'anonymous' ? <GenderSymbol gender={item.authorGender} /> : null}
-                {ownReply ? <Text style={styles.replyYouTag}> (You)</Text> : null}
+                {ownReply ? <Text maxFontSizeMultiplier={1.2} style={styles.replyYouTag}> (You)</Text> : null}
               </View>
-              <Text style={styles.replyTime}>
+              <Text maxFontSizeMultiplier={1.2} style={styles.replyTime}>
                 {formatTimeAgo(item.createdAt)}
                 {item.editedAt ? ' · edited' : ''}
               </Text>
@@ -780,12 +780,12 @@ export default function ConfessionThreadScreen() {
                 hitSlop={6}
               >
                 <Ionicons name="return-down-back-outline" size={13} color={COLORS.primary} />
-                <Text style={styles.headerReplyBtnText}>Reply</Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.headerReplyBtnText}>Reply</Text>
               </TouchableOpacity>
             ) : null}
           </View>
 
-          <Text style={styles.replyText}>{item.text}</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.replyText}>{item.text}</Text>
 
           {hasOwnerReply ? (
             <View style={styles.inlineReplyGroup}>
@@ -853,27 +853,27 @@ export default function ConfessionThreadScreen() {
                 <Ionicons name="person" size={12} color={COLORS.primary} />
               </View>
             )}
-            <Text style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>
+            <Text maxFontSizeMultiplier={1.2} style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>
               {getDisplayName()}
             </Text>
             {!isFullyAnonymous ? <GenderSymbol gender={confession.authorGender} /> : null}
-            <Text style={styles.timeAgo}>{formatTimeAgo(confession.createdAt)}</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.timeAgo}>{formatTimeAgo(confession.createdAt)}</Text>
           </View>
 
-          <Text style={styles.confessionText}>{confession.text}</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.confessionText}>{confession.text}</Text>
 
           <View style={styles.statsRow}>
             <View style={styles.statItem}>
               <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
-              <Text style={styles.statCount}>{confession.replyCount}</Text>
-              <Text style={styles.statLabel}>
+              <Text maxFontSizeMultiplier={1.2} style={styles.statCount}>{confession.replyCount}</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.statLabel}>
                 {confession.replyCount === 1 ? 'Reply' : 'Replies'}
               </Text>
             </View>
             <View style={styles.statItem}>
               <Ionicons name="heart-outline" size={14} color={COLORS.textMuted} />
-              <Text style={styles.statCount}>{confession.reactionCount}</Text>
-              <Text style={styles.statLabel}>
+              <Text maxFontSizeMultiplier={1.2} style={styles.statCount}>{confession.reactionCount}</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.statLabel}>
                 {confession.reactionCount === 1 ? 'Reaction' : 'Reactions'}
               </Text>
             </View>
@@ -883,7 +883,7 @@ export default function ConfessionThreadScreen() {
         {isThreadClosed ? (
           <View style={styles.closedBanner}>
             <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
-            <Text style={styles.closedBannerText}>
+            <Text maxFontSizeMultiplier={1.2} style={styles.closedBannerText}>
               This confession has expired. Comments are closed.
             </Text>
           </View>
@@ -891,7 +891,7 @@ export default function ConfessionThreadScreen() {
 
         {topLevelReplies.length > 0 ? (
           <View style={styles.repliesSectionHeader}>
-            <Text style={styles.repliesSectionTitle}>
+            <Text maxFontSizeMultiplier={1.2} style={styles.repliesSectionTitle}>
               {topLevelReplies.length}{' '}
               {topLevelReplies.length === 1 ? 'Reply' : 'Replies'}
             </Text>
@@ -908,10 +908,10 @@ export default function ConfessionThreadScreen() {
         <View style={styles.emptyIconWrap}>
           <Ionicons name="chatbubbles-outline" size={40} color={COLORS.textMuted} />
         </View>
-        <Text style={styles.emptyTitle}>
+        <Text maxFontSizeMultiplier={1.2} style={styles.emptyTitle}>
           {isThreadClosed ? 'Thread closed' : 'No replies yet'}
         </Text>
-        <Text style={styles.emptySubtitle}>
+        <Text maxFontSizeMultiplier={1.2} style={styles.emptySubtitle}>
           {isThreadClosed
             ? 'This confession has expired.'
             : 'Be the first to share your thoughts'}
@@ -930,12 +930,12 @@ export default function ConfessionThreadScreen() {
           <TouchableOpacity onPress={handleBack} hitSlop={8}>
             <Ionicons name="chevron-back" size={24} color={COLORS.text} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Thread</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.headerTitle}>Thread</Text>
           <View style={{ width: 24 }} />
         </View>
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Loading thread...</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.loadingText}>Loading thread...</Text>
         </View>
       </SafeAreaView>
     );
@@ -948,19 +948,19 @@ export default function ConfessionThreadScreen() {
           <TouchableOpacity onPress={handleBack} hitSlop={8}>
             <Ionicons name="chevron-back" size={24} color={COLORS.text} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Thread</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.headerTitle}>Thread</Text>
           <View style={{ width: 24 }} />
         </View>
         <View style={styles.errorContainer}>
           <View style={styles.errorIconWrap}>
             <Ionicons name="alert-circle-outline" size={48} color={COLORS.textMuted} />
           </View>
-          <Text style={styles.errorTitle}>Not Found</Text>
-          <Text style={styles.errorSubtitle}>
+          <Text maxFontSizeMultiplier={1.2} style={styles.errorTitle}>Not Found</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.errorSubtitle}>
             This confession may have expired or been removed.
           </Text>
           <TouchableOpacity style={styles.errorButton} onPress={handleBack}>
-            <Text style={styles.errorButtonText}>Go Back</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.errorButtonText}>Go Back</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -1012,7 +1012,7 @@ export default function ConfessionThreadScreen() {
         {composerMode === 'owner-reply' && replyingToParent ? (
           <View style={styles.replyingToBar}>
             <Ionicons name="return-down-forward-outline" size={13} color={COLORS.textMuted} />
-            <Text style={styles.replyingToText} numberOfLines={1}>
+            <Text maxFontSizeMultiplier={1.2} style={styles.replyingToText} numberOfLines={1}>
               Replying to{' '}
               {canonicalMode(
                 replyingToParent.identityMode as string | undefined,
@@ -1030,7 +1030,7 @@ export default function ConfessionThreadScreen() {
         {composerMode === 'edit' ? (
           <View style={styles.replyingToBar}>
             <Ionicons name="create-outline" size={13} color={COLORS.textMuted} />
-            <Text style={styles.replyingToText} numberOfLines={1}>
+            <Text maxFontSizeMultiplier={1.2} style={styles.replyingToText} numberOfLines={1}>
               Editing your comment
             </Text>
             <TouchableOpacity onPress={resetComposer} hitSlop={8}>
@@ -1073,7 +1073,7 @@ export default function ConfessionThreadScreen() {
           </TouchableOpacity>
         </View>
 
-        <Text style={styles.composerHint}>{description}</Text>
+        <Text maxFontSizeMultiplier={1.2} style={styles.composerHint}>{description}</Text>
       </View>
     );
   };
@@ -1092,8 +1092,8 @@ export default function ConfessionThreadScreen() {
             <Ionicons name="checkmark-circle-outline" size={18} color={COLORS.primary} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.alreadyCommentedTitle}>You already commented</Text>
-            <Text style={styles.alreadyCommentedSub} numberOfLines={1}>
+            <Text maxFontSizeMultiplier={1.2} style={styles.alreadyCommentedTitle}>You already commented</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.alreadyCommentedSub} numberOfLines={1}>
               Long-press your comment to edit or delete
             </Text>
           </View>
@@ -1108,7 +1108,7 @@ export default function ConfessionThreadScreen() {
         <View style={styles.ownerNoticeIcon}>
           <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
         </View>
-        <Text style={styles.ownerNoticeText}>
+        <Text maxFontSizeMultiplier={1.2} style={styles.ownerNoticeText}>
           This confession has expired. Comments are closed.
         </Text>
       </View>
@@ -1121,7 +1121,7 @@ export default function ConfessionThreadScreen() {
         <View style={styles.ownerNoticeIcon}>
           <Ionicons name="eye-outline" size={14} color={COLORS.textMuted} />
         </View>
-        <Text style={styles.ownerNoticeText}>
+        <Text maxFontSizeMultiplier={1.2} style={styles.ownerNoticeText}>
           This is your confession. Tap Reply on any comment to respond as the author.
         </Text>
       </View>
@@ -1161,7 +1161,7 @@ export default function ConfessionThreadScreen() {
           <TouchableOpacity onPress={handleBack} hitSlop={8}>
             <Ionicons name="chevron-back" size={24} color={COLORS.text} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Thread</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.headerTitle}>Thread</Text>
           <View style={{ width: 24 }} />
         </View>
 
@@ -1199,7 +1199,7 @@ export default function ConfessionThreadScreen() {
               // Stop touches on the card from closing the modal.
               onStartShouldSetResponder={() => true}
             >
-              <Text style={styles.menuTitle}>
+              <Text maxFontSizeMultiplier={1.2} style={styles.menuTitle}>
                 {menuTargetIsOwn ? 'Manage Comment' : 'Comment Actions'}
               </Text>
 
@@ -1211,7 +1211,7 @@ export default function ConfessionThreadScreen() {
                     activeOpacity={0.85}
                   >
                     <Ionicons name="create-outline" size={18} color={COLORS.primary} />
-                    <Text style={[styles.menuBtnText, styles.menuBtnTextEdit]}>Edit</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={[styles.menuBtnText, styles.menuBtnTextEdit]}>Edit</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
@@ -1220,7 +1220,7 @@ export default function ConfessionThreadScreen() {
                     activeOpacity={0.85}
                   >
                     <Ionicons name="trash-outline" size={18} color={MENU_DANGER} />
-                    <Text style={[styles.menuBtnText, styles.menuBtnTextDelete]}>Delete</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={[styles.menuBtnText, styles.menuBtnTextDelete]}>Delete</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
@@ -1229,7 +1229,7 @@ export default function ConfessionThreadScreen() {
                     activeOpacity={0.85}
                   >
                     <Ionicons name="close-outline" size={18} color={COLORS.textMuted} />
-                    <Text style={[styles.menuBtnText, styles.menuBtnTextCancel]}>Cancel</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={[styles.menuBtnText, styles.menuBtnTextCancel]}>Cancel</Text>
                   </TouchableOpacity>
                 </View>
               ) : (
@@ -1240,7 +1240,7 @@ export default function ConfessionThreadScreen() {
                     activeOpacity={0.85}
                   >
                     <Ionicons name="flag-outline" size={18} color={MENU_DANGER} />
-                    <Text style={[styles.menuBtnText, styles.menuBtnTextReport]}>Report</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={[styles.menuBtnText, styles.menuBtnTextReport]}>Report</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
@@ -1249,7 +1249,7 @@ export default function ConfessionThreadScreen() {
                     activeOpacity={0.85}
                   >
                     <Ionicons name="close-outline" size={18} color={COLORS.textMuted} />
-                    <Text style={[styles.menuBtnText, styles.menuBtnTextCancel]}>Cancel</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={[styles.menuBtnText, styles.menuBtnTextCancel]}>Cancel</Text>
                   </TouchableOpacity>
                 </View>
               )}
@@ -1273,7 +1273,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   listContent: {
-    paddingTop: 8,
+    paddingTop: SPACING.sm,
   },
 
   // Header
@@ -1281,14 +1281,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
     backgroundColor: COLORS.backgroundDark,
   },
   headerTitle: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
     fontWeight: '700',
     color: COLORS.text,
   },
@@ -1298,10 +1298,10 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    gap: 12,
+    gap: SPACING.md,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     color: COLORS.textLight,
   },
 
@@ -1310,7 +1310,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 40,
+    paddingHorizontal: moderateScale(32, 0.5),
   },
   errorIconWrap: {
     width: 80,
@@ -1319,47 +1319,47 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(153,153,153,0.1)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 16,
+    marginBottom: SPACING.base,
   },
   errorTitle: {
-    fontSize: 22,
+    fontSize: moderateScale(22, 0.4),
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: SPACING.sm,
   },
   errorSubtitle: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: moderateScale(15, 0.4),
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
     color: COLORS.textLight,
     textAlign: 'center',
-    marginBottom: 24,
+    marginBottom: SPACING.xl,
   },
   errorButton: {
     borderRadius: 24,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
     backgroundColor: COLORS.primary,
   },
   errorButtonText: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
     fontWeight: '600',
     color: COLORS.white,
   },
 
   // Header section
   headerSection: {
-    paddingBottom: 4,
+    paddingBottom: SPACING.xs,
   },
 
   // Confession card (hero)
   confessionCard: {
     backgroundColor: COLORS.background,
     borderRadius: 16,
-    paddingHorizontal: 18,
-    paddingTop: 16,
-    paddingBottom: 14,
-    marginHorizontal: 12,
-    marginVertical: 6,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.md,
+    marginHorizontal: SPACING.md,
+    marginVertical: SPACING.xs,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
@@ -1369,8 +1369,8 @@ const styles = StyleSheet.create({
   authorRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
     minHeight: 26,
   },
   avatar: {
@@ -1390,7 +1390,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(153,153,153,0.12)',
   },
   authorName: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.textLight,
     flex: 1,
@@ -1399,38 +1399,38 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
   timeAgo: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
   },
   confessionText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     fontWeight: '500',
-    lineHeight: 24,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
     color: COLORS.text,
-    marginBottom: 14,
+    marginBottom: SPACING.md,
     letterSpacing: 0.1,
   },
   statsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 16,
+    gap: SPACING.base,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
-    paddingTop: 12,
-    marginTop: 6,
+    paddingTop: SPACING.md,
+    marginTop: SPACING.xs,
   },
   statItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: SPACING.xs,
   },
   statCount: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textMuted,
     fontWeight: '500',
   },
   statLabel: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textMuted,
   },
 
@@ -1438,28 +1438,28 @@ const styles = StyleSheet.create({
   closedBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginHorizontal: 12,
-    marginTop: 6,
-    marginBottom: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    gap: SPACING.sm,
+    marginHorizontal: SPACING.md,
+    marginTop: SPACING.xs,
+    marginBottom: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
     backgroundColor: 'rgba(153,153,153,0.10)',
     borderRadius: 12,
   },
   closedBannerText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textLight,
     flex: 1,
   },
 
   // Replies section header
   repliesSectionHeader: {
-    paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.md,
   },
   repliesSectionTitle: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.textLight,
     textTransform: 'uppercase',
@@ -1470,11 +1470,11 @@ const styles = StyleSheet.create({
   replyCard: {
     backgroundColor: COLORS.background,
     borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 12,
-    marginHorizontal: 12,
-    marginBottom: 8,
+    paddingHorizontal: SPACING.base,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.md,
+    marginHorizontal: SPACING.md,
+    marginBottom: SPACING.sm,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
@@ -1491,8 +1491,8 @@ const styles = StyleSheet.create({
   replyHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
   },
   replyAvatar: {
     width: REPLY_AVATAR_SIZE,
@@ -1516,10 +1516,10 @@ const styles = StyleSheet.create({
   replyAuthorRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: SPACING.xs,
   },
   replyAuthor: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.text,
   },
@@ -1530,21 +1530,21 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
   },
   replyYouTag: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
     fontWeight: '500',
   },
   genderIcon: {
-    marginLeft: 2,
+    marginLeft: SPACING.xxs,
   },
   replyTime: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     color: COLORS.textMuted,
-    marginTop: 2,
+    marginTop: SPACING.xxs,
   },
   replyText: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: moderateScale(15, 0.4),
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
     color: COLORS.text,
     paddingLeft: REPLY_AVATAR_SIZE + 8,
   },
@@ -1552,14 +1552,14 @@ const styles = StyleSheet.create({
   headerReplyBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
-    paddingVertical: 4,
-    paddingHorizontal: 8,
+    gap: SPACING.xxs,
+    paddingVertical: SPACING.xs,
+    paddingHorizontal: SPACING.sm,
     backgroundColor: 'rgba(255,107,107,0.10)',
     borderRadius: 10,
   },
   headerReplyBtnText: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     fontWeight: '600',
     color: COLORS.primary,
     letterSpacing: 0.1,
@@ -1567,24 +1567,24 @@ const styles = StyleSheet.create({
 
   // Inline owner reply — rendered INSIDE the parent comment card.
   inlineReplyGroup: {
-    marginTop: 10,
+    marginTop: SPACING.sm,
     marginLeft: REPLY_AVATAR_SIZE + 8,
-    paddingTop: 8,
+    paddingTop: SPACING.sm,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.border,
   },
   inlineReplyRow: {
     flexDirection: 'row',
     alignItems: 'stretch',
-    gap: 8,
-    paddingVertical: 2,
+    gap: SPACING.sm,
+    paddingVertical: SPACING.xxs,
   },
   inlineReplyConnector: {
     width: 2,
     backgroundColor: 'rgba(255,107,107,0.35)',
     borderRadius: 1,
-    marginTop: 4,
-    marginBottom: 4,
+    marginTop: SPACING.xs,
+    marginBottom: SPACING.xs,
   },
   inlineReplyContent: {
     flex: 1,
@@ -1592,36 +1592,36 @@ const styles = StyleSheet.create({
   inlineReplyHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: 4,
+    gap: SPACING.xs,
+    marginBottom: SPACING.xs,
     flexWrap: 'wrap',
   },
   inlineReplyAuthor: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: '600',
     color: COLORS.text,
   },
   inlineAuthorBadge: {
-    paddingHorizontal: 6,
-    paddingVertical: 1,
+    paddingHorizontal: SPACING.xs,
+    paddingVertical: SPACING.xxs,
     backgroundColor: 'rgba(255,107,107,0.14)',
     borderRadius: 6,
   },
   inlineAuthorBadgeText: {
-    fontSize: 9,
+    fontSize: FONT_SIZE.xxs,
     fontWeight: '700',
     color: COLORS.primary,
     letterSpacing: 0.3,
     textTransform: 'uppercase',
   },
   inlineReplyTime: {
-    fontSize: 10,
+    fontSize: FONT_SIZE.xs,
     color: COLORS.textMuted,
     marginLeft: 'auto',
   },
   inlineReplyText: {
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
     color: COLORS.text,
     paddingLeft: REPLY_AVATAR_SIZE + 6,
   },
@@ -1630,8 +1630,8 @@ const styles = StyleSheet.create({
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 40,
-    paddingTop: 56,
+    paddingHorizontal: moderateScale(32, 0.5),
+    paddingTop: SPACING.xxxl,
   },
   emptyIconWrap: {
     width: 80,
@@ -1640,17 +1640,17 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(153,153,153,0.08)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 16,
+    marginBottom: SPACING.base,
   },
   emptyTitle: {
-    fontSize: 18,
+    fontSize: FONT_SIZE.xl,
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: SPACING.sm,
   },
   emptySubtitle: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: moderateScale(15, 0.4),
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
     color: COLORS.textLight,
     textAlign: 'center',
   },
@@ -1660,16 +1660,16 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.border,
-    paddingHorizontal: 12,
-    paddingTop: 12,
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.md,
   },
   ownerNoticeInner: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(153,153,153,0.08)',
     borderRadius: 12,
-    padding: 12,
-    gap: 10,
+    padding: SPACING.md,
+    gap: SPACING.sm,
   },
   ownerNoticeIcon: {
     width: 28,
@@ -1681,9 +1681,9 @@ const styles = StyleSheet.create({
   },
   ownerNoticeText: {
     flex: 1,
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     color: COLORS.textLight,
-    lineHeight: 18,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
   },
 
   // Composer
@@ -1691,37 +1691,37 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.border,
-    paddingHorizontal: 12,
-    paddingTop: 10,
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.sm,
   },
   replyingToBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    gap: SPACING.xs,
+    marginBottom: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xs,
     backgroundColor: 'rgba(153,153,153,0.10)',
     borderRadius: 10,
   },
   replyingToText: {
     flex: 1,
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textLight,
   },
   identitySelectorRow: {
     flexDirection: 'row',
-    gap: 6,
-    marginBottom: 10,
+    gap: SPACING.xs,
+    marginBottom: SPACING.sm,
   },
   identityChip: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 5,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
+    gap: SPACING.xs,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
     borderRadius: 14,
     backgroundColor: COLORS.backgroundDark,
     borderWidth: 1,
@@ -1732,7 +1732,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.primary,
   },
   identityChipLabel: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     fontWeight: '600',
     color: COLORS.textLight,
   },
@@ -1742,15 +1742,15 @@ const styles = StyleSheet.create({
   composerRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 8,
+    gap: SPACING.sm,
   },
   textInput: {
     flex: 1,
     backgroundColor: COLORS.backgroundDark,
     borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    fontSize: 14,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
+    fontSize: FONT_SIZE.md,
     color: COLORS.text,
     maxHeight: 100,
   },
@@ -1773,10 +1773,10 @@ const styles = StyleSheet.create({
     elevation: 0,
   },
   composerHint: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     color: COLORS.textMuted,
-    marginTop: 6,
-    marginBottom: 2,
+    marginTop: SPACING.xs,
+    marginBottom: SPACING.xxs,
     textAlign: 'center',
   },
 
@@ -1785,15 +1785,15 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.border,
-    paddingHorizontal: 12,
-    paddingTop: 6,
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.xs,
   },
   alreadyCommentedRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
+    gap: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
     backgroundColor: 'rgba(255,107,107,0.08)',
     borderRadius: 12,
   },
@@ -1806,14 +1806,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   alreadyCommentedTitle: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '700',
     color: COLORS.text,
   },
   alreadyCommentedSub: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     color: COLORS.textMuted,
-    marginTop: 1,
+    marginTop: SPACING.xxs,
   },
   // Long-press compact action modal (centered card)
   menuBackdrop: {
@@ -1824,16 +1824,16 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 32,
+    paddingHorizontal: SPACING.xxl,
   },
   menuCard: {
     width: '100%',
     maxWidth: 340,
     backgroundColor: COLORS.background,
     borderRadius: 20,
-    paddingTop: 18,
-    paddingHorizontal: 16,
-    paddingBottom: 16,
+    paddingTop: SPACING.base,
+    paddingHorizontal: SPACING.base,
+    paddingBottom: SPACING.base,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: COLORS.border,
     shadowColor: '#000',
@@ -1843,25 +1843,25 @@ const styles = StyleSheet.create({
     elevation: 16,
   },
   menuTitle: {
-    fontSize: 15,
+    fontSize: moderateScale(15, 0.4),
     fontWeight: '700',
     color: COLORS.text,
     textAlign: 'center',
-    marginBottom: 16,
+    marginBottom: SPACING.base,
     letterSpacing: 0.2,
   },
   menuRow: {
     flexDirection: 'row',
     alignItems: 'stretch',
-    gap: 10,
+    gap: SPACING.sm,
   },
   menuBtn: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
-    paddingVertical: 12,
-    paddingHorizontal: 6,
+    gap: SPACING.xs,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.xs,
     borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth,
   },
@@ -1883,7 +1883,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   menuBtnText: {
-    fontSize: 13,
+    fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     letterSpacing: 0.1,
   },
