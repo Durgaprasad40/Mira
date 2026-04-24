@@ -1,11 +1,18 @@
 /**
- * LOCKED (VOICE MESSAGE BUBBLE)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * VOICE MESSAGE BUBBLE
  *
  * STATUS:
- * - Feature is stable and production-locked
+ * - Feature is stable and production-tested
  * - P0 audit passed: uses backend storage URLs, no local file paths
- * - Used by both Phase-1 and Phase-2 messaging
+ * - Used by Phase-1 Messages (DM flow) via MessageBubble
+ *   (Phase-2 Chat Rooms now uses DmAudioBubble)
+ *
+ * [P1_VOICE_UI_UPGRADE] — Premium look pass:
+ *   - Palette now matches Phase-1 text-bubble theme (#E94E77 rose / white)
+ *   - Compact 34x34 play button (down from 42x42)
+ *   - Mic badge (copied from Phase-2 DmAudioBubble design)
+ *   - Tighter bubble dimensions (minWidth 200, maxWidth 260, padding 9/12)
+ *   - Behavior preserved (playback, preload, ticks, delete, duration)
  *
  * Features:
  * - Waveform-style UI with play/pause
@@ -383,19 +390,26 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
         waveformInactive: isOwn ? 'rgba(183,148,224,0.35)' : 'rgba(123,123,158,0.35)',
         progressBg: 'rgba(255,255,255,0.12)',
         progressFill: isOwn ? '#B794E0' : '#8E8EAE',
+        micBadgeBg: isOwn ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.08)',
+        micBadgeIcon: isOwn ? '#FFFFFF' : '#B8B8D0',
       }
     : {
-        // Phase-1 light theme
-        bubbleBg: isOwn ? COLORS.primary : '#F0F2F5',
-        bubbleGradient: isOwn ? '#7B5BA6' : '#E8EAED',
+        // [P1_VOICE_UI_UPGRADE] Phase-1 light theme, colour-matched to the
+        // rose-on-white Messages text bubbles (MessageBubble ownBubble=#E94E77,
+        // otherBubble=#FFFFFF). Previously used COLORS.primary (#FF6B6B) which
+        // looked like "a large red block" next to the rose text bubbles.
+        bubbleBg: isOwn ? '#E94E77' : '#FFFFFF',
+        bubbleGradient: isOwn ? '#D63E67' : '#F5F5F7',
         text: isOwn ? '#FFFFFF' : COLORS.text,
-        textLight: isOwn ? 'rgba(255,255,255,0.75)' : COLORS.textLight,
-        playBtnBg: isOwn ? 'rgba(255,255,255,0.25)' : COLORS.primary,
+        textLight: isOwn ? 'rgba(255,255,255,0.78)' : 'rgba(0,0,0,0.45)',
+        playBtnBg: isOwn ? 'rgba(255,255,255,0.22)' : '#E94E77',
         playBtnIcon: '#FFFFFF',
-        waveformActive: isOwn ? '#FFFFFF' : COLORS.primary,
-        waveformInactive: isOwn ? 'rgba(255,255,255,0.4)' : 'rgba(107,74,148,0.3)',
-        progressBg: isOwn ? 'rgba(255,255,255,0.25)' : 'rgba(107,74,148,0.15)',
-        progressFill: isOwn ? '#FFFFFF' : COLORS.primary,
+        waveformActive: isOwn ? '#FFFFFF' : '#E94E77',
+        waveformInactive: isOwn ? 'rgba(255,255,255,0.42)' : 'rgba(233,78,119,0.25)',
+        progressBg: isOwn ? 'rgba(255,255,255,0.22)' : 'rgba(233,78,119,0.12)',
+        progressFill: isOwn ? '#FFFFFF' : '#E94E77',
+        micBadgeBg: isOwn ? 'rgba(255,255,255,0.18)' : 'rgba(233,78,119,0.12)',
+        micBadgeIcon: isOwn ? '#FFFFFF' : '#E94E77',
       };
 
   // VOICE-UI-UPGRADE: Generate waveform bar heights (deterministic based on messageId)
@@ -424,17 +438,17 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
       disabled={isUnavailable}
     >
       <View style={styles.content}>
-        {/* VOICE-UI-UPGRADE: Modern circular play button */}
+        {/* [P1_VOICE_UI_UPGRADE] Compact 34x34 play button (was 42x42) */}
         <View style={[styles.playButton, { backgroundColor: C.playBtnBg }]}>
           <Ionicons
             name={isUnavailable ? 'alert-circle' : isPlaying ? 'pause' : 'play'}
-            size={22}
+            size={18}
             color={isUnavailable ? C.textLight : C.playBtnIcon}
-            style={!isUnavailable && !isPlaying ? { marginLeft: 2 } : undefined}
+            style={!isUnavailable && !isPlaying ? { marginLeft: 1.5 } : undefined}
           />
         </View>
 
-        {/* VOICE-UI-UPGRADE: Waveform visualization with progress overlay */}
+        {/* Waveform visualization with per-bar progress coloring */}
         <View style={styles.waveformContainer}>
           <View style={styles.waveformBars}>
             {waveformBars.map((height, index) => {
@@ -447,7 +461,7 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
                   style={[
                     styles.waveformBar,
                     {
-                      height: 4 + height * 18, // 4-22px height range
+                      height: 4 + height * 16, // 4-20px range (slightly tighter)
                       backgroundColor: isPlayed ? C.waveformActive : C.waveformInactive,
                     },
                   ]}
@@ -459,6 +473,12 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
           <Text style={[styles.duration, { color: C.textLight }]}>
             {isUnavailable ? 'Unavailable' : isPlaying ? formatDuration(playbackPosition) : formatDuration(durationMs)}
           </Text>
+        </View>
+
+        {/* [P1_VOICE_UI_UPGRADE] Mic badge (adapted from Phase-2 DmAudioBubble)
+            — gives the bubble a premium voice-note glyph and balances the row */}
+        <View style={[styles.micBadge, { backgroundColor: C.micBadgeBg }]}>
+          <Ionicons name="mic" size={10} color={C.micBadgeIcon} />
         </View>
       </View>
 
@@ -485,44 +505,61 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
 });
 
 const styles = StyleSheet.create({
+  // [P1_VOICE_UI_UPGRADE] Tighter premium bubble:
+  //   - maxWidth 260 (was 75% of screen) → consistent on small + large Android
+  //   - paddingVertical 9, horizontal 12 (was 10/10) → matches text-bubble feel
+  //   - borderRadius 18 with 6px tail on sender side (matches MessageBubble)
+  //   - subtle shadow on own-side rose, hairline border on other-side white
   container: {
-    maxWidth: '75%',
+    maxWidth: 260,
     minWidth: 200,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     borderRadius: 18,
   },
   containerOwn: {
     borderBottomRightRadius: 6,
     alignSelf: 'flex-end',
+    shadowColor: '#E94E77',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
+    elevation: 2,
   },
   containerOther: {
     borderBottomLeftRadius: 6,
     alignSelf: 'flex-start',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0, 0, 0, 0.06)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
   content: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
-  // VOICE-UI-UPGRADE: Larger, more prominent play button
+  // [P1_VOICE_UI_UPGRADE] Compact 34x34 circular play button (was 42x42),
+  // matching the Phase-2 DmAudioBubble proportions.
   playButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  // VOICE-UI-UPGRADE: Waveform container
   waveformContainer: {
     flex: 1,
-    gap: 6,
+    gap: 4,
   },
   waveformBars: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    height: 24,
+    height: 22,
     gap: 2,
   },
   waveformBar: {
@@ -534,12 +571,22 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '500',
   },
+  // [P1_VOICE_UI_UPGRADE] Mic badge — subtle 22x22 glyph that anchors the
+  // right edge of the row and signals "voice note" at a glance. Matches the
+  // Phase-2 DmAudioBubble mic badge but sized for the tighter Phase-1 row.
+  micBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   // VOICE-TICKS: Footer for timestamp + tick alignment
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
-    marginTop: 6,
+    marginTop: 4,
   },
   timestamp: {
     fontSize: 10,

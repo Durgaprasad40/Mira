@@ -63,7 +63,12 @@ export function ProtectedMediaBubble({
   onHoldEnd,
   onExpire,
 }: ProtectedMediaBubbleProps) {
-  const token = useAuthStore((s) => s.token);
+  // [P1_MEDIA_FIX] Backend validators require `userId` (media.getMediaInfo)
+  // and `authUserId` (protectedMedia.getMediaUrl). They do NOT accept a
+  // `token` field — passing it triggers ArgumentValidationError and crashes
+  // the chat. Read the authenticated user ID from the auth store and use
+  // the prop form only if nothing is available from the store.
+  const authUserId = useAuthStore((s) => s.userId) ?? userId ?? null;
 
   // ============================================================================
   // HOOKS-FIX: ALL hooks must be declared at the top, BEFORE any early returns
@@ -73,15 +78,15 @@ export function ProtectedMediaBubble({
   // Fetch media info from Convex if mediaId is provided
   const mediaInfo = useQuery(
     api.media.getMediaInfo,
-    mediaId && token ? { mediaId: mediaId as any, token, authUserId: userId } : 'skip'
+    mediaId && authUserId ? { mediaId: mediaId as any, userId: authUserId as any } : 'skip'
   );
 
   // PREFETCH-FIX: Fetch media URL for prefetching (only if not expired and mediaId exists)
   // Note: We use isExpiredProp here since isExpired derived value isn't available yet
   const mediaUrlData = useQuery(
     api.protectedMedia.getMediaUrl,
-    mediaId && token && !isExpiredProp
-      ? { messageId: messageId as any, token, authUserId: userId }
+    mediaId && authUserId && !isExpiredProp
+      ? { messageId: messageId as any, authUserId }
       : 'skip'
   );
 

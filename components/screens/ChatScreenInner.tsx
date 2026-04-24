@@ -57,7 +57,7 @@ import {
   getOtherUserIdFromMeta,
 } from '@/lib/threadsIntegrity';
 import { preloadVideos } from '@/lib/videoCache';
-import { validateFileSize } from '@/lib/uploadUtils';
+import { validateFileSize, uploadMediaToConvexWithProgress, UploadError } from '@/lib/uploadUtils';
 import type { DemoConversationMeta, DemoDmMessage } from '@/stores/demoDmStore';
 import type { Doc, Id } from '@/convex/_generated/dataModel';
 
@@ -145,21 +145,44 @@ type BaseRenderMessage = {
   audioDurationMs?: number;
 };
 
+// [P1_MEDIA_UPLOAD] Pending media lifecycle states (ported from Phase-2 chat rooms)
+type PendingSecureUploadStatus = 'uploading' | 'sending' | 'upload_failed' | 'send_failed';
+
+// Stored alongside a pending message so a retry after send_failed
+// can resubmit with the same secure-photo/video options.
+type PendingSecureRetryOptions = {
+  mediaType: 'photo' | 'video';
+  localUri: string;
+  timer: number;
+  viewingMode: 'tap' | 'hold';
+  isMirrored: boolean;
+};
+
 type RenderMessage = BaseRenderMessage & {
   isPending?: true;
   optimisticStatus?: 'sending' | 'failed';
   errorMessage?: string;
+  // [P1_MEDIA_UPLOAD] progress overlay fields (pending secure media only)
+  localUri?: string;
+  uploadStatus?: PendingSecureUploadStatus;
+  uploadProgress?: number;
+  storageId?: string;
+  retryOptions?: PendingSecureRetryOptions;
 };
 type PendingSecureMessage = RenderMessage & {
   type: 'image' | 'video';
   isPending: true;
+  localUri: string;
+  uploadStatus: PendingSecureUploadStatus;
+  uploadProgress: number;
+  retryOptions: PendingSecureRetryOptions;
 };
 type OptimisticTextMessage = RenderMessage & {
   clientMessageId: string;
   type: 'text' | 'template';
   optimisticStatus: 'sending' | 'failed';
 };
-type CurrentUserSummary = Pick<Doc<'users'>, 'name' | 'gender' | 'subscriptionTier'>;
+type CurrentUserSummary = Pick<Doc<'users'>, '_id' | 'name' | 'gender' | 'subscriptionTier'>;
 
 const PHOTO_UPLOAD_COMPRESSION_THRESHOLD_BYTES = 4 * 1024 * 1024;
 const PHOTO_UPLOAD_MAX_WIDTH = 1600;
@@ -178,7 +201,9 @@ const TEXT_MAX_SCALE = 1.2;
 const TEXT_PROPS = { maxFontSizeMultiplier: TEXT_MAX_SCALE } as const;
 const HEADER_NAME_SIZE = FONT_SIZE.lg;
 const EMPTY_CHAT_TEXT_SIZE = moderateScale(15, 0.4);
-const TD_BUTTON_LABEL_SIZE = FONT_SIZE.sm;
+// TD-BUTTON-BIGGER: slight bump for a more premium, substantial feel while
+// still fitting alongside the 3-dot menu in the header right slot.
+const TD_BUTTON_LABEL_SIZE = moderateScale(14, 0.25);
 const TD_INVITE_BODY_SIZE = moderateScale(15, 0.4);
 const BANNER_TEXT_SIZE = FONT_SIZE.body2;
 const LOADING_ICON_SIZE = moderateScale(48, 0.3);
@@ -255,6 +280,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const contentSizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentSizeFrameRef = useRef<number | null>(null);
   const cooldownTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // COOLDOWN-ANCHOR-FIX: Snapshot absolute cooldown expiry at press time so
+  // the floating toast always shows remaining time even if the backend only
+  // populates `remainingMs` (not `cooldownUntil`).
+  const cooldownAnchorRef = useRef<number | null>(null);
   const uploadAbortControllersRef = useRef<Set<AbortController>>(new Set());
 
   const clearManagedTimeouts = useCallback(() => {
@@ -434,6 +463,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     !isDemo && userId ? { userId: asUserId(userId) } : 'skip'
   ) as CurrentUserSummary | null | undefined;
 
+  // Live typing presence — backend returns `{ isTyping }` for the OTHER participant
+  const otherUserTyping = useQuery(
+    api.messages.getTypingStatus,
+    !isDemo && liveConversationId && currentUser?._id
+      ? { conversationId: liveConversationId, userId: currentUser._id }
+      : 'skip'
+  ) as { isTyping?: boolean } | undefined;
+
   const messages = (isDemo ? demoMessageList : convexMessages) as BaseRenderMessage[] | undefined;
 
   // Demo conversation metadata comes from demoDmStore.meta, seeded by
@@ -511,6 +548,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // PARALLEL-SEND-FIX: Support multiple concurrent secure photo/video sends
   // Changed from single object to array to allow back-to-back sends
   const [pendingSecureMessages, setPendingSecureMessages] = useState<PendingSecureMessage[]>([]);
+  // [P1_MEDIA_UPLOAD] throttle progress state updates per-pending-message
+  const PROGRESS_UPDATE_INTERVAL_MS = 50;
+  const lastProgressUpdateAtRef = useRef<Map<string, number>>(new Map());
   const [optimisticTextMessages, setOptimisticTextMessages] = useState<OptimisticTextMessage[]>([]);
 
   // PARALLEL-SEND-FIX: Helper to add a pending message
@@ -752,6 +792,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const sendInviteMutation = useMutation(api.games.sendBottleSpinInvite);
   const respondToInviteMutation = useMutation(api.games.respondToBottleSpinInvite);
   const endGameMutation = useMutation(api.games.endBottleSpinGame);
+  // TD-LIFECYCLE: Mutations for proper session lifecycle (manual start + cleanup)
+  const startGameMutation = useMutation(api.games.startBottleSpinGame);
+  const cleanupExpiredMutation = useMutation(api.games.cleanupExpiredSession);
 
   // Get other user's ID for invite
   const truthDareOtherUserId = activeConversation?.otherUser?.id;
@@ -759,34 +802,123 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Track cooldown state for inline UI feedback (instead of Alert spam)
   const [showCooldownMessage, setShowCooldownMessage] = useState(false);
   const [cooldownRemainingMin, setCooldownRemainingMin] = useState(0);
+  // COOLDOWN-RETRIGGER-FIX: Bump this counter on every T/D tap during cooldown
+  // so repeated taps reliably re-trigger the toast + reset the auto-hide
+  // timer. Using `showCooldownMessage` alone fails because React bails out
+  // when setState is called with the same value, so a second tap while the
+  // toast is already visible would silently do nothing.
+  const [cooldownToastNonce, setCooldownToastNonce] = useState(0);
+  // COOLDOWN-OVERLAY-FIX-V2: Measure the HEADER directly (always-rendered,
+  // stable sibling) instead of relying on KAV.onLayout (unreliable / often 0
+  // on Android). The cooldown toast overlay sits at
+  //   `insets.top + measuredHeaderHeight (or fallback) + small gap`
+  // so it can never be hidden behind the header — regardless of when
+  // layout measurements settle.
+  const [measuredHeaderHeight, setMeasuredHeaderHeight] = useState(0);
+  // COOLDOWN-LIVE: tick every second so the "Cooldown ends in XXm XXs" banner
+  // updates in real-time while gameSession.state === 'cooldown'.
+  const [cooldownTick, setCooldownTick] = useState(0);
+
+  // TD-UX: Banner shown to invitee while waiting for inviter to manually start the accepted game
+  const [showWaitingForStartToast, setShowWaitingForStartToast] = useState(false);
+
+  // Live typing indicator state (driven by other side's typing presence)
+  const [showTypingIndicator, setShowTypingIndicator] = useState(false);
+
+  useEffect(() => {
+    if (isDemo) {
+      setShowTypingIndicator(false);
+      return;
+    }
+    setShowTypingIndicator(otherUserTyping?.isTyping === true);
+  }, [isDemo, otherUserTyping?.isTyping]);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // AUTO-CLOSE: Watch game session state changes for cross-device sync
+  // TD-LIFECYCLE: Watch game session state changes for cross-device sync
   // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (isDemo || !gameSession) return;
 
-    // Auto-close game modal when game is ended/rejected on either device
-    if (gameSession.state === 'cooldown' || gameSession.state === 'none') {
+    // Auto-close game modal when game is ended/rejected/expired on either device.
+    // TD-MESSAGES-FIX: Previously this list included 'none'. That was wrong —
+    // 'none' is the IDLE state (no session exists yet) and is exactly the
+    // state in which the user opens the invite modal. Because this effect has
+    // `showTruthDareInvite` in its deps, calling setShowTruthDareInvite(true)
+    // re-fired this effect with state='none', which then slammed the modal
+    // back to false the same render tick, making T/D appear completely
+    // unresponsive on tap. 'none' must NOT auto-close anything.
+    if (gameSession.state === 'cooldown' || gameSession.state === 'expired') {
       if (showTruthDareGame) {
         setShowTruthDareGame(false);
       }
-    }
-
-    // Auto-open game modal when invite is accepted (for inviter)
-    if (gameSession.state === 'active') {
-      // Only auto-open if we have a pending invite modal open (inviter waiting)
       if (showTruthDareInvite) {
         setShowTruthDareInvite(false);
-        setShowTruthDareGame(true);
       }
     }
+
+    // TD-LIFECYCLE: Handle expired session - cleanup and show message
+    if (gameSession.state === 'expired' && gameSession.endedReason && userId && conversationId) {
+      if (__DEV__) {
+        console.log('[TD_END_TRACE] cleanup_expired_session', {
+          endedReason: gameSession.endedReason,
+          conversationId,
+          note: 'backend will set cooldownUntil on this path',
+        });
+      }
+      // Cleanup the expired session in backend
+      cleanupExpiredMutation({
+        authUserId: userId,
+        conversationId,
+        endedReason: gameSession.endedReason as 'invite_expired' | 'not_started' | 'timeout',
+      })
+        .then(() => {
+          if (__DEV__) {
+            console.log('[TD_END_TRACE] cooldown_set', {
+              via: 'cleanupExpiredSession',
+              endedReason: gameSession.endedReason,
+            });
+          }
+        })
+        .catch((err) => console.warn('[TD_END_TRACE] cleanup_expired_failed', err));
+
+      // Show appropriate system message
+      const messages: Record<string, string> = {
+        invite_expired: 'Truth or Dare invite expired',
+        not_started: 'Truth or Dare was not started in time',
+        timeout: 'Truth or Dare ended due to inactivity',
+      };
+      const msg = messages[gameSession.endedReason];
+      if (msg) {
+        sendMessage({
+          conversationId: asConversationId(conversationId),
+          authUserId: userId,
+          content: `[SYSTEM:truthdare]${msg}`,
+          type: 'text',
+        }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
+      }
+    }
+
+    // TD-LIFECYCLE: Close invite modal when game becomes active
+    // Do NOT auto-open game modal - inviter must manually start via T/D button
+    if (gameSession.state === 'active') {
+      if (showTruthDareInvite) {
+        setShowTruthDareInvite(false);
+        // DO NOT open game modal - inviter must click T/D button to start
+      }
+    }
+
+    // TD-UX: Show "waiting for inviter to start" banner to invitee while accepted-but-not-started
+    const isInviteeWaitingForStart =
+      gameSession.state === 'active' &&
+      !gameSession.gameStartedAt &&
+      gameSession.inviteeId === userId;
+    setShowWaitingForStartToast(isInviteeWaitingForStart);
 
     // Clear cooldown message when cooldown expires
     if (gameSession.state !== 'cooldown') {
       setShowCooldownMessage(false);
     }
-  }, [isDemo, gameSession?.state, showTruthDareGame, showTruthDareInvite]);
+  }, [isDemo, gameSession?.state, gameSession?.endedReason, gameSession?.gameStartedAt, gameSession?.inviteeId, showTruthDareGame, showTruthDareInvite, userId, conversationId, cleanupExpiredMutation]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-OPEN MODAL WHEN IT'S MY TURN TO CHOOSE
@@ -798,6 +930,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // Only care about active games in choosing phase
     if (gameSession.state !== 'active') return;
+    // TD-LIFECYCLE: Do NOT auto-open until inviter has manually started the game
+    if (!gameSession.gameStartedAt) return;
     if (gameSession.turnPhase !== 'choosing') return;
     if (!gameSession.currentTurnRole) return;
 
@@ -828,62 +962,162 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       }
       setShowTruthDareGame(true);
     }
-  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, userId, showTruthDareGame]);
+  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, gameSession?.gameStartedAt, userId, showTruthDareGame]);
 
-  // Handle T/D button press based on current state
-  const handleTruthDarePress = useCallback(() => {
+  // TD-LIFECYCLE: Handle T/D button press with manual start support
+  const handleTruthDarePress = useCallback(async () => {
+    if (__DEV__) {
+      console.log('[TD_MESSAGES][button_press]', {
+        isDemo,
+        hasUserId: !!userId,
+        hasConversationId: !!conversationId,
+        sessionLoaded: gameSession !== undefined,
+        sessionState: gameSession?.state,
+      });
+    }
+
     if (isDemo) {
       // Demo mode: skip invite flow, go directly to game
       setShowTruthDareGame(true);
       return;
     }
 
-    if (!gameSession) return;
-
-    // Priority 1: Cooldown active - show inline message instead of Alert
-    if (gameSession.state === 'cooldown') {
-      const remainingMin = Math.ceil((gameSession.remainingMs || 0) / 60000);
-      setCooldownRemainingMin(remainingMin);
-      setShowCooldownMessage(true);
-      // Auto-hide after 3 seconds
-      if (cooldownTimeoutRef.current) {
-        clearTimeout(cooldownTimeoutRef.current);
+    if (!userId || !conversationId) {
+      if (__DEV__) {
+        console.log('[TD_MESSAGES][guard_blocked]', {
+          reason: !userId ? 'missing_userId' : 'missing_conversationId',
+        });
       }
-      cooldownTimeoutRef.current = setTimeout(() => {
-        if (mountedRef.current) {
-          setShowCooldownMessage(false);
-        }
-      }, 3000);
       return;
     }
 
-    // Priority 2: Active game exists
+    if (__DEV__) {
+      console.log('[TD_MESSAGES][handler_start]', { state: gameSession?.state ?? 'loading' });
+    }
+
+    // TD-MESSAGES-FIX: When the Convex session query is still loading
+    // (gameSession === undefined), previously the handler bailed silently and
+    // the T/D button appeared dead. Treat "loading" the same as "no session
+    // yet" so the invite modal opens; the backend mutation still enforces
+    // cooldown / active / pending rules.
+    if (!gameSession) {
+      if (__DEV__) {
+        console.log('[TD_MESSAGES][open_modal] session_still_loading → open invite');
+      }
+      setShowTruthDareInvite(true);
+      return;
+    }
+
+    // Priority 1: Cooldown active - show inline message instead of Alert
+    if (gameSession.state === 'cooldown') {
+      const remainingMs = (gameSession as any).remainingMs || 0;
+      const cooldownUntil = (gameSession as any).cooldownUntil;
+      // COOLDOWN-ANCHOR-FIX: capture absolute expiry at press time so the
+      // floating toast can countdown even when only `remainingMs` is present.
+      const anchor = typeof cooldownUntil === 'number' && cooldownUntil > 0
+        ? cooldownUntil
+        : Date.now() + remainingMs;
+      cooldownAnchorRef.current = anchor;
+      const remainingMin = Math.ceil(remainingMs / 60000);
+      if (__DEV__) {
+        console.log('[TD_COOLDOWN_TAP]', {
+          anchor,
+          remainingMs,
+          remainingMin,
+          cooldownUntil,
+        });
+      }
+      setCooldownRemainingMin(remainingMin);
+      setShowCooldownMessage(true);
+      // COOLDOWN-RETRIGGER-FIX: Bump nonce to guarantee the auto-hide useEffect
+      // re-runs (and resets its timer) on every tap — even when the toast is
+      // already visible from a previous tap.
+      setCooldownToastNonce((n) => n + 1);
+      return;
+    }
+
+    // Priority 2: Expired session - handled by useEffect cleanup, no-op here
+    if (gameSession.state === 'expired') {
+      return;
+    }
+
+    // Priority 3: Active game exists
     if (gameSession.state === 'active') {
+      const amIInviter = gameSession.inviterId === userId;
+      const hasGameStarted = !!gameSession.gameStartedAt;
+
+      // TD-LIFECYCLE: If game not started yet, handle based on role
+      if (!hasGameStarted) {
+        if (amIInviter) {
+          // Inviter: Start the game manually
+          try {
+            const result = await startGameMutation({
+              authUserId: userId,
+              conversationId,
+            });
+            if (result.success) {
+              // Send system message announcing game start
+              sendMessage({
+                conversationId: asConversationId(conversationId),
+                authUserId: userId,
+                content: '[SYSTEM:truthdare]Game started!',
+                type: 'text',
+              }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
+              setShowTruthDareGame(true);
+            }
+          } catch (err) {
+            console.error('[TD_MANUAL_START] Error starting game:', err);
+          }
+        } else {
+          // Invitee: game accepted but inviter hasn't started yet - no-op,
+          // wait for inviter to manually start the game.
+        }
+        return;
+      }
+
+      // Game is started - open the modal normally
       setShowTruthDareGame(true);
       return;
     }
 
-    // Priority 3: Pending invite exists - no action (button is disabled or visual feedback)
+    // Priority 4: Pending invite exists - no action (button is disabled or visual feedback)
     if (gameSession.state === 'pending') {
       // Invitee sees the invite card below chat
       // Inviter sees "Waiting..." indicator - no action needed
       return;
     }
 
-    // Priority 4: No game - show invite modal
+    // Priority 5: No game - show invite modal
+    if (__DEV__) {
+      console.log('[TD_MESSAGES][open_modal] state_none_open_invite');
+    }
     setShowTruthDareInvite(true);
-  }, [isDemo, gameSession, userId]);
+  }, [isDemo, gameSession, userId, conversationId, startGameMutation]);
 
   // Send game invite
   const handleSendInvite = useCallback(async () => {
-    if (!userId || !conversationId || !truthDareOtherUserId) return;
+    if (!userId || !conversationId || !truthDareOtherUserId) {
+      if (__DEV__) {
+        console.log('[TD_MESSAGES][guard_blocked] handleSendInvite', {
+          hasUserId: !!userId,
+          hasConversationId: !!conversationId,
+          hasOtherUserId: !!truthDareOtherUserId,
+        });
+      }
+      // TD-MESSAGES-FIX: Surface the problem instead of dying silently, so the
+      // "Invite" button never appears dead when profile data is slow to load.
+      Alert.alert('Please wait', 'Still loading chat details — try again in a moment.');
+      return;
+    }
 
     try {
+      if (__DEV__) console.log('[TD_MESSAGES][mutation_start] sendBottleSpinInvite');
       await sendInviteMutation({
         authUserId: userId,
         conversationId,
         otherUserId: String(truthDareOtherUserId),
       });
+      if (__DEV__) console.log('[TD_MESSAGES][mutation_success] sendBottleSpinInvite');
       setShowTruthDareInvite(false);
 
       // Send system message about invite (neutral phrasing that works for both parties)
@@ -897,6 +1131,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         type: 'text',
       });
     } catch (error) {
+      if (__DEV__) console.warn('[TD_MESSAGES][mutation_error] sendBottleSpinInvite', error);
       Alert.alert('Error', getErrorMessage(error, 'Failed to send invite'));
     }
   }, [userId, conversationId, truthDareOtherUserId, sendInviteMutation, currentUser, sendMessage]);
@@ -935,7 +1170,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [userId, conversationId, respondToInviteMutation, currentUser, sendMessage]);
 
   // End game (called from BottleSpinGame)
+  // TD_END_TRACE: centralised instrumentation so any future accidental
+  // cooldown trigger is immediately attributable from the device log.
   const handleEndGame = useCallback(async () => {
+    if (__DEV__) {
+      console.log('[TD_END_TRACE] end_game_called', {
+        isDemo,
+        hasUserId: !!userId,
+        hasConversationId: !!conversationId,
+        caller: 'handleEndGame',
+      });
+    }
     if (isDemo) return; // Demo mode doesn't track game sessions
 
     if (!userId || !conversationId) return;
@@ -945,10 +1190,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         authUserId: userId,
         conversationId,
       });
+      if (__DEV__) {
+        console.log('[TD_END_TRACE] cooldown_set', {
+          via: 'endBottleSpinGame',
+          conversationId,
+        });
+      }
     } catch (error) {
       // Silent fail - UI will close anyway
       if (__DEV__) {
-        console.warn('[TD] Failed to end game:', error);
+        console.warn('[TD_END_TRACE] end_game_failed', error);
       }
     }
   }, [isDemo, userId, conversationId, endGameMutation]);
@@ -958,8 +1209,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const handleSendTruthDareResult = useCallback(async (message: string) => {
     if (!conversationId) return;
 
-    // Handle "ended the game" message - also call backend
-    if (message.includes('ended the game')) {
+    // TD_END_TRACE: tighten "ended the game" detection. The previous
+    // `message.includes('ended the game')` was a substring match and would
+    // fire for any future message that happens to contain that phrase.
+    // Switch to an exact suffix match against the deliberate format produced
+    // by handleEndGameConfirm (`${currentUserName} ended the game`) so only
+    // an explicit End Game confirmation triggers the backend mutation.
+    const isEndGameSystemMessage = /^[^\s].* ended the game$/.test(message);
+    if (isEndGameSystemMessage) {
+      if (__DEV__) {
+        console.log('[TD_END_TRACE] end_game_message_detected', { message });
+      }
       handleEndGame();
     }
 
@@ -1220,6 +1480,30 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     });
     return () => sub.remove();
   }, [scrollToBottom]);
+
+  // COOLDOWN-LIVE: 1-second tick while in T/D cooldown so the banner countdown
+  // updates in real-time. Stops when not in cooldown to save renders.
+  useEffect(() => {
+    if (isDemo) return;
+    if ((gameSession as any)?.state !== 'cooldown') return;
+    const id = setInterval(() => setCooldownTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [isDemo, (gameSession as any)?.state]);
+
+  // COOLDOWN-TOAST-AUTOHIDE: Each tap bumps `cooldownToastNonce`, which
+  // re-runs this effect and resets the 3.5s auto-hide timer. This guarantees
+  // repeated taps during cooldown always show the toast for a fresh window,
+  // even if it was already visible from a previous tap.
+  useEffect(() => {
+    if (cooldownToastNonce === 0) return;
+    if (!showCooldownMessage) return;
+    const timer = setTimeout(() => {
+      if (mountedRef.current) {
+        setShowCooldownMessage(false);
+      }
+    }, 3500);
+    return () => clearTimeout(timer);
+  }, [cooldownToastNonce, showCooldownMessage]);
 
   // B5 fix: persist drafts in both demo and Convex modes
   const handleDraftChange = useCallback((text: string) => {
@@ -1647,74 +1931,82 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       }
 
       // Convex mode: upload and send
-      // PARALLEL-SEND-FIX: Show immediate optimistic placeholder (supports multiple)
+      // [P1_MEDIA_UPLOAD] Insert optimistic placeholder with local preview
+      // so the bubble appears instantly with progress %.
       // VIDEO-FIX: Use correct type for video
       if (!liveConversationId) {
         throw new Error('Conversation unavailable');
       }
       pendingId = `pending_secure_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const mediaType = isVideo ? 'video' : 'photo';
+      const retryOptions: PendingSecureRetryOptions = {
+        mediaType,
+        localUri: imageUri,
+        timer: options.timer,
+        viewingMode: options.viewingMode,
+        isMirrored: isVideo && isMirrored,
+      };
       addPendingSecureMessage({
         _id: pendingId,
         senderId: userId,
         type: isVideo ? 'video' : 'image',
-        content: isVideo ? 'Preparing secure video...' : 'Preparing secure photo...',
+        content: isVideo ? 'Uploading secure video...' : 'Uploading secure photo...',
         createdAt: Date.now(),
         isPending: true,
+        localUri: imageUri,
+        uploadStatus: 'uploading',
+        uploadProgress: 0,
+        retryOptions,
       });
-
-      const mediaType = isVideo ? 'video' : 'photo';
-      if (!isVideo) {
-        updatePendingSecureMessage(pendingId, (message) => ({
-          ...message,
-          content: 'Optimizing secure photo...',
-        }));
+      if (__DEV__) {
+        console.log('[P1_MEDIA_UPLOAD] optimistic_insert', {
+          pendingId,
+          mediaType,
+          timer: options.timer,
+          viewMode: options.viewingMode,
+        });
       }
+
+      // Optimize photo before upload (video goes straight through)
       const preparedAsset = await prepareSecureUploadAsset(imageUri, mediaType);
       cleanupUploadUri = preparedAsset.cleanupUri;
 
-      // 1. Get upload URL
-      updatePendingSecureMessage(pendingId, (message) => ({
-        ...message,
-        content: isVideo ? 'Uploading secure video...' : 'Uploading secure photo...',
-      }));
-      const uploadUrl = await generateUploadUrl();
+      // 1+2. Upload with real progress via FileSystem.createUploadTask
+      const storageId = await uploadMediaToConvexWithProgress(
+        preparedAsset.uploadUri,
+        async () => await generateUploadUrl(),
+        mediaType,
+        (pct) => {
+          if (!mountedRef.current) return;
+          const now = Date.now();
+          const last = lastProgressUpdateAtRef.current.get(pendingId) ?? 0;
+          // Always let 0% and 100% through; throttle intermediate updates.
+          if (pct > 0 && pct < 100 && now - last < PROGRESS_UPDATE_INTERVAL_MS) return;
+          lastProgressUpdateAtRef.current.set(pendingId, now);
+          updatePendingSecureMessage(pendingId, (m) => ({
+            ...m,
+            uploadProgress: pct,
+          }));
+          if (__DEV__ && (pct === 0 || pct === 100 || Math.floor(pct) % 10 === 0)) {
+            console.log('[P1_MEDIA_UPLOAD] progress', {
+              pendingId,
+              pct: Math.round(pct),
+            });
+          }
+        }
+      );
+      lastProgressUpdateAtRef.current.delete(pendingId);
 
-      // 2. Upload the media
-      const nextReadController = createAbortController();
-      readController = nextReadController;
-      const response = await fetch(preparedAsset.uploadUri, { signal: nextReadController.signal });
-      const blob = await response.blob();
-      releaseAbortController(readController);
-      readController = null;
-      // VIDEO-FIX: Use correct Content-Type for video
-      const contentType = isVideo ? (blob.type || 'video/mp4') : (blob.type || 'image/jpeg');
-
-      const nextUploadController = createAbortController();
-      uploadController = nextUploadController;
-      const uploadResponse = await fetch(uploadUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': contentType },
-        body: blob,
-        signal: nextUploadController.signal,
-      });
-
-      // CRASH FIX: Validate upload response before accessing storageId
-      if (!uploadResponse.ok) {
-        throw new Error(`Upload failed: ${uploadResponse.status}`);
-      }
-
-      const uploadResult = await uploadResponse.json();
-      if (!uploadResult?.storageId) {
-        throw new Error('Upload succeeded but no storageId returned');
-      }
-      const { storageId } = uploadResult;
-
-      updatePendingSecureMessage(pendingId, (message) => ({
-        ...message,
+      // Upload succeeded — transition to 'sending' while we commit the message.
+      updatePendingSecureMessage(pendingId, (m) => ({
+        ...m,
+        uploadStatus: 'sending',
+        uploadProgress: 100,
+        storageId: storageId as unknown as string,
         content: isVideo ? 'Finalizing secure video...' : 'Finalizing secure photo...',
       }));
 
-      // 3. Send protected media message with Phase-1 options mapped to Convex format
+      // 3. Send protected media message
       // MSG-003 FIX: Use authUserId for server-side verification
       // HOLD-TAP-FIX: Pass viewMode to backend for consistent rendering
       // VIDEO-FIX: Pass mediaType to distinguish photo vs video
@@ -1724,24 +2016,61 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         authUserId: userId,
         imageStorageId: storageId,
         timer: options.timer,
-        screenshotAllowed: false, // Phase-1 default: no screenshots
-        viewOnce: options.timer === 0, // "Once" timer = view once
-        watermark: false, // Phase-1 default: no watermark
-        viewMode: options.viewingMode, // HOLD-TAP-FIX: Store the actual viewing mode
-        mediaType: isVideo ? 'video' : 'image', // VIDEO-FIX: Pass correct media type
-        isMirrored: isVideo && isMirrored, // VIDEO-MIRROR-FIX: Pass mirrored flag for front-camera videos
+        screenshotAllowed: false,
+        viewOnce: options.timer === 0,
+        watermark: false,
+        viewMode: options.viewingMode,
+        mediaType: isVideo ? 'video' : 'image',
+        isMirrored: isVideo && isMirrored,
       });
-      // PARALLEL-SEND-FIX: Remove specific pending message on success
+      if (__DEV__) {
+        console.log('[P1_MEDIA_UPLOAD] success', { pendingId });
+        console.log('[P1_MEDIA_UPLOAD] replace_optimistic', { pendingId });
+      }
       removePendingSecureMessage(pendingId);
-      releaseAbortController(uploadController);
-      uploadController = null;
     } catch (error) {
-      // PARALLEL-SEND-FIX: Remove pending message on error too (only if set)
-      if (pendingId) removePendingSecureMessage(pendingId);
-      if (!isAbortError(error) && mountedRef.current) {
-        Alert.alert('Error', getErrorMessage(error, 'Failed to send secure photo'));
+      // [P1_MEDIA_UPLOAD] Keep pending message visible with retry UI.
+      // Distinguish upload_failed (retry must re-upload) vs send_failed
+      // (retry can reuse the already-uploaded storageId).
+      if (pendingId && mountedRef.current) {
+        const isUploadError = error instanceof UploadError;
+        // If we got a storageId already, the failure is in sendProtectedImage,
+        // i.e. a send_failed; otherwise it's an upload_failed.
+        setPendingSecureMessages((prev) =>
+          prev.map((m) => {
+            if (m._id !== pendingId) return m;
+            const alreadyUploaded = !!m.storageId;
+            const nextStatus: PendingSecureUploadStatus = alreadyUploaded
+              ? 'send_failed'
+              : 'upload_failed';
+            if (__DEV__) {
+              console.log('[P1_MEDIA_UPLOAD] failed', {
+                pendingId,
+                nextStatus,
+                uploadErrorType: isUploadError ? (error as UploadError).type : undefined,
+                errorMessage: getErrorMessage(error, 'Failed'),
+              });
+            }
+            return {
+              ...m,
+              uploadStatus: nextStatus,
+              errorMessage: getErrorMessage(
+                error,
+                alreadyUploaded ? 'Failed to send.' : 'Upload failed.'
+              ),
+            };
+          })
+        );
+      }
+      // For file-too-large / invalid-file, show a one-time alert so the user
+      // knows why it failed; the bubble itself shows "Tap to retry".
+      if (error instanceof UploadError && !error.retryable && mountedRef.current) {
+        Alert.alert('Error', error.message);
+      } else if (!isAbortError(error) && __DEV__) {
+        console.warn('[P1_MEDIA_UPLOAD] error', error);
       }
     } finally {
+      if (pendingId) lastProgressUpdateAtRef.current.delete(pendingId);
       if (readController) {
         releaseAbortController(readController);
       }
@@ -1751,10 +2080,174 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       if (cleanupUploadUri) {
         FileSystem.deleteAsync(cleanupUploadUri, { idempotent: true }).catch(() => {});
       }
-      // PARALLEL-SEND-FIX: No isSending state management for media sends
-      // The pending messages array handles UI feedback
     }
   };
+
+  // [P1_MEDIA_UPLOAD] Retry a failed pending secure message.
+  // - upload_failed  → re-run the full upload + send with the stored retryOptions
+  // - send_failed    → re-run only sendProtectedImage with the stored storageId
+  const retryingPendingIdsRef = useRef<Set<string>>(new Set());
+  const handleRetrySecurePhotoMessage = useCallback(async (pendingId: string) => {
+    if (!userId || !liveConversationId) return;
+    if (retryingPendingIdsRef.current.has(pendingId)) return;
+    retryingPendingIdsRef.current.add(pendingId);
+
+    const pending = pendingSecureMessages.find((m) => m._id === pendingId);
+    if (!pending) {
+      retryingPendingIdsRef.current.delete(pendingId);
+      return;
+    }
+    const { retryOptions } = pending;
+    const isVideoRetry = retryOptions.mediaType === 'video';
+
+    // send_failed → we already have a storageId; just resend.
+    if (pending.uploadStatus === 'send_failed' && pending.storageId) {
+      updatePendingSecureMessage(pendingId, (m) => ({
+        ...m,
+        uploadStatus: 'sending',
+        errorMessage: undefined,
+        content: isVideoRetry ? 'Finalizing secure video...' : 'Finalizing secure photo...',
+      }));
+      try {
+        await sendProtectedImage({
+          conversationId: liveConversationId,
+          authUserId: userId,
+          imageStorageId: pending.storageId as Id<'_storage'>,
+          timer: retryOptions.timer,
+          screenshotAllowed: false,
+          viewOnce: retryOptions.timer === 0,
+          watermark: false,
+          viewMode: retryOptions.viewingMode,
+          mediaType: isVideoRetry ? 'video' : 'image',
+          isMirrored: retryOptions.isMirrored,
+        });
+        if (__DEV__) {
+          console.log('[P1_MEDIA_UPLOAD] success', { pendingId, via: 'retry_send_failed' });
+          console.log('[P1_MEDIA_UPLOAD] replace_optimistic', { pendingId });
+        }
+        removePendingSecureMessage(pendingId);
+      } catch (error) {
+        if (__DEV__) {
+          console.log('[P1_MEDIA_UPLOAD] failed', {
+            pendingId,
+            nextStatus: 'send_failed',
+            via: 'retry_send_failed',
+            errorMessage: getErrorMessage(error, 'Failed'),
+          });
+        }
+        if (mountedRef.current) {
+          updatePendingSecureMessage(pendingId, (m) => ({
+            ...m,
+            uploadStatus: 'send_failed',
+            errorMessage: getErrorMessage(error, 'Failed to send.'),
+          }));
+        }
+      } finally {
+        retryingPendingIdsRef.current.delete(pendingId);
+      }
+      return;
+    }
+
+    // upload_failed (or any other state) → full re-upload + resend.
+    let cleanupUri: string | null = null;
+    updatePendingSecureMessage(pendingId, (m) => ({
+      ...m,
+      uploadStatus: 'uploading',
+      uploadProgress: 0,
+      errorMessage: undefined,
+      storageId: undefined,
+      content: isVideoRetry ? 'Uploading secure video...' : 'Uploading secure photo...',
+    }));
+    try {
+      const preparedAsset = await prepareSecureUploadAsset(
+        retryOptions.localUri,
+        retryOptions.mediaType
+      );
+      cleanupUri = preparedAsset.cleanupUri;
+      const storageId = await uploadMediaToConvexWithProgress(
+        preparedAsset.uploadUri,
+        async () => await generateUploadUrl(),
+        retryOptions.mediaType,
+        (pct) => {
+          if (!mountedRef.current) return;
+          const now = Date.now();
+          const last = lastProgressUpdateAtRef.current.get(pendingId) ?? 0;
+          if (pct > 0 && pct < 100 && now - last < PROGRESS_UPDATE_INTERVAL_MS) return;
+          lastProgressUpdateAtRef.current.set(pendingId, now);
+          updatePendingSecureMessage(pendingId, (m) => ({ ...m, uploadProgress: pct }));
+        }
+      );
+      lastProgressUpdateAtRef.current.delete(pendingId);
+
+      updatePendingSecureMessage(pendingId, (m) => ({
+        ...m,
+        uploadStatus: 'sending',
+        uploadProgress: 100,
+        storageId: storageId as unknown as string,
+        content: isVideoRetry ? 'Finalizing secure video...' : 'Finalizing secure photo...',
+      }));
+      await sendProtectedImage({
+        conversationId: liveConversationId,
+        authUserId: userId,
+        imageStorageId: storageId,
+        timer: retryOptions.timer,
+        screenshotAllowed: false,
+        viewOnce: retryOptions.timer === 0,
+        watermark: false,
+        viewMode: retryOptions.viewingMode,
+        mediaType: isVideoRetry ? 'video' : 'image',
+        isMirrored: retryOptions.isMirrored,
+      });
+      if (__DEV__) {
+        console.log('[P1_MEDIA_UPLOAD] success', { pendingId, via: 'retry_upload_failed' });
+        console.log('[P1_MEDIA_UPLOAD] replace_optimistic', { pendingId });
+      }
+      removePendingSecureMessage(pendingId);
+    } catch (error) {
+      if (mountedRef.current) {
+        setPendingSecureMessages((prev) =>
+          prev.map((m) => {
+            if (m._id !== pendingId) return m;
+            const alreadyUploaded = !!m.storageId;
+            const nextStatus: PendingSecureUploadStatus = alreadyUploaded
+              ? 'send_failed'
+              : 'upload_failed';
+            if (__DEV__) {
+              console.log('[P1_MEDIA_UPLOAD] failed', {
+                pendingId,
+                nextStatus,
+                via: 'retry_upload_failed',
+                errorMessage: getErrorMessage(error, 'Failed'),
+              });
+            }
+            return {
+              ...m,
+              uploadStatus: nextStatus,
+              errorMessage: getErrorMessage(
+                error,
+                alreadyUploaded ? 'Failed to send.' : 'Upload failed.'
+              ),
+            };
+          })
+        );
+      }
+    } finally {
+      lastProgressUpdateAtRef.current.delete(pendingId);
+      if (cleanupUri) {
+        FileSystem.deleteAsync(cleanupUri, { idempotent: true }).catch(() => {});
+      }
+      retryingPendingIdsRef.current.delete(pendingId);
+    }
+  }, [
+    userId,
+    liveConversationId,
+    pendingSecureMessages,
+    prepareSecureUploadAsset,
+    generateUploadUrl,
+    sendProtectedImage,
+    updatePendingSecureMessage,
+    removePendingSecureMessage,
+  ]);
 
   const findDisplayMessageById = useCallback(
     (messageId: string) => displayMessages.find((message) => message._id === messageId),
@@ -1905,14 +2398,50 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const otherUserId = typeof otherUser.id === 'string' && otherUser.id.length > 0
     ? otherUser.id
     : undefined;
+  // PRIVACY-RESTORE: Confession DMs are anonymous on the recipient's side until
+  // the confessor opts to reveal. Detect both flags up-front and use them to
+  // gate avatar/name rendering and profile-tap navigation.
+  const isOtherUserAnonymous = !isDemo && (otherUser as any).isAnonymous === true;
+  const isConfessionChat = !isDemo && (activeConversation as any).isConfessionChat === true;
   const otherUserName = otherUser.name;
-  const otherUserPhotoUrl = otherUser.photoUrl;
+  const otherUserPhotoUrl = isOtherUserAnonymous ? undefined : otherUser.photoUrl;
   const otherUserLastActive = otherUser.lastActive ?? 0;
   const activeMatchId = !isDemo ? conversation?.matchId : undefined;
 
-  const composerBottomPadding = source === 'messages'
-    ? Math.max(insets.bottom, Platform.OS === 'android' ? SPACING.sm : moderateScale(6, 0.25))
-    : Math.max(insets.bottom, Platform.OS === 'android' ? SPACING.md - SPACING.xxs : SPACING.sm);
+  // FLUSH-COMPOSER: The chat screen renders INSIDE the bottom tab navigator,
+  // which means the tab bar itself already sits below our composer. We must
+  // NOT add any extra bottom padding here — not safe-area, not hairline —
+  // or there will be a visible gap between the input bar and the tabs.
+  // Keyboard-open stays at 0 (KAV handles keyboard offset internally).
+  const composerBottomPadding = 0;
+
+  // COOLDOWN-LIVE: derive "XXm XXs" countdown text.
+  // Primary source: gameSession.cooldownUntil (absolute timestamp).
+  // Fallback: cooldownAnchorRef captured at press time from remainingMs.
+  // cooldownTick (1s interval) drives re-render. Hidden when not in cooldown.
+  const cooldownLiveText = (() => {
+    if (isDemo) return null;
+    const gs: any = gameSession;
+    if (!gs || gs.state !== 'cooldown') return null;
+    let expiry: number | null = null;
+    if (typeof gs.cooldownUntil === 'number' && gs.cooldownUntil > 0) {
+      expiry = gs.cooldownUntil;
+    } else if (cooldownAnchorRef.current && cooldownAnchorRef.current > Date.now()) {
+      expiry = cooldownAnchorRef.current;
+    } else if (typeof gs.remainingMs === 'number' && gs.remainingMs > 0) {
+      // Last-resort: approximate from live remainingMs snapshot.
+      expiry = Date.now() + gs.remainingMs;
+    }
+    if (!expiry) return null;
+    const remaining = Math.max(0, expiry - Date.now());
+    if (remaining <= 0) return null;
+    const totalSec = Math.floor(remaining / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}m ${s.toString().padStart(2, '0')}s`;
+  })();
+  // Reference cooldownTick so React re-evaluates each second while cooldown is active.
+  void cooldownTick;
   const pendingInviteBottom = composerHeight + composerBottomPadding + SPACING.sm;
 
   const canSendCustom = isDemo
@@ -1926,93 +2455,156 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   return (
     <View style={styles.container}>
       {/* LOCKED: P1 chat header avatar + open profile. Do not modify without explicit approval. */}
+      {/* PRIVACY-RESTORE: Confession-chat safety banner sits ABOVE the header
+          and replaces the normal top inset, signaling that this is an
+          anonymous chat originated from a confession. */}
+      {isConfessionChat && (
+        <View style={[styles.confessionBanner, { paddingTop: insets.top + 8 }]}>
+          <View style={styles.confessionBannerInner}>
+            <Ionicons name="eye-off" size={14} color={COLORS.primary} />
+            <Text {...TEXT_PROPS} style={styles.confessionBannerText}>
+              Anonymous Chat from Confess
+            </Text>
+          </View>
+          <Text {...TEXT_PROPS} style={styles.confessionBannerHint}>
+            Be kind. Do not share personal info.
+          </Text>
+        </View>
+      )}
       {/* Header — sits above KAV (does not move when keyboard opens) */}
-      <View style={[styles.header, { paddingTop: insets.top }]}>
+      <View
+        style={[styles.header, !isConfessionChat && { paddingTop: insets.top }]}
+        onLayout={(e) => {
+          const h = e.nativeEvent.layout.height;
+          if (h > 0 && Math.abs(h - measuredHeaderHeight) > 0.5) {
+            setMeasuredHeaderHeight(h);
+          }
+        }}
+      >
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={HEADER_ICON_SIZE} color={COLORS.text} />
         </TouchableOpacity>
-        {/* Avatar with presence dot - tappable to open profile */}
-        <TouchableOpacity
-          onPress={() => handleOpenProfile(otherUserId)}
-          style={styles.avatarButton}
-          activeOpacity={0.7}
-        >
-          <View style={styles.avatarContainer}>
-            {otherUserPhotoUrl ? (
-              <Image
-                source={{ uri: otherUserPhotoUrl }}
-                style={styles.headerAvatar}
-              />
-            ) : (
-              <View style={styles.headerAvatarPlaceholder}>
-                <Text {...TEXT_PROPS} style={styles.headerAvatarInitials}>{avatarInitials}</Text>
+        {/* Avatar with presence dot - tappable to open profile (disabled for anonymous users) */}
+        {isOtherUserAnonymous ? (
+          // PRIVACY: Non-tappable anonymous avatar with eye-off glyph.
+          <View style={styles.avatarButton}>
+            <View style={styles.avatarContainer}>
+              <View style={[styles.headerAvatarPlaceholder, styles.headerAvatarAnonymous]}>
+                <Ionicons name="eye-off" size={18} color={COLORS.textMuted} />
               </View>
-            )}
-            {/* PRESENCE-DOT: Online indicator on avatar */}
-            {(() => {
-              const isOnline = Date.now() - otherUserLastActive < 60_000;
-              return (
-                <View style={[
-                  styles.presenceDot,
-                  isOnline ? styles.presenceDotOnline : styles.presenceDotOffline,
-                ]} />
-              );
-            })()}
+            </View>
           </View>
-        </TouchableOpacity>
-        {/* Name + status - tappable to open profile */}
-        <TouchableOpacity
-          onPress={() => handleOpenProfile(otherUserId)}
-          style={styles.headerInfo}
-          activeOpacity={0.7}
-        >
-          {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
-          <Text {...TEXT_PROPS} style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
-            {otherUserName}
-          </Text>
-          {/* ONLINE-STATUS-FIX: Show "Online" for very recent activity */}
-          <Text {...TEXT_PROPS} style={styles.headerStatus}>
-            {(() => {
-              const diff = Date.now() - otherUserLastActive;
-              // Online: within 1 minute (likely still in app)
-              if (diff < 60_000) return 'Online';
-              // Active now: within 5 minutes
-              if (diff < 5 * 60_000) return 'Active now';
-              // Recently active: anything else with valid timestamp
-              if (otherUserLastActive > 0) return 'Recently active';
-              return 'Offline';
-            })()}
-          </Text>
-        </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            onPress={() => handleOpenProfile(otherUserId)}
+            style={styles.avatarButton}
+            activeOpacity={0.7}
+          >
+            <View style={styles.avatarContainer}>
+              {otherUserPhotoUrl ? (
+                <Image
+                  source={{ uri: otherUserPhotoUrl }}
+                  style={styles.headerAvatar}
+                />
+              ) : (
+                <View style={styles.headerAvatarPlaceholder}>
+                  <Text {...TEXT_PROPS} style={styles.headerAvatarInitials}>{avatarInitials}</Text>
+                </View>
+              )}
+              {/* PRESENCE-DOT: Online indicator on avatar */}
+              {(() => {
+                const isOnline = Date.now() - otherUserLastActive < 60_000;
+                return (
+                  <View style={[
+                    styles.presenceDot,
+                    isOnline ? styles.presenceDotOnline : styles.presenceDotOffline,
+                  ]} />
+                );
+              })()}
+            </View>
+          </TouchableOpacity>
+        )}
+        {/* Name + status - tappable to open profile (disabled for anonymous users) */}
+        {isOtherUserAnonymous ? (
+          // PRIVACY: Non-tappable anonymous name display.
+          <View style={styles.headerInfo}>
+            <Text {...TEXT_PROPS} style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
+              Anonymous
+            </Text>
+            <Text {...TEXT_PROPS} style={styles.headerStatus}>From a confession</Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            onPress={() => handleOpenProfile(otherUserId)}
+            style={styles.headerInfo}
+            activeOpacity={0.7}
+          >
+            {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
+            <Text {...TEXT_PROPS} style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
+              {otherUserName}
+            </Text>
+            {/* ONLINE-STATUS-FIX: Show "Online" for very recent activity */}
+            <Text {...TEXT_PROPS} style={styles.headerStatus}>
+              {(() => {
+                const diff = Date.now() - otherUserLastActive;
+                // Online: within 1 minute (likely still in app)
+                if (diff < 60_000) return 'Online';
+                // Active now: within 5 minutes
+                if (diff < 5 * 60_000) return 'Active now';
+                // Recently active: anything else with valid timestamp
+                if (otherUserLastActive > 0) return 'Recently active';
+                return 'Offline';
+              })()}
+            </Text>
+          </TouchableOpacity>
+        )}
         {/* Right section: T/D button + menu with stable spacing */}
         <View style={styles.headerRightSection}>
         {/* Truth/Dare game button - only for matched users (non-pre-match) */}
         {!activeConversation.isPreMatch && (
           <TouchableOpacity
             onPress={handleTruthDarePress}
-            hitSlop={8}
+            // TD-MESSAGES-FIX: Widen tap surface so no near-miss tap is lost.
+            // The wrapping gameButton already hugs the pill visually, but we
+            // give +12 on all sides so even a 48pt finger pad around the pill
+            // edges always registers a press on the visible T/D button.
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
             style={styles.gameButton}
             disabled={!isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId}
+            testID="chat-header-truthdare-button"
+            accessibilityRole="button"
+            accessibilityLabel="Truth or Dare"
           >
             <View style={[
               styles.truthDareButton,
-              // Show indicator dot if there's a pending invite for me
+              // BUTTON-CONSISTENCY: T/D button keeps the SAME visual treatment in
+              // every state (normal / pending / cooldown / active). Only the
+              // contextual badge + label text change. No opacity dimming, no
+              // color flips — the button must never look "disabled".
               gameSession?.state === 'pending' && gameSession?.inviteeId === userId && styles.truthDareButtonWithBadge,
-              // Dim button if I sent a pending invite (waiting for response)
-              !isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId && styles.truthDareButtonWaiting,
-              // Dim button during cooldown
-              !isDemo && gameSession?.state === 'cooldown' && styles.truthDareButtonCooldown,
             ]}>
-              <Ionicons name="wine" size={TD_ICON_SIZE} color={COLORS.white} />
-              <Text {...TEXT_PROPS} style={styles.truthDareLabel}>
-                {/* Show status on button */}
+              {/* TD-ICON-FIX: Removed inline icon — the pill was overflowing
+                  the fixed-size gameButton slot and clipping into the 3-dot
+                  menu. Clean text-only label is both readable and premium. */}
+              <Text
+                {...TEXT_PROPS}
+                style={styles.truthDareLabel}
+                numberOfLines={1}
+              >
+                {/* TD-UX: Show contextual status on button */}
                 {!isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId
-                  ? 'Wait'
-                  : 'T/D'}
+                  ? 'Sent'
+                  : !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId
+                    ? 'Start!'
+                    : 'T/D'}
               </Text>
               {/* Pending invite indicator (for invitee) */}
               {gameSession?.state === 'pending' && gameSession?.inviteeId === userId && (
                 <View style={styles.truthDareBadge} />
+              )}
+              {/* TD-UX: Badge dot for inviter when ready to start */}
+              {!isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId && (
+                <View style={styles.truthDareStartBadge} />
               )}
             </View>
           </TouchableOpacity>
@@ -2027,12 +2619,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         </View>
       </View>
 
-      {/* T/D Cooldown inline message (replaces Alert spam) */}
-      {showCooldownMessage && (
-        <View style={styles.cooldownBanner}>
-          <Ionicons name="timer-outline" size={BANNER_ICON_SIZE} color={COLORS.warning} />
-          <Text {...TEXT_PROPS} style={styles.cooldownBannerText}>
-            Cooldown: wait {cooldownRemainingMin} min{cooldownRemainingMin !== 1 ? 's' : ''} before playing again
+      {/* TD-UX: Waiting for inviter to start banner (for invitee) */}
+      {showWaitingForStartToast && (
+        <View style={styles.waitingStartBanner}>
+          <Ionicons name="hourglass-outline" size={BANNER_ICON_SIZE} color="#2E7D32" />
+          <Text {...TEXT_PROPS} style={styles.waitingStartBannerText}>
+            Waiting for {otherUserName} to start the game
           </Text>
         </View>
       )}
@@ -2125,6 +2717,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                     durationMs: item.durationMs,
                     audioUrl: item.audioUrl ?? undefined,
                     audioDurationMs: item.audioDurationMs,
+                    // [P1_MEDIA_UPLOAD] Forward optimistic media preview + progress state
+                    isPending: item.isPending,
+                    localUri: item.localUri,
+                    uploadStatus: item.uploadStatus,
+                    uploadProgress: item.uploadProgress,
+                    errorMessage: item.errorMessage,
                   }}
                   isOwn={isMessageOwn}
                   otherUserName={otherUserName}
@@ -2135,12 +2733,15 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                   onProtectedMediaHoldEnd={handleProtectedMediaHoldEnd}
                   onProtectedMediaExpire={handleProtectedMediaExpire}
                   onVoiceDelete={handleVoiceDelete}
+                  // [P1_MEDIA_UPLOAD] Tap-to-retry for failed pending secure media
+                  onRetryPendingMedia={handleRetrySecurePhotoMessage}
                   // AVATAR GROUPING: Pass grouping info for Instagram/Tinder style layout
                   showAvatar={showAvatar}
                   avatarUrl={otherUserPhotoUrl}
                   isLastInGroup={isLastInGroup}
                   // PROFILE-TAP: Avatar tap opens profile
-                  onAvatarPress={() => handleOpenProfile(otherUserId)}
+                  // PRIVACY-RESTORE: Disable profile tap for anonymous confession sender.
+                  onAvatarPress={isOtherUserAnonymous ? undefined : () => handleOpenProfile(otherUserId)}
                 />
                 {isMessageOwn && optimisticStatus === 'sending' && (
                   <View style={styles.optimisticStatusRow}>
@@ -2170,10 +2771,23 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           }}
           ListEmptyComponent={
             <View style={styles.emptyChat}>
-              <Ionicons name="chatbubble-outline" size={EMPTY_CHAT_ICON_SIZE} color={COLORS.border} />
+              <View style={styles.emptyChatIconContainer}>
+                <Ionicons name="chatbubble-outline" size={EMPTY_CHAT_ICON_SIZE} color={COLORS.primary} />
+              </View>
               <Text {...TEXT_PROPS} style={styles.emptyChatText}>
                 Start the conversation with {otherUserName}.
               </Text>
+              <Text {...TEXT_PROPS} style={styles.emptyChatHint}>
+                Say hi, share a moment, or break the ice with a Truth/Dare.
+              </Text>
+              {activeConversation.isPreMatch && (
+                <View style={styles.matchContextBadge}>
+                  <Ionicons name="sparkles" size={12} color={COLORS.primary} />
+                  <Text {...TEXT_PROPS} style={styles.emptyChatHint}>
+                    Pre-match chat — make it count
+                  </Text>
+                </View>
+              )}
             </View>
           }
           contentContainerStyle={{
@@ -2181,7 +2795,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             justifyContent: displayMessages.length > 0 ? 'flex-end' as const : 'center' as const,
             paddingTop: SPACING.sm,
             paddingHorizontal: SPACING.md,
-            paddingBottom: composerHeight + composerBottomPadding,
+            // ANCHOR-FIX: composer is a sibling of FlashList inside chatArea
+            // (NOT an absolute overlay), so it already has its own slot below.
+            // Adding composerHeight here just creates dead empty space and
+            // floats the last message above the input. Use a tiny bottom
+            // breathing-room instead so the last message anchors right above
+            // the composer (WhatsApp/iMessage feel).
+            paddingBottom: SPACING.xs,
           }}
           onScroll={onScroll}
           scrollEventThrottle={16}
@@ -2189,14 +2809,24 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           keyboardDismissMode="interactive"
           onContentSizeChange={onContentSizeChange}
         />
-          {/* ─── COMPOSER (matches locked chat-rooms pattern) ─── */}
+          {/* ─── COMPOSER (fixed to bottom of chatArea — sibling of FlashList) ─── */}
           <View
             onLayout={onComposerLayout}
-            style={styles.composerWrapper}
+            style={[styles.composerWrapper, { paddingBottom: composerBottomPadding }]}
           >
-            <View style={{ paddingBottom: composerBottomPadding }}>
-              {/* L2 FIX: Voice messages only work in demo mode - hide from production UI */}
-              <MessageInput
+            {/* COOLDOWN-UI: persistent pill removed — replaced with a floating
+                top notification rendered absolutely below the header (see
+                cooldownToastFloating below). Composer no longer reserves space. */}
+            {showTypingIndicator && (
+              <View style={styles.typingIndicatorBar}>
+                <View style={styles.typingIndicatorDot} />
+                <Text {...TEXT_PROPS} style={styles.typingIndicatorText}>
+                  {otherUserName} is typing…
+                </Text>
+              </View>
+            )}
+            {/* L2 FIX: Voice messages only work in demo mode - hide from production UI */}
+            <MessageInput
                 onSend={handleSend}
                 onSendCamera={handleSendCamera}
                 onSendGallery={handleSendGallery}
@@ -2210,11 +2840,42 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 initialText={demoDraft ?? ''}
                 onTextChange={handleDraftChange}
                 onTypingChange={handleTypingChange}
+                disabledPlaceholder={isExpiredChat ? 'This chat has expired' : undefined}
               />
-            </View>
           </View>
         </View>
       </KeyboardAvoidingView>
+
+      {/* COOLDOWN-TOAST-OVERLAY-V2: True top-level overlay rendered OUTSIDE
+          the KAV, anchored directly below the chat header. `top` is derived
+          from the measured header height (which already includes the
+          `paddingTop: insets.top` baked in) plus a small gap. If the header
+          measurement hasn't settled yet, we fall back to
+          `insets.top + HEADER_FALLBACK_HEIGHT` so the toast is always
+          visible below the header — never hidden behind it. */}
+      {showCooldownMessage && (() => {
+        const HEADER_FALLBACK_HEIGHT = 64;
+        const topOffset = measuredHeaderHeight > 0
+          ? measuredHeaderHeight + 8
+          : insets.top + HEADER_FALLBACK_HEIGHT + 8;
+        return (
+          <View
+            style={[styles.cooldownToastFloating, { top: topOffset }]}
+            pointerEvents="box-none"
+          >
+            <View style={styles.cooldownToastPill} pointerEvents="none">
+              <Ionicons name="timer-outline" size={14} color={COLORS.warning || '#FF9800'} />
+              <Text {...TEXT_PROPS} style={styles.cooldownToastText}>
+                {cooldownLiveText
+                  ? `Cooldown ends in ${cooldownLiveText}`
+                  : cooldownRemainingMin > 0
+                    ? `Cooldown: ${cooldownRemainingMin} min${cooldownRemainingMin === 1 ? '' : 's'} remaining`
+                    : 'Cooldown active — try again shortly'}
+              </Text>
+            </View>
+          </View>
+        );
+      })()}
 
       {/* Phase-1 Secure Photo/Video Sheet */}
       <CameraPhotoSheet
@@ -2346,6 +3007,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       )}
 
       {/* Truth/Dare Bottle Spin Game */}
+      {/* TD-FLOW (Option B): autoAdvance enables non-blocking result toast +
+          automatic return to idle for Phase-1 Messages. Phase-2 Truth/Dare
+          tab intentionally leaves this off to preserve its [Again]/[Done] UI. */}
       <BottleSpinGame
         visible={showTruthDareGame}
         onClose={() => setShowTruthDareGame(false)}
@@ -2354,6 +3018,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         conversationId={conversationId || ''}
         userId={userId || getDemoUserId()}
         onSendResultMessage={handleSendTruthDareResult}
+        autoAdvance={true}
       />
     </View>
   );
@@ -2367,8 +3032,11 @@ const styles = StyleSheet.create({
   kavContainer: {
     flex: 1,
   },
+  // PREMIUM-BG: subtle tint behind the message thread (separates bubbles from
+  // pure-white app background) — like WhatsApp/iMessage chat surface.
   chatArea: {
     flex: 1,
+    backgroundColor: '#F5F5F7',
   },
   composerWrapper: {
     backgroundColor: COLORS.background,
@@ -2503,27 +3171,46 @@ const styles = StyleSheet.create({
     alignItems: 'center' as const,
     flexShrink: 0, // Prevent right section from shrinking
   },
+  // TD-ICON-FIX: Previously a fixed SIZES.button.md square — the premium
+  // pill (paddingHorizontal: 14 + label) overflowed its bounds and clipped
+  // into the 3-dot menu. Now the slot fits the pill's natural width and
+  // reserves a small right margin so there is always clear space before
+  // the ellipsis-vertical button.
   gameButton: {
-    padding: SPACING.xs,
-    width: SIZES.button.md,
-    height: SIZES.button.md,
+    paddingVertical: SPACING.xs,
+    marginRight: SPACING.xs,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
+  // PREMIUM-TD-BUTTON: A single, unchanging visual treatment — used for every
+  // T/D state so the button never looks "disabled". Two-layer elevation
+  // (secondary-tinted soft glow + crisp shadow), hairline inner border for
+  // depth, tightened padding, refined typography with slight letterSpacing.
   truthDareButton: {
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
+    justifyContent: 'center' as const,
     backgroundColor: COLORS.secondary,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: moderateScale(6, 0.25),
-    borderRadius: SIZES.radius.md + SPACING.xxs,
-    gap: SPACING.xs,
+    // TD-BUTTON-BIGGER: slightly larger pill (was 12×7) for more premium
+    // presence. Still fits alongside the 3-dot menu thanks to gameButton
+    // marginRight and the text-only label.
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.22)',
+    shadowColor: COLORS.secondary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 9,
+    elevation: 6,
   },
   truthDareLabel: {
     fontSize: TD_BUTTON_LABEL_SIZE,
-    fontWeight: '700' as const,
+    fontWeight: '800' as const,
     color: COLORS.white,
-    lineHeight: lineHeight(TD_BUTTON_LABEL_SIZE, 1.2),
+    lineHeight: lineHeight(TD_BUTTON_LABEL_SIZE, 1.15),
+    letterSpacing: 0.5,
   },
   truthDareButtonWithBadge: {
     position: 'relative' as const,
@@ -2547,6 +3234,61 @@ const styles = StyleSheet.create({
     opacity: 0.5,
     backgroundColor: COLORS.textMuted,
   },
+  truthDareButtonReadyToStart: {
+    backgroundColor: '#FF9800',
+  },
+  truthDareButtonActive: {
+    backgroundColor: '#2E7D32',
+  },
+  truthDareLabelWaiting: {
+    color: COLORS.background,
+  },
+  truthDareStartBadge: {
+    position: 'absolute' as const,
+    top: -SPACING.xxs,
+    right: -SPACING.xxs,
+    width: SPACING.sm,
+    height: SPACING.sm,
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.warning || '#FF9800',
+    borderWidth: 2,
+    borderColor: COLORS.background,
+  },
+  waitingStartBanner: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    gap: SPACING.sm,
+    backgroundColor: 'rgba(46, 125, 50, 0.12)',
+    paddingVertical: SPACING.sm + SPACING.xxs,
+    paddingHorizontal: SPACING.base,
+  },
+  waitingStartBannerText: {
+    fontSize: BANNER_TEXT_SIZE,
+    fontWeight: '500' as const,
+    color: '#2E7D32',
+    lineHeight: lineHeight(BANNER_TEXT_SIZE, 1.35),
+  },
+  typingIndicatorBar: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: SPACING.xs,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.xs,
+    backgroundColor: COLORS.background,
+  },
+  typingIndicatorDot: {
+    width: SPACING.xs,
+    height: SPACING.xs,
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.primary,
+  },
+  typingIndicatorText: {
+    fontSize: BANNER_TEXT_SIZE,
+    fontStyle: 'italic' as const,
+    color: COLORS.textLight,
+    lineHeight: lineHeight(BANNER_TEXT_SIZE, 1.35),
+  },
   cooldownBanner: {
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
@@ -2561,6 +3303,41 @@ const styles = StyleSheet.create({
     fontWeight: '500' as const,
     color: COLORS.warning || '#FF9800',
     lineHeight: lineHeight(BANNER_TEXT_SIZE, 1.35),
+  },
+  // COOLDOWN-TOAST-FLOATING: premium, rounded, floating top notification
+  // shown only on T/D-during-cooldown press. Absolute-positioned at
+  // container level (sibling of KAV) so it always overlays FlashList.
+  // `top` is set dynamically from the measured chatTopY. Does NOT occupy
+  // permanent space — overlays the chat without shifting messages.
+  cooldownToastFloating: {
+    position: 'absolute' as const,
+    left: 0,
+    right: 0,
+    alignItems: 'center' as const,
+    zIndex: 999,
+    elevation: 999,
+  },
+  cooldownToastPill: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 6,
+    backgroundColor: COLORS.background,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 152, 0, 0.35)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+  cooldownToastText: {
+    fontSize: 12.5,
+    fontWeight: '600' as const,
+    color: COLORS.warning || '#FF9800',
+    letterSpacing: 0.1,
   },
   // Truth/Dare Invite Modal styles
   tdInviteOverlay: {
@@ -2652,12 +3429,38 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: SPACING.xl,
   },
+  emptyChatIconContainer: {
+    width: SIZES.avatar.lg,
+    height: SIZES.avatar.lg,
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.primarySubtle,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    marginBottom: SPACING.sm,
+  },
   emptyChatText: {
     fontSize: EMPTY_CHAT_TEXT_SIZE,
     color: COLORS.textMuted,
     marginTop: SPACING.md,
     textAlign: 'center',
     lineHeight: lineHeight(EMPTY_CHAT_TEXT_SIZE, 1.35),
+  },
+  emptyChatHint: {
+    fontSize: BANNER_TEXT_SIZE,
+    color: COLORS.textLight,
+    marginTop: SPACING.xs,
+    textAlign: 'center' as const,
+    lineHeight: lineHeight(BANNER_TEXT_SIZE, 1.35),
+  },
+  matchContextBadge: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: SPACING.xs,
+    marginTop: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xxs,
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.primarySubtle,
   },
   expiredBanner: {
     flexDirection: 'row',
@@ -2688,5 +3491,31 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: COLORS.success,
     lineHeight: lineHeight(BANNER_TEXT_SIZE, 1.35),
+  },
+  // PRIVACY-RESTORE: Anonymous-confession privacy header styles.
+  confessionBanner: {
+    backgroundColor: 'rgba(233, 30, 99, 0.08)',
+    paddingBottom: 8,
+    paddingHorizontal: 16,
+  },
+  confessionBannerInner: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    gap: 6,
+  },
+  confessionBannerText: {
+    fontSize: 13,
+    fontWeight: '600' as const,
+    color: COLORS.primary,
+  },
+  confessionBannerHint: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    textAlign: 'center' as const,
+    marginTop: 2,
+  },
+  headerAvatarAnonymous: {
+    backgroundColor: COLORS.backgroundDark,
   },
 });

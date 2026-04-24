@@ -19,7 +19,6 @@ import { COLORS } from '@/lib/constants';
 import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
 import { getVideoUri } from '@/lib/videoCache';
-import { useAuthStore } from '@/stores/authStore';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -50,7 +49,6 @@ export function ProtectedMediaViewer({
   isHoldMode = false,
 }: ProtectedMediaViewerProps) {
   const insets = useSafeAreaInsets();
-  const token = useAuthStore((s) => s.token);
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -86,9 +84,15 @@ export function ProtectedMediaViewer({
     };
   }, []);
 
+  // [P1_MEDIA_FIX] Backend validator for `protectedMedia.getMediaUrl` strictly
+  // accepts only `{ messageId, authUserId }`. Passing a `token` field triggers
+  // ArgumentValidationError ("Object contains extra field `token`") and crashes
+  // the viewer. Gate on userId (authenticated user) instead of token.
   const mediaData = useQuery(
     api.protectedMedia.getMediaUrl,
-    visible && messageId && token ? { messageId: messageId as any, token, authUserId: userId } : 'skip'
+    visible && messageId && userId
+      ? { messageId: messageId as any, authUserId: userId }
+      : 'skip'
   );
 
   // SECURE-REWRITE: Reset viewer state when opening
@@ -150,16 +154,16 @@ export function ProtectedMediaViewer({
   useScreenProtection(!allowScreenshot && visible);
 
   // Screenshot detection — fires on both platforms
+  // [P1_MEDIA_FIX] Backend validator for `logScreenshotEvent` accepts only
+  // `{ messageId, wasTaken }` — userId is derived from server auth.
   const handleScreenshot = useCallback(() => {
-    if (messageId && userId && token) {
+    if (messageId && userId) {
       void logScreenshot({
         messageId: messageId as any,
-        token,
-        authUserId: userId,
         wasTaken: true,
       }).catch(() => {});
     }
-  }, [messageId, userId, token, logScreenshot]);
+  }, [messageId, userId, logScreenshot]);
 
   useScreenshotDetection({
     enabled: visible,
@@ -176,11 +180,11 @@ export function ProtectedMediaViewer({
 
     // 5-2: If view-once, expire on close (only once)
     // MSG-006 FIX: Use authUserId for server-side verification
+    // [P1_MEDIA_FIX] `markExpired` validator accepts only `{ messageId, authUserId }`.
     if (mediaData?.viewOnce && !hasExpired.current) {
       hasExpired.current = true;
       void markExpired({
         messageId: messageId as any,
-        token: token ?? undefined,
         authUserId: userId,
       }).catch(() => {});
     }
@@ -195,7 +199,7 @@ export function ProtectedMediaViewer({
     hasMarkedViewed.current = false;
     hasExpired.current = false; // Reset for next open
     onClose();
-  }, [mediaData, messageId, userId, token, markExpired, onClose]);
+  }, [mediaData, messageId, userId, markExpired, onClose]);
 
   // SECURE-REWRITE: Process mediaData and set viewerState
   // Only transition state when data arrives; image load callback handles 'ready'
@@ -243,9 +247,9 @@ export function ProtectedMediaViewer({
       processUrl();
 
       // MSG-006 FIX: Use authUserId for server-side verification
+      // [P1_MEDIA_FIX] `markViewed` validator accepts only `{ messageId, authUserId }`.
       void markViewed({
         messageId: messageId as any,
-        token: token ?? undefined,
         authUserId: userId,
       }).catch(() => {});
 
@@ -271,20 +275,20 @@ export function ProtectedMediaViewer({
         setTimeLeft(mediaData.timerSeconds);
       }
     }
-  }, [visible, mediaData, markViewed, messageId, userId, token]);
+  }, [visible, mediaData, markViewed, messageId, userId]);
 
   // 6-2: handleExpire now includes handleClose in deps (no stale closure)
   // MSG-006 FIX: Use authUserId for server-side verification
   const handleExpire = useCallback(() => {
     if (hasExpired.current) return; // Already expired
     hasExpired.current = true;
+    // [P1_MEDIA_FIX] `markExpired` validator accepts only `{ messageId, authUserId }`.
     void markExpired({
       messageId: messageId as any,
-      token: token ?? undefined,
       authUserId: userId,
     }).catch(() => {});
     handleClose();
-  }, [messageId, userId, token, markExpired, handleClose]);
+  }, [messageId, userId, markExpired, handleClose]);
 
   // STABILITY FIX: C-5 - Fix timer infinite loop by using proper dependency pattern
   // Compute stable boolean outside effect to avoid expression in dependency array
@@ -340,17 +344,18 @@ export function ProtectedMediaViewer({
     }
   }, [timeLeft, handleExpire, isViewOnce]);
 
+  // [P1_MEDIA_FIX] `requestScreenshotAccess` validator expects
+  // `{ mediaId, requesterId: Id<'users'> }` — not `{ token, authUserId }`.
   const handleRequestAccess = useCallback(() => {
-    if (mediaId && token) {
+    if (mediaId && userId) {
       void requestAccess({
         mediaId: mediaId as any,
-        token,
-        authUserId: userId,
+        requesterId: userId as any,
       })
         .then(() => setRequestedAccess(true))
         .catch(() => {});
     }
-  }, [mediaId, userId, token, requestAccess]);
+  }, [mediaId, userId, requestAccess]);
 
   // SECURE-REWRITE: Image load handlers (ONLY for images, not videos)
   const handleImageLoad = useCallback(() => {

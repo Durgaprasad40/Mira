@@ -16,6 +16,7 @@ import MediaMessage from './MediaMessage';
 import { ProtectedMediaBubble } from './ProtectedMediaBubble';
 import { SystemMessage } from './SystemMessage';
 import { VoiceMessageBubble } from './VoiceMessageBubble';
+import UploadProgressRing from '@/components/chatroom/UploadProgressRing';
 import { formatTime } from '@/utils/chatTime';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -23,12 +24,16 @@ import { formatTime } from '@/utils/chatTime';
 // ═══════════════════════════════════════════════════════════════════════════
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-// Avatar sizing - compact for tight layout
-const AVATAR_SIZE = 26;
-const AVATAR_GAP = 4;
+// Avatar sizing - larger, premium presence; left-side uses real estate well.
+// AVATAR-PREMIUM: bumped from 26 → 34 so received messages have a clear
+// identity anchor without crowding the bubble.
+const AVATAR_SIZE = 34;
+const AVATAR_GAP = 6;
 
-// Bubble constraints - maximize usable width
-const MAX_BUBBLE_WIDTH = Math.min(SCREEN_WIDTH * 0.80, 310);
+// Bubble constraints - maximize usable width.
+// LEFT-SIDE-USE: bumped from 0.80 → 0.86 so received messages can take
+// closer to ~90% of usable width once avatar gutter is accounted for.
+const MAX_BUBBLE_WIDTH = Math.min(SCREEN_WIDTH * 0.86, 340);
 
 // Border radius for premium rounded look
 const BUBBLE_RADIUS = 18;
@@ -76,6 +81,11 @@ interface MessageBubbleProps {
     audioDurationMs?: number; // Production mode duration
     // SECURE-REWRITE: Pending/optimistic message indicator
     isPending?: boolean;
+    // [P1_MEDIA_UPLOAD] pending secure media optimistic preview + progress
+    localUri?: string;
+    uploadStatus?: 'uploading' | 'sending' | 'upload_failed' | 'send_failed';
+    uploadProgress?: number;
+    errorMessage?: string;
   };
   isOwn: boolean;
   otherUserName?: string;
@@ -87,6 +97,8 @@ interface MessageBubbleProps {
   onProtectedMediaHoldEnd?: (messageId: string) => void;
   onProtectedMediaExpire?: (messageId: string) => void;
   onVoiceDelete?: (messageId: string) => void;
+  // [P1_MEDIA_UPLOAD] tap-to-retry handler for failed pending media
+  onRetryPendingMedia?: (messageId: string) => void;
   /** Whether to show the timestamp (for grouping). Defaults to true. */
   showTimestamp?: boolean;
   // AVATAR GROUPING: Show avatar only on last message of group for received messages
@@ -140,6 +152,7 @@ function MessageBubbleComponent({
   onProtectedMediaHoldEnd,
   onProtectedMediaExpire,
   onVoiceDelete,
+  onRetryPendingMedia,
   showTimestamp = true,
   showAvatar = false,
   avatarUrl,
@@ -214,14 +227,20 @@ function MessageBubbleComponent({
       const subtype = markerMatch[1];
       const displayText = message.content.slice(markerMatch[0].length);
 
-      // PIN-NOTIFICATION-CLEANUP: Auto-hide "Bottle landed on" notifications
-      // after 5 minutes of being seen (UI-only suppression, message still exists in DB)
-      const isBottleLandedNotification = subtype === 'truthdare' && displayText.startsWith('Bottle landed on');
-      if (isBottleLandedNotification && message.readAt) {
-        const fiveMinutesMs = 5 * 60 * 1000;
-        const timeSinceSeen = Date.now() - message.readAt;
-        if (timeSinceSeen > fiveMinutesMs) {
-          return null; // Hide temporary pin notification after 5 min of being seen
+      // TD-AUTO-HIDE: All Truth/Dare system notifications are transient by
+      // design. Once the recipient has seen the message (readAt set), hide
+      // it after 1 minute. Hard cap at 3 minutes from creation regardless
+      // of read state so abandoned T/D banners don't linger forever.
+      // UI-only suppression — the underlying message still exists in DB.
+      if (subtype === 'truthdare') {
+        const ONE_MIN = 60 * 1000;
+        const THREE_MIN = 3 * 60 * 1000;
+        const now = Date.now();
+        if (message.readAt && now - message.readAt > ONE_MIN) {
+          return null;
+        }
+        if (now - message.createdAt > THREE_MIN) {
+          return null;
         }
       }
 
@@ -231,12 +250,82 @@ function MessageBubbleComponent({
 
   // SECURE-REWRITE: Pending/optimistic message (uploading secure photo)
   // Always own message, no avatar needed
+  // [P1_MEDIA_UPLOAD] When a localUri is available we render a real preview
+  // thumbnail plus a progress ring (uploading) / spinner (sending) /
+  // "Tap to retry" pill (upload_failed or send_failed), mirroring the
+  // Phase-2 chat-rooms UX. Legacy code path (no localUri) falls through to
+  // the original text-only bubble.
   if (message.isPending) {
     const pendingLabel = message.content.trim().length > 0
       ? message.content
       : message.type === 'video'
         ? 'Sending secure video...'
         : 'Sending secure photo...';
+
+    if (message.localUri) {
+      const isUploading = message.uploadStatus === 'uploading';
+      const isSending = message.uploadStatus === 'sending';
+      const hasFailed =
+        message.uploadStatus === 'upload_failed' || message.uploadStatus === 'send_failed';
+      const progress = Math.max(0, Math.min(100, message.uploadProgress ?? 0));
+      const previewContent = (
+        <View style={styles.pendingMediaFrame}>
+          <Image
+            source={{ uri: message.localUri }}
+            style={styles.pendingMediaImage}
+            resizeMode="cover"
+          />
+          {message.type === 'video' && (
+            <View style={styles.pendingVideoGlyph}>
+              <Ionicons name="play-circle" size={20} color="rgba(255,255,255,0.92)" />
+            </View>
+          )}
+          <View style={styles.pendingOverlay}>
+            {isUploading ? (
+              <View style={styles.pendingCol}>
+                {/* SIZE-REDUCE: smaller ring to match the shrunken frame */}
+                <UploadProgressRing progress={progress} size={36} strokeWidth={3} />
+              </View>
+            ) : isSending ? (
+              <View style={styles.pendingRow}>
+                <ActivityIndicator size="small" color="#FFFFFF" />
+                <Text style={styles.pendingSubtext}>Sending…</Text>
+              </View>
+            ) : hasFailed ? (
+              <View style={styles.pendingRow}>
+                <Ionicons name="alert-circle" size={16} color="#FCA5A5" />
+                <Text style={styles.pendingSubtext}>Tap to retry</Text>
+              </View>
+            ) : (
+              <View style={styles.pendingRow}>
+                <ActivityIndicator size="small" color="#FFFFFF" />
+                <Text style={styles.pendingSubtext}>{pendingLabel}</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      );
+
+      return (
+        <View style={[styles.container, styles.ownContainer]}>
+          <View style={[styles.bubble, styles.ownBubble, styles.pendingMediaBubble]}>
+            {hasFailed && onRetryPendingMedia ? (
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => onRetryPendingMedia(message.id)}
+                accessibilityRole="button"
+                accessibilityLabel="Tap to retry sending"
+              >
+                {previewContent}
+              </TouchableOpacity>
+            ) : (
+              previewContent
+            )}
+          </View>
+        </View>
+      );
+    }
+
     return (
       <View style={[styles.container, styles.ownContainer]}>
         <View style={[styles.bubble, styles.ownBubble, styles.pendingBubble]}>
@@ -441,11 +530,14 @@ function MessageBubbleComponent({
           styles.text,
           isOwn && styles.ownText,
           isEmojiOnly && styles.emojiText,
+          // INLINE-TIME: reserve space at bottom-right of the bubble for the
+          // floating timestamp/tick (WhatsApp-style). Skip for emoji-only.
+          (showTimestamp || isOwn) && !isEmojiOnly && styles.textWithInlineMeta,
         ]}>
           {message.content}
         </Text>
-        {(showTimestamp || isOwn) && (
-          <View style={styles.footer}>
+        {(showTimestamp || isOwn) && !isEmojiOnly && (
+          <View style={styles.inlineMeta}>
             {showTimestamp && (
               <Text style={[styles.time, isOwn && styles.ownTime]}>
                 {formatTime(message.createdAt)}
@@ -456,12 +548,21 @@ function MessageBubbleComponent({
               return (
                 <Ionicons
                   name={getTickIcon(tickStatus)}
-                  size={14}
+                  size={12}
                   color={getTickColor(tickStatus, isOwn)}
                   style={styles.readIcon}
                 />
               );
             })()}
+          </View>
+        )}
+        {isEmojiOnly && (showTimestamp || isOwn) && (
+          <View style={styles.footer}>
+            {showTimestamp && (
+              <Text style={[styles.time, isOwn && styles.ownTime]}>
+                {formatTime(message.createdAt)}
+              </Text>
+            )}
           </View>
         )}
       </View>
@@ -509,6 +610,11 @@ function areMessageBubblePropsEqual(
     prev.message.durationMs === next.message.durationMs &&
     prev.message.audioDurationMs === next.message.audioDurationMs &&
     prev.message.isPending === next.message.isPending &&
+    // [P1_MEDIA_UPLOAD] progress-overlay fields must re-render bubble
+    prev.message.localUri === next.message.localUri &&
+    prev.message.uploadStatus === next.message.uploadStatus &&
+    prev.message.uploadProgress === next.message.uploadProgress &&
+    prev.onRetryPendingMedia === next.onRetryPendingMedia &&
     prevMedia?.localUri === nextMedia?.localUri &&
     prevMedia?.mediaType === nextMedia?.mediaType &&
     prevMedia?.timer === nextMedia?.timer &&
@@ -529,7 +635,9 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginVertical: 2,
+    // PREMIUM-RHYTHM: 6px breathing room between sender groups (last-in-group);
+    // groupedContainer overrides to 1px for tight consecutive messages.
+    marginVertical: 6,
     paddingHorizontal: 8, // Tight horizontal padding
   },
   ownContainer: {
@@ -562,7 +670,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   avatarInitials: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '700',
     color: COLORS.white,
   },
@@ -572,23 +680,35 @@ const styles = StyleSheet.create({
   // ═══════════════════════════════════════════════════════════════════════════
   bubble: {
     maxWidth: MAX_BUBBLE_WIDTH,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
     borderRadius: BUBBLE_RADIUS,
     backgroundColor: COLORS.backgroundDark,
   },
+  // PREMIUM-BUBBLE-PAIR (reverted): Own bubble deep-rose #E94E77 — brand-on
+  // rose that feels sophisticated against the clean-white received bubble.
+  // Matching shadow tint gives it subtle premium depth.
   ownBubble: {
-    backgroundColor: COLORS.primary,
+    backgroundColor: '#E94E77',
     borderBottomRightRadius: BUBBLE_TAIL_RADIUS,
+    shadowColor: '#E94E77',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
+    elevation: 2,
   },
+  // PREMIUM-BUBBLE-PAIR (reverted): Received bubble clean white with a
+  // hairline border — iMessage-style premium ghost bubble that pairs
+  // cleanly with the rose-tinted own bubble.
   otherBubble: {
-    backgroundColor: COLORS.card,
+    backgroundColor: '#FFFFFF',
     borderBottomLeftRadius: BUBBLE_TAIL_RADIUS,
-    // Very subtle shadow
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0, 0, 0, 0.06)',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.03,
-    shadowRadius: 1,
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
     elevation: 1,
   },
   dareBubble: {
@@ -617,6 +737,52 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: 14,
     fontWeight: '500',
+  },
+  // [P1_MEDIA_UPLOAD] Rich pending preview (photo/video thumb + progress/retry)
+  // SIZE-REDUCE: Shrink pending preview to ~1/2 linear dims (≈1/4 visual area)
+  // so the in-flight upload bubble feels lightweight while keeping the
+  // progress ring + "Uploading…"/"Sending…"/"Tap to retry" states readable.
+  pendingMediaBubble: {
+    padding: 2,
+    overflow: 'hidden',
+  },
+  pendingMediaFrame: {
+    width: Math.min(MAX_BUBBLE_WIDTH - 10, 120),
+    height: Math.min(MAX_BUBBLE_WIDTH - 10, 120) * 0.75,
+    borderRadius: BUBBLE_RADIUS - 6,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0,0,0,0.12)',
+  },
+  pendingMediaImage: {
+    width: '100%',
+    height: '100%',
+  },
+  pendingVideoGlyph: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pendingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.42)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pendingCol: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  pendingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pendingSubtext: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
+    letterSpacing: 0.2,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -653,6 +819,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 2,
     justifyContent: 'flex-end',
+  },
+  // INLINE-TIME: WhatsApp-style floating timestamp at bubble bottom-right.
+  // Sits absolutely inside the bubble; the text reserves padding-right so
+  // they don't overlap on the last line.
+  textWithInlineMeta: {
+    paddingRight: 52,
+    paddingBottom: 2,
+  },
+  inlineMeta: {
+    position: 'absolute',
+    right: 8,
+    bottom: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
   },
   time: {
     fontSize: 10,
