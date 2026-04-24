@@ -90,6 +90,7 @@ import * as Haptics from 'expo-haptics';
 import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 import { NearbyPreviewCard, NearbyPreviewData } from '@/components/nearby/NearbyPreviewCard';
 import { trackEvent } from '@/lib/analytics';
+import { useScreenProtection } from '@/hooks/useScreenProtection';
 
 // Key for storing when user last viewed crossed paths
 const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
@@ -413,6 +414,12 @@ export default function NearbyScreen() {
   const router = useRouter();
   const isDemo = isDemoMode;
   const insets = useSafeAreaInsets();
+
+  // Safe Nearby v2 — Android FLAG_SECURE on this tab only.
+  // Blocks screenshots + screen recording while Nearby is mounted, preventing
+  // coarse-pin leakage via screen capture. iOS is intentionally left untouched
+  // (optional hardening for a later pass).
+  useScreenProtection(Platform.OS === 'android');
 
   // Map ref for programmatic control
   const mapRef = useRef<MapView>(null);

@@ -1960,7 +1960,10 @@ export const getNearbyUsers = query({
         cellLng = resnapped.lng;
       }
 
-      const display = makeDisplayLatLng(cellLat, cellLng);
+      // Snapshot-bound seed: stable for this snapshot (userId + publishedAt);
+      // changes when the user republishes, so jitter rotates with each snapshot.
+      const displaySeed = `${String(user._id)}:${user.publishedAt ?? 0}`;
+      const display = makeDisplayLatLng(cellLat, cellLng, displaySeed);
       const cellId = makeCellId(cellLat, cellLng);
 
       const bucketingDistance = user.strongPrivacyMode === true
@@ -3117,20 +3120,24 @@ function makeCellId(gridLat: number, gridLng: number): string {
 }
 
 /**
- * Phase-2.5 privacy helper: per-request randomized display point inside the
- * originating grid cell. Math.random() is evaluated fresh for every result,
- * so two viewers (or the same viewer across two requests) never see the same
- * displayed coord for the same user. This removes the multi-observer /
- * logging inference vector: clients only ever see random points inside the
- * ~300m cell — not the stored grid coordinate, and never a GPS-precision
- * value.
+ * Safe Nearby v2 — snapshot-bound display point inside the originating grid
+ * cell. The jitter (bearing + distance inside CELL_JITTER_RADIUS_M) is
+ * deterministic per snapshot, seeded on userId + publishedAt. This means:
+ *   - same snapshot → same displayLat/displayLng across viewers and requests
+ *   - new snapshot (new publishedAt) → new jitter
+ * This closes the multi-query jitter-averaging attack where a previous
+ * Math.random() implementation let an attacker average N observations to
+ * recover the ~300m grid centre.
  */
 function makeDisplayLatLng(
   gridLat: number,
   gridLng: number,
+  seedKey: string,
 ): { lat: number; lng: number } {
-  const bearingRad = Math.random() * 2 * Math.PI;
-  const distanceMeters = Math.random() * CELL_JITTER_RADIUS_M;
+  const bearingSeed = simpleHash(`${seedKey}:bearing`);
+  const distanceSeed = simpleHash(`${seedKey}:distance`);
+  const bearingRad = ((bearingSeed % 36000) / 36000) * 2 * Math.PI;
+  const distanceMeters = ((distanceSeed % 10000) / 10000) * CELL_JITTER_RADIUS_M;
   return offsetCoords(gridLat, gridLng, distanceMeters, bearingRad);
 }
 
