@@ -870,47 +870,14 @@ export function useNotifications() {
 }
 
 function useBellBadgeForPhase(phase: 'phase1' | 'phase2') {
-  const userId = useAuthStore((s) => s.userId);
-  const token = useAuthStore((s) => s.token);
-  const authReady = useAuthStore((s) => s.authReady);
-  const hasValidToken = typeof token === 'string' && token.trim().length > 0;
-
-  const phase1Count = useQuery(
-    api.notifications.getBellUnreadCount,
-    phase === 'phase1' && !isDemoMode && userId && authReady && hasValidToken
-      ? { phase: 'phase1' as const, userId }
-      : 'skip',
-  );
-  const phase2Count = useQuery(
-    api.privateNotifications.getPrivateBellUnreadCount,
-    phase === 'phase2' && !isDemoMode && userId && authReady && hasValidToken
-      ? { userId }
-      : 'skip',
-  );
-
-  const demoNotifications = useDemoNotifStore((s) => s.notifications);
-  const [stableNow, setStableNow] = useState(() => Math.floor(Date.now() / 60000) * 60000);
-
-  useEffect(() => {
-    if (!isDemoMode) return;
-    const interval = setInterval(() => {
-      setStableNow(Math.floor(Date.now() / 60000) * 60000);
-    }, 60000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const demoUnseenCount = useMemo(
-    () =>
-      demoNotifications.reduce((count, notification) => {
-        if (notification.isRead || isExpired(notification, stableNow)) return count;
-        return shouldIncludeBellNotificationForPhase(notification.type, phase) ? count + 1 : count;
-      }, 0),
-    [demoNotifications, phase, stableNow],
-  );
-
-  const convexCount = phase === 'phase1' ? phase1Count : phase2Count;
+  // Derive the bell badge count directly from the same filtered notifications
+  // list the popover and notifications screen render. This guarantees the
+  // badge can never disagree with what the user actually sees. The underlying
+  // useQuery subscription is deduped by Convex when the popover is also
+  // mounted, so this does not add network load.
+  const { notifications } = useNotificationsForPhase(phase);
   return {
-    unseenCount: isDemoMode ? demoUnseenCount : convexCount ?? 0,
+    unseenCount: notifications.length,
   };
 }
 
