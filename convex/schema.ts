@@ -916,7 +916,9 @@ export default defineSchema({
     .index('by_reported_user', ['reportedUserId'])
     .index('by_status', ['status']),
 
-  // Notifications table
+  // Phase-1 Notifications table (dating/discover/messages)
+  // STRICT ISOLATION: This table is ONLY for Phase-1 notifications.
+  // Phase-2 notifications live in `privateNotifications` (separate physical table).
   notifications: defineTable({
     userId: v.id('users'),
     type: v.union(
@@ -928,7 +930,8 @@ export default defineSchema({
       v.literal('subscription'),
       v.literal('weekly_refresh'),
       v.literal('profile_nudge'),
-      // Phase-2 notification types (isolated from Phase-1)
+      // Legacy Phase-2 literals retained for backwards compatibility with
+      // existing rows; new writes MUST go to `privateNotifications`.
       v.literal('phase2_match'),
       v.literal('phase2_like'),
       v.literal('phase2_private_message')
@@ -941,10 +944,13 @@ export default defineSchema({
       userId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
       likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
-      // Phase-2 specific fields
-      phase: v.optional(v.string()), // 'phase2' to distinguish P2 notifications
-      otherUserId: v.optional(v.string()), // For P2 likes - who sent the like
+      // Legacy fields retained for backwards compatibility
+      phase: v.optional(v.string()),
+      otherUserId: v.optional(v.string()),
     })),
+    // Strict phase tag for server-side filtering. New rows MUST set 'phase1'.
+    // Optional only because legacy rows were written without it.
+    phase: v.optional(v.literal('phase1')),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
     readAt: v.optional(v.number()),
@@ -958,6 +964,44 @@ export default defineSchema({
     // 4-1: Lookup by userId+dedupeKey for upsert
     .index('by_user_dedupe', ['userId', 'dedupeKey'])
     // 4-2: Cleanup index for expired notifications
+    .index('by_expires', ['expiresAt']),
+
+  // Phase-2 Notifications table (incognito/private/desire-land)
+  // STRICT ISOLATION: This table is ONLY for Phase-2 notifications.
+  // Phase-1 notifications live in `notifications` (separate physical table).
+  // The two tables are intentionally never read together by any query.
+  privateNotifications: defineTable({
+    userId: v.id('users'),
+    type: v.union(
+      v.literal('phase2_match'),
+      v.literal('phase2_like'),
+      v.literal('phase2_private_message'),
+      v.literal('phase2_deep_connect'),
+      v.literal('phase2_chat_room')
+    ),
+    title: v.string(),
+    body: v.string(),
+    data: v.optional(v.object({
+      matchId: v.optional(v.string()),
+      conversationId: v.optional(v.string()),
+      privateConversationId: v.optional(v.string()),
+      userId: v.optional(v.string()),
+      otherUserId: v.optional(v.string()),
+      chatRoomId: v.optional(v.string()),
+      threadId: v.optional(v.string()),
+    })),
+    // Strict phase tag — every Phase-2 row MUST be 'phase2'.
+    phase: v.literal('phase2'),
+    // Deduplication key (same semantics as Phase-1)
+    dedupeKey: v.optional(v.string()),
+    readAt: v.optional(v.number()),
+    sentAt: v.optional(v.number()),
+    createdAt: v.number(),
+    expiresAt: v.optional(v.number()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_unread', ['userId', 'readAt'])
+    .index('by_user_dedupe', ['userId', 'dedupeKey'])
     .index('by_expires', ['expiresAt']),
 
   // Crossed Paths table
@@ -2252,6 +2296,10 @@ export default defineSchema({
     endedAt: v.optional(v.number()),      // When game was ended
     endedReason: v.optional(v.string()),  // Legacy reason metadata from older Bottle Spin sessions
     cooldownUntil: v.optional(v.number()), // Cooldown end time (1 hour after rejection/end)
+    // TD-LIFECYCLE: Manual-start + inactivity timeout tracking (restored from c471732)
+    acceptedAt: v.optional(v.number()),    // When invitee accepted (separate from respondedAt for legacy compat)
+    gameStartedAt: v.optional(v.number()), // Set by startBottleSpinGame when inviter manually starts
+    lastActionAt: v.optional(v.number()),  // Updated on every spin/turn for inactivity timeout
     // Turn tracking for real-time sync across devices
     // NOTE: Using role-based turn tracking to avoid ID format mismatch issues
     currentTurnUserId: v.optional(v.string()), // Legacy - kept for compatibility
