@@ -378,7 +378,8 @@ export function ReportBlockModal({
     <Modal
       visible={visible}
       transparent
-      animationType="slide"
+      animationType="fade"
+      statusBarTranslucent
       onRequestClose={resetAndClose}
     >
       <TouchableOpacity
@@ -400,53 +401,73 @@ export function ReportBlockModal({
 }
 
 const styles = StyleSheet.create({
+  // PREMIUM-MENU: No dim/blur overlay. Backdrop is fully transparent so the
+  // chat remains fully visible behind the floating action card. Tap-outside
+  // still dismisses (the TouchableOpacity fills the screen), but visually
+  // it feels like a lightweight floating menu, not a modal.
   overlay: {
     flex: 1,
     justifyContent: "flex-end",
-    backgroundColor: COLORS.overlay,
+    backgroundColor: "transparent",
   },
+  // PREMIUM-MENU: Floating rounded card with margin on all sides + soft
+  // shadow. No full-width edge-to-edge sheet — sits inset from the screen
+  // edges so it feels like an elegant floating popover.
   sheet: {
     backgroundColor: COLORS.background,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    paddingBottom: 40,
+    borderRadius: 20,
+    marginHorizontal: 12,
+    marginBottom: 16,
+    paddingBottom: 8,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.14,
+    shadowRadius: 24,
+    elevation: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0, 0, 0, 0.04)",
   },
   handle: {
-    width: 40,
+    width: 36,
     height: 4,
     borderRadius: 2,
     backgroundColor: COLORS.border,
     alignSelf: "center",
-    marginTop: 12,
-    marginBottom: 8,
+    marginTop: 10,
+    marginBottom: 6,
   },
   content: {
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 8,
+    paddingHorizontal: 18,
+    paddingTop: 4,
+    paddingBottom: 4,
   },
   actionRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 14,
+    paddingVertical: 13,
     gap: 14,
   },
   actionText: {
-    fontSize: 16,
+    fontSize: 15.5,
     fontWeight: "500",
     color: COLORS.text,
+    letterSpacing: 0.1,
   },
   divider: {
-    height: 1,
+    height: StyleSheet.hairlineWidth,
     backgroundColor: COLORS.border,
+    marginHorizontal: -4,
   },
   cancelButton: {
-    paddingVertical: 14,
+    paddingVertical: 13,
     alignItems: "center",
-    marginTop: 8,
+    marginTop: 6,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
   },
   cancelText: {
-    fontSize: 16,
+    fontSize: 15.5,
+    fontWeight: "600",
     color: COLORS.textLight,
   },
   // Other input styles
