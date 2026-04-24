@@ -329,6 +329,7 @@ export const sendMessage = mutation({
           title: 'New Message',
           body: notificationBody,
           data: { conversationId: conversationId },
+          phase: 'phase1',
           dedupeKey,
           createdAt: now,
           expiresAt: now + 24 * 60 * 60 * 1000,
@@ -592,6 +593,7 @@ export const sendPreMatchMessage = mutation({
         title: `${fromUser.name} sent you a message`,
         body: notificationBody,
         data: { conversationId: conversation._id, userId: fromUserId },
+        phase: 'phase1',
         dedupeKey,
         createdAt: now,
         expiresAt: now + 24 * 60 * 60 * 1000,
@@ -1129,20 +1131,50 @@ export const getConversation = query({
     if (!otherUserId) return null;
 
     const otherUser = await ctx.db.get(otherUserId);
-    if (!otherUser) return null;
+
+    // P1-RESTORE: Terminal state — degrade gracefully instead of returning null
+    let terminalState: 'unmatched' | 'user_removed' | null = null;
+
+    // Check unmatched (only relevant if conversation has a matchId)
+    if (conversation.matchId) {
+      const match = await ctx.db.get(conversation.matchId);
+      if (!match || (match as any).isActive === false) {
+        terminalState = 'unmatched';
+      }
+    }
+    // user_removed takes precedence (user gone or deactivated)
+    if (!otherUser || (otherUser as any).isActive === false) {
+      terminalState = 'user_removed';
+    }
 
     // PRIVACY FIX: Check if the other user should be shown anonymously
     // This happens when they're the confession author on an anonymous confession
     const isOtherUserAnonymous = conversation.anonymousParticipantId === otherUserId;
 
-    // Get primary photo (only if not anonymous)
+    // Get primary photo (only if not anonymous and user still exists)
     let photo = null;
-    if (!isOtherUserAnonymous) {
+    if (!isOtherUserAnonymous && otherUser && terminalState !== 'user_removed') {
       photo = await ctx.db
         .query('photos')
         .withIndex('by_user', (q) => q.eq('userId', otherUserId))
         .filter((q) => q.eq(q.field('isPrimary'), true))
         .first();
+
+      // BUG FIX: Fallback to any photo if no isPrimary photo exists
+      // Same pattern as likes.ts to handle edge cases where isPrimary flag is not set
+      if (!photo) {
+        photo = await ctx.db
+          .query('photos')
+          .withIndex('by_user', (q) => q.eq('userId', otherUserId))
+          .first();
+      }
+    }
+
+    // BUG FIX: Resolve photo URL at query time using ctx.storage.getUrl
+    // Stored URLs can expire; always fetch fresh URL from storage
+    let resolvedPhotoUrl: string | null = null;
+    if (photo?.storageId) {
+      resolvedPhotoUrl = await ctx.storage.getUrl(photo.storageId);
     }
 
     // Check if this is an expired confession-based conversation
@@ -1159,13 +1191,22 @@ export const getConversation = query({
       isConfessionChat,
       expiresAt: conversation.expiresAt,
       isExpired,
+      terminalState,
       otherUser: {
         id: otherUserId,
-        // PRIVACY FIX: Return anonymous display info if user should be anonymous
-        name: isOtherUserAnonymous ? 'Anonymous' : otherUser.name,
-        photoUrl: isOtherUserAnonymous ? undefined : photo?.url,
-        lastActive: isOtherUserAnonymous ? undefined : otherUser.lastActive,
-        isVerified: isOtherUserAnonymous ? false : otherUser.isVerified,
+        // P1-RESTORE: Show 'User unavailable' for removed users; never blank.
+        name: terminalState === 'user_removed'
+          ? 'User unavailable'
+          : (isOtherUserAnonymous ? 'Anonymous' : (otherUser?.name ?? 'User unavailable')),
+        photoUrl: terminalState === 'user_removed'
+          ? undefined
+          : (isOtherUserAnonymous ? undefined : resolvedPhotoUrl),
+        lastActive: terminalState === 'user_removed'
+          ? undefined
+          : (isOtherUserAnonymous ? undefined : otherUser?.lastActive),
+        isVerified: terminalState === 'user_removed'
+          ? false
+          : (isOtherUserAnonymous ? false : !!otherUser?.isVerified),
         isAnonymous: isOtherUserAnonymous, // Flag for UI to show anonymous avatar
       },
     };
@@ -1295,9 +1336,8 @@ export const getConversations = query({
         if (!otherUserId) continue;
         if (blockedUserIds.has(otherUserId as string)) continue;
 
-        const otherUser = participantUserMap.get(otherUserId as string);
-        if (!otherUser || !otherUser.isActive) continue;
-
+        // P1-RESTORE: terminal state — keep candidate even if user removed/inactive,
+        // so the inbox row degrades gracefully to "User unavailable" instead of vanishing.
         pushCandidate({
           conversation,
           otherUserId,
@@ -1353,9 +1393,8 @@ export const getConversations = query({
         if (!otherUserId) continue;
         if (blockedUserIds.has(otherUserId as string)) continue;
 
-        const otherUser = fallbackUserMap.get(otherUserId as string);
-        if (!otherUser || !otherUser.isActive) continue;
-
+        // P1-RESTORE: terminal state — keep candidate even if user removed/inactive
+        // so the row can render as "User unavailable" instead of being dropped silently.
         const unreadCount = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
         pushCandidate({
           conversation,
@@ -1392,8 +1431,8 @@ export const getConversations = query({
 
     const otherUserIds = finalCandidates.map((candidate) => candidate.otherUserId);
 
-    // Parallel batch: users, photos, and last messages for only the final bounded set.
-    const [users, photos, lastMessages] = await Promise.all([
+    // Parallel batch: users, photos, last messages, AND matches (for terminal-state detection).
+    const [users, photos, lastMessages, matches] = await Promise.all([
       Promise.all(otherUserIds.map((id) => ctx.db.get(id))),
       Promise.all(
         otherUserIds.map((id) =>
@@ -1415,16 +1454,66 @@ export const getConversations = query({
             .first()
         )
       ),
+      // P1-RESTORE: fetch matches per-row for unmatched terminal-state detection.
+      Promise.all(
+        finalCandidates.map((candidate) =>
+          candidate.conversation.matchId ? ctx.db.get(candidate.conversation.matchId) : Promise.resolve(null)
+        )
+      ),
     ]);
+
+    // BUG FIX: Fallback to any photo for users without isPrimary photo
+    // Same pattern as likes.ts to handle edge cases where isPrimary flag is not set
+    const photoMap = new Map(otherUserIds.map((id, i) => [id as string, photos[i]]));
+    const usersWithoutPrimaryPhoto = otherUserIds.filter((_id, i) => !photos[i]);
+    if (usersWithoutPrimaryPhoto.length > 0) {
+      const fallbackPhotos = await Promise.all(
+        usersWithoutPrimaryPhoto.map((id) =>
+          ctx.db
+            .query('photos')
+            .withIndex('by_user', (q) => q.eq('userId', id))
+            .first()
+        )
+      );
+      usersWithoutPrimaryPhoto.forEach((id, i) => {
+        if (fallbackPhotos[i]) {
+          photoMap.set(id as string, fallbackPhotos[i]);
+        }
+      });
+    }
+
+    // BUG FIX: Resolve photo URLs at query time using ctx.storage.getUrl
+    // Stored URLs can expire; always fetch fresh URLs from storage
+    const photoUrlMap = new Map<string, string | null>();
+    const usersWithPhotos = Array.from(photoMap.entries()).filter(([_, photo]) => photo?.storageId);
+    if (usersWithPhotos.length > 0) {
+      const resolvedUrls = await Promise.all(
+        usersWithPhotos.map(([_, photo]) => ctx.storage.getUrl(photo!.storageId))
+      );
+      usersWithPhotos.forEach(([id], i) => {
+        photoUrlMap.set(id, resolvedUrls[i]);
+      });
+    }
 
     // Build result
     const result = [];
     for (let i = 0; i < finalCandidates.length; i++) {
       const { conversation, otherUserId, unreadCount } = finalCandidates[i];
       const otherUser = users[i];
-      if (!otherUser || !otherUser.isActive) continue;
+      const match = matches[i];
 
-      const photo = photos[i];
+      // P1-RESTORE: terminal state — degrade UI gracefully instead of dropping rows.
+      let terminalState: 'unmatched' | 'user_removed' | null = null;
+      if (conversation.matchId) {
+        if (!match || (match as any).isActive === false) {
+          terminalState = 'unmatched';
+        }
+      }
+      if (!otherUser || (otherUser as any).isActive === false) {
+        terminalState = 'user_removed';
+      }
+
+      const resolvedPhotoUrl = photoUrlMap.get(otherUserId as string) ?? null;
       const lastMessage = lastMessages[i];
 
       // PRIVACY FIX: Check if the other user should be shown anonymously
@@ -1436,14 +1525,41 @@ export const getConversations = query({
         matchId: conversation.matchId,
         isPreMatch: conversation.isPreMatch,
         lastMessageAt: conversation.lastMessageAt,
+        terminalState,
         otherUser: {
           id: otherUserId,
           // PRIVACY FIX: Return anonymous display info if user should be anonymous
-          name: isOtherUserAnonymous ? 'Anonymous' : otherUser.name,
-          photoUrl: isOtherUserAnonymous ? undefined : photo?.url,
-          lastActive: isOtherUserAnonymous ? undefined : otherUser.lastActive,
-          isVerified: isOtherUserAnonymous ? false : otherUser.isVerified,
-          photoBlurred: isOtherUserAnonymous ? false : otherUser.photoBlurred === true,
+          // P1-RESTORE: Override with "User unavailable" when terminal=user_removed.
+          name:
+            terminalState === 'user_removed'
+              ? 'User unavailable'
+              : isOtherUserAnonymous
+                ? 'Anonymous'
+                : (otherUser?.name ?? 'User unavailable'),
+          photoUrl:
+            terminalState === 'user_removed'
+              ? undefined
+              : isOtherUserAnonymous
+                ? undefined
+                : resolvedPhotoUrl,
+          lastActive:
+            terminalState === 'user_removed'
+              ? undefined
+              : isOtherUserAnonymous
+                ? undefined
+                : otherUser?.lastActive,
+          isVerified:
+            terminalState === 'user_removed'
+              ? false
+              : isOtherUserAnonymous
+                ? false
+                : otherUser?.isVerified,
+          photoBlurred:
+            terminalState === 'user_removed'
+              ? false
+              : isOtherUserAnonymous
+                ? false
+                : otherUser?.photoBlurred === true,
           isAnonymous: isOtherUserAnonymous, // Flag for UI to show anonymous avatar
         },
         lastMessage: lastMessage

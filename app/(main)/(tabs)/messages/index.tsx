@@ -16,6 +16,7 @@ import {
   Animated,
   Dimensions,
   BackHandler,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
@@ -46,6 +47,8 @@ import {
 } from '@/lib/threadsIntegrity';
 import { log } from '@/utils/logger';
 import { useScreenTrace } from '@/lib/devTrace';
+import { useBatchPresence, type PresenceStatus } from '@/hooks/usePresence';
+import type { Id } from '@/convex/_generated/dataModel';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - UI_SPACING.base * 3) / 2;
@@ -79,6 +82,33 @@ const LIKE_CARD_CONTENT_PADDING = moderateScale(10, 0.25);
 const RECENCY_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 const INBOX_TIMESTAMP_REFRESH_MS = 60 * 1000;
 const INBOX_LOADING_PLACEHOLDER_COUNT = 4;
+
+// Premium skeleton row with pulsing opacity (restored from c471732 inbox polish)
+const SkeletonChatRow = React.memo(function SkeletonChatRow() {
+  const pulseAnim = useRef(new Animated.Value(0.4)).current;
+  useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.7, duration: 700, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+      ]),
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, [pulseAnim]);
+  return (
+    <Animated.View style={[styles.loadingConversationRow, { opacity: pulseAnim }]}>
+      <View style={styles.loadingAvatar} />
+      <View style={styles.loadingConversationBody}>
+        <View style={styles.loadingConversationHeader}>
+          <View style={styles.loadingNameBar} />
+          <View style={styles.loadingTimeBar} />
+        </View>
+        <View style={styles.loadingPreviewBar} />
+      </View>
+    </Animated.View>
+  );
+});
 
 // Format relative time
 function formatRelativeTime(timestamp: number): string {
@@ -121,7 +151,46 @@ type InboxConversationRow = ProcessedThread | {
   } | null;
   unreadCount?: number;
   isPreMatch?: boolean;
+  /**
+   * P1-RESTORE: Backend marks rows where the other side became unreachable
+   * (match dissolved or user account deactivated). Frontend keeps the row
+   * visible but degrades the avatar/name rendering gracefully.
+   */
+  terminalState?: 'unmatched' | 'user_removed' | null;
 };
+
+const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
+
+function getConversationSearchPreview(
+  lastMessage: {
+    content: string;
+    type: string;
+    senderId: string;
+    isProtected?: boolean;
+  } | null | undefined,
+  currentUserId?: string
+): string {
+  if (!lastMessage) return 'say hi';
+
+  const previewPrefix = currentUserId && lastMessage.senderId === currentUserId ? 'you ' : '';
+  if (lastMessage.isProtected) {
+    return `${previewPrefix}${lastMessage.type === 'video' ? 'secure video' : 'secure photo'}`;
+  }
+  if (lastMessage.type === 'image') return `${previewPrefix}photo`;
+  if (lastMessage.type === 'video') return `${previewPrefix}video`;
+  if (lastMessage.type === 'voice') return `${previewPrefix}voice message`;
+  if (lastMessage.type === 'dare') return `${previewPrefix}dare sent`;
+
+  if (typeof lastMessage.content === 'string' && lastMessage.content.trim()) {
+    const markerMatch = lastMessage.content.match(SYSTEM_MARKER_RE);
+    if (markerMatch) {
+      return lastMessage.content.slice(markerMatch[0].length).trim() || 'new message';
+    }
+    return `${previewPrefix}${lastMessage.content}`;
+  }
+
+  return 'new message';
+}
 
 function getNonEmptyString(value: string | null | undefined): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
@@ -135,13 +204,27 @@ function getInboxMatchId(item: InboxConversationRow): string | undefined {
   return getNonEmptyString('matchId' in item ? item.matchId : undefined);
 }
 
-function getNormalizedInboxOtherUser(item: InboxConversationRow) {
+function getNormalizedInboxOtherUser(
+  item: InboxConversationRow,
+  presenceByUserId?: Record<string, { status: PresenceStatus }> | null,
+) {
   if (!item.otherUser) return undefined;
 
+  // P1-RESTORE: Preserve `id` even when it's empty/whitespace. Stripping it via
+  // getNonEmptyString broke avatar rendering for demo-photo fallback rows whose
+  // ConversationItem keys off the raw id field. Coerce null to undefined so the
+  // ConversationItem prop type is satisfied without dropping non-empty strings.
+  const otherUserId = item.otherUser.id ?? undefined;
+  // P0-RESTORE: ConversationItem now reads `presenceStatus` (not `lastActive`)
+  // for the green active-now dot. Inject status from the unified presence
+  // batch so the dot lights up correctly.
+  const presenceStatus =
+    otherUserId && presenceByUserId ? presenceByUserId[otherUserId]?.status : undefined;
   return {
     ...item.otherUser,
-    id: getNonEmptyString(item.otherUser.id),
+    id: otherUserId,
     lastActive: item.otherUser.lastActive ?? 0,
+    presenceStatus,
   };
 }
 
@@ -184,11 +267,32 @@ export default function MessagesScreen() {
 
   // Swipe mutation for Convex mode like/pass actions
   const swipe = useMutation(api.likes.swipe);
+  // P0-RESTORE: Lazy-create a conversation when the user taps a new-match card
+  // that doesn't have a conversationId yet. Without this, taps silently fail.
+  const ensureConversation = useMutation(api.conversations.getOrCreateForMatch);
   const [retryKey, setRetryKey] = useState(0);
   const { safeTimeout } = useScreenSafety();
 
   // View state: 'messages' | 'likes' — IN-PLACE toggle, not a route change
   const [activeView, setActiveView] = useState<'messages' | 'likes'>('messages');
+
+  // P1-RESTORE: Search bar state for filtering conversations by name / preview text.
+  // P1-POLISH: Debounce filter (120ms) so large inboxes don't lag per-keystroke,
+  // but propagate empty/clear instantly so the UI snaps back without delay.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const clearSearch = useCallback(() => {
+    setSearchQuery('');
+    setDebouncedSearchQuery('');
+  }, []);
+  useEffect(() => {
+    if (searchQuery.length === 0) {
+      setDebouncedSearchQuery('');
+      return;
+    }
+    const handle = setTimeout(() => setDebouncedSearchQuery(searchQuery), 120);
+    return () => clearTimeout(handle);
+  }, [searchQuery]);
 
   // Match modal state
   const [matchModalVisible, setMatchModalVisible] = useState(false);
@@ -530,12 +634,31 @@ export default function MessagesScreen() {
   // FIX: Filter out conversations without messages — those should only appear in
   // Super Likes / New Matches section, not in the Messages list. This prevents
   // the same profile from appearing in both places.
+  // P1-RESTORE: Always keep rows in a terminalState (unmatched / user_removed)
+  // so the user sees the graceful "User unavailable" degraded row instead of
+  // the conversation silently disappearing.
   const conversations = useMemo(() => {
     if (isDemoMode) return demoThreads;
     if (!convexConversations) return [];
-    // Only show conversations that have at least one message
-    return convexConversations.filter((c: any) => c.lastMessage !== null);
+    return convexConversations.filter(
+      (c: any) => c.lastMessage !== null || c.terminalState != null,
+    );
   }, [isDemoMode, demoThreads, convexConversations]);
+
+  // P0-RESTORE: Batch-fetch presence for the visible inbox rows so the green
+  // "active now" dot lights up via the unified presence system. Returns a map
+  // keyed by userId -> PresenceInfo.
+  const conversationOtherUserIds = useMemo(() => {
+    const ids: Id<'users'>[] = [];
+    for (const c of conversations as any[]) {
+      const id = c?.otherUser?.id;
+      if (typeof id === 'string' && id.length > 0) {
+        ids.push(id as Id<'users'>);
+      }
+    }
+    return ids;
+  }, [conversations]);
+  const conversationPresenceByUserId = useBatchPresence(conversationOtherUserIds) ?? null;
   const unreadCount = isDemoMode ? demoUnreadCount : convexUnreadCount;
   const currentUser = isDemoMode
     ? { gender: 'male', subscriptionTier: 'premium' as const }
@@ -1022,11 +1145,38 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.compactMatchItem}
               activeOpacity={0.7}
-              onPress={() => {
+              onPress={async () => {
                 if (item.conversationId) {
                   safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat');
-                } else {
-                  log.warn('[MESSAGES]', 'New Match card missing conversationId', { matchId: item.id });
+                  return;
+                }
+                // P0-RESTORE: Match cards may not have a conversationId yet.
+                // Lazily create the conversation via ensureConversation, then
+                // navigate. Without this fallback the tap silently fails.
+                const matchId = item.id || item.matchId;
+                if (!matchId || !userId) {
+                  log.warn('[MESSAGES]', 'New Match card cannot create conversation', {
+                    matchId,
+                    hasUserId: !!userId,
+                  });
+                  Toast.show('Unable to open chat. Please try again.');
+                  return;
+                }
+                try {
+                  const result = await ensureConversation({ matchId: matchId as any, authUserId: userId });
+                  if (result?.conversationId) {
+                    safePush(
+                      router,
+                      `/(main)/(tabs)/messages/chat/${result.conversationId}` as any,
+                      'messages->newMatchChat',
+                    );
+                  } else {
+                    log.error('[MESSAGES]', 'ensureConversation returned no conversationId', { result });
+                    Toast.show('Unable to open chat. Please try again.');
+                  }
+                } catch (error) {
+                  log.error('[MESSAGES]', 'ensureConversation failed', { error, matchId });
+                  Toast.show('Unable to open chat. Please try again.');
                 }
               }}
             >
@@ -1080,19 +1230,7 @@ export default function MessagesScreen() {
             </View>
             <View style={styles.loadingList}>
               {Array.from({ length: INBOX_LOADING_PLACEHOLDER_COUNT }, (_, index) => (
-                <View
-                  key={`messages-loading-${index}`}
-                  style={styles.loadingConversationRow}
-                >
-                  <View style={styles.loadingAvatar} />
-                  <View style={styles.loadingConversationBody}>
-                    <View style={styles.loadingConversationHeader}>
-                      <View style={styles.loadingNameBar} />
-                      <View style={styles.loadingTimeBar} />
-                    </View>
-                    <View style={styles.loadingPreviewBar} />
-                  </View>
-                </View>
+                <SkeletonChatRow key={`messages-loading-${index}`} />
               ))}
             </View>
           </View>
@@ -1221,59 +1359,119 @@ export default function MessagesScreen() {
         // MESSAGES VIEW - Clean layout structure (gap fix rewrite)
         // ════════════════════════════════════════════════════════════════════════
         // Structure:
-        //   1. Optional sections (ProfileNudge, Super Likes, New Matches) - ONLY if they exist
-        //   2. FlatList for conversations - NO ListHeaderComponent (avoids gap bug)
-        //
-        // Key fix: Removed ListHeaderComponent entirely. FlatList's ListHeaderComponent
-        // can reserve space even when returning null, causing unwanted gaps.
-        // Instead, optional sections are rendered as direct siblings ABOVE the FlatList.
+        //   1. Search bar (P1-RESTORE)
+        //   2. Optional sections (ProfileNudge, Super Likes, New Matches) - ONLY when not searching
+        //   3. FlatList for conversations - NO ListHeaderComponent (avoids gap bug)
         // ════════════════════════════════════════════════════════════════════════
-        <View style={styles.messagesContent}>
-          {/* Optional top sections - rendered ONLY when they have data */}
-          {showMessagesNudge && (
-            <ProfileNudge
-              message={NUDGE_MESSAGES.needs_both.messages}
-              onDismiss={() => dismissNudge('messages')}
-            />
-          )}
-          {superLikeMatches.length > 0 && renderSuperLikesRow()}
-          {newMatches.length > 0 && renderNewMatchesRow()}
+        (() => {
+          // P1-POLISH: Use debounced value for filter; raw `searchQuery` still
+          // drives the input so typing feels instant.
+          const normalizedSearchQuery = debouncedSearchQuery.trim().toLowerCase();
+          const isSearching = normalizedSearchQuery.length > 0;
+          const baseConversations = (conversations || []) as InboxConversationRow[];
+          const filteredConversations = isSearching
+            ? baseConversations.filter((conversation) => {
+                const haystack = [
+                  conversation.otherUser?.name || '',
+                  getConversationSearchPreview(conversation.lastMessage, userId || undefined),
+                ]
+                  .join(' ')
+                  .toLowerCase();
+                return haystack.includes(normalizedSearchQuery);
+              })
+            : baseConversations;
 
-          {/* Conversation list - starts immediately after header when no top sections */}
-          <FlatList
-            key="messages-list"
-            style={styles.conversationList}
-            data={conversations || []}
-            keyExtractor={(item, index) => getInboxConversationKey(item as InboxConversationRow, index)}
-            renderItem={({ item }: { item: InboxConversationRow }) => (
-              <ConversationItem
-                id={item.id || item.conversationId || getInboxMatchId(item) || 'conversation'}
-                otherUser={getNormalizedInboxOtherUser(item)}
-                lastMessage={item.lastMessage}
-                unreadCount={item.unreadCount ?? 0}
-                isPreMatch={item.isPreMatch ?? false}
-                currentTimeMs={inboxTimeReferenceMs}
-                onPress={() => handleConversationPress(item)}
-                onAvatarPress={() => handleConversationAvatarPress(item)}
-              />
-            )}
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Ionicons name="chatbubbles-outline" size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
-                <Text {...TEXT_PROPS} style={styles.emptyTitle}>Your inbox is quiet for now</Text>
-                <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
-                  When you match with someone or accept a confession, your conversations will appear here.
-                </Text>
+          return (
+            <View style={styles.messagesContent}>
+              {/* P1-RESTORE: Search bar */}
+              <View style={styles.searchSection}>
+                <View style={styles.searchInputWrap}>
+                  <Ionicons name="search" size={18} color={COLORS.textMuted} />
+                  <TextInput
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                    placeholder="Search conversations"
+                    placeholderTextColor={COLORS.textMuted}
+                    style={styles.searchInput}
+                    returnKeyType="search"
+                    autoCorrect={false}
+                    autoCapitalize="none"
+                    clearButtonMode="never"
+                  />
+                  {searchQuery.length > 0 && (
+                    <TouchableOpacity
+                      onPress={clearSearch}
+                      style={styles.searchClearButton}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Ionicons name="close-circle" size={18} color={COLORS.textLight} />
+                    </TouchableOpacity>
+                  )}
+                </View>
               </View>
-            }
-            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-            contentContainerStyle={
-              (!conversations || conversations.length === 0)
-                ? styles.emptyListContainer
-                : styles.conversationListContent
-            }
-          />
-        </View>
+
+              {/* Optional top sections - hidden while searching */}
+              {!isSearching && showMessagesNudge && (
+                <ProfileNudge
+                  message={NUDGE_MESSAGES.needs_both.messages}
+                  onDismiss={() => dismissNudge('messages')}
+                />
+              )}
+              {!isSearching && superLikeMatches.length > 0 && renderSuperLikesRow()}
+              {!isSearching && newMatches.length > 0 && renderNewMatchesRow()}
+
+              {/* Conversation list */}
+              <FlatList
+                key="messages-list"
+                style={styles.conversationList}
+                data={filteredConversations}
+                keyExtractor={(item, index) => getInboxConversationKey(item as InboxConversationRow, index)}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item }: { item: InboxConversationRow }) => (
+                  <ConversationItem
+                    id={item.id || item.conversationId || getInboxMatchId(item) || 'conversation'}
+                    otherUser={getNormalizedInboxOtherUser(item, conversationPresenceByUserId)}
+                    lastMessage={item.lastMessage}
+                    unreadCount={item.unreadCount ?? 0}
+                    isPreMatch={item.isPreMatch ?? false}
+                    currentUserId={userId ?? undefined}
+                    currentTimeMs={inboxTimeReferenceMs}
+                    onPress={() => handleConversationPress(item)}
+                    onAvatarPress={() => handleConversationAvatarPress(item)}
+                  />
+                )}
+                ListEmptyComponent={
+                  <View style={styles.emptyContainer}>
+                    <Ionicons
+                      name={isSearching ? 'search-outline' : 'chatbubbles-outline'}
+                      size={EMPTY_STATE_ICON_SIZE}
+                      color={COLORS.textLight}
+                    />
+                    <Text {...TEXT_PROPS} style={styles.emptyTitle}>
+                      {isSearching ? 'No matching conversations' : 'Your inbox is quiet for now'}
+                    </Text>
+                    <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
+                      {isSearching
+                        ? 'Try a different name or phrase from the last message.'
+                        : 'When you match with someone or accept a confession, your conversations will appear here.'}
+                    </Text>
+                    {isSearching && (
+                      <TouchableOpacity style={styles.searchClearAction} onPress={clearSearch}>
+                        <Text {...TEXT_PROPS} style={styles.searchClearActionText}>Clear search</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                }
+                refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+                contentContainerStyle={
+                  filteredConversations.length === 0
+                    ? styles.emptyListContainer
+                    : styles.conversationListContent
+                }
+              />
+            </View>
+          );
+        })()
       )}
 
       {/* Match Modal */}
@@ -1342,6 +1540,48 @@ const styles = StyleSheet.create({
     flex: 1,
     marginTop: 0,
     paddingTop: 0,
+  },
+  // P1-RESTORE: Search bar styles
+  searchSection: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 4,
+    backgroundColor: COLORS.background,
+  },
+  searchInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    minHeight: 44,
+    paddingHorizontal: 14,
+    borderRadius: 16,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 15,
+    color: COLORS.text,
+    paddingVertical: 11,
+  },
+  searchClearButton: {
+    paddingVertical: 4,
+    paddingLeft: 4,
+  },
+  searchClearAction: {
+    marginTop: UI_SPACING.md,
+    paddingHorizontal: UI_SPACING.base,
+    paddingVertical: UI_SPACING.sm,
+    borderRadius: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  searchClearActionText: {
+    color: COLORS.text,
+    fontSize: FONT_SIZE.body,
+    fontWeight: '600',
   },
   // HARD FIX: FlatList style - negative margin to pull content up and eliminate gap
   conversationList: {
