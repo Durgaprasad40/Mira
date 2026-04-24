@@ -13,6 +13,8 @@ const PHASE2_LEGACY_TYPES = new Set<string>([
   'phase2_match',
   'phase2_like',
   'phase2_private_message',
+  'phase2_deep_connect',
+  'phase2_chat_room',
 ]);
 
 function isPhase1Row(row: { phase?: string | null; type: string }): boolean {
