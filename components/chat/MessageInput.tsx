@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Modal, Pressable, Keyboard } from 'react-native';
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Keyboard } from 'react-native';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -64,9 +64,13 @@ export function MessageInput({
     transform: [{ scale: sendButtonScale.value }],
   }));
 
+  // INPUT-COLOR-FIX: Focus border no longer uses COLORS.primary (brand red) —
+  // that was making the composer look like an error state while typing. Use
+  // a neutral premium border tone (same hue family as the border token, a
+  // touch darker when focused so there is still feedback).
   const inputAnimatedStyle = useAnimatedStyle(() => ({
-    borderWidth: 1.5,
-    borderColor: inputBorderColor.value === 1 ? COLORS.primary : 'transparent',
+    borderWidth: 1,
+    borderColor: inputBorderColor.value === 1 ? 'rgba(0, 0, 0, 0.12)' : 'transparent',
   }));
 
   const handleFocus = useCallback(() => {
@@ -260,6 +264,46 @@ export function MessageInput({
 
   return (
     <View style={styles.container}>
+      {/* FLOATING-PANEL: Vertical attach panel — absolutely positioned above
+          the composer and over the chat. Does NOT push or move chat UI.
+          Tap outside (handled by parent overlay) or tap + again to dismiss. */}
+      {showAttachMenu && !isRecording && (
+        <View style={styles.attachPanelFloating} pointerEvents="box-none">
+          <View style={styles.attachPanelStack}>
+            {onSendCamera && (
+              <TouchableOpacity
+                style={[styles.attachCircle, { backgroundColor: COLORS.primary }]}
+                onPress={handleCameraPress}
+                activeOpacity={0.85}
+                accessibilityLabel="Secure camera"
+              >
+                <Ionicons name="camera" size={22} color={COLORS.white} />
+              </TouchableOpacity>
+            )}
+            {onSendGallery && (
+              <TouchableOpacity
+                style={[styles.attachCircle, { backgroundColor: COLORS.secondary }]}
+                onPress={handleGalleryPress}
+                activeOpacity={0.85}
+                accessibilityLabel="Secure gallery"
+              >
+                <Ionicons name="images" size={22} color={COLORS.white} />
+              </TouchableOpacity>
+            )}
+            {onSendVoice && (
+              <TouchableOpacity
+                style={[styles.attachCircle, { backgroundColor: '#9B59B6' }]}
+                onPress={handleVoicePress}
+                activeOpacity={0.85}
+                accessibilityLabel="Voice message"
+              >
+                <Ionicons name="mic" size={22} color={COLORS.white} />
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+      )}
+
       {showTemplates && (
         <View style={styles.templatesContainer}>
           <View style={styles.templatesHeader}>
@@ -296,62 +340,26 @@ export function MessageInput({
       {/* Message limit banner removed — no weekly limit for now (until subscriptions added) */}
 
       <View style={styles.inputContainer}>
-        {/* + Button with popup menu - LEFT side of TextInput */}
+        {/* + Button toggles the inline circular attach row */}
         {!isRecording && (
-          <View style={styles.attachButtonWrapper}>
-            <TouchableOpacity
-              style={styles.attachButton}
-              onPress={() => setShowAttachMenu(true)}
-              disabled={disabled}
-            >
-              <Ionicons name="add" size={26} color={COLORS.primary} />
-            </TouchableOpacity>
-
-            {/* Popup menu */}
-            <Modal
-              visible={showAttachMenu}
-              transparent
-              animationType="fade"
-              onRequestClose={() => setShowAttachMenu(false)}
-            >
-              <Pressable style={styles.menuOverlay} onPress={() => setShowAttachMenu(false)}>
-                <View style={styles.menuContainer}>
-                  <Text style={styles.menuCaption}>
-                    Choose tap or hold, then pick view once or a timer before sending.
-                  </Text>
-                  {/* Camera option */}
-                  {onSendCamera && (
-                    <TouchableOpacity style={styles.menuItem} onPress={handleCameraPress}>
-                      <View style={[styles.menuIcon, { backgroundColor: COLORS.primary }]}>
-                        <Ionicons name="camera" size={20} color={COLORS.white} />
-                      </View>
-                      <Text style={styles.menuText}>Secure Camera</Text>
-                    </TouchableOpacity>
-                  )}
-
-                  {/* Gallery option */}
-                  {onSendGallery && (
-                    <TouchableOpacity style={styles.menuItem} onPress={handleGalleryPress}>
-                      <View style={[styles.menuIcon, { backgroundColor: COLORS.secondary }]}>
-                        <Ionicons name="images" size={20} color={COLORS.white} />
-                      </View>
-                      <Text style={styles.menuText}>Secure Gallery</Text>
-                    </TouchableOpacity>
-                  )}
-
-                  {/* Voice option */}
-                  {onSendVoice && (
-                    <TouchableOpacity style={styles.menuItem} onPress={handleVoicePress}>
-                      <View style={[styles.menuIcon, { backgroundColor: '#9B59B6' }]}>
-                        <Ionicons name="mic" size={20} color={COLORS.white} />
-                      </View>
-                      <Text style={styles.menuText}>Voice</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              </Pressable>
-            </Modal>
-          </View>
+          <TouchableOpacity
+            style={styles.attachButton}
+            onPress={() => {
+              setShowAttachMenu((v) => {
+                const next = !v;
+                if (next) Keyboard.dismiss();
+                return next;
+              });
+            }}
+            disabled={disabled}
+            accessibilityLabel={showAttachMenu ? 'Close attachments' : 'Open attachments'}
+          >
+            <Ionicons
+              name={showAttachMenu ? 'close' : 'add'}
+              size={26}
+              color={COLORS.primary}
+            />
+          </TouchableOpacity>
         )}
 
         {isPreMatch && !isRecording && (
@@ -494,9 +502,6 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     gap: 8,
   },
-  attachButtonWrapper: {
-    position: 'relative',
-  },
   attachButton: {
     width: 40,
     height: 40,
@@ -505,51 +510,32 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  menuOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    justifyContent: 'flex-end',
-  },
-  menuContainer: {
+  // FLOATING-PANEL: positioned absolutely above the composer (bottom: 100%)
+  // so the chat thread does NOT shift when the panel opens.
+  attachPanelFloating: {
     position: 'absolute',
-    left: 16,
-    bottom: 80,
-    backgroundColor: COLORS.background,
-    borderRadius: 12,
-    paddingVertical: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    elevation: 8,
+    bottom: '100%',
+    left: 12,
+    paddingBottom: 8,
+    zIndex: 10,
+    elevation: 10,
   },
-  menuCaption: {
-    fontSize: 12,
-    lineHeight: 17,
-    color: COLORS.textMuted,
-    marginBottom: 6,
-    paddingHorizontal: 16,
-    paddingTop: 4,
-  },
-  menuItem: {
-    flexDirection: 'row',
+  attachPanelStack: {
+    flexDirection: 'column',
     alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    minWidth: 140,
+    gap: 10,
   },
-  menuIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+  attachCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 12,
-  },
-  menuText: {
-    fontSize: 15,
-    color: COLORS.text,
-    fontWeight: '500',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
+    elevation: 4,
   },
   iconButton: {
     padding: 8,
