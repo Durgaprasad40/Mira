@@ -13,7 +13,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConvex } from 'convex/react';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
-import { useNotifications, useDemoNotifStore, type AppNotification } from '@/hooks/useNotifications';
+import { usePhase1Notifications, useDemoNotifStore, type AppNotification } from '@/hooks/useNotifications';
 import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { api } from '@/convex/_generated/api';
@@ -35,8 +35,9 @@ export default function NotificationsScreen() {
   // STABILITY: Track refresh timeout for cleanup on unmount
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // ── Single source of truth — same hook the bell badge uses ──
-  const { notifications, unseenCount, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
+  // ── Single source of truth — same hook the Phase-1 bell badge uses ──
+  // STRICT ISOLATION: Phase-1 only. Phase-2 lives at /(main)/(private)/notifications.
+  const { notifications, unseenCount, markAllSeen, markRead, cleanupExpiredNotifications } = usePhase1Notifications();
 
   // ── Demo mode: access likes and crossedPaths to validate notification invariants ──
   const demoLikes = useDemoStore((s) => s.likes);

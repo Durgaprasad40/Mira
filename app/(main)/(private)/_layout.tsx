@@ -495,6 +495,7 @@ export default function PrivateLayout() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="p2-profile/[userId]" />
         <Stack.Screen name="phase2-likes" />
+        <Stack.Screen name="notifications" />
       </Stack>
     </AppErrorBoundary>
   );

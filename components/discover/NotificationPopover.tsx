@@ -18,7 +18,11 @@ import {
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
-import { useNotifications, type AppNotification } from '@/hooks/useNotifications';
+import {
+  usePhase1Notifications,
+  usePhase2Notifications,
+  type AppNotification,
+} from '@/hooks/useNotifications';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const POPOVER_WIDTH = Math.min(SCREEN_WIDTH - 32, 360);
@@ -31,6 +35,12 @@ interface NotificationPopoverProps {
   anchorRight?: number;
   /** Anchor position for the popover (top offset from header) */
   anchorTop?: number;
+  /**
+   * STRICT ISOLATION: which phase's notifications this popover renders.
+   * Phase-1 hosts (Discover) MUST pass 'phase1'. Phase-2 hosts (Deep Connect)
+   * MUST pass 'phase2'. There is no auto-detect — the host owns the choice.
+   */
+  phase: 'phase1' | 'phase2';
 }
 
 export function NotificationPopover({
@@ -38,10 +48,16 @@ export function NotificationPopover({
   onClose,
   anchorRight = 16,
   anchorTop = 56,
+  phase,
 }: NotificationPopoverProps) {
-  // SAFEGUARD: useNotifications returns empty array when userId is not ready
-  // This prevents crashes from undefined data
-  const { notifications, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
+  // STRICT ISOLATION: bind to the phase-specific hook so this popover never
+  // sees rows from the other phase's table.
+  // Both hooks are called unconditionally (rules of hooks); the unused branch
+  // is gated server-side via `'skip'` and contributes no rows.
+  const phase1Data = usePhase1Notifications();
+  const phase2Data = usePhase2Notifications();
+  const { notifications, markAllSeen, markRead, cleanupExpiredNotifications } =
+    phase === 'phase1' ? phase1Data : phase2Data;
 
   // Additional safeguard: ensure notifications is always an array
   const safeNotifications = notifications ?? [];
@@ -70,6 +86,55 @@ export function NotificationPopover({
       notification.data?.otherUserId ??
       notification.data?.userId;
 
+    // STRICT ISOLATION: route by phase. Phase-2 rows must never route to
+    // Phase-1 surfaces (Discover / nearby / messages tab) and vice versa.
+    if (phase === 'phase2') {
+      switch (notification.type) {
+        case 'phase2_private_message': {
+          const p2ConvoId =
+            notification.data?.privateConversationId ??
+            notification.data?.conversationId;
+          if (p2ConvoId) {
+            router.push(`/(main)/incognito-chat?id=${encodeURIComponent(p2ConvoId)}&${notifParams}${dedupeParam}` as any);
+          }
+          break;
+        }
+        case 'phase2_match': {
+          const p2ConvoId =
+            notification.data?.privateConversationId ??
+            notification.data?.conversationId;
+          if (p2ConvoId) {
+            router.push(`/(main)/incognito-chat?id=${encodeURIComponent(p2ConvoId)}&${notifParams}${dedupeParam}` as any);
+          } else {
+            router.push(`/(main)/(private)?${notifParams}${dedupeParam}` as any);
+          }
+          break;
+        }
+        case 'phase2_like':
+          router.push(`/(main)/(private)?${notifParams}${dedupeParam}` as any);
+          break;
+        case 'phase2_deep_connect':
+        case 'phase2_chat_room': {
+          const roomId = notification.data?.chatRoomId;
+          if (roomId) {
+            router.push(`/(main)/(private)/chat-room/${roomId}?${notifParams}${dedupeParam}` as any);
+          } else {
+            router.push(`/(main)/(private)?${notifParams}${dedupeParam}` as any);
+          }
+          break;
+        }
+        default:
+          // Unknown Phase-2 type — stay in Phase-2 home rather than leaking
+          // to a Phase-1 surface.
+          if (__DEV__) {
+            console.warn('[NotificationPopover] unknown phase2 type:', notification.type);
+          }
+          break;
+      }
+      return;
+    }
+
+    // ── phase === 'phase1' ────────────────────────────────────────────
     switch (notification.type) {
       case 'match':
       case 'new_match':
@@ -106,13 +171,6 @@ export function NotificationPopover({
           router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}?${notifParams}${dedupeParam}` as any);
         }
         break;
-      case 'phase2_private_message': {
-        const p2ConvoId = notification.data?.conversationId;
-        if (p2ConvoId) {
-          router.push(`/(main)/incognito-chat?id=${encodeURIComponent(p2ConvoId)}&${notifParams}${dedupeParam}` as any);
-        }
-        break;
-      }
       case 'crossed_paths':
         router.push({
           pathname: '/(main)/(tabs)/nearby',
@@ -138,9 +196,11 @@ export function NotificationPopover({
       case 'match':
       case 'new_match':
       case 'match_created':
+      case 'phase2_match':
         return 'heart';
       case 'like':
       case 'like_received':
+      case 'phase2_like':
         return 'heart-outline';
       case 'super_like':
       case 'superlike':
@@ -150,6 +210,9 @@ export function NotificationPopover({
       case 'new_message':
       case 'phase2_private_message':
         return 'chatbubble';
+      case 'phase2_chat_room':
+      case 'phase2_deep_connect':
+        return 'people';
       case 'crossed_paths':
         return 'location';
       case 'profile_viewed':
@@ -170,6 +233,10 @@ export function NotificationPopover({
       case 'match_created':
       case 'like':
       case 'like_received':
+      case 'phase2_match':
+      case 'phase2_like':
+      case 'phase2_deep_connect':
+      case 'phase2_chat_room':
         return COLORS.primary;
       case 'super_like':
       case 'superlike':
@@ -285,13 +352,17 @@ export function NotificationPopover({
             </View>
           )}
 
-          {/* See all link */}
+          {/* See all link — phase-aware route */}
           {safeNotifications.length > 5 && (
             <TouchableOpacity
               style={styles.seeAllButton}
               onPress={() => {
                 onClose();
-                router.push('/(main)/notifications' as any);
+                const target =
+                  phase === 'phase2'
+                    ? '/(main)/(private)/notifications'
+                    : '/(main)/notifications';
+                router.push(target as any);
               }}
             >
               <Text style={styles.seeAllText}>

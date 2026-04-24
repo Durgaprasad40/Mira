@@ -77,7 +77,7 @@ import {
   unwrapPhase1DiscoverQueryResult,
   type Phase1DiscoverEmptyReason,
 } from "@/lib/phase1DiscoverQuery";
-import { useNotificationBellBadge } from "@/hooks/useNotifications";
+import { usePhase1NotificationBellBadge } from "@/hooks/useNotifications";
 import { DEMO_PROFILES, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
 import { useBlockStore } from "@/stores/blockStore";
@@ -799,8 +799,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const discoverProfileActionResult = useInteractionStore((s) => s.discoverProfileActionResult);
   const setDiscoverProfileActionResult = useInteractionStore((s) => s.setDiscoverProfileActionResult);
 
-  // Notifications
-  const { unseenCount } = useNotificationBellBadge();
+  // Notifications (Phase-1 only — DiscoverCardStack is Phase-1)
+  const { unseenCount } = usePhase1NotificationBellBadge();
 
   // Demo store — single shallow selector to minimize re-renders.
   // Only subscribes to fields Discover actually needs; shallow compare
@@ -2975,6 +2975,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const notificationPopover = showNotificationPopover ? (
     <NotificationPopover
       visible
+      phase="phase1"
       onClose={() => setShowNotificationPopover(false)}
       anchorTop={insets.top + HEADER_H + SPACING.sm}
     />

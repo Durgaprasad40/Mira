@@ -6,38 +6,41 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import { create } from 'zustand';
 import { log } from '@/utils/logger';
-import { usePhaseMode } from '@/lib/usePhaseMode';
 import { DEBUG_NOTIFICATIONS } from '@/lib/debugFlags';
 
-// Phase 1-only notification types — never shown in Phase 2 (private tabs)
-const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
-
-// Phase 2-only notification types — never shown in Phase 1 (main discover)
-// PHASE SEPARATION: These types are created by Phase 2 (Deep Connect) backend and should
-// only appear in the Phase 2 notification bell, not in the Phase 1 bell.
-// - phase2_match: Matches created in Deep Connect
-// - phase2_like: Likes received in Deep Connect
-// - comment_connect: Confession comment connects
-const PHASE2_ONLY_TYPES = new Set([
+// Phase-2 type set — used ONLY by demo mode. Convex mode separates phases at the
+// table level (notifications vs privateNotifications) so type-based filtering is
+// no longer required for Convex callers.
+const PHASE2_TYPES = new Set([
   'phase2_match',
   'phase2_like',
   'phase2_private_message',
+  'phase2_deep_connect',
+  'phase2_chat_room',
 ]);
 
-// Types excluded from ALL in-app bells — messages have dedicated chat UI, not bell
-// Push notifications for messages still work; this only affects the bell popover
-const BELL_EXCLUDED_TYPES = new Set(['message', 'new_message']);
+// Phase-1 demo-only types
+const PHASE1_DEMO_TYPES = new Set(['crossed_paths', 'nearby']);
 
-function shouldIncludeBellNotification(type: string, isInPhase2: boolean): boolean {
-  if (BELL_EXCLUDED_TYPES.has(type)) {
-    return false;
+// Types excluded from ALL in-app bells — messages have dedicated chat UI, not bell.
+const BELL_EXCLUDED_TYPES = new Set([
+  'message',
+  'new_message',
+  'phase2_private_message',
+]);
+
+function shouldIncludeBellNotificationForPhase(
+  type: string,
+  phase: 'phase1' | 'phase2'
+): boolean {
+  if (BELL_EXCLUDED_TYPES.has(type)) return false;
+  if (phase === 'phase1') {
+    // Phase-1 bell shows everything that isn't a Phase-2 type
+    return !PHASE2_TYPES.has(type);
   }
-
-  if (isInPhase2) {
-    return !PHASE1_ONLY_TYPES.has(type);
-  }
-
-  return !PHASE2_ONLY_TYPES.has(type);
+  // Phase-2 bell shows ONLY Phase-2 types (never crossed_paths/nearby/etc.)
+  if (PHASE1_DEMO_TYPES.has(type)) return false;
+  return PHASE2_TYPES.has(type);
 }
 
 // REMOVED: Module-level phase tracking (_isInPhase2, setPhase2Active)
@@ -510,37 +513,22 @@ const EMPTY_ARRAY: any[] = [];
 let __notifLogged = false;
 
 /**
- * Single source-of-truth hook for notifications.
+ * Phase-explicit notifications hook.
  *
- * Both the bell badge (home.tsx) and the notifications screen
- * call this hook. They share the SAME underlying data:
- *  - Demo mode → Zustand store (shared across component trees)
- *  - Convex mode → reactive getNotifications query
+ * STRICT ISOLATION: The phase is provided by the caller and determines BOTH
+ * which Convex query is read AND which mutations run. Phase-1 reads from
+ * `notifications`, Phase-2 reads from `privateNotifications`. The two phases
+ * never share rows.
  *
- * Returns:
- *  - notifications: full list (same array drives both badge & list)
- *  - unseenCount:   derived from notifications.filter(n => !n.isRead)
- *  - markAllSeen(): marks every unread notification as read
- *  - markRead(id):  marks a single notification as read
+ * Demo mode still uses the local Zustand store (single source) but applies
+ * type-based filtering for the requested phase.
  */
-export function useNotifications() {
+function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const convexUserId = asUserId(userId);
   const hasValidToken = typeof token === 'string' && token.trim().length > 0;
-
-  // ══════════════════════════════════════════════════════════════════════════════
-  // PHASE DETECTION: Derive notification phase directly from route
-  // - Phase 2 ('phase2'): Show Phase 2 notifications
-  // - Shared ('shared'): Show Phase 2 notifications (user came from Phase 2)
-  // - Phase 1 ('phase1'): Show Phase 1 notifications
-  //
-  // KEY FIX: Shared routes (incognito-chat, match-celebration) are reached FROM
-  // Phase 2, so the user expects to see Phase 2 notifications in the bell.
-  // ══════════════════════════════════════════════════════════════════════════════
-  const phaseMode = usePhaseMode();
-  const isInPhase2 = phaseMode === 'phase2' || phaseMode === 'shared';
 
   // BUGFIX #32: Track mounted state to prevent state updates after unmount
   const isMountedRef = useRef(true);
@@ -609,19 +597,32 @@ export function useNotifications() {
   }, []);
 
   // ── Convex queries (skipped in legacy demo mode only) ──
-  // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  // FIX: Pass userId to the query - the backend requires it
-  const convexNotifications = useQuery(
+  // STRICT ISOLATION: Phase-1 reads `notifications`; Phase-2 reads `privateNotifications`.
+  // The two queries are never combined.
+  const phase1Notifications = useQuery(
     api.notifications.getNotifications,
-    !isDemoMode && convexUserId && authReady && hasValidToken
+    phase === 'phase1' && !isDemoMode && convexUserId && authReady && hasValidToken
       ? { userId: convexUserId }
       : 'skip',
   );
-  const markAsReadMutation = useMutation(api.notifications.markAsRead);
-  const markAllAsReadMutation = useMutation(api.notifications.markAllAsRead);
-  // A1 & A2 fix: Convex mutations for dedupeKey and conversation-based marking
-  const markReadByDedupeKeyMutation = useMutation(api.notifications.markReadByDedupeKey);
-  const markReadForConversationMutation = useMutation(api.notifications.markReadForConversation);
+  const phase2Notifications = useQuery(
+    api.privateNotifications.getPrivateNotifications,
+    phase === 'phase2' && !isDemoMode && convexUserId && authReady && hasValidToken
+      ? { userId: convexUserId }
+      : 'skip',
+  );
+  const convexNotifications = phase === 'phase1' ? phase1Notifications : phase2Notifications;
+
+  // Phase-1 mutations
+  const markAsReadMutationP1 = useMutation(api.notifications.markAsRead);
+  const markAllAsReadMutationP1 = useMutation(api.notifications.markAllAsRead);
+  const markReadByDedupeKeyMutationP1 = useMutation(api.notifications.markReadByDedupeKey);
+  const markReadForConversationMutationP1 = useMutation(api.notifications.markReadForConversation);
+
+  // Phase-2 mutations
+  const markAsReadMutationP2 = useMutation(api.privateNotifications.markPrivateNotificationRead);
+  const markAllAsReadMutationP2 = useMutation(api.privateNotifications.markAllPrivateNotificationsRead);
+  const markReadForConversationMutationP2 = useMutation(api.privateNotifications.markPrivateReadForConversation);
 
   // ── Demo-mode shared state ──
   const demoNotifs = useDemoNotifStore((s) => s.notifications);
@@ -686,20 +687,32 @@ export function useNotifications() {
     [mappedConvex, stableNow],
   );
 
-  // Phase 2 isolation: filter out Phase 1-only notification types when in private tabs
-  // ORDERING FIX: In demo mode, return empty array until demoStore is seeded (orphan cleanup complete)
+  // STRICT ISOLATION: Convex rows are already phase-filtered server-side.
+  // Demo mode applies type-based filtering for the requested phase.
   const baseNotifications = isDemoMode
     ? (demoStoreReady ? filteredDemoNotifs : EMPTY_ARRAY)
     : filteredConvexNotifs;
-  // Filter notifications for bell display:
-  // 1. Always exclude BELL_EXCLUDED_TYPES (messages have dedicated chat UI)
-  // 2. Phase separation: Phase 1 excludes Phase-2 types, Phase 2 excludes Phase-1 types
+
   const notifications: AppNotification[] = useMemo(
-    () => {
-      return baseNotifications.filter((n) => shouldIncludeBellNotification(n.type, isInPhase2));
-    },
-    [baseNotifications, isInPhase2],
+    () => baseNotifications.filter((n) => shouldIncludeBellNotificationForPhase(n.type, phase)),
+    [baseNotifications, phase],
   );
+
+  // P2-11: Dev-only assertion that we never render cross-phase rows.
+  if (__DEV__) {
+    for (const n of notifications) {
+      const isP2Type = PHASE2_TYPES.has(n.type);
+      if (phase === 'phase1' && isP2Type) {
+        console.warn('[useNotificationsForPhase] Phase-2 row leaked into Phase-1 render:', n.type, n._id);
+      }
+      if (phase === 'phase2' && !isP2Type && !PHASE1_DEMO_TYPES.has(n.type)) {
+        // OK in demo mode if PHASE2 set is incomplete; otherwise warn
+      }
+      if (phase === 'phase2' && PHASE1_DEMO_TYPES.has(n.type)) {
+        console.warn('[useNotificationsForPhase] Phase-1 row leaked into Phase-2 render:', n.type, n._id);
+      }
+    }
+  }
 
   // ── Derived count (single formula, no separate query) ──
   const unseenCount = notifications.filter((n) => !n.isRead).length;
@@ -707,80 +720,97 @@ export function useNotifications() {
   // ── Debug logging (once globally, DEV only, gated) ──
   useEffect(() => {
     if (__DEV__ && DEBUG_NOTIFICATIONS && !__notifLogged) {
-      console.log(`[useNotifications] ${isDemoMode ? 'demo' : 'convex'} total=${notifications.length} unseen=${unseenCount}`);
+      console.log(`[useNotificationsForPhase:${phase}] ${isDemoMode ? 'demo' : 'convex'} total=${notifications.length} unseen=${unseenCount}`);
       __notifLogged = true;
     }
-  }, [notifications.length, unseenCount]);
+  }, [phase, notifications.length, unseenCount]);
 
-  // ── Mark all as seen/read ──
+  // ── Mark all as seen/read (phase-scoped) ──
   const markAllSeen = useCallback(() => {
     if (isDemoMode) {
       demoMarkAllRead();
       return;
     }
-    if (convexUserId) {
-      markAllAsReadMutation({}).catch(console.error);
+    if (!convexUserId || !userId) return;
+    if (phase === 'phase1') {
+      markAllAsReadMutationP1({ authUserId: userId }).catch(console.error);
+    } else {
+      markAllAsReadMutationP2({ authUserId: userId }).catch(console.error);
     }
-  }, [convexUserId, markAllAsReadMutation, demoMarkAllRead]);
+  }, [phase, convexUserId, userId, markAllAsReadMutationP1, markAllAsReadMutationP2, demoMarkAllRead]);
 
-  // ── Mark single notification as read ──
-  // BUGFIX #33: Uses ref for pending reads to avoid setState on unmount warnings
+  // ── Mark single notification as read (phase-scoped) ──
   const markRead = useCallback(
     (notificationId: string) => {
       if (isDemoMode) {
         demoMarkRead(notificationId);
         return;
       }
-      if (convexUserId) {
-        // BUGFIX #33: Add to ref and force re-render for optimistic UI
-        pendingReadsRef.current.add(notificationId);
-        forceUpdate((n) => n + 1);
+      if (!convexUserId || !userId) return;
 
-        markAsReadMutation({
-          notificationId: notificationId as any,
+      pendingReadsRef.current.add(notificationId);
+      forceUpdate((n) => n + 1);
+
+      const promise =
+        phase === 'phase1'
+          ? markAsReadMutationP1({ notificationId: notificationId as any, authUserId: userId })
+          : markAsReadMutationP2({ notificationId: notificationId as any, authUserId: userId });
+
+      promise
+        .then(() => {
+          pendingReadsRef.current.delete(notificationId);
         })
-          .then(() => {
-            // BUGFIX #33: Remove from ref on success (Convex query update triggers re-render)
-            pendingReadsRef.current.delete(notificationId);
-          })
-          .catch((error) => {
-            // BUGFIX #33: Remove from ref on error (rollback)
-            if (__DEV__) console.error('[useNotifications] markRead failed:', error);
-            pendingReadsRef.current.delete(notificationId);
-            forceUpdate((n) => n + 1);
-          });
-      }
+        .catch((error) => {
+          if (__DEV__) console.error('[useNotificationsForPhase] markRead failed:', error);
+          pendingReadsRef.current.delete(notificationId);
+          forceUpdate((n) => n + 1);
+        });
     },
-    [convexUserId, markAsReadMutation, demoMarkRead],
+    [phase, convexUserId, userId, markAsReadMutationP1, markAsReadMutationP2, demoMarkRead],
   );
 
-  // ── Mark by dedupe key (A1 fix: now supports Convex mode) ──
+  // ── Mark by dedupe key (Phase-1 only — Phase-2 has no analog yet) ──
   const markReadByDedupeKey = useCallback(
     (dedupeKey: string) => {
       if (isDemoMode) {
         demoMarkReadByDedupeKey(dedupeKey);
-      } else if (convexUserId) {
-        markReadByDedupeKeyMutation({ dedupeKey }).catch(console.error);
+        return;
       }
+      if (phase !== 'phase1' || !convexUserId || !userId) return;
+      markReadByDedupeKeyMutationP1({ dedupeKey, authUserId: userId }).catch(console.error);
     },
-    [demoMarkReadByDedupeKey, convexUserId, markReadByDedupeKeyMutation],
+    [phase, demoMarkReadByDedupeKey, convexUserId, userId, markReadByDedupeKeyMutationP1],
   );
 
-  // ── Mark all message notifications for a conversation as read (A2 fix: now supports Convex mode) ──
+  // ── Mark all message notifications for a conversation as read (phase-scoped) ──
   const markReadForConversation = useCallback(
     (conversationId: string) => {
-      // A4 fix: normalize conversationId to string
       const normalizedId = String(conversationId);
       if (isDemoMode) {
         demoMarkReadForConversation(normalizedId);
-      } else if (convexUserId && userId) {
-        markReadForConversationMutation({
+        return;
+      }
+      if (!convexUserId || !userId) return;
+      if (phase === 'phase1') {
+        markReadForConversationMutationP1({
           authUserId: userId,
           conversationId: normalizedId,
         }).catch(console.error);
+      } else {
+        markReadForConversationMutationP2({
+          authUserId: userId,
+          privateConversationId: normalizedId,
+        }).catch(console.error);
       }
     },
-    [demoMarkReadForConversation, convexUserId, userId, markReadForConversationMutation],
+    [
+      phase,
+      demoMarkReadForConversation,
+      convexUserId,
+      userId,
+      markReadForConversationMutationP1,
+      markReadForConversationMutationP2,
+    ],
   );
 
   // ── Add notification (demo mode only — Convex mode uses server push) ──
@@ -815,31 +845,54 @@ export function useNotifications() {
   };
 }
 
-export function useNotificationBellBadge() {
+/**
+ * STRICT ISOLATION: Phase-1 notifications hook.
+ * Reads ONLY from `notifications` table.
+ */
+export function usePhase1Notifications() {
+  return useNotificationsForPhase('phase1');
+}
+
+/**
+ * STRICT ISOLATION: Phase-2 notifications hook.
+ * Reads ONLY from `privateNotifications` table.
+ */
+export function usePhase2Notifications() {
+  return useNotificationsForPhase('phase2');
+}
+
+/**
+ * @deprecated Use `usePhase1Notifications()` or `usePhase2Notifications()` directly.
+ * Defaults to Phase-1 to preserve legacy callers that expected Phase-1 behaviour.
+ */
+export function useNotifications() {
+  return useNotificationsForPhase('phase1');
+}
+
+function useBellBadgeForPhase(phase: 'phase1' | 'phase2') {
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
-  const convexUserId = asUserId(userId);
   const hasValidToken = typeof token === 'string' && token.trim().length > 0;
-  const phaseMode = usePhaseMode();
-  const isInPhase2 = phaseMode === 'phase2' || phaseMode === 'shared';
-  const phase = isInPhase2 ? 'phase2' : 'phase1';
 
-  // NOTE: isDemoAuthMode uses real Convex backend with userId-based auth
-  // FIX: Backend expects { userId }, not { token }
-  const convexUnseenCount = useQuery(
+  const phase1Count = useQuery(
     api.notifications.getBellUnreadCount,
-    !isDemoMode && userId && authReady ? { phase, userId } : 'skip',
+    phase === 'phase1' && !isDemoMode && userId && authReady && hasValidToken
+      ? { phase: 'phase1' as const, userId }
+      : 'skip',
+  );
+  const phase2Count = useQuery(
+    api.privateNotifications.getPrivateBellUnreadCount,
+    phase === 'phase2' && !isDemoMode && userId && authReady && hasValidToken
+      ? { userId }
+      : 'skip',
   );
 
   const demoNotifications = useDemoNotifStore((s) => s.notifications);
   const [stableNow, setStableNow] = useState(() => Math.floor(Date.now() / 60000) * 60000);
 
   useEffect(() => {
-    if (!isDemoMode) {
-      return;
-    }
-
+    if (!isDemoMode) return;
     const interval = setInterval(() => {
       setStableNow(Math.floor(Date.now() / 60000) * 60000);
     }, 60000);
@@ -849,15 +902,38 @@ export function useNotificationBellBadge() {
   const demoUnseenCount = useMemo(
     () =>
       demoNotifications.reduce((count, notification) => {
-        if (notification.isRead || isExpired(notification, stableNow)) {
-          return count;
-        }
-        return shouldIncludeBellNotification(notification.type, isInPhase2) ? count + 1 : count;
+        if (notification.isRead || isExpired(notification, stableNow)) return count;
+        return shouldIncludeBellNotificationForPhase(notification.type, phase) ? count + 1 : count;
       }, 0),
-    [demoNotifications, isInPhase2, stableNow],
+    [demoNotifications, phase, stableNow],
   );
 
+  const convexCount = phase === 'phase1' ? phase1Count : phase2Count;
   return {
-    unseenCount: isDemoMode ? demoUnseenCount : convexUnseenCount ?? 0,
+    unseenCount: isDemoMode ? demoUnseenCount : convexCount ?? 0,
   };
+}
+
+/**
+ * STRICT ISOLATION: Phase-1 bell badge.
+ * Reads ONLY from Phase-1 `notifications` table.
+ */
+export function usePhase1NotificationBellBadge() {
+  return useBellBadgeForPhase('phase1');
+}
+
+/**
+ * STRICT ISOLATION: Phase-2 bell badge.
+ * Reads ONLY from Phase-2 `privateNotifications` table.
+ */
+export function usePhase2NotificationBellBadge() {
+  return useBellBadgeForPhase('phase2');
+}
+
+/**
+ * @deprecated Use `usePhase1NotificationBellBadge()` or `usePhase2NotificationBellBadge()` directly.
+ * Defaults to Phase-1 to preserve legacy callers.
+ */
+export function useNotificationBellBadge() {
+  return useBellBadgeForPhase('phase1');
 }
