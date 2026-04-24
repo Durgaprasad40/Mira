@@ -126,8 +126,10 @@ const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 // A user stays on the map regardless of the age of their published location
 // until a later coarse republish replaces it or an exclusion fires.
 
-// Crossed paths history
-const HISTORY_EXPIRY_MS = 28 * 24 * 60 * 60 * 1000; // 4 weeks (28 days)
+// Crossed paths history — Safe Nearby v2: retention shortened from 4 weeks
+// to 14 days so the historical surface aligns with GHOST_CUTOFF_MS and
+// matches the hybrid model's promise of "events within the last two weeks".
+const HISTORY_EXPIRY_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const MAX_HISTORY_ENTRIES = 15; // Max crossed paths list entries
 
 // Grid size for approximate crossing location (privacy: round to ~300m)
@@ -138,11 +140,26 @@ const LOCATION_GRID_METERS = 300;
 // ---------------------------------------------------------------------------
 
 // Ghost cutoff — users whose last coarse publish is older than this are
-// hidden from the Nearby map. This is NOT a short TTL / live-freshness
-// rule (we keep the persistent eligibility model). It only evicts users
-// who opened the app a long time ago and never came back, so the map does
-// not fill up with abandoned accounts.
+// hidden from ALL Nearby surfaces (map + crossed paths list). It only
+// evicts users who opened the app a long time ago and never came back,
+// so neither surface fills up with abandoned accounts.
 const GHOST_CUTOFF_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+
+// Safe Nearby v2 — Map pin TTL: a published snapshot is visible on the
+// LIVE MAP for at most 6 hours after `publishedAt`. After 6h the user is
+// removed from the map but stays available in the Crossed Paths list
+// (Surface 2) until GHOST_CUTOFF_MS via the crossPathHistory pipeline.
+// This prevents the map from acting as a "last known location" tracker
+// while still letting the historical surface keep context.
+const NEARBY_MAP_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+// Safe Nearby v2 — Snapshot regeneration movement threshold. Even after
+// the 6h publish window expires, a user MUST have moved at least this
+// distance from their previous snapshot cell before a new snapshot is
+// recorded. Without this, a user who stays at home all day would have
+// their snapshot reliably re-pinned at home every 6 hours, confirming
+// home location to any observer.
+const SNAPSHOT_MOVEMENT_THRESHOLD_M = 500;
 
 // Coarse recency buckets for the UI freshness chip (Phase-2.5 three-tier).
 //   <= 24h              → "recent"  → "Recently here"
@@ -277,14 +294,41 @@ export const publishLocation = mutation({
       return { success: false, published: false, reason: 'disabled_or_paused' };
     }
 
-    // Check if published location is still within the 6-hour window
-    if (user.publishedAt && now - user.publishedAt < PUBLISH_WINDOW_MS) {
-      return {
-        success: true,
-        published: false,
-        reason: 'within_window',
-        nextPublishAt: user.publishedAt + PUBLISH_WINDOW_MS,
-      };
+    // Safe Nearby v2 — Snapshot regeneration gate.
+    // A new snapshot is allowed only when BOTH:
+    //   (a) the previous snapshot is at least 6 hours old (PUBLISH_WINDOW_MS), AND
+    //   (b) the user has moved at least 500 m from their previous snapshot cell.
+    // The 6h gate locks the snapshot in place to prevent live-tracking via
+    // refresh; the 500 m gate prevents same-cell re-snapshots from leaking
+    // home/work location to observers who watch the publish cadence.
+    if (user.publishedAt) {
+      const elapsed = now - user.publishedAt;
+      if (elapsed < PUBLISH_WINDOW_MS) {
+        return {
+          success: true,
+          published: false,
+          reason: 'within_window',
+          nextPublishAt: user.publishedAt + PUBLISH_WINDOW_MS,
+        };
+      }
+      if (
+        typeof user.publishedLat === 'number' &&
+        typeof user.publishedLng === 'number'
+      ) {
+        const movedMeters = calculateDistanceMeters(
+          user.publishedLat,
+          user.publishedLng,
+          latitude,
+          longitude,
+        );
+        if (movedMeters < SNAPSHOT_MOVEMENT_THRESHOLD_M) {
+          return {
+            success: true,
+            published: false,
+            reason: 'no_movement',
+          };
+        }
+      }
     }
 
     // Phase-1 privacy fix: snap incoming coords to the 300m grid BEFORE writing.
@@ -1813,10 +1857,13 @@ export const getNearbyUsers = query({
       // coarse published position stays eligible until the next republish).
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
 
-      // Phase-2 ghost cutoff: evict users whose last coarse publish is older
-      // than GHOST_CUTOFF_MS (14 days). This is NOT a short TTL — active
-      // users are unaffected. It only prunes abandoned accounts so the map
-      // does not fill up with stale pins that will never move again.
+      // Safe Nearby v2 — Live map TTL: a snapshot is only visible on the
+      // map for NEARBY_MAP_TTL_MS (6 hours) after publish. Beyond that the
+      // user is removed from the map entirely; they may still appear in the
+      // historical Crossed Paths surface, which uses its own retention.
+      // The longer GHOST_CUTOFF_MS (14d) acts as a defense-in-depth backstop
+      // and is also enforced by the historical surface.
+      if (now - user.publishedAt > NEARBY_MAP_TTL_MS) continue;
       if (now - user.publishedAt > GHOST_CUTOFF_MS) continue;
 
       // Distance check — 0 to 1 km range (no minimum floor; co-located users eligible)
@@ -3162,35 +3209,34 @@ function formatDistanceRange(distanceMeters: number): string {
 }
 
 /**
- * Format timestamp to a human-friendly relative time string.
- * "just now", "today", "yesterday", "3 days ago", etc.
+ * Format timestamp to a vague past-tense relative time label.
+ *
+ * Safe Nearby v2 — no minute-precision labels, no "just now", no hour
+ * precision. The label set is intentionally short and coarse so that
+ * (a) historical entries always read as past events, never as live
+ * tracking signals, and (b) refresh-tracking cannot resolve the user's
+ * recent activity to better than half-a-day.
+ *
+ * Buckets:
+ *   < 24 h          → "earlier today"
+ *   exactly 1 day   → "yesterday"
+ *   2 – 6 days      → "{N} days ago"
+ *   7 – 13 days     → "last week"
+ *   ≥ 14 days       → not surfaced (HISTORY_EXPIRY_MS prunes it before this)
  */
 function formatRelativeTime(timestamp: number, now: number): string {
   const diffMs = now - timestamp;
-  const diffMinutes = Math.floor(diffMs / (60 * 1000));
   const diffHours = Math.floor(diffMs / (60 * 60 * 1000));
   const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
 
-  if (diffMinutes < 5) {
-    return 'just now';
-  } else if (diffMinutes < 60) {
-    return `${diffMinutes} minutes ago`;
-  } else if (diffHours < 2) {
-    return 'about an hour ago';
-  } else if (diffHours < 24) {
-    return 'today';
+  if (diffHours < 24) {
+    return 'earlier today';
   } else if (diffDays === 1) {
     return 'yesterday';
   } else if (diffDays < 7) {
     return `${diffDays} days ago`;
-  } else if (diffDays < 14) {
-    return 'about a week ago';
-  } else if (diffDays < 21) {
-    return '2 weeks ago';
-  } else if (diffDays < 28) {
-    return '3 weeks ago';
   } else {
-    return 'about a month ago';
+    return 'last week';
   }
 }
 
