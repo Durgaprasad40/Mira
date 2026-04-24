@@ -1118,11 +1118,7 @@ export const sendTodConnectRequest = mutation({
       return { success: false, reason: 'Answer does not belong to this prompt' };
     }
 
-    const isAnonymousAnswer = getNormalizedTodAnswerIdentity(answer).isAnonymous;
-    if (isAnonymousAnswer) {
-      return { success: false, reason: 'Cannot connect to an anonymous answer' };
-    }
-
+    // Anonymous answers ARE connectable: identity is revealed only on accept.
     const toUserId = answer.userId;
 
     // Cannot connect to self
@@ -1147,7 +1143,15 @@ export const sendTodConnectRequest = mutation({
       .first();
 
     if (existing) {
-      return { success: false, reason: 'Request already exists' };
+      console.log('[TOD_CONNECT_SEND] Duplicate forward request:', {
+        from: (fromUserId as string).slice(-8),
+        to: (toUserId as string).slice(-8),
+        status: existing.status,
+      });
+      return {
+        success: true,
+        action: existing.status === 'connected' ? 'already_connected' : 'already_pending',
+      };
     }
 
     const reverseExisting = await ctx.db
@@ -1162,7 +1166,18 @@ export const sendTodConnectRequest = mutation({
       .first();
 
     if (reverseExisting) {
-      return { success: false, reason: 'Request already exists' };
+      // Reverse request exists: surface it instead of erroring so UI can prompt accept.
+      console.log('[TOD_CONNECT_SEND] Reverse request exists:', {
+        from: (fromUserId as string).slice(-8),
+        to: (toUserId as string).slice(-8),
+        reverseRequestId: reverseExisting._id,
+        status: reverseExisting.status,
+      });
+      return {
+        success: true,
+        action: reverseExisting.status === 'connected' ? 'already_connected' : 'reverse_pending',
+        reverseRequestId: reverseExisting._id as string,
+      };
     }
 
     const rateCheck = await checkRateLimit(ctx, fromUserId, 'connect');
@@ -1171,7 +1186,7 @@ export const sendTodConnectRequest = mutation({
     }
 
     // Create connect request
-    await ctx.db.insert('todConnectRequests', {
+    const requestId = await ctx.db.insert('todConnectRequests', {
       promptId,
       answerId,
       fromUserId,
@@ -1180,12 +1195,20 @@ export const sendTodConnectRequest = mutation({
       createdAt: Date.now(),
     });
 
-    return { success: true };
+    console.log('[TOD_CONNECT_SEND] Created request:', {
+      requestId,
+      from: (fromUserId as string).slice(-8),
+      to: (toUserId as string).slice(-8),
+      promptId,
+      answerId,
+    });
+
+    return { success: true, action: 'pending' as const, requestId: requestId as string };
   },
 });
 
 // Respond to connect request (Connect or Remove)
-// Creates conversation in EXISTING conversations table for both users
+// Creates conversation in Phase-2 privateConversations for both users
 export const respondToConnect = mutation({
   args: {
     requestId: v.id('todConnectRequests'),
@@ -1232,47 +1255,60 @@ export const respondToConnect = mutation({
         return { success: false, reason: 'Connect request is no longer valid' };
       }
 
-      // Resolve sender to Id<'users'>
-      const senderDbId = await resolveUserIdByAuthId(ctx, request.fromUserId);
+      // P1-5: request.fromUserId is the Convex users-table id stored as a string at send time.
+      // Resolve directly; fall back to lookup-by-authId only if direct fetch fails.
+      let senderDbId: Id<'users'> | null = null;
+      try {
+        const direct = await ctx.db.get(request.fromUserId as Id<'users'>);
+        if (direct) {
+          senderDbId = direct._id;
+        }
+      } catch {
+        // Not a valid Convex ID format - fall through.
+      }
       if (!senderDbId) {
+        senderDbId = await resolveUserIdByAuthId(ctx, request.fromUserId);
+      }
+      if (!senderDbId) {
+        console.log('[TOD_CONNECT_RESPOND] Sender not found:', {
+          requestId,
+          fromUserId: request.fromUserId,
+        });
         return { success: false, reason: 'Sender user not found' };
       }
 
       if (await hasBlockBetween(ctx, senderDbId as string, recipientDbId as string)) {
+        console.log('[TOD_CONNECT_RESPOND] Blocked between users:', {
+          sender: (senderDbId as string).slice(-8),
+          recipient: (recipientDbId as string).slice(-8),
+        });
         return { success: false, reason: 'Connect unavailable for this user' };
       }
 
-      // Get sender profile for response
+      // Get sender + recipient profiles for response
       const sender = await ctx.db.get(senderDbId as Id<'users'>);
-
-      // Get recipient profile for response
       const recipient = await ctx.db.get(recipientDbId as Id<'users'>);
 
       const senderIdentity = getPromptConnectIdentity(prompt, sender);
       const recipientIdentity = answer
         ? getAnswerConnectIdentity(answer, recipient)
         : getDefaultConnectIdentity(recipient);
-
-      if (recipientIdentity.isAnonymous) {
-        return { success: false, reason: 'Connect unavailable for this user' };
-      }
+      // Anonymous identity is allowed: identity is revealed on accept by design.
 
       // Order participants for consistent deduplication (lower ID first)
       const participantIds = [senderDbId as Id<'users'>, recipientDbId as Id<'users'>].sort();
 
-      // Check if conversation already exists for this user pair
-      // Query conversationParticipants to find shared conversations
+      // P0-2: Look up existing Phase-2 conversation for this user pair.
       const senderParticipations = await ctx.db
-        .query('conversationParticipants')
+        .query('privateConversationParticipants')
         .withIndex('by_user', (q) => q.eq('userId', senderDbId as Id<'users'>))
         .collect();
 
-      let existingConversationId: Id<'conversations'> | null = null;
+      let existingConversationId: Id<'privateConversations'> | null = null;
 
       for (const sp of senderParticipations) {
-        // Check if recipient is also in this conversation
         const recipientInConvo = await ctx.db
-          .query('conversationParticipants')
+          .query('privateConversationParticipants')
           .withIndex('by_user_conversation', (q) =>
             q.eq('userId', recipientDbId as Id<'users'>).eq('conversationId', sp.conversationId)
           )
@@ -1285,45 +1321,72 @@ export const respondToConnect = mutation({
       }
 
       const now = Date.now();
-      let conversationId: Id<'conversations'>;
+      let conversationId: Id<'privateConversations'>;
+      let conversationCreated = false;
 
       if (existingConversationId) {
-        // Reuse existing conversation
+        // Reuse existing Phase-2 conversation
         conversationId = existingConversationId;
-        // Update lastMessageAt
         await ctx.db.patch(conversationId, { lastMessageAt: now });
+        // Make sure the conversation is visible to both sides if previously hidden.
+        const sp = await ctx.db
+          .query('privateConversationParticipants')
+          .withIndex('by_user_conversation', (q) =>
+            q.eq('userId', senderDbId as Id<'users'>).eq('conversationId', conversationId)
+          )
+          .first();
+        if (sp?.isHidden) {
+          await ctx.db.patch(sp._id, { isHidden: false });
+        }
+        const rp = await ctx.db
+          .query('privateConversationParticipants')
+          .withIndex('by_user_conversation', (q) =>
+            q.eq('userId', recipientDbId as Id<'users'>).eq('conversationId', conversationId)
+          )
+          .first();
+        if (rp?.isHidden) {
+          await ctx.db.patch(rp._id, { isHidden: false });
+        }
       } else {
-        // Create new conversation in EXISTING conversations table
-        conversationId = await ctx.db.insert('conversations', {
+        // Create new Phase-2 conversation
+        conversationId = await ctx.db.insert('privateConversations', {
           participants: participantIds,
           isPreMatch: false,
           connectionSource: 'tod',
           createdAt: now,
           lastMessageAt: now,
         });
+        conversationCreated = true;
 
-        // Create conversationParticipants for BOTH users
-        await ctx.db.insert('conversationParticipants', {
+        await ctx.db.insert('privateConversationParticipants', {
           conversationId,
           userId: senderDbId as Id<'users'>,
           unreadCount: 1, // Sender will see the system message as unread
         });
 
-        await ctx.db.insert('conversationParticipants', {
+        await ctx.db.insert('privateConversationParticipants', {
           conversationId,
           userId: recipientDbId as Id<'users'>,
-          unreadCount: 0, // Recipient is accepting, they'll see it immediately
+          unreadCount: 0, // Recipient is accepting; they'll see it immediately
         });
 
-        // Create initial system message
-        await ctx.db.insert('messages', {
+        // Initial system message in Phase-2 messages table.
+        await ctx.db.insert('privateMessages', {
           conversationId,
           senderId: recipientDbId as Id<'users'>,
-          type: 'text',
+          type: 'system',
           content: '[SYSTEM:truthdare]T&D connection accepted! Say hi!',
           createdAt: now,
         });
       }
+
+      console.log('[TOD_CONNECT_RESPOND] Accepted:', {
+        requestId,
+        conversationId,
+        conversationCreated,
+        sender: (senderDbId as string).slice(-8),
+        recipient: (recipientDbId as string).slice(-8),
+      });
 
       if (privateMedia) {
         await ctx.db.patch(privateMedia._id, {
@@ -1366,6 +1429,10 @@ export const respondToConnect = mutation({
         });
       }
       await ctx.db.patch(requestId, { status: 'removed' });
+      console.log('[TOD_CONNECT_RESPOND] Removed:', {
+        requestId,
+        recipient: (recipientDbId as string).slice(-8),
+      });
       return { success: true, action: 'removed' as const };
     }
   },

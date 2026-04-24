@@ -910,20 +910,56 @@ export default function PromptThreadScreen() {
       });
 
       if (result.success) {
+        const action = (result as any).action as
+          | 'pending'
+          | 'already_pending'
+          | 'already_connected'
+          | 'reverse_pending'
+          | undefined;
+
         if (isMountedRef.current) {
           setConnectSentFor((prev) => {
             const next = new Set(prev);
             next.add(answerId);
             return next;
           });
-          setSelectedAnswerId(null); // Clear selection after successful send
+          setSelectedAnswerId(null);
         }
-        Alert.alert('Connect Sent', 'Your connect request has been sent!');
+
+        if (action === 'reverse_pending') {
+          Alert.alert(
+            'They sent you one!',
+            'They already sent you a connect request. Open Messages to accept it.'
+          );
+        } else if (action === 'already_connected') {
+          Alert.alert('Already Connected', 'You are already connected. Open Messages to chat.');
+        } else if (action === 'already_pending') {
+          Alert.alert('Already Sent', 'Your connect request is already pending.');
+        } else {
+          Alert.alert('Connect Sent', 'Your connect request has been sent!');
+        }
       } else {
-        // Backend already deduplicates - show user-friendly message
+        // P2-9: Ensure retry is allowed on failure (no leaked state).
+        if (isMountedRef.current) {
+          setConnectSentFor((prev) => {
+            if (!prev.has(answerId)) return prev;
+            const next = new Set(prev);
+            next.delete(answerId);
+            return next;
+          });
+        }
         Alert.alert('Cannot Connect', result.reason || 'Failed to send connect request.');
       }
     } catch (error) {
+      // P2-9: Ensure retry is allowed on thrown error.
+      if (isMountedRef.current) {
+        setConnectSentFor((prev) => {
+          if (!prev.has(answerId)) return prev;
+          const next = new Set(prev);
+          next.delete(answerId);
+          return next;
+        });
+      }
       if (isRetryableTodError(error)) {
         Alert.alert(
           'Connect Unconfirmed',
