@@ -477,12 +477,11 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   // P3 POLISH: Animation refs for premium feel
   // ---------------------------------------------------------------------------
-  // P2-FIX-3: Auto-hide empty state after ~3s with direct unmount (no fade).
-  // Flag suppresses re-show until the empty condition resolves (users appeared)
-  // or the screen remounts. No Animated.Value used — plain conditional render
-  // so nothing sits over the map after the timer fires.
-  const emptyStateAutoHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasAutoHiddenEmptyStateRef = useRef(false);
+  // Empty state is persistent: the card stays visible as long as the empty
+  // condition is true. An earlier iteration auto-hid the card after a few
+  // seconds, which left users staring at an empty map with no explanation
+  // or recovery affordance. Hybrid-UX restoration keeps the card in view
+  // until new users appear (handled by the show/clear effects below).
   // P3-002: Recenter button press scale animation
   const recenterScale = useRef(new Animated.Value(1)).current;
   // P3-003: Loading overlay fade animation
@@ -1361,7 +1360,7 @@ export default function NearbyScreen() {
       }
       return;
     }
-    if (isEmptyStateCondition && !hasAutoHiddenEmptyStateRef.current) {
+    if (isEmptyStateCondition) {
       if (emptyStateShowDelayRef.current) {
         clearTimeout(emptyStateShowDelayRef.current);
       }
@@ -1377,26 +1376,6 @@ export default function NearbyScreen() {
       };
     }
   }, [isEmptyStateCondition, showEmptyState]);
-
-  // P2-FIX-3: Reset the auto-hide flag whenever the empty condition resolves
-  // (e.g. nearby users appeared). Lets the card show again briefly next time.
-  useEffect(() => {
-    if (!isEmptyStateCondition) {
-      hasAutoHiddenEmptyStateRef.current = false;
-    }
-  }, [isEmptyStateCondition]);
-
-  // Phase-1 UX fix: the empty-state card used to auto-dismiss after ~3s,
-  // which left users staring at an empty map with no explanation of why
-  // nobody was showing up. The card now stays visible for as long as the
-  // empty-state condition is true and is only cleared when new users
-  // actually appear (handled in the reset-on-recovery effect above).
-  useEffect(() => {
-    if (emptyStateAutoHideTimerRef.current) {
-      clearTimeout(emptyStateAutoHideTimerRef.current);
-      emptyStateAutoHideTimerRef.current = null;
-    }
-  }, [showEmptyState]);
 
   // P3-004: Subtle pulse loop while empty card is visible. Native driver,
   // single Animated.loop, auto-stops on unmount / when card hides.
@@ -1475,13 +1454,9 @@ export default function NearbyScreen() {
     safePush(router, '/(main)/verification' as any, 'nearby->verification');
   }, [router]);
 
-  // Phase-3: actionable empty state. When Nearby is empty the user can jump
-  // to the main discover feed or open their discovery preferences to widen
-  // filters — both are existing screens, we only add navigation entries.
-  const handleOpenDiscover = useCallback(() => {
-    safePush(router, '/(main)/discover' as any, 'nearby->discover');
-  }, [router]);
-
+  // Phase-3: actionable empty state. When Nearby is empty the user can open
+  // their discovery preferences to widen filters — existing screen, we only
+  // add the navigation entry.
   const handleOpenPreferences = useCallback(() => {
     safePush(router, '/(main)/discovery-preferences' as any, 'nearby->preferences');
   }, [router]);
@@ -2176,7 +2151,9 @@ export default function NearbyScreen() {
           </View>
         )}
 
-        {/* Empty state card — shown briefly, auto-hides after ~3s (direct unmount). */}
+        {/* Empty state card — persistent while empty condition holds. Gives
+             the user clear context + two recovery actions (refresh, widen
+             preferences) so they never land on a silent empty map. */}
         {/* P2-FIX-3: pointerEvents="box-none" lets taps on the surrounding
              overlay strip pass through to the map; only the card itself is tappable. */}
         {showEmptyState && (
@@ -2200,10 +2177,7 @@ export default function NearbyScreen() {
                 <View style={styles.emptyIconBubble}>
                   <Ionicons name="people-outline" size={SIZES.icon.lg} color={COLORS.primary} />
                 </View>
-                <Text style={styles.emptyTitle} maxFontSizeMultiplier={1.2}>You&apos;re early — check back soon</Text>
-                <Text style={styles.emptySubtitle} maxFontSizeMultiplier={1.2}>
-                  Be the first in your area or check back later.
-                </Text>
+                <Text style={styles.emptyTitle} maxFontSizeMultiplier={1.2}>No one is currently in your area</Text>
                 <Text style={styles.emptyTrust} maxFontSizeMultiplier={1.2}>Approximate area only — not live tracking</Text>
                 <Text style={styles.emptyHint} maxFontSizeMultiplier={1.2}>Move the map to explore other areas</Text>
                 <View style={styles.emptyActionRow}>
@@ -2222,18 +2196,8 @@ export default function NearbyScreen() {
                       <Ionicons name="refresh" size={SIZES.icon.sm} color={COLORS.primary} />
                     )}
                     <Text style={styles.emptyActionText} maxFontSizeMultiplier={1.2}>
-                      {isRetrying ? 'Refreshing Nearby…' : 'Refresh'}
+                      {isRetrying ? 'Refreshing…' : 'Refresh'}
                     </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.emptyActionButton}
-                    onPress={handleOpenDiscover}
-                    activeOpacity={0.85}
-                    accessibilityLabel="Try Discover"
-                    accessibilityHint="Browse the full discover feed while Nearby is empty"
-                  >
-                    <Ionicons name="compass-outline" size={SIZES.icon.sm} color={COLORS.primary} />
-                    <Text style={styles.emptyActionText} maxFontSizeMultiplier={1.2}>Try Discover</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.emptyActionButton}
@@ -2244,14 +2208,6 @@ export default function NearbyScreen() {
                   >
                     <Ionicons name="options-outline" size={SIZES.icon.sm} color={COLORS.primary} />
                     <Text style={styles.emptyActionText} maxFontSizeMultiplier={1.2}>Adjust preferences</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.emptyActionButton}
-                    onPress={handleOpenCrossedPaths}
-                    activeOpacity={0.85}
-                  >
-                    <Ionicons name="footsteps-outline" size={SIZES.icon.sm} color={COLORS.primary} />
-                    <Text style={styles.emptyActionText} maxFontSizeMultiplier={1.2}>Crossed Paths</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -2581,14 +2537,6 @@ const styles = StyleSheet.create({
     marginTop: SPACING.md,
     textAlign: 'center',
     letterSpacing: -0.2,
-  },
-  emptySubtitle: {
-    fontSize: FONT_SIZE.body2,
-    lineHeight: lineHeight(FONT_SIZE.body2, 1.45),
-    color: COLORS.textLight,
-    textAlign: 'center',
-    marginTop: SPACING.xs,
-    paddingHorizontal: SPACING.xs,
   },
   emptyCardWrap: {
     alignItems: 'center',
