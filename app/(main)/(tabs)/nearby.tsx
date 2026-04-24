@@ -492,13 +492,6 @@ export default function NearbyScreen() {
   // P3-005: Empty card entry animation (fade + slight rise)
   const emptyCardOpacity = useRef(new Animated.Value(0)).current;
   const emptyCardTranslateY = useRef(new Animated.Value(10)).current;
-  // P3-004: Delay before showing empty card so it doesn't flash on transient empties
-  const emptyStateShowDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Auto-hide the empty card 5s after it becomes visible, even if still empty.
-  const emptyStateAutoHideRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Once we auto-hide, don't re-show for the same empty session; reset when
-  // the empty condition naturally resolves (users appear / state changes).
-  const emptyStateAutoHiddenRef = useRef(false);
   // P2-FIX-4: Removed mapOpacity Animated.Value — the fade-in caused the
   // map to remain invisible when onMapReady didn't fire reliably on Android
   // (a known react-native-maps issue when mounted inside opacity:0 parent).
@@ -1355,64 +1348,21 @@ export default function NearbyScreen() {
     !isDemo &&
     (!shouldShowLoadingState || hasRetainedNearbyResult);
 
-  // P2-FIX-3 / P3-004: Show empty-state card after a brief 1500 ms delay so
-  // it doesn't flash on transient empties. Once the card auto-hides after 5s
-  // (see effect below) it stays suppressed until the empty condition resolves
-  // naturally (users appear / state changes), at which point the flag resets
-  // so the card can appear again on the next empty session.
+  // Show empty-state card whenever the empty condition is truthy, then
+  // auto-hide it after 5 seconds. If the empty condition toggles (e.g. user
+  // refreshes, moves the map, or users appear and disappear again) the
+  // effect re-runs, clears the prior timer, and re-shows the card.
   useEffect(() => {
-    if (!isEmptyStateCondition) {
-      // Empty condition cleared — allow a future empty session to show again.
-      emptyStateAutoHiddenRef.current = false;
-      if (showEmptyState) {
-        setShowEmptyState(false);
-      }
-      return;
-    }
-    if (showEmptyState) {
-      return;
-    }
-    if (emptyStateAutoHiddenRef.current) {
-      // Already auto-hidden for this empty session; do not re-show.
-      return;
-    }
-    if (emptyStateShowDelayRef.current) {
-      clearTimeout(emptyStateShowDelayRef.current);
-    }
-    emptyStateShowDelayRef.current = setTimeout(() => {
-      if (!isMountedRef.current) return;
-      setShowEmptyState(true);
-    }, 1500);
-    return () => {
-      if (emptyStateShowDelayRef.current) {
-        clearTimeout(emptyStateShowDelayRef.current);
-        emptyStateShowDelayRef.current = null;
-      }
-    };
-  }, [isEmptyStateCondition, showEmptyState]);
+    if (!isEmptyStateCondition) return;
 
-  // Auto-hide the empty-state card 5s after it becomes visible, regardless of
-  // whether users have appeared. Marks the session as auto-hidden so the
-  // show-effect won't re-trigger until the empty condition resolves.
-  useEffect(() => {
-    if (!showEmptyState) {
-      return;
-    }
-    if (emptyStateAutoHideRef.current) {
-      clearTimeout(emptyStateAutoHideRef.current);
-    }
-    emptyStateAutoHideRef.current = setTimeout(() => {
-      if (!isMountedRef.current) return;
-      emptyStateAutoHiddenRef.current = true;
+    setShowEmptyState(true);
+
+    const timer = setTimeout(() => {
       setShowEmptyState(false);
     }, 5000);
-    return () => {
-      if (emptyStateAutoHideRef.current) {
-        clearTimeout(emptyStateAutoHideRef.current);
-        emptyStateAutoHideRef.current = null;
-      }
-    };
-  }, [showEmptyState]);
+
+    return () => clearTimeout(timer);
+  }, [isEmptyStateCondition]);
 
   // P3-004: Subtle pulse loop while empty card is visible. Native driver,
   // single Animated.loop, auto-stops on unmount / when card hides.
