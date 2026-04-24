@@ -6,6 +6,8 @@ import { resolveUserIdByAuthId } from './helpers';
 import {
   BOTTLE_SPIN_COOLDOWN_MS,
   BOTTLE_SPIN_PENDING_INVITE_TIMEOUT_MS,
+  BOTTLE_SPIN_NOT_STARTED_TIMEOUT_MS,
+  BOTTLE_SPIN_INACTIVITY_TIMEOUT_MS,
 } from '../lib/bottleSpin';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -260,6 +262,36 @@ export const getBottleSpinSession = query({
       // Sort by createdAt descending to get most recent active
       activeSessions.sort((a, b) => b.createdAt - a.createdAt);
       const session = activeSessions[0];
+
+      // TD-LIFECYCLE: Check for "accepted but not started" timeout
+      // If game was accepted but never manually started within the timeout window,
+      // surface it as 'expired' so the client can call cleanupExpiredSession.
+      const hasGameStarted = !!session.gameStartedAt;
+      const acceptedAt = session.acceptedAt || session.respondedAt || session.createdAt;
+      const timeSinceAccepted = now - acceptedAt;
+
+      if (!hasGameStarted && timeSinceAccepted >= BOTTLE_SPIN_NOT_STARTED_TIMEOUT_MS) {
+        return {
+          state: 'expired' as const,
+          endedReason: 'not_started' as const,
+          sessionId: session._id,
+        };
+      }
+
+      // TD-LIFECYCLE: Inactivity timeout (only meaningful once the game has started)
+      if (hasGameStarted) {
+        const lastAction = session.lastActionAt || session.gameStartedAt || acceptedAt;
+        const timeSinceLastAction = now - lastAction;
+
+        if (timeSinceLastAction >= BOTTLE_SPIN_INACTIVITY_TIMEOUT_MS) {
+          return {
+            state: 'expired' as const,
+            endedReason: 'timeout' as const,
+            sessionId: session._id,
+          };
+        }
+      }
+
       return {
         state: 'active' as const,
         sessionId: session._id,
@@ -267,15 +299,26 @@ export const getBottleSpinSession = query({
         inviteeId: session.inviteeId,
         currentTurnUserId: session.currentTurnUserId,
         currentTurnRole: session.currentTurnRole,
+        spinTurnRole: session.spinTurnRole,
         turnPhase: session.turnPhase,
         lastSpinResult: session.lastSpinResult,
+        // RANDOM-TARGET-FIX: Surface streak tracking so frontend can render
+        // fairness-aware UI hints and stay in sync with backend selection.
+        lastSelectedRole: session.lastSelectedRole,
+        consecutiveSelectedCount: session.consecutiveSelectedCount ?? 0,
+        // TD-LIFECYCLE: Frontend uses these to gate auto-open and detect expiry
+        gameStartedAt: session.gameStartedAt,
+        acceptedAt: session.acceptedAt,
+        lastActionAt: session.lastActionAt,
       };
     }
 
     // Priority 2: Find PENDING session (invite waiting for response)
-    // WAIT-FIX: Pending invites expire after 5 minutes - treat expired ones as 'none'
-    const freshPendingSessions = allSessions.filter(
-      (session) => session.status === 'pending' && !isPendingInviteExpired(session, now)
+    // WAIT-FIX: Pending invites expire after 5 minutes - treat expired ones as 'expired'
+    // so the client can clean them up rather than silently swallowing them.
+    const pendingSessions = allSessions.filter((session) => session.status === 'pending');
+    const freshPendingSessions = pendingSessions.filter(
+      (session) => !isPendingInviteExpired(session, now)
     );
     if (freshPendingSessions.length > 0) {
       freshPendingSessions.sort((a, b) => b.createdAt - a.createdAt);
@@ -288,10 +331,20 @@ export const getBottleSpinSession = query({
         createdAt: session.createdAt,
       };
     }
+    if (pendingSessions.length > 0) {
+      // All pending sessions are stale → expired (will be cleaned up on next mutation).
+      pendingSessions.sort((a, b) => b.createdAt - a.createdAt);
+      const session = pendingSessions[0];
+      return {
+        state: 'expired' as const,
+        endedReason: 'invite_expired' as const,
+        sessionId: session._id,
+      };
+    }
 
-    // Priority 3: Check for cooldown from most recent ended/rejected session
+    // Priority 3: Check for cooldown from most recent ended/rejected/expired session
     const endedSessions = allSessions.filter(
-      (s) => (s.status === 'ended' || s.status === 'rejected') && s.cooldownUntil
+      (s) => (s.status === 'ended' || s.status === 'rejected' || s.status === 'expired') && s.cooldownUntil
     );
     if (endedSessions.length > 0) {
       endedSessions.sort((a, b) => b.createdAt - a.createdAt);
@@ -416,14 +469,19 @@ export const respondToBottleSpinInvite = mutation({
     }
 
     if (accept) {
-      // Accept: activate the game AND initialize turn state
+      // TD-LIFECYCLE: Accept invite - set to active but game NOT started yet
+      // Game remains in 'idle' state until inviter manually starts it
       await ctx.db.patch(session._id, {
         status: 'active',
         respondedAt: now,
-        // Initialize turn state to avoid undefined issues
+        acceptedAt: now,           // TD-LIFECYCLE: Track when accepted
+        lastActionAt: now,         // TD-LIFECYCLE: Track last activity
+        // Initialize turn state - game is idle until manual start
         turnPhase: 'idle',
+        spinTurnRole: 'inviter',   // Inviter gets first spin when game starts
         currentTurnRole: undefined,
         lastSpinResult: undefined,
+        // gameStartedAt remains undefined - set when inviter manually starts
       });
       return { success: true, status: 'active' as const };
     } else {
@@ -472,14 +530,124 @@ export const endBottleSpinGame = mutation({
       throw new Error('Only participants can end the game');
     }
 
-    // End the game with cooldown
+    // TD-LIFECYCLE: End the game with proper reason tracking
     await ctx.db.patch(session._id, {
       status: 'ended',
       endedAt: now,
+      endedReason: 'manual',
       cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS,
     });
 
     return { success: true };
+  },
+});
+
+// TD-LIFECYCLE: Manual start game (inviter must explicitly start after acceptance)
+// This is the critical fix: game modal should only open after this mutation succeeds
+export const startBottleSpinGame = mutation({
+  args: {
+    authUserId: v.string(),
+    conversationId: v.string(),
+  },
+  handler: async (ctx, { authUserId, conversationId }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const now = Date.now();
+
+    // Find the ACTIVE session
+    const allSessions = await ctx.db
+      .query('bottleSpinSessions')
+      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+      .collect();
+
+    const activeSessions = allSessions.filter((s) => s.status === 'active');
+    if (activeSessions.length === 0) {
+      throw new Error('No active game session found');
+    }
+
+    activeSessions.sort((a, b) => b.createdAt - a.createdAt);
+    const session = activeSessions[0];
+
+    // Only the INVITER can start the game
+    if (session.inviterId !== authUserId) {
+      return { success: false, reason: 'only_inviter_can_start' as const };
+    }
+
+    // Check if game already started (idempotent)
+    if (session.gameStartedAt) {
+      return { success: true, alreadyStarted: true as const };
+    }
+
+    // TD-LIFECYCLE: Mark game as started
+    await ctx.db.patch(session._id, {
+      gameStartedAt: now,
+      lastActionAt: now,
+    });
+
+    return { success: true, gameStartedAt: now };
+  },
+});
+
+// TD-LIFECYCLE: Clean up expired sessions (mark them as expired in DB)
+// Called by frontend when it detects an expired state
+export const cleanupExpiredSession = mutation({
+  args: {
+    authUserId: v.string(),
+    conversationId: v.string(),
+    endedReason: v.union(
+      v.literal('invite_expired'),
+      v.literal('not_started'),
+      v.literal('timeout')
+    ),
+  },
+  handler: async (ctx, { authUserId, conversationId, endedReason }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const now = Date.now();
+
+    // Find sessions that need cleanup
+    const allSessions = await ctx.db
+      .query('bottleSpinSessions')
+      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+      .collect();
+
+    let cleanedCount = 0;
+
+    // Mark expired pending sessions
+    if (endedReason === 'invite_expired') {
+      const pendingSessions = allSessions.filter((s) => s.status === 'pending');
+      for (const session of pendingSessions) {
+        await ctx.db.patch(session._id, {
+          status: 'expired',
+          endedAt: now,
+          endedReason: 'invite_expired',
+          cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS,
+        });
+        cleanedCount++;
+      }
+    }
+
+    // Mark expired active sessions (not started or timeout)
+    if (endedReason === 'not_started' || endedReason === 'timeout') {
+      const activeSessions = allSessions.filter((s) => s.status === 'active');
+      for (const session of activeSessions) {
+        await ctx.db.patch(session._id, {
+          status: 'expired',
+          endedAt: now,
+          endedReason,
+          cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS,
+        });
+        cleanedCount++;
+      }
+    }
+
+    return { success: true, cleanedCount };
   },
 });
 
@@ -534,13 +702,72 @@ export const setBottleSpinTurn = mutation({
       throw new Error('Only participants can update turn state');
     }
 
-    // Update turn state with role-based ownership
+    // SPIN-TURN-FIX: Determine caller's role for ownership enforcement.
+    const callerRole: 'inviter' | 'invitee' = session.inviterId === authUserId ? 'inviter' : 'invitee';
+
+    // SPIN-TURN-FIX: Only the current spin-turn owner can initiate a spin.
+    if (turnPhase === 'spinning') {
+      const currentSpinTurnRole = session.spinTurnRole || 'inviter';
+      if (callerRole !== currentSpinTurnRole) {
+        throw new Error('Not your turn to spin');
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // RANDOM-TARGET-FIX: Backend-only random selection with fairness cap.
+    // ALL randomness happens in backend so both devices stay in sync.
+    // ═══════════════════════════════════════════════════════════════════════════
+    const MAX_CONSECUTIVE_SAME_TARGET = 3;
+    let selectedTargetRole: 'inviter' | 'invitee' | undefined = currentTurnRole;
+    let nextLastSelectedRole = session.lastSelectedRole;
+    let nextConsecutiveCount = session.consecutiveSelectedCount ?? 0;
+
+    if (turnPhase === 'spinning') {
+      const lastSelected = session.lastSelectedRole;
+      const consecutiveCount = session.consecutiveSelectedCount ?? 0;
+
+      if (lastSelected && consecutiveCount >= MAX_CONSECUTIVE_SAME_TARGET) {
+        // Force the opposite of lastSelectedRole to enforce fairness cap.
+        selectedTargetRole = lastSelected === 'inviter' ? 'invitee' : 'inviter';
+      } else {
+        // Normal 50/50 random selection, performed in backend.
+        selectedTargetRole = Math.random() < 0.5 ? 'inviter' : 'invitee';
+      }
+
+      // Update streak tracking immediately.
+      if (selectedTargetRole === lastSelected) {
+        nextConsecutiveCount = consecutiveCount + 1;
+      } else {
+        nextConsecutiveCount = 1;
+      }
+      nextLastSelectedRole = selectedTargetRole;
+    }
+
+    // SPIN-TURN-FIX: Alternate spinTurnRole when round completes
+    // (inviter -> invitee -> inviter ...).
+    let nextSpinTurnRole = session.spinTurnRole;
+    if (turnPhase === 'complete') {
+      nextSpinTurnRole = session.spinTurnRole === 'inviter' ? 'invitee' : 'inviter';
+    }
+
+    const now = Date.now();
+
+    // TD-LIFECYCLE: Persist turn state, streak tracking, and bump lastActionAt
+    // so the inactivity timeout only fires when the game is genuinely idle.
     await ctx.db.patch(session._id, {
-      currentTurnRole,
+      currentTurnRole: selectedTargetRole,
       turnPhase,
+      spinTurnRole: nextSpinTurnRole,
       lastSpinResult: lastSpinResult ?? session.lastSpinResult,
+      lastSelectedRole: nextLastSelectedRole,
+      consecutiveSelectedCount: nextConsecutiveCount,
+      lastActionAt: now,
     });
 
-    return { success: true };
+    // Return the selected target so frontend knows the animation direction.
+    return {
+      success: true,
+      selectedTargetRole,
+    };
   },
 });

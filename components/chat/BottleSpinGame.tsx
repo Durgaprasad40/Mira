@@ -45,6 +45,13 @@ interface BottleSpinGameProps {
   userId: string;
   /** Called when spin completes to send result message to chat */
   onSendResultMessage?: (message: string) => void;
+  /**
+   * PHASE-1 MESSAGES OPTION B: when true, replaces the blocking 'complete'
+   * screen with a non-blocking result toast and auto-advances the backend
+   * turn phase from 'complete' back to 'idle' after ~2s. Phase-2 keeps the
+   * legacy [Again]/[Done] screen by leaving this prop unset / false.
+   */
+  autoAdvance?: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -62,6 +69,7 @@ export function BottleSpinGame({
   conversationId,
   userId,
   onSendResultMessage,
+  autoAdvance = false,
 }: BottleSpinGameProps) {
   // ═══════════════════════════════════════════════════════════════════════════
   // LOCAL STATE - Only for animation and UI helpers, NOT for turn ownership
@@ -69,6 +77,12 @@ export function BottleSpinGame({
   const [isSpinningLocally, setIsSpinningLocally] = useState(false);
   const [chosenOption, setChosenOption] = useState<'truth' | 'dare' | 'skip' | null>(null);
   const [showEndConfirmation, setShowEndConfirmation] = useState(false);
+
+  // TD-FLOW (Option B): result toast + auto-advance timer state. Only active
+  // when autoAdvance === true (Phase-1 Messages). Phase-2 behavior unchanged.
+  const [toastInfo, setToastInfo] = useState<{ text: string; key: number } | null>(null);
+  const toastOpacity = useRef(new Animated.Value(0)).current;
+  const autoAdvanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Stale callback guard: increments on reset, animation checks before applying
   const spinSessionRef = useRef(0);
@@ -96,6 +110,8 @@ export function BottleSpinGame({
   const backendTurnPhase = isSessionActive ? gameSession.turnPhase : undefined;
   // SPIN-TURN-FIX: Extract spinTurnRole from backend
   const backendSpinTurnRole = isSessionActive ? gameSession.spinTurnRole : undefined;
+  // TD-FLOW (Option B): observer needs last chosen result to show the toast
+  const backendLastSpinResult = isSessionActive ? gameSession.lastSpinResult : undefined;
   const inviterId = isSessionActive ? gameSession.inviterId : undefined;
   const inviteeId = isSessionActive ? gameSession.inviteeId : undefined;
   // TD-LIFECYCLE: Extract gameStartedAt for manual start check
@@ -204,6 +220,17 @@ export function BottleSpinGame({
 
     // Priority 4: Backend says complete
     if (backendTurnPhase === 'complete') {
+      // TD-FLOW (Option B): autoAdvance mode never renders a blocking
+      // 'complete' screen. The choice result is surfaced via a floating
+      // toast, and the visible game state falls through to idle / waiting
+      // for the next spin. Backend has already rotated spinTurnRole, so
+      // this correctly hands off to the other player visually.
+      if (autoAdvance) {
+        if (!isMySpinTurn && myRole) {
+          return 'waiting_for_spin';
+        }
+        return 'idle';
+      }
       return 'complete';
     }
 
@@ -274,6 +301,68 @@ export function BottleSpinGame({
   }, [visible, gameSessionState, isSessionActive, userId, inviterId, inviteeId, myRole, backendTurnRole, backendTurnPhase, backendSpinTurnRole, currentSpinTurnRole, isMySpinTurn, isSpinningLocally, isAnimationLocked, uiMode]);
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // TD-FLOW (Option B): OBSERVER TOAST
+  // When the OTHER player makes a choice, backend turnPhase flips to 'complete'
+  // with lastSpinResult set. On the observer device, chosenOption is still null
+  // (we only set it for the chooser in handleChoice). Show a toast for them too
+  // so both players see the outcome before the modal auto-advances to idle.
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!autoAdvance) return;
+    if (!visible) return;
+    if (backendTurnPhase !== 'complete') return;
+    if (!backendLastSpinResult) return;
+    // Only trigger for observer side; chooser toast already set in handleChoice
+    if (chosenOption) return;
+
+    const result = backendLastSpinResult;
+    const text =
+      result === 'skip'
+        ? `${otherUserName} skipped 😅`
+        : result === 'truth'
+          ? `${otherUserName} chose TRUTH 🔥`
+          : `${otherUserName} chose DARE 😈`;
+    if (__DEV__) console.log('[TD_FLOW] result_toast_show', { text, byChooser: false });
+    setToastInfo({ text, key: Date.now() });
+  }, [autoAdvance, visible, backendTurnPhase, backendLastSpinResult, chosenOption, otherUserName]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TD-FLOW (Option B): TOAST FADE ANIMATION
+  // Keyed on toastInfo?.key so the same text can re-trigger. Fades in, holds,
+  // fades out, then clears toastInfo. Runs purely on the JS-driver-free
+  // opacity value (useNativeDriver: true) so it won't interfere with layout.
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!toastInfo) return;
+    toastOpacity.setValue(0);
+    const seq = Animated.sequence([
+      Animated.timing(toastOpacity, { toValue: 1, duration: 180, useNativeDriver: true }),
+      Animated.delay(1500),
+      Animated.timing(toastOpacity, { toValue: 0, duration: 220, useNativeDriver: true }),
+    ]);
+    seq.start(({ finished }) => {
+      if (finished) setToastInfo(null);
+    });
+    return () => {
+      seq.stop();
+    };
+  }, [toastInfo, toastOpacity]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TD-FLOW (Option B): UNMOUNT CLEANUP
+  // Make sure any pending auto-advance timer is cleared if the component is
+  // torn down (user closes chat, navigates away, etc.).
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    return () => {
+      if (autoAdvanceTimerRef.current) {
+        clearTimeout(autoAdvanceTimerRef.current);
+        autoAdvanceTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // SKIP TRACKING
   // ═══════════════════════════════════════════════════════════════════════════
   const windowKey = getWindowKey();
@@ -300,10 +389,25 @@ export function BottleSpinGame({
   // GAME ACTIONS
   // ═══════════════════════════════════════════════════════════════════════════
   const resetGame = useCallback(async () => {
+    if (__DEV__) {
+      // TD_END_TRACE: resetGame only mutates turnPhase to 'idle'. It does NOT
+      // end the session or set cooldown — logged here for triage visibility.
+      console.log('[TD_END_TRACE] reset_game_called', {
+        autoAdvance,
+        hasPendingAutoAdvance: !!autoAdvanceTimerRef.current,
+      });
+    }
     spinSessionRef.current += 1;
     setIsSpinningLocally(false);
     setChosenOption(null);
     setShowEndConfirmation(false);
+    // TD-FLOW (Option B): clear pending toast + auto-advance timer on reset
+    if (autoAdvanceTimerRef.current) {
+      clearTimeout(autoAdvanceTimerRef.current);
+      autoAdvanceTimerRef.current = null;
+    }
+    setToastInfo(null);
+    toastOpacity.setValue(0);
     spinAnim.stopAnimation();
     spinAnim.setValue(0);
     currentRotation.current = 0;
@@ -320,7 +424,7 @@ export function BottleSpinGame({
         // Ignore errors during reset
       }
     }
-  }, [spinAnim, userId, conversationId, setTurnMutation]);
+  }, [spinAnim, userId, conversationId, setTurnMutation, toastOpacity, autoAdvance]);
 
   const handleClose = useCallback(() => {
     resetGame();
@@ -332,6 +436,13 @@ export function BottleSpinGame({
   }, []);
 
   const handleEndGameConfirm = useCallback(() => {
+    if (__DEV__) {
+      // TD_END_TRACE: this is the ONLY legitimate caller of the end-game
+      // mutation path (via the "ended the game" system message). Any other
+      // [TD_END_TRACE] end_game_called log without a preceding
+      // [TD_END_TRACE] end_game_confirm_pressed is a bug.
+      console.log('[TD_END_TRACE] end_game_confirm_pressed');
+    }
     setShowEndConfirmation(false);
     if (onSendResultMessage) {
       onSendResultMessage(`${currentUserName} ended the game`);
@@ -393,14 +504,18 @@ export function BottleSpinGame({
     // ═══════════════════════════════════════════════════════════════════════════
     let selectedRole: 'inviter' | 'invitee';
     try {
+      // Backend now performs the random selection authoritatively when
+      // turnPhase === 'spinning' and returns { success, selectedTargetRole }.
       const result = await setTurnMutation({
         authUserId: userId,
         conversationId,
         currentTurnRole: undefined,
         turnPhase: 'spinning',
       });
-      // Backend returns the randomly selected target
-      selectedRole = result.selectedTargetRole as 'inviter' | 'invitee';
+      if (!result?.selectedTargetRole) {
+        throw new Error('Backend did not return a selected target');
+      }
+      selectedRole = result.selectedTargetRole;
       console.log('[BOTTLE_SPIN] Backend selected target:', { selectedRole });
     } catch (error) {
       console.error('[BOTTLE_SPIN] Failed to get spin result from backend:', error);
@@ -471,6 +586,10 @@ export function BottleSpinGame({
       return;
     }
 
+    if (__DEV__) {
+      console.log('[TD_FLOW] choice_selected', { choice, autoAdvance });
+    }
+
     setChosenOption(choice);
 
     // Update backend
@@ -512,7 +631,53 @@ export function BottleSpinGame({
     } catch {
       // Haptics not available
     }
-  }, [uiMode, currentUserName, incrementSkipCount, onSendResultMessage, userId, conversationId, setTurnMutation]);
+
+    // TD-FLOW (Option B): when autoAdvance is on, surface the choice as a
+    // non-blocking toast and schedule a return to 'idle' after ~2s so the
+    // user never has to manually tap [Again]/[Done] to continue playing.
+    // Backend has already rotated spinTurnRole on the 'complete' write.
+    if (autoAdvance) {
+      const text =
+        choice === 'skip'
+          ? 'Skipped 😅'
+          : choice === 'truth'
+            ? 'You chose TRUTH 🔥'
+            : 'You chose DARE 😈';
+      if (__DEV__) console.log('[TD_FLOW] result_toast_show', { text, byChooser: true });
+      setToastInfo({ text, key: Date.now() });
+
+      if (autoAdvanceTimerRef.current) {
+        clearTimeout(autoAdvanceTimerRef.current);
+      }
+      autoAdvanceTimerRef.current = setTimeout(async () => {
+        autoAdvanceTimerRef.current = null;
+        setChosenOption(null);
+        if (userId && conversationId) {
+          // TD_FLOW: explicit payload log so it's unambiguous which mutation
+          // the autoAdvance timer calls. This is setBottleSpinTurn with
+          // turnPhase:'idle' — it does NOT end the session or set cooldown.
+          const payload = {
+            authUserId: userId,
+            conversationId,
+            currentTurnRole: undefined,
+            turnPhase: 'idle' as const,
+          };
+          if (__DEV__) {
+            console.log('[TD_FLOW] auto_advance_payload', {
+              mutation: 'setBottleSpinTurn',
+              payload,
+            });
+            console.log('[TD_FLOW] auto_advance_to_idle');
+          }
+          try {
+            await setTurnMutation(payload);
+          } catch (err) {
+            console.warn('[TD_FLOW] auto_advance_to_idle failed', err);
+          }
+        }
+      }, 2000);
+    }
+  }, [uiMode, currentUserName, incrementSkipCount, onSendResultMessage, userId, conversationId, setTurnMutation, autoAdvance]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SPIN AGAIN
@@ -757,6 +922,18 @@ export function BottleSpinGame({
                 )}
               </View>
             </View>
+
+            {/* TD-FLOW (Option B): Floating result toast overlay. Non-blocking,
+                pointerEvents='none' so underlying UI stays interactive. Only
+                rendered when toastInfo has content; fade handled by animation effect. */}
+            {autoAdvance && toastInfo && (
+              <Animated.View
+                pointerEvents="none"
+                style={[styles.resultToast, { opacity: toastOpacity }]}
+              >
+                <Text style={styles.resultToastText}>{toastInfo.text}</Text>
+              </Animated.View>
+            )}
           </View>
 
           {/* ═══════════════════════════════════════════════════════════════════
@@ -792,8 +969,8 @@ export function BottleSpinGame({
           {/* CHOOSING_FOR_OTHER: Other player chooses - show observer UI */}
           {uiMode === 'choosing_for_other' && renderObserverUI()}
 
-          {/* COMPLETE: Show result */}
-          {uiMode === 'complete' && renderComplete()}
+          {/* COMPLETE: Show result (legacy blocking screen) - only when autoAdvance is off (Phase-2). */}
+          {uiMode === 'complete' && !autoAdvance && renderComplete()}
 
           {/* Bottom row: Skip info + End Game */}
           <View style={styles.bottomRow}>
@@ -910,6 +1087,28 @@ const styles = StyleSheet.create({
   gameArea: {
     alignItems: 'center',
     paddingVertical: 10,
+    position: 'relative',
+  },
+  // TD-FLOW (Option B): floating result toast overlay
+  resultToast: {
+    position: 'absolute',
+    top: 8,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.82)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 14,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
+  resultToastText: {
+    color: COLORS.white,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   userLabel: {
     marginVertical: 6,
