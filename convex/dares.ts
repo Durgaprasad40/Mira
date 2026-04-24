@@ -65,6 +65,7 @@ export const sendDare = mutation({
       type: 'message', // Generic to keep it anonymous
       title: 'New Dare Received!',
       body: 'Someone sent you a dare. Accept to reveal who!',
+      phase: 'phase1',
       createdAt: now,
     });
 
@@ -236,6 +237,7 @@ export const acceptDare = mutation({
       title: 'Dare Accepted!',
       body: `${toUser.name} accepted your dare! It's a match!`,
       data: { matchId: match?._id },
+      phase: 'phase1',
       createdAt: now,
     });
 

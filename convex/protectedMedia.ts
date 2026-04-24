@@ -167,6 +167,7 @@ export const sendProtectedImage = mutation({
         title: 'New Message',
         body: `${sender.name} sent you a protected ${isVideo ? 'video' : 'photo'}`,
         data: { conversationId },
+        phase: 'phase1',
         createdAt: now,
       });
     }

@@ -13,7 +13,7 @@ import { query, mutation, internalQuery, MutationCtx, QueryCtx } from './_genera
 import { Id } from './_generated/dataModel';
 import { validateSessionToken, resolveUserIdByAuthId, getPhase2DisplayName } from './helpers';
 import { shouldCreatePhase2PrivateMessagesNotification } from './phase2NotificationPrefs';
-import { markInboxMessageNotificationsForConversation } from './notifications';
+import { markPrivateMessageNotificationsForConversation } from './privateNotifications';
 import { softMaskText } from './softMask';
 
 // P1-001: Generate upload URL for secure media (photos/videos)
@@ -512,8 +512,8 @@ export const markPrivateMessagesRead = mutation({
       await ctx.db.patch(participantRecord._id, { unreadCount: 0 });
     }
 
-    // Clear Phase-2 private-message inbox row (dedupe: phase2_message:…); Phase-1 key no-ops here
-    await markInboxMessageNotificationsForConversation(ctx, userId, conversationId as string);
+    // Clear Phase-2 private-message inbox row in privateNotifications table
+    await markPrivateMessageNotificationsForConversation(ctx, userId, conversationId as string);
 
     return { success: true, markedCount: unreadMessages.length };
   },
@@ -660,12 +660,13 @@ export const sendPrivateMessage = mutation({
       }
     }
 
-    // Phase-2 in-app notification (recipient only; `phase2_private_message` — isolated from Phase-1 `message` type)
+    // Phase-2 in-app notification (recipient only).
+    // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only.
     if (recipientId && type !== 'system') {
       if (await shouldCreatePhase2PrivateMessagesNotification(ctx, recipientId)) {
         const dedupeKey = `phase2_message:${conversationId}:unread`;
         const existingNotif = await ctx.db
-          .query('notifications')
+          .query('privateNotifications')
           .withIndex('by_user_dedupe', (q) =>
             q.eq('userId', recipientId).eq('dedupeKey', dedupeKey)
           )
@@ -680,18 +681,19 @@ export const sendPrivateMessage = mutation({
             body: notificationBody,
             createdAt: now,
             expiresAt: now + 24 * 60 * 60 * 1000,
+            readAt: undefined,
           });
         } else {
-          await ctx.db.insert('notifications', {
+          await ctx.db.insert('privateNotifications', {
             userId: recipientId,
             type: 'phase2_private_message',
             title: `${senderLabel} sent you a message`,
             body: notificationBody,
             data: {
-              conversationId: conversationId as string,
-              phase: 'phase2',
+              privateConversationId: conversationId as string,
               otherUserId: senderId as string,
             },
+            phase: 'phase2',
             dedupeKey,
             createdAt: now,
             expiresAt: now + 24 * 60 * 60 * 1000,

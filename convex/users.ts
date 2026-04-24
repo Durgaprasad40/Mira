@@ -2194,6 +2194,7 @@ export const sendProfileNudge = mutation({
       type: "profile_nudge" as any,
       title: "Complete your profile",
       body,
+      phase: "phase1",
       createdAt: Date.now(),
     });
 

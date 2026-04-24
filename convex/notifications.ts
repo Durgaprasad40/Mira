@@ -5,9 +5,25 @@ import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId } from './helpers';
 import { bellNotificationCountsForPhase } from './notificationBellPhase';
 
+// Server-side Phase-1 row guard. A row is Phase-1 iff:
+//   - phase is undefined (legacy rows) AND type is not a legacy phase2_* type, OR
+//   - phase === 'phase1'
+// New code must always set phase: 'phase1' on insert.
+const PHASE2_LEGACY_TYPES = new Set<string>([
+  'phase2_match',
+  'phase2_like',
+  'phase2_private_message',
+]);
+
+function isPhase1Row(row: { phase?: string | null; type: string }): boolean {
+  if (row.phase === 'phase1') return true;
+  if (row.phase === 'phase2') return false;
+  return !PHASE2_LEGACY_TYPES.has(row.type);
+}
+
 /**
- * Marks in-app inbox rows for a conversation using Phase-1 and Phase-2 dedupe keys.
- * Convex IDs never collide across `conversations` vs `privateConversations`, so at most one row matches.
+ * Marks Phase-1 in-app inbox rows for a conversation.
+ * Phase-2 rows live in `privateNotifications` and are handled by `markPrivateMessageNotificationsForConversation`.
  */
 export async function markInboxMessageNotificationsForConversation(
   ctx: MutationCtx,
@@ -16,19 +32,14 @@ export async function markInboxMessageNotificationsForConversation(
 ): Promise<number> {
   const now = Date.now();
   let count = 0;
-  const dedupeKeys = [
-    `message:${conversationId}:unread`,
-    `phase2_message:${conversationId}:unread`,
-  ];
-  for (const dedupeKey of dedupeKeys) {
-    const notification = await ctx.db
-      .query('notifications')
-      .withIndex('by_user_dedupe', (q) => q.eq('userId', userId).eq('dedupeKey', dedupeKey))
-      .first();
-    if (notification && !notification.readAt) {
-      await ctx.db.patch(notification._id, { readAt: now });
-      count++;
-    }
+  const dedupeKey = `message:${conversationId}:unread`;
+  const notification = await ctx.db
+    .query('notifications')
+    .withIndex('by_user_dedupe', (q) => q.eq('userId', userId).eq('dedupeKey', dedupeKey))
+    .first();
+  if (notification && !notification.readAt) {
+    await ctx.db.patch(notification._id, { readAt: now });
+    count++;
   }
   return count;
 }
@@ -72,7 +83,9 @@ export const getNotifications = query({
       )
     );
 
-    return await queryBuilder.order('desc').take(limit);
+    const rows = await queryBuilder.order('desc').take(limit * 2);
+    // Strict Phase-1 isolation enforced server-side
+    return rows.filter(isPhase1Row).slice(0, limit);
   },
 });
 
@@ -106,21 +119,28 @@ export const getUnreadCount = query({
       )
       .collect();
 
-    return notifications.length;
+    // Strict Phase-1 isolation
+    return notifications.filter(isPhase1Row).length;
   },
 });
 
-// Get bell notification unread count (for tab badge)
-// Accepts userId (authUserId string) and phase for filtering
+// Get bell notification unread count (for tab badge) - PHASE-1 ONLY.
+// Phase-2 callers must use `api.privateNotifications.getPrivateBellUnreadCount` instead.
 export const getBellUnreadCount = query({
   args: {
     userId: v.union(v.id('users'), v.string()),
+    // Argument retained for backwards compatibility; this query is Phase-1 only.
     phase: v.optional(v.union(v.literal('phase1'), v.literal('phase2'))),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
     const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!userId) {
+      return 0;
+    }
+
+    if (args.phase === 'phase2') {
+      // Hard guard: Phase-2 must use privateNotifications.getPrivateBellUnreadCount
+      console.warn('[getBellUnreadCount] Phase-2 called Phase-1 query; returning 0');
       return 0;
     }
 
@@ -131,7 +151,6 @@ export const getBellUnreadCount = query({
       .filter((q) =>
         q.and(
           q.eq(q.field('readAt'), undefined),
-          // Only count non-expired notifications
           q.or(
             q.eq(q.field('expiresAt'), undefined),
             q.gt(q.field('expiresAt'), now)
@@ -140,10 +159,10 @@ export const getBellUnreadCount = query({
       )
       .collect();
 
-    const phase: 'phase1' | 'phase2' = args.phase ?? 'phase1';
     let count = 0;
     for (const n of notifications) {
-      if (bellNotificationCountsForPhase(n.type, phase)) {
+      if (!isPhase1Row(n)) continue;
+      if (bellNotificationCountsForPhase(n.type, 'phase1')) {
         count++;
       }
     }
@@ -204,11 +223,15 @@ export const markAllAsRead = mutation({
       .filter((q) => q.eq(q.field('readAt'), undefined))
       .collect();
 
+    // Strict Phase-1 isolation: only mark Phase-1 rows
+    let count = 0;
     for (const notification of unreadNotifications) {
+      if (!isPhase1Row(notification)) continue;
       await ctx.db.patch(notification._id, { readAt: now });
+      count++;
     }
 
-    return { success: true, count: unreadNotifications.length };
+    return { success: true, count };
   },
 });
 
@@ -257,6 +280,7 @@ export const createNotification = mutation({
           title,
           body,
           data,
+          phase: 'phase1',
           createdAt: now,
           expiresAt,
           readAt: undefined, // Mark as unread again
@@ -265,13 +289,14 @@ export const createNotification = mutation({
       }
     }
 
-    // Create new notification
+    // Create new Phase-1 notification (server-tagged)
     const notificationId = await ctx.db.insert('notifications', {
       userId,
       type,
       title,
       body,
       data,
+      phase: 'phase1',
       dedupeKey,
       createdAt: now,
       expiresAt, // 4-2: Set expiry timestamp
@@ -324,7 +349,7 @@ export const markReadByDedupeKey = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    // Find unread notifications matching the dedupeKey
+    // Find unread Phase-1 notifications matching the dedupeKey
     const notifications = await ctx.db
       .query('notifications')
       .withIndex('by_user', (q) => q.eq('userId', userId))
@@ -333,6 +358,7 @@ export const markReadByDedupeKey = mutation({
 
     let count = 0;
     for (const notification of notifications) {
+      if (!isPhase1Row(notification)) continue;
       // Compute dedupeKey from type+data
       const notifDedupeKey = computeDedupeKey(notification.type, notification.data);
       if (notifDedupeKey === dedupeKey) {
@@ -415,11 +441,15 @@ export const deleteAllNotifications = mutation({
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
 
+    // Strict Phase-1 isolation: only delete Phase-1 rows
+    let count = 0;
     for (const notification of notifications) {
+      if (!isPhase1Row(notification)) continue;
       await ctx.db.delete(notification._id);
+      count++;
     }
 
-    return { success: true, count: notifications.length };
+    return { success: true, count };
   },
 });
 
@@ -446,6 +476,7 @@ export const sendWeeklyRefreshNotifications = mutation({
           type: 'weekly_refresh',
           title: 'Weekly Messages Refreshed!',
           body: 'Your weekly messages have been reset. Start connecting!',
+          phase: 'phase1',
           dedupeKey: `weekly_refresh:${new Date(now).toDateString()}`, // 4-1: One per day
           createdAt: now,
           expiresAt, // 4-2: Set expiry

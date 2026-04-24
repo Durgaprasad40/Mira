@@ -367,14 +367,15 @@ export const swipe = mutation({
         ]);
 
         // Notify the other user (toUser) about the match
-        // PHASE SEPARATION: Use 'phase2_match' type so it only shows in Phase 2 bell
+        // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only
         if (await shouldCreatePhase2DeepConnectNotification(ctx, toUserId)) {
-          await ctx.db.insert('notifications', {
+          await ctx.db.insert('privateNotifications', {
             userId: toUserId,
             type: 'phase2_match',
             title: 'New Match! 🎉',
             body: `You matched with ${fromDisplayName} in Deep Connect!`,
-            data: { matchId: matchId as string, conversationId: conversationId as string, phase: 'phase2' },
+            data: { matchId: matchId as string, privateConversationId: conversationId as string },
+            phase: 'phase2',
             dedupeKey: `p2_match:${matchId}:${toUserId}`,
             createdAt: now,
             expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
@@ -382,14 +383,15 @@ export const swipe = mutation({
         }
 
         // Notify the current user (fromUser) about the match
-        // PHASE SEPARATION: Use 'phase2_match' type so it only shows in Phase 2 bell
+        // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only
         if (await shouldCreatePhase2DeepConnectNotification(ctx, fromUserId)) {
-          await ctx.db.insert('notifications', {
+          await ctx.db.insert('privateNotifications', {
             userId: fromUserId,
             type: 'phase2_match',
             title: 'New Match! 🎉',
             body: `You matched with ${toDisplayName} in Deep Connect!`,
-            data: { matchId: matchId as string, conversationId: conversationId as string, phase: 'phase2' },
+            data: { matchId: matchId as string, privateConversationId: conversationId as string },
+            phase: 'phase2',
             dedupeKey: `p2_match:${matchId}:${fromUserId}`,
             createdAt: now,
             expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
@@ -408,18 +410,17 @@ export const swipe = mutation({
         });
 
         // Notify the recipient that someone liked them (anonymous)
-        // PHASE SEPARATION: Use 'phase2_like' type so it only shows in Phase 2 bell
+        // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only
         if (await shouldCreatePhase2DeepConnectNotification(ctx, toUserId)) {
-          await ctx.db.insert('notifications', {
+          await ctx.db.insert('privateNotifications', {
             userId: toUserId,
             type: 'phase2_like',
             title: action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜',
             body: 'Check your likes in Deep Connect to see who!',
             data: {
-              likeType: action,
               otherUserId: fromUserId as string,
-              phase: 'phase2',
             },
+            phase: 'phase2',
             dedupeKey: `p2_like:${fromUserId}:${toUserId}`,
             createdAt: now,
             expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days

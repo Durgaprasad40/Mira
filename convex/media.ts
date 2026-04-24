@@ -97,6 +97,7 @@ export const createMediaMessage = mutation({
         title: 'New Message',
         body: `${sender.name} sent you a protected photo`,
         data: { conversationId: chatId },
+        phase: 'phase1',
         createdAt: now,
       });
     }

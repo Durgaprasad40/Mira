@@ -498,6 +498,7 @@ export const adminReviewVerification = mutation({
         type: "subscription", // Using existing type for system notifications
         title: "Profile Verified!",
         body: "Your profile photo has been verified. You can now fully use Mira!",
+        phase: "phase1",
         createdAt: now,
       });
     } else {
@@ -531,6 +532,7 @@ export const adminReviewVerification = mutation({
         type: "subscription",
         title: "Photo Verification Failed",
         body: `${message} Please upload a new photo to get verified.`,
+        phase: "phase1",
         createdAt: now,
       });
     }
