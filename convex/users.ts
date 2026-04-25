@@ -119,29 +119,20 @@ function sanitizeProfilePrompts(
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
-function orderCurrentUserPhotos(
-  user: Doc<"users">,
-  photos: Doc<"photos">[],
-): Doc<"photos">[] {
-  if (!user.isVerified) {
-    const referencePhoto = photos.find((photo) => photo.photoType === "verification_reference");
-    const otherPhotos = photos
-      .filter((photo) => photo.photoType !== "verification_reference")
-      .sort((a, b) => a.order - b.order);
-    return referencePhoto ? [referencePhoto, ...otherPhotos] : otherPhotos;
-  }
+function orderCurrentUserPhotos(photos: Doc<"photos">[]): Doc<"photos">[] {
+  const publicPhotos = photos.filter((photo) => photo.photoType !== "verification_reference");
 
-  const primaryPhoto = photos.find((photo) => photo.isPrimary === true);
-  const otherPhotos = photos
+  const primaryPhoto = publicPhotos.find((photo) => photo.isPrimary === true);
+  const otherPhotos = publicPhotos
     .filter((photo) => photo.isPrimary !== true)
     .sort((a, b) => a.order - b.order);
   return primaryPhoto
     ? [primaryPhoto, ...otherPhotos]
-    : [...photos].sort((a, b) => a.order - b.order);
+    : [...publicPhotos].sort((a, b) => a.order - b.order);
 }
 
 function projectCurrentUserPhotos(photos: Doc<"photos">[]) {
-  return photos.map((photo) => ({
+  return photos.filter((photo) => photo.photoType !== "verification_reference").map((photo) => ({
     _id: photo._id,
     url: photo.url,
     order: photo.order,
@@ -260,7 +251,7 @@ export const getCurrentUser = query({
       .withIndex("by_user_order", (q) => q.eq("userId", convexUserId))
       .collect();
 
-    const orderedPhotos = orderCurrentUserPhotos(user, photos);
+    const orderedPhotos = orderCurrentUserPhotos(photos);
 
     return projectCurrentUserForPhase1(user, orderedPhotos);
   },

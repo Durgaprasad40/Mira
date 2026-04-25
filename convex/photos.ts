@@ -599,6 +599,8 @@ export const reorderPhotos = mutation({
       throw new Error('Unauthorized: invalid or expired session');
     }
 
+    const publicPhotoIds: Id<'photos'>[] = [];
+
     // SECURITY: Verify all photos belong to user before reordering
     for (const photoId of photoIds) {
       const photo = await ctx.db.get(photoId);
@@ -608,11 +610,14 @@ export const reorderPhotos = mutation({
       if (photo.userId !== userId) {
         throw new Error('Unauthorized photo modification');
       }
+      if (photo.photoType !== 'verification_reference') {
+        publicPhotoIds.push(photoId);
+      }
     }
 
     // Update order
-    for (let i = 0; i < photoIds.length; i++) {
-      await ctx.db.patch(photoIds[i], {
+    for (let i = 0; i < publicPhotoIds.length; i++) {
+      await ctx.db.patch(publicPhotoIds[i], {
         order: i,
         isPrimary: i === 0,
       });
@@ -622,7 +627,12 @@ export const reorderPhotos = mutation({
     const primaryPhoto = await ctx.db
       .query('photos')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .filter((q) => q.eq(q.field('isPrimary'), true))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field('isPrimary'), true),
+          q.neq(q.field('photoType'), 'verification_reference'),
+        )
+      )
       .first();
     await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
 
@@ -630,9 +640,8 @@ export const reorderPhotos = mutation({
   },
 });
 
-// Get user photos - ordering depends on verification status
-// NOT verified: reference photo locked as first
-// Verified: user's chosen primary photo is first
+// Get public user photos for profile grids. Verification reference photos stay
+// private to the verification system and are never returned here.
 export const getUserPhotos = query({
   args: {
     userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
@@ -645,34 +654,16 @@ export const getUserPhotos = query({
       return [];
     }
 
-    // Get user to check verification status
-    const user = await ctx.db.get(convexUserId);
-    if (!user) {
-      return [];
-    }
-
     const photos = await ctx.db
       .query('photos')
       .withIndex('by_user_order', (q) => q.eq('userId', convexUserId))
+      .filter((q) => q.neq(q.field('photoType'), 'verification_reference'))
       .take(MAX_GET_USER_PHOTOS);
 
-    // Photo ordering depends on verification status:
-    // - NOT verified: force reference photo first (locked until verification complete)
-    // - Verified: respect user's chosen order (isPrimary determines main photo)
-    let orderedPhotos;
-    if (!user.isVerified) {
-      // Not verified: reference photo must be first
-      const referencePhoto = photos.find(photo => photo.photoType === 'verification_reference');
-      const otherPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
-      otherPhotos.sort((a, b) => a.order - b.order);
-      orderedPhotos = referencePhoto ? [referencePhoto, ...otherPhotos] : otherPhotos;
-    } else {
-      // Verified: respect order field, isPrimary photo comes first
-      const primaryPhoto = photos.find(photo => photo.isPrimary === true);
-      const otherPhotos = photos.filter(photo => photo.isPrimary !== true);
-      otherPhotos.sort((a, b) => a.order - b.order);
-      orderedPhotos = primaryPhoto ? [primaryPhoto, ...otherPhotos] : photos.sort((a, b) => a.order - b.order);
-    }
+    const primaryPhoto = photos.find(photo => photo.isPrimary === true);
+    const otherPhotos = photos.filter(photo => photo.isPrimary !== true);
+    otherPhotos.sort((a, b) => a.order - b.order);
+    const orderedPhotos = primaryPhoto ? [primaryPhoto, ...otherPhotos] : photos.sort((a, b) => a.order - b.order);
 
     return orderedPhotos;
   },
@@ -971,7 +962,7 @@ export const uploadVerificationReferencePhoto = mutation({
       displayPrimaryPhotoId: winner.storageId,
       displayPrimaryPhotoUrl: winner.url,
       displayPrimaryPhotoVariant: 'original',
-      primaryPhotoUrl: gridPrimaryPhotoUrl,
+      primaryPhotoUrl: gridPrimaryPhotoUrl ?? undefined,
       // Set verification status to pending
       faceVerificationStatus: 'unverified',
       verificationStatus: 'pending_auto',
@@ -1047,7 +1038,7 @@ export const setDisplayPhotoVariant = mutation({
         displayPrimaryPhotoId: user.verificationReferencePhotoId,
         displayPrimaryPhotoUrl: user.verificationReferencePhotoUrl,
         displayPrimaryPhotoVariant: 'original',
-        primaryPhotoUrl: gridPrimaryPhotoUrl,
+        primaryPhotoUrl: gridPrimaryPhotoUrl ?? undefined,
       });
     } else {
       // For blurred/cartoon, need the processed version
