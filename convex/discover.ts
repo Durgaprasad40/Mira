@@ -838,9 +838,9 @@ export const getDiscoverProfiles = query({
       const { user, distance } = filteredCandidates[i];
       const photos = photoResults[i];
 
-      // P0: include ALL photos for the user (reference, normal, secure).
-      // Do NOT drop verification_reference — single source of truth with profile view.
-      const safePublicPhotos = photos.filter((p) => !p.isNsfw);
+      const safePublicPhotos = photos.filter(
+        (p) => !p.isNsfw && p.photoType !== 'verification_reference'
+      );
       if (safePublicPhotos.length === 0) {
         if (DISCOVER_AUDIT_ENABLED) {
           console.log('[DISCOVER_AUDIT][visibility] no_public_safe_photos', {
@@ -1795,8 +1795,9 @@ async function hydrateExploreProfiles(
       // the user's chosen primary photo is always at position 0 on Explore cards.
       // Prepend isPrimary photo, then sort the rest by `order`. NSFW filtering
       // is unchanged.
-      // P0: include ALL photos (reference included). Mirror profile-view contract.
-      const safePhotos = chunkPhotos[index].filter((photo) => !photo.isNsfw);
+      const safePhotos = chunkPhotos[index].filter(
+        (photo) => !photo.isNsfw && photo.photoType !== 'verification_reference'
+      );
       const primaryPhoto = safePhotos.find((p) => p.isPrimary === true);
       const nonPrimaryPhotos = safePhotos
         .filter((p) => p._id !== primaryPhoto?._id)
@@ -1806,11 +1807,7 @@ async function hydrateExploreProfiles(
         : nonPrimaryPhotos;
       const publicPhotos = orderedSafePhotos.map((photo) => ({ url: photo.url }));
 
-      if (publicPhotos.length === 0) {
-        const fallbackUrl = candidate.primaryPhotoUrl || candidate.displayPrimaryPhotoUrl;
-        if (!fallbackUrl) continue;
-        publicPhotos.push({ url: fallbackUrl });
-      }
+      if (publicPhotos.length === 0) continue;
 
       const { rankingScore, rankingLastActive, sourceUserId, primaryPhotoUrl, displayPrimaryPhotoUrl, ...safeCandidate } = candidate;
       results.push({

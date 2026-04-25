@@ -47,6 +47,25 @@ function isUnavailableDmUser(user: Doc<'users'> | null): boolean {
   return !user || !user.isActive || user.isBanned === true || !!user.deletedAt;
 }
 
+async function getPhase1PrimaryPhoto(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<'users'>
+): Promise<Doc<'photos'> | null> {
+  const photos = await ctx.db
+    .query('photos')
+    .withIndex('by_user_order', (q) => q.eq('userId', userId))
+    .filter((q) => q.neq(q.field('photoType'), 'verification_reference'))
+    .collect();
+
+  photos.sort((a, b) => {
+    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+    if (a.order !== b.order) return a.order - b.order;
+    return a.createdAt - b.createdAt;
+  });
+
+  return photos[0] ?? null;
+}
+
 // UNREAD-RULE: Message types that count toward unread badges
 // Includes: text, image (photo), video, voice, template, dare
 // Excludes: system (screenshot events, permission events, T&D connection system messages, etc.)
@@ -1271,20 +1290,7 @@ export const getConversation = query({
     // Get primary photo (only if not anonymous and user still exists)
     let photo = null;
     if (!isOtherUserAnonymous && otherUser && terminalState !== 'user_removed') {
-      photo = await ctx.db
-        .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', otherUserId))
-        .filter((q) => q.eq(q.field('isPrimary'), true))
-        .first();
-
-      // BUG FIX: Fallback to any photo if no isPrimary photo exists
-      // Same pattern as likes.ts to handle edge cases where isPrimary flag is not set
-      if (!photo) {
-        photo = await ctx.db
-          .query('photos')
-          .withIndex('by_user', (q) => q.eq('userId', otherUserId))
-          .first();
-      }
+      photo = await getPhase1PrimaryPhoto(ctx, otherUserId);
     }
 
     // BUG FIX: Resolve photo URL at query time using ctx.storage.getUrl
@@ -1552,13 +1558,7 @@ export const getConversations = query({
     const [users, photos, lastMessages, matches] = await Promise.all([
       Promise.all(otherUserIds.map((id) => ctx.db.get(id))),
       Promise.all(
-        otherUserIds.map((id) =>
-          ctx.db
-            .query('photos')
-            .withIndex('by_user', (q) => q.eq('userId', id))
-            .filter((q) => q.eq(q.field('isPrimary'), true))
-            .first()
-        )
+        otherUserIds.map((id) => getPhase1PrimaryPhoto(ctx, id))
       ),
       Promise.all(
         finalCandidates.map((candidate) =>
@@ -1579,25 +1579,7 @@ export const getConversations = query({
       ),
     ]);
 
-    // BUG FIX: Fallback to any photo for users without isPrimary photo
-    // Same pattern as likes.ts to handle edge cases where isPrimary flag is not set
     const photoMap = new Map(otherUserIds.map((id, i) => [id as string, photos[i]]));
-    const usersWithoutPrimaryPhoto = otherUserIds.filter((_id, i) => !photos[i]);
-    if (usersWithoutPrimaryPhoto.length > 0) {
-      const fallbackPhotos = await Promise.all(
-        usersWithoutPrimaryPhoto.map((id) =>
-          ctx.db
-            .query('photos')
-            .withIndex('by_user', (q) => q.eq('userId', id))
-            .first()
-        )
-      );
-      usersWithoutPrimaryPhoto.forEach((id, i) => {
-        if (fallbackPhotos[i]) {
-          photoMap.set(id as string, fallbackPhotos[i]);
-        }
-      });
-    }
 
     // BUG FIX: Resolve photo URLs at query time using ctx.storage.getUrl
     // Stored URLs can expire; always fetch fresh URLs from storage

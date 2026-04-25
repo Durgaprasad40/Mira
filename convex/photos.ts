@@ -88,6 +88,25 @@ const MIN_PHOTO_DIMENSION = 200; // Minimum width/height in pixels
 // Keep a buffer for legacy/order-repair cases while avoiding unbounded reads.
 const MAX_GET_USER_PHOTOS = 25;
 
+async function getGridPrimaryPhotoUrl(
+  ctx: Pick<MutationCtx, 'db'>,
+  userId: Id<'users'>
+): Promise<string | null> {
+  const photos = await ctx.db
+    .query('photos')
+    .withIndex('by_user_order', (q) => q.eq('userId', userId))
+    .filter((q) => q.neq(q.field('photoType'), 'verification_reference'))
+    .collect();
+
+  photos.sort((a, b) => {
+    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+    if (a.order !== b.order) return a.order - b.order;
+    return a.createdAt - b.createdAt;
+  });
+
+  return photos[0]?.url ?? null;
+}
+
 // Generate upload URL
 export const generateUploadUrl = mutation({
   args: {},
@@ -944,6 +963,7 @@ export const uploadVerificationReferencePhoto = mutation({
 
     // M9 FIX: Update user with WINNER's data, not current request's data
     // This ensures both concurrent requests point user to the same deterministic winner
+    const gridPrimaryPhotoUrl = await getGridPrimaryPhotoUrl(ctx, userId);
     await ctx.db.patch(userId, {
       verificationReferencePhotoId: winner.storageId,
       verificationReferencePhotoUrl: winner.url,
@@ -951,8 +971,7 @@ export const uploadVerificationReferencePhoto = mutation({
       displayPrimaryPhotoId: winner.storageId,
       displayPrimaryPhotoUrl: winner.url,
       displayPrimaryPhotoVariant: 'original',
-      // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
-      primaryPhotoUrl: winner.url,
+      primaryPhotoUrl: gridPrimaryPhotoUrl,
       // Set verification status to pending
       faceVerificationStatus: 'unverified',
       verificationStatus: 'pending_auto',
@@ -1023,12 +1042,12 @@ export const setDisplayPhotoVariant = mutation({
 
     if (variant === 'original') {
       // Use the original verification reference photo
+      const gridPrimaryPhotoUrl = await getGridPrimaryPhotoUrl(ctx, userId);
       await ctx.db.patch(userId, {
         displayPrimaryPhotoId: user.verificationReferencePhotoId,
         displayPrimaryPhotoUrl: user.verificationReferencePhotoUrl,
         displayPrimaryPhotoVariant: 'original',
-        // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
-        primaryPhotoUrl: user.verificationReferencePhotoUrl,
+        primaryPhotoUrl: gridPrimaryPhotoUrl,
       });
     } else {
       // For blurred/cartoon, need the processed version

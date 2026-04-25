@@ -52,6 +52,7 @@ async function prefetchPhotoCounts(
     ctx.db
       .query('photos')
       .withIndex('by_user', (q: any) => q.eq('userId', uid))
+      .filter((q: any) => q.neq(q.field('photoType'), 'verification_reference'))
       .collect()
   );
 
@@ -62,6 +63,37 @@ async function prefetchPhotoCounts(
   });
 
   return counts;
+}
+
+async function fetchPhase1PrimaryPhotoUrl(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: string
+): Promise<string | null> {
+  const photos = await ctx.db
+    .query('photos')
+    .withIndex('by_user_order', (q: any) => q.eq('userId', userId))
+    .filter((q: any) => q.neq(q.field('photoType'), 'verification_reference'))
+    .collect();
+
+  photos.sort((a: Doc<'photos'>, b: Doc<'photos'>) => {
+    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+    if (a.order !== b.order) return a.order - b.order;
+    return a.createdAt - b.createdAt;
+  });
+
+  return photos[0]?.url ?? null;
+}
+
+async function prefetchPhase1PrimaryPhotoUrls(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userIds: string[]
+): Promise<Map<string, string | null>> {
+  const entries = await Promise.all(
+    userIds.map(async (id) => [id, await fetchPhase1PrimaryPhotoUrl(ctx, id)] as const)
+  );
+  return new Map(entries);
 }
 
 /**
@@ -1850,9 +1882,6 @@ export const getNearbyUsers = query({
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
 
-      // P0 FIX: Require valid primary photo URL
-      if (!user.primaryPhotoUrl) continue;
-
       // Must have published location (persistent: no freshness TTL — the last
       // coarse published position stays eligible until the next republish).
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
@@ -1902,8 +1931,11 @@ export const getNearbyUsers = query({
       candidateUsers.push(user);
     }
 
-    // STABILITY FIX: Fetch photo counts only for candidates (not all users)
-    const photoCountsMap = await prefetchPhotoCounts(ctx, candidateUserIds);
+    // STABILITY FIX: Fetch photo counts and phase-1 primary photos only for candidates.
+    const [photoCountsMap, primaryPhotoUrlMap] = await Promise.all([
+      prefetchPhotoCounts(ctx, candidateUserIds),
+      prefetchPhase1PrimaryPhotoUrls(ctx, candidateUserIds),
+    ]);
 
     // Second pass: filter by photo count and build results.
     // Phase-2.5 hardening + Phase-3 ranking & preview fields:
@@ -1927,6 +1959,9 @@ export const getNearbyUsers = query({
 
     for (let i = 0; i < candidateUsers.length; i++) {
       const user = candidateUsers[i];
+      const photoUrl = primaryPhotoUrlMap.get(user._id as string) ?? null;
+      if (!photoUrl) continue;
+
       const photoCount = photoCountsMap.get(user._id as string) || 0;
       if (photoCount < 2) continue;
 
@@ -2042,7 +2077,7 @@ export const getNearbyUsers = query({
         distanceBucket: user.hideDistance === true ? undefined : bucket.label,
         freshness,
         freshnessLabel,
-        photoUrl: user.primaryPhotoUrl ?? null,
+        photoUrl,
         isVerified: user.isVerified,
         strongPrivacyMode: user.strongPrivacyMode ?? false,
         hideDistance: user.hideDistance ?? false,
@@ -2180,20 +2215,8 @@ export const getCrossPathHistory = query({
       if (user) usersMap.set(id as string, user as Doc<'users'>);
     });
 
-    // Parallel fetch all primary photos
-    const photosMap = new Map<string, string | null>();
-    const photoFetches = await Promise.all(
-      otherUserIds.map((id) =>
-        ctx.db
-          .query('photos')
-          .withIndex('by_user', (q) => q.eq('userId', id))
-          .filter((q) => q.eq(q.field('isPrimary'), true))
-          .first()
-      )
-    );
-    otherUserIds.forEach((id, i) => {
-      photosMap.set(id as string, photoFetches[i]?.url ?? null);
-    });
+    // Parallel fetch phase-1 primary photos from the user's public photo grid.
+    const photosMap = await prefetchPhase1PrimaryPhotoUrls(ctx, otherUserIds.map(String));
 
     // Build results using pre-fetched data
     const results = [];
@@ -2206,8 +2229,8 @@ export const getCrossPathHistory = query({
       if (otherUser.nearbyEnabled === false) continue;
       if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
 
-      // P0 FIX: Require valid primary photo URL
-      if (!otherUser.primaryPhotoUrl) continue;
+      const photoUrl = photosMap.get(otherUserId as string) ?? null;
+      if (!photoUrl) continue;
 
       const crossingCount = crossingCountsMap.get(otherUserId as string) || 1;
 
@@ -2290,7 +2313,7 @@ export const getCrossPathHistory = query({
         whyExplanation,
         createdAt: entry.createdAt,
         expiresAt: entry.expiresAt,
-        photoUrl: photosMap.get(otherUserId as string),
+        photoUrl,
         initial: otherUser.name.charAt(0),
         isVerified: otherUser.isVerified,
       });
@@ -2577,20 +2600,8 @@ export const getCrossedPaths = query({
       if (user) usersMap.set(id as string, user as Doc<'users'>);
     });
 
-    // Parallel fetch all primary photos
-    const photosMap = new Map<string, string | undefined>();
-    const photoFetches = await Promise.all(
-      otherUserIds.map((id) =>
-        ctx.db
-          .query('photos')
-          .withIndex('by_user', (q) => q.eq('userId', id))
-          .filter((q) => q.eq(q.field('isPrimary'), true))
-          .first()
-      )
-    );
-    otherUserIds.forEach((id, i) => {
-      photosMap.set(id as string, photoFetches[i]?.url);
-    });
+    // Parallel fetch phase-1 primary photos from the user's public photo grid.
+    const photosMap = await prefetchPhase1PrimaryPhotoUrls(ctx, otherUserIds.map(String));
 
     // Build results using pre-fetched data
     const result = [];
@@ -2604,8 +2615,8 @@ export const getCrossedPaths = query({
       if (otherUser.nearbyEnabled === false) continue;
       if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
 
-      // P0 FIX: Require valid primary photo URL
-      if (!otherUser.primaryPhotoUrl) continue;
+      const photoUrl = photosMap.get(otherUserId as string) ?? null;
+      if (!photoUrl) continue;
 
       // Calculate distance range if we have location data
       let distanceRange: string | null = null;
@@ -2635,7 +2646,7 @@ export const getCrossedPaths = query({
           id: otherUserId,
           name: otherUser.name,
           age: calculateAge(otherUser.dateOfBirth),
-          photoUrl: photosMap.get(otherUserId as string),
+          photoUrl,
           isVerified: otherUser.isVerified,
         },
       });

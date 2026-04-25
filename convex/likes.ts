@@ -36,6 +36,26 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
+async function getPhase1PrimaryPhoto(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: Id<'users'>
+) {
+  const photos = await ctx.db
+    .query('photos')
+    .withIndex('by_user_order', (q: any) => q.eq('userId', userId))
+    .filter((q: any) => q.neq(q.field('photoType'), 'verification_reference'))
+    .collect();
+
+  photos.sort((a: any, b: any) => {
+    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+    if (a.order !== b.order) return a.order - b.order;
+    return a.createdAt - b.createdAt;
+  });
+
+  return photos[0] ?? null;
+}
+
 // SMART MATCHING: Check for T&D connected status between two users
 // Returns true if there's a 'connected' todConnectRequest between them
 // Handles mixed storage patterns in todConnectRequests (authUserId vs Id<'users'>)
@@ -703,20 +723,7 @@ export const getLikesReceived = query({
       const fromUser = await ctx.db.get(like.fromUserId);
       if (!fromUser || !fromUser.isActive) continue;
 
-      // Get primary photo, fallback to any photo if no primary exists
-      let photo = await ctx.db
-        .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', like.fromUserId))
-        .filter((q) => q.eq(q.field('isPrimary'), true))
-        .first();
-
-      // BUG FIX: Fallback to any photo if no isPrimary photo exists
-      if (!photo) {
-        photo = await ctx.db
-          .query('photos')
-          .withIndex('by_user', (q) => q.eq('userId', like.fromUserId))
-          .first();
-      }
+      const photo = await getPhase1PrimaryPhoto(ctx, like.fromUserId);
 
       // PRODUCT FIX: Always return REAL profile data (no anonymization)
       result.push({

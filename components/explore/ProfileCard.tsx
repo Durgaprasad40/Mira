@@ -2,33 +2,13 @@ import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Image } from 'expo-image';
 import { COLORS } from '@/lib/constants';
+import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 
 interface ProfileCardProps {
   profile: any;
   onPress: () => void;
   width?: number;
   height?: number;
-}
-
-/**
- * Resolve a photo URL from whichever field the profile carries.
- * Returns a valid string URL or null.
- */
-function resolvePhotoUrl(p: any): string | null {
-  if (typeof p?.mainPhotoUrl === 'string' && p.mainPhotoUrl) return p.mainPhotoUrl;
-  if (typeof p?.photoUrl === 'string' && p.photoUrl) return p.photoUrl;
-  if (typeof p?.avatarUrl === 'string' && p.avatarUrl) return p.avatarUrl;
-
-  const first = p?.photos?.[0];
-  if (first) {
-    if (typeof first === 'string' && first) return first;
-    if (typeof first?.url === 'string' && first.url) return first.url;
-  }
-
-  const media = p?.media?.[0];
-  if (typeof media?.url === 'string' && media.url) return media.url;
-
-  return null;
 }
 
 export function ProfileCard({ profile, onPress, width = 140, height = 180 }: ProfileCardProps) {
@@ -39,7 +19,7 @@ export function ProfileCard({ profile, onPress, width = 140, height = 180 }: Pro
         ? profile.distance
         : undefined;
 
-  const photoUrl = resolvePhotoUrl(profile);
+  const photoUrl = getPrimaryPhotoUrl(profile.photos);
 
   return (
     <TouchableOpacity

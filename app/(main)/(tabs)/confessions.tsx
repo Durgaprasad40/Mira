@@ -30,6 +30,7 @@ import { asUserId } from '@/convex/id';
 import { COLORS, FONT_SIZE, SPACING, lineHeight, moderateScale } from '@/lib/constants';
 import { isContentClean } from '@/lib/contentFilter';
 import { isProbablyEmoji } from '@/lib/utils';
+import { getPhase1PrimaryPhoto } from '@/lib/photoUtils';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useScreenTrace } from '@/lib/devTrace';
 import { useAuthStore } from '@/stores/authStore';
@@ -262,10 +263,9 @@ export default function ConfessionsScreen() {
     }
 
     if (!isDemoMode && convexCurrentUser) {
-      const primaryPhoto = convexCurrentUser.photos?.find((photo: any) => photo.isPrimary) ?? convexCurrentUser.photos?.[0];
       return {
         authorName: (convexCurrentUser as any).name,
-        authorPhotoUrl: primaryPhoto?.url,
+        authorPhotoUrl: getPhase1PrimaryPhoto(convexCurrentUser) ?? undefined,
         authorAge: computeAge((convexCurrentUser as any).dateOfBirth),
         authorGender: (convexCurrentUser as any).gender,
       };

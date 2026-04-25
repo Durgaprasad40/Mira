@@ -23,3 +23,9 @@ export function getPrimaryPhotoUrl(
   // Photos should always be pre-sorted by order (order=0 first)
   return photos[0]?.url || null;
 }
+
+export function getPhase1PrimaryPhoto(profile: any): string | null {
+  const photos = profile?.photos || [];
+  const publicPhotos = photos.filter((p: any) => p.photoType !== 'verification_reference');
+  return publicPhotos[0]?.url || null;
+}
