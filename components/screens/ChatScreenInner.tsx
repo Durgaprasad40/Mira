@@ -792,6 +792,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // back open while the user is intentionally away. Cleared the moment the
   // user taps the T/D button again (treated as explicit resume intent).
   const [isTruthDarePaused, setIsTruthDarePaused] = useState(false);
+  const [showSpinHint, setShowSpinHint] = useState(false);
+  const spinHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSpinHintKeyRef = useRef<string | null>(null);
 
   // Query game session status from backend
   const gameSession = useQuery(
@@ -799,6 +802,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     !isDemo && conversationId ? { conversationId } : 'skip'
   );
   const truthDareLastActionAt = gameSession ? (gameSession as any).lastActionAt : undefined;
+  const truthDareSpinTurnRole = gameSession ? (gameSession as any).spinTurnRole : undefined;
   const truthDareRole = deriveMyRole(gameSession, userId);
   const isTruthDareInviter = truthDareRole === 'inviter';
   const isTruthDareInvitee = truthDareRole === 'invitee';
@@ -945,6 +949,63 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [isDemo, gameSession?.state, gameSession?.endedReason, gameSession?.gameStartedAt, isTruthDareInvitee, showTruthDareGame, showTruthDareInvite, userId, conversationId, cleanupExpiredMutation]);
 
+  useEffect(() => {
+    return () => {
+      if (spinHintTimerRef.current) {
+        clearTimeout(spinHintTimerRef.current);
+        spinHintTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // TD_HINT: Phase-1 Messages nudge when the round is idle and it is my spin.
+  useEffect(() => {
+    if (isDemo) return;
+    if (!gameSession || !userId) return;
+    if (gameSession.state !== 'active') return;
+    if (gameSession.turnPhase !== 'idle') return;
+    if (!gameSession.gameStartedAt) return;
+    if (showTruthDareGame) return;
+    if (isTruthDarePaused) return;
+
+    const myRole = deriveMyRole(gameSession, userId);
+    const spinTurnRole = truthDareSpinTurnRole || 'inviter';
+    if (!myRole || spinTurnRole !== myRole) return;
+
+    const hintKey = `${spinTurnRole}:${truthDareLastActionAt}`;
+    if (lastSpinHintKeyRef.current === hintKey) return;
+    lastSpinHintKeyRef.current = hintKey;
+
+    if (spinHintTimerRef.current) {
+      clearTimeout(spinHintTimerRef.current);
+    }
+
+    setShowSpinHint(true);
+    if (__DEV__) {
+      console.log('[TD_HINT] my_spin_turn_show', {
+        conversationId,
+        spinTurnRole,
+        lastActionAt: truthDareLastActionAt,
+      });
+    }
+
+    spinHintTimerRef.current = setTimeout(() => {
+      setShowSpinHint(false);
+      spinHintTimerRef.current = null;
+    }, 3000);
+  }, [
+    isDemo,
+    gameSession?.state,
+    gameSession?.turnPhase,
+    gameSession?.gameStartedAt,
+    truthDareSpinTurnRole,
+    truthDareLastActionAt,
+    userId,
+    conversationId,
+    showTruthDareGame,
+    isTruthDarePaused,
+  ]);
+
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-OPEN MODAL WHEN IT'S MY TURN TO CHOOSE
   // This is the critical fix: when backend says it's my turn (choosing phase),
@@ -1033,6 +1094,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         sessionLoaded: gameSession !== undefined,
         sessionState: gameSession?.state,
       });
+    }
+
+    if (showSpinHint) {
+      setShowSpinHint(false);
+      if (spinHintTimerRef.current) {
+        clearTimeout(spinHintTimerRef.current);
+        spinHintTimerRef.current = null;
+      }
     }
 
     // TD_RESUME: tapping the T/D button is explicit user intent to re-enter
@@ -1173,7 +1242,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       console.log('[TD_MESSAGES][open_modal] state_none_open_invite');
     }
     setShowTruthDareInvite(true);
-  }, [isDemo, gameSession, userId, conversationId, startGameMutation, isTruthDarePaused]);
+  }, [isDemo, gameSession, userId, conversationId, startGameMutation, isTruthDarePaused, showSpinHint]);
 
   // Send game invite
   const handleSendInvite = useCallback(async () => {
@@ -2733,6 +2802,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         </View>
       </View>
 
+      {/* TD_HINT: Short-lived nudge when it is my turn to spin */}
+      {showSpinHint && (
+        <View
+          style={[styles.spinHintAnchor, { top: measuredHeaderHeight + 4 }]}
+          pointerEvents="none"
+        >
+          <View style={styles.spinHintCaret} />
+          <View style={styles.spinHintChip}>
+            <View style={styles.spinHintDot} />
+            <Text {...TEXT_PROPS} style={styles.spinHintText}>
+              Your turn — tap to spin
+            </Text>
+          </View>
+        </View>
+      )}
+
       {/* TD-UX: Waiting for inviter to start banner (for invitee) */}
       {showWaitingForStartToast && (
         <View style={styles.waitingStartBanner}>
@@ -3404,6 +3489,52 @@ const styles = StyleSheet.create({
     fontWeight: '500' as const,
     color: '#2E7D32',
     lineHeight: lineHeight(BANNER_TEXT_SIZE, 1.35),
+  },
+  spinHintAnchor: {
+    position: 'absolute' as const,
+    right: SPACING.base,
+    zIndex: 30,
+    elevation: 30,
+    alignItems: 'flex-end' as const,
+  },
+  spinHintCaret: {
+    width: 10,
+    height: 10,
+    marginRight: 34,
+    marginBottom: -5,
+    backgroundColor: COLORS.white,
+    borderLeftWidth: 1,
+    borderTopWidth: 1,
+    borderColor: 'rgba(17, 24, 39, 0.08)',
+    transform: [{ rotate: '45deg' }],
+  },
+  spinHintChip: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: SPACING.xs,
+    backgroundColor: COLORS.white,
+    paddingHorizontal: SPACING.sm + SPACING.xxs,
+    paddingVertical: SPACING.xs + 1,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(17, 24, 39, 0.08)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+  spinHintDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+    backgroundColor: COLORS.primary,
+  },
+  spinHintText: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: '600' as const,
+    color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.25),
   },
   typingIndicatorBar: {
     flexDirection: 'row' as const,
