@@ -12,7 +12,6 @@ import {
 } from 'react-native-vision-camera';
 // FFmpegKit removed - Maven artifacts unavailable (project retired Jan 2025)
 import { useVideoPlayer, VideoView } from 'expo-video';
-import * as ImageManipulator from 'expo-image-manipulator';
 import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
 import { Image } from 'expo-image';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -260,23 +259,11 @@ export default function CameraComposerScreen() {
       const ext = capturedType === 'video' ? 'mp4' : 'jpg';
       const fileName = `${Date.now()}.${ext}`;
 
-      // MIRROR FIX: Flip front camera photos
-      // (Videos are fixed at recording time with isMirrored={false})
-      let finalUri = capturedUri;
-      if (capturedType === 'photo' && capturedFacing === 'front') {
-        try {
-          const flipped = await ImageManipulator.manipulateAsync(
-            capturedUri,
-            [{ flip: ImageManipulator.FlipType.Horizontal }],
-            { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG }
-          );
-          finalUri = flipped.uri;
-        } catch (flipErr) {
-          console.warn('[CameraComposer] Failed to flip image:', flipErr);
-        }
-      }
-
-      const sourceFile = new ExpoFile(finalUri);
+      // Front camera: vision-camera isMirrored={true} already produces a
+      // mirrored (selfie-view) file. Trust that as the final source — no
+      // additional ImageManipulator flip, no preview scaleX:-1. Photo and
+      // video pipelines now match.
+      const sourceFile = new ExpoFile(capturedUri);
       const destFile = new ExpoFile(mediaDir, fileName);
       sourceFile.copy(destFile);
       const permanentUri = destFile.uri;
@@ -354,7 +341,6 @@ export default function CameraComposerScreen() {
 
   // PREVIEW SCREEN
   if (capturedUri && capturedType) {
-    const isFrontCamera = capturedFacing === 'front';
     const isVideo = capturedType === 'video';
 
     return (
@@ -379,10 +365,11 @@ export default function CameraComposerScreen() {
               nativeControls={false}
             />
           ) : (
-            // PHOTO PREVIEW: Show mirrored for selfie UX, flip actual file on submit
+            // PHOTO PREVIEW: File is already in selfie-mirror orientation from
+            // vision-camera isMirrored={true}; show it as-is.
             <Image
               source={{ uri: capturedUri }}
-              style={[styles.previewMedia, isFrontCamera && styles.mirrored]}
+              style={styles.previewMedia}
               contentFit="contain"
             />
           )}
@@ -580,7 +567,6 @@ const styles = StyleSheet.create({
   previewTitle: { fontSize: 17, fontWeight: '700', color: C.text },
   previewArea: { flex: 1, marginHorizontal: 8, borderRadius: 12, overflow: 'hidden' },
   previewMedia: { flex: 1 },
-  mirrored: { transform: [{ scaleX: -1 }] },
   videoDurationBadge: {
     position: 'absolute', bottom: 12, right: 12,
     flexDirection: 'row', alignItems: 'center', gap: 4,
