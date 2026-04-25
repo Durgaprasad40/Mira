@@ -900,7 +900,9 @@ export default function EditProfileScreen() {
     if (fromSlot === 0) return; // Already main
 
     // Check verification status
-    const isVerified = currentUser?.isVerified === true;
+    const isVerified =
+      currentUser?.verificationStatus === 'verified' ||
+      currentUser?.isVerified === true;
 
     // If NOT verified: block the swap with explanation
     if (!isVerified) {
