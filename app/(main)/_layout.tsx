@@ -10,6 +10,7 @@ import { ToastHost } from "@/components/ui/Toast";
 import { useRouteTrace, trace } from "@/lib/devTrace";
 import { usePhaseMode, type PhaseMode } from "@/lib/usePhaseMode";
 import { trackRouteChange } from "@/lib/sentry";
+import { useDeliveryAck } from "@/hooks/useDeliveryAck";
 
 // Navigation state tracking (minimal, for effect dependency)
 let _lastPathname = '';
@@ -154,6 +155,12 @@ export default function MainLayout() {
     api.users.getCurrentUser,
     !isDemoMode && userId ? { userId: userId as any } : "skip"
   );
+
+  // DELIVERY_ACK: Mount app-wide foreground delivery acknowledgement for Phase-1.
+  // Ensures senders see a 2nd tick even when the receiver is on a non-Messages
+  // tab. Internally guarded on auth/foreground/demo; safe to always mount here.
+  // Never touches protected-media timers.
+  useDeliveryAck();
 
   // Security gate — guarded one-shot redirect.
   // LOOP FIX: Memoize to prevent recomputation on every render

@@ -1073,6 +1073,123 @@ export const markAllAsDelivered = mutation({
   },
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DELIVERY_ACK: lightweight, app-wide delivery acknowledgement for Phase-1.
+//
+// Problem: `markAllAsDelivered` only runs when the Messages tab is mounted;
+// if the receiver is on any other Phase-1 screen (Discover, Profile, etc.)
+// the sender never sees the second tick until the receiver opens Messages.
+//
+// Fix: pair a narrow subscription (`listUndeliveredIncomingMessages`) with
+// a targeted mutation (`markMessagesDelivered`) and invoke them from a
+// hook mounted at the Phase-1 layout root. The query only re-fires when
+// actually-undelivered messages change, so idle devices stay quiet.
+//
+// Safety:
+//  - Sender guard on both query + mutation (`senderId !== userId`).
+//  - Does NOT touch `media`, `mediaPermissions`, `openedAt`, `readAt`, or any
+//    protected-media timer fields. Delivery acknowledgement never starts
+//    secure-media countdowns or expires view-once media.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Cap per-call workload to protect the server when a user returns after a
+// long absence with a huge backlog. Subsequent subscription ticks will
+// drain the rest.
+const DELIVERY_ACK_LIMIT = 200;
+
+export const listUndeliveredIncomingMessages = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { authUserId } = args;
+    if (!authUserId || authUserId.trim().length === 0) {
+      return [] as Array<{ _id: Id<'messages'>; conversationId: Id<'conversations'> }>;
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return [] as Array<{ _id: Id<'messages'>; conversationId: Id<'conversations'> }>;
+    }
+
+    const participations = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    const results: Array<{ _id: Id<'messages'>; conversationId: Id<'conversations'> }> = [];
+
+    for (const participation of participations) {
+      if (results.length >= DELIVERY_ACK_LIMIT) break;
+
+      const undelivered = await ctx.db
+        .query('messages')
+        .withIndex('by_conversation', (q) => q.eq('conversationId', participation.conversationId))
+        .filter((q) =>
+          q.and(
+            q.neq(q.field('senderId'), userId),
+            q.eq(q.field('deliveredAt'), undefined)
+          )
+        )
+        .collect();
+
+      for (const msg of undelivered) {
+        if (results.length >= DELIVERY_ACK_LIMIT) break;
+        results.push({ _id: msg._id, conversationId: msg.conversationId });
+      }
+    }
+
+    return results;
+  },
+});
+
+export const markMessagesDelivered = mutation({
+  args: {
+    messageIds: v.array(v.id('messages')),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { messageIds, authUserId } = args;
+    const now = Date.now();
+
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: false, count: 0 };
+    }
+    if (!messageIds || messageIds.length === 0) {
+      return { success: true, count: 0 };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false, count: 0 };
+    }
+
+    // Cap to DELIVERY_ACK_LIMIT to keep the mutation bounded.
+    const ids = messageIds.slice(0, DELIVERY_ACK_LIMIT);
+    let marked = 0;
+
+    for (const messageId of ids) {
+      const message = await ctx.db.get(messageId);
+      if (!message) continue;
+      // Sender guard: user must not be the sender.
+      if (message.senderId === userId) continue;
+      // Participant guard: user must be in the conversation.
+      const participation = await ctx.db
+        .query('conversationParticipants')
+        .withIndex('by_user_conversation', (q) =>
+          q.eq('userId', userId).eq('conversationId', message.conversationId)
+        )
+        .first();
+      if (!participation) continue;
+      // Idempotent: skip if already delivered.
+      if (message.deliveredAt) continue;
+
+      await ctx.db.patch(messageId, { deliveredAt: now });
+      marked++;
+    }
+
+    return { success: true, count: marked };
+  },
+});
+
 // ONLINE-STATUS-FIX: Update user's lastActive timestamp
 // Called periodically while user is in a conversation to show "Online" status
 export const updatePresence = mutation({

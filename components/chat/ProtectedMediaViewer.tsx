@@ -36,6 +36,11 @@ interface ProtectedMediaViewerProps {
   isMirrored?: boolean;
   // HOLD-MODE-FIX: When true, viewer closes on ANY touch release (finger up)
   isHoldMode?: boolean;
+  // SECURE_TIMER: True when the current user sent this message. When true,
+  // the viewer skips markViewed, skips the countdown UI, and skips markExpired
+  // so the sender can review their own media without consuming the recipient's
+  // timer or globally expiring view-once media.
+  isSender?: boolean;
 }
 
 export function ProtectedMediaViewer({
@@ -47,6 +52,7 @@ export function ProtectedMediaViewer({
   onReport,
   isMirrored = false,
   isHoldMode = false,
+  isSender = false,
 }: ProtectedMediaViewerProps) {
   const insets = useSafeAreaInsets();
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
@@ -150,8 +156,10 @@ export function ProtectedMediaViewer({
     }
   }, [visible, viewerState, messageId, mediaData, isMirrored, effectiveIsMirrored, isViewOnce]);
 
-  // Screen protection (Android FLAG_SECURE) — block when screenshots not allowed
-  useScreenProtection(!allowScreenshot && visible);
+  // Screen protection — always block screenshots + screen recording while the
+  // viewer is visible (photos AND videos). Enables FLAG_SECURE on Android and
+  // preventScreenCaptureAsync on iOS for the lifetime of the open viewer.
+  useScreenProtection(visible);
 
   // Screenshot detection — fires on both platforms
   // [P1_MEDIA_FIX] Backend validator for `logScreenshotEvent` accepts only
@@ -181,12 +189,17 @@ export function ProtectedMediaViewer({
     // 5-2: If view-once, expire on close (only once)
     // MSG-006 FIX: Use authUserId for server-side verification
     // [P1_MEDIA_FIX] `markExpired` validator accepts only `{ messageId, authUserId }`.
-    if (mediaData?.viewOnce && !hasExpired.current) {
+    // SECURE_TIMER: sender must never consume the timer on their own media —
+    // skip markExpired entirely when the current user is the sender.
+    if (mediaData?.viewOnce && !hasExpired.current && !isSender) {
       hasExpired.current = true;
+      console.log('[SECURE_TIMER] markExpired', { messageId, reason: 'viewonce_close' });
       void markExpired({
         messageId: messageId as any,
         authUserId: userId,
       }).catch(() => {});
+    } else if (mediaData?.viewOnce && isSender) {
+      console.log('[SECURE_TIMER] skip_sender_timer', { messageId, reason: 'viewonce_close' });
     }
 
     // 5-1: Only update state if still mounted
@@ -199,7 +212,7 @@ export function ProtectedMediaViewer({
     hasMarkedViewed.current = false;
     hasExpired.current = false; // Reset for next open
     onClose();
-  }, [mediaData, messageId, userId, markExpired, onClose]);
+  }, [mediaData, messageId, userId, markExpired, onClose, isSender]);
 
   // SECURE-REWRITE: Process mediaData and set viewerState
   // Only transition state when data arrives; image load callback handles 'ready'
@@ -246,49 +259,80 @@ export function ProtectedMediaViewer({
 
       processUrl();
 
-      // MSG-006 FIX: Use authUserId for server-side verification
-      // [P1_MEDIA_FIX] `markViewed` validator accepts only `{ messageId, authUserId }`.
-      void markViewed({
-        messageId: messageId as any,
-        authUserId: userId,
-      }).catch(() => {});
+      // SECURE_TIMER: log open context for diagnostics
+      console.log('[SECURE_TIMER] viewer_open', {
+        messageId,
+        currentUserId: userId,
+        isSender,
+        timerSeconds: mediaData.timerSeconds ?? null,
+        expiresAt: mediaData.expiresAt ?? null,
+        viewOnce: mediaData.viewOnce === true,
+      });
 
-      // ONCE-VIEW-FIX: Skip timer for view-once media
-      // View-once media has NO timer - user can view as long as they want
-      // Expiration happens ONLY when user closes the viewer
-      if (mediaData.viewOnce) {
-        console.log('[SECURE-VIEWER] view-once mode: no timer');
-        // No timer for view-once - leave timeLeft as null
-      } else if (mediaData.expiresAt) {
-        // TIMER-FIX: Use absolute deadline (expiresAt) instead of resetting to timerSeconds
-        // This ensures timer continues even if viewer is closed and reopened
-        const remainingMs = mediaData.expiresAt - Date.now();
-        const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
-        if (remainingSec > 0) {
-          setTimeLeft(remainingSec);
-        } else {
-          // Already expired by deadline
-          setTimeLeft(0);
+      if (isSender) {
+        // SECURE_TIMER: sender is reviewing their own media. Do NOT call
+        // markViewed and do NOT set timeLeft. Timer UI stays hidden; sender
+        // can review safely without consuming the recipient's timer or
+        // triggering global expiry.
+        console.log('[SECURE_TIMER] skip_sender_timer', { messageId, reason: 'url_ready' });
+      } else {
+        // MSG-006 FIX: Use authUserId for server-side verification
+        // [P1_MEDIA_FIX] `markViewed` validator accepts only `{ messageId, authUserId }`.
+        console.log('[SECURE_TIMER] markViewed', { messageId });
+        void markViewed({
+          messageId: messageId as any,
+          authUserId: userId,
+        }).catch(() => {});
+
+        // ONCE-VIEW-FIX: Skip timer for view-once media
+        // View-once media has NO timer - user can view as long as they want
+        // Expiration happens ONLY when user closes the viewer
+        if (mediaData.viewOnce) {
+          console.log('[SECURE-VIEWER] view-once mode: no timer');
+          // No timer for view-once - leave timeLeft as null
+        } else if (mediaData.expiresAt) {
+          // TIMER-FIX: Use absolute deadline (expiresAt) instead of resetting to timerSeconds
+          // This ensures timer continues even if viewer is closed and reopened
+          const remainingMs = mediaData.expiresAt - Date.now();
+          const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
+          if (remainingSec > 0) {
+            console.log('[SECURE_TIMER] receiver_timer_start', { messageId, remainingSec });
+            setTimeLeft(remainingSec);
+          } else {
+            // Already expired by deadline
+            setTimeLeft(0);
+          }
+        } else if (mediaData.timerSeconds && mediaData.timerSeconds > 0) {
+          // First open - use timerSeconds (markViewed will set expiresAt on backend)
+          console.log('[SECURE_TIMER] receiver_timer_start', {
+            messageId,
+            remainingSec: mediaData.timerSeconds,
+          });
+          setTimeLeft(mediaData.timerSeconds);
         }
-      } else if (mediaData.timerSeconds && mediaData.timerSeconds > 0) {
-        // First open - use timerSeconds (markViewed will set expiresAt on backend)
-        setTimeLeft(mediaData.timerSeconds);
       }
     }
-  }, [visible, mediaData, markViewed, messageId, userId]);
+  }, [visible, mediaData, markViewed, messageId, userId, isSender]);
 
   // 6-2: handleExpire now includes handleClose in deps (no stale closure)
   // MSG-006 FIX: Use authUserId for server-side verification
   const handleExpire = useCallback(() => {
     if (hasExpired.current) return; // Already expired
     hasExpired.current = true;
+    // SECURE_TIMER: sender must never trigger global expiry from the viewer.
+    if (isSender) {
+      console.log('[SECURE_TIMER] skip_sender_timer', { messageId, reason: 'expire' });
+      handleClose();
+      return;
+    }
     // [P1_MEDIA_FIX] `markExpired` validator accepts only `{ messageId, authUserId }`.
+    console.log('[SECURE_TIMER] markExpired', { messageId, reason: 'timer_zero' });
     void markExpired({
       messageId: messageId as any,
       authUserId: userId,
     }).catch(() => {});
     handleClose();
-  }, [messageId, userId, markExpired, handleClose]);
+  }, [messageId, userId, markExpired, handleClose, isSender]);
 
   // STABILITY FIX: C-5 - Fix timer infinite loop by using proper dependency pattern
   // Compute stable boolean outside effect to avoid expression in dependency array
@@ -418,7 +462,8 @@ export function ProtectedMediaViewer({
           </TouchableOpacity>
 
           <View style={styles.headerRight}>
-            {timeLeft !== null && timeLeft > 0 && (
+            {/* SECURE_TIMER: hide countdown badge when sender is reviewing own media */}
+            {!isSender && timeLeft !== null && timeLeft > 0 && (
               <View style={styles.timerBadge}>
                 <Ionicons name="timer-outline" size={16} color={COLORS.white} />
                 <Text style={styles.timerText}>{timeLeft}s</Text>
@@ -432,23 +477,6 @@ export function ProtectedMediaViewer({
             )}
           </View>
         </View>
-
-        {/* Trust signal banner - only show when ready */}
-        {viewerState === 'ready' && (
-          <View style={styles.trustBanner}>
-            {allowScreenshot ? (
-              <View style={styles.trustRow}>
-                <Ionicons name="shield-checkmark-outline" size={14} color="#4CAF50" />
-                <Text style={[styles.trustText, { color: '#4CAF50' }]}>Screenshot allowed</Text>
-              </View>
-            ) : (
-              <View style={styles.trustRow}>
-                <Ionicons name="shield" size={14} color={COLORS.primary} />
-                <Text style={[styles.trustText, { color: COLORS.primary }]}>Screenshot blocked</Text>
-              </View>
-            )}
-          </View>
-        )}
 
         {/* SECURE-REWRITE: State-based content rendering */}
         {viewerState === 'loading' && (
@@ -625,7 +653,8 @@ export function ProtectedMediaViewer({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.95)',
+    backgroundColor: 'black',
+    justifyContent: 'center',
   },
   header: {
     flexDirection: 'row',
@@ -725,18 +754,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   blurWrapper: {
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT * 0.65,
+    width: '100%',
+    height: '100%',
     position: 'relative',
   },
   image: {
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT * 0.65,
+    width: '100%',
+    height: '100%',
   },
   // VIDEO-FIX: Explicit video player style for visibility
   videoPlayer: {
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT * 0.65,
+    width: '100%',
+    height: '100%',
     backgroundColor: '#000',
   },
   // VIDEO-MIRROR-FIX: Horizontal flip for front-camera videos

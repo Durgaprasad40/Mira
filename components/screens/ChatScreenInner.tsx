@@ -543,6 +543,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const [viewerMessageId, setViewerMessageId] = useState<string | null>(null);
   const [viewerIsMirrored, setViewerIsMirrored] = useState(false); // VIDEO-MIRROR-FIX: Track mirrored state for viewer
   const [viewerIsHoldMode, setViewerIsHoldMode] = useState(false); // HOLD-MODE-FIX: Track if viewer was opened via hold
+  // SECURE_TIMER: Track whether the current user is the sender of the message
+  // being viewed. Passed to ProtectedMediaViewer to suppress timer UI + mutations.
+  const [viewerIsSender, setViewerIsSender] = useState(false);
   const [demoSecurePhotoId, setDemoSecurePhotoId] = useState<string | null>(null); // Demo mode viewer
   const [demoViewerIsHoldMode, setDemoViewerIsHoldMode] = useState(false); // HOLD-MODE-FIX: Demo mode hold tracking
   const [reportModalVisible, setReportModalVisible] = useState(false);
@@ -2342,7 +2345,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // VIDEO-MIRROR-FIX: Look up message to get isMirrored state
       const msg = findDisplayMessageById(messageId);
       const isMirrored = msg?.protectedMedia?.isMirrored === true;
+      // SECURE_TIMER: determine if current user sent this message. When true,
+      // the viewer suppresses the countdown and all consuming mutations.
+      const isSender = !!(msg?.senderId && userId && msg.senderId === userId);
+      console.log('[SECURE_TIMER] viewer_open', {
+        messageId,
+        currentUserId: userId,
+        senderId: msg?.senderId ?? null,
+        isSender,
+        trigger: 'tap',
+      });
       setViewerIsMirrored(isMirrored);
+      setViewerIsSender(isSender);
       setViewerIsHoldMode(false); // HOLD-MODE-FIX: Tap mode
       setViewerMessageId(messageId);
     }
@@ -2360,8 +2374,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // VIDEO-MIRROR-FIX: Look up message to get isMirrored state
       const msg = findDisplayMessageById(messageId);
       const isMirrored = msg?.protectedMedia?.isMirrored === true;
+      // SECURE_TIMER: same sender detection as tap path.
+      const isSender = !!(msg?.senderId && userId && msg.senderId === userId);
       if (__DEV__) console.log('[HOLD-MODE] Convex holdStart:', messageId, 'isMirrored:', isMirrored);
+      console.log('[SECURE_TIMER] viewer_open', {
+        messageId,
+        currentUserId: userId,
+        senderId: msg?.senderId ?? null,
+        isSender,
+        trigger: 'hold',
+      });
       setViewerIsMirrored(isMirrored);
+      setViewerIsSender(isSender);
       setViewerIsHoldMode(true); // HOLD-MODE-FIX: Hold mode
       setViewerMessageId(messageId);
     }
@@ -2401,9 +2425,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         markDemoSecurePhotoExpired(conversationId, messageId);
       }
     } else {
+      // SECURE_TIMER: the bubble countdown is visible to both sides (sender
+      // sees recipient's wall-clock timer). Only the receiver should call
+      // markExpired from the bubble — sender must never consume the timer.
+      const msg = findDisplayMessageById(messageId);
+      const isSender = !!(msg?.senderId && userId && msg.senderId === userId);
+      if (isSender) {
+        console.log('[SECURE_TIMER] skip_sender_timer', {
+          messageId,
+          reason: 'bubble_countdown_zero',
+        });
+        return;
+      }
       // Convex mode: call backend to mark expired
       if (userId) {
         if (__DEV__) console.log('[EXPIRY] Marking media expired from bubble:', messageId);
+        console.log('[SECURE_TIMER] markExpired', { messageId, reason: 'bubble_countdown_zero' });
         markMediaExpired({
           messageId: asMessageId(messageId),
           authUserId: userId,
@@ -2970,15 +3007,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           messageId={viewerMessageId}
           userId={userId}
           viewerName={currentUser?.name || otherUserName}
-          onClose={() => { setViewerMessageId(null); setViewerIsMirrored(false); setViewerIsHoldMode(false); }}
+          onClose={() => {
+            setViewerMessageId(null);
+            setViewerIsMirrored(false);
+            setViewerIsHoldMode(false);
+            setViewerIsSender(false);
+          }}
           onReport={() => {
             setViewerMessageId(null);
             setViewerIsMirrored(false);
             setViewerIsHoldMode(false);
+            setViewerIsSender(false);
             setReportModalVisible(true);
           }}
           isMirrored={viewerIsMirrored}
           isHoldMode={viewerIsHoldMode}
+          isSender={viewerIsSender}
         />
       )}
 
