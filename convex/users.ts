@@ -412,23 +412,21 @@ export const getUserById = query({
       .withIndex("by_user_order", (q) => q.eq("userId", userId))
       .collect();
 
-    // Photo ordering depends on verification status:
-    // - NOT verified: force reference photo first (locked until verification complete)
-    // - Verified: respect user's chosen order (isPrimary determines main photo)
-    let orderedPhotos;
-    if (!user.isVerified) {
-      // Not verified: reference photo must be first
-      const referencePhoto = photos.find(photo => photo.photoType === 'verification_reference');
-      const otherPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
-      otherPhotos.sort((a, b) => a.order - b.order);
-      orderedPhotos = referencePhoto ? [referencePhoto, ...otherPhotos] : otherPhotos;
-    } else {
-      // Verified: respect order field, isPrimary photo comes first
-      const primaryPhoto = photos.find(photo => photo.isPrimary === true);
-      const otherPhotos = photos.filter(photo => photo.isPrimary !== true);
-      otherPhotos.sort((a, b) => a.order - b.order);
-      orderedPhotos = primaryPhoto ? [primaryPhoto, ...otherPhotos] : photos.sort((a, b) => a.order - b.order);
-    }
+    const publicPhotos = photos.filter(
+      (p) => p.photoType !== "verification_reference"
+    );
+
+    const primaryPhoto = publicPhotos.find(
+      (p) => p.isPrimary === true
+    );
+
+    const otherPhotos = publicPhotos
+      .filter((p) => p.isPrimary !== true)
+      .sort((a, b) => a.order - b.order);
+
+    const orderedPhotos = primaryPhoto
+      ? [primaryPhoto, ...otherPhotos]
+      : [...publicPhotos].sort((a, b) => a.order - b.order);
 
     // Calculate distance if both have location
     const viewer = await ctx.db.get(viewerId);
