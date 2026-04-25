@@ -623,11 +623,17 @@ export const cleanupExpiredSession = mutation({
     if (endedReason === 'invite_expired') {
       const pendingSessions = allSessions.filter((s) => s.status === 'pending');
       for (const session of pendingSessions) {
+        if (session.cooldownUntil && session.cooldownUntil <= now) {
+          continue;
+        }
+
         await ctx.db.patch(session._id, {
           status: 'expired',
           endedAt: now,
-          endedReason: 'invite_expired',
-          cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS,
+          endedReason,
+          ...(session.cooldownUntil && session.cooldownUntil > now
+            ? {}
+            : { cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS }),
         });
         cleanedCount++;
       }
@@ -637,11 +643,17 @@ export const cleanupExpiredSession = mutation({
     if (endedReason === 'not_started' || endedReason === 'timeout') {
       const activeSessions = allSessions.filter((s) => s.status === 'active');
       for (const session of activeSessions) {
+        if (session.cooldownUntil && session.cooldownUntil <= now) {
+          continue;
+        }
+
         await ctx.db.patch(session._id, {
           status: 'expired',
           endedAt: now,
           endedReason,
-          cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS,
+          ...(session.cooldownUntil && session.cooldownUntil > now
+            ? {}
+            : { cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS }),
         });
         cleanedCount++;
       }

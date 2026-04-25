@@ -50,6 +50,7 @@ import { useDemoNotifStore } from '@/hooks/useNotifications';
 // Toast import removed — using Alert.alert for guaranteed error visibility
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import { popHandoff } from '@/lib/memoryHandoff';
+import { deriveMyRole } from '@/lib/bottleSpin';
 import { useIsFocused } from '@react-navigation/native';
 import {
   isUserBlocked,
@@ -74,6 +75,8 @@ function getDemoUserId(): string {
  * seed demoDmStore with a deterministic `demo_convo_${profileId}` key.
  * This empty record is kept as a fallback for seedConversation(). */
 const DEMO_SEED_MESSAGES: Record<string, DemoDmMessage[]> = {};
+
+const truthDarePauseByConversation = new Map<string, number>();
 
 export type ChatSource = 'messages' | 'discover' | 'confession' | 'notification' | 'match' | undefined;
 
@@ -781,12 +784,21 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const [showTruthDareGame, setShowTruthDareGame] = useState(false);
   const [showTruthDareInvite, setShowTruthDareInvite] = useState(false);
+  // TD_PAUSE: when the user cancels the Bottle Spin modal (X / backdrop), we
+  // flip this flag so the auto-open effect below will NOT force the modal
+  // back open while the user is intentionally away. Cleared the moment the
+  // user taps the T/D button again (treated as explicit resume intent).
+  const [isTruthDarePaused, setIsTruthDarePaused] = useState(false);
 
   // Query game session status from backend
   const gameSession = useQuery(
     api.games.getBottleSpinSession,
     !isDemo && conversationId ? { conversationId } : 'skip'
   );
+  const truthDareLastActionAt = gameSession ? (gameSession as any).lastActionAt : undefined;
+  const truthDareRole = deriveMyRole(gameSession, userId);
+  const isTruthDareInviter = truthDareRole === 'inviter';
+  const isTruthDareInvitee = truthDareRole === 'invitee';
 
   // Game session mutations
   const sendInviteMutation = useMutation(api.games.sendBottleSpinInvite);
@@ -833,6 +845,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     setShowTypingIndicator(otherUserTyping?.isTyping === true);
   }, [isDemo, otherUserTyping?.isTyping]);
 
+  useEffect(() => {
+    if (gameSession?.state !== 'cooldown') {
+      cooldownAnchorRef.current = null;
+    }
+  }, [gameSession?.state]);
+
   // ═══════════════════════════════════════════════════════════════════════════
   // TD-LIFECYCLE: Watch game session state changes for cross-device sync
   // ═══════════════════════════════════════════════════════════════════════════
@@ -864,6 +882,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           conversationId,
           note: 'backend will set cooldownUntil on this path',
         });
+      }
+      const cooldownUntil = (gameSession as any).cooldownUntil;
+      if (typeof cooldownUntil === 'number' && cooldownUntil <= Date.now()) {
+        return;
       }
       // Cleanup the expired session in backend
       cleanupExpiredMutation({
@@ -911,14 +933,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     const isInviteeWaitingForStart =
       gameSession.state === 'active' &&
       !gameSession.gameStartedAt &&
-      gameSession.inviteeId === userId;
+      isTruthDareInvitee;
     setShowWaitingForStartToast(isInviteeWaitingForStart);
 
     // Clear cooldown message when cooldown expires
     if (gameSession.state !== 'cooldown') {
       setShowCooldownMessage(false);
     }
-  }, [isDemo, gameSession?.state, gameSession?.endedReason, gameSession?.gameStartedAt, gameSession?.inviteeId, showTruthDareGame, showTruthDareInvite, userId, conversationId, cleanupExpiredMutation]);
+  }, [isDemo, gameSession?.state, gameSession?.endedReason, gameSession?.gameStartedAt, isTruthDareInvitee, showTruthDareGame, showTruthDareInvite, userId, conversationId, cleanupExpiredMutation]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-OPEN MODAL WHEN IT'S MY TURN TO CHOOSE
@@ -928,6 +950,20 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   useEffect(() => {
     if (isDemo || !gameSession || !userId) return;
 
+    const pausedAt = truthDarePauseByConversation.get(conversationId);
+    const lastActionAt = truthDareLastActionAt || gameSession?.gameStartedAt || 0;
+    if (pausedAt && lastActionAt && lastActionAt > pausedAt) {
+      truthDarePauseByConversation.delete(conversationId);
+      setIsTruthDarePaused(false);
+      if (__DEV__) {
+        console.log('[TD_PAUSE] pause_cleared_new_action', {
+          conversationId,
+          pausedAt,
+          lastActionAt,
+        });
+      }
+    }
+
     // Only care about active games in choosing phase
     if (gameSession.state !== 'active') return;
     // TD-LIFECYCLE: Do NOT auto-open until inviter has manually started the game
@@ -935,10 +971,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (gameSession.turnPhase !== 'choosing') return;
     if (!gameSession.currentTurnRole) return;
 
-    // Determine my role
-    const amIInviter = gameSession.inviterId === userId;
-    const amIInvitee = gameSession.inviteeId === userId;
-    const myRole = amIInviter ? 'inviter' : (amIInvitee ? 'invitee' : null);
+    const myRole = deriveMyRole(gameSession, userId);
 
     if (!myRole) return;
 
@@ -957,12 +990,35 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // If it's my turn and modal is closed, open it automatically
     if (isMyTurn && !showTruthDareGame) {
+      if (pausedAt && pausedAt > lastActionAt) {
+        if (__DEV__) {
+          console.log('[TD_PAUSE] pause_persisted_until_new_action', {
+            conversationId,
+            pausedAt,
+            lastActionAt,
+          });
+        }
+        return;
+      }
+      // TD_PAUSE: respect an explicit user cancel — do NOT force the modal
+      // back open until the user taps the T/D button again (which clears the
+      // paused flag). Backend game state is intentionally unchanged here.
+      if (isTruthDarePaused) {
+        if (__DEV__) {
+          console.log('[TD_PAUSE] skip_auto_open', {
+            turnPhase: gameSession.turnPhase,
+            currentTurnRole: gameSession.currentTurnRole,
+            myRole,
+          });
+        }
+        return;
+      }
       if (__DEV__) {
         console.log('[BOTTLE_SPIN_AUTO_OPEN] Opening modal - it is my turn to choose!');
       }
       setShowTruthDareGame(true);
     }
-  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, gameSession?.gameStartedAt, userId, showTruthDareGame]);
+  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, gameSession?.gameStartedAt, truthDareLastActionAt, conversationId, userId, showTruthDareGame, isTruthDarePaused]);
 
   // TD-LIFECYCLE: Handle T/D button press with manual start support
   const handleTruthDarePress = useCallback(async () => {
@@ -974,6 +1030,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         sessionLoaded: gameSession !== undefined,
         sessionState: gameSession?.state,
       });
+    }
+
+    // TD_RESUME: tapping the T/D button is explicit user intent to re-enter
+    // the game. Clear the paused flag so the auto-open effect (and the normal
+    // open paths below) can surface the current backend phase without the
+    // pause gate blocking them. Log the phase we are resuming from so device
+    // verification can correlate with the previous [TD_PAUSE] entry.
+    if (isTruthDarePaused) {
+      if (__DEV__) {
+        console.log('[TD_RESUME] reopening_from_phase', {
+          turnPhase: gameSession?.turnPhase,
+          currentTurnRole: gameSession?.currentTurnRole,
+          state: gameSession?.state,
+        });
+      }
+      setIsTruthDarePaused(false);
     }
 
     if (isDemo) {
@@ -1011,29 +1083,34 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // Priority 1: Cooldown active - show inline message instead of Alert
     if (gameSession.state === 'cooldown') {
       const remainingMs = (gameSession as any).remainingMs || 0;
-      const cooldownUntil = (gameSession as any).cooldownUntil;
-      // COOLDOWN-ANCHOR-FIX: capture absolute expiry at press time so the
-      // floating toast can countdown even when only `remainingMs` is present.
-      const anchor = typeof cooldownUntil === 'number' && cooldownUntil > 0
-        ? cooldownUntil
-        : Date.now() + remainingMs;
-      cooldownAnchorRef.current = anchor;
-      const remainingMin = Math.ceil(remainingMs / 60000);
-      if (__DEV__) {
-        console.log('[TD_COOLDOWN_TAP]', {
-          anchor,
-          remainingMs,
-          remainingMin,
-          cooldownUntil,
-        });
+      if (remainingMs <= 0) {
+        cooldownAnchorRef.current = null;
+        setShowCooldownMessage(false);
+      } else {
+        const cooldownUntil = (gameSession as any).cooldownUntil;
+        // COOLDOWN-ANCHOR-FIX: capture absolute expiry at press time so the
+        // floating toast can countdown even when only `remainingMs` is present.
+        const anchor = typeof cooldownUntil === 'number' && cooldownUntil > 0
+          ? cooldownUntil
+          : Date.now() + remainingMs;
+        cooldownAnchorRef.current = anchor;
+        const remainingMin = Math.ceil(remainingMs / 60000);
+        if (__DEV__) {
+          console.log('[TD_COOLDOWN_TAP]', {
+            anchor,
+            remainingMs,
+            remainingMin,
+            cooldownUntil,
+          });
+        }
+        setCooldownRemainingMin(remainingMin);
+        setShowCooldownMessage(true);
+        // COOLDOWN-RETRIGGER-FIX: Bump nonce to guarantee the auto-hide useEffect
+        // re-runs (and resets its timer) on every tap — even when the toast is
+        // already visible from a previous tap.
+        setCooldownToastNonce((n) => n + 1);
+        return;
       }
-      setCooldownRemainingMin(remainingMin);
-      setShowCooldownMessage(true);
-      // COOLDOWN-RETRIGGER-FIX: Bump nonce to guarantee the auto-hide useEffect
-      // re-runs (and resets its timer) on every tap — even when the toast is
-      // already visible from a previous tap.
-      setCooldownToastNonce((n) => n + 1);
-      return;
     }
 
     // Priority 2: Expired session - handled by useEffect cleanup, no-op here
@@ -1043,12 +1120,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // Priority 3: Active game exists
     if (gameSession.state === 'active') {
-      const amIInviter = gameSession.inviterId === userId;
+      const myRole = deriveMyRole(gameSession, userId);
+      const isInviter = myRole === 'inviter';
       const hasGameStarted = !!gameSession.gameStartedAt;
 
       // TD-LIFECYCLE: If game not started yet, handle based on role
       if (!hasGameStarted) {
-        if (amIInviter) {
+        if (isInviter) {
           // Inviter: Start the game manually
           try {
             const result = await startGameMutation({
@@ -1092,7 +1170,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       console.log('[TD_MESSAGES][open_modal] state_none_open_invite');
     }
     setShowTruthDareInvite(true);
-  }, [isDemo, gameSession, userId, conversationId, startGameMutation]);
+  }, [isDemo, gameSession, userId, conversationId, startGameMutation, isTruthDarePaused]);
 
   // Send game invite
   const handleSendInvite = useCallback(async () => {
@@ -2420,9 +2498,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Fallback: cooldownAnchorRef captured at press time from remainingMs.
   // cooldownTick (1s interval) drives re-render. Hidden when not in cooldown.
   const cooldownLiveText = (() => {
-    if (isDemo) return null;
+    if (isDemo || gameSession?.state !== 'cooldown') return null;
     const gs: any = gameSession;
-    if (!gs || gs.state !== 'cooldown') return null;
     let expiry: number | null = null;
     if (typeof gs.cooldownUntil === 'number' && gs.cooldownUntil > 0) {
       expiry = gs.cooldownUntil;
@@ -2570,7 +2647,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             // edges always registers a press on the visible T/D button.
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
             style={styles.gameButton}
-            disabled={!isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId}
+            disabled={!isDemo && gameSession?.state === 'pending' && isTruthDareInviter}
             testID="chat-header-truthdare-button"
             accessibilityRole="button"
             accessibilityLabel="Truth or Dare"
@@ -2581,7 +2658,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               // every state (normal / pending / cooldown / active). Only the
               // contextual badge + label text change. No opacity dimming, no
               // color flips — the button must never look "disabled".
-              gameSession?.state === 'pending' && gameSession?.inviteeId === userId && styles.truthDareButtonWithBadge,
+              gameSession?.state === 'pending' && isTruthDareInvitee && styles.truthDareButtonWithBadge,
             ]}>
               {/* TD-ICON-FIX: Removed inline icon — the pill was overflowing
                   the fixed-size gameButton slot and clipping into the 3-dot
@@ -2592,18 +2669,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 numberOfLines={1}
               >
                 {/* TD-UX: Show contextual status on button */}
-                {!isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId
+                {!isDemo && gameSession?.state === 'pending' && isTruthDareInviter
                   ? 'Sent'
-                  : !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId
+                  : !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && isTruthDareInviter
                     ? 'Start!'
                     : 'T/D'}
               </Text>
               {/* Pending invite indicator (for invitee) */}
-              {gameSession?.state === 'pending' && gameSession?.inviteeId === userId && (
+              {gameSession?.state === 'pending' && isTruthDareInvitee && (
                 <View style={styles.truthDareBadge} />
               )}
               {/* TD-UX: Badge dot for inviter when ready to start */}
-              {!isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId && (
+              {!isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && isTruthDareInviter && (
                 <View style={styles.truthDareStartBadge} />
               )}
             </View>
@@ -2995,7 +3072,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       </Modal>
 
       {/* Truth/Dare Pending Invite Card (for invitee) */}
-      {gameSession?.state === 'pending' && gameSession?.inviteeId === userId && (
+      {gameSession?.state === 'pending' && isTruthDareInvitee && (
         <View style={[styles.tdPendingInviteWrapper, { bottom: pendingInviteBottom }]}>
           <TruthDareInviteCard
             inviterName={otherUserName}
@@ -3013,6 +3090,21 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       <BottleSpinGame
         visible={showTruthDareGame}
         onClose={() => setShowTruthDareGame(false)}
+        // TD_PAUSE: Cancel (X / backdrop / Android back) closes the modal
+        // and flips the paused flag so the auto-open effect does not force
+        // the modal back open. Backend game state is intentionally untouched.
+        onCancel={() => {
+          const pausedAt = Date.now();
+          truthDarePauseByConversation.set(conversationId, pausedAt);
+          if (__DEV__) {
+            console.log('[TD_PAUSE] pause_persisted_until_new_action', {
+              conversationId,
+              pausedAt,
+            });
+          }
+          setIsTruthDarePaused(true);
+          setShowTruthDareGame(false);
+        }}
         currentUserName={isDemo ? 'You' : (currentUser?.name || 'You')}
         otherUserName={otherUserName}
         conversationId={conversationId || ''}

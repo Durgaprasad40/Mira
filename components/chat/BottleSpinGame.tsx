@@ -27,6 +27,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
+import { deriveMyRole, normalizeId } from '@/lib/bottleSpin';
 
 const MAX_SKIPS = 3;
 
@@ -52,6 +53,14 @@ interface BottleSpinGameProps {
    * legacy [Again]/[Done] screen by leaving this prop unset / false.
    */
   autoAdvance?: boolean;
+  /**
+   * TD_PAUSE: user-initiated cancel (X button, Android back, backdrop). When
+   * provided, the Cancel path calls this instead of onClose and intentionally
+   * does NOT mutate backend game state. Parent is expected to flip a local
+   * "paused" flag so the auto-open effect will not re-force the modal open
+   * while the user is intentionally away. If omitted, falls back to onClose.
+   */
+  onCancel?: () => void;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -70,6 +79,7 @@ export function BottleSpinGame({
   userId,
   onSendResultMessage,
   autoAdvance = false,
+  onCancel,
 }: BottleSpinGameProps) {
   // ═══════════════════════════════════════════════════════════════════════════
   // LOCAL STATE - Only for animation and UI helpers, NOT for turn ownership
@@ -86,6 +96,21 @@ export function BottleSpinGame({
 
   // Stale callback guard: increments on reset, animation checks before applying
   const spinSessionRef = useRef(0);
+
+  // TD_LIVE: dedup refs — a single 'complete' event (identified by
+  // backendLastActionAt) must only fire ONE observer toast and ONE auto-advance
+  // mutation regardless of how many times the effects re-run.
+  const toastFiredForActionRef = useRef<number | null>(null);
+  const autoAdvanceFiredForActionRef = useRef<number | null>(null);
+  // TD_SPIN: dedup ref for observer-side controlled spin. We only kick off one
+  // Animated.timing per distinct backendLastActionAt so re-renders cannot
+  // restart the animation mid-flight.
+  const observerSpinFiredForActionRef = useRef<number | null>(null);
+  // TD_SPIN: handle for the current observer-side single-shot animation so we
+  // can cleanly stop it if the component unmounts or phase changes away.
+  const observerAnimRef = useRef<Animated.CompositeAnimation | null>(null);
+  // TD_LIVE: previous uiMode, used for single-shot phase_map / transition logs.
+  const prevUiModeRef = useRef<UIMode | null>(null);
 
   const spinAnim = useRef(new Animated.Value(0)).current;
   const currentRotation = useRef(0);
@@ -112,6 +137,9 @@ export function BottleSpinGame({
   const backendSpinTurnRole = isSessionActive ? gameSession.spinTurnRole : undefined;
   // TD-FLOW (Option B): observer needs last chosen result to show the toast
   const backendLastSpinResult = isSessionActive ? gameSession.lastSpinResult : undefined;
+  // TD_LIVE: lastActionAt is bumped by the backend on every turn mutation and
+  // is the stable dedup key for a single completion event across re-renders.
+  const backendLastActionAt = isSessionActive ? gameSession.lastActionAt : undefined;
   const inviterId = isSessionActive ? gameSession.inviterId : undefined;
   const inviteeId = isSessionActive ? gameSession.inviteeId : undefined;
   // TD-LIFECYCLE: Extract gameStartedAt for manual start check
@@ -125,11 +153,7 @@ export function BottleSpinGame({
   // ═══════════════════════════════════════════════════════════════════════════
   // inviterId is the auth ID stored when invite was sent
   // userId is my auth ID passed from parent
-  // ROLE-FIX: Normalize IDs for comparison (trim whitespace, ensure string)
-  const normalizeId = (id: string | undefined): string => {
-    if (!id) return '';
-    return String(id).trim();
-  };
+  const myRole = deriveMyRole(gameSession, userId);
   const normalizedUserId = normalizeId(userId);
   const normalizedInviterId = normalizeId(inviterId);
   const normalizedInviteeId = normalizeId(inviteeId);
@@ -149,10 +173,8 @@ export function BottleSpinGame({
       inviteeMatch_normalized: normalizedUserId === normalizedInviteeId,
     });
   }
-  // ROLE-FIX: Use normalized comparison for robustness
-  const amIInviter = Boolean(normalizedInviterId && normalizedUserId === normalizedInviterId);
-  const amIInvitee = Boolean(normalizedInviteeId && normalizedUserId === normalizedInviteeId);
-  const myRole: 'inviter' | 'invitee' | null = amIInviter ? 'inviter' : (amIInvitee ? 'invitee' : null);
+  const amIInviter = myRole === 'inviter';
+  const amIInvitee = myRole === 'invitee';
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SPIN TURN OWNERSHIP - SPIN-TURN-FIX
@@ -301,19 +323,193 @@ export function BottleSpinGame({
   }, [visible, gameSessionState, isSessionActive, userId, inviterId, inviteeId, myRole, backendTurnRole, backendTurnPhase, backendSpinTurnRole, currentSpinTurnRole, isMySpinTurn, isSpinningLocally, isAnimationLocked, uiMode]);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // TD-FLOW (Option B): OBSERVER TOAST
+  // TD_LIVE: single-shot transition logs + per-phase entry logs
+  // Fires once per uiMode transition so log volume stays bounded even as
+  // other effects re-evaluate. Keep behind __DEV__ guard.
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!visible) {
+      prevUiModeRef.current = null;
+      return;
+    }
+    if (prevUiModeRef.current === uiMode) return;
+    const prev = prevUiModeRef.current;
+    prevUiModeRef.current = uiMode;
+    if (__DEV__) {
+      console.log('[TD_LIVE] phase_map', {
+        from: prev ?? 'init',
+        to: uiMode,
+        backendTurnPhase,
+        backendTurnRole,
+        backendSpinTurnRole,
+        myRole,
+      });
+      if (uiMode === 'spinning_local') {
+        console.log('[TD_LIVE] show_spinning', { asSpinner: isSpinningLocally });
+      } else if (uiMode === 'choosing_for_me') {
+        console.log('[TD_LIVE] show_choose_buttons', {
+          backendTurnRole,
+          myRole,
+        });
+      } else if (uiMode === 'choosing_for_other') {
+        console.log('[TD_LIVE] show_waiting_for_choice', {
+          other: otherUserName,
+          backendTurnRole,
+          myRole,
+        });
+        // Spinner who landed the bottle on the other user transitions
+        // spinning_local → choosing_for_other automatically; log that the
+        // blocking spinner UI has been auto-closed/replaced with waiting UI.
+        if (prev === 'spinning_local') {
+          console.log('[TD_LIVE] auto_close_spinner_modal', {
+            reason: 'spin_landed_on_other',
+          });
+        }
+      }
+    }
+  }, [
+    visible,
+    uiMode,
+    backendTurnPhase,
+    backendTurnRole,
+    backendSpinTurnRole,
+    myRole,
+    isSpinningLocally,
+    otherUserName,
+  ]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TD_SPIN: OBSERVER-SIDE SINGLE CONTROLLED SPIN
+  //
+  // Replaces the previous Animated.loop (which caused glitchy infinite rotation
+  // and mid-spin restart). Backend contract (convex/games.ts:758): when the
+  // spinner calls setBottleSpinTurn with turnPhase='spinning', the backend
+  // writes `currentTurnRole: selectedTargetRole` in the SAME patch, so by the
+  // time the observer's Convex subscription sees turnPhase='spinning',
+  // currentTurnRole is already the deterministic landing role. lastActionAt
+  // is bumped on that same write, giving us a stable dedup key.
+  //
+  // Rules:
+  //  - Only fire when backendTurnPhase === 'spinning' AND !isSpinningLocally
+  //    AND currentTurnRole is known AND we haven't already animated for this
+  //    exact backendLastActionAt.
+  //  - Compute final angle deterministically from currentTurnRole using the
+  //    same mapping as the chooser-side local spin (landsOnMe=0°, else 180°).
+  //  - Single Animated.timing, Easing.out(Easing.cubic), 1800ms, no loop.
+  //  - On completion, set currentRotation.current so subsequent spins start
+  //    from the true landing angle.
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!visible) return;
+    if (isSpinningLocally) return; // chooser-side spin owns the animation
+    if (backendTurnPhase !== 'spinning') return;
+    if (!backendLastActionAt) return;
+    if (!backendTurnRole) return; // currentTurnRole not yet surfaced
+    if (!myRole) return;
+
+    // TD_SPIN: dedup — never restart an animation for the same backend event.
+    if (observerSpinFiredForActionRef.current === backendLastActionAt) {
+      if (__DEV__) {
+        console.log('[TD_SPIN] skip_duplicate', {
+          backendLastActionAt,
+          reason: 'already_animated_for_this_action',
+        });
+      }
+      return;
+    }
+    observerSpinFiredForActionRef.current = backendLastActionAt;
+
+    // TD_SPIN: deterministic landing angle — matches chooser-side mapping
+    // (finalAngle = landsOnMe ? 0 : 180) so both devices land identically.
+    const landsOnMe = backendTurnRole === myRole;
+    const finalAngle = landsOnMe ? 0 : 180;
+    const fullRotations = 4; // deterministic visual rotations for observer
+    const fromAngle = currentRotation.current;
+    const totalRotation =
+      fromAngle + fullRotations * 360 + ((finalAngle - (fromAngle % 360) + 360) % 360);
+
+    if (__DEV__) {
+      console.log('[TD_SPIN] start_spin', {
+        side: 'observer',
+        fromAngle,
+        fullRotations,
+        backendLastActionAt,
+        backendTurnRole,
+        myRole,
+      });
+      console.log('[TD_SPIN] target_angle', {
+        side: 'observer',
+        finalAngle,
+        totalRotation,
+        landsOnMe,
+      });
+    }
+
+    spinAnim.setValue(fromAngle);
+    const anim = Animated.timing(spinAnim, {
+      toValue: totalRotation,
+      duration: 1800,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    observerAnimRef.current = anim;
+    anim.start(({ finished }) => {
+      observerAnimRef.current = null;
+      if (!finished) {
+        // Animation was stopped (e.g. phase changed or modal closed).
+        // Do NOT mutate currentRotation here; cleanup branch handles reset.
+        return;
+      }
+      currentRotation.current = totalRotation % 360;
+      if (__DEV__) {
+        console.log('[TD_SPIN] animation_complete', {
+          side: 'observer',
+          landedAt: currentRotation.current,
+          backendLastActionAt,
+        });
+      }
+    });
+
+    return () => {
+      // If effect re-runs (phase change, visibility change, unmount), stop
+      // the running animation cleanly. Do not reset spinAnim — leaving it at
+      // its current interpolated value prevents the "snap back" glitch.
+      if (observerAnimRef.current) {
+        observerAnimRef.current.stop();
+        observerAnimRef.current = null;
+      }
+    };
+  }, [
+    visible,
+    backendTurnPhase,
+    backendTurnRole,
+    backendLastActionAt,
+    isSpinningLocally,
+    myRole,
+    spinAnim,
+  ]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TD-FLOW (Option B) + TD_LIVE: OBSERVER TOAST (deduped per lastActionAt)
   // When the OTHER player makes a choice, backend turnPhase flips to 'complete'
   // with lastSpinResult set. On the observer device, chosenOption is still null
   // (we only set it for the chooser in handleChoice). Show a toast for them too
   // so both players see the outcome before the modal auto-advances to idle.
+  //
+  // Dedup: a single 'complete' event has a unique backendLastActionAt. We only
+  // fire the observer toast once per distinct lastActionAt so React re-renders
+  // cannot re-trigger it.
   // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (!autoAdvance) return;
     if (!visible) return;
     if (backendTurnPhase !== 'complete') return;
     if (!backendLastSpinResult) return;
+    if (!backendLastActionAt) return;
     // Only trigger for observer side; chooser toast already set in handleChoice
     if (chosenOption) return;
+    if (toastFiredForActionRef.current === backendLastActionAt) return;
+    toastFiredForActionRef.current = backendLastActionAt;
 
     const result = backendLastSpinResult;
     const text =
@@ -322,9 +518,16 @@ export function BottleSpinGame({
         : result === 'truth'
           ? `${otherUserName} chose TRUTH 🔥`
           : `${otherUserName} chose DARE 😈`;
-    if (__DEV__) console.log('[TD_FLOW] result_toast_show', { text, byChooser: false });
+    if (__DEV__) {
+      console.log('[TD_FLOW] result_toast_show', { text, byChooser: false });
+      console.log('[TD_LIVE] complete_toast', {
+        text,
+        byChooser: false,
+        lastActionAt: backendLastActionAt,
+      });
+    }
     setToastInfo({ text, key: Date.now() });
-  }, [autoAdvance, visible, backendTurnPhase, backendLastSpinResult, chosenOption, otherUserName]);
+  }, [autoAdvance, visible, backendTurnPhase, backendLastSpinResult, backendLastActionAt, chosenOption, otherUserName]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // TD-FLOW (Option B): TOAST FADE ANIMATION
@@ -356,6 +559,7 @@ export function BottleSpinGame({
   useEffect(() => {
     return () => {
       if (autoAdvanceTimerRef.current) {
+        console.log('[TD_LIVE] auto_advance_cleanup_on_unmount');
         clearTimeout(autoAdvanceTimerRef.current);
         autoAdvanceTimerRef.current = null;
       }
@@ -426,7 +630,33 @@ export function BottleSpinGame({
     }
   }, [spinAnim, userId, conversationId, setTurnMutation, toastOpacity, autoAdvance]);
 
-  const handleClose = useCallback(() => {
+  // TD_PAUSE: Cancel = UI close only. Does NOT reset the game. Does NOT mutate
+  // backend state. Does NOT trigger a spin. Parent receives onCancel (falls
+  // back to onClose when not supplied) and is responsible for setting its
+  // local paused flag so the auto-open effect does not immediately reopen the
+  // modal for the chooser.
+  const handleCancel = useCallback(() => {
+    if (__DEV__) {
+      console.log('[TD_PAUSE] user_paused', {
+        reason: 'cancel_button_or_backdrop',
+        backendTurnPhase,
+        backendTurnRole,
+        myRole,
+      });
+    }
+    if (onCancel) {
+      onCancel();
+    } else {
+      onClose();
+    }
+  }, [onCancel, onClose, backendTurnPhase, backendTurnRole, myRole]);
+
+  // Kept for the Phase-2 legacy [Done] button on the post-result screen where
+  // the user has explicitly finished a round and wants the game returned to
+  // idle. autoAdvance=true path never reaches this branch in normal flow
+  // (auto-advance timer handles the idle transition) but leaving the reset
+  // preserves Phase-2 behavior.
+  const handleFinishRound = useCallback(() => {
     resetGame();
     onClose();
   }, [resetGame, onClose]);
@@ -535,6 +765,21 @@ export function BottleSpinGame({
     const animDuration = 3000 + Math.random() * 1000;
 
     console.log('[BOTTLE_SPIN] Animation direction:', { landsOnMe, myRole, selectedRole });
+    if (__DEV__) {
+      console.log('[TD_SPIN] start_spin', {
+        side: 'chooser',
+        fromAngle: 0,
+        fullRotations,
+        selectedRole,
+        myRole,
+      });
+      console.log('[TD_SPIN] target_angle', {
+        side: 'chooser',
+        finalAngle,
+        totalRotation,
+        landsOnMe,
+      });
+    }
 
     Animated.timing(spinAnim, {
       toValue: totalRotation,
@@ -549,6 +794,13 @@ export function BottleSpinGame({
 
       currentRotation.current = totalRotation % 360;
       setIsSpinningLocally(false);
+      if (__DEV__) {
+        console.log('[TD_SPIN] animation_complete', {
+          side: 'chooser',
+          landedAt: currentRotation.current,
+          selectedRole,
+        });
+      }
 
       // Transition to choosing phase (backend already knows the selected target)
       try {
@@ -643,8 +895,20 @@ export function BottleSpinGame({
           : choice === 'truth'
             ? 'You chose TRUTH 🔥'
             : 'You chose DARE 😈';
-      if (__DEV__) console.log('[TD_FLOW] result_toast_show', { text, byChooser: true });
+      if (__DEV__) {
+        console.log('[TD_FLOW] result_toast_show', { text, byChooser: true });
+        console.log('[TD_LIVE] complete_toast', { text, byChooser: true });
+      }
       setToastInfo({ text, key: Date.now() });
+
+      // TD_LIVE: dedup guard — mark this specific choice event as already
+      // auto-advanced so the observer-side effect (if it were to fire on the
+      // chooser's own device due to state timing) cannot double-fire the
+      // turnPhase:'idle' mutation. We tag with the locally-known actionAt
+      // (Date.now()) since the backend bumps its own lastActionAt on the
+      // 'complete' write that will arrive right after.
+      const choiceLocalActionAt = Date.now();
+      autoAdvanceFiredForActionRef.current = choiceLocalActionAt;
 
       if (autoAdvanceTimerRef.current) {
         clearTimeout(autoAdvanceTimerRef.current);
@@ -668,6 +932,10 @@ export function BottleSpinGame({
               payload,
             });
             console.log('[TD_FLOW] auto_advance_to_idle');
+            console.log('[TD_LIVE] auto_advance_once', {
+              byChooser: true,
+              localActionAt: choiceLocalActionAt,
+            });
           }
           try {
             await setTurnMutation(payload);
@@ -761,13 +1029,17 @@ export function BottleSpinGame({
 
   // ═══════════════════════════════════════════════════════════════════════════
   // RENDER: OBSERVER UI (other user is choosing) - Compact layout
+  // TD_LIVE: restyled to match renderWaitingForSpin so the spinner (non-chooser)
+  // sees an explicit non-blocking wait affordance instead of a blocking popup.
   // ═══════════════════════════════════════════════════════════════════════════
   const renderObserverUI = () => (
-    <View style={styles.resultContainer}>
-      <Text style={styles.resultText}>
-        <Text style={styles.resultName}>{otherUserName}</Text>
-        {' '}is choosing...
-      </Text>
+    <View style={styles.waitingContainer}>
+      <View style={styles.waitingContent}>
+        <Ionicons name="hourglass-outline" size={18} color={COLORS.textLight} />
+        <Text style={styles.waitingText}>
+          Waiting for <Text style={styles.waitingName}>{otherUserName}</Text> to choose…
+        </Text>
+      </View>
     </View>
   );
 
@@ -825,7 +1097,7 @@ export function BottleSpinGame({
           <Ionicons name="refresh" size={14} color={COLORS.primary} />
           <Text style={styles.compactActionText}>Again</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.compactActionButton} onPress={handleClose}>
+        <TouchableOpacity style={styles.compactActionButton} onPress={handleFinishRound}>
           <Ionicons name="checkmark" size={14} color={COLORS.secondary} />
           <Text style={[styles.compactActionText, { color: COLORS.secondary }]}>Done</Text>
         </TouchableOpacity>
@@ -841,7 +1113,7 @@ export function BottleSpinGame({
       visible={visible}
       animationType="fade"
       transparent
-      onRequestClose={handleClose}
+      onRequestClose={handleCancel}
     >
       <View style={styles.overlay}>
         <View style={styles.container}>
@@ -852,7 +1124,7 @@ export function BottleSpinGame({
               <Text style={styles.title}>Spin the Bottle</Text>
             </View>
             <TouchableOpacity
-              onPress={handleClose}
+              onPress={handleCancel}
               style={[styles.closeButton, isAnimationLocked && styles.buttonDisabled]}
               disabled={isAnimationLocked}
             >

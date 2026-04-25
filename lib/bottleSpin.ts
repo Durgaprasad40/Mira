@@ -34,3 +34,20 @@ export function formatBottleSpinCooldown(remainingMs: number): string {
 
   return `${totalMinutes} minute${totalMinutes === 1 ? '' : 's'}`;
 }
+
+export function normalizeId(id: any): string {
+  return String(id ?? '').trim();
+}
+
+export function deriveMyRole(session: any, userId: any): 'inviter' | 'invitee' | null {
+  if (!session || !userId) return null;
+
+  const normalizedUserId = normalizeId(userId);
+  const normalizedInviterId = normalizeId(session.inviterId);
+  const normalizedInviteeId = normalizeId(session.inviteeId);
+
+  if (normalizedUserId === normalizedInviterId) return 'inviter';
+  if (normalizedUserId === normalizedInviteeId) return 'invitee';
+
+  return null;
+}
