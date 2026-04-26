@@ -1932,16 +1932,6 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 )}
               </View>
             )}
-
-            {phase2IntentChips.length > 0 && (
-              <View style={styles.phase2IntentMetaRow}>
-                {phase2IntentChips.map((chip) => (
-                  <View key={chip.key} style={styles.phase2IntentMetaChip}>
-                    <Text style={styles.phase2IntentMetaText}>{chip.label}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
           </View>
 
           {/* ═══════════════════════════════════════════════════════════════════════════
