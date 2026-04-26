@@ -70,7 +70,7 @@ import { useDiscoverStore } from "@/stores/discoverStore";
 import { useFilterStore } from "@/stores/filterStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { ProfileCardPreview } from "@/components/cards/ProfileCardPreview";
-import { WelcomeOverlay, SwipeGuidanceHint, SkeletonCard } from "@/components/ui";
+import { WelcomeOverlay, SwipeGuidanceHint } from "@/components/ui";
 import { isDemoMode } from "@/hooks/useConvex";
 import { getDiscoverPrefetchSnapshot, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
 import {
@@ -140,12 +140,6 @@ const EMPTY_ARRAY: any[] = [];
 const EMPTY_STRING_ARRAY: string[] = [];
 const PREFETCH_HOLD_MS = 1200;
 const PHASE1_LOCATION_FOCUS_REVISIT_GAP_MS = 30 * 1000;
-/** Deep Connect (Phase-2): minimum skeleton smoothing only — empty results show right after this window */
-const DEEP_CONNECT_MIN_SKELETON_MS = 350;
-/** Deep Connect: show “searching” copy under skeleton after this delay (zero profiles) */
-const DEEP_CONNECT_SEARCHING_LABEL_MS = 700;
-/** Deep Connect: fade between skeleton / searching / empty */
-const DEEP_CONNECT_CONTENT_FADE_MS = 250;
 /** Deep Connect: switch to a recovery state if the live query stalls */
 const DEEP_CONNECT_QUERY_TIMEOUT_MS = 8500;
 /** Deep Connect: downward pull distance before the deck refreshes */
@@ -708,9 +702,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // ── Swipe lock: prevents re-entrant swipes while animation + processing is in flight ──
   // Acquired in animateSwipe, released after advanceCard + match logic complete.
   const swipeLockRef = useRef(false);
-  // Deep Connect (Phase-2): lock UI once first stable non-loading state is reached — no skeleton oscillation
-  const hasCommittedRef = useRef(false);
-  const prevDeepConnectContentStateRef = useRef<string | null>(null);
   const prevDiscoverReadyLogKeyRef = useRef<string | null>(null);
   // LIVE_LOCATION: Prevent duplicate location refresh requests during focus
   const isRefreshingLocationRef = useRef(false);
@@ -765,29 +756,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     };
   }, [isPhase2]);
 
-  // Phase-2 Deep Connect: minimum skeleton smoothing window only (no empty-result grace / no extra empty hold)
-  const [p2MinSkeletonDone, setP2MinSkeletonDone] = useState(() => !isPhase2);
-  const [p2SearchingLabelVisible, setP2SearchingLabelVisible] = useState(false);
-  const [phase2RefreshCycle, setPhase2RefreshCycle] = useState(0);
   const [phase2QueryPaused, setPhase2QueryPaused] = useState(false);
   const [isRefreshingPhase2Deck, setIsRefreshingPhase2Deck] = useState(false);
   const [phase2QueryTimedOut, setPhase2QueryTimedOut] = useState(false);
-
-  useEffect(() => {
-    if (!isPhase2) {
-      hasCommittedRef.current = false;
-    }
-  }, [isPhase2]);
-
-  useEffect(() => {
-    if (!isPhase2 || isDemoMode) {
-      setP2MinSkeletonDone(true);
-      return;
-    }
-    setP2MinSkeletonDone(false);
-    const t = setTimeout(() => setP2MinSkeletonDone(true), DEEP_CONNECT_MIN_SKELETON_MS);
-    return () => clearTimeout(t);
-  }, [isPhase2, isDemoMode, userId, phase2RefreshCycle]);
 
   // Overlay refs + shared values (no React re-renders during drag)
   const overlayDirectionRef = useRef<"left" | "right" | "up" | null>(null);
@@ -1133,12 +1104,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       ? phase1SessionProfiles
       : phase1ProfilesWithPrefetch;
 
-  // Reset Deep Connect content lock when user changes (new session)
+  // Track Deep Connect profile user so user changes start a new session cleanly.
   const phase2ProfilesUserRef = useRef<string | null>(null);
   if (userId !== phase2ProfilesUserRef.current) {
     phase2ProfilesUserRef.current = userId;
-    hasCommittedRef.current = false;
-    prevDeepConnectContentStateRef.current = null;
   }
 
   // P1-003 FIX: Phase-2 — only `undefined` is loading; `[]` is resolved empty (no grace-period fake loading)
@@ -1347,23 +1316,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     [latestProfiles, isPhase2],
   );
 
-  // Keep last non-empty profiles to prevent blank-frame flicker
-  const stableProfilesRef = useRef<ProfileData[]>([]);
+  // Keep a union of seen profiles to prevent blank-frame flicker
+  const stableProfilesMapRef = useRef<Map<string, ProfileData>>(new Map());
+  const consumedIdsRef = useRef<Set<string>>(new Set()); // Profiles already swiped
   // FIX: Track userId to invalidate cache when user changes (prevents showing stale profiles)
   const stableUserIdRef = useRef<string | null>(null);
   if (userId !== stableUserIdRef.current) {
     // User changed — clear stale cache to prevent showing old user's excluded profiles
     // FLICKER_FIX: Only clear if there WAS a previous user (not first mount)
     if (stableUserIdRef.current !== null) {
-      stableProfilesRef.current = [];
+      stableProfilesMapRef.current.clear();
       if (__DEV__ && isPhase2) {
         console.log('[DISCOVER_RESET] reason=user_changed, prev=', stableUserIdRef.current?.slice(0, 10), 'new=', userId?.slice(0, 10));
       }
     }
     stableUserIdRef.current = userId;
-  }
-  if (validProfiles.length > 0) {
-    stableProfilesRef.current = validProfiles;
   }
   const phase1DiscoverPaused =
     !isPhase2 &&
@@ -1387,27 +1354,26 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const prevPhase1CacheResetKeyRef = useRef<string | null>(null);
   if (!isPhase2 && !isDemoMode && !externalProfiles && prevPhase1CacheResetKeyRef.current !== phase1CacheResetKey) {
     if (prevPhase1CacheResetKeyRef.current !== null) {
-      stableProfilesRef.current = [];
+      stableProfilesMapRef.current.clear();
     }
     prevPhase1CacheResetKeyRef.current = phase1CacheResetKey;
   }
+  for (const p of validProfiles) {
+    stableProfilesMapRef.current.set(p.id, p);
+  }
   // FLICKER_FIX: Log when falling back to stable cache
   const usingStableCache = isPhase2
-    ? validProfiles.length === 0 && stableProfilesRef.current.length > 0
-    : effectiveConvexProfiles === undefined && stableProfilesRef.current.length > 0;
+    ? validProfiles.length === 0 && stableProfilesMapRef.current.size > 0
+    : effectiveConvexProfiles === undefined && stableProfilesMapRef.current.size > 0;
   if (__DEV__ && isPhase2 && usingStableCache) {
-    console.log('[DISCOVER_GUARD] Using stable cache:', stableProfilesRef.current.length, 'profiles (validProfiles was empty)');
+    console.log('[DISCOVER_GUARD] Using stable cache:', stableProfilesMapRef.current.size, 'profiles (validProfiles was empty)');
   }
-  const profilesRaw = validProfiles.length > 0
-    ? validProfiles
-    : usingStableCache
-      ? stableProfilesRef.current
-      : (EMPTY_ARRAY as ProfileData[]);
+  const profilesRaw = Array.from(stableProfilesMapRef.current.values());
 
   // FIX: Defensive filter — never show current user's profile in Discover
   // Backend already excludes, but this protects against stale cache contamination
   const profiles = useMemo(
-    () => userId ? profilesRaw.filter((p) => p.id !== userId) : profilesRaw,
+    () => profilesRaw.filter((p) => p.id !== userId && !consumedIdsRef.current.has(p.id)),
     [profilesRaw, userId],
   );
 
@@ -1444,9 +1410,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         navigatingRef.current;
       if (!shouldDeferReset) {
         setIndex(0);
-        // Also reset queue when filter changes
-        visibleQueueRef.current = [];
-        consumedIdsRef.current.clear();
         pendingFilterResetRef.current = false;
       } else {
         // P2-001 FIX: Mark that filter changed during swipe, will apply after swipe completes
@@ -1467,7 +1430,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   const QUEUE_SIZE = 3; // Number of cards to buffer
   const visibleQueueRef = useRef<string[]>([]); // Profile IDs in queue
-  const consumedIdsRef = useRef<Set<string>>(new Set()); // Profiles already swiped
 
   // P2_CARD_FIX: State trigger to force re-render when queue transitions from empty to populated
   // Refs don't trigger re-renders, so we need this state to ensure the card appears on first load
@@ -1546,19 +1508,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         return;
       }
 
-      hasCommittedRef.current = false;
-      prevDeepConnectContentStateRef.current = null;
-      stableProfilesRef.current = [];
+      stableProfilesMapRef.current.clear();
       profileMapRef.current.clear();
       visibleQueueRef.current = [];
       consumedIdsRef.current.clear();
       refetchRetryCountRef.current = 0;
       setIndex(0);
       setQueueVersion((version) => version + 1);
-      setP2SearchingLabelVisible(false);
       setPhase2QueryTimedOut(false);
       setIsRefreshingPhase2Deck(true);
-      setPhase2RefreshCycle((value) => value + 1);
       setPhase2QueryPaused(true);
 
       setTimeout(() => {
@@ -2650,29 +2608,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Minimum upward velocity for intentional gesture
   const profileOpenMinVelocity = 0.3;
 
-  // Loading state — non-demo only; skip when using external profiles
-  // P1-003 FIX: Phase-2 uses isPhase2QueryLoading only while useQuery is undefined (resolved [] is not loading)
-  // AUTH_READY_FIX: Show loading when auth is not ready (userId / stable auth gate) in Phase-2
   const isAuthPending = isPhase2 && !isDemoMode && (!userId || !isAuthReadyForQuery);
-  const isDiscoverLoading = !isDemoMode && !externalProfiles && (!effectiveConvexProfiles || isPhase2QueryLoading || isAuthPending);
-  const isQueueBootstrapping =
-    !hasCommittedRef.current &&
-    profiles.length > 0 &&
-    visibleQueueRef.current.length === 0 &&
-    consumedIdsRef.current.size === 0;
-
-  const phase2MinHold = isPhase2 && !isDemoMode && !p2MinSkeletonDone;
-  const phase2ReloadSkeleton =
-    isPhase2 &&
-    !isDemoMode &&
-    isPhase2QueryLoading &&
-    !usingStableCache &&
-    profiles.length === 0;
-  const loadingDrivesSkeleton =
-    (!hasCommittedRef.current || !isPhase2 || isDemoMode) && (isDiscoverLoading && !usingStableCache);
-
-  const showCardSkeleton =
-    loadingDrivesSkeleton || isQueueBootstrapping || phase2MinHold || phase2ReloadSkeleton;
 
   // JS callbacks to be called from UI thread via runOnJS
   const updateOverlayDirection = useCallback((newDir: "left" | "right" | "up" | null) => {
@@ -2725,7 +2661,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     const isPullRefreshGesture =
       isPhase2 &&
-      !showCardSkeleton &&
       !showPhaseTransition &&
       dy > DEEP_CONNECT_PULL_REFRESH_MIN_DISTANCE &&
       dy > absX * 1.35 &&
@@ -2738,7 +2673,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
 
     resetPosition();
-  }, [thresholdX, thresholdY, velocityX, velocityY, profileOpenMinDistance, profileOpenMaxDistance, profileOpenMinVelocity, resetPosition, hasReachedStandOutLimit, standOutsRemaining, openProfileCb, isPhase2, showCardSkeleton, showPhaseTransition, triggerPhase2Refresh]);
+  }, [thresholdX, thresholdY, velocityX, velocityY, profileOpenMinDistance, profileOpenMaxDistance, profileOpenMinVelocity, resetPosition, hasReachedStandOutLimit, standOutsRemaining, openProfileCb, isPhase2, showPhaseTransition, triggerPhase2Refresh]);
 
   // P0-001 FIX: Keep handlePanEndRef in sync with latest handlePanEnd
   handlePanEndRef.current = handlePanEnd;
@@ -2851,14 +2786,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   useEffect(() => {
     if (!isPhase2 || !pendingFilterResetRef.current) return;
-    if (swipeLockRef.current || showPhaseTransition || showCardSkeleton || navigatingRef.current) {
+    if (swipeLockRef.current || showPhaseTransition || navigatingRef.current) {
       return;
     }
     pendingFilterResetRef.current = false;
     setIndex(0);
-    visibleQueueRef.current = [];
-    consumedIdsRef.current.clear();
-  }, [isPhase2, showPhaseTransition, showCardSkeleton, sourceProfiles.length]);
+  }, [isPhase2, showPhaseTransition, sourceProfiles.length]);
 
   const hasResolvedPhase2Query =
     isPhase2 && !isDemoMode && privateDiscoverArgs !== "skip" && phase2Profiles !== undefined;
@@ -2866,7 +2799,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     isPhase2 &&
     !isDemoMode &&
     !showPhaseTransition &&
-    p2MinSkeletonDone &&
     !isAuthPending &&
     hasResolvedPhase2Query &&
     !usingStableCache &&
@@ -2875,21 +2807,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     isPhase2 &&
     !isDemoMode &&
     !showPhaseTransition &&
-    p2MinSkeletonDone &&
     !isAuthPending &&
     !usingStableCache &&
     phase2QueryTimedOut &&
     profiles.length === 0;
-
-  // Deep Connect (Phase-2): commit only when cards exist or empty is truly settled.
-  if (
-    isPhase2 &&
-    !isDemoMode &&
-    !hasCommittedRef.current &&
-    (profiles.length > 0 || isPhase2EmptySettled || isPhase2NetworkIssueSettled)
-  ) {
-    hasCommittedRef.current = true;
-  }
 
   useEffect(() => {
     if (!isPhase2) {
@@ -2904,50 +2825,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       setIsRefreshingPhase2Deck(false);
     }
   }, [hasResolvedPhase2Query, isPhase2, isPhase2NetworkIssueSettled, privateDiscoverArgs]);
-
-  useEffect(() => {
-    if (!isPhase2 || !showCardSkeleton || profilesSafe.length > 0) {
-      setP2SearchingLabelVisible(false);
-      return;
-    }
-    const id = setTimeout(() => setP2SearchingLabelVisible(true), DEEP_CONNECT_SEARCHING_LABEL_MS);
-    return () => clearTimeout(id);
-  }, [isPhase2, showCardSkeleton, profilesSafe.length]);
-
-  const contentState = useMemo(() => {
-    if (isPhase2) {
-      if (showCardSkeleton) {
-        if (profiles.length > 0 && hasCommittedRef.current) return "cards";
-        if (profiles.length === 0 && p2SearchingLabelVisible) return "searching";
-        return "skeleton";
-      }
-      if (profiles.length > 0) return "cards";
-      if (isPhase2NetworkIssueSettled) return "network_issue";
-      if (isPhase2EmptySettled) return "empty";
-      return "skeleton";
-    }
-    if (showCardSkeleton) return "skeleton";
-    if (profiles.length > 0) return "cards";
-    return "empty";
-  }, [isPhase2, showCardSkeleton, profiles.length, p2SearchingLabelVisible, isPhase2NetworkIssueSettled, isPhase2EmptySettled]);
-
-  if (__DEV__ && isPhase2) {
-    if (contentState !== prevDeepConnectContentStateRef.current) {
-      prevDeepConnectContentStateRef.current = contentState;
-      console.log("[DEEPCONNECT_CONTENT_STATE]", contentState);
-    }
-  }
-
-  useEffect(() => {
-    if (!__DEV__ || !isPhase2) return;
-    console.log("[P2_STATE_DEBUG]", {
-      profilesSafeLength: profilesSafe.length,
-      profilesLength: profiles.length,
-      usingStableCache,
-      contentState,
-      intentFilters,
-    });
-  }, [contentState, intentFilters, isPhase2, profiles.length, profilesSafe.length, usingStableCache]);
 
   const phase2FilterLabels = useMemo(
     () => intentFilters
@@ -3005,12 +2882,51 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       anchorTop={insets.top + HEADER_H + SPACING.sm}
     />
   ) : null;
+  const hasProfiles = profiles.length > 0;
+  const queryResolved = phase2Profiles !== undefined;
+  const searchingOnceRef = useRef(false);
+  const state =
+    hasProfiles
+      ? "cards"
+      : !queryResolved && !searchingOnceRef.current
+        ? "searching"
+        : "empty";
+
+  useEffect(() => {
+    if (state === "cards") {
+      searchingOnceRef.current = true;
+    }
+  }, [state]);
+
+  useEffect(() => {
+    if (!__DEV__ || !isPhase2) return;
+    console.log("[P2_STATE_DEBUG]", {
+      profilesSafeLength: profilesSafe.length,
+      profilesLength: profiles.length,
+      usingStableCache,
+      state,
+      intentFilters,
+    });
+  }, [intentFilters, isPhase2, profiles.length, profilesSafe.length, state, usingStableCache]);
+
+  function SearchingOverlay() {
+    return (
+      <View style={{ alignItems: "center", justifyContent: "center", flex: 1 }}>
+        <Text
+          {...DISCOVER_TEXT_PROPS}
+          style={[styles.phase2EmptySubtitle, { color: "rgba(255,255,255,0.86)" }]}
+        >
+          Finding new connections…
+        </Text>
+      </View>
+    );
+  }
 
   // Empty state (no profiles at all)
   const shouldShowEmptyState =
-    !showCardSkeleton &&
-    profiles.length === 0 &&
-    (!isPhase2 || isDemoMode || (!usingStableCache && (isPhase2EmptySettled || isPhase2NetworkIssueSettled)));
+    isPhase2
+      ? state === "empty"
+      : profiles.length === 0;
 
   if (shouldShowEmptyState) {
     // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
@@ -3025,6 +2941,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     return (
       <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {isPhase2 && (
+          <>
+            <LinearGradient
+              colors={['#080913', '#101426', '#121c32', '#0d1427', '#080913']}
+              locations={[0, 0.28, 0.52, 0.76, 1]}
+              style={StyleSheet.absoluteFill}
+              pointerEvents="none"
+            />
+            <View pointerEvents="none" style={styles.phase2DeckGlowTop} />
+            <View pointerEvents="none" style={styles.phase2DeckGlowBottom} />
+          </>
+        )}
         {/* Premium subtle gradient background for Phase-1 */}
         {!dark && (
           <LinearGradient
@@ -3236,9 +3164,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Deck exhausted state (swiped through all profiles)
   const shouldShowDeckExhaustedState =
-    !showCardSkeleton &&
-    !current &&
-    (!isPhase2 || isDemoMode || (!usingStableCache && hasResolvedPhase2Query));
+    !isPhase2 &&
+    !current;
 
   if (shouldShowDeckExhaustedState) {
     // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
@@ -3422,7 +3349,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
       {/* Card Area (fills between header and tab bar) */}
       <View style={[styles.cardArea, { top: cardTop, bottom: cardBottom }]} pointerEvents="box-none">
-        {isPhase2 && !showCardSkeleton && !showPhaseTransition ? (
+        {isPhase2 && state === "cards" && !showPhaseTransition ? (
           <Animated.View style={[styles.phase2PullRefreshHint, phase2RefreshHintAnimatedStyle]} pointerEvents="none">
             <View style={styles.phase2PullRefreshInner}>
               <Ionicons
@@ -3438,21 +3365,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           </Animated.View>
         ) : null}
 
-        {showCardSkeleton ? (
-          isPhase2 ? (
-            <View style={styles.phase2SkeletonColumn} pointerEvents="box-none">
-              <SkeletonCard dark={dark} includeActions={false} />
-              {profilesSafe.length === 0 && p2SearchingLabelVisible ? (
-                <Animated.View entering={FadeIn.duration(DEEP_CONNECT_CONTENT_FADE_MS)} style={styles.phase2SearchingLabelWrap}>
-                  <Text {...DISCOVER_TEXT_PROPS} style={[styles.phase2SearchingLabel, dark && { color: INCOGNITO_COLORS.textLight }]}>
-                    Looking for people nearby...
-                  </Text>
-                </Animated.View>
-              ) : null}
-            </View>
-          ) : (
-            <SkeletonCard dark={dark} includeActions={false} />
-          )
+        {isPhase2 && state === "searching" ? (
+          <SearchingOverlay />
         ) : (
           <>
             {/* Back card */}
@@ -3561,9 +3475,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       <View style={[styles.actions, styles.premiumActions, { bottom: actionRowBottom }]} pointerEvents="box-none">
         {/* Skip (X) - Light feedback */}
         <AnimatedActionButton
-          style={[styles.actionButton, styles.premiumSkipBtn, (showCardSkeleton || !current) && styles.premiumBtnDisabled]}
+          style={[styles.actionButton, styles.premiumSkipBtn, !current && styles.premiumBtnDisabled]}
           onPress={() => animateSwipeRef.current("left")}
-          disabled={showCardSkeleton || !current}
+          disabled={!current}
           feedbackScale={0.92}
           hapticType="light"
         >
@@ -3575,7 +3489,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           style={[
             styles.actionButton,
             styles.premiumStandOutBtn,
-            (hasReachedStandOutLimit() || showCardSkeleton || !current) && styles.premiumBtnDisabled,
+            (hasReachedStandOutLimit() || !current) && styles.premiumBtnDisabled,
           ]}
           onPress={() => {
             const c = currentRef.current;
@@ -3583,7 +3497,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsLeft}` as any);
             }
           }}
-          disabled={hasReachedStandOutLimit() || showCardSkeleton || !current}
+          disabled={hasReachedStandOutLimit() || !current}
           feedbackScale={0.9}
           hapticType="medium"
         >
@@ -3595,9 +3509,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
         {/* Like (heart) - Medium feedback with stronger scale */}
         <AnimatedActionButton
-          style={[styles.actionButton, styles.premiumLikeBtn, (showCardSkeleton || !current) && styles.premiumBtnDisabled]}
+          style={[styles.actionButton, styles.premiumLikeBtn, !current && styles.premiumBtnDisabled]}
           onPress={() => animateSwipeRef.current("right")}
-          disabled={showCardSkeleton || !current}
+          disabled={!current}
           feedbackScale={0.9}
           hapticType="medium"
         >
@@ -3797,12 +3711,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     padding: SPACING.xl,
   },
-  loadingText: {
-    marginTop: SPACING.base,
-    fontSize: FONT_SIZE.lg,
-    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
-    color: COLORS.textLight,
-  },
   // FIX 9: Premium empty state styles - minimal and polished
   emptyEmoji: {
     fontSize: DISCOVER_EMOJI_SIZE,
@@ -3825,25 +3733,6 @@ const styles = StyleSheet.create({
     lineHeight: lineHeight(DISCOVER_FONT_15, 1.35),
     paddingHorizontal: SPACING.xxl,
     maxWidth: DISCOVER_EMPTY_CONTENT_MAX_WIDTH,
-  },
-
-  // Deep Connect (Phase-2): skeleton → searching label → empty (same screen)
-  phase2SkeletonColumn: {
-    flex: 1,
-    width: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  phase2SearchingLabelWrap: {
-    marginTop: SPACING.lg,
-    paddingHorizontal: SPACING.xl + SPACING.xs,
-  },
-  phase2SearchingLabel: {
-    fontSize: FONT_SIZE.lg,
-    fontWeight: "500",
-    textAlign: "center",
-    letterSpacing: 0.2,
-    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
   },
   phase2EmptyContent: {
     alignItems: "center",
