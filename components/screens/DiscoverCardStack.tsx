@@ -2974,8 +2974,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     return {
       icon: "sparkles-outline" as const,
       iconColor: "rgba(233, 69, 96, 0.95)",
-      title: "Fresh faces are on the way",
-      subtitle: "Deep Connect refreshes as new nearby people finish setting up. Try again in a bit or widen your filters.",
+      title: "The room is quiet right now",
+      subtitle: "We’ll surface new people the moment they arrive. Adjust your filters or check back shortly.",
       primaryAction: "retry" as const,
       primaryLabel: "Try again",
       secondaryAction: intentFilters.length > 0 ? ("clear_filters" as const) : null,
@@ -3161,14 +3161,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   entering={FadeInUp.duration(350).delay(200)}
                   style={styles.phase2EmptyTitle}
                 >
-                  {phase2EmptyState?.title ?? "Fresh faces are on the way"}
+                  {phase2EmptyState?.title ?? "The room is quiet right now"}
                 </Animated.Text>
                 <Animated.Text
                   {...DISCOVER_TEXT_PROPS}
                   entering={FadeInUp.duration(350).delay(280)}
                   style={styles.phase2EmptySubtitle}
                 >
-                  {phase2EmptyState?.subtitle ?? "Deep Connect refreshes as new nearby people finish setting up. Try again in a bit or widen your filters."}
+                  {phase2EmptyState?.subtitle ?? "We’ll surface new people the moment they arrive. Adjust your filters or check back shortly."}
                 </Animated.Text>
 
                 <Animated.View entering={FadeIn.duration(300).delay(400)} style={styles.phase2EmptyActions}>
