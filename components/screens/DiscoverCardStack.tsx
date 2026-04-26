@@ -81,6 +81,7 @@ import { usePhase1NotificationBellBadge } from "@/hooks/useNotifications";
 import { DEMO_PROFILES, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
 import { useBlockStore } from "@/stores/blockStore";
+import { usePhase2DiscoverCacheStore } from "@/stores/phase2DiscoverCacheStore";
 import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -685,6 +686,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const [phase1SessionProfiles, setPhase1SessionProfiles] = useState<any[]>([]);
   const phase1LoadMoreInFlightRef = useRef(false);
   const phase1HasMoreRef = useRef(true);
+  const phase1ConsumedIdsRef = useRef<Set<string>>(new Set()); // Profiles already swiped in Phase-1
 
   // Engagement triggers - swipe progress tracking
   const trackSwipe = useExplorePrefsStore((s) => s.trackSwipe);
@@ -1008,7 +1010,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (!phase1HasMoreRef.current) return;
     if (phase1SessionProfiles.length === 0) return;
 
-    const unshown = phase1SessionProfiles.filter((p) => !consumedIdsRef.current.has(p.id)).length;
+    const unshown = phase1SessionProfiles.filter((p) => !phase1ConsumedIdsRef.current.has(p.id)).length;
     if (unshown > PHASE1_LOAD_MORE_THRESHOLD) return;
 
     phase1LoadMoreInFlightRef.current = true;
@@ -1316,22 +1318,53 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     [latestProfiles, isPhase2],
   );
 
-  // Keep a union of seen profiles to prevent blank-frame flicker
-  const stableProfilesMapRef = useRef<Map<string, ProfileData>>(new Map());
-  const consumedIdsRef = useRef<Set<string>>(new Set()); // Profiles already swiped
+  const {
+    viewerUserId: cachedViewerUserId,
+    profilesMap: cachedProfilesMap,
+    consumedIds: cachedConsumedIds,
+    queue: cachedQueue,
+    searchingDone: cachedSearchingDone,
+    mergeProfiles: mergeCachedProfiles,
+    consume: consumeCachedProfile,
+    setQueue: setCachedQueue,
+    markSearchingDone: markCachedSearchingDone,
+    resetForUser: resetPhase2CacheForUser,
+    hardReset: hardResetPhase2Cache,
+  } = usePhase2DiscoverCacheStore(
+    useShallow((s) => ({
+      viewerUserId: s.viewerUserId,
+      profilesMap: s.profilesMap,
+      consumedIds: s.consumedIds,
+      queue: s.queue,
+      searchingDone: s.searchingDone,
+      mergeProfiles: s.mergeProfiles,
+      consume: s.consume,
+      setQueue: s.setQueue,
+      markSearchingDone: s.markSearchingDone,
+      resetForUser: s.resetForUser,
+      hardReset: s.hardReset,
+    })),
+  );
+  // Keep a union of seen Phase-1 profiles to prevent blank-frame flicker.
+  const phase1StableProfilesMapRef = useRef<Map<string, ProfileData>>(new Map());
   // FIX: Track userId to invalidate cache when user changes (prevents showing stale profiles)
   const stableUserIdRef = useRef<string | null>(null);
   if (userId !== stableUserIdRef.current) {
     // User changed — clear stale cache to prevent showing old user's excluded profiles
     // FLICKER_FIX: Only clear if there WAS a previous user (not first mount)
     if (stableUserIdRef.current !== null) {
-      stableProfilesMapRef.current.clear();
+      phase1StableProfilesMapRef.current.clear();
       if (__DEV__ && isPhase2) {
         console.log('[DISCOVER_RESET] reason=user_changed, prev=', stableUserIdRef.current?.slice(0, 10), 'new=', userId?.slice(0, 10));
       }
     }
     stableUserIdRef.current = userId;
   }
+  useEffect(() => {
+    if (isPhase2) {
+      resetPhase2CacheForUser(userId);
+    }
+  }, [isPhase2, resetPhase2CacheForUser, userId]);
   const phase1DiscoverPaused =
     !isPhase2 &&
     viewerProfile?.isDiscoveryPaused === true &&
@@ -1354,27 +1387,50 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const prevPhase1CacheResetKeyRef = useRef<string | null>(null);
   if (!isPhase2 && !isDemoMode && !externalProfiles && prevPhase1CacheResetKeyRef.current !== phase1CacheResetKey) {
     if (prevPhase1CacheResetKeyRef.current !== null) {
-      stableProfilesMapRef.current.clear();
+      phase1StableProfilesMapRef.current.clear();
     }
     prevPhase1CacheResetKeyRef.current = phase1CacheResetKey;
   }
-  for (const p of validProfiles) {
-    stableProfilesMapRef.current.set(p.id, p);
+  if (!isPhase2) {
+    for (const p of validProfiles) {
+      phase1StableProfilesMapRef.current.set(p.id, p);
+    }
   }
+  useEffect(() => {
+    if (!isPhase2) return;
+    mergeCachedProfiles(userId, validProfiles);
+  }, [isPhase2, mergeCachedProfiles, userId, validProfiles]);
+
+  const phase2CacheBelongsToViewer = cachedViewerUserId === (userId ?? null);
+  const phase2ProfilesRaw = useMemo(() => {
+    const merged = phase2CacheBelongsToViewer
+      ? new Map(cachedProfilesMap)
+      : new Map<string, ProfileData>();
+
+    for (const profile of validProfiles) {
+      if (!cachedConsumedIds.has(profile.id)) {
+        merged.set(profile.id, profile);
+      }
+    }
+
+    return Array.from(merged.values());
+  }, [cachedConsumedIds, cachedProfilesMap, phase2CacheBelongsToViewer, validProfiles]);
+  const phase1ProfilesRaw = Array.from(phase1StableProfilesMapRef.current.values());
   // FLICKER_FIX: Log when falling back to stable cache
   const usingStableCache = isPhase2
-    ? validProfiles.length === 0 && stableProfilesMapRef.current.size > 0
-    : effectiveConvexProfiles === undefined && stableProfilesMapRef.current.size > 0;
+    ? validProfiles.length === 0 && phase2CacheBelongsToViewer && cachedProfilesMap.size > 0
+    : effectiveConvexProfiles === undefined && phase1StableProfilesMapRef.current.size > 0;
   if (__DEV__ && isPhase2 && usingStableCache) {
-    console.log('[DISCOVER_GUARD] Using stable cache:', stableProfilesMapRef.current.size, 'profiles (validProfiles was empty)');
+    console.log('[DISCOVER_GUARD] Using stable cache:', cachedProfilesMap.size, 'profiles (validProfiles was empty)');
   }
-  const profilesRaw = Array.from(stableProfilesMapRef.current.values());
+  const profilesRaw = isPhase2 ? phase2ProfilesRaw : phase1ProfilesRaw;
+  const activeConsumedIds = isPhase2 ? cachedConsumedIds : phase1ConsumedIdsRef.current;
 
   // FIX: Defensive filter — never show current user's profile in Discover
   // Backend already excludes, but this protects against stale cache contamination
   const profiles = useMemo(
-    () => profilesRaw.filter((p) => p.id !== userId && !consumedIdsRef.current.has(p.id)),
-    [profilesRaw, userId],
+    () => profilesRaw.filter((p) => p.id !== userId && !activeConsumedIds.has(p.id)),
+    [activeConsumedIds, profilesRaw, userId],
   );
 
   // Phase-2 fallback decks (demo/external) still need local filtering.
@@ -1394,32 +1450,51 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [profiles, isPhase2, intentFilters, isDemoMode, externalProfiles]);
 
   // Reset index when filter changes (always show first matching profile)
-  const prevFilterRef = useRef<string>(JSON.stringify([]));
+  const intentFilterKey = useMemo(() => JSON.stringify([...intentFilters].sort()), [intentFilters]);
+  const prevFilterRef = useRef<string | null>(null);
   // P2-001 FIX: Track pending filter change to apply after swipe completes
   const pendingFilterResetRef = useRef<boolean>(false);
   useEffect(() => {
-    const filterKey = JSON.stringify([...intentFilters].sort());
-    if (!isPhase2 || prevFilterRef.current === filterKey) {
+    if (!isPhase2) {
       return;
     }
 
-    if (isPhase2) {
-      const shouldDeferReset =
-        swipeLockRef.current ||
-        showPhaseTransition ||
-        navigatingRef.current;
-      if (!shouldDeferReset) {
-        setIndex(0);
-        pendingFilterResetRef.current = false;
-      } else {
-        // P2-001 FIX: Mark that filter changed during swipe, will apply after swipe completes
-        pendingFilterResetRef.current = true;
-      }
-      // Track Phase-2 intent filter selection (use first key for backward compat)
-      trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
-      prevFilterRef.current = filterKey;
+    if (prevFilterRef.current === null) {
+      // First hydration should not clear the global cache.
+      prevFilterRef.current = intentFilterKey;
+      return;
     }
-  }, [intentFilters, isPhase2, showPhaseTransition]);
+
+    if (prevFilterRef.current === intentFilterKey) {
+      return;
+    }
+
+    const isColdBootFilterHydration =
+      prevFilterRef.current === "[]" &&
+      intentFilters.length > 0 &&
+      usePhase2DiscoverCacheStore.getState().profilesMap.size > 0;
+
+    if (isColdBootFilterHydration) {
+      prevFilterRef.current = intentFilterKey;
+      return;
+    }
+
+    const shouldDeferReset =
+      swipeLockRef.current ||
+      showPhaseTransition ||
+      navigatingRef.current;
+    hardResetPhase2Cache();
+    if (!shouldDeferReset) {
+      setIndex(0);
+      pendingFilterResetRef.current = false;
+    } else {
+      // P2-001 FIX: Mark that filter changed during swipe, will apply after swipe completes
+      pendingFilterResetRef.current = true;
+    }
+    // Track Phase-2 intent filter selection (use first key for backward compat)
+    trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
+    prevFilterRef.current = intentFilterKey;
+  }, [hardResetPhase2Cache, intentFilterKey, intentFilters, isPhase2, showPhaseTransition]);
 
   // ══════════════════════════════════════════════════════════════════════════
   // STABLE QUEUE MODEL: Prevents back card from changing during swipe animation
@@ -1429,7 +1504,35 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // This ensures the back card remains stable even if source data changes mid-swipe.
 
   const QUEUE_SIZE = 3; // Number of cards to buffer
-  const visibleQueueRef = useRef<string[]>([]); // Profile IDs in queue
+  const phase1VisibleQueueRef = useRef<string[]>([]); // Profile IDs in queue for Phase-1
+  const getVisibleQueue = useCallback(
+    () => isPhase2 ? usePhase2DiscoverCacheStore.getState().queue : phase1VisibleQueueRef.current,
+    [isPhase2],
+  );
+  const setVisibleQueue = useCallback(
+    (ids: string[]) => {
+      if (isPhase2) {
+        setCachedQueue(ids);
+      } else {
+        phase1VisibleQueueRef.current = ids;
+      }
+    },
+    [isPhase2, setCachedQueue],
+  );
+  const getConsumedIds = useCallback(
+    () => isPhase2 ? usePhase2DiscoverCacheStore.getState().consumedIds : phase1ConsumedIdsRef.current,
+    [isPhase2],
+  );
+  const consumeProfileId = useCallback(
+    (profileId: string) => {
+      if (isPhase2) {
+        consumeCachedProfile(profileId);
+      } else {
+        phase1ConsumedIdsRef.current.add(profileId);
+      }
+    },
+    [consumeCachedProfile, isPhase2],
+  );
 
   // P2_CARD_FIX: State trigger to force re-render when queue transitions from empty to populated
   // Refs don't trigger re-renders, so we need this state to ensure the card appears on first load
@@ -1449,8 +1552,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
 
     if (prevPhase1QueueResetKeyRef.current !== phase1CacheResetKey) {
-      visibleQueueRef.current = [];
-      consumedIdsRef.current.clear();
+      phase1VisibleQueueRef.current = [];
+      phase1ConsumedIdsRef.current.clear();
       prevPhase1QueueResetKeyRef.current = phase1CacheResetKey;
       setIndex(0);
       setQueueVersion((version) => version + 1);
@@ -1497,8 +1600,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       if (isDemoMode) {
         useDemoStore.getState().clearSwipedProfiles();
         useDemoStore.getState().resetDiscoverPool();
-        visibleQueueRef.current = [];
-        consumedIdsRef.current.clear();
+        hardResetPhase2Cache();
         setIndex(0);
         setQueueVersion((version) => version + 1);
         return;
@@ -1508,10 +1610,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         return;
       }
 
-      stableProfilesMapRef.current.clear();
+      hardResetPhase2Cache();
       profileMapRef.current.clear();
-      visibleQueueRef.current = [];
-      consumedIdsRef.current.clear();
       refetchRetryCountRef.current = 0;
       setIndex(0);
       setQueueVersion((version) => version + 1);
@@ -1524,17 +1624,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         setPhase2QueryPaused(false);
       }, 32);
     },
-    [convexUserId, externalProfiles, isAuthReadyForQuery, isDemoMode, isPhase2, skipInternalQuery],
+    [convexUserId, externalProfiles, hardResetPhase2Cache, isAuthReadyForQuery, isDemoMode, isPhase2, skipInternalQuery],
   );
 
   const sanitizeQueue = useCallback(() => {
     if (isPhase2) return false;
 
-    const currentQueue = visibleQueueRef.current;
+    const currentQueue = getVisibleQueue();
     if (currentQueue.length === 0) return false;
 
     const validIds = new Set(sourceProfiles.map((p) => p.id));
-    const consumed = consumedIdsRef.current;
+    const consumed = getConsumedIds();
     const seen = new Set<string>();
     const sanitizedQueue: string[] = [];
 
@@ -1552,11 +1652,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       sanitizedQueue.some((id, idx) => id !== currentQueue[idx]);
 
     if (changed) {
-      visibleQueueRef.current = sanitizedQueue;
+      setVisibleQueue(sanitizedQueue);
     }
 
     return changed;
-  }, [isPhase2, sourceProfiles, userId]);
+  }, [getConsumedIds, getVisibleQueue, isPhase2, setVisibleQueue, sourceProfiles, userId]);
 
   /**
    * Refill the visible queue from source profiles.
@@ -1567,8 +1667,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
    */
   const refillQueue = useCallback(() => {
     const sanitized = sanitizeQueue();
-    const queue = visibleQueueRef.current;
-    const consumed = consumedIdsRef.current;
+    const queue = getVisibleQueue();
+    const consumed = getConsumedIds();
     const needed = QUEUE_SIZE - queue.length;
     if (needed <= 0) return sanitized;
 
@@ -1586,7 +1686,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     if (toAdd.length > 0) {
       const wasEmpty = queue.length === 0;
-      visibleQueueRef.current = [...queue, ...toAdd];
+      setVisibleQueue([...queue, ...toAdd]);
 
       // P2_CARD_FIX: Force re-render when queue transitions from empty to populated
       // This ensures the first card renders on first open
@@ -1600,30 +1700,30 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       return true;
     }
     return sanitized;
-  }, [sanitizeQueue, sourceProfiles, userId, isPhase2]);
+  }, [getConsumedIds, getVisibleQueue, sanitizeQueue, setVisibleQueue, sourceProfiles, userId, isPhase2]);
 
   /**
    * Advance the queue after swipe completion.
    * Removes the front card, marks it as consumed, and refills.
    */
   const advanceQueue = useCallback(() => {
-    const queue = visibleQueueRef.current;
+    const queue = getVisibleQueue();
     if (queue.length === 0) return;
 
     // Mark front card as consumed
     const consumedId = queue[0];
-    consumedIdsRef.current.add(consumedId);
+    consumeProfileId(consumedId);
 
     // Remove front card from queue
-    visibleQueueRef.current = queue.slice(1);
+    setVisibleQueue(queue.slice(1));
 
     // Refill queue with next available profiles
     refillQueue();
 
     // LOG_NOISE_FIX: Queue state logging gated behind DEBUG_DISCOVER_QUEUE
-    const newQueueLength = visibleQueueRef.current.length;
+    const newQueueLength = getVisibleQueue().length;
     if (__DEV__ && DEBUG_DISCOVER_QUEUE && isPhase2) {
-      console.log(`[QUEUE] len=${newQueueLength} consumed=${consumedIdsRef.current.size}`);
+      console.log(`[QUEUE] len=${newQueueLength} consumed=${getConsumedIds().size}`);
     }
 
     // P2_REFETCH_FIX: If queue is empty after refill, trigger retry mechanism
@@ -1640,7 +1740,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           // Re-run refillQueue with potentially updated sourceProfiles
           refillQueue();
           // If still empty, bump version to force UI update
-          if (visibleQueueRef.current.length === 0) {
+          if (getVisibleQueue().length === 0) {
             setQueueVersion(v => v + 1);
           }
         }, 500);
@@ -1648,7 +1748,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         console.log('[REFETCH] exhausted - no more profiles');
       }
     }
-  }, [refillQueue, isPhase2, sourceProfiles]);
+  }, [consumeProfileId, getConsumedIds, getVisibleQueue, refillQueue, isPhase2, setVisibleQueue, sourceProfiles]);
 
   // Refill queue when source data changes AND no swipe is in progress
   // This ensures the queue is populated but doesn't change mid-swipe
@@ -1658,9 +1758,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     // P2_REFETCH_FIX: Cleanup consumed IDs that are no longer in sourceProfiles
     // This handles the case where backend has removed swiped profiles from results
-    if (sourceProfiles.length > 0) {
+    if (!isPhase2 && sourceProfiles.length > 0) {
       const sourceIdSet = new Set(sourceProfiles.map(p => p.id));
-      const consumed = consumedIdsRef.current;
+      const consumed = phase1ConsumedIdsRef.current;
       const toRemove: string[] = [];
       for (const id of consumed) {
         if (!sourceIdSet.has(id)) {
@@ -1672,7 +1772,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           consumed.delete(id);
         }
         // LOG_NOISE_FIX: Gated cleanup log
-        if (__DEV__ && DEBUG_DISCOVER_QUEUE && isPhase2) {
+        if (__DEV__ && DEBUG_DISCOVER_QUEUE) {
           console.log(`[QUEUE] cleanup: removed ${toRemove.length} stale IDs`);
         }
       }
@@ -1685,29 +1785,34 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
 
     // P2_REFETCH_FIX: If queue is now populated, reset retry count
-    if (visibleQueueRef.current.length > 0) {
+    if (getVisibleQueue().length > 0) {
       refetchRetryCountRef.current = 0;
     }
-  }, [sourceProfiles, refillQueue, isPhase2]);
+  }, [getVisibleQueue, sourceProfiles, refillQueue, isPhase2]);
 
   // Reset queue when user changes (prevents showing stale profiles)
   const prevUserIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (prevUserIdRef.current !== null && prevUserIdRef.current !== userId) {
       // User changed — clear queue and consumed IDs
-      visibleQueueRef.current = [];
-      consumedIdsRef.current.clear();
+      if (isPhase2) {
+        resetPhase2CacheForUser(userId);
+      } else {
+        phase1VisibleQueueRef.current = [];
+        phase1ConsumedIdsRef.current.clear();
+      }
       setPhase1FetchOffset(0);
       setPhase1SessionProfiles([]);
       phase1HasMoreRef.current = true;
     }
     prevUserIdRef.current = userId;
-  }, [userId]);
+  }, [isPhase2, resetPhase2CacheForUser, userId]);
 
   // Get current/next from the STABLE QUEUE (not from live array indices)
   // P2_CARD_FIX: queueVersion dependency ensures this re-computes after queue populates
-  const currentQueueId = visibleQueueRef.current[0];
-  const nextQueueId = visibleQueueRef.current[1];
+  const visibleQueue = isPhase2 ? cachedQueue : phase1VisibleQueueRef.current;
+  const currentQueueId = visibleQueue[0];
+  const nextQueueId = visibleQueue[1];
   const queueCurrent = currentQueueId ? profileMapRef.current.get(currentQueueId) : undefined;
   const queueNext = nextQueueId ? profileMapRef.current.get(nextQueueId) : undefined;
 
@@ -1732,9 +1837,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (!mountedRef.current) return;
     setIndex(0);
     // STABLE QUEUE: Reset queue when demo pool is replenished
-    visibleQueueRef.current = [];
-    consumedIdsRef.current.clear();
-  }, [profiles.length, externalProfiles]);
+    if (isPhase2) {
+      hardResetPhase2Cache();
+    } else {
+      phase1VisibleQueueRef.current = [];
+      phase1ConsumedIdsRef.current.clear();
+    }
+  }, [externalProfiles, hardResetPhase2Cache, isPhase2, profiles.length]);
 
   // Profile completion nudge DISABLED on Discover screen
   // Nudges should only appear on Profile/Edit Profile screens (not swiping context)
@@ -2161,18 +2270,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
 
     const { profileId } = discoverProfileActionResult;
-    const queueBefore = visibleQueueRef.current;
+    const queueBefore = phase1VisibleQueueRef.current;
 
-    if (!queueBefore.includes(profileId) && consumedIdsRef.current.has(profileId)) {
+    if (!queueBefore.includes(profileId) && phase1ConsumedIdsRef.current.has(profileId)) {
       setDiscoverProfileActionResult(null);
       return;
     }
 
     let queueChanged = false;
-    consumedIdsRef.current.add(profileId);
+    phase1ConsumedIdsRef.current.add(profileId);
     const queueAfterRemoval = queueBefore.filter((id) => id !== profileId);
     queueChanged = queueAfterRemoval.length !== queueBefore.length;
-    visibleQueueRef.current = queueAfterRemoval;
+    phase1VisibleQueueRef.current = queueAfterRemoval;
     if (refillQueue()) {
       queueChanged = true;
     }
@@ -2884,19 +2993,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   ) : null;
   const hasProfiles = profiles.length > 0;
   const queryResolved = phase2Profiles !== undefined;
-  const searchingOnceRef = useRef(false);
+  const cachedHas = phase2CacheBelongsToViewer && cachedProfilesMap.size > 0;
   const state =
     hasProfiles
       ? "cards"
-      : !queryResolved && !searchingOnceRef.current
+      : !queryResolved && !cachedSearchingDone && !cachedHas
         ? "searching"
-        : "empty";
+        : cachedHas
+          ? "cards"
+          : "empty";
 
   useEffect(() => {
-    if (state === "cards") {
-      searchingOnceRef.current = true;
+    if (isPhase2 && state === "cards" && !cachedSearchingDone) {
+      markCachedSearchingDone();
     }
-  }, [state]);
+  }, [cachedSearchingDone, isPhase2, markCachedSearchingDone, state]);
 
   useEffect(() => {
     if (!__DEV__ || !isPhase2) return;
@@ -2904,10 +3015,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       profilesSafeLength: profilesSafe.length,
       profilesLength: profiles.length,
       usingStableCache,
+      cachedHas,
+      searchingDone: cachedSearchingDone,
       state,
       intentFilters,
     });
-  }, [intentFilters, isPhase2, profiles.length, profilesSafe.length, state, usingStableCache]);
+  }, [cachedHas, cachedSearchingDone, intentFilters, isPhase2, profiles.length, profilesSafe.length, state, usingStableCache]);
 
   function SearchingOverlay() {
     return (
