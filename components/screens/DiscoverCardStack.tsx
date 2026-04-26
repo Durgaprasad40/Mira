@@ -3022,14 +3022,67 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     });
   }, [cachedHas, cachedSearchingDone, intentFilters, isPhase2, profiles.length, profilesSafe.length, state, usingStableCache]);
 
+  const searchingPulse = useSharedValue(0);
+  useEffect(() => {
+    if (!isPhase2) {
+      searchingPulse.value = 0;
+      return;
+    }
+
+    searchingPulse.value = withRepeat(
+      withTiming(1, {
+        duration: 1400,
+        easing: Easing.inOut(Easing.ease),
+      }),
+      -1,
+      true,
+    );
+  }, [isPhase2, searchingPulse]);
+
+  const searchingIconPulseStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(searchingPulse.value, [0, 1], [0.78, 1], Extrapolation.CLAMP),
+    transform: [
+      { scale: interpolate(searchingPulse.value, [0, 1], [0.94, 1.06], Extrapolation.CLAMP) },
+    ],
+  }));
+
+  const searchingGlowPulseStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(searchingPulse.value, [0, 1], [0.42, 0.76], Extrapolation.CLAMP),
+    transform: [
+      { scale: interpolate(searchingPulse.value, [0, 1], [0.9, 1.14], Extrapolation.CLAMP) },
+    ],
+  }));
+
   function SearchingOverlay() {
     return (
-      <View style={{ alignItems: "center", justifyContent: "center", flex: 1 }}>
+      <View style={styles.phase2SearchingOverlay}>
+        <LinearGradient
+          colors={['#0F0F1A', '#141428', '#1A1A2E', '#16213E', '#1A1A2E', '#141428', '#0F0F1A']}
+          locations={[0, 0.15, 0.35, 0.5, 0.65, 0.85, 1]}
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+        <Animated.View style={[styles.phase2SearchingGlow, searchingGlowPulseStyle]} pointerEvents="none" />
+        <Animated.View style={[styles.phase2IconOuter, searchingIconPulseStyle]}>
+          <View style={styles.phase2IconInner}>
+            <Ionicons
+              name="sparkles-outline"
+              size={DISCOVER_PHASE2_EMPTY_ICON_SIZE}
+              color="rgba(233, 69, 96, 0.95)"
+            />
+          </View>
+        </Animated.View>
         <Text
           {...DISCOVER_TEXT_PROPS}
-          style={[styles.phase2EmptySubtitle, { color: "rgba(255,255,255,0.86)" }]}
+          style={styles.phase2EmptyTitle}
         >
-          Finding new connections…
+          Curating your circle
+        </Text>
+        <Text
+          {...DISCOVER_TEXT_PROPS}
+          style={styles.phase2EmptySubtitle}
+        >
+          We’re finding people who fit your moment
         </Text>
       </View>
     );
@@ -3853,6 +3906,24 @@ const styles = StyleSheet.create({
     maxWidth: DISCOVER_EMPTY_CONTENT_MAX_WIDTH,
     paddingHorizontal: SPACING.xl + SPACING.xs,
     zIndex: 2,
+  },
+  phase2SearchingOverlay: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: SPACING.xl + SPACING.xs,
+    overflow: "hidden",
+  },
+  phase2SearchingGlow: {
+    position: "absolute",
+    width: moderateScale(260, 0.25),
+    height: moderateScale(260, 0.25),
+    borderRadius: moderateScale(130, 0.25),
+    backgroundColor: "rgba(233, 69, 96, 0.08)",
+    shadowColor: "#E94560",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.18,
+    shadowRadius: 70,
   },
   // Subtle radial glow overlay for depth
   phase2RadialGlow: {

@@ -354,6 +354,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // Standardized thresholds: Online Now = 10 min, recently active = 24h
   const isActiveNow = presenceStatus === 'online';
   const isActiveToday = presenceStatus === 'active_today';
+  const phase2AreaLabel = isPhase2 && city ? 'Nearby area' : null;
+  const phase2DistanceLabel = useMemo(() => {
+    if (!isPhase2 || distance === undefined || distance < 0) return null;
+    if (distance < 5) return 'Nearby';
+    if (distance < 25) return 'In your city';
+    if (distance < 80) return 'Same region';
+    return 'Far away';
+  }, [distance, isPhase2]);
 
   // LOG_NOISE_FIX: Presence logging gated behind DEBUG_CARD_PRESENCE (default: false)
   useEffect(() => {
@@ -1900,7 +1908,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               ) : null}
             </View>
 
-            {/* LAYER B: PHOTO-1-ONLY METADATA - Presence + City */}
+            {/* LAYER B: PHOTO-1-ONLY METADATA - Presence + Area */}
             {photoIndex === 0 && (
               <View style={styles.phase2MetadataRow}>
                 {/* Online/recently active status badges */}
@@ -1915,18 +1923,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                     <Text style={styles.phase2StatusText}>Recently active</Text>
                   </View>
                 )}
-                {/* City */}
-                {city && (
+                {/* Privacy-preserving area */}
+                {phase2AreaLabel && (
                   <View style={styles.phase2CityBadge}>
                     <Ionicons name="location-outline" size={10} color="rgba(255,255,255,0.6)" />
-                    <Text style={styles.phase2CityText}>{city}</Text>
+                    <Text style={styles.phase2CityText}>{phase2AreaLabel}</Text>
                   </View>
                 )}
-                {distance !== undefined && distance >= 0 && (
+                {phase2DistanceLabel && (
                   <View style={styles.phase2CityBadge}>
-                    <Text style={styles.phase2CityText}>
-                      {distance < 1 ? '< 1 km away' : `${distance.toFixed(0)} km away`}
-                    </Text>
+                    <Text style={styles.phase2CityText}>{phase2DistanceLabel}</Text>
                   </View>
                 )}
               </View>
