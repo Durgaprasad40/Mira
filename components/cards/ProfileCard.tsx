@@ -351,7 +351,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const arrowButtonBottom = Math.round(windowHeight * 0.165);
 
   // P0 UNIFIED PRESENCE: Derive presence from presenceStatus prop (single source of truth)
-  // Standardized thresholds: Online Now = 10 min, Active Today = 24h
+  // Standardized thresholds: Online Now = 10 min, recently active = 24h
   const isActiveNow = presenceStatus === 'online';
   const isActiveToday = presenceStatus === 'active_today';
 
@@ -1903,7 +1903,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             {/* LAYER B: PHOTO-1-ONLY METADATA - Presence + City */}
             {photoIndex === 0 && (
               <View style={styles.phase2MetadataRow}>
-                {/* Online/Active status badges */}
+                {/* Online/recently active status badges */}
                 {isActiveNow && (
                   <View style={styles.phase2StatusBadge}>
                     <View style={styles.phase2OnlineDot} />
@@ -1912,8 +1912,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 )}
                 {isActiveToday && !isActiveNow && (
                   <View style={styles.phase2StatusBadge}>
-                    <Ionicons name="time-outline" size={10} color="rgba(255,255,255,0.7)" />
-                    <Text style={styles.phase2StatusText}>Active Today</Text>
+                    <Text style={styles.phase2StatusText}>Recently active</Text>
                   </View>
                 )}
                 {/* City */}
@@ -3033,7 +3032,7 @@ const styles = StyleSheet.create({
     gap: 8,
     marginTop: 4,
   },
-  // PHASE2_PARITY: Status badge (Online/Active Today)
+  // PHASE2_PARITY: Status badge (Online/recently active)
   phase2StatusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
