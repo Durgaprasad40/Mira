@@ -31,7 +31,9 @@ function distanceKmBetween(lat1: number, lon1: number, lat2: number, lon2: numbe
 }
 
 function getProfileIntentKeys(profile: { privateIntentKeys?: string[]; privateIntentKey?: string | null | undefined }): string[] {
-  return profile.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
+  return (profile.privateIntentKeys && profile.privateIntentKeys.length > 0)
+    ? profile.privateIntentKeys
+    : (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 }
 
 async function isWithinDeepConnectImpressionRateLimit(

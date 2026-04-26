@@ -1432,8 +1432,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // P2-001 FIX: Track pending filter change to apply after swipe completes
   const pendingFilterResetRef = useRef<boolean>(false);
   useEffect(() => {
-    const filterKey = JSON.stringify(intentFilters);
-    if (isPhase2 && prevFilterRef.current !== filterKey) {
+    const filterKey = JSON.stringify([...intentFilters].sort());
+    if (!isPhase2 || prevFilterRef.current === filterKey) {
+      return;
+    }
+
+    if (isPhase2) {
       const shouldDeferReset =
         swipeLockRef.current ||
         showPhaseTransition ||
@@ -2652,16 +2656,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const isAuthPending = isPhase2 && !isDemoMode && (!userId || !isAuthReadyForQuery);
   const isDiscoverLoading = !isDemoMode && !externalProfiles && (!effectiveConvexProfiles || isPhase2QueryLoading || isAuthPending);
   const isQueueBootstrapping =
+    !hasCommittedRef.current &&
     profiles.length > 0 &&
     visibleQueueRef.current.length === 0 &&
     consumedIdsRef.current.size === 0;
 
   const phase2MinHold = isPhase2 && !isDemoMode && !p2MinSkeletonDone;
+  const phase2ReloadSkeleton =
+    isPhase2 &&
+    !isDemoMode &&
+    isPhase2QueryLoading &&
+    !usingStableCache &&
+    profiles.length === 0;
   const loadingDrivesSkeleton =
     (!hasCommittedRef.current || !isPhase2 || isDemoMode) && (isDiscoverLoading && !usingStableCache);
 
   const showCardSkeleton =
-    loadingDrivesSkeleton || isQueueBootstrapping || phase2MinHold;
+    loadingDrivesSkeleton || isQueueBootstrapping || phase2MinHold || phase2ReloadSkeleton;
 
   // JS callbacks to be called from UI thread via runOnJS
   const updateOverlayDirection = useCallback((newDir: "left" | "right" | "up" | null) => {
@@ -2866,6 +2877,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     !showPhaseTransition &&
     p2MinSkeletonDone &&
     !isAuthPending &&
+    !usingStableCache &&
     phase2QueryTimedOut &&
     profiles.length === 0;
 
@@ -2905,17 +2917,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const contentState = useMemo(() => {
     if (isPhase2) {
       if (showCardSkeleton) {
-        if (profilesSafe.length === 0 && p2SearchingLabelVisible) return "searching";
+        if (profiles.length > 0 && hasCommittedRef.current) return "cards";
+        if (profiles.length === 0 && p2SearchingLabelVisible) return "searching";
         return "skeleton";
       }
-      if (profilesSafe.length > 0) return "cards";
+      if (profiles.length > 0) return "cards";
       if (isPhase2NetworkIssueSettled) return "network_issue";
-      return "empty";
+      if (isPhase2EmptySettled) return "empty";
+      return "skeleton";
     }
     if (showCardSkeleton) return "skeleton";
-    if (profilesSafe.length > 0) return "cards";
+    if (profiles.length > 0) return "cards";
     return "empty";
-  }, [isPhase2, showCardSkeleton, profilesSafe.length, p2SearchingLabelVisible, isPhase2NetworkIssueSettled]);
+  }, [isPhase2, showCardSkeleton, profiles.length, p2SearchingLabelVisible, isPhase2NetworkIssueSettled, isPhase2EmptySettled]);
 
   if (__DEV__ && isPhase2) {
     if (contentState !== prevDeepConnectContentStateRef.current) {
@@ -2923,6 +2937,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       console.log("[DEEPCONNECT_CONTENT_STATE]", contentState);
     }
   }
+
+  useEffect(() => {
+    if (!__DEV__ || !isPhase2) return;
+    console.log("[P2_STATE_DEBUG]", {
+      profilesSafeLength: profilesSafe.length,
+      profilesLength: profiles.length,
+      usingStableCache,
+      contentState,
+      intentFilters,
+    });
+  }, [contentState, intentFilters, isPhase2, profiles.length, profilesSafe.length, usingStableCache]);
 
   const phase2FilterLabels = useMemo(
     () => intentFilters
@@ -2982,7 +3007,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   ) : null;
 
   // Empty state (no profiles at all)
-  if (!showCardSkeleton && profiles.length === 0) {
+  const shouldShowEmptyState =
+    !showCardSkeleton &&
+    profiles.length === 0 &&
+    (!isPhase2 || isDemoMode || (!usingStableCache && (isPhase2EmptySettled || isPhase2NetworkIssueSettled)));
+
+  if (shouldShowEmptyState) {
     // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
     const handleResetDemoSwipes = () => {
       if (isDemoMode) {
@@ -3205,7 +3235,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
 
   // Deck exhausted state (swiped through all profiles)
-  if (!showCardSkeleton && !current) {
+  const shouldShowDeckExhaustedState =
+    !showCardSkeleton &&
+    !current &&
+    (!isPhase2 || isDemoMode || (!usingStableCache && hasResolvedPhase2Query));
+
+  if (shouldShowDeckExhaustedState) {
     // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
     const handleResetDeck = () => {
       if (isDemoMode) {
