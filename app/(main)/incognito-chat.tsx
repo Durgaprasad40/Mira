@@ -40,6 +40,10 @@ import { useAuthStore } from '@/stores/authStore';
 import { COLORS, FONT_SIZE, SPACING } from '@/lib/constants';
 import { Phase2ProtectedMediaBubble } from '@/components/private/Phase2ProtectedMediaBubble';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
+import { Phase2VoiceRecorder } from '@/components/private/Phase2VoiceRecorder';
+// Pure-UI voice playback bubble. Verified to make ZERO `api.*` calls; uses
+// the pure Zustand audioPlayerStore. Safe to reuse across phases.
+import DmAudioBubble from '@/components/chatroom/DmAudioBubble';
 
 type Phase2MessageRow = {
   id: Id<'privateMessages'>;
@@ -59,6 +63,9 @@ type Phase2MessageRow = {
   viewedAt?: number;
   timerEndsAt?: number;
   isExpired?: boolean;
+  // Phase-2 voice fields (returned by getPrivateMessages when type='voice')
+  audioUrl?: string | null;
+  audioDurationMs?: number;
 };
 
 function isSystemContent(content: string): { isSystem: boolean; display: string } {
@@ -114,6 +121,14 @@ export default function IncognitoChatScreen() {
 
   const sendPrivateMessage = useMutation(api.privateConversations.sendPrivateMessage);
   const markPrivateMessagesRead = useMutation(api.privateConversations.markPrivateMessagesRead);
+  // STRICT ISOLATION: Phase-2 typing presence. Never `api.typingStatus.*` (Phase-1).
+  const setPrivateTypingStatus = useMutation(api.privateConversations.setPrivateTypingStatus);
+  const otherTyping = useQuery(
+    api.privateConversations.getPrivateTypingStatus,
+    authReady && userId && conversationIdParam
+      ? { conversationId, authUserId: userId }
+      : 'skip'
+  );
   // STRICT ISOLATION: Phase-2-only safety actions.
   // - blockUser/reportUser operate on shared `blocks`/`reports` tables (intentionally cross-phase by design).
   // - unmatchPrivate operates ONLY on Phase-2 tables; never `api.matches.unmatch`.
@@ -129,6 +144,62 @@ export default function IncognitoChatScreen() {
   const [sendingProtected, setSendingProtected] = useState(false);
   const [viewerOpen, setViewerOpen] = useState(false);
   const [viewerMessage, setViewerMessage] = useState<Phase2MessageRow | null>(null);
+
+  // Typing-presence state (Phase-2-only):
+  // - typingActiveRef: true when we last told backend we ARE typing (avoids per-keystroke RPC).
+  // - typingIdleTimerRef: clears typing after 3s of no input.
+  const typingActiveRef = useRef(false);
+  const typingIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const sendTypingState = useCallback(
+    (isTyping: boolean) => {
+      if (!token || !conversationIdParam) return;
+      setPrivateTypingStatus({ token, conversationId, isTyping }).catch((err) => {
+        if (__DEV__) console.log('[P2_CHAT] setTyping failed:', err?.message);
+      });
+    },
+    [token, conversationId, conversationIdParam, setPrivateTypingStatus]
+  );
+
+  const clearTypingIdleTimer = useCallback(() => {
+    if (typingIdleTimerRef.current) {
+      clearTimeout(typingIdleTimerRef.current);
+      typingIdleTimerRef.current = null;
+    }
+  }, []);
+
+  const stopTyping = useCallback(() => {
+    clearTypingIdleTimer();
+    if (typingActiveRef.current) {
+      typingActiveRef.current = false;
+      sendTypingState(false);
+    }
+  }, [clearTypingIdleTimer, sendTypingState]);
+
+  const noteUserActivity = useCallback(() => {
+    if (!token || !conversationIdParam) return;
+    if (!typingActiveRef.current) {
+      typingActiveRef.current = true;
+      sendTypingState(true);
+    }
+    clearTypingIdleTimer();
+    typingIdleTimerRef.current = setTimeout(() => {
+      typingActiveRef.current = false;
+      sendTypingState(false);
+    }, 3000);
+  }, [token, conversationIdParam, sendTypingState, clearTypingIdleTimer]);
+
+  // Cleanup typing presence on unmount.
+  useEffect(() => {
+    return () => {
+      clearTypingIdleTimer();
+      if (typingActiveRef.current && token && conversationIdParam) {
+        // Fire-and-forget; component is unmounting.
+        setPrivateTypingStatus({ token, conversationId, isTyping: false }).catch(() => {});
+        typingActiveRef.current = false;
+      }
+    };
+  }, [clearTypingIdleTimer, token, conversationId, conversationIdParam, setPrivateTypingStatus]);
 
   // Mark as read whenever new messages arrive
   useEffect(() => {
@@ -183,13 +254,28 @@ export default function IncognitoChatScreen() {
         clientMessageId,
       });
       setDraft('');
+      // Clear typing presence right after a successful send.
+      stopTyping();
     } catch (err: any) {
       Alert.alert('Send failed', err?.message || 'Could not send message. Try again.');
     } finally {
       sendInFlightRef.current = false;
       setSending(false);
     }
-  }, [draft, token, conversationId, conversationIdParam, sendPrivateMessage]);
+  }, [draft, token, conversationId, conversationIdParam, sendPrivateMessage, stopTyping]);
+
+  const handleDraftChange = useCallback(
+    (next: string) => {
+      setDraft(next);
+      if (next.length === 0) {
+        // User cleared the input → no longer typing.
+        stopTyping();
+      } else {
+        noteUserActivity();
+      }
+    },
+    [noteUserActivity, stopTyping]
+  );
 
   // ----- Phase-2 protected (secure) image send -----
   // STRICT ISOLATION: uses ONLY Phase-2 backend:
@@ -278,6 +364,68 @@ export default function IncognitoChatScreen() {
     [sendProtectedImage]
   );
 
+  // ----- Phase-2 voice message send -----
+  // STRICT ISOLATION: uses ONLY Phase-2 backend:
+  //   api.privateConversations.generateSecureMediaUploadUrl  (generic upload URL after auth)
+  //   api.privateConversations.sendPrivateMessage  (type='voice', audioStorageId, audioDurationMs)
+  // Never uses Phase-1 audio/storage helpers.
+  const [voiceRecorderOpen, setVoiceRecorderOpen] = useState(false);
+  const [uploadingVoice, setUploadingVoice] = useState(false);
+
+  const sendVoiceMessage = useCallback(
+    async (audioUri: string, durationMs: number) => {
+      if (!token || !conversationIdParam) {
+        Alert.alert('Not signed in', 'Please sign in again to send a voice note.');
+        return;
+      }
+      if (uploadingVoice) return;
+      setUploadingVoice(true);
+      try {
+        // 1. Phase-2 upload URL
+        const uploadUrl = await generateSecureUploadUrl({ token });
+        // 2. POST audio bytes to Convex storage
+        const fileResp = await fetch(audioUri);
+        const blob = await fileResp.blob();
+        const uploadResp = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'audio/m4a' },
+          body: blob,
+        });
+        if (!uploadResp.ok) throw new Error(`Upload failed: ${uploadResp.status}`);
+        const { storageId } = (await uploadResp.json()) as { storageId: Id<'_storage'> };
+        // 3. Phase-2 message
+        const clientMessageId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        await sendPrivateMessage({
+          token,
+          conversationId,
+          type: 'voice',
+          content: '',
+          audioStorageId: storageId,
+          audioDurationMs: Math.round(durationMs),
+          clientMessageId,
+        });
+        setVoiceRecorderOpen(false);
+      } catch (err: any) {
+        Alert.alert('Send failed', err?.message || 'Could not send voice note.');
+      } finally {
+        setUploadingVoice(false);
+      }
+    },
+    [
+      token,
+      conversationId,
+      conversationIdParam,
+      uploadingVoice,
+      generateSecureUploadUrl,
+      sendPrivateMessage,
+    ]
+  );
+
+  const closeVoiceRecorder = useCallback(() => {
+    if (uploadingVoice) return;
+    setVoiceRecorderOpen(false);
+  }, [uploadingVoice]);
+
   const handleAttachProtected = useCallback(async () => {
     if (sendingProtected) return;
     try {
@@ -303,6 +451,18 @@ export default function IncognitoChatScreen() {
       Alert.alert('Attach failed', err?.message || 'Could not open photo library.');
     }
   }, [sendingProtected, promptProtectedTimerAndSend]);
+
+  // Phase-2-safe attach action sheet. Built on `Alert.alert` to avoid Phase-1
+  // TelegramMediaSheet/CameraPhotoSheet. Defined AFTER `handleAttachProtected`
+  // so the dependency array references a fully-initialised callback.
+  const handleAttachMenu = useCallback(() => {
+    if (sendingProtected || uploadingVoice) return;
+    Alert.alert('Send', 'Pick a media type', [
+      { text: 'Secure photo', onPress: () => handleAttachProtected() },
+      { text: 'Voice note', onPress: () => setVoiceRecorderOpen(true) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [sendingProtected, uploadingVoice, handleAttachProtected]);
 
   const openProtectedViewer = useCallback((msg: Phase2MessageRow) => {
     setViewerMessage(msg);
@@ -439,6 +599,20 @@ export default function IncognitoChatScreen() {
         );
       }
       const isOwn = userId != null && item.senderId === (userId as unknown as Id<'users'>);
+      // Phase-2 voice row: pure-UI DmAudioBubble. Backend `getPrivateMessages`
+      // returns `audioUrl` for type='voice' messages.
+      if (item.type === 'voice' && item.audioUrl) {
+        return (
+          <View style={[styles.bubbleRow, isOwn ? styles.bubbleRowOwn : styles.bubbleRowOther]}>
+            <DmAudioBubble
+              messageId={item.id as string}
+              audioUrl={item.audioUrl}
+              isMe={isOwn}
+              bubbleColor={isOwn ? COLORS.primary : COLORS.backgroundDark}
+            />
+          </View>
+        );
+      }
       // Phase-2 protected media row: render the secure tile and let the viewer modal handle reveal/expiry.
       if (item.isProtected) {
         return (
@@ -591,6 +765,18 @@ export default function IncognitoChatScreen() {
         )}
       </View>
 
+      {/* Typing indicator (Phase-2). Subtle dots strip just above the input bar. */}
+      {otherTyping?.isTyping && !isBlocked ? (
+        <View style={styles.typingRow} accessibilityLabel="Other user is typing">
+          <View style={styles.typingDots}>
+            <View style={[styles.typingDot, styles.typingDot1]} />
+            <View style={[styles.typingDot, styles.typingDot2]} />
+            <View style={[styles.typingDot, styles.typingDot3]} />
+          </View>
+          <Text style={styles.typingText}>typing…</Text>
+        </View>
+      ) : null}
+
       {/* Input */}
       {isBlocked ? (
         <View style={[styles.inputBar, { paddingBottom: insets.bottom + SPACING.sm }]}>
@@ -601,22 +787,25 @@ export default function IncognitoChatScreen() {
       ) : (
         <View style={[styles.inputBar, { paddingBottom: insets.bottom + SPACING.sm }]}>
           <TouchableOpacity
-            onPress={handleAttachProtected}
-            disabled={sendingProtected}
-            style={[styles.attachBtn, sendingProtected && styles.sendBtnDisabled]}
+            onPress={handleAttachMenu}
+            disabled={sendingProtected || uploadingVoice}
+            style={[
+              styles.attachBtn,
+              (sendingProtected || uploadingVoice) && styles.sendBtnDisabled,
+            ]}
             hitSlop={8}
             accessibilityRole="button"
-            accessibilityLabel="Send a secure photo"
+            accessibilityLabel="Open media options"
           >
-            {sendingProtected ? (
+            {sendingProtected || uploadingVoice ? (
               <ActivityIndicator size="small" color={COLORS.primary} />
             ) : (
-              <Ionicons name="image-outline" size={22} color={COLORS.primary} />
+              <Ionicons name="add-circle-outline" size={26} color={COLORS.primary} />
             )}
           </TouchableOpacity>
           <TextInput
             value={draft}
-            onChangeText={setDraft}
+            onChangeText={handleDraftChange}
             placeholder="Message…"
             placeholderTextColor={COLORS.textMuted}
             style={styles.input}
@@ -651,6 +840,15 @@ export default function IncognitoChatScreen() {
         onClose={closeProtectedViewer}
         messageData={viewerMessageData}
         isSenderViewing={isViewerSenderViewing}
+      />
+
+      {/* Phase-2 voice recorder (pure-UI). Upload + send is handled by
+          `sendVoiceMessage` using only Phase-2 mutations. */}
+      <Phase2VoiceRecorder
+        visible={voiceRecorderOpen}
+        onCancel={closeVoiceRecorder}
+        onComplete={sendVoiceMessage}
+        isUploading={uploadingVoice}
       />
     </KeyboardAvoidingView>
   );
@@ -719,6 +917,34 @@ const styles = StyleSheet.create({
   bubbleTimeOwn: { color: 'rgba(255,255,255,0.85)' },
   bubbleTimeOther: { color: COLORS.textMuted },
 
+  typingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 6,
+    backgroundColor: COLORS.background,
+  },
+  typingDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 8,
+  },
+  typingDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: COLORS.primary,
+    marginRight: 3,
+    opacity: 0.45,
+  },
+  typingDot1: { opacity: 0.85 },
+  typingDot2: { opacity: 0.65 },
+  typingDot3: { opacity: 0.4 },
+  typingText: {
+    fontSize: FONT_SIZE.xs,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+  },
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
