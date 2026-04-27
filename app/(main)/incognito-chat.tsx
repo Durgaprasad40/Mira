@@ -604,12 +604,24 @@ export default function IncognitoChatScreen() {
       if (item.type === 'voice' && item.audioUrl) {
         return (
           <View style={[styles.bubbleRow, isOwn ? styles.bubbleRowOwn : styles.bubbleRowOther]}>
-            <DmAudioBubble
-              messageId={item.id as string}
-              audioUrl={item.audioUrl}
-              isMe={isOwn}
-              bubbleColor={isOwn ? COLORS.primary : COLORS.backgroundDark}
-            />
+            <View>
+              <DmAudioBubble
+                messageId={item.id as string}
+                audioUrl={item.audioUrl}
+                isMe={isOwn}
+                bubbleColor={isOwn ? COLORS.primary : COLORS.backgroundDark}
+              />
+              <View style={[styles.bubbleMeta, !isOwn && styles.bubbleMetaStart]}>
+                <Text style={[styles.bubbleTime, styles.bubbleTimeOutside]}>
+                  {formatTime(item.createdAt)}
+                </Text>
+                {isOwn && item.readAt ? (
+                  <Ionicons name="checkmark-done" size={12} color={COLORS.primary} />
+                ) : isOwn && item.deliveredAt ? (
+                  <Ionicons name="checkmark" size={12} color={COLORS.textMuted} />
+                ) : null}
+              </View>
+            </View>
           </View>
         );
       }
@@ -617,16 +629,28 @@ export default function IncognitoChatScreen() {
       if (item.isProtected) {
         return (
           <View style={[styles.bubbleRow, isOwn ? styles.bubbleRowOwn : styles.bubbleRowOther]}>
-            <Phase2ProtectedMediaBubble
-              isOwn={isOwn}
-              isProtected={item.isProtected === true}
-              isExpired={item.isExpired}
-              viewedAt={item.viewedAt}
-              timerEndsAt={item.timerEndsAt}
-              protectedMediaTimer={item.protectedMediaTimer}
-              protectedMediaViewingMode={item.protectedMediaViewingMode}
-              onOpen={() => openProtectedViewer(item)}
-            />
+            <View>
+              <Phase2ProtectedMediaBubble
+                isOwn={isOwn}
+                isProtected={item.isProtected === true}
+                isExpired={item.isExpired}
+                viewedAt={item.viewedAt}
+                timerEndsAt={item.timerEndsAt}
+                protectedMediaTimer={item.protectedMediaTimer}
+                protectedMediaViewingMode={item.protectedMediaViewingMode}
+                onOpen={() => openProtectedViewer(item)}
+              />
+              <View style={[styles.bubbleMeta, !isOwn && styles.bubbleMetaStart]}>
+                <Text style={[styles.bubbleTime, styles.bubbleTimeOutside]}>
+                  {formatTime(item.createdAt)}
+                </Text>
+                {isOwn && item.readAt ? (
+                  <Ionicons name="checkmark-done" size={12} color={COLORS.primary} />
+                ) : isOwn && item.deliveredAt ? (
+                  <Ionicons name="checkmark" size={12} color={COLORS.textMuted} />
+                ) : null}
+              </View>
+            </View>
           </View>
         );
       }
@@ -638,12 +662,18 @@ export default function IncognitoChatScreen() {
             >
               {display}
             </Text>
-            <Text
-              style={[styles.bubbleTime, isOwn ? styles.bubbleTimeOwn : styles.bubbleTimeOther]}
-            >
-              {formatTime(item.createdAt)}
-              {isOwn && item.readAt ? '  ✓✓' : isOwn && item.deliveredAt ? '  ✓' : ''}
-            </Text>
+            <View style={styles.bubbleMeta}>
+              <Text
+                style={[styles.bubbleTime, isOwn ? styles.bubbleTimeOwn : styles.bubbleTimeOther]}
+              >
+                {formatTime(item.createdAt)}
+              </Text>
+              {isOwn && item.readAt ? (
+                <Ionicons name="checkmark-done" size={12} color="rgba(255,255,255,0.85)" />
+              ) : isOwn && item.deliveredAt ? (
+                <Ionicons name="checkmark" size={12} color="rgba(255,255,255,0.85)" />
+              ) : null}
+            </View>
           </View>
         </View>
       );
@@ -744,6 +774,10 @@ export default function IncognitoChatScreen() {
         {messages === undefined ? (
           <View style={styles.center}>
             <ActivityIndicator color={COLORS.primary} />
+          </View>
+        ) : messages.length === 0 ? (
+          <View style={styles.center}>
+            <Text style={styles.emptyText}>Say hi to start a private chat</Text>
           </View>
         ) : (
           <FlashList
@@ -913,9 +947,23 @@ const styles = StyleSheet.create({
   bubbleText: { fontSize: FONT_SIZE.md, lineHeight: 20 },
   bubbleTextOwn: { color: '#FFFFFF' },
   bubbleTextOther: { color: COLORS.text },
-  bubbleTime: { fontSize: 10, marginTop: 2, alignSelf: 'flex-end' },
+  bubbleMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    marginTop: 2,
+    gap: 4,
+  },
+  bubbleMetaStart: { alignSelf: 'flex-start' },
+  bubbleTime: { fontSize: FONT_SIZE.xs },
   bubbleTimeOwn: { color: 'rgba(255,255,255,0.85)' },
   bubbleTimeOther: { color: COLORS.textMuted },
+  bubbleTimeOutside: { color: COLORS.textMuted },
+  emptyText: {
+    fontSize: FONT_SIZE.sm,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+  },
 
   typingRow: {
     flexDirection: 'row',

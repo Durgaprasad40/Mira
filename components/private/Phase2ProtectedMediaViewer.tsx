@@ -177,7 +177,7 @@ function SecureVideoPlayer({ uri, elapsedMs, onReady }: SecureVideoPlayerProps) 
       {/* TIMER-FIX: Show loading indicator while video loads */}
       {isLoading && (
         <View style={secureVideoStyles.loadingOverlay}>
-          <Text style={secureVideoStyles.loadingText}>Loading video...</Text>
+          <Text style={secureVideoStyles.loadingText}>Loading video…</Text>
         </View>
       )}
       {!isPlaying && !isLoading && (
@@ -643,7 +643,7 @@ export function Phase2ProtectedMediaViewer({
         ) : (
           <View style={styles.placeholder}>
             <Ionicons name={isVideo ? "videocam-outline" : "image-outline"} size={64} color={C.textLight} />
-            <Text style={styles.placeholderText}>Loading...</Text>
+            <Text style={styles.placeholderText}>Loading…</Text>
           </View>
         )}
 
@@ -660,7 +660,7 @@ export function Phase2ProtectedMediaViewer({
         <View style={[styles.footer, { paddingBottom: insets.bottom + 16 }]} pointerEvents="none">
           <View style={styles.infoRow}>
             <Ionicons name="shield-checkmark" size={16} color={SOFT_ACCENT} />
-            <Text style={styles.infoText}>{isVideo ? 'Secure Video' : 'Secure Photo'}</Text>
+            <Text style={styles.infoText}>{isVideo ? 'Secure video' : 'Secure photo'}</Text>
           </View>
         </View>
       </View>

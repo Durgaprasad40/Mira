@@ -120,7 +120,7 @@ const styles = StyleSheet.create({
     maxWidth: 260,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    borderRadius: 16,
+    borderRadius: 18,
   },
   tileOwn: {
     backgroundColor: COLORS.primary,
