@@ -28,9 +28,8 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 // AVATAR-PREMIUM: bumped from 26 → 34 so received messages have a clear
 // identity anchor without crowding the bubble.
 const AVATAR_SIZE = 34;
-// LEFT-TIGHTEN: gap from 6 → 4 so the bubble hugs the avatar more closely
-// without losing visual breathing room.
-const AVATAR_GAP = 4;
+// Premium avatar gap keeps received bubbles close without feeling cramped.
+const AVATAR_GAP = 6;
 
 // Bubble constraints - maximize usable width.
 // LEFT-SIDE-USE: bumped from 0.80 → 0.86 so received messages can take
@@ -650,7 +649,7 @@ const styles = StyleSheet.create({
     // LEFT-TIGHTEN: override container's paddingHorizontal:8 on the left only
     // so received messages sit closer to the screen edge. Outgoing keeps the
     // original 8px right padding via container default — no visual change.
-    paddingLeft: 2,
+    paddingLeft: 0,
   },
   groupedContainer: {
     marginVertical: 1, // Minimal gap for grouped messages
@@ -830,21 +829,17 @@ const styles = StyleSheet.create({
   // Sits absolutely inside the bubble; the text reserves padding-right so
   // they don't overlap on the last line.
   textWithInlineMeta: {
-    // COMPACT-TIME: trim reservation from 52 → 48 so short bubbles are less
-    // puffy while preserving safe non-overlap with the floating
-    // timestamp/tick block on outgoing messages (which carry an extra tick).
-    paddingRight: 48,
+    // Reserve room so inline timestamp/ticks never overlap the final text line.
+    paddingRight: 52,
     paddingBottom: 2,
   },
   inlineMeta: {
     position: 'absolute',
-    // COMPACT-TIME: pull the timestamp tighter to the bubble's right edge
-    // (8 → 6) so it visually clings to the text end.
-    right: 6,
+    right: 8,
     bottom: 4,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    gap: 3,
   },
   time: {
     fontSize: 10,
