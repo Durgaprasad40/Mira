@@ -3008,7 +3008,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const notificationPopover = showNotificationPopover ? (
     <NotificationPopover
       visible
-      phase="phase1"
+      phase={isPhase2 ? "phase2" : "phase1"}
       onClose={() => setShowNotificationPopover(false)}
       anchorTop={insets.top + HEADER_H + SPACING.sm}
     />

@@ -11,6 +11,7 @@ import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { getPhase2DisplayName, validateSessionToken, resolveUserIdByAuthId } from './helpers';
 import { shouldCreatePhase2DeepConnectNotification } from './phase2NotificationPrefs';
+import { dispatchPrivatePush } from './privateNotifications';
 
 // Helper: Check if either user has blocked the other
 async function isBlockedBidirectional(
@@ -380,6 +381,14 @@ export const swipe = mutation({
             createdAt: now,
             expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
           });
+          // PHASE-2 PUSH: surface OS notification for new match (gated by same pref)
+          await dispatchPrivatePush(ctx, {
+            userId: toUserId,
+            type: 'phase2_match',
+            title: 'New Match! 🎉',
+            body: `You matched with ${fromDisplayName} in Deep Connect!`,
+            data: { matchId: matchId as string, privateConversationId: conversationId as string },
+          });
         }
 
         // Notify the current user (fromUser) about the match
@@ -395,6 +404,14 @@ export const swipe = mutation({
             dedupeKey: `p2_match:${matchId}:${fromUserId}`,
             createdAt: now,
             expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
+          });
+          // PHASE-2 PUSH: surface OS notification for new match (gated by same pref)
+          await dispatchPrivatePush(ctx, {
+            userId: fromUserId,
+            type: 'phase2_match',
+            title: 'New Match! 🎉',
+            body: `You matched with ${toDisplayName} in Deep Connect!`,
+            data: { matchId: matchId as string, privateConversationId: conversationId as string },
           });
         }
 
@@ -412,11 +429,14 @@ export const swipe = mutation({
         // Notify the recipient that someone liked them (anonymous)
         // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only
         if (await shouldCreatePhase2DeepConnectNotification(ctx, toUserId)) {
+          const likeTitle =
+            action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜';
+          const likeBody = 'Check your likes in Deep Connect to see who!';
           await ctx.db.insert('privateNotifications', {
             userId: toUserId,
             type: 'phase2_like',
-            title: action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜',
-            body: 'Check your likes in Deep Connect to see who!',
+            title: likeTitle,
+            body: likeBody,
             data: {
               otherUserId: fromUserId as string,
             },
@@ -424,6 +444,14 @@ export const swipe = mutation({
             dedupeKey: `p2_like:${fromUserId}:${toUserId}`,
             createdAt: now,
             expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
+          });
+          // PHASE-2 PUSH: surface OS notification for new like (gated by same pref)
+          await dispatchPrivatePush(ctx, {
+            userId: toUserId,
+            type: 'phase2_like',
+            title: likeTitle,
+            body: likeBody,
+            data: { otherUserId: fromUserId as string },
           });
         }
       }

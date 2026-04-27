@@ -117,8 +117,11 @@ export default function Phase2LikesScreen() {
       }
 
       if (result?.isMatch) {
+        // PHASE-2 ISOLATION: do not route to Phase-1 match-celebration. Open
+        // the Phase-2 conversation directly. Backend already created the
+        // match, conversation, participants, and phase2_match notification.
         router.push(
-          `/(main)/match-celebration?matchId=${result.matchId}&userId=${like.fromUserId}&mode=phase2&conversationId=${result.conversationId}` as any
+          `/(main)/incognito-chat?conversationId=${result.conversationId}` as any
         );
       } else {
         Toast.show('Liked! Keep swiping to find more matches.');
