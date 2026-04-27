@@ -659,3 +659,76 @@ export const getIncomingLikesCount = query({
     return count;
   },
 });
+
+/**
+ * Phase-2 Unmatch
+ *
+ * STRICT ISOLATION: Operates ONLY on Phase-2 tables (privateMatches,
+ * privateConversationParticipants). Never touches Phase-1 `matches` or
+ * `conversations`. Must NOT be confused with `api.matches.unmatch` (Phase-1).
+ *
+ * Behavior:
+ *   1. Verifies the caller is a participant in the privateConversation.
+ *   2. If a privateMatch exists for the participant pair, sets isActive=false.
+ *   3. Hides the conversation for the caller (privateConversationParticipants.isHidden=true).
+ *      The other participant's view is left untouched (one-sided unmatch UX).
+ */
+export const unmatchPrivate = mutation({
+  args: {
+    authUserId: v.string(),
+    conversationId: v.id('privateConversations'),
+  },
+  handler: async (ctx, args) => {
+    const { authUserId, conversationId } = args;
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false, error: 'unauthorized' as const };
+    }
+
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation) {
+      return { success: false, error: 'conversation_not_found' as const };
+    }
+
+    // Verify caller is part of this conversation
+    const callerParticipant = await ctx.db
+      .query('privateConversationParticipants')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', userId).eq('conversationId', conversationId)
+      )
+      .first();
+    if (!callerParticipant) {
+      return { success: false, error: 'not_a_participant' as const };
+    }
+
+    // Find the other participant (Phase-2 conversations are 1:1)
+    const otherParticipantId = conversation.participants.find(
+      (p) => (p as string) !== (userId as string)
+    ) as Id<'users'> | undefined;
+
+    // Mark the privateMatch inactive if it exists
+    if (otherParticipantId) {
+      const user1Id =
+        (userId as string) < (otherParticipantId as string) ? userId : otherParticipantId;
+      const user2Id =
+        (userId as string) < (otherParticipantId as string) ? otherParticipantId : userId;
+
+      const match = await ctx.db
+        .query('privateMatches')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', user1Id as Id<'users'>).eq('user2Id', user2Id as Id<'users'>)
+        )
+        .first();
+
+      if (match && match.isActive) {
+        await ctx.db.patch(match._id, { isActive: false });
+      }
+    }
+
+    // Hide the conversation for the caller (one-sided)
+    await ctx.db.patch(callerParticipant._id, { isHidden: true });
+
+    return { success: true };
+  },
+});

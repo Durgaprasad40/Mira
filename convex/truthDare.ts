@@ -3,6 +3,7 @@ import { v } from 'convex/values';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { resolveUserIdByAuthId } from './helpers';
+import { shouldCreatePhase2DeepConnectNotification } from './phase2NotificationPrefs';
 
 // 24-hour auto-delete rule (same as Confessions)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
@@ -1203,6 +1204,29 @@ export const sendTodConnectRequest = mutation({
       answerId,
     });
 
+    // Phase-2 in-app notification for the recipient (toUser).
+    // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only.
+    // T&D is a Deep Connect–adjacent flow, so we gate on the deepConnect preference.
+    // Body is identity-safe because T&D answers may be anonymous; identity is
+    // revealed only on accept (see respondToConnect).
+    if (await shouldCreatePhase2DeepConnectNotification(ctx, toUserId as Id<'users'>)) {
+      const now = Date.now();
+      await ctx.db.insert('privateNotifications', {
+        userId: toUserId as Id<'users'>,
+        type: 'phase2_deep_connect',
+        title: 'New Truth or Dare connect',
+        body: 'Someone wants to connect on your answer.',
+        data: {
+          otherUserId: fromUserId as string,
+          threadId: requestId as string,
+        },
+        phase: 'phase2',
+        dedupeKey: `p2_tod_request:${requestId}`,
+        createdAt: now,
+        expiresAt: now + 7 * 24 * 60 * 60 * 1000,
+      });
+    }
+
     return { success: true, action: 'pending' as const, requestId: requestId as string };
   },
 });
@@ -1394,6 +1418,26 @@ export const respondToConnect = mutation({
         });
       }
       await ctx.db.patch(requestId, { status: 'connected' });
+
+      // Phase-2 in-app notification for the inviter (sender) confirming the
+      // T&D connect was accepted and a Phase-2 conversation now exists.
+      // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only.
+      if (await shouldCreatePhase2DeepConnectNotification(ctx, senderDbId as Id<'users'>)) {
+        await ctx.db.insert('privateNotifications', {
+          userId: senderDbId as Id<'users'>,
+          type: 'phase2_match',
+          title: 'Truth or Dare connect accepted',
+          body: `${recipientIdentity.name} accepted your T&D connect.`,
+          data: {
+            privateConversationId: conversationId as string,
+            otherUserId: recipientDbId as string,
+          },
+          phase: 'phase2',
+          dedupeKey: `p2_tod_accept:${requestId}`,
+          createdAt: now,
+          expiresAt: now + 7 * 24 * 60 * 60 * 1000,
+        });
+      }
 
       return {
         success: true,
@@ -3622,116 +3666,5 @@ export const getVoiceUrl = query({
     }
 
     return { status: 'no_media' as const };
-  },
-});
-
-// ============================================================
-// USER CONVERSATIONS QUERY (for Messages tab integration)
-// ============================================================
-
-/**
- * Get all conversations for a user from the EXISTING conversations table.
- * Returns conversations with participant info for display.
- * Used by chats.tsx to rehydrate from backend.
- */
-export const getUserConversations = query({
-  args: { authUserId: v.string() },
-  handler: async (ctx, { authUserId }) => {
-    const userDbId = await getOptionalAuthenticatedTodUserId(ctx, authUserId, 'getUserConversations');
-    if (!userDbId) return [];
-
-    // Get all conversation participations for this user
-    const participations = await ctx.db
-      .query('conversationParticipants')
-      .withIndex('by_user', (q) => q.eq('userId', userDbId as Id<'users'>))
-      .collect();
-
-    if (participations.length === 0) return [];
-
-    // Fetch conversation details and other participant info
-    const results = await Promise.all(
-      participations.map(async (p) => {
-        const conversation = await ctx.db.get(p.conversationId);
-        if (!conversation) return null;
-
-        // Find the other participant
-        const otherParticipantId = conversation.participants.find(
-          (pid) => pid !== userDbId
-        );
-        if (!otherParticipantId) return null;
-
-        // Get other participant's profile
-        const otherUser = await ctx.db.get(otherParticipantId);
-        if (!otherUser) return null;
-
-        let participantIdentity = getDefaultConnectIdentity(otherUser);
-
-        if (conversation.connectionSource === 'tod') {
-          const outgoingTodRequests = await ctx.db
-            .query('todConnectRequests')
-            .withIndex('by_from_to', (q) =>
-              q.eq('fromUserId', userDbId as string).eq('toUserId', otherParticipantId as string)
-            )
-            .collect();
-          const incomingTodRequests = await ctx.db
-            .query('todConnectRequests')
-            .withIndex('by_from_to', (q) =>
-              q.eq('fromUserId', otherParticipantId as string).eq('toUserId', userDbId as string)
-            )
-            .collect();
-
-          const latestConnectedRequest = [...outgoingTodRequests, ...incomingTodRequests]
-            .filter((request) => request.status === 'connected')
-            .sort((a, b) => b.createdAt - a.createdAt)[0];
-
-          if (latestConnectedRequest) {
-            const prompt = await ctx.db.get(latestConnectedRequest.promptId as Id<'todPrompts'>);
-            const answer = await ctx.db
-              .query('todAnswers')
-              .filter((q) => q.eq(q.field('_id'), latestConnectedRequest.answerId as Id<'todAnswers'>))
-              .first();
-
-            if (prompt && prompt.ownerUserId === (otherParticipantId as string)) {
-              participantIdentity = getPromptConnectIdentity(prompt, otherUser);
-            } else if (answer && answer.userId === (otherParticipantId as string)) {
-              participantIdentity = getAnswerConnectIdentity(answer, otherUser);
-            }
-          }
-        }
-
-        // Get last message for preview
-        const lastMessage = await ctx.db
-          .query('messages')
-          .withIndex('by_conversation_created', (q) => q.eq('conversationId', p.conversationId))
-          .order('desc')
-          .first();
-
-        return {
-          id: conversation._id,
-          participantId: otherParticipantId,
-          participantAuthId: otherUser.authUserId ?? null,
-          participantName: participantIdentity.name,
-          participantPhotoUrl: participantIdentity.photoUrl,
-          participantAge: participantIdentity.age,
-          participantGender: participantIdentity.gender,
-          participantIsAnonymous: participantIdentity.isAnonymous,
-          participantPhotoBlurMode: participantIdentity.photoBlurMode,
-          isPhotoBlurred:
-            participantIdentity.isAnonymous || participantIdentity.photoBlurMode === 'blur',
-          canViewClearPhoto:
-            !participantIdentity.isAnonymous && participantIdentity.photoBlurMode !== 'blur',
-          connectionSource: conversation.connectionSource ?? 'match',
-          lastMessage: lastMessage?.content ?? null,
-          lastMessageAt: conversation.lastMessageAt ?? conversation.createdAt,
-          unreadCount: p.unreadCount,
-          createdAt: conversation.createdAt,
-        };
-      })
-    );
-
-    // Filter out nulls and sort by last message time
-    return results
-      .filter((r): r is NonNullable<typeof r> => r !== null)
-      .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
   },
 });

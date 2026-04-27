@@ -102,6 +102,12 @@ export default function IncognitoChatScreen() {
 
   const sendPrivateMessage = useMutation(api.privateConversations.sendPrivateMessage);
   const markPrivateMessagesRead = useMutation(api.privateConversations.markPrivateMessagesRead);
+  // STRICT ISOLATION: Phase-2-only safety actions.
+  // - blockUser/reportUser operate on shared `blocks`/`reports` tables (intentionally cross-phase by design).
+  // - unmatchPrivate operates ONLY on Phase-2 tables; never `api.matches.unmatch`.
+  const blockUserMutation = useMutation(api.users.blockUser);
+  const reportUserMutation = useMutation(api.users.reportUser);
+  const unmatchPrivateMutation = useMutation(api.privateSwipes.unmatchPrivate);
 
   // Mark as read whenever new messages arrive
   useEffect(() => {
@@ -163,6 +169,94 @@ export default function IncognitoChatScreen() {
       setSending(false);
     }
   }, [draft, token, conversationId, conversationIdParam, sendPrivateMessage]);
+
+  // ----- Phase-2 header safety menu (block / report / unmatch) -----
+  // Intentionally NOT using ReportBlockModal (Phase-1). All flows below are phase-safe:
+  // block/report use shared cross-phase tables; unmatch hits ONLY Phase-2 privateMatches.
+  const otherUserId = conversationInfo?.participantId as Id<'users'> | undefined;
+
+  const handleBlock = useCallback(() => {
+    if (!userId || !otherUserId) return;
+    Alert.alert(
+      'Block this user?',
+      'They won’t be able to see or message you anywhere in the app.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await blockUserMutation({ authUserId: userId, blockedUserId: otherUserId });
+              router.back();
+            } catch (err: any) {
+              Alert.alert('Block failed', err?.message || 'Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  }, [userId, otherUserId, blockUserMutation, router]);
+
+  const submitReport = useCallback(
+    async (reason: 'inappropriate_photos' | 'harassment' | 'spam' | 'fake_profile' | 'other') => {
+      if (!userId || !otherUserId) return;
+      try {
+        await reportUserMutation({
+          authUserId: userId,
+          reportedUserId: otherUserId,
+          reason,
+        });
+        Alert.alert('Report submitted', 'Thanks — our team will review this.');
+      } catch (err: any) {
+        Alert.alert('Report failed', err?.message || 'Please try again.');
+      }
+    },
+    [userId, otherUserId, reportUserMutation]
+  );
+
+  const handleReport = useCallback(() => {
+    if (!userId || !otherUserId) return;
+    Alert.alert('Report this user', 'Pick a reason:', [
+      { text: 'Inappropriate photos', onPress: () => submitReport('inappropriate_photos') },
+      { text: 'Harassment', onPress: () => submitReport('harassment') },
+      { text: 'Spam', onPress: () => submitReport('spam') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [userId, otherUserId, submitReport]);
+
+  const handleUnmatch = useCallback(() => {
+    if (!userId || !conversationIdParam) return;
+    Alert.alert(
+      'Unmatch?',
+      'This conversation will be removed from your inbox.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unmatch',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await unmatchPrivateMutation({ authUserId: userId, conversationId });
+              router.back();
+            } catch (err: any) {
+              Alert.alert('Unmatch failed', err?.message || 'Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  }, [userId, conversationId, conversationIdParam, unmatchPrivateMutation, router]);
+
+  const handleHeaderMenu = useCallback(() => {
+    if (!otherUserId) return;
+    Alert.alert('Options', undefined, [
+      { text: 'Block', style: 'destructive', onPress: handleBlock },
+      { text: 'Report', onPress: handleReport },
+      { text: 'Unmatch', style: 'destructive', onPress: handleUnmatch },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [otherUserId, handleBlock, handleReport, handleUnmatch]);
 
   const renderItem = useCallback(
     ({ item }: { item: Phase2MessageRow }) => {
@@ -271,6 +365,17 @@ export default function IncognitoChatScreen() {
             </Text>
           ) : null}
         </View>
+        {otherUserId ? (
+          <TouchableOpacity
+            onPress={handleHeaderMenu}
+            style={styles.headerMenuBtn}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel="Conversation options"
+          >
+            <Ionicons name="ellipsis-vertical" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {/* Messages */}
@@ -364,6 +469,7 @@ const styles = StyleSheet.create({
   headerText: { flex: 1, minWidth: 0 },
   headerName: { fontSize: FONT_SIZE.lg, fontWeight: '600', color: COLORS.text },
   headerSub: { fontSize: FONT_SIZE.xs, color: COLORS.textMuted, marginTop: 1 },
+  headerMenuBtn: { padding: 4, marginLeft: SPACING.xs },
 
   listWrap: { flex: 1, backgroundColor: COLORS.background },
   listContent: {
