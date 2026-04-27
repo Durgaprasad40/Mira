@@ -2480,11 +2480,33 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
 
         const SWIPE_TIMEOUT_MS = 6000;
+
+        // PHASE-2 ID FIX: privateSwipes.swipe expects v.id('users'). For Phase-2,
+        // `swipedProfile.id` is the `userPrivateProfiles._id` (card id), and
+        // `swipedProfile.userId` is the underlying `users._id`. Always pass userId
+        // to the Phase-2 mutation. Phase-1 keeps using `id` (which is users._id).
+        if (isPhase2 && !isDemoMode) {
+          const p2ToUserId = swipedProfile.userId;
+          if (!p2ToUserId || p2ToUserId === swipedProfile.id) {
+            if (__DEV__) {
+              console.warn('[P2_SWIPE_GUARD] Phase-2 profile is missing a valid users._id; refusing swipe', {
+                hasUserId: !!p2ToUserId,
+                idEqualsUserId: p2ToUserId === swipedProfile.id,
+                profileIdSuffix: (swipedProfile.id as string | undefined)?.slice?.(-8),
+              });
+            }
+            Toast.show("Couldn't process swipe. Please try again.");
+            resetPosition();
+            releaseSwipeLock(activeSwipeId);
+            return;
+          }
+        }
+
         const swipePromise =
           isPhase2 && !isDemoMode
             ? phase2SwipeMutation({
                 authUserId: convexUserId as string,
-                toUserId: swipedProfile.id as Id<'users'>,
+                toUserId: swipedProfile.userId as Id<'users'>,
                 action,
                 message,
               })
