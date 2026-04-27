@@ -32,11 +32,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
+import * as ImagePicker from 'expo-image-picker';
 
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS, FONT_SIZE, SPACING } from '@/lib/constants';
+import { Phase2ProtectedMediaBubble } from '@/components/private/Phase2ProtectedMediaBubble';
+import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
 
 type Phase2MessageRow = {
   id: Id<'privateMessages'>;
@@ -47,6 +50,15 @@ type Phase2MessageRow = {
   deliveredAt?: number;
   readAt?: number;
   createdAt: number;
+  // Phase-2 protected media fields (returned by getPrivateMessages when isProtected=true)
+  isProtected?: boolean;
+  imageUrl?: string | null;
+  protectedMediaTimer?: number;
+  protectedMediaViewingMode?: 'tap' | 'hold';
+  protectedMediaIsMirrored?: boolean;
+  viewedAt?: number;
+  timerEndsAt?: number;
+  isExpired?: boolean;
 };
 
 function isSystemContent(content: string): { isSystem: boolean; display: string } {
@@ -108,6 +120,15 @@ export default function IncognitoChatScreen() {
   const blockUserMutation = useMutation(api.users.blockUser);
   const reportUserMutation = useMutation(api.users.reportUser);
   const unmatchPrivateMutation = useMutation(api.privateSwipes.unmatchPrivate);
+  // Phase-2 secure media upload URL (NOT Phase-1 protectedMedia.*)
+  const generateSecureUploadUrl = useMutation(
+    api.privateConversations.generateSecureMediaUploadUrl
+  );
+
+  // Protected media UI state
+  const [sendingProtected, setSendingProtected] = useState(false);
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const [viewerMessage, setViewerMessage] = useState<Phase2MessageRow | null>(null);
 
   // Mark as read whenever new messages arrive
   useEffect(() => {
@@ -169,6 +190,155 @@ export default function IncognitoChatScreen() {
       setSending(false);
     }
   }, [draft, token, conversationId, conversationIdParam, sendPrivateMessage]);
+
+  // ----- Phase-2 protected (secure) image send -----
+  // STRICT ISOLATION: uses ONLY Phase-2 backend:
+  //   api.privateConversations.generateSecureMediaUploadUrl
+  //   api.privateConversations.sendPrivateMessage (with isProtected=true, imageStorageId)
+  // Never uses Phase-1 api.media.* or api.protectedMedia.*.
+  const sendProtectedImage = useCallback(
+    async (
+      uri: string,
+      timerSeconds: number,
+      viewingMode: 'tap' | 'hold'
+    ) => {
+      if (!token || !conversationIdParam) {
+        Alert.alert('Not signed in', 'Please sign in again to send media.');
+        return;
+      }
+      if (sendingProtected) return;
+      setSendingProtected(true);
+      try {
+        // 1. Get a Phase-2 upload URL
+        const uploadUrl = await generateSecureUploadUrl({ token });
+
+        // 2. POST the file bytes to Convex storage
+        const fileResp = await fetch(uri);
+        const blob = await fileResp.blob();
+        const uploadResp = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'image/jpeg' },
+          body: blob,
+        });
+        if (!uploadResp.ok) {
+          throw new Error(`Upload failed: ${uploadResp.status}`);
+        }
+        const { storageId } = (await uploadResp.json()) as {
+          storageId: Id<'_storage'>;
+        };
+
+        // 3. Send a Phase-2 message referencing the uploaded asset
+        const clientMessageId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        await sendPrivateMessage({
+          token,
+          conversationId,
+          type: 'image',
+          content: '',
+          imageStorageId: storageId,
+          isProtected: true,
+          protectedMediaTimer: timerSeconds, // 0 = view-once
+          protectedMediaViewingMode: viewingMode,
+          clientMessageId,
+        });
+      } catch (err: any) {
+        Alert.alert('Send failed', err?.message || 'Could not send secure photo.');
+      } finally {
+        setSendingProtected(false);
+      }
+    },
+    [
+      token,
+      conversationId,
+      conversationIdParam,
+      sendingProtected,
+      generateSecureUploadUrl,
+      sendPrivateMessage,
+    ]
+  );
+
+  const promptProtectedTimerAndSend = useCallback(
+    (uri: string) => {
+      // Minimal options sheet via Alert (avoids Phase-1 TelegramMediaSheet/CameraPhotoSheet).
+      Alert.alert('Secure photo timer', 'How should the recipient view it?', [
+        {
+          text: 'View once (tap)',
+          onPress: () => sendProtectedImage(uri, 0, 'tap'),
+        },
+        {
+          text: 'Hold to view (10s)',
+          onPress: () => sendProtectedImage(uri, 10, 'hold'),
+        },
+        {
+          text: 'Tap to view (10s)',
+          onPress: () => sendProtectedImage(uri, 10, 'tap'),
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    },
+    [sendProtectedImage]
+  );
+
+  const handleAttachProtected = useCallback(async () => {
+    if (sendingProtected) return;
+    try {
+      // Permission flow
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert(
+          'Permission needed',
+          'Allow photo library access to send a secure photo.'
+        );
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.9,
+        allowsEditing: false,
+      });
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset?.uri) return;
+      promptProtectedTimerAndSend(asset.uri);
+    } catch (err: any) {
+      Alert.alert('Attach failed', err?.message || 'Could not open photo library.');
+    }
+  }, [sendingProtected, promptProtectedTimerAndSend]);
+
+  const openProtectedViewer = useCallback((msg: Phase2MessageRow) => {
+    setViewerMessage(msg);
+    setViewerOpen(true);
+  }, []);
+
+  const closeProtectedViewer = useCallback(() => {
+    setViewerOpen(false);
+    setViewerMessage(null);
+  }, []);
+
+  // Build viewer messageData from a Phase-2 backend row (no Phase-1 shape).
+  const viewerMessageData = useMemo(() => {
+    if (!viewerMessage) return null;
+    const timerSec = viewerMessage.protectedMediaTimer ?? 0;
+    return {
+      id: viewerMessage.id as string,
+      isProtected: viewerMessage.isProtected ?? true,
+      isExpired: viewerMessage.isExpired,
+      viewedAt: viewerMessage.viewedAt,
+      timerEndsAt: viewerMessage.timerEndsAt,
+      protectedMedia: {
+        localUri: viewerMessage.imageUrl ?? undefined,
+        mediaType: 'photo' as const,
+        timer: timerSec,
+        viewingMode: viewerMessage.protectedMediaViewingMode ?? 'tap',
+        isMirrored: viewerMessage.protectedMediaIsMirrored,
+        expiresDurationMs: timerSec * 1000,
+      },
+    };
+  }, [viewerMessage]);
+
+  const isViewerSenderViewing = useMemo(() => {
+    if (!viewerMessage || !userId) return false;
+    return viewerMessage.senderId === (userId as unknown as Id<'users'>);
+  }, [viewerMessage, userId]);
 
   // ----- Phase-2 header safety menu (block / report / unmatch) -----
   // Intentionally NOT using ReportBlockModal (Phase-1). All flows below are phase-safe:
@@ -269,6 +439,23 @@ export default function IncognitoChatScreen() {
         );
       }
       const isOwn = userId != null && item.senderId === (userId as unknown as Id<'users'>);
+      // Phase-2 protected media row: render the secure tile and let the viewer modal handle reveal/expiry.
+      if (item.isProtected) {
+        return (
+          <View style={[styles.bubbleRow, isOwn ? styles.bubbleRowOwn : styles.bubbleRowOther]}>
+            <Phase2ProtectedMediaBubble
+              isOwn={isOwn}
+              isProtected={item.isProtected === true}
+              isExpired={item.isExpired}
+              viewedAt={item.viewedAt}
+              timerEndsAt={item.timerEndsAt}
+              protectedMediaTimer={item.protectedMediaTimer}
+              protectedMediaViewingMode={item.protectedMediaViewingMode}
+              onOpen={() => openProtectedViewer(item)}
+            />
+          </View>
+        );
+      }
       return (
         <View style={[styles.bubbleRow, isOwn ? styles.bubbleRowOwn : styles.bubbleRowOther]}>
           <View style={[styles.bubble, isOwn ? styles.bubbleOwn : styles.bubbleOther]}>
@@ -287,7 +474,7 @@ export default function IncognitoChatScreen() {
         </View>
       );
     },
-    [userId]
+    [userId, openProtectedViewer]
   );
 
   const headerTitle = useMemo(() => {
@@ -413,6 +600,20 @@ export default function IncognitoChatScreen() {
         </View>
       ) : (
         <View style={[styles.inputBar, { paddingBottom: insets.bottom + SPACING.sm }]}>
+          <TouchableOpacity
+            onPress={handleAttachProtected}
+            disabled={sendingProtected}
+            style={[styles.attachBtn, sendingProtected && styles.sendBtnDisabled]}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Send a secure photo"
+          >
+            {sendingProtected ? (
+              <ActivityIndicator size="small" color={COLORS.primary} />
+            ) : (
+              <Ionicons name="image-outline" size={22} color={COLORS.primary} />
+            )}
+          </TouchableOpacity>
           <TextInput
             value={draft}
             onChangeText={setDraft}
@@ -440,6 +641,17 @@ export default function IncognitoChatScreen() {
           </TouchableOpacity>
         </View>
       )}
+
+      {/* Phase-2 protected media viewer (modal). Phase-2-only: uses
+          api.privateConversations.markPrivateSecureMedia* internally. */}
+      <Phase2ProtectedMediaViewer
+        visible={viewerOpen && viewerMessage != null}
+        conversationId={conversationIdParam}
+        messageId={(viewerMessage?.id as string) ?? ''}
+        onClose={closeProtectedViewer}
+        messageData={viewerMessageData}
+        isSenderViewing={isViewerSenderViewing}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -526,6 +738,14 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     color: COLORS.text,
     fontSize: FONT_SIZE.md,
+  },
+  attachBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 4,
   },
   sendBtn: {
     width: 40,
