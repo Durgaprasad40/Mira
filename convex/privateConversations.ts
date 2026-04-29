@@ -222,7 +222,10 @@ export const getUserPrivateConversations = query({
         // PHASE-2 PRIVACY FIX: ALWAYS use handle from users table, never stored displayName
         // Stored displayName may contain old full names from before the fix
         // Phase-2 must NEVER expose first name or last name
-        const displayName = otherUser?.handle || 'Anonymous';
+        const displayName =
+          otherPrivateProfile?.displayName ||
+          otherUser?.handle ||
+          'Anonymous';
 
         // Compute unread count from source of truth (privateMessages table)
         // P2-002 FIX: Use denormalized unreadCount from participant record (avoids race condition)
@@ -430,6 +433,19 @@ export const getPrivateMessages = query({
           viewedAt: m.viewedAt,
           timerEndsAt: m.timerEndsAt,
           isExpired: m.isExpired,
+        };
+      }
+
+      // PHASE-2 NORMAL MEDIA: Non-protected images/videos still need a URL on
+      // the wire so MessageBubble's <MediaMessage /> path can render them.
+      // This is the Phase-2 equivalent of Phase-1 "Normal" (timer = -1) — the
+      // sender did NOT request expiry, so the message is not in the protected
+      // pipeline but we still resolve the storage URL so the recipient can
+      // view it. Schema is unchanged; this is an additive query enhancement.
+      if ((m.type === 'image' || m.type === 'video') && m.imageStorageId) {
+        return {
+          ...baseMessage,
+          imageUrl: imageUrlMap.get(m.imageStorageId as string) ?? null,
         };
       }
 
@@ -806,7 +822,10 @@ export const getPrivateConversation = query({
     // PHASE-2 PRIVACY FIX: ALWAYS use handle from users table, never stored displayName
     // Stored displayName may contain old full names from before the fix
     // Phase-2 must NEVER expose first name or last name
-    const displayName = otherUser?.handle || 'Anonymous';
+    const displayName =
+      otherPrivateProfile?.displayName ||
+      otherUser?.handle ||
+      'Anonymous';
 
     // ═══════════════════════════════════════════════════════════════════════════
     // PHOTO ACCESS CONTROL: Check if other user has blur enabled and access status
