@@ -118,7 +118,7 @@ export default function PrivateNotificationsScreen() {
           notification.data?.privateConversationId ??
           notification.data?.conversationId;
         if (id) {
-          router.push(`/(main)/incognito-chat?id=${encodeURIComponent(id)}&${notifParams}${dedupeParam}` as any);
+          router.push(`/(main)/(private)/(tabs)/chats/${encodeURIComponent(id)}?${notifParams}${dedupeParam}` as any);
         }
         break;
       }
@@ -127,7 +127,7 @@ export default function PrivateNotificationsScreen() {
           notification.data?.privateConversationId ??
           notification.data?.conversationId;
         if (id) {
-          router.push(`/(main)/incognito-chat?id=${encodeURIComponent(id)}&${notifParams}${dedupeParam}` as any);
+          router.push(`/(main)/(private)/(tabs)/chats/${encodeURIComponent(id)}?${notifParams}${dedupeParam}` as any);
         } else {
           router.push(`/(main)/(private)?${notifParams}${dedupeParam}` as any);
         }

@@ -322,10 +322,12 @@ export default function ChatsScreen() {
   // T&D Pending Connect Requests (still uses truthDare API - T&D is a separate feature)
   // P0-AUTH-CRASH-FIX: Gate on canRunQueries to prevent early query errors
   // FIX: Use authUserId instead of token (backend expects authUserId)
+  const shouldQueryTodRequests = canRunQueries && !!currentUserId;
   const pendingRequests = useQuery(
     api.truthDare.getPendingConnectRequests,
-    canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
+    shouldQueryTodRequests ? { authUserId: currentUserId } : 'skip'
   );
+  const pendingRequestsLoading = shouldQueryTodRequests && pendingRequests === undefined;
   const respondToConnect = useMutation(api.truthDare.respondToConnect);
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
   const pendingConnectResponseRef = useRef<Set<string>>(new Set());
@@ -355,13 +357,16 @@ export default function ChatsScreen() {
     if (__DEV__) {
       console.log('[T/D RECEIVE UI] State:', {
         currentUserId: currentUserId?.slice(-8) ?? 'NULL',
-        querySkipped: !currentUserId,
-        pendingRequestsLoading: pendingRequests === undefined,
+        authReady,
+        authConfirmed,
+        canRunQueries,
+        querySkipped: !shouldQueryTodRequests,
+        pendingRequestsLoading,
         pendingRequestsCount: visiblePendingRequests.length,
         pendingRequestIds: visiblePendingRequests.map((r) => r._id?.slice(-8)) ?? [],
       });
     }
-  }, [currentUserId, pendingRequests, visiblePendingRequests]);
+  }, [authReady, authConfirmed, canRunQueries, currentUserId, pendingRequestsLoading, shouldQueryTodRequests, visiblePendingRequests]);
 
   useEffect(() => {
     if (!pendingRequests) return;
@@ -765,8 +770,12 @@ export default function ChatsScreen() {
                 style={styles.matchItem}
                 activeOpacity={0.7}
                 // Phase-2: tap opens chat thread directly (conversation already exists)
-                onPress={() => router.push(`/(main)/incognito-chat?id=${item.id}` as any)}
+                onPress={() => {
+                  console.log('[P2_CHAT_OPEN] match-row', item.id);
+                  router.push(`/(main)/(private)/(tabs)/chats/${item.id}` as any);
+                }}
               >
+                <View pointerEvents="none" style={{ alignItems: 'center' }}>
                 <View style={styles.matchAvatarContainer}>
                   {/* NEW badge for very recent connections */}
                   {isRecentConnect && (
@@ -825,6 +834,7 @@ export default function ChatsScreen() {
                   ) : null}
                 </View>
                 <Text style={styles.matchName} numberOfLines={1}>{item.participantName}</Text>
+                </View>
               </TouchableOpacity>
             );
           }}
@@ -856,7 +866,11 @@ export default function ChatsScreen() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.listContent}>
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={styles.listContent}
+        keyboardShouldPersistTaps="always"
+      >
         {/* P2-003: Loading state */}
         {isQueryLoading && (
           <View style={styles.loadingContainer}>
@@ -913,10 +927,17 @@ export default function ChatsScreen() {
               <TouchableOpacity
                 key={convo.id}
                 style={styles.chatRow}
-                onPress={() => router.push(`/(main)/incognito-chat?id=${convo.id}` as any)}
+                onPress={() => {
+                  console.log('[P2_CHAT_OPEN] chat-row', convo.id);
+                  router.push(`/(main)/(private)/(tabs)/chats/${convo.id}` as any);
+                }}
                 onLongPress={() => setReportTarget({ id: convo.participantId, name: convo.participantName, conversationId: convo.id })}
                 activeOpacity={0.8}
               >
+                <View
+                  pointerEvents="none"
+                  style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}
+                >
                 {/* CLEAN UI: Profile photo only (no extra badges/icons) */}
                 <View style={styles.chatAvatarWrap}>
                   <View style={styles.chatAvatarRing}>
@@ -972,6 +993,7 @@ export default function ChatsScreen() {
                     <Text style={styles.unreadText}>{convo.unreadCount}</Text>
                   </View>
                 )}
+                </View>
               </TouchableOpacity>
             );
           })
@@ -1064,7 +1086,8 @@ export default function ChatsScreen() {
                   onPress={() => {
                     const convoId = successSheet.conversationId;
                     setSuccessSheet(null);
-                    router.push(`/(main)/incognito-chat?id=${convoId}` as any);
+                    console.log('[P2_CHAT_OPEN] success-sheet', convoId);
+                    router.push(`/(main)/(private)/(tabs)/chats/${convoId}` as any);
                   }}
                 >
                   <Ionicons name="chatbubble" size={18} color="#FFF" />

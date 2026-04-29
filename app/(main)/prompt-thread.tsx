@@ -2426,7 +2426,7 @@ export default function PromptThreadScreen() {
                   onPress={() => {
                     const convoId = successSheet.conversationId;
                     setSuccessSheet(null);
-                    router.push(`/(main)/incognito-chat?id=${convoId}` as any);
+                    router.push(`/(main)/(private)/(tabs)/chats/${convoId}` as any);
                   }}
                 >
                   <Ionicons name="chatbubble" size={18} color="#FFF" />

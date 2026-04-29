@@ -121,7 +121,7 @@ export default function Phase2LikesScreen() {
         // the Phase-2 conversation directly. Backend already created the
         // match, conversation, participants, and phase2_match notification.
         router.push(
-          `/(main)/incognito-chat?conversationId=${result.conversationId}` as any
+          `/(main)/(private)/(tabs)/chats/${result.conversationId}` as any
         );
       } else {
         Toast.show('Liked! Keep swiping to find more matches.');
