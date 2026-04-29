@@ -772,7 +772,10 @@ export default function ChatsScreen() {
                 // Phase-2: tap opens chat thread directly (conversation already exists)
                 onPress={() => {
                   console.log('[P2_CHAT_OPEN] match-row', item.id);
-                  router.push(`/(main)/(private)/(tabs)/chats/${item.id}` as any);
+                  router.push({
+                    pathname: '/(main)/(private)/(tabs)/chats/[id]',
+                    params: { id: String(item.id) },
+                  } as any);
                 }}
               >
                 <View pointerEvents="none" style={{ alignItems: 'center' }}>
@@ -929,7 +932,10 @@ export default function ChatsScreen() {
                 style={styles.chatRow}
                 onPress={() => {
                   console.log('[P2_CHAT_OPEN] chat-row', convo.id);
-                  router.push(`/(main)/(private)/(tabs)/chats/${convo.id}` as any);
+                  router.push({
+                    pathname: '/(main)/(private)/(tabs)/chats/[id]',
+                    params: { id: String(convo.id) },
+                  } as any);
                 }}
                 onLongPress={() => setReportTarget({ id: convo.participantId, name: convo.participantName, conversationId: convo.id })}
                 activeOpacity={0.8}
@@ -1087,7 +1093,10 @@ export default function ChatsScreen() {
                     const convoId = successSheet.conversationId;
                     setSuccessSheet(null);
                     console.log('[P2_CHAT_OPEN] success-sheet', convoId);
-                    router.push(`/(main)/(private)/(tabs)/chats/${convoId}` as any);
+                    router.push({
+                      pathname: '/(main)/(private)/(tabs)/chats/[id]',
+                      params: { id: String(convoId) },
+                    } as any);
                   }}
                 >
                   <Ionicons name="chatbubble" size={18} color="#FFF" />
