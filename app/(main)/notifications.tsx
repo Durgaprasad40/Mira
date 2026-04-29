@@ -184,6 +184,12 @@ export default function NotificationsScreen() {
           router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}?${notifParams}${dedupeParam}` as any);
         }
         break;
+      case 'phase2_private_message':
+      case 'phase2_match':
+        if (notification.data?.conversationId) {
+          router.push(`/(main)/incognito-chat?id=${notification.data.conversationId}` as any);
+        }
+        break;
       case 'crossed_paths': {
         // Navigate to crossed-paths screen
         router.push({
