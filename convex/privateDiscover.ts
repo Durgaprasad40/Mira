@@ -13,6 +13,7 @@ import { computeRankScore, logBatchRankingComparison, DEFAULT_RANKING_CONFIG } f
 const SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
 const MAX_BLOCK_ROWS = 5000;
 const MAX_CONVERSATION_ROWS = 500;
+const MAX_PRIVATE_RELATIONSHIP_ROWS = 5000;
 const MAX_PENDING_DELETION_ROWS = 5000;
 const IMPRESSION_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
 const MAX_IMPRESSIONS_PER_WINDOW = 300;
@@ -132,7 +133,15 @@ export const getProfiles = query({
     const runShadow = shouldRunShadowComparison();
 
     // Get blocks for current user (both directions - shared across Phase-1 and Phase-2)
-    const [blocksOut, blocksIn, myConversationParticipations] = await Promise.all([
+    const [
+      blocksOut,
+      blocksIn,
+      myConversationParticipations,
+      matchesAsUser1,
+      matchesAsUser2,
+      myPrivateSwipes,
+      myReports,
+    ] = await Promise.all([
       ctx.db
         .query('blocks')
         .withIndex('by_blocker', (q) => q.eq('blockerId', viewerUserId))
@@ -143,9 +152,25 @@ export const getProfiles = query({
         .take(MAX_BLOCK_ROWS),
       // CONVERSATION PARTNER EXCLUSION: Users with existing chats must not reappear
       ctx.db
-        .query('conversationParticipants')
+        .query('privateConversationParticipants')
         .withIndex('by_user', (q) => q.eq('userId', viewerUserId))
         .take(MAX_CONVERSATION_ROWS),
+      ctx.db
+        .query('privateMatches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', viewerUserId))
+        .take(MAX_PRIVATE_RELATIONSHIP_ROWS),
+      ctx.db
+        .query('privateMatches')
+        .withIndex('by_user2', (q) => q.eq('user2Id', viewerUserId))
+        .take(MAX_PRIVATE_RELATIONSHIP_ROWS),
+      ctx.db
+        .query('privateLikes')
+        .withIndex('by_from_user', (q) => q.eq('fromUserId', viewerUserId))
+        .take(MAX_PRIVATE_RELATIONSHIP_ROWS),
+      ctx.db
+        .query('reports')
+        .withIndex('by_reporter', (q) => q.eq('reporterId', viewerUserId))
+        .take(MAX_PRIVATE_RELATIONSHIP_ROWS),
     ]);
 
     // Combine into a set of blocked user IDs
@@ -169,6 +194,28 @@ export const getProfiles = query({
         }
       }
     }
+
+    const matchedUserIds = new Set<string>();
+    const unmatchedUserIds = new Set<string>();
+    for (const match of matchesAsUser1) {
+      const isUnmatched =
+        match.isActive === false ||
+        (match as any).unmatchedAt != null ||
+        (match as any).user1UnmatchedAt != null ||
+        (match as any).user2UnmatchedAt != null;
+      (isUnmatched ? unmatchedUserIds : matchedUserIds).add(match.user2Id as string);
+    }
+    for (const match of matchesAsUser2) {
+      const isUnmatched =
+        match.isActive === false ||
+        (match as any).unmatchedAt != null ||
+        (match as any).user1UnmatchedAt != null ||
+        (match as any).user2UnmatchedAt != null;
+      (isUnmatched ? unmatchedUserIds : matchedUserIds).add(match.user1Id as string);
+    }
+
+    const swipedUserIds = new Set(myPrivateSwipes.map((s) => s.toUserId as string));
+    const reportedUserIds = new Set(myReports.map((r) => r.reportedUserId as string));
 
     const profiles = await ctx.db
       .query('userPrivateProfiles')
@@ -204,6 +251,10 @@ export const getProfiles = query({
     // - The requesting user
     // - Incomplete profiles
     // - Blocked users (either direction)
+    // - Existing private conversation partners
+    // - Existing private matches and unmatched private matches
+    // - Users already swiped in Deep Connect
+    // - Users reported by the viewer
     // - Users with pending deletion
     // - Users who opted out of Deep Connect discovery (hideFromDeepConnect === true; missing = visible)
     // NOTE: Profiles without ranking metrics are still eligible (use fallback defaults)
@@ -216,11 +267,12 @@ export const getProfiles = query({
           p.userId !== viewerUserId &&
           p.isSetupComplete &&
           !blockedUserIds.has(p.userId as string) &&
+          !conversationPartnerIds.has(p.userId as string) &&
+          !matchedUserIds.has(p.userId as string) &&
+          !unmatchedUserIds.has(p.userId as string) &&
+          !swipedUserIds.has(p.userId as string) &&
+          !reportedUserIds.has(p.userId as string) &&
           !deletedUserIds.has(p.userId as string) &&
-          // CONVERSATION PARTNER EXCLUSION — DISABLED (mirrors Discover/Explore):
-          // An existing conversation no longer hides the candidate. Phase-2
-          // `isSetupComplete`, blocks, deletion, and hideFromDeepConnect still
-          // apply. conversationPartnerIds is still computed for debugging.
           p.hideFromDeepConnect !== true &&
           (!requestedIntentKeySet ||
             profileIntentKeys.some((key) => requestedIntentKeySet.has(key)))
