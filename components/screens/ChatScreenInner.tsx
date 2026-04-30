@@ -2481,6 +2481,27 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // Convex mode: close viewer on hold end
       if (viewerMessageId === messageId) {
         if (__DEV__) console.log('[HOLD-MODE] Convex holdEnd:', messageId);
+        // P1_ONCE_VIEW_FIX: For view-once ("Once") media, hold release on the
+        // receiver side is the moment the media has been seen — it must be
+        // expired immediately so the bubble redacts to the "expired" state
+        // and the blob is removed by the cleanup cron. Previously this path
+        // only cleared the local viewer, leaving the media re-openable until
+        // the next mount/refresh. Sender viewing their own media must NEVER
+        // expire it (mirrors handleProtectedMediaExpire's sender skip and the
+        // viewer's handleClose isSender guard).
+        const msg = findDisplayMessageById(messageId);
+        const isSender = !!(msg?.senderId && userId && msg.senderId === userId);
+        if (msg?.viewOnce && !isSender && userId) {
+          console.log('[SECURE_TIMER] markExpired', { messageId, reason: 'viewonce_hold_release' });
+          markMediaExpired({
+            messageId: asMessageId(messageId),
+            authUserId: userId,
+          }).catch((err) => {
+            if (__DEV__) console.error('[P1_ONCE_VIEW_FIX] hold-release markExpired failed:', err);
+          });
+        } else if (msg?.viewOnce && isSender) {
+          console.log('[SECURE_TIMER] skip_sender_timer', { messageId, reason: 'viewonce_hold_release' });
+        }
         setViewerMessageId(null);
       }
     }
