@@ -338,6 +338,56 @@ export default function Phase2ChatThread() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tdState, tdPaused, gameStartedAt]);
 
+  // P2_TD_RECEIVER_PARITY: Auto-open the invite modal on the invitee's
+  // device as soon as the live game-session query reports a pending invite
+  // addressed to us. Phase-1 (`components/screens/ChatScreenInner.tsx:3204`)
+  // renders the `TruthDareInviteCard` automatically whenever
+  // `gameSession?.state === 'pending' && isTruthDareInvitee` — no header-
+  // button tap required. Phase-2 keeps the same card but wraps it inside
+  // `<Modal visible={showInviteModal}>` (line ~1422), and the previous
+  // implementation only flipped `showInviteModal=true` from
+  // `handleTruthDarePress`, so the invitee never saw the popup until they
+  // manually tapped the T/D header — that is the bug.
+  //
+  // Mirror Phase-1 by tracking the auto-opened session id in a ref so we:
+  //   1. open the modal exactly once per fresh pending invite (no re-open
+  //      loop during the brief 'pending'→'active' query refresh window
+  //      after accept, since the sessionId is unchanged);
+  //   2. dismiss the modal automatically when the session leaves 'pending'
+  //      via accept (→active), decline (→cooldown), timeout (→expired) or
+  //      cancel (→none), so the invitee never sees a stale prompt;
+  //   3. leave the inviter's manually-opened "Send invite" form alone
+  //      (the ref is only ever set inside the `amInvitee` branch).
+  const autoOpenedInviteSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const pendingSessionId = (gameSession as any)?.sessionId as
+      | string
+      | undefined;
+    if (tdState === 'pending' && amInvitee && pendingSessionId) {
+      if (autoOpenedInviteSessionRef.current !== pendingSessionId) {
+        console.log('[P2_TD_RECEIVE_AUTO_OPEN]', {
+          id,
+          sessionId: pendingSessionId,
+        });
+        autoOpenedInviteSessionRef.current = pendingSessionId;
+        setShowInviteModal(true);
+      }
+      return;
+    }
+    if (
+      autoOpenedInviteSessionRef.current !== null &&
+      tdState !== 'pending'
+    ) {
+      console.log('[P2_TD_RECEIVE_AUTO_CLOSE]', {
+        id,
+        nextState: tdState,
+      });
+      autoOpenedInviteSessionRef.current = null;
+      setShowInviteModal(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tdState, amInvitee, gameSession]);
+
   // P2_TD_FIX: Auto-cleanup expired sessions so the next invite doesn't hit
   // "Game already active". Phase-1 parity: ChatScreenInner.tsx:885-928. The
   // backend may return state='expired' while the DB row is still status='active'
