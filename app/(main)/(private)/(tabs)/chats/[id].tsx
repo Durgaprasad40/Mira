@@ -66,6 +66,7 @@ import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2Protected
 import { popHandoff } from '@/lib/memoryHandoff';
 import { deriveMyRole } from '@/lib/bottleSpin';
 import { uploadMediaToConvexWithProgress } from '@/lib/uploadUtils';
+import { getCachedMediaUri } from '@/lib/mediaCache';
 
 // [P2_MEDIA_UPLOAD] Mirror Phase-1 ChatScreenInner.PendingSecureMessage
 // (components/screens/ChatScreenInner.tsx:171-182). Drives the optimistic
@@ -1754,6 +1755,13 @@ export default function Phase2ChatThread() {
           onMediaPress={(url, mediaType) =>
             setNormalViewer({ uri: url, type: mediaType })
           }
+          // LOAD-FIRST UX (Option A): Show a tap-to-load arrow on remote
+          // photo/video tiles so receivers don't auto-download every
+          // message. The MediaMessage caches via mediaCache and only
+          // opens the viewer on the second tap. Doodles bypass the gate
+          // internally in MediaMessage.
+          requireMediaDownloadBeforeOpen
+          autoDownloadMedia={false}
           showAvatar={!isOwn && isLastInGroup}
           avatarUrl={otherPhotoUrl}
           isLastInGroup={isLastInGroup}
@@ -1773,6 +1781,11 @@ export default function Phase2ChatThread() {
                     timerEndsAt={item.timerEndsAt}
                     protectedMediaTimer={item.protectedMediaTimer}
                     protectedMediaViewingMode={item.protectedMediaViewingMode}
+                    // LOAD-FIRST: pass the remote URL so the bubble can render
+                    // the tap-to-load arrow and pre-cache via mediaCache before
+                    // the viewer opens. Sender (isOwn) bypasses internally.
+                    mediaUrl={item.imageUrl ?? undefined}
+                    mediaKind={item.type === 'video' ? 'video' : 'image'}
                     onOpen={() =>
                       setProtectedViewer({
                         raw: item,
@@ -2272,7 +2285,20 @@ export default function Phase2ChatThread() {
             viewedAt: protectedViewer.raw.viewedAt,
             timerEndsAt: protectedViewer.raw.timerEndsAt,
             protectedMedia: {
-              localUri: protectedViewer.raw.imageUrl ?? undefined,
+              // LOAD-FIRST hand-off: prefer the already-cached local file
+              // (downloaded by Phase2ProtectedMediaBubble's tap-to-load
+              // gate) over the remote URL — avoids a second fetch when
+              // the receiver actually opens the viewer.
+              localUri:
+                (protectedViewer.raw.imageUrl
+                  ? getCachedMediaUri(protectedViewer.raw.imageUrl)
+                  : undefined) ??
+                protectedViewer.raw.imageUrl ??
+                undefined,
+              // LOAD-FIRST cleanup: pass the original remote URL so the
+              // viewer can wipe the on-disk cached file when the message
+              // is marked expired (once-view close, timer→0, etc.).
+              remoteUrl: protectedViewer.raw.imageUrl ?? undefined,
               mediaType:
                 protectedViewer.raw.type === 'video' ? 'video' : 'photo',
               timer: protectedViewer.raw.protectedMediaTimer ?? 0,

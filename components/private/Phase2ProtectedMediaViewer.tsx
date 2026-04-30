@@ -37,6 +37,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
 import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
+import { deleteCachedMedia } from '@/lib/mediaCache';
 
 // PHASE-1 PARITY FIX: Message data passed from parent for backend messages
 interface MessageData {
@@ -52,6 +53,15 @@ interface MessageData {
     viewingMode?: 'tap' | 'hold';
     isMirrored?: boolean;
     expiresDurationMs?: number;
+    /**
+     * LOAD-FIRST cleanup hint: original remote URL of the cached secure
+     * media. When the viewer marks the message expired (once-view close,
+     * timer→0, hold-release), the local cached file at this URL is
+     * deleted from disk so the recipient can never re-open it from the
+     * cache. The backend remains the source of truth for expiry — this
+     * is purely a defense-in-depth client-side wipe.
+     */
+    remoteUrl?: string;
   };
 }
 
@@ -352,7 +362,30 @@ export function Phase2ProtectedMediaViewer({
       // Local message: use store action
       markSecurePhotoExpired(conversationId, messageId);
     }
-  }, [isBackendMessage, token, messageId, conversationId, markExpiredMutation, markSecurePhotoExpired]);
+
+    // LOAD-FIRST cleanup: best-effort wipe of the on-disk cached file so
+    // the receiver can't re-open the secure media after expiry. Backend
+    // is still the source of truth — this is defense-in-depth.
+    const remote = messageData?.protectedMedia?.remoteUrl;
+    const kind =
+      messageData?.protectedMedia?.mediaType === 'video' ? 'video' : 'image';
+    if (
+      remote &&
+      (remote.startsWith('http://') || remote.startsWith('https://'))
+    ) {
+      deleteCachedMedia(remote, kind).catch(() => {
+        // Best-effort: silent failure (e.g. file already gone).
+      });
+    }
+  }, [
+    isBackendMessage,
+    token,
+    messageId,
+    conversationId,
+    markExpiredMutation,
+    markSecurePhotoExpired,
+    messageData,
+  ]);
 
   // Handle close (close button or back gesture) - only for tap mode
   // SENDER-VIEW-FIX: Skip ONCE expiration when sender closes viewer

@@ -1211,13 +1211,23 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // MEDIA PRELOADING: Cache all media from visible messages for instant open
   // Handles videos, images, doodles, and audio for premium feel
+  //
+  // LOAD-FIRST UX (Option A): When `LOAD_FIRST_MEDIA` is enabled, eager
+  // prefetch of remote photos/videos is disabled. Each MediaMessage tile
+  // shows a "Tap to load" arrow and downloads on demand via mediaCache —
+  // matches WhatsApp/Telegram behavior and avoids burning bandwidth on
+  // media the user never opens. DOODLES are intentionally kept on the
+  // fast path (they're tiny and the "preserve doodle paths" rule asks
+  // for instant render).
   // ─────────────────────────────────────────────────────────────────────────
+  const LOAD_FIRST_MEDIA = true;
   useEffect(() => {
     if (!messages || messages.length === 0) return;
 
     // Extract media URLs from recent messages (last 15 for good coverage)
     const videoUrls: string[] = [];
     const imageUrls: string[] = [];
+    const doodleUrls: string[] = [];
     const recentMessages = messages.slice(-15);
 
     for (const msg of recentMessages) {
@@ -1231,21 +1241,29 @@ export default function ChatRoomScreen() {
           videoUrls.push(url);
           break;
         case 'image':
-        case 'doodle':
           imageUrls.push(url);
+          break;
+        case 'doodle':
+          doodleUrls.push(url);
           break;
       }
     }
 
-    // Preload videos (non-blocking, max 2 concurrent)
-    if (videoUrls.length > 0) {
+    // Preload videos (non-blocking, max 2 concurrent) — skipped under LOAD_FIRST.
+    if (!LOAD_FIRST_MEDIA && videoUrls.length > 0) {
       const uniqueUrls = [...new Set(videoUrls)];
       preloadVideos(uniqueUrls, 2);
     }
 
-    // Prefetch images/doodles to expo-image cache
-    if (imageUrls.length > 0) {
+    // Prefetch images to expo-image cache — skipped under LOAD_FIRST.
+    if (!LOAD_FIRST_MEDIA && imageUrls.length > 0) {
       const uniqueUrls = [...new Set(imageUrls)];
+      ExpoImage.prefetch(uniqueUrls);
+    }
+
+    // Doodles ALWAYS prefetch (small payload + fast doodle path preserved).
+    if (doodleUrls.length > 0) {
+      const uniqueUrls = [...new Set(doodleUrls)];
       ExpoImage.prefetch(uniqueUrls);
     }
   }, [messages]);

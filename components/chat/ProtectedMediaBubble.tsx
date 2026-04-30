@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { View, Text, StyleSheet, PanResponder, GestureResponderEvent } from 'react-native';
+import { View, Text, StyleSheet, PanResponder, GestureResponderEvent, Pressable, ActivityIndicator } from 'react-native';
 import { Image } from 'expo-image';
 import { Video, AVPlaybackStatus } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
@@ -81,11 +81,20 @@ export function ProtectedMediaBubble({
     mediaId && authUserId ? { mediaId: mediaId as any, userId: authUserId as any } : 'skip'
   );
 
+  // LOAD-FIRST: Receivers must explicitly tap to load before any URL fetch or
+  // prefetch. Senders bypass the gate (they already have local state from
+  // upload). Tapping the load arrow flips this flag — it does NOT call
+  // onPress/onHoldStart, so no view is registered yet.
+  const [loadRequested, setLoadRequested] = useState(false);
+  const isReceiver = !isOwn;
+  const gateOpen = loadRequested || !isReceiver;
+
   // PREFETCH-FIX: Fetch media URL for prefetching (only if not expired and mediaId exists)
   // Note: We use isExpiredProp here since isExpired derived value isn't available yet
+  // LOAD-FIRST: Skip the URL query for receivers until they tap the load arrow.
   const mediaUrlData = useQuery(
     api.protectedMedia.getMediaUrl,
-    mediaId && authUserId && !isExpiredProp
+    mediaId && authUserId && !isExpiredProp && gateOpen
       ? { messageId: messageId as any, authUserId }
       : 'skip'
   );
@@ -313,6 +322,33 @@ export function ProtectedMediaBubble({
     );
   }
 
+  // LOAD-FIRST: Receiver placeholder — show download arrow until tap.
+  // Tapping ONLY flips loadRequested; it does NOT call onPress/onHoldStart,
+  // so no view is registered until the user explicitly opens the viewer.
+  if (isReceiver && !loadRequested) {
+    return (
+      <Pressable onPress={() => setLoadRequested(true)} style={styles.container}>
+        <View style={styles.placeholderInner}>
+          <Ionicons name="arrow-down-circle" size={26} color="#FFFFFF" />
+          <Text style={styles.placeholderText}>Tap to load</Text>
+        </View>
+      </Pressable>
+    );
+  }
+
+  // LOAD-FIRST: Receiver loading state — once tapped, show spinner until the
+  // Convex URL query hydrates and the prefetch begins.
+  if (isReceiver && !mediaUrlData) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.placeholderInner}>
+          <ActivityIndicator size="small" color="#FFFFFF" />
+          <Text style={styles.placeholderText}>Loading…</Text>
+        </View>
+      </View>
+    );
+  }
+
   // Phase-1 style: Blurred tile matching MediaMessage.tsx exactly
   const localUri = protectedMedia?.localUri;
   const isVideo = protectedMedia?.mediaType === 'video';
@@ -486,6 +522,19 @@ const styles = StyleSheet.create({
     height: 1,
     position: 'absolute',
     opacity: 0,
+  },
+  // LOAD-FIRST: Download-arrow / loading placeholder
+  placeholderInner: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    gap: 4,
+  },
+  placeholderText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '600',
   },
   // SENDER-TIMER: Wrapper for bubble + external timer
   senderWrapper: {

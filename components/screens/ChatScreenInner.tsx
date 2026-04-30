@@ -2962,6 +2962,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                   // PROFILE-TAP: Avatar tap opens profile
                   // PRIVACY-RESTORE: Disable profile tap for anonymous confession sender.
                   onAvatarPress={isOtherUserAnonymous ? undefined : () => handleOpenProfile(otherUserId)}
+                  // LOAD-FIRST UX (Option A): Show a tap-to-load arrow on
+                  // remote photo/video tiles instead of auto-downloading
+                  // every message. MediaMessage caches via mediaCache and
+                  // only opens the lightbox on the second tap. Doodles
+                  // bypass the gate internally.
+                  requireMediaDownloadBeforeOpen
+                  autoDownloadMedia={false}
                 />
                 {isMessageOwn && optimisticStatus === 'sending' && (
                   <View style={styles.optimisticStatusRow}>

@@ -121,6 +121,17 @@ interface MessageBubbleProps {
    * default Phase-1 ProtectedMediaBubble is used as before.
    */
   renderProtectedMedia?: () => React.ReactNode;
+  /**
+   * LOAD-FIRST: When true, normal-media bubbles render a download-arrow
+   * placeholder until the user taps to download (or autoDownloadMedia kicks
+   * in). Tapping the arrow does NOT call onMediaPress. Default false keeps
+   * legacy auto-load behavior.
+   */
+  requireMediaDownloadBeforeOpen?: boolean;
+  /** If true, normal media auto-starts the download on mount (still gated UI). */
+  autoDownloadMedia?: boolean;
+  /** Called after a normal-media download completes with the local cache URI. */
+  onMediaDownloaded?: (messageId: string, localUri: string) => void;
 }
 
 // Detect messages that are only emoji (1–8 emoji, no other text)
@@ -170,6 +181,9 @@ function MessageBubbleComponent({
   isLastInGroup = true,
   onAvatarPress,
   renderProtectedMedia,
+  requireMediaDownloadBeforeOpen = false,
+  autoDownloadMedia = false,
+  onMediaDownloaded,
 }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
 
@@ -446,6 +460,9 @@ function MessageBubbleComponent({
               mediaUrl={mediaUrl!}
               type={message.type as 'image' | 'video'}
               onPress={() => onMediaPress?.(mediaUrl!, message.type as 'image' | 'video')}
+              requireDownloadBeforeOpen={requireMediaDownloadBeforeOpen}
+              autoDownload={autoDownloadMedia}
+              onDownloaded={(uri) => onMediaDownloaded?.(message.id, uri)}
             />
             {(showTimestamp || isOwn) && (
               <View style={[styles.imageFooter, !showTimestamp && styles.statusOnlyFooter]}>
@@ -639,6 +656,9 @@ function areMessageBubblePropsEqual(
     // parent render); the inner Phase-2 card already re-renders via the
     // tracked message.* fields below (isExpired/viewedAt/timerEndsAt/...).
     !!prev.renderProtectedMedia === !!next.renderProtectedMedia &&
+    // LOAD-FIRST: gate flags must re-render to flip placeholder/preview.
+    prev.requireMediaDownloadBeforeOpen === next.requireMediaDownloadBeforeOpen &&
+    prev.autoDownloadMedia === next.autoDownloadMedia &&
     prevMedia?.localUri === nextMedia?.localUri &&
     prevMedia?.mediaType === nextMedia?.mediaType &&
     prevMedia?.timer === nextMedia?.timer &&

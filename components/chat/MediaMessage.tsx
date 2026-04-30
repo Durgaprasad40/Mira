@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useMemo, useEffect } from 'react';
+import React, { useCallback, useRef, useMemo, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -6,11 +6,18 @@ import {
   Pressable,
   PanResponder,
   PanResponderInstance,
+  ActivityIndicator,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useMediaViewStore } from '@/stores/mediaViewStore';
 import { COLORS } from '@/lib/constants';
+import {
+  getCachedMediaUri,
+  getMediaUri,
+  isMediaCachedOnDisk,
+  type MediaKind,
+} from '@/lib/mediaCache';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MEDIA SIZING - Consistent with bubble styling
@@ -23,6 +30,7 @@ const MEDIA_RADIUS = 12;
 
 // Check if URI is a local content:// URI (Android gallery) which doesn't work well with blur
 const isContentUri = (uri: string) => uri.startsWith('content://');
+const isRemoteUri = (uri: string) => uri.startsWith('http://') || uri.startsWith('https://');
 
 interface MediaMessageProps {
   /**
@@ -41,6 +49,23 @@ interface MediaMessageProps {
   onPress?: () => void;
   /** Optional: is this a "view once" media (future feature) */
   viewOnce?: boolean;
+  /**
+   * Load-first gate: when true and no cached local URI exists, render a
+   * download-arrow placeholder instead of mounting <Image> with the remote URL.
+   * The user must tap the arrow to start the download. Tapping the arrow does
+   * NOT call onPress/onHoldStart and does NOT trigger any view-marking.
+   */
+  requireDownloadBeforeOpen?: boolean;
+  /**
+   * If true and gated, kicks off the download automatically on mount instead of
+   * waiting for a tap. Defaults to false. (Used by surfaces that prefer eager
+   * download but still want the placeholder until the file is local.)
+   */
+  autoDownload?: boolean;
+  /** Called after a successful download with the resolved local URI. */
+  onDownloaded?: (localUri: string) => void;
+  /** Called when a download attempt fails. */
+  onDownloadError?: (error: unknown) => void;
 }
 
 export default function MediaMessage({
@@ -51,6 +76,10 @@ export default function MediaMessage({
   onHoldEnd,
   onPress,
   viewOnce = false,
+  requireDownloadBeforeOpen = false,
+  autoDownload = false,
+  onDownloaded,
+  onDownloadError,
 }: MediaMessageProps) {
   const markViewedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -63,6 +92,87 @@ export default function MediaMessage({
       }
     };
   }, []);
+
+  // ─── Load-first cache state ──────────────────────────────────────────────
+  // Doodles bypass entirely (small, fast, no privacy gate).
+  const isDoodle = type === 'doodle';
+  // Local URIs need no caching, render directly.
+  const remote = !!mediaUrl && isRemoteUri(mediaUrl);
+  const gateActive = requireDownloadBeforeOpen && remote && !isDoodle;
+
+  const initialCached = remote ? getCachedMediaUri(mediaUrl) : mediaUrl;
+  const [localUri, setLocalUri] = useState<string | undefined>(initialCached || (remote ? undefined : mediaUrl));
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState(false);
+
+  const mediaKind: MediaKind = type === 'video' ? 'video' : 'image';
+
+  // Stable callbacks for callers via refs (avoid re-running effects).
+  const onDownloadedRef = useRef(onDownloaded);
+  const onDownloadErrorRef = useRef(onDownloadError);
+  onDownloadedRef.current = onDownloaded;
+  onDownloadErrorRef.current = onDownloadError;
+
+  const startDownload = useCallback(async () => {
+    if (!remote) return;
+    setDownloading(true);
+    setDownloadError(false);
+    try {
+      const uri = await getMediaUri(mediaUrl, mediaKind);
+      // If getMediaUri fell back to the remote URL (download failed), treat as error
+      if (!uri || uri === mediaUrl) {
+        setDownloadError(true);
+        onDownloadErrorRef.current?.(new Error('Download failed'));
+      } else {
+        setLocalUri(uri);
+        onDownloadedRef.current?.(uri);
+      }
+    } catch (err) {
+      setDownloadError(true);
+      onDownloadErrorRef.current?.(err);
+    } finally {
+      setDownloading(false);
+    }
+  }, [mediaUrl, mediaKind, remote]);
+
+  // On mount / mediaUrl change: re-check sync cache, then disk cache, then
+  // optionally auto-download when the gate is active.
+  useEffect(() => {
+    if (!remote) {
+      setLocalUri(mediaUrl);
+      return;
+    }
+    const sync = getCachedMediaUri(mediaUrl);
+    if (sync) {
+      setLocalUri(sync);
+      return;
+    }
+    setLocalUri(undefined);
+    let cancelled = false;
+    (async () => {
+      const onDisk = await isMediaCachedOnDisk(mediaUrl, mediaKind);
+      if (cancelled) return;
+      if (onDisk) {
+        setLocalUri(getCachedMediaUri(mediaUrl));
+        return;
+      }
+      if (gateActive && autoDownload) {
+        startDownload();
+      } else if (!gateActive) {
+        // No gate: legacy behavior — render the remote URL directly.
+        setLocalUri(mediaUrl);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaUrl, mediaKind, gateActive, autoDownload]);
+
+  // Effective URI to feed expo-image / Video — never the raw remote URL when
+  // the gate is active and we haven't downloaded yet.
+  const effectiveUri = localUri;
+  const isLoaded = !!effectiveUri;
 
   // DOODLE-UNBLUR-FIX: Doodles ALWAYS render without blur, regardless of context
   // Early return ensures doodles never enter secure/blur flow
@@ -102,12 +212,71 @@ export default function MediaMessage({
     );
   }
 
+  // ─── Load-first placeholder renderers ────────────────────────────────────
+  // Tap-to-load handler shared by all modes; download tap NEVER calls onPress
+  // or marks viewed.
+  const handleDownloadTap = () => {
+    if (downloading) return;
+    startDownload();
+  };
+
+  const renderLegacyPlaceholder = () => (
+    <Pressable style={styles.legacyContainer} onPress={handleDownloadTap}>
+      <View style={styles.legacyPlaceholderInner}>
+        {downloading ? (
+          <>
+            <ActivityIndicator size="small" color="#FFFFFF" />
+            <Text style={styles.placeholderText}>Loading…</Text>
+          </>
+        ) : downloadError ? (
+          <>
+            <Ionicons name="refresh" size={28} color="#FFFFFF" />
+            <Text style={styles.placeholderText}>Tap to retry</Text>
+          </>
+        ) : (
+          <>
+            <Ionicons name="arrow-down-circle" size={36} color="#FFFFFF" />
+            <Text style={styles.placeholderText}>
+              {type === 'video' ? 'Tap to load video' : 'Tap to load'}
+            </Text>
+          </>
+        )}
+      </View>
+    </Pressable>
+  );
+
+  const renderSecurePlaceholder = (label: string) => (
+    <Pressable style={styles.container} onPress={handleDownloadTap}>
+      <View style={styles.securePlaceholderInner}>
+        {downloading ? (
+          <>
+            <ActivityIndicator size="small" color="#FFFFFF" />
+            <Text style={styles.placeholderTextSmall}>Loading…</Text>
+          </>
+        ) : downloadError ? (
+          <>
+            <Ionicons name="refresh" size={20} color="#FFFFFF" />
+            <Text style={styles.placeholderTextSmall}>Tap to retry</Text>
+          </>
+        ) : (
+          <>
+            <Ionicons name="arrow-down-circle" size={26} color="#FFFFFF" />
+            <Text style={styles.placeholderTextSmall}>{label}</Text>
+          </>
+        )}
+      </View>
+    </Pressable>
+  );
+
   // Legacy mode (DMs): simple tap-to-view
   if (!isSecureMode) {
+    if (gateActive && !isLoaded) {
+      return renderLegacyPlaceholder();
+    }
     return (
       <Pressable style={styles.legacyContainer} onPress={onPress}>
         <Image
-          source={{ uri: mediaUrl }}
+          source={{ uri: effectiveUri || mediaUrl }}
           style={styles.legacyThumbnail}
           contentFit="cover"
         />
@@ -143,6 +312,9 @@ export default function MediaMessage({
 
   // DM-SECURE-FIX: TAP-to-view mode - blurred thumbnail, opens on tap
   if (useTapMode) {
+    if (gateActive && !isLoaded) {
+      return renderSecurePlaceholder('Tap to load');
+    }
     const handleTap = () => {
       // Mark as viewed on tap
       if (!hasBeenViewed && messageId) {
@@ -160,7 +332,7 @@ export default function MediaMessage({
       <Pressable style={styles.container} onPress={handleTap}>
         {/* Media thumbnail - blurred for privacy */}
         <Image
-          source={{ uri: mediaUrl }}
+          source={{ uri: effectiveUri || mediaUrl }}
           style={styles.thumbnail}
           contentFit="cover"
           blurRadius={canBlur ? 25 : 0}
@@ -239,10 +411,16 @@ export default function MediaMessage({
     onPanResponderTerminationRequest: () => false,
   }), []);
 
+  // HOLD mode: when not yet downloaded, swap PanResponder for a tap-to-load
+  // placeholder so the hold gesture can never open an unloaded viewer.
+  if (gateActive && !isLoaded) {
+    return renderSecurePlaceholder('Tap to load');
+  }
+
   return (
     <View style={styles.container} {...panResponder.panHandlers}>
       <Image
-        source={{ uri: mediaUrl }}
+        source={{ uri: effectiveUri || mediaUrl }}
         style={styles.thumbnail}
         contentFit="cover"
         blurRadius={canBlur ? 25 : 0}
@@ -342,5 +520,33 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(0, 0, 0, 0.25)',
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LOAD-FIRST PLACEHOLDERS
+  // ═══════════════════════════════════════════════════════════════════════════
+  legacyPlaceholderInner: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.35)',
+    gap: 6,
+  },
+  securePlaceholderInner: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    gap: 4,
+  },
+  placeholderText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  placeholderTextSmall: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '600',
   },
 });

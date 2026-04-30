@@ -24,10 +24,16 @@
  * The actual media is rendered by Phase2ProtectedMediaViewer (modal); this
  * bubble is a chat-row tile that triggers the viewer via onPress.
  */
-import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, Pressable } from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { View, Text, StyleSheet, Pressable, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import {
+  getCachedMediaUri,
+  getMediaUri,
+  isMediaCachedOnDisk,
+  type MediaKind,
+} from '@/lib/mediaCache';
 
 const C = INCOGNITO_COLORS;
 
@@ -54,6 +60,22 @@ interface Phase2ProtectedMediaBubbleProps {
   protectedMediaTimer?: number; // seconds; 0 = view-once
   protectedMediaViewingMode?: 'tap' | 'hold';
   onOpen: () => void;
+  /**
+   * LOAD-FIRST (Phase-2): Remote URL of the secure media. When provided AND
+   * the receiver hasn't viewed yet, the card shows a tap-to-load arrow and
+   * downloads via mediaCache before transitioning to "Tap/Hold to view".
+   * Sender (isOwn) bypasses the gate — they can preview their own media
+   * immediately.
+   */
+  mediaUrl?: string;
+  /** Media kind, used to pick cache extension (defaults to image). */
+  mediaKind?: MediaKind;
+  /**
+   * Called after the cache download completes with the resolved local URI.
+   * Parents may keep this around to hand off to the viewer (avoiding a
+   * second fetch when the user finally opens the modal).
+   */
+  onDownloaded?: (localUri: string) => void;
 }
 
 export function Phase2ProtectedMediaBubble({
@@ -65,12 +87,61 @@ export function Phase2ProtectedMediaBubble({
   protectedMediaTimer,
   protectedMediaViewingMode,
   onOpen,
+  mediaUrl,
+  mediaKind = 'image',
+  onDownloaded,
 }: Phase2ProtectedMediaBubbleProps) {
   const state = useMemo<'expired' | 'viewing' | 'locked'>(() => {
     if (isExpired) return 'expired';
     if (viewedAt && timerEndsAt && timerEndsAt > Date.now()) return 'viewing';
     return 'locked';
   }, [isExpired, viewedAt, timerEndsAt]);
+
+  // LOAD-FIRST: receiver-only download gate. Sender bypasses (they may preview
+  // their own media without a network fetch — usually it's already on-device).
+  const isReceiver = !isOwn;
+  const remote = !!mediaUrl && (mediaUrl.startsWith('http://') || mediaUrl.startsWith('https://'));
+  const gateApplies = isReceiver && remote && state === 'locked';
+
+  const [cachedUri, setCachedUri] = useState<string | undefined>(
+    remote && mediaUrl ? getCachedMediaUri(mediaUrl) : undefined
+  );
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState(false);
+
+  // Detect on-disk cache (for cases where memory map was reset by app restart).
+  useEffect(() => {
+    if (!gateApplies || !mediaUrl) return;
+    if (cachedUri) return;
+    let cancelled = false;
+    (async () => {
+      const onDisk = await isMediaCachedOnDisk(mediaUrl, mediaKind);
+      if (cancelled) return;
+      if (onDisk) setCachedUri(getCachedMediaUri(mediaUrl));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [gateApplies, mediaUrl, mediaKind, cachedUri]);
+
+  const startDownload = async () => {
+    if (!mediaUrl || downloading) return;
+    setDownloading(true);
+    setDownloadError(false);
+    try {
+      const uri = await getMediaUri(mediaUrl, mediaKind);
+      if (!uri || uri === mediaUrl) {
+        setDownloadError(true);
+      } else {
+        setCachedUri(uri);
+        onDownloaded?.(uri);
+      }
+    } catch {
+      setDownloadError(true);
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   if (!isProtected) return null;
 
@@ -118,6 +189,41 @@ export function Phase2ProtectedMediaBubble({
           <Text style={styles.timerBadgeText}>{timerLabel}</Text>
         </View>
       </View>
+    );
+  }
+
+  // LOAD-FIRST: receiver-only first stage — show download arrow until tap,
+  // then a spinner during the cache download, then transition to the regular
+  // "Tap/Hold to view" tile. The download tap does NOT call onOpen, so the
+  // viewer doesn't open and no view is registered yet.
+  if (gateApplies && !cachedUri) {
+    return (
+      <Pressable
+        onPress={startDownload}
+        style={({ pressed }) => [...frameStyle, pressed && styles.cardPressed]}
+        accessibilityRole="button"
+        accessibilityLabel={downloadError ? 'Tap to retry download' : 'Tap to load secure photo'}
+      >
+        {downloading ? (
+          <>
+            <ActivityIndicator size="small" color="#FFFFFF" />
+            <Text style={styles.titleText}>Loading…</Text>
+          </>
+        ) : downloadError ? (
+          <>
+            <Ionicons name="refresh" size={20} color="#FFFFFF" />
+            <Text style={styles.titleText}>Tap to retry</Text>
+          </>
+        ) : (
+          <>
+            <Ionicons name="arrow-down-circle" size={22} color="#FFFFFF" />
+            <Text style={styles.titleText}>Tap to load</Text>
+          </>
+        )}
+        <View style={styles.timerBadge}>
+          <Text style={styles.timerBadgeText}>{timerLabel}</Text>
+        </View>
+      </Pressable>
     );
   }
 
