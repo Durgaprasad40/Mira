@@ -26,6 +26,20 @@ crons.interval(
   internal.protectedMedia.cleanupExpiredMedia
 );
 
+// Phase-2 Messages secure media: backend enforcement of expiry for
+// `privateMessages` rows. Mirrors the Phase-1 cron above but operates
+// strictly on Phase-2 tables (privateMessages) and Phase-2 storage blobs —
+// Phase-1 tables (media/mediaPermissions) are NEVER touched here. Sweeps any
+// protected privateMessage whose `timerEndsAt` has elapsed (or whose
+// `isExpired` was already flipped by the client), deletes its storage blob,
+// and clears `imageStorageId` so subsequent `getPrivateMessages` queries
+// can never re-issue a playable URL.
+crons.interval(
+  'cleanup-expired-private-protected-media',
+  { minutes: 1 },
+  internal.privateConversations.cleanupExpiredPrivateProtectedMedia
+);
+
 // 8C: Cleanup verification photos older than 90 days (daily at 3:00 AM UTC)
 crons.daily(
   'cleanup-verification-photos',

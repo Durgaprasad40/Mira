@@ -9,7 +9,7 @@
  */
 
 import { v } from 'convex/values';
-import { query, mutation, internalQuery, MutationCtx, QueryCtx } from './_generated/server';
+import { query, mutation, internalMutation, internalQuery, MutationCtx, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { validateSessionToken, resolveUserIdByAuthId, getPhase2DisplayName } from './helpers';
 import { shouldCreatePhase2PrivateMessagesNotification } from './phase2NotificationPrefs';
@@ -396,6 +396,12 @@ export const getPrivateMessages = query({
     );
     const imageUrlMap = new Map(imageStorageIds.map((id, i) => [id as string, imageUrls[i]]));
 
+    // PHASE-2 SECURE-MEDIA EXPIRY GATE: backend-derived expiry used to redact
+    // playable URLs even when the frontend hasn't yet flipped `isExpired`.
+    // Mirrors Phase-1 `getMediaUrl` which returns `{ url: null, isExpired: true }`
+    // once the deadline passes. Belt-and-braces with the cron sweep below.
+    const nowMs = Date.now();
+
     // Return in chronological order with media URLs resolved
     return messages.reverse().map((m) => {
       const shouldHideReadAt =
@@ -423,16 +429,26 @@ export const getPrivateMessages = query({
 
       // P1-001: Protected media messages: include image URL and metadata
       if (m.isProtected && m.imageStorageId) {
+        // PHASE-2 SECURE-MEDIA EXPIRY GATE: derive expiry from `isExpired`
+        // (frontend-flipped) OR from `timerEndsAt <= now` (deadline elapsed
+        // even if the client never round-tripped). When expired, never expose
+        // the playable storage URL — the client will render the "Expired"
+        // state via Phase2ProtectedMediaBubble (`isExpired` branch).
+        const timerEnded =
+          typeof m.timerEndsAt === 'number' && m.timerEndsAt <= nowMs;
+        const derivedExpired = !!m.isExpired || timerEnded;
         return {
           ...baseMessage,
           isProtected: true,
-          imageUrl: imageUrlMap.get(m.imageStorageId as string) ?? null,
+          imageUrl: derivedExpired
+            ? null
+            : imageUrlMap.get(m.imageStorageId as string) ?? null,
           protectedMediaTimer: m.protectedMediaTimer,
           protectedMediaViewingMode: m.protectedMediaViewingMode,
           protectedMediaIsMirrored: m.protectedMediaIsMirrored,
           viewedAt: m.viewedAt,
           timerEndsAt: m.timerEndsAt,
-          isExpired: m.isExpired,
+          isExpired: derivedExpired,
         };
       }
 
@@ -1400,6 +1416,100 @@ export const markPrivateSecureMediaExpired = mutation({
     });
 
     return { success: true };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE-2 PARITY: Backend cron sweep for expired secure media
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Internal cron-driven sweep that enforces Phase-2 secure-media expiry on the
+ * backend (i.e. independent of any frontend timer). Mirrors the Phase-1
+ * `protectedMedia.cleanupExpiredMedia` cron but operates STRICTLY on Phase-2
+ * tables: only `privateMessages` rows are read/patched, and only their own
+ * `imageStorageId` blob is deleted from storage. Phase-1 tables (`media`,
+ * `mediaPermissions`) are NEVER touched here.
+ *
+ * Eligibility (per row):
+ *   - `isProtected === true`
+ *   - `imageStorageId` still set (i.e. not already redacted)
+ *   - either `isExpired === true` (frontend already flipped) OR
+ *     `timerEndsAt !== undefined && timerEndsAt <= now` (deadline elapsed).
+ *
+ * Action:
+ *   - delete the storage blob (best-effort; cron will retry next minute)
+ *   - patch the message: clear `imageStorageId`, set `isExpired = true`.
+ *
+ * The message row itself is intentionally retained so the chat history stays
+ * chronologically consistent and the recipient sees the "Expired" placeholder
+ * card; user-initiated removal still flows through the existing
+ * `cleanupExpiredPrivateMessage` (which hard-deletes the row).
+ *
+ * Wired from `convex/crons.ts` at 1-minute interval, satisfying the
+ * "within ~1 minute after expiry" cleanup expectation for Phase-2.
+ */
+export const cleanupExpiredPrivateProtectedMedia = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const messages = await ctx.db.query('privateMessages').collect();
+
+    let scannedCount = 0;
+    let redactedCount = 0;
+    let storageDeletedCount = 0;
+    let storageDeleteFailures = 0;
+
+    for (const m of messages) {
+      if (!m.isProtected) continue;
+      if (!m.imageStorageId) continue; // already redacted in a previous sweep
+      scannedCount += 1;
+
+      const timerEnded =
+        typeof m.timerEndsAt === 'number' && m.timerEndsAt <= now;
+      const eligible = !!m.isExpired || timerEnded;
+      if (!eligible) continue;
+
+      // Best-effort storage deletion; mirrors Phase-1 finalizeExpiredMedia.
+      try {
+        await ctx.storage.delete(m.imageStorageId);
+        storageDeletedCount += 1;
+      } catch (e) {
+        storageDeleteFailures += 1;
+        console.warn(
+          '[cleanupExpiredPrivateProtectedMedia] storage.delete failed',
+          {
+            messageId: (m._id as string)?.slice(-8),
+            error: String((e as any)?.message ?? e),
+          }
+        );
+      }
+
+      // Redact the message: clear blob reference and mark expired so the
+      // query never resolves a URL for this row again.
+      await ctx.db.patch(m._id, {
+        imageStorageId: undefined,
+        isExpired: true,
+      });
+      redactedCount += 1;
+    }
+
+    if (redactedCount > 0 || storageDeleteFailures > 0) {
+      console.log('[cleanupExpiredPrivateProtectedMedia] sweep complete', {
+        scannedCount,
+        redactedCount,
+        storageDeletedCount,
+        storageDeleteFailures,
+      });
+    }
+
+    return {
+      success: true,
+      scannedCount,
+      redactedCount,
+      storageDeletedCount,
+      storageDeleteFailures,
+    };
   },
 });
 
