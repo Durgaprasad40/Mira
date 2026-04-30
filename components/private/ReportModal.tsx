@@ -1,6 +1,10 @@
 /**
- * Phase 2 Report/Block/Leave Modal
- * PHASE 1 PARITY: Full backend integration for moderation actions
+ * Phase 2 Report/Block/Unmatch Modal
+ *
+ * MENU-CLEANUP: Final user-facing actions only — Unmatch / Block / Report /
+ * Scam / Cancel. Report sub-view exposes 4 reasons (no Spam, no Other).
+ * Scam is a frontend-only quick action that maps to backend
+ * `reportUser({ reason: 'other', description: 'Scam/fraudulent behavior' })`.
  */
 import React, { useState } from 'react';
 import {
@@ -10,7 +14,6 @@ import {
   Modal,
   TouchableOpacity,
   Alert,
-  TextInput,
   ActivityIndicator,
   Keyboard,
 } from 'react-native';
@@ -22,18 +25,16 @@ import { Toast } from '@/components/ui/Toast';
 import { trackEvent } from '@/lib/analytics';
 import { useAuthStore } from '@/stores/authStore';
 
-// Report reasons matching backend schema
+// MENU-CLEANUP: Final 4 report reasons only.
 const REPORT_REASONS = [
-  { id: 'inappropriate_photos', label: 'Inappropriate content', icon: 'warning-outline' as const },
-  { id: 'harassment', label: 'Harassment or bullying', icon: 'hand-left-outline' as const },
-  { id: 'spam', label: 'Spam or scam', icon: 'megaphone-outline' as const },
   { id: 'fake_profile', label: 'Fake profile', icon: 'person-remove-outline' as const },
-  { id: 'underage', label: 'Underage user', icon: 'alert-circle-outline' as const },
-  { id: 'other', label: 'Other', icon: 'ellipsis-horizontal' as const },
+  { id: 'inappropriate_photos', label: 'Inappropriate photos', icon: 'warning-outline' as const },
+  { id: 'harassment', label: 'Harassment', icon: 'hand-left-outline' as const },
+  { id: 'underage', label: 'Underage', icon: 'alert-circle-outline' as const },
 ] as const;
 
 type ReportReason = typeof REPORT_REASONS[number]['id'];
-type ViewState = 'main' | 'report' | 'other';
+type ViewState = 'main' | 'report';
 
 interface ReportModalProps {
   visible: boolean;
@@ -44,6 +45,7 @@ interface ReportModalProps {
   conversationId?: string;
   onClose: () => void;
   onBlockSuccess?: () => void;
+  // Fired on successful Unmatch (kept name for backwards compat with callers)
   onLeaveSuccess?: () => void;
   // Legacy callbacks for backward compatibility (used when targetUserId/authToken not provided)
   onReport?: (reason: string) => void;
@@ -68,19 +70,18 @@ export function ReportModal({
   // Determine if we have full backend integration or using legacy mode
   const hasBackendIntegration = !!(targetUserId && (authToken || userId));
   const [viewState, setViewState] = useState<ViewState>('main');
-  const [otherReason, setOtherReason] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  // Backend mutations (same as Phase 1)
+  // Backend mutations (Phase-2 isolation: privateSwipes / privateConversations
+  // for the match graph; api.users for shared block/report tables).
   const blockMutation = useMutation(api.users.blockUser);
   const reportMutation = useMutation(api.users.reportUser);
-  // Leave conversation mutation (backend-backed, not local-only)
+  const unmatchPrivateMutation = useMutation(api.privateSwipes.unmatchPrivate);
   const leaveMutation = useMutation(api.privateConversations.leavePrivateConversation);
 
   // Track action with analytics
   type ChatActionType = 'unmatch' | 'uncrush' | 'block' | 'report' | 'spam' | 'scam' | 'inappropriate' | 'other';
   const logAction = (action: string, reason?: string) => {
-    // Only track recognized actions
     const validActions: ChatActionType[] = ['unmatch', 'uncrush', 'block', 'report', 'spam', 'scam', 'inappropriate', 'other'];
     if (validActions.includes(action as ChatActionType) && targetUserId) {
       trackEvent({
@@ -103,7 +104,6 @@ export function ReportModal({
   const resetAndClose = () => {
     Keyboard.dismiss();
     setViewState('main');
-    setOtherReason('');
     setIsLoading(false);
     onClose();
   };
@@ -160,50 +160,63 @@ export function ReportModal({
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // UNCRUSH: Backend-backed removal (Phase 1 parity)
-  // Persists to backend so conversation won't reappear after refresh
+  // UNMATCH: Phase-2 Unmatch path. Calls api.privateSwipes.unmatchPrivate to
+  // flip privateMatches.isActive=false + caller's participantState.isHidden
+  // true, then best-effort leavePrivateConversation so the row drops off the
+  // chat list immediately. Phase-1 tables are NEVER touched.
   // ═══════════════════════════════════════════════════════════════════════════
-  const handleUncrush = () => {
+  const handleUnmatch = () => {
     Alert.alert(
-      'Uncrush',
-      `Are you sure you want to remove your crush on ${targetName}?`,
+      'Unmatch?',
+      `This will remove your match and close the conversation with ${targetName}.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Yes',
+          text: 'Unmatch',
+          style: 'destructive',
           onPress: async () => {
-            logAction('uncrush');
+            logAction('unmatch');
             setIsLoading(true);
 
             try {
-              // Get auth token for backend mutation
-              const { useAuthStore } = await import('@/stores/authStore');
-              const token = useAuthStore.getState().token;
-
-              if (!token || !conversationId) {
+              if (!userId || !conversationId) {
                 throw new Error('Missing authentication or conversation ID');
               }
 
-              // Call backend mutation to persist the leave action
-              const result = await leaveMutation({
-                token,
+              const result = await unmatchPrivateMutation({
+                authUserId: userId,
                 conversationId: conversationId as any,
               });
 
-              if (!result.success) {
-                throw new Error(result.error || 'Failed to remove crush');
+              if (!result?.success) {
+                throw new Error((result as any)?.error || 'Failed to unmatch');
+              }
+
+              // Best-effort hide via leavePrivateConversation so the chat list
+              // drops the row immediately (unmatch already flipped isActive).
+              try {
+                const { useAuthStore } = await import('@/stores/authStore');
+                const token = useAuthStore.getState().token;
+                if (token) {
+                  await leaveMutation({
+                    token,
+                    conversationId: conversationId as any,
+                  });
+                }
+              } catch {
+                // best-effort
               }
 
               // Also remove from local store for immediate UI feedback
               const { usePrivateChatStore } = await import('@/stores/privateChatStore');
               usePrivateChatStore.getState().removeConversation(conversationId);
 
-              Toast.show(`Removed crush on ${targetName}`);
+              Toast.show(`Unmatched with ${targetName}`);
               resetAndClose();
               onLeaveSuccess?.();
             } catch (error: any) {
               setIsLoading(false);
-              Alert.alert('Error', error.message || 'Failed to remove crush.');
+              Alert.alert('Error', error.message || 'Failed to unmatch.');
             }
           },
         },
@@ -215,11 +228,6 @@ export function ReportModal({
   // REPORT: Persist to backend with reason (Phase 1 parity) or use legacy callback
   // ═══════════════════════════════════════════════════════════════════════════
   const handleReportReason = async (reasonId: ReportReason) => {
-    if (reasonId === 'other') {
-      setViewState('other');
-      return;
-    }
-
     // Legacy mode: use callback if no backend integration
     if (!hasBackendIntegration) {
       onReport?.(reasonId);
@@ -251,23 +259,21 @@ export function ReportModal({
     }
   };
 
-  // Submit "Other" reason with description
-  const handleOtherSubmit = async () => {
-    const trimmed = otherReason.trim();
-    if (!trimmed) {
-      Alert.alert('Required', 'Please enter a reason');
-      return;
-    }
-
-    // Legacy mode: use callback if no backend integration
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SCAM: Frontend-only quick action. Maps to backend `reason: 'other'` +
+  // description so no new backend literal is required. Moderators see the
+  // descriptive label in the audit row.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const handleScam = async () => {
+    // Legacy mode: surface as a generic report callback
     if (!hasBackendIntegration) {
-      onReport?.(`other: ${trimmed}`);
-      Toast.show('Report submitted. Thank you.');
+      onReport?.('scam');
+      Toast.show('Reported as scam');
       resetAndClose();
       return;
     }
 
-    logAction('report', `other: ${trimmed}`);
+    logAction('scam');
     setIsLoading(true);
 
     try {
@@ -280,10 +286,10 @@ export function ReportModal({
         authUserId: userId,
         reportedUserId: targetUserId as any,
         reason: 'other',
-        description: trimmed,
+        description: 'Scam/fraudulent behavior',
       });
 
-      Toast.show('Report submitted. Thank you.');
+      Toast.show('Reported as scam');
       resetAndClose();
     } catch (error: any) {
       setIsLoading(false);
@@ -293,16 +299,13 @@ export function ReportModal({
 
   const handleBack = () => {
     Keyboard.dismiss();
-    if (viewState === 'other') {
-      setOtherReason('');
-      setViewState('report');
-    } else if (viewState === 'report') {
+    if (viewState === 'report') {
       setViewState('main');
     }
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // RENDER: Main action menu
+  // RENDER: Main action menu — Unmatch / Block / Report / Scam / Cancel
   // ═══════════════════════════════════════════════════════════════════════════
   const renderMain = () => (
     <View style={styles.content}>
@@ -313,17 +316,16 @@ export function ReportModal({
         </TouchableOpacity>
       </View>
 
-      {/* Uncrush - only shown for private chats (with backend integration) */}
-      {/* PHASE 1 PARITY: Match wording and behavior */}
+      {/* Unmatch — only shown for matched/private chats with backend wiring */}
       {hasBackendIntegration && (
         <>
-          <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>
+          <TouchableOpacity style={styles.actionRow} onPress={handleUnmatch}>
             <View style={[styles.actionIcon, { backgroundColor: C.surface }]}>
-              <Ionicons name="heart-dislike-outline" size={20} color={C.textLight} />
+              <Ionicons name="close-circle-outline" size={20} color={C.textLight} />
             </View>
             <View style={styles.actionInfo}>
-              <Text style={styles.actionText}>Uncrush</Text>
-              <Text style={styles.actionHint}>Remove from Deep Connect</Text>
+              <Text style={styles.actionText}>Unmatch</Text>
+              <Text style={styles.actionHint}>Remove match and conversation</Text>
             </View>
           </TouchableOpacity>
 
@@ -344,7 +346,7 @@ export function ReportModal({
 
       <View style={styles.divider} />
 
-      {/* Report */}
+      {/* Report — opens 4-reason picker */}
       <TouchableOpacity style={styles.actionRow} onPress={() => setViewState('report')}>
         <View style={[styles.actionIcon, { backgroundColor: '#FF950020' }]}>
           <Ionicons name="flag-outline" size={20} color="#FF9500" />
@@ -356,6 +358,19 @@ export function ReportModal({
         <Ionicons name="chevron-forward" size={18} color={C.textLight} />
       </TouchableOpacity>
 
+      <View style={styles.divider} />
+
+      {/* Scam — frontend-only quick action */}
+      <TouchableOpacity style={styles.actionRow} onPress={handleScam}>
+        <View style={[styles.actionIcon, { backgroundColor: C.surface }]}>
+          <Ionicons name="alert-circle-outline" size={20} color={C.textLight} />
+        </View>
+        <View style={styles.actionInfo}>
+          <Text style={styles.actionText}>Scam</Text>
+          <Text style={styles.actionHint}>Report fraudulent behavior</Text>
+        </View>
+      </TouchableOpacity>
+
       <TouchableOpacity style={styles.cancelButton} onPress={resetAndClose}>
         <Text style={styles.cancelText}>Cancel</Text>
       </TouchableOpacity>
@@ -363,7 +378,7 @@ export function ReportModal({
   );
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // RENDER: Report reasons list
+  // RENDER: Report reasons list — MENU-CLEANUP: 4 reasons only
   // ═══════════════════════════════════════════════════════════════════════════
   const renderReportReasons = () => (
     <View style={styles.content}>
@@ -389,10 +404,7 @@ export function ReportModal({
               <Ionicons name={reason.icon} size={18} color={C.textLight} />
             </View>
             <Text style={styles.actionText}>{reason.label}</Text>
-            {reason.id === 'other' && (
-              <Ionicons name="chevron-forward" size={18} color={C.textLight} />
-            )}
-            {isLoading && reason.id !== 'other' && (
+            {isLoading && (
               <ActivityIndicator size="small" color={C.primary} />
             )}
           </TouchableOpacity>
@@ -405,61 +417,11 @@ export function ReportModal({
     </View>
   );
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // RENDER: Other reason text input
-  // ═══════════════════════════════════════════════════════════════════════════
-  const renderOtherInput = () => (
-    <View style={styles.content}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={handleBack} hitSlop={8}>
-          <Ionicons name="chevron-back" size={24} color={C.text} />
-        </TouchableOpacity>
-        <Text style={styles.title}>Other Reason</Text>
-        <View style={{ width: 24 }} />
-      </View>
-
-      <Text style={styles.subtitle}>Please describe the issue</Text>
-
-      <TextInput
-        style={styles.otherInput}
-        placeholder="Enter your reason..."
-        placeholderTextColor={C.textLight}
-        value={otherReason}
-        onChangeText={setOtherReason}
-        multiline
-        maxLength={300}
-        autoFocus
-        editable={!isLoading}
-      />
-
-      <Text style={styles.charCount}>{otherReason.length}/300</Text>
-
-      <View style={styles.otherButtons}>
-        <TouchableOpacity style={styles.otherCancelBtn} onPress={handleBack}>
-          <Text style={styles.otherCancelText}>Back</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.otherSubmitBtn, (!otherReason.trim() || isLoading) && styles.otherSubmitDisabled]}
-          onPress={handleOtherSubmit}
-          disabled={!otherReason.trim() || isLoading}
-        >
-          {isLoading ? (
-            <ActivityIndicator size="small" color="#FFFFFF" />
-          ) : (
-            <Text style={styles.otherSubmitText}>Submit Report</Text>
-          )}
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-
   // Render current view
   const renderCurrentView = () => {
     switch (viewState) {
       case 'report':
         return renderReportReasons();
-      case 'other':
-        return renderOtherInput();
       default:
         return renderMain();
     }
@@ -471,9 +433,7 @@ export function ReportModal({
       transparent
       animationType="slide"
       onRequestClose={() => {
-        if (viewState === 'other') {
-          handleBack();
-        } else if (viewState === 'report') {
+        if (viewState === 'report') {
           handleBack();
         } else {
           resetAndClose();
@@ -595,57 +555,5 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: C.textLight,
     fontWeight: '500',
-  },
-  // Other input styles
-  otherInput: {
-    borderWidth: 1,
-    borderColor: C.surface,
-    borderRadius: 12,
-    padding: 12,
-    fontSize: 14,
-    color: C.text,
-    minHeight: 100,
-    maxHeight: 150,
-    textAlignVertical: 'top',
-    backgroundColor: C.surface,
-  },
-  charCount: {
-    fontSize: 12,
-    color: C.textLight,
-    textAlign: 'right',
-    marginTop: 4,
-    marginBottom: 16,
-  },
-  otherButtons: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  otherCancelBtn: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: C.surface,
-    alignItems: 'center',
-  },
-  otherCancelText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: C.textLight,
-  },
-  otherSubmitBtn: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 20,
-    backgroundColor: C.primary,
-    alignItems: 'center',
-  },
-  otherSubmitDisabled: {
-    opacity: 0.5,
-  },
-  otherSubmitText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#FFFFFF',
   },
 });

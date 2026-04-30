@@ -5,7 +5,6 @@ import {
   StyleSheet,
   TouchableOpacity,
   Modal,
-  TextInput,
   Alert,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -29,7 +28,29 @@ interface Props {
   onUnmatchSuccess?: () => void;
 }
 
-type ActionType = 'unmatch' | 'uncrush' | 'block' | 'report' | 'spam' | 'scam' | 'other';
+// MENU-CLEANUP: Final user-facing actions only — Unmatch / Block / Report / Scam.
+// (Spam, Other, Uncrush rows removed.)
+type ActionType = 'unmatch' | 'block' | 'report' | 'scam';
+
+// MENU-CLEANUP: Final 4 report reasons only.
+type ReportReasonId =
+  | 'fake_profile'
+  | 'inappropriate_photos'
+  | 'harassment'
+  | 'underage';
+
+const REPORT_REASONS: ReadonlyArray<{
+  id: ReportReasonId;
+  label: string;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+}> = [
+  { id: 'fake_profile', label: 'Fake profile', icon: 'person-remove-outline' },
+  { id: 'inappropriate_photos', label: 'Inappropriate photos', icon: 'warning-outline' },
+  { id: 'harassment', label: 'Harassment', icon: 'hand-left-outline' },
+  { id: 'underage', label: 'Underage', icon: 'alert-circle-outline' },
+];
+
+type ViewState = 'main' | 'report';
 
 export function ReportBlockModal({
   visible,
@@ -42,8 +63,7 @@ export function ReportBlockModal({
   onBlockSuccess,
   onUnmatchSuccess,
 }: Props) {
-  const [showOtherInput, setShowOtherInput] = useState(false);
-  const [otherReason, setOtherReason] = useState("");
+  const [viewState, setViewState] = useState<ViewState>('main');
 
   const blockMutation = useMutation(api.users.blockUser);
   const reportMutation = useMutation(api.users.reportUser);
@@ -70,8 +90,7 @@ export function ReportBlockModal({
   };
 
   const resetAndClose = () => {
-    setShowOtherInput(false);
-    setOtherReason("");
+    setViewState('main');
     onClose();
   };
 
@@ -120,28 +139,6 @@ export function ReportBlockModal({
     );
   };
 
-  // Uncrush: confirm dialog then remove like
-  const handleUncrush = () => {
-    Alert.alert(
-      "Uncrush",
-      `Are you sure you want to remove your crush on ${reportedUserName}?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Yes",
-          onPress: () => {
-            logAction('uncrush');
-            if (isDemoMode) {
-              useDemoStore.getState().removeLike(reportedUserId);
-            }
-            Toast.show(`Removed crush on ${reportedUserName}`);
-            resetAndClose();
-          },
-        },
-      ]
-    );
-  };
-
   // Block: keep existing behavior
   const handleBlock = async () => {
     logAction('block');
@@ -166,9 +163,9 @@ export function ReportBlockModal({
     }
   };
 
-  // Report: submit to backend
-  const handleReport = async () => {
-    logAction('report');
+  // Report reason: submit selected category to backend
+  const handleReportReason = async (reason: ReportReasonId) => {
+    logAction('report', reason);
     if (isDemoMode) {
       Toast.show("Report submitted");
       resetAndClose();
@@ -179,7 +176,7 @@ export function ReportBlockModal({
       await reportMutation({
         authUserId: currentUserId,
         reportedUserId: reportedUserId as any,
-        reason: 'inappropriate_photos',
+        reason,
       });
       Toast.show("Report submitted");
       resetAndClose();
@@ -188,29 +185,9 @@ export function ReportBlockModal({
     }
   };
 
-  // Spam: submit to backend
-  const handleSpam = async () => {
-    logAction('spam');
-    if (isDemoMode) {
-      Toast.show("Marked as spam");
-      resetAndClose();
-      return;
-    }
-
-    try {
-      await reportMutation({
-        authUserId: currentUserId,
-        reportedUserId: reportedUserId as any,
-        reason: 'spam',
-      });
-      Toast.show("Marked as spam");
-      resetAndClose();
-    } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to submit report.");
-    }
-  };
-
-  // Scam: submit to backend (maps to 'other' with description)
+  // Scam: frontend-only mapping to backend `other` reason with description.
+  // No new backend literal is added — the `reports` audit row just records
+  // `reason: 'other'` + description so moderators can see the user-facing label.
   const handleScam = async () => {
     logAction('scam');
     if (isDemoMode) {
@@ -233,46 +210,7 @@ export function ReportBlockModal({
     }
   };
 
-  // Other: open text input modal
-  const handleOtherPress = () => {
-    setShowOtherInput(true);
-  };
-
-  // Submit Other reason
-  const handleOtherSubmit = async () => {
-    const trimmed = otherReason.trim();
-    if (!trimmed) {
-      Alert.alert("Required", "Please enter a reason");
-      return;
-    }
-    logAction('other', trimmed);
-
-    if (isDemoMode) {
-      Toast.show("Feedback submitted");
-      resetAndClose();
-      return;
-    }
-
-    try {
-      await reportMutation({
-        authUserId: currentUserId,
-        reportedUserId: reportedUserId as any,
-        reason: 'other',
-        description: trimmed,
-      });
-      Toast.show("Feedback submitted");
-      resetAndClose();
-    } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to submit report.");
-    }
-  };
-
-  const handleOtherCancel = () => {
-    setShowOtherInput(false);
-    setOtherReason("");
-  };
-
-  // Main action sheet
+  // Main action sheet — Unmatch / Block / Report / Scam / Cancel
   const renderMain = () => (
     <View style={styles.content}>
       {/* Unmatch - only show if there's a matchId (matched users) */}
@@ -286,17 +224,6 @@ export function ReportBlockModal({
         </>
       )}
 
-      {isDemoMode && (
-        <>
-          <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>
-            <Ionicons name="heart-dislike-outline" size={20} color={COLORS.textLight} />
-            <Text style={styles.actionText}>Uncrush</Text>
-          </TouchableOpacity>
-
-          <View style={styles.divider} />
-        </>
-      )}
-
       {/* Block */}
       <TouchableOpacity style={styles.actionRow} onPress={handleBlock}>
         <Ionicons name="ban" size={20} color={COLORS.error} />
@@ -305,34 +232,20 @@ export function ReportBlockModal({
 
       <View style={styles.divider} />
 
-      {/* Report */}
-      <TouchableOpacity style={styles.actionRow} onPress={handleReport}>
+      {/* Report — opens reason picker */}
+      <TouchableOpacity style={styles.actionRow} onPress={() => setViewState('report')}>
         <Ionicons name="flag-outline" size={20} color={COLORS.warning} />
         <Text style={[styles.actionText, { color: COLORS.warning }]}>Report</Text>
+        <View style={{ flex: 1 }} />
+        <Ionicons name="chevron-forward" size={18} color={COLORS.textLight} />
       </TouchableOpacity>
 
       <View style={styles.divider} />
 
-      {/* Spam */}
-      <TouchableOpacity style={styles.actionRow} onPress={handleSpam}>
-        <Ionicons name="megaphone-outline" size={20} color={COLORS.textLight} />
-        <Text style={styles.actionText}>Spam</Text>
-      </TouchableOpacity>
-
-      <View style={styles.divider} />
-
-      {/* Scam */}
+      {/* Scam — quick action, frontend-only mapping to other+description */}
       <TouchableOpacity style={styles.actionRow} onPress={handleScam}>
         <Ionicons name="alert-circle-outline" size={20} color={COLORS.textLight} />
         <Text style={styles.actionText}>Scam</Text>
-      </TouchableOpacity>
-
-      <View style={styles.divider} />
-
-      {/* Other */}
-      <TouchableOpacity style={styles.actionRow} onPress={handleOtherPress}>
-        <Ionicons name="ellipsis-horizontal" size={20} color={COLORS.textLight} />
-        <Text style={styles.actionText}>Other</Text>
       </TouchableOpacity>
 
       {/* Cancel */}
@@ -342,35 +255,33 @@ export function ReportBlockModal({
     </View>
   );
 
-  // Other input modal (nested within the same overlay)
-  const renderOtherInput = () => (
-    <View style={styles.otherInputContainer}>
-      <Text style={styles.otherTitle}>Tell us more</Text>
-      <TextInput
-        style={styles.otherInput}
-        placeholder="Enter your reason..."
-        placeholderTextColor={COLORS.textMuted}
-        value={otherReason}
-        onChangeText={setOtherReason}
-        multiline
-        maxLength={300}
-        autoFocus
-        autoComplete="off"
-        textContentType="none"
-        importantForAutofill="noExcludeDescendants"
-      />
-      <View style={styles.otherButtons}>
-        <TouchableOpacity style={styles.otherCancelBtn} onPress={handleOtherCancel}>
-          <Text style={styles.otherCancelText}>Cancel</Text>
+  // Report reason sub-view — 4 reasons (no Spam, no Other)
+  const renderReportReasons = () => (
+    <View style={styles.content}>
+      <View style={styles.reportHeader}>
+        <TouchableOpacity onPress={() => setViewState('main')} hitSlop={8}>
+          <Ionicons name="chevron-back" size={22} color={COLORS.text} />
         </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.otherSubmitBtn, !otherReason.trim() && styles.otherSubmitDisabled]}
-          onPress={handleOtherSubmit}
-          disabled={!otherReason.trim()}
-        >
-          <Text style={styles.otherSubmitText}>Submit</Text>
-        </TouchableOpacity>
+        <Text style={styles.reportTitle}>Report {reportedUserName}</Text>
+        <View style={{ width: 22 }} />
       </View>
+
+      {REPORT_REASONS.map((reason, index) => (
+        <React.Fragment key={reason.id}>
+          {index > 0 && <View style={styles.divider} />}
+          <TouchableOpacity
+            style={styles.actionRow}
+            onPress={() => handleReportReason(reason.id)}
+          >
+            <Ionicons name={reason.icon} size={20} color={COLORS.textLight} />
+            <Text style={styles.actionText}>{reason.label}</Text>
+          </TouchableOpacity>
+        </React.Fragment>
+      ))}
+
+      <TouchableOpacity style={styles.cancelButton} onPress={resetAndClose}>
+        <Text style={styles.cancelText}>Cancel</Text>
+      </TouchableOpacity>
     </View>
   );
 
@@ -393,7 +304,7 @@ export function ReportBlockModal({
           onPress={() => {}}
         >
           <View style={styles.handle} />
-          {showOtherInput ? renderOtherInput() : renderMain()}
+          {viewState === 'report' ? renderReportReasons() : renderMain()}
         </TouchableOpacity>
       </TouchableOpacity>
     </Modal>
@@ -470,60 +381,19 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: COLORS.textLight,
   },
-  // Other input styles
-  otherInputContainer: {
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 8,
-  },
-  otherTitle: {
-    fontSize: 17,
-    fontWeight: "600",
-    color: COLORS.text,
-    textAlign: "center",
-    marginBottom: 12,
-  },
-  otherInput: {
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 12,
-    padding: 12,
-    fontSize: 15,
-    color: COLORS.text,
-    minHeight: 80,
-    textAlignVertical: "top",
-    marginBottom: 16,
-  },
-  otherButtons: {
+  // Report sub-view header
+  reportHeader: {
     flexDirection: "row",
-    gap: 12,
-  },
-  otherCancelBtn: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: COLORS.border,
     alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 8,
+    marginBottom: 4,
   },
-  otherCancelText: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: COLORS.textLight,
-  },
-  otherSubmitBtn: {
+  reportTitle: {
     flex: 1,
-    paddingVertical: 12,
-    borderRadius: 20,
-    backgroundColor: COLORS.primary,
-    alignItems: "center",
-  },
-  otherSubmitDisabled: {
-    opacity: 0.5,
-  },
-  otherSubmitText: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: COLORS.white,
+    textAlign: "center",
+    fontSize: 16,
+    fontWeight: "700",
+    color: COLORS.text,
   },
 });
