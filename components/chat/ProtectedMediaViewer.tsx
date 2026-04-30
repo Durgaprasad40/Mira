@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Dimensions,
   Platform,
+  BackHandler,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Video, ResizeMode, AVPlaybackStatus } from 'expo-av';
@@ -213,6 +214,21 @@ export function ProtectedMediaViewer({
     hasExpired.current = false; // Reset for next open
     onClose();
   }, [mediaData, messageId, userId, markExpired, onClose, isSender]);
+
+  // P1_SECURE_BACK: Android hardware back must close the secure viewer (and
+  // funnel through handleClose so view-once expiry / timer cleanup runs)
+  // instead of falling through to the screen-level BackHandler that would
+  // exit the entire chat. Mirrors Phase-2 Phase2ProtectedMediaViewer.tsx
+  // back-handler pattern. Registered only while the viewer is visible so it
+  // does not steal back presses when the modal is dismissed.
+  useEffect(() => {
+    if (!visible) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleClose();
+      return true;
+    });
+    return () => sub.remove();
+  }, [visible, handleClose]);
 
   // SECURE-REWRITE: Process mediaData and set viewerState
   // Only transition state when data arrives; image load callback handles 'ready'
@@ -448,7 +464,17 @@ export function ProtectedMediaViewer({
   if (!visible) return null;
 
   return (
-    <Modal visible={visible} transparent animationType="fade">
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      // P1_SECURE_BACK: Modal-level Android back handler. React Native fires
+      // onRequestClose for hardware back / system gesture even when the
+      // BackHandler subscription order is awkward; routing through the same
+      // handleClose funnel guarantees view-once expiry and timer cleanup
+      // always run before the modal unmounts.
+      onRequestClose={handleClose}
+    >
       <View
         style={styles.container}
         // HOLD-MODE-FIX: Detect touch end to close viewer when finger is released
