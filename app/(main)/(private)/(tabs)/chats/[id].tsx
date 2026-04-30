@@ -34,7 +34,6 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  Pressable,
   Alert,
   KeyboardAvoidingView,
   Platform,
@@ -65,7 +64,6 @@ import {
 import { Phase2ProtectedMediaBubble } from '@/components/private/Phase2ProtectedMediaBubble';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
 import { popHandoff } from '@/lib/memoryHandoff';
-import { formatTime } from '@/utils/chatTime';
 
 const C = INCOGNITO_COLORS;
 
@@ -1124,153 +1122,78 @@ export default function Phase2ChatThread() {
       const next = messageList[index + 1];
       const isLastInGroup = !next || next.senderId !== item.senderId;
 
-      // SECURE-MEDIA OPEN FIX:
-      // Phase-2 protected media must be rendered via Phase-2 components,
-      // NOT via the locked Phase-1 MessageBubble. The Phase-1 bubble routes
-      // protected media through ProtectedMediaBubble which queries
-      // api.media.* / api.protectedMedia.* — those tables don't exist for
-      // Phase-2 (Phase-2 stores media on the privateMessages doc and
-      // resolves URLs in api.privateConversations.getPrivateMessages).
-      // Bypassing MessageBubble for `isProtected` lets Phase2ProtectedMediaBubble
-      // render the locked-state tile and Phase2ProtectedMediaViewer handle
-      // the open / countdown / mark-viewed / mark-expired lifecycle via
-      // api.privateConversations.markPrivateSecureMediaViewed and
-      // api.privateConversations.markPrivateSecureMediaExpired.
+      // PHASE-2 PARITY: every message type is now rendered through the
+      // shared Phase-1 MessageBubble so avatar gutter, grouping spacing,
+      // bubble frame, timestamp/tick footer, and media sizing match Phase-1
+      // exactly. The only Phase-2-specific divergence is the protected-media
+      // inner card, which is supplied via the additive `renderProtectedMedia`
+      // slot so the Phase-2 backend (api.privateConversations.*) stays the
+      // sole data source — Phase-1's ProtectedMediaBubble (api.media.* /
+      // api.protectedMedia.*) is NEVER touched on this screen.
       const isProtectedMedia =
         !!item.isProtected &&
         (item.type === 'image' || item.type === 'video');
 
-      if (isProtectedMedia) {
-        return (
-          <View
-            style={[
-              styles.protectedRow,
-              isOwn ? styles.protectedRowOwn : styles.protectedRowOther,
-            ]}
-          >
-            <Phase2ProtectedMediaBubble
-              isOwn={isOwn}
-              isProtected
-              isExpired={!!item.isExpired}
-              viewedAt={item.viewedAt}
-              timerEndsAt={item.timerEndsAt}
-              protectedMediaTimer={item.protectedMediaTimer}
-              protectedMediaViewingMode={item.protectedMediaViewingMode}
-              onOpen={() =>
-                setProtectedViewer({
-                  raw: item,
-                  isSender: item.senderId === userId,
-                })
-              }
-            />
-          </View>
-        );
-      }
-
-      // PHASE-2 NORMAL MEDIA — render via a compact 110×82 card so it shares
-      // the same outer footprint as Phase-2 secure placeholders. Bypasses the
-      // locked Phase-1 MessageBubble + MediaMessage path which is hard-coded
-      // to a 220×165 legacyContainer.
-      const isNormalMedia =
-        !item.isProtected &&
-        (item.type === 'image' || item.type === 'video') &&
-        !!item.imageUrl;
-
-      if (isNormalMedia) {
-        const url = item.imageUrl as string;
-        const mediaType = item.type as 'image' | 'video';
-        const tickStatus = item.readAt
-          ? 'read'
-          : item.deliveredAt
-            ? 'delivered'
-            : 'sent';
-        return (
-          <View
-            style={[
-              styles.protectedRow,
-              isOwn ? styles.protectedRowOwn : styles.protectedRowOther,
-            ]}
-          >
-            <View>
-              <Pressable
-                onPress={() => setNormalViewer({ uri: url, type: mediaType })}
-                style={({ pressed }) => [
-                  styles.normalMediaCard,
-                  isOwn ? styles.normalMediaCardOwn : styles.normalMediaCardOther,
-                  pressed && styles.normalMediaCardPressed,
-                ]}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  mediaType === 'video' ? 'Open video' : 'Open photo'
-                }
-              >
-                <Image
-                  source={{ uri: url }}
-                  style={styles.normalMediaThumb}
-                  contentFit="cover"
-                />
-                {mediaType === 'video' && (
-                  <View style={styles.normalMediaPlay}>
-                    <Ionicons name="play" size={14} color="#FFFFFF" />
-                  </View>
-                )}
-              </Pressable>
-              <View style={styles.normalMediaFooter}>
-                <Text style={styles.normalMediaTime}>
-                  {formatTime(item.createdAt)}
-                </Text>
-                {isOwn && (
-                  <Ionicons
-                    name={
-                      tickStatus === 'read'
-                        ? 'checkmark-done'
-                        : tickStatus === 'delivered'
-                          ? 'checkmark-done'
-                          : 'checkmark'
-                    }
-                    size={12}
-                    color={tickStatus === 'read' ? C.primary : C.textLight}
-                    style={styles.normalMediaTick}
-                  />
-                )}
-              </View>
-            </View>
-          </View>
-        );
-      }
-
       return (
-        <View style={{ paddingHorizontal: 4 }}>
-          <MessageBubble
-            message={{
-              id: String(item.id),
-              senderId: item.senderId,
-              type: item.type,
-              content: item.content ?? '',
-              createdAt: item.createdAt,
-              deliveredAt: item.deliveredAt,
-              readAt: item.readAt,
-              imageUrl: item.imageUrl,
-              audioUrl: item.audioUrl,
-              audioDurationMs: item.audioDurationMs,
-              isProtected: item.isProtected,
-            }}
-            isOwn={isOwn}
-            otherUserName={otherUserName}
-            currentUserId={userId ?? undefined}
-            currentUserToken={token ?? undefined}
-            // NORMAL-MEDIA OPEN: tap normal photo/video → fullscreen lightbox.
-            // Phase-2 backend resolved imageUrl in getPrivateMessages, so
-            // MessageBubble already renders it via <MediaMessage/>; we just
-            // need a parent handler to show the full-screen view.
-            onMediaPress={(url, mediaType) =>
-              setNormalViewer({ uri: url, type: mediaType })
-            }
-            showAvatar={!isOwn && isLastInGroup}
-            avatarUrl={otherPhotoUrl}
-            isLastInGroup={isLastInGroup}
-          />
-        </View>
+        <MessageBubble
+          message={{
+            id: String(item.id),
+            senderId: item.senderId,
+            type: item.type,
+            content: item.content ?? '',
+            createdAt: item.createdAt,
+            deliveredAt: item.deliveredAt,
+            readAt: item.readAt,
+            imageUrl: item.imageUrl,
+            audioUrl: item.audioUrl,
+            audioDurationMs: item.audioDurationMs,
+            isProtected: item.isProtected,
+            isExpired: item.isExpired,
+            timerEndsAt: item.timerEndsAt,
+            expiredAt: item.expiredAt,
+            viewedAt: item.viewedAt,
+          }}
+          isOwn={isOwn}
+          otherUserName={otherUserName}
+          currentUserId={userId ?? undefined}
+          currentUserToken={token ?? undefined}
+          // NORMAL-MEDIA OPEN: tap normal photo/video → fullscreen lightbox.
+          // Phase-2 backend resolved imageUrl in getPrivateMessages, so
+          // MessageBubble renders it via <MediaMessage/>; we just provide
+          // the open-fullscreen handler.
+          onMediaPress={(url, mediaType) =>
+            setNormalViewer({ uri: url, type: mediaType })
+          }
+          showAvatar={!isOwn && isLastInGroup}
+          avatarUrl={otherPhotoUrl}
+          isLastInGroup={isLastInGroup}
+          // PHASE-2 SECURE MEDIA: substitute Phase2ProtectedMediaBubble into
+          // MessageBubble's protected-media slot. Layout (avatar gutter,
+          // grouped spacing, bubble frame, timestamp/tick footer) is owned
+          // by MessageBubble; the inner card and the open/viewer flow stay
+          // Phase-2-only.
+          renderProtectedMedia={
+            isProtectedMedia
+              ? () => (
+                  <Phase2ProtectedMediaBubble
+                    isOwn={isOwn}
+                    isProtected
+                    isExpired={!!item.isExpired}
+                    viewedAt={item.viewedAt}
+                    timerEndsAt={item.timerEndsAt}
+                    protectedMediaTimer={item.protectedMediaTimer}
+                    protectedMediaViewingMode={item.protectedMediaViewingMode}
+                    onOpen={() =>
+                      setProtectedViewer({
+                        raw: item,
+                        isSender: isOwn,
+                      })
+                    }
+                  />
+                )
+              : undefined
+          }
+        />
       );
     },
     [userId, token, otherUserName, otherPhotoUrl, messageList]
@@ -1828,61 +1751,6 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   cooldownText: { color: COLORS.white, fontSize: 13, fontWeight: '500' },
-  // SECURE-MEDIA OPEN: row that aligns Phase2ProtectedMediaBubble left/right.
-  // The Phase-2 bubble component is just a tile; alignment is the parent's
-  // job (mirrors how MessageBubble aligns via container/ownContainer).
-  protectedRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 8,
-    marginVertical: 6,
-  },
-  protectedRowOwn: { justifyContent: 'flex-end' },
-  protectedRowOther: { justifyContent: 'flex-start' },
-  // PHASE-2 NORMAL MEDIA — compact 110×82 card matching the Phase-2 secure
-  // placeholder dimensions so all photos/videos share the same footprint.
-  normalMediaCard: {
-    width: 110,
-    height: 82,
-    borderRadius: 10,
-    borderWidth: 2,
-    overflow: 'hidden',
-    backgroundColor: '#22223A',
-  },
-  normalMediaCardOwn: {
-    borderColor: C.primary,
-    borderBottomRightRadius: 4,
-  },
-  normalMediaCardOther: {
-    borderColor: '#4A5568',
-    borderBottomLeftRadius: 4,
-  },
-  normalMediaCardPressed: { opacity: 0.88 },
-  normalMediaThumb: { width: '100%', height: '100%' },
-  normalMediaPlay: {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    marginLeft: -14,
-    marginTop: -14,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  normalMediaFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    marginTop: 3,
-    paddingHorizontal: 2,
-  },
-  normalMediaTime: {
-    fontSize: 10,
-    color: C.textLight,
-  },
-  normalMediaTick: { marginLeft: 4 },
   listWrap: { flex: 1, backgroundColor: C.dmBackground ?? C.background },
   // BOTTOM-ANCHOR-FIX: flexGrow + justifyContent: 'flex-end' makes the message
   // list hug the bottom (just above composer) when content is shorter than the

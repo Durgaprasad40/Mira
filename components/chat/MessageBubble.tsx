@@ -111,6 +111,16 @@ interface MessageBubbleProps {
   isLastInGroup?: boolean;
   /** Callback when avatar is pressed (to open profile) */
   onAvatarPress?: () => void;
+  /**
+   * PHASE-2 EXTENSION (optional, additive — Phase-1 unchanged when omitted):
+   * If provided, this render function replaces the default
+   * <ProtectedMediaBubble/> inside the protected-media slot. Lets Phase-2
+   * substitute its own <Phase2ProtectedMediaBubble/> (Phase-2 backend) while
+   * still inheriting MessageBubble's avatar gutter, grouping spacing, bubble
+   * frame, and timestamp/tick footer. Phase-1 callers omit this prop and the
+   * default Phase-1 ProtectedMediaBubble is used as before.
+   */
+  renderProtectedMedia?: () => React.ReactNode;
 }
 
 // Detect messages that are only emoji (1–8 emoji, no other text)
@@ -159,6 +169,7 @@ function MessageBubbleComponent({
   avatarUrl,
   isLastInGroup = true,
   onAvatarPress,
+  renderProtectedMedia,
 }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
 
@@ -351,24 +362,31 @@ function MessageBubbleComponent({
 
     // TOUCH-FIX: Wrap protected media with Pressable for sender long-press delete
     // Receiver uses ProtectedMediaBubble's internal PanResponder for tap/hold to view
+    // PHASE-2 EXTENSION: when `renderProtectedMedia` is provided we render the
+    // caller's slot (e.g. Phase2ProtectedMediaBubble) inside the same bubble
+    // frame so layout (avatar gutter, grouping, footer) stays identical.
     const protectedMediaContent = (
       <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, styles.protectedBubble]}>
-        <ProtectedMediaBubble
-          messageId={message.id}
-          mediaId={message.mediaId}
-          authToken={currentUserToken}
-          protectedMedia={message.protectedMedia as any}
-          timerEndsAt={message.timerEndsAt}
-          isExpired={!!message.isExpired}
-          expiredAt={message.expiredAt}
-          isOwn={isOwn}
-          viewOnce={message.viewOnce}
-          recipientOpened={message.recipientOpened}
-          onPress={() => onProtectedMediaPress?.(message.id)}
-          onHoldStart={() => onProtectedMediaHoldStart?.(message.id)}
-          onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
-          onExpire={() => onProtectedMediaExpire?.(message.id)}
-        />
+        {renderProtectedMedia ? (
+          renderProtectedMedia()
+        ) : (
+          <ProtectedMediaBubble
+            messageId={message.id}
+            mediaId={message.mediaId}
+            authToken={currentUserToken}
+            protectedMedia={message.protectedMedia as any}
+            timerEndsAt={message.timerEndsAt}
+            isExpired={!!message.isExpired}
+            expiredAt={message.expiredAt}
+            isOwn={isOwn}
+            viewOnce={message.viewOnce}
+            recipientOpened={message.recipientOpened}
+            onPress={() => onProtectedMediaPress?.(message.id)}
+            onHoldStart={() => onProtectedMediaHoldStart?.(message.id)}
+            onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
+            onExpire={() => onProtectedMediaExpire?.(message.id)}
+          />
+        )}
         {!message.isExpired && (showTimestamp || isOwn) && (
           <View style={[styles.imageFooter, !showTimestamp && styles.statusOnlyFooter]}>
             {showTimestamp && (
@@ -616,6 +634,11 @@ function areMessageBubblePropsEqual(
     prev.message.uploadStatus === next.message.uploadStatus &&
     prev.message.uploadProgress === next.message.uploadProgress &&
     prev.onRetryPendingMedia === next.onRetryPendingMedia &&
+    // PHASE-2 EXTENSION: presence parity for the protected-media render slot.
+    // Function identity intentionally NOT compared (closures change every
+    // parent render); the inner Phase-2 card already re-renders via the
+    // tracked message.* fields below (isExpired/viewedAt/timerEndsAt/...).
+    !!prev.renderProtectedMedia === !!next.renderProtectedMedia &&
     prevMedia?.localUri === nextMedia?.localUri &&
     prevMedia?.mediaType === nextMedia?.mediaType &&
     prevMedia?.timer === nextMedia?.timer &&
