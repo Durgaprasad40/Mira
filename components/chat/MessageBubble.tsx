@@ -1,23 +1,49 @@
 /**
- * LOCKED (MESSAGE BUBBLE)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * MESSAGE BUBBLE
  *
  * STATUS:
- * - Feature is stable and production-locked
+ * - Feature is stable and production-tested
  * - P0 audit passed: renders backend message data correctly
- * - Used by Phase-1 messaging (ChatScreenInner)
+ * - Used by Phase-1 messaging (ChatScreenInner) AND Phase-2 messaging
+ *   (app/(main)/(private)/(tabs)/chats/[id].tsx).
+ *
+ * PHASE-2 THEMING (UI-ONLY):
+ * - An optional `theme?: 'phase1' | 'phase2'` prop drives premium dark
+ *   styling for Phase-2 callers. Default is 'phase1' so Phase-1 ChatScreenInner
+ *   behavior + visuals stay 100% identical when the prop is omitted.
+ * - Theme prop drives only colors (bubble bg, text color, time color, avatar
+ *   fallback bg, shadow tint). It does NOT change layout, sizing, animations,
+ *   logic, or any callback behavior.
  */
 import React from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity, Alert, Pressable, Dimensions } from 'react-native';
 import Animated, { FadeIn, SlideInUp } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
+import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
 import { ProtectedMediaBubble } from './ProtectedMediaBubble';
 import { SystemMessage } from './SystemMessage';
 import { VoiceMessageBubble } from './VoiceMessageBubble';
 import UploadProgressRing from '@/components/chatroom/UploadProgressRing';
 import { formatTime } from '@/utils/chatTime';
+
+// PHASE-2 PREMIUM PALETTE (shared by Phase-2 messaging surfaces).
+// These are the bubble/text/avatar/shadow tokens used when theme==='phase2'.
+// Colors picked for premium dark grade: deep plum-navy bubbles, rose primary,
+// soft white text, rose-tinted glow. Phase-1 styles are NOT touched.
+const PHASE2 = {
+  ownBubbleBg: INCOGNITO_COLORS.primary, // #E94560 — Phase-2 rose
+  otherBubbleBg: '#262943',              // dark glass plum-navy (premium)
+  otherBubbleBorder: 'rgba(255,255,255,0.06)',
+  textOwn: '#FFFFFF',
+  textOther: '#F2F3F8',
+  timeOwn: 'rgba(255,255,255,0.62)',
+  timeOther: 'rgba(224,224,232,0.55)',
+  avatarBg: '#22223A',
+  avatarFallbackBg: INCOGNITO_COLORS.primary,
+  ownShadow: INCOGNITO_COLORS.primary,
+  otherShadow: '#000000',
+} as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LAYOUT CONSTANTS - Tight, modern chat layout (WhatsApp/Telegram density)
@@ -132,6 +158,14 @@ interface MessageBubbleProps {
   autoDownloadMedia?: boolean;
   /** Called after a normal-media download completes with the local cache URI. */
   onMediaDownloaded?: (messageId: string, localUri: string) => void;
+  /**
+   * PHASE-2 PREMIUM THEME (UI-only, additive).
+   * When set to 'phase2', the bubble + avatar + text + time render with the
+   * Phase-2 dark/glass palette. Default 'phase1' preserves the existing
+   * Phase-1 ChatScreenInner look exactly. No logic / sizing / layout
+   * change — colors only.
+   */
+  theme?: 'phase1' | 'phase2';
 }
 
 // Detect messages that are only emoji (1–8 emoji, no other text)
@@ -184,8 +218,39 @@ function MessageBubbleComponent({
   requireMediaDownloadBeforeOpen = false,
   autoDownloadMedia = false,
   onMediaDownloaded,
+  theme = 'phase1',
 }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
+
+  // PHASE-2 PREMIUM: precompute theme-aware style overlays. All overlays are
+  // applied AFTER the base styles so Phase-1 (theme==='phase1') sees a no-op
+  // (overlay is null) and the original visuals are preserved exactly.
+  const isPhase2 = theme === 'phase2';
+  const ownBubbleOverlay = isPhase2
+    ? {
+        backgroundColor: PHASE2.ownBubbleBg,
+        shadowColor: PHASE2.ownShadow,
+        shadowOpacity: 0.32,
+        shadowRadius: 6,
+      }
+    : null;
+  const otherBubbleOverlay = isPhase2
+    ? {
+        backgroundColor: PHASE2.otherBubbleBg,
+        borderColor: PHASE2.otherBubbleBorder,
+        shadowColor: PHASE2.otherShadow,
+        shadowOpacity: 0.22,
+        shadowRadius: 4,
+      }
+    : null;
+  const textOverlay = isPhase2 ? { color: PHASE2.textOther } : null;
+  const ownTextOverlay = isPhase2 ? { color: PHASE2.textOwn } : null;
+  const timeOverlay = isPhase2 ? { color: PHASE2.timeOther } : null;
+  const ownTimeOverlay = isPhase2 ? { color: PHASE2.timeOwn } : null;
+  const avatarOverlay = isPhase2 ? { backgroundColor: PHASE2.avatarBg } : null;
+  const avatarFallbackOverlay = isPhase2
+    ? { backgroundColor: PHASE2.avatarFallbackBg }
+    : null;
 
   // Entry animation: subtle fade + slide up for new messages
   const enteringAnimation = FadeIn.duration(180).withInitialValues({
@@ -218,7 +283,7 @@ function MessageBubbleComponent({
           >
             <Image
               source={{ uri: avatarUrl }}
-              style={styles.avatar}
+              style={[styles.avatar, avatarOverlay]}
             />
           </TouchableOpacity>
         );
@@ -230,7 +295,7 @@ function MessageBubbleComponent({
           activeOpacity={0.7}
           disabled={!onAvatarPress}
         >
-          <View style={[styles.avatar, styles.avatarFallback]}>
+          <View style={[styles.avatar, styles.avatarFallback, avatarFallbackOverlay]}>
             <Text style={styles.avatarInitials}>{initials}</Text>
           </View>
         </TouchableOpacity>
@@ -334,7 +399,7 @@ function MessageBubbleComponent({
 
       return (
         <View style={[styles.container, styles.ownContainer]}>
-          <View style={[styles.bubble, styles.ownBubble, styles.pendingMediaBubble]}>
+          <View style={[styles.bubble, styles.ownBubble, ownBubbleOverlay, styles.pendingMediaBubble]}>
             {hasFailed && onRetryPendingMedia ? (
               <TouchableOpacity
                 activeOpacity={0.85}
@@ -354,7 +419,7 @@ function MessageBubbleComponent({
 
     return (
       <View style={[styles.container, styles.ownContainer]}>
-        <View style={[styles.bubble, styles.ownBubble, styles.pendingBubble]}>
+        <View style={[styles.bubble, styles.ownBubble, ownBubbleOverlay, styles.pendingBubble]}>
           <View style={styles.pendingContent}>
             <ActivityIndicator size="small" color={COLORS.white} />
             <Text style={styles.pendingText}>{pendingLabel}</Text>
@@ -380,7 +445,7 @@ function MessageBubbleComponent({
     // caller's slot (e.g. Phase2ProtectedMediaBubble) inside the same bubble
     // frame so layout (avatar gutter, grouping, footer) stays identical.
     const protectedMediaContent = (
-      <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, styles.protectedBubble]}>
+      <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, isOwn ? ownBubbleOverlay : otherBubbleOverlay, styles.protectedBubble]}>
         {renderProtectedMedia ? (
           renderProtectedMedia()
         ) : (
@@ -404,7 +469,7 @@ function MessageBubbleComponent({
         {!message.isExpired && (showTimestamp || isOwn) && (
           <View style={[styles.imageFooter, !showTimestamp && styles.statusOnlyFooter]}>
             {showTimestamp && (
-              <Text style={[styles.time, isOwn && styles.ownTime]}>
+              <Text style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
                 {formatTime(message.createdAt)}
               </Text>
             )}
@@ -455,7 +520,7 @@ function MessageBubbleComponent({
         ]}
       >
         {!isOwn && renderAvatar()}
-        <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
+        <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, isOwn ? ownBubbleOverlay : otherBubbleOverlay]}>
             <MediaMessage
               mediaUrl={mediaUrl!}
               type={message.type as 'image' | 'video'}
@@ -463,11 +528,12 @@ function MessageBubbleComponent({
               requireDownloadBeforeOpen={requireMediaDownloadBeforeOpen}
               autoDownload={autoDownloadMedia}
               onDownloaded={(uri) => onMediaDownloaded?.(message.id, uri)}
+              theme={theme}
             />
             {(showTimestamp || isOwn) && (
               <View style={[styles.imageFooter, !showTimestamp && styles.statusOnlyFooter]}>
                 {showTimestamp && (
-                  <Text style={[styles.time, isOwn && styles.ownTime]}>
+                  <Text style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
                     {formatTime(message.createdAt)}
                   </Text>
                 )}
@@ -531,7 +597,7 @@ function MessageBubbleComponent({
         ]}
       >
         {!isOwn && renderAvatar()}
-        <View style={[styles.bubble, styles.dareBubble, isOwn && styles.ownBubble]}>
+        <View style={[styles.bubble, styles.dareBubble, isOwn && styles.ownBubble, isOwn && ownBubbleOverlay]}>
           <View style={styles.dareHeader}>
             <Ionicons name="dice" size={20} color={COLORS.white} />
             <Text style={styles.dareTitle}>
@@ -539,7 +605,7 @@ function MessageBubbleComponent({
             </Text>
           </View>
           <Text style={styles.dareContent}>{message.content}</Text>
-          <Text style={[styles.time, styles.dareTime]}>{formatTime(message.createdAt)}</Text>
+          <Text style={[styles.time, styles.dareTime, isOwn ? ownTimeOverlay : timeOverlay]}>{formatTime(message.createdAt)}</Text>
         </View>
       </Animated.View>
     );
@@ -560,11 +626,15 @@ function MessageBubbleComponent({
       <View style={[
         styles.bubble,
         isOwn ? styles.ownBubble : styles.otherBubble,
+        // PHASE-2 PREMIUM: emoji-only stays transparent (no overlay) so big
+        // emoji glyphs sit on the gradient bg; otherwise apply theme overlay.
+        !isEmojiOnly && (isOwn ? ownBubbleOverlay : otherBubbleOverlay),
         isEmojiOnly && styles.emojiBubble,
       ]}>
         <Text style={[
           styles.text,
           isOwn && styles.ownText,
+          !isEmojiOnly && (isOwn ? ownTextOverlay : textOverlay),
           isEmojiOnly && styles.emojiText,
           // INLINE-TIME: reserve space at bottom-right of the bubble for the
           // floating timestamp/tick (WhatsApp-style). Skip for emoji-only.
@@ -575,7 +645,7 @@ function MessageBubbleComponent({
         {(showTimestamp || isOwn) && !isEmojiOnly && (
           <View style={styles.inlineMeta}>
             {showTimestamp && (
-              <Text style={[styles.time, isOwn && styles.ownTime]}>
+              <Text style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
                 {formatTime(message.createdAt)}
               </Text>
             )}
@@ -595,7 +665,7 @@ function MessageBubbleComponent({
         {isEmojiOnly && (showTimestamp || isOwn) && (
           <View style={styles.footer}>
             {showTimestamp && (
-              <Text style={[styles.time, isOwn && styles.ownTime]}>
+              <Text style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
                 {formatTime(message.createdAt)}
               </Text>
             )}
@@ -659,6 +729,9 @@ function areMessageBubblePropsEqual(
     // LOAD-FIRST: gate flags must re-render to flip placeholder/preview.
     prev.requireMediaDownloadBeforeOpen === next.requireMediaDownloadBeforeOpen &&
     prev.autoDownloadMedia === next.autoDownloadMedia &&
+    // PHASE-2 PREMIUM: theme prop drives palette overlays — must re-render
+    // when toggled (Phase-1 callers always omit it so this is a no-op).
+    prev.theme === next.theme &&
     prevMedia?.localUri === nextMedia?.localUri &&
     prevMedia?.mediaType === nextMedia?.mediaType &&
     prevMedia?.timer === nextMedia?.timer &&

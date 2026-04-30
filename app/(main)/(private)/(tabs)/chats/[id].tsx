@@ -41,6 +41,7 @@ import {
   Modal,
 } from 'react-native';
 import { Image } from 'expo-image';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
@@ -1709,6 +1710,7 @@ export default function Phase2ChatThread() {
             showAvatar={false}
             isLastInGroup={isLastInGroup}
             onRetryPendingMedia={handleRetryPendingPhase2Media}
+            theme="phase2"
           />
         );
       }
@@ -1796,6 +1798,7 @@ export default function Phase2ChatThread() {
                 )
               : undefined
           }
+          theme="phase2"
         />
       );
     },
@@ -1888,7 +1891,14 @@ export default function Phase2ChatThread() {
 
   // --------------------------------------------------------------------- main
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <LinearGradient
+      // PHASE-2 PREMIUM: deep midnight navy → midnight plum → tab-bar surface.
+      // Bottom stop matches the Phase-2 tab bar (C.surface = #16213E) so the
+      // thread → composer → tab-bar transition reads as one cohesive surface.
+      colors={['#101426', '#1A1633', '#16213E']}
+      locations={[0, 0.55, 1]}
+      style={[styles.container, styles.gradientContainer, { paddingTop: insets.top }]}
+    >
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity
@@ -1989,10 +1999,12 @@ export default function Phase2ChatThread() {
 
       {/* P2_TD_PARITY: waiting-for-start banner shown to the invitee after
           they accept. Phase-1 ChatScreenInner.tsx:2821-2829. Driven entirely
-          by the live game session — no persisted system message needed. */}
+          by the live game session — no persisted system message needed.
+          PHASE-2 PREMIUM: hourglass tinted rose to harmonize with the new
+          dark-glass banner. State-condition + duration unchanged. */}
       {tdState === 'active' && !gameStartedAt && amInvitee && (
         <View style={styles.waitingStartBanner}>
-          <Ionicons name="hourglass-outline" size={16} color="#2E7D32" />
+          <Ionicons name="hourglass-outline" size={16} color="#E94560" />
           <Text style={styles.waitingStartBannerText} numberOfLines={1}>
             Waiting for {otherUserName} to start the game
           </Text>
@@ -2091,6 +2103,7 @@ export default function Phase2ChatThread() {
           onSendCamera={handleSendCameraPress}
           onSendGallery={handleSendGalleryPress}
           onSendVoice={handleSendVoiceMessage}
+          theme="phase2"
         />
       </KeyboardAvoidingView>
 
@@ -2109,6 +2122,7 @@ export default function Phase2ChatThread() {
                 isInvitee
                 onAccept={handleAcceptInvite}
                 onReject={handleDeclineInvite}
+                theme="phase2"
               />
               <TouchableOpacity
                 style={styles.modalDismiss}
@@ -2342,22 +2356,33 @@ export default function Phase2ChatThread() {
           otherUserName={otherUserName}
           onSendResultMessage={handleSendResultMessage}
           autoAdvance
+          theme="phase2"
         />
       )}
-    </View>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  // PHASE-2 PREMIUM: when the outer wrapper is a LinearGradient, the inherited
+  // backgroundColor from `container` would obscure the gradient. This style is
+  // appended to the LinearGradient's style array to clear it. Functionally
+  // identical to `container` minus the solid bg — preserves flex:1 + paddings.
+  gradientContainer: { backgroundColor: 'transparent' },
+  // PHASE-2 PREMIUM: softer header divider (subtle white-on-dark hairline
+  // instead of the heavier C.border slate). Gives a more premium edge,
+  // closer to the iMessage / WhatsApp dark mode look.
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 6,
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: C.border,
-    backgroundColor: C.background,
+    borderBottomColor: 'rgba(255,255,255,0.07)',
+    // PHASE-2 PREMIUM: transparent so the LinearGradient backdrop bleeds
+    // through the header edge, giving a soft "infinite surface" feel.
+    backgroundColor: 'transparent',
   },
   headerBtn: { padding: 6 },
   headerInfo: {
@@ -2423,21 +2448,23 @@ const styles = StyleSheet.create({
     color: C.textLight,
     marginTop: 2,
   },
+  // PHASE-2 PREMIUM (T/D): rose pill with rose-tinted glow. Layout / hit-slop
+  // / size unchanged — only visual harmony with the dark gradient surface.
   tdPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: C.primary,
+    backgroundColor: C.primary, // INCOGNITO_COLORS.primary === '#E94560' rose
     paddingHorizontal: 12,
     paddingVertical: 7,
     borderRadius: 999,
     marginRight: 4,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.18)',
-    shadowColor: '#000',
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 4,
+    shadowColor: '#E94560',
+    shadowOpacity: 0.45,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
   },
   tdPillDisabled: { opacity: 0.5 },
   tdPillText: {
@@ -2454,32 +2481,43 @@ const styles = StyleSheet.create({
     marginLeft: 5,
   },
   menuBtn: { padding: 8 },
+  // PHASE-2 PREMIUM (T/D): inviter waiting strip uses dark-glass surface +
+  // soft rose hairline so it feels like part of the gradient instead of a
+  // hard slate band. Behavior, copy, and visibility logic unchanged.
   waitingBar: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: C.surface,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(34, 34, 58, 0.85)',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(233, 69, 96, 0.32)',
     gap: 8,
   },
   waitingText: { color: C.text, fontSize: 13, flexShrink: 1 },
-  // P2_TD_PARITY: waiting-for-start banner (Phase-1 styles 3478-3492).
+  // PHASE-2 PREMIUM (T/D): waiting-for-start banner. Dropped the green tint
+  // (looked disconnected from the new rose-accented dark theme); now reads as
+  // a glassy plum strip with a rose hourglass to feel cohesive with tdPill.
   waitingStartBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    backgroundColor: 'rgba(46, 125, 50, 0.12)',
+    backgroundColor: 'rgba(34, 34, 58, 0.85)',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(233, 69, 96, 0.32)',
     paddingVertical: 10,
     paddingHorizontal: 16,
   },
   waitingStartBannerText: {
     fontSize: 13,
     fontWeight: '500',
-    color: '#2E7D32',
+    color: 'rgba(224, 224, 232, 0.88)',
     flexShrink: 1,
   },
-  // P2_TD_PARITY: spin-hint chip (Phase-1 styles 3493-3538).
+  // PHASE-2 PREMIUM (T/D): spin-hint chip switched from white-on-light to
+  // dark-glass with a rose dot. Caret now matches the chip surface so the
+  // tooltip blends with the gradient backdrop. Position / dedupe unchanged.
   spinHintAnchor: {
     position: 'absolute',
     right: 16,
@@ -2492,41 +2530,42 @@ const styles = StyleSheet.create({
     height: 10,
     marginRight: 34,
     marginBottom: -5,
-    backgroundColor: COLORS.white,
+    backgroundColor: 'rgba(34, 34, 58, 0.96)',
     borderLeftWidth: 1,
     borderTopWidth: 1,
-    borderColor: 'rgba(17, 24, 39, 0.08)',
+    borderColor: 'rgba(233, 69, 96, 0.32)',
     transform: [{ rotate: '45deg' }],
   },
   spinHintChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: COLORS.white,
+    backgroundColor: 'rgba(34, 34, 58, 0.96)',
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(17, 24, 39, 0.08)',
-    shadowColor: '#000',
+    borderColor: 'rgba(233, 69, 96, 0.32)',
+    shadowColor: '#E94560',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 10,
-    elevation: 4,
+    shadowOpacity: 0.30,
+    shadowRadius: 12,
+    elevation: 6,
   },
   spinHintDot: {
     width: 7,
     height: 7,
     borderRadius: 999,
-    backgroundColor: C.primary,
+    backgroundColor: '#E94560',
   },
   spinHintText: {
     fontSize: 13,
     fontWeight: '600',
-    color: C.text,
+    color: '#F2F3F8',
   },
-  // P2_TD_PARITY: ephemeral choice toast — same visual language as
-  // cooldownToast above so styling stays consistent within the thread.
+  // PHASE-2 PREMIUM (T/D): floating choice toast. Uses the same midnight-plum
+  // backdrop as the spin hint chip with a rose hairline border so multiple
+  // T/D ephemerals share a single visual language. Timing / dedupe unchanged.
   tdToast: {
     position: 'absolute',
     alignSelf: 'center',
@@ -2534,17 +2573,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 14,
     paddingVertical: 8,
-    backgroundColor: 'rgba(0,0,0,0.85)',
+    backgroundColor: 'rgba(15, 12, 30, 0.92)',
     borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(233, 69, 96, 0.32)',
+    shadowColor: '#E94560',
+    shadowOpacity: 0.30,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
     zIndex: 50,
     gap: 6,
   },
   tdToastText: {
-    color: COLORS.white,
+    color: '#F2F3F8',
     fontSize: 13,
     fontWeight: '500',
     maxWidth: 260,
   },
+  // PHASE-2 PREMIUM (T/D): cooldown pill mirrors tdToast — same dark-glass +
+  // rose hairline so they feel like one design system. Live tick unchanged.
   cooldownToast: {
     position: 'absolute',
     alignSelf: 'center',
@@ -2552,13 +2600,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 14,
     paddingVertical: 8,
-    backgroundColor: 'rgba(0,0,0,0.85)',
+    backgroundColor: 'rgba(15, 12, 30, 0.92)',
     borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(233, 69, 96, 0.32)',
+    shadowColor: '#E94560',
+    shadowOpacity: 0.30,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
     zIndex: 50,
     gap: 6,
   },
-  cooldownText: { color: COLORS.white, fontSize: 13, fontWeight: '500' },
-  listWrap: { flex: 1, backgroundColor: C.dmBackground ?? C.background },
+  cooldownText: { color: '#F2F3F8', fontSize: 13, fontWeight: '500' },
+  // PHASE-2 PREMIUM: transparent so the LinearGradient backdrop is visible
+  // through the FlashList wrapper. Bubbles paint themselves; the surface
+  // stays gradient-driven for the cohesive thread look.
+  listWrap: { flex: 1, backgroundColor: 'transparent' },
   // BOTTOM-ANCHOR-FIX: flexGrow + justifyContent: 'flex-end' makes the message
   // list hug the bottom (just above composer) when content is shorter than the
   // viewport — same approach Phase-1 uses in ChatScreenInner.tsx. paddingBottom
@@ -2579,41 +2637,59 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   emptyText: { color: C.textLight, fontSize: 14, textAlign: 'center' },
+  // PHASE-2 PREMIUM (T/D): deeper plum-tinted backdrop so the invite modal
+  // sits inside the same midnight palette as the gradient surface.
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: 'rgba(8, 6, 16, 0.68)',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 20,
   },
+  // PHASE-2 PREMIUM (T/D): "Send invite?" card — dark glass with a soft rose
+  // hairline + glow. Replaces the previous solid white surface that looked
+  // disconnected from the rest of the Phase-2 thread.
   inviteCard: {
     width: '100%',
     maxWidth: 360,
-    backgroundColor: COLORS.background,
-    borderRadius: 16,
-    padding: 20,
+    backgroundColor: '#22223A',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(233, 69, 96, 0.28)',
+    padding: 22,
     alignItems: 'center',
+    shadowColor: '#E94560',
+    shadowOpacity: 0.28,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
   },
   inviteIconCircle: {
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: C.primary,
+    backgroundColor: '#E94560',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 12,
+    marginBottom: 14,
+    shadowColor: '#E94560',
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
   },
   inviteTitle: {
     fontSize: 18,
     fontWeight: '700',
-    color: COLORS.text,
+    color: '#F2F3F8',
     marginBottom: 6,
   },
   inviteSubtitle: {
     fontSize: 14,
-    color: COLORS.textLight,
+    color: 'rgba(224, 224, 232, 0.72)',
     textAlign: 'center',
-    marginBottom: 16,
+    marginBottom: 18,
+    lineHeight: 20,
   },
   inviteRow: { flexDirection: 'row', gap: 12, width: '100%' },
   inviteBtn: {
@@ -2623,13 +2699,31 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  inviteCancel: { backgroundColor: '#E5E5EA' },
-  inviteCancelText: { color: COLORS.text, fontWeight: '600' },
-  inviteSend: { backgroundColor: C.primary },
-  inviteSendText: { color: COLORS.white, fontWeight: '600' },
+  // PHASE-2 PREMIUM (T/D): Cancel = neutral dark glass with a subtle white
+  // border (no bright iOS grey). Send = rose with a soft glow to feel like
+  // the primary action.
+  inviteCancel: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  inviteCancelText: { color: '#F2F3F8', fontWeight: '600' },
+  inviteSend: {
+    backgroundColor: '#E94560',
+    shadowColor: '#E94560',
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
+  inviteSendText: { color: COLORS.white, fontWeight: '700', letterSpacing: 0.2 },
   inviteCardWrap: { width: '100%', maxWidth: 380, alignItems: 'center' },
   modalDismiss: { marginTop: 14, padding: 10 },
-  modalDismissText: { color: COLORS.white, fontSize: 14, fontWeight: '500' },
+  modalDismissText: {
+    color: 'rgba(224, 224, 232, 0.78)',
+    fontSize: 14,
+    fontWeight: '500',
+  },
   // 3-dot menu / report sheet
   menuBackdrop: {
     flex: 1,

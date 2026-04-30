@@ -13,6 +13,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, Alert, ActivityIndicator, Modal, AppState } from 'react-native';
 import { Image } from 'expo-image';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -849,7 +850,13 @@ export default function ChatsScreen() {
   };
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <LinearGradient
+      // PHASE-2 PREMIUM: matches the thread (chats/[id].tsx) gradient so the
+      // tab → list → thread → tab transition stays cohesive.
+      colors={['#101426', '#1A1633', '#16213E']}
+      locations={[0, 0.55, 1]}
+      style={[styles.container, styles.gradientContainer, { paddingTop: insets.top }]}
+    >
       <View style={styles.header}>
         <Ionicons name="mail" size={24} color={C.primary} />
         <Text style={styles.headerTitle}>Messages</Text>
@@ -1116,12 +1123,16 @@ export default function ChatsScreen() {
       )}
 
       {/* Note: Incoming Likes Modal removed - now uses dedicated page */}
-    </View>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  // PHASE-2 PREMIUM: appended to the LinearGradient style array to clear the
+  // solid backgroundColor inherited from `container`, letting the gradient
+  // paint the full surface.
+  gradientContainer: { backgroundColor: 'transparent' },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingVertical: 12,
@@ -1385,10 +1396,20 @@ const styles = StyleSheet.create({
   },
 
   // ── Chat rows ──
+  // PHASE-2 PREMIUM: subtle elevation + faint inner border give the card a
+  // premium "lifted" feel against the dark background, mirroring iOS dark
+  // mode list cells. Background and corner radius unchanged.
   chatRow: {
     flexDirection: 'row', alignItems: 'center', padding: 14,
-    backgroundColor: C.surface, borderRadius: 12, marginBottom: 8,
+    backgroundColor: C.surface, borderRadius: 14, marginBottom: 8,
     marginHorizontal: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.05)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    elevation: 2,
   },
   chatAvatarWrap: { position: 'relative' },
   chatAvatarRing: {
@@ -1440,9 +1461,16 @@ const styles = StyleSheet.create({
   },
   chatTime: { fontSize: 11, color: C.textLight },
   chatLastMsg: { fontSize: 13, color: C.textLight },
+  // PHASE-2 PREMIUM: rose glow on unread badge for an iconic, eye-catching
+  // accent against the dark list. Same color and shape — added shadow only.
   unreadBadge: {
     minWidth: 20, height: 20, borderRadius: 10, backgroundColor: C.primary,
     alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, marginLeft: 8,
+    shadowColor: C.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 6,
+    elevation: 3,
   },
   unreadText: { fontSize: 11, fontWeight: '700', color: '#FFFFFF' },
 

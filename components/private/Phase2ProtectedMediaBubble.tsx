@@ -259,16 +259,28 @@ const styles = StyleSheet.create({
     borderWidth: BORDER_WIDTH,
     overflow: 'hidden',
   },
-  // Visible accent matching MessageBubble own/other framing aesthetic:
-  //   own  → rose primary (mirrors Phase-1 ownBubble #E94E77 / Phase-2 #E94560)
+  // PHASE-2 PREMIUM: visible accent matching MessageBubble own/other framing
+  // aesthetic — own gets a soft rose glow (matches secure-media branding),
+  // other gets a faint white-on-dark hairline + neutral shadow.
+  //   own  → rose primary (mirrors Phase-2 #E94560)
   //   other→ light slate (clearly visible against dark chat bg)
   cardOwn: {
     borderColor: C.primary,
     borderBottomRightRadius: 4,
+    shadowColor: C.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.45,
+    shadowRadius: 8,
+    elevation: 4,
   },
   cardOther: {
-    borderColor: '#4A5568',
+    borderColor: 'rgba(255,255,255,0.18)',
     borderBottomLeftRadius: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 2,
   },
   cardExpired: {
     opacity: 0.65,

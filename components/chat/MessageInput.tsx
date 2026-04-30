@@ -7,7 +7,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
+import { COLORS, INCOGNITO_COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { isDemoMode } from '@/config/demo';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
@@ -33,6 +33,15 @@ interface MessageInputProps {
   onTypingChange?: (isTyping: boolean) => void;
   /** Optional placeholder when composer is disabled for a known reason. */
   disabledPlaceholder?: string;
+  /**
+   * PHASE-2 PREMIUM THEME (UI-only):
+   * When set to 'phase2', the composer renders with the Phase-2 dark/glass
+   * palette (deep navy bg, dark surface input, rose primary). Default
+   * behavior (Phase-1) is unchanged. No logic, no behavior, no callback
+   * change — only colors / borders. Phase-1 callers (ChatScreenInner)
+   * MUST NOT pass this prop.
+   */
+  theme?: 'phase1' | 'phase2';
 }
 
 export function MessageInput({
@@ -50,7 +59,17 @@ export function MessageInput({
   onTextChange,
   onTypingChange,
   disabledPlaceholder,
+  theme = 'phase1',
 }: MessageInputProps) {
+  // PHASE-2 PREMIUM: precompute palette overrides once. No logic change.
+  const isPhase2 = theme === 'phase2';
+  const p2 = INCOGNITO_COLORS;
+  // Dark glass surface for input field — distinctly lighter than chat bg
+  // (#1A1A2E) but still part of the dark family. Matches the Phase-2
+  // protected-media card fill so the composer reads as a sibling surface.
+  const PHASE2_INPUT_FILL = '#22223A';
+  const PHASE2_BORDER = 'rgba(255,255,255,0.06)';
+  const PHASE2_FOCUS_BORDER = 'rgba(233, 69, 96, 0.45)'; // rose-tinted focus
   const [text, setText] = useState(initialText);
   const [showTemplates, setShowTemplates] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
@@ -68,9 +87,13 @@ export function MessageInput({
   // that was making the composer look like an error state while typing. Use
   // a neutral premium border tone (same hue family as the border token, a
   // touch darker when focused so there is still feedback).
+  // PHASE-2 PREMIUM: focus uses a soft rose-tinted border on the dark glass
+  // input; resting state stays a faint white-on-dark hairline.
   const inputAnimatedStyle = useAnimatedStyle(() => ({
     borderWidth: 1,
-    borderColor: inputBorderColor.value === 1 ? 'rgba(0, 0, 0, 0.12)' : 'transparent',
+    borderColor: isPhase2
+      ? (inputBorderColor.value === 1 ? PHASE2_FOCUS_BORDER : PHASE2_BORDER)
+      : (inputBorderColor.value === 1 ? 'rgba(0, 0, 0, 0.12)' : 'transparent'),
   }));
 
   const handleFocus = useCallback(() => {
@@ -262,8 +285,28 @@ export function MessageInput({
     toggleRecording();
   };
 
+  // PHASE-2 PREMIUM: per-render style overrides (object identity is stable
+  // across renders only when isPhase2 toggles — toggling never happens at
+  // runtime in the current codebase, so no perf concern).
+  const containerStyle = isPhase2
+    ? [styles.container, { backgroundColor: p2.background, borderTopColor: 'rgba(255,255,255,0.06)' }]
+    : styles.container;
+  const attachButtonStyle = isPhase2
+    ? [styles.attachButton, { backgroundColor: PHASE2_INPUT_FILL }]
+    : styles.attachButton;
+  const sendButtonBaseStyle = isPhase2
+    ? [styles.sendButton, { backgroundColor: p2.primary, shadowColor: p2.primary, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.45, shadowRadius: 6, elevation: 4 }]
+    : styles.sendButton;
+  const inputStyleOverride = isPhase2
+    ? { backgroundColor: PHASE2_INPUT_FILL, color: p2.text }
+    : null;
+  const placeholderColor = isPhase2
+    ? (isRecording ? COLORS.error : p2.textLight)
+    : (isRecording ? COLORS.error : COLORS.textLight);
+  const plusIconColor = isPhase2 ? p2.primary : COLORS.primary;
+
   return (
-    <View style={styles.container}>
+    <View style={containerStyle}>
       {/* FLOATING-PANEL: Vertical attach panel — absolutely positioned above
           the composer and over the chat. Does NOT push or move chat UI.
           Tap outside (handled by parent overlay) or tap + again to dismiss. */}
@@ -343,7 +386,7 @@ export function MessageInput({
         {/* + Button toggles the inline circular attach row */}
         {!isRecording && (
           <TouchableOpacity
-            style={styles.attachButton}
+            style={attachButtonStyle}
             onPress={() => {
               setShowAttachMenu((v) => {
                 const next = !v;
@@ -357,7 +400,7 @@ export function MessageInput({
             <Ionicons
               name={showAttachMenu ? 'close' : 'add'}
               size={26}
-              color={COLORS.primary}
+              color={plusIconColor}
             />
           </TouchableOpacity>
         )}
@@ -381,6 +424,7 @@ export function MessageInput({
           <TextInput
             style={[
               styles.input,
+              inputStyleOverride,
               !isDemoMode && !canSendCustom && isPreMatch && styles.inputDisabled,
               isRecording && styles.inputRecording,
             ]}
@@ -391,7 +435,7 @@ export function MessageInput({
                   ? disabledPlaceholder
                   : (!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...')
             }
-            placeholderTextColor={isRecording ? COLORS.error : COLORS.textLight}
+            placeholderTextColor={placeholderColor}
             value={text}
             onChangeText={handleTextChange}
             onFocus={handleFocus}
@@ -411,7 +455,7 @@ export function MessageInput({
         {!isRecording && (
           <AnimatedTouchable
             style={[
-              styles.sendButton,
+              sendButtonBaseStyle,
               (!text.trim() || disabled || isSending) && styles.sendButtonDisabled,
               sendButtonStyle,
             ]}

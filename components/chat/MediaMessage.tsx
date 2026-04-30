@@ -19,6 +19,15 @@ import {
   type MediaKind,
 } from '@/lib/mediaCache';
 
+// PHASE-2 PREMIUM PALETTE (additive — only applied when theme === 'phase2').
+// Phase-1 visuals are byte-identical when this prop is omitted.
+const PHASE2 = {
+  containerBg: '#22223A',
+  legacyBg: '#22223A',
+  placeholderOverlay: 'rgba(20, 18, 36, 0.55)',
+  securePlaceholderOverlay: 'rgba(20, 18, 36, 0.65)',
+} as const;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // MEDIA SIZING - Consistent with bubble styling
 // ═══════════════════════════════════════════════════════════════════════════
@@ -66,6 +75,13 @@ interface MediaMessageProps {
   onDownloaded?: (localUri: string) => void;
   /** Called when a download attempt fails. */
   onDownloadError?: (error: unknown) => void;
+  /**
+   * PHASE-2 PREMIUM THEME (UI-only, additive). When 'phase2', the placeholder
+   * card and the legacy/secure container backgrounds blend with the dark
+   * Phase-2 chat thread. Default 'phase1' preserves the legacy look exactly
+   * (no behavioral change).
+   */
+  theme?: 'phase1' | 'phase2';
 }
 
 export default function MediaMessage({
@@ -80,7 +96,15 @@ export default function MediaMessage({
   autoDownload = false,
   onDownloaded,
   onDownloadError,
+  theme = 'phase1',
 }: MediaMessageProps) {
+  // PHASE-2 PREMIUM: precomputed style overlays. Null in phase1 so the style
+  // arrays below are no-ops (Phase-1 visuals preserved exactly).
+  const isPhase2 = theme === 'phase2';
+  const containerOverlay = isPhase2 ? { backgroundColor: PHASE2.containerBg } : null;
+  const legacyContainerOverlay = isPhase2 ? { backgroundColor: PHASE2.legacyBg } : null;
+  const legacyPlaceholderOverlay = isPhase2 ? { backgroundColor: PHASE2.placeholderOverlay } : null;
+  const securePlaceholderOverlay = isPhase2 ? { backgroundColor: PHASE2.securePlaceholderOverlay } : null;
   const markViewedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Cleanup timeout on unmount to prevent state updates after unmount
@@ -178,7 +202,7 @@ export default function MediaMessage({
   // Early return ensures doodles never enter secure/blur flow
   if (type === 'doodle') {
     return (
-      <Pressable style={styles.legacyContainer} onPress={onPress}>
+      <Pressable style={[styles.legacyContainer, legacyContainerOverlay]} onPress={onPress}>
         <Image
           source={{ uri: mediaUrl }}
           style={styles.legacyThumbnail}
@@ -221,8 +245,8 @@ export default function MediaMessage({
   };
 
   const renderLegacyPlaceholder = () => (
-    <Pressable style={styles.legacyContainer} onPress={handleDownloadTap}>
-      <View style={styles.legacyPlaceholderInner}>
+    <Pressable style={[styles.legacyContainer, legacyContainerOverlay]} onPress={handleDownloadTap}>
+      <View style={[styles.legacyPlaceholderInner, legacyPlaceholderOverlay]}>
         {downloading ? (
           <>
             <ActivityIndicator size="small" color="#FFFFFF" />
@@ -246,8 +270,8 @@ export default function MediaMessage({
   );
 
   const renderSecurePlaceholder = (label: string) => (
-    <Pressable style={styles.container} onPress={handleDownloadTap}>
-      <View style={styles.securePlaceholderInner}>
+    <Pressable style={[styles.container, containerOverlay]} onPress={handleDownloadTap}>
+      <View style={[styles.securePlaceholderInner, securePlaceholderOverlay]}>
         {downloading ? (
           <>
             <ActivityIndicator size="small" color="#FFFFFF" />
@@ -274,7 +298,7 @@ export default function MediaMessage({
       return renderLegacyPlaceholder();
     }
     return (
-      <Pressable style={styles.legacyContainer} onPress={onPress}>
+      <Pressable style={[styles.legacyContainer, legacyContainerOverlay]} onPress={onPress}>
         <Image
           source={{ uri: effectiveUri || mediaUrl }}
           style={styles.legacyThumbnail}
@@ -292,7 +316,7 @@ export default function MediaMessage({
   // Doodle in secure mode: show normally without blur/hold-to-view
   if (!isSecureMedia) {
     return (
-      <Pressable style={styles.container} onPress={onPress}>
+      <Pressable style={[styles.container, containerOverlay]} onPress={onPress}>
         <Image
           source={{ uri: mediaUrl }}
           style={styles.thumbnail}
@@ -329,7 +353,7 @@ export default function MediaMessage({
     };
 
     return (
-      <Pressable style={styles.container} onPress={handleTap}>
+      <Pressable style={[styles.container, containerOverlay]} onPress={handleTap}>
         {/* Media thumbnail - blurred for privacy */}
         <Image
           source={{ uri: effectiveUri || mediaUrl }}
@@ -418,7 +442,7 @@ export default function MediaMessage({
   }
 
   return (
-    <View style={styles.container} {...panResponder.panHandlers}>
+    <View style={[styles.container, containerOverlay]} {...panResponder.panHandlers}>
       <Image
         source={{ uri: effectiveUri || mediaUrl }}
         style={styles.thumbnail}

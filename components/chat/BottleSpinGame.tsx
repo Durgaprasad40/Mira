@@ -31,6 +31,31 @@ import { deriveMyRole, normalizeId } from '@/lib/bottleSpin';
 
 const MAX_SKIPS = 3;
 
+// PHASE-2 PREMIUM (T/D): dark-glass / midnight-plum palette consumed only when
+// the parent passes theme="phase2". Phase-1 callers (ChatScreenInner.tsx) leave
+// the prop unset so all overlays evaluate to null and the original COLORS-based
+// styles render byte-identically. Mirrors the cohesive Phase-2 Messages palette.
+const PHASE2_TD = {
+  containerBg: '#22223A',
+  containerBorder: 'rgba(255, 255, 255, 0.08)',
+  glow: '#E94560',
+  text: '#F2F3F8',
+  textMuted: 'rgba(224, 224, 232, 0.68)',
+  rose: '#E94560',
+  roseSoft: 'rgba(233, 69, 96, 0.18)',
+  neutralCard: '#262943',
+  border: 'rgba(255, 255, 255, 0.10)',
+  borderSoft: 'rgba(255, 255, 255, 0.06)',
+  toastBg: 'rgba(15, 12, 30, 0.92)',
+  spinButtonBg: '#E94560',
+  skipDotInactive: 'rgba(255, 255, 255, 0.12)',
+  modalOverlay: 'rgba(8, 6, 16, 0.78)',
+  endGameBg: 'rgba(233, 69, 96, 0.14)',
+  endGameBorder: 'rgba(233, 69, 96, 0.40)',
+  endGameText: '#FF8A9B',
+  errorRed: '#FF6B7A',
+} as const;
+
 // Generate windowKey for daily UTC buckets (e.g., "2024-01-15")
 function getWindowKey(): string {
   const now = new Date();
@@ -61,6 +86,15 @@ interface BottleSpinGameProps {
    * while the user is intentionally away. If omitted, falls back to onClose.
    */
   onCancel?: () => void;
+  /**
+   * PHASE-2 PREMIUM (T/D): visual theme. Defaults to 'phase1' so all existing
+   * Phase-1 call sites (ChatScreenInner.tsx) keep their byte-identical look.
+   * Phase-2 chats/[id].tsx passes 'phase2' to opt-in to the dark / glass /
+   * rose styling that matches the rest of the Phase-2 Messages experience.
+   * Theme is purely cosmetic — it does NOT affect game logic, turn ownership,
+   * timing, dedup, or any backend mutation.
+   */
+  theme?: 'phase1' | 'phase2';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -80,7 +114,125 @@ export function BottleSpinGame({
   onSendResultMessage,
   autoAdvance = false,
   onCancel,
+  theme = 'phase1',
 }: BottleSpinGameProps) {
+  // PHASE-2 PREMIUM (T/D): theme overlays. Each value is null when phase1 so
+  // the original COLORS-based styles render byte-identically (RN ignores
+  // null/undefined entries in style arrays). Pre-computed once per render.
+  const isPhase2Theme = theme === 'phase2';
+  const overlayBgOverlay = isPhase2Theme ? { backgroundColor: PHASE2_TD.modalOverlay } : null;
+  const containerOverlay = isPhase2Theme
+    ? {
+        backgroundColor: PHASE2_TD.containerBg,
+        borderWidth: 1,
+        borderColor: PHASE2_TD.containerBorder,
+        shadowColor: PHASE2_TD.glow,
+        shadowOpacity: 0.22,
+        shadowRadius: 22,
+        shadowOffset: { width: 0, height: 10 },
+        elevation: 12,
+      }
+    : null;
+  const titleOverlay = isPhase2Theme ? { color: PHASE2_TD.text } : null;
+  const userBadgeOverlay = isPhase2Theme
+    ? { backgroundColor: PHASE2_TD.neutralCard, borderColor: 'transparent' }
+    : null;
+  const userBadgeSelectedOverlay = isPhase2Theme
+    ? { backgroundColor: PHASE2_TD.roseSoft, borderColor: PHASE2_TD.rose }
+    : null;
+  const userBadgeSpinTurnOverlay = isPhase2Theme
+    ? { backgroundColor: PHASE2_TD.roseSoft, borderColor: PHASE2_TD.rose }
+    : null;
+  const userBadgeSpinTurnOtherOverlay = isPhase2Theme
+    ? { backgroundColor: 'rgba(255,255,255,0.04)', borderColor: 'rgba(255,255,255,0.10)' }
+    : null;
+  const userNameOverlay = isPhase2Theme ? { color: PHASE2_TD.text } : null;
+  const userNameSelectedOverlay = isPhase2Theme ? { color: PHASE2_TD.rose } : null;
+  const userNameSpinTurnOverlay = isPhase2Theme ? { color: PHASE2_TD.rose } : null;
+  const userNameSpinTurnOtherOverlay = isPhase2Theme ? { color: PHASE2_TD.textMuted } : null;
+  const turnTextOverlay = isPhase2Theme ? { color: PHASE2_TD.rose } : null;
+  const spinTurnTextOverlay = isPhase2Theme ? { color: PHASE2_TD.rose } : null;
+  const spinTurnTextOtherOverlay = isPhase2Theme ? { color: PHASE2_TD.textMuted } : null;
+  const spinButtonOverlay = isPhase2Theme
+    ? {
+        backgroundColor: PHASE2_TD.spinButtonBg,
+        shadowColor: PHASE2_TD.glow,
+        shadowOpacity: 0.45,
+        shadowRadius: 14,
+        shadowOffset: { width: 0, height: 6 },
+        elevation: 8,
+      }
+    : null;
+  const spinningTextOverlay = isPhase2Theme ? { color: PHASE2_TD.textMuted } : null;
+  const waitingContentOverlay = isPhase2Theme
+    ? {
+        backgroundColor: PHASE2_TD.neutralCard,
+        borderWidth: 1,
+        borderColor: PHASE2_TD.border,
+      }
+    : null;
+  const waitingTextThemeOverlay = isPhase2Theme ? { color: PHASE2_TD.textMuted } : null;
+  const waitingNameOverlay = isPhase2Theme ? { color: PHASE2_TD.text } : null;
+  const skipChoiceOverlay = isPhase2Theme
+    ? {
+        backgroundColor: 'rgba(255,255,255,0.06)',
+        borderColor: 'rgba(255,255,255,0.14)',
+      }
+    : null;
+  const skipChoiceTextOverlay = isPhase2Theme ? { color: PHASE2_TD.text } : null;
+  const skipChoiceTextDisabledOverlay = isPhase2Theme ? { color: PHASE2_TD.textMuted } : null;
+  const resultContainerOverlay = isPhase2Theme
+    ? {
+        backgroundColor: PHASE2_TD.neutralCard,
+        borderWidth: 1,
+        borderColor: PHASE2_TD.border,
+      }
+    : null;
+  const resultTextOverlay = isPhase2Theme ? { color: PHASE2_TD.text } : null;
+  const resultNameOverlay = isPhase2Theme ? { color: PHASE2_TD.rose } : null;
+  const compactActionButtonOverlay = isPhase2Theme
+    ? {
+        backgroundColor: 'rgba(255,255,255,0.06)',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.10)',
+      }
+    : null;
+  const compactActionTextOverlay = isPhase2Theme ? { color: PHASE2_TD.rose } : null;
+  const skipDotInactiveOverlay = isPhase2Theme
+    ? { backgroundColor: PHASE2_TD.skipDotInactive }
+    : null;
+  const skipsTextOverlay = isPhase2Theme ? { color: PHASE2_TD.textMuted } : null;
+  const bottomRowOverlay = isPhase2Theme ? { borderTopColor: PHASE2_TD.border } : null;
+  const endGameButtonOverlay = isPhase2Theme
+    ? {
+        backgroundColor: PHASE2_TD.endGameBg,
+        borderColor: PHASE2_TD.endGameBorder,
+      }
+    : null;
+  const endGameTextOverlay = isPhase2Theme ? { color: PHASE2_TD.endGameText } : null;
+  const confirmContainerOverlay = isPhase2Theme
+    ? {
+        backgroundColor: PHASE2_TD.containerBg,
+        borderWidth: 1,
+        borderColor: PHASE2_TD.containerBorder,
+      }
+    : null;
+  const confirmTitleOverlay = isPhase2Theme ? { color: PHASE2_TD.text } : null;
+  const confirmMessageOverlay = isPhase2Theme ? { color: PHASE2_TD.textMuted } : null;
+  const confirmButtonNoOverlay = isPhase2Theme
+    ? {
+        backgroundColor: 'rgba(255,255,255,0.06)',
+        borderColor: 'rgba(255,255,255,0.14)',
+      }
+    : null;
+  const confirmButtonNoTextOverlay = isPhase2Theme ? { color: PHASE2_TD.text } : null;
+  const resultToastOverlay = isPhase2Theme
+    ? {
+        backgroundColor: PHASE2_TD.toastBg,
+        borderWidth: 1,
+        borderColor: 'rgba(233, 69, 96, 0.32)',
+      }
+    : null;
   // ═══════════════════════════════════════════════════════════════════════════
   // LOCAL STATE - Only for animation and UI helpers, NOT for turn ownership
   // ═══════════════════════════════════════════════════════════════════════════
@@ -996,12 +1148,27 @@ export function BottleSpinGame({
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.choiceButton, styles.skipChoiceButton, !canSkip && styles.skipChoiceButtonDisabled]}
+          style={[styles.choiceButton, styles.skipChoiceButton, skipChoiceOverlay, !canSkip && styles.skipChoiceButtonDisabled]}
           onPress={() => canSkip && handleChoice('skip')}
           disabled={!canSkip}
         >
-          <Ionicons name="play-skip-forward" size={14} color={canSkip ? COLORS.text : COLORS.textMuted} />
-          <Text style={[styles.skipChoiceText, !canSkip && styles.skipChoiceTextDisabled]}>
+          <Ionicons
+            name="play-skip-forward"
+            size={14}
+            color={
+              canSkip
+                ? (isPhase2Theme ? PHASE2_TD.text : COLORS.text)
+                : (isPhase2Theme ? PHASE2_TD.textMuted : COLORS.textMuted)
+            }
+          />
+          <Text
+            style={[
+              styles.skipChoiceText,
+              skipChoiceTextOverlay,
+              !canSkip && styles.skipChoiceTextDisabled,
+              !canSkip && skipChoiceTextDisabledOverlay,
+            ]}
+          >
             Skip
           </Text>
         </TouchableOpacity>
@@ -1016,10 +1183,14 @@ export function BottleSpinGame({
   // ═══════════════════════════════════════════════════════════════════════════
   const renderObserverUI = () => (
     <View style={styles.waitingContainer}>
-      <View style={styles.waitingContent}>
-        <Ionicons name="hourglass-outline" size={18} color={COLORS.textLight} />
-        <Text style={styles.waitingText}>
-          Waiting for <Text style={styles.waitingName}>{otherUserName}</Text> to choose…
+      <View style={[styles.waitingContent, waitingContentOverlay]}>
+        <Ionicons
+          name="hourglass-outline"
+          size={18}
+          color={isPhase2Theme ? PHASE2_TD.textMuted : COLORS.textLight}
+        />
+        <Text style={[styles.waitingText, waitingTextThemeOverlay]}>
+          Waiting for <Text style={[styles.waitingName, waitingNameOverlay]}>{otherUserName}</Text> to choose…
         </Text>
       </View>
     </View>
@@ -1030,10 +1201,14 @@ export function BottleSpinGame({
   // ═══════════════════════════════════════════════════════════════════════════
   const renderWaitingForSpin = () => (
     <View style={styles.waitingContainer}>
-      <View style={styles.waitingContent}>
-        <Ionicons name="hourglass-outline" size={18} color={COLORS.textLight} />
-        <Text style={styles.waitingText}>
-          Waiting for <Text style={styles.waitingName}>{otherUserName}</Text> to spin
+      <View style={[styles.waitingContent, waitingContentOverlay]}>
+        <Ionicons
+          name="hourglass-outline"
+          size={18}
+          color={isPhase2Theme ? PHASE2_TD.textMuted : COLORS.textLight}
+        />
+        <Text style={[styles.waitingText, waitingTextThemeOverlay]}>
+          Waiting for <Text style={[styles.waitingName, waitingNameOverlay]}>{otherUserName}</Text> to spin
         </Text>
       </View>
     </View>
@@ -1044,10 +1219,14 @@ export function BottleSpinGame({
   // ═══════════════════════════════════════════════════════════════════════════
   const renderObserverSpinningText = () => (
     <View style={styles.waitingContainer}>
-      <View style={styles.waitingContent}>
-        <Ionicons name="hourglass-outline" size={18} color={COLORS.textLight} />
-        <Text style={styles.waitingText}>
-          <Text style={styles.waitingName}>{otherUserName}</Text> is spinning…
+      <View style={[styles.waitingContent, waitingContentOverlay]}>
+        <Ionicons
+          name="hourglass-outline"
+          size={18}
+          color={isPhase2Theme ? PHASE2_TD.textMuted : COLORS.textLight}
+        />
+        <Text style={[styles.waitingText, waitingTextThemeOverlay]}>
+          <Text style={[styles.waitingName, waitingNameOverlay]}>{otherUserName}</Text> is spinning…
         </Text>
       </View>
     </View>
@@ -1058,10 +1237,14 @@ export function BottleSpinGame({
   // ═══════════════════════════════════════════════════════════════════════════
   const renderWaitingForStart = () => (
     <View style={styles.waitingContainer}>
-      <View style={styles.waitingContent}>
-        <Ionicons name="time-outline" size={18} color={COLORS.textLight} />
-        <Text style={styles.waitingText}>
-          Waiting for <Text style={styles.waitingName}>{otherUserName}</Text> to start
+      <View style={[styles.waitingContent, waitingContentOverlay]}>
+        <Ionicons
+          name="time-outline"
+          size={18}
+          color={isPhase2Theme ? PHASE2_TD.rose : COLORS.textLight}
+        />
+        <Text style={[styles.waitingText, waitingTextThemeOverlay]}>
+          Waiting for <Text style={[styles.waitingName, waitingNameOverlay]}>{otherUserName}</Text> to start
         </Text>
       </View>
     </View>
@@ -1071,8 +1254,8 @@ export function BottleSpinGame({
   // RENDER: COMPLETE STATE - Compact layout with inline actions
   // ═══════════════════════════════════════════════════════════════════════════
   const renderComplete = () => (
-    <View style={styles.resultContainer}>
-      <Text style={styles.resultText}>
+    <View style={[styles.resultContainer, resultContainerOverlay]}>
+      <Text style={[styles.resultText, resultTextOverlay]}>
         {chosenOption === 'skip' ? (
           <>Skipped!</>
         ) : chosenOption ? (
@@ -1089,13 +1272,13 @@ export function BottleSpinGame({
         )}
       </Text>
       <View style={styles.compactActions}>
-        <TouchableOpacity style={styles.compactActionButton} onPress={handleSpinAgain}>
-          <Ionicons name="refresh" size={14} color={COLORS.primary} />
-          <Text style={styles.compactActionText}>Again</Text>
+        <TouchableOpacity style={[styles.compactActionButton, compactActionButtonOverlay]} onPress={handleSpinAgain}>
+          <Ionicons name="refresh" size={14} color={isPhase2Theme ? PHASE2_TD.rose : COLORS.primary} />
+          <Text style={[styles.compactActionText, compactActionTextOverlay]}>Again</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.compactActionButton} onPress={handleFinishRound}>
-          <Ionicons name="checkmark" size={14} color={COLORS.secondary} />
-          <Text style={[styles.compactActionText, { color: COLORS.secondary }]}>Done</Text>
+        <TouchableOpacity style={[styles.compactActionButton, compactActionButtonOverlay]} onPress={handleFinishRound}>
+          <Ionicons name="checkmark" size={14} color={isPhase2Theme ? PHASE2_TD.text : COLORS.secondary} />
+          <Text style={[styles.compactActionText, { color: isPhase2Theme ? PHASE2_TD.text : COLORS.secondary }]}>Done</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -1111,20 +1294,28 @@ export function BottleSpinGame({
       transparent
       onRequestClose={handleCancel}
     >
-      <View style={styles.overlay}>
-        <View style={styles.container}>
+      <View style={[styles.overlay, overlayBgOverlay]}>
+        <View style={[styles.container, containerOverlay]}>
           {/* Header */}
           <View style={styles.header}>
             <View style={styles.headerTitleRow}>
-              <Ionicons name="wine" size={18} color={COLORS.secondary} />
-              <Text style={styles.title}>Spin the Bottle</Text>
+              <Ionicons name="wine" size={18} color={isPhase2Theme ? PHASE2_TD.rose : COLORS.secondary} />
+              <Text style={[styles.title, titleOverlay]}>Spin the Bottle</Text>
             </View>
             <TouchableOpacity
               onPress={handleCancel}
               style={[styles.closeButton, isAnimationLocked && styles.buttonDisabled]}
               disabled={isAnimationLocked}
             >
-              <Ionicons name="close" size={22} color={isAnimationLocked ? COLORS.textMuted : COLORS.text} />
+              <Ionicons
+                name="close"
+                size={22}
+                color={
+                  isAnimationLocked
+                    ? (isPhase2Theme ? PHASE2_TD.textMuted : COLORS.textMuted)
+                    : (isPhase2Theme ? PHASE2_TD.text : COLORS.text)
+                }
+              />
             </TouchableOpacity>
           </View>
 
@@ -1135,21 +1326,27 @@ export function BottleSpinGame({
               <View style={styles.userLabel}>
                 <View style={[
                   styles.userBadge,
+                  userBadgeOverlay,
                   isCurrentUserSelected && styles.userBadgeSelected,
+                  isCurrentUserSelected && userBadgeSelectedOverlay,
                   showMySpinTurnBadge && styles.userBadgeSpinTurn,
+                  showMySpinTurnBadge && userBadgeSpinTurnOverlay,
                 ]}>
                   <Text style={[
                     styles.userName,
+                    userNameOverlay,
                     isCurrentUserSelected && styles.userNameSelected,
+                    isCurrentUserSelected && userNameSelectedOverlay,
                     showMySpinTurnBadge && styles.userNameSpinTurn,
+                    showMySpinTurnBadge && userNameSpinTurnOverlay,
                   ]}>
                     {currentUserName}
                   </Text>
                   {isCurrentUserSelected && (
-                    <Text style={styles.turnText}>Your turn!</Text>
+                    <Text style={[styles.turnText, turnTextOverlay]}>Your turn!</Text>
                   )}
                   {showMySpinTurnBadge && (
-                    <Text style={styles.spinTurnText}>Your turn to spin</Text>
+                    <Text style={[styles.spinTurnText, spinTurnTextOverlay]}>Your turn to spin</Text>
                   )}
                 </View>
               </View>
@@ -1173,21 +1370,27 @@ export function BottleSpinGame({
               <View style={styles.userLabel}>
                 <View style={[
                   styles.userBadge,
+                  userBadgeOverlay,
                   isOtherUserSelected && styles.userBadgeSelected,
+                  isOtherUserSelected && userBadgeSelectedOverlay,
                   showOtherSpinTurnBadge && styles.userBadgeSpinTurnOther,
+                  showOtherSpinTurnBadge && userBadgeSpinTurnOtherOverlay,
                 ]}>
                   <Text style={[
                     styles.userName,
+                    userNameOverlay,
                     isOtherUserSelected && styles.userNameSelected,
+                    isOtherUserSelected && userNameSelectedOverlay,
                     showOtherSpinTurnBadge && styles.userNameSpinTurnOther,
+                    showOtherSpinTurnBadge && userNameSpinTurnOtherOverlay,
                   ]}>
                     {otherUserName}
                   </Text>
                   {isOtherUserSelected && (
-                    <Text style={styles.turnText}>Their turn!</Text>
+                    <Text style={[styles.turnText, turnTextOverlay]}>Their turn!</Text>
                   )}
                   {showOtherSpinTurnBadge && (
-                    <Text style={styles.spinTurnTextOther}>Their turn to spin</Text>
+                    <Text style={[styles.spinTurnTextOther, spinTurnTextOtherOverlay]}>Their turn to spin</Text>
                   )}
                 </View>
               </View>
@@ -1198,7 +1401,7 @@ export function BottleSpinGame({
               {autoAdvance && toastInfo && (
                 <Animated.View
                   pointerEvents="none"
-                  style={[styles.resultToast, { opacity: toastOpacity }]}
+                  style={[styles.resultToast, resultToastOverlay, { opacity: toastOpacity }]}
                 >
                   <Text style={styles.resultToastText}>{toastInfo.text}</Text>
                 </Animated.View>
@@ -1213,7 +1416,7 @@ export function BottleSpinGame({
           {/* IDLE: Show spin button */}
           {uiMode === 'idle' && (
             <View style={styles.actions}>
-              <TouchableOpacity style={styles.spinButton} onPress={spinBottle}>
+              <TouchableOpacity style={[styles.spinButton, spinButtonOverlay]} onPress={spinBottle}>
                 <Ionicons name="refresh" size={18} color={COLORS.white} />
                 <Text style={styles.spinButtonText}>Spin the Bottle</Text>
               </TouchableOpacity>
@@ -1223,7 +1426,7 @@ export function BottleSpinGame({
           {/* SPINNING: Show spinning text */}
           {uiMode === 'spinning_local' && (
             <View style={styles.spinningContainer}>
-              <Text style={styles.spinningText}>Spinning...</Text>
+              <Text style={[styles.spinningText, spinningTextOverlay]}>Spinning...</Text>
             </View>
           )}
 
@@ -1246,7 +1449,7 @@ export function BottleSpinGame({
           {uiMode === 'complete' && !autoAdvance && renderComplete()}
 
           {/* Bottom row: Skip info + End Game */}
-          <View style={styles.bottomRow}>
+          <View style={[styles.bottomRow, bottomRowOverlay]}>
             <View style={styles.skipInfoLeft}>
               <View style={styles.skipsIndicator}>
                 {[...Array(MAX_SKIPS)].map((_, i) => (
@@ -1255,25 +1458,40 @@ export function BottleSpinGame({
                     style={[
                       styles.skipDot,
                       i < skipsRemaining ? styles.skipDotActive : styles.skipDotInactive,
+                      i >= skipsRemaining && skipDotInactiveOverlay,
                     ]}
                   />
                 ))}
               </View>
-              <Text style={styles.skipsText}>Skips: {skipsRemaining}/{MAX_SKIPS}</Text>
+              <Text style={[styles.skipsText, skipsTextOverlay]}>Skips: {skipsRemaining}/{MAX_SKIPS}</Text>
             </View>
 
             <TouchableOpacity
-              style={[styles.endGameButton, isAnimationLocked && styles.endGameButtonDisabled]}
+              style={[
+                styles.endGameButton,
+                endGameButtonOverlay,
+                isAnimationLocked && styles.endGameButtonDisabled,
+              ]}
               onPress={handleEndGamePress}
               disabled={isAnimationLocked}
             >
               <Ionicons
                 name="close-circle-outline"
                 size={14}
-                color={isAnimationLocked ? COLORS.textMuted : '#E57373'}
+                color={
+                  isAnimationLocked
+                    ? (isPhase2Theme ? PHASE2_TD.textMuted : COLORS.textMuted)
+                    : (isPhase2Theme ? PHASE2_TD.endGameText : '#E57373')
+                }
                 style={{ marginRight: 4 }}
               />
-              <Text style={[styles.endGameText, isAnimationLocked && styles.endGameTextDisabled]}>
+              <Text
+                style={[
+                  styles.endGameText,
+                  endGameTextOverlay,
+                  isAnimationLocked && styles.endGameTextDisabled,
+                ]}
+              >
                 End Game
               </Text>
             </TouchableOpacity>
@@ -1287,18 +1505,18 @@ export function BottleSpinGame({
           transparent
           onRequestClose={handleEndGameCancel}
         >
-          <View style={styles.confirmOverlay}>
-            <View style={styles.confirmContainer}>
-              <Text style={styles.confirmTitle}>End Game?</Text>
-              <Text style={styles.confirmMessage}>
+          <View style={[styles.confirmOverlay, overlayBgOverlay]}>
+            <View style={[styles.confirmContainer, confirmContainerOverlay]}>
+              <Text style={[styles.confirmTitle, confirmTitleOverlay]}>End Game?</Text>
+              <Text style={[styles.confirmMessage, confirmMessageOverlay]}>
                 Are you sure you want to end the game?
               </Text>
               <View style={styles.confirmButtons}>
                 <TouchableOpacity
-                  style={[styles.confirmButton, styles.confirmButtonNo]}
+                  style={[styles.confirmButton, styles.confirmButtonNo, confirmButtonNoOverlay]}
                   onPress={handleEndGameCancel}
                 >
-                  <Text style={styles.confirmButtonNoText}>No</Text>
+                  <Text style={[styles.confirmButtonNoText, confirmButtonNoTextOverlay]}>No</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.confirmButton, styles.confirmButtonYes]}
