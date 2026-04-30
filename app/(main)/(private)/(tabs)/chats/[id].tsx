@@ -64,6 +64,34 @@ import {
 import { Phase2ProtectedMediaBubble } from '@/components/private/Phase2ProtectedMediaBubble';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
 import { popHandoff } from '@/lib/memoryHandoff';
+import { deriveMyRole } from '@/lib/bottleSpin';
+import { uploadMediaToConvexWithProgress } from '@/lib/uploadUtils';
+
+// [P2_MEDIA_UPLOAD] Mirror Phase-1 ChatScreenInner.PendingSecureMessage
+// (components/screens/ChatScreenInner.tsx:171-182). Drives the optimistic
+// chat bubble during upload + send: localUri preview, progress ring,
+// sending spinner, and persistent retry on failure. Phase-2 backend only.
+type PendingPhase2Message = {
+  _id: string;
+  senderId: string;
+  type: 'image' | 'video';
+  content: string;
+  createdAt: number;
+  localUri: string;
+  uploadStatus: 'uploading' | 'sending' | 'upload_failed' | 'send_failed';
+  uploadProgress: number;
+  // Cached after upload succeeds so `send_failed` retries can skip re-upload.
+  storageId?: string;
+  // Captured at confirm time so retries reuse the user's original choices.
+  isProtected: boolean;
+  protectedMediaTimer?: 0 | 30 | 60;
+  protectedMediaViewingMode?: 'tap' | 'hold';
+  protectedMediaIsMirrored?: boolean;
+  clientMessageId: string;
+};
+
+// [P2_MEDIA_UPLOAD] 50ms throttle matches Phase-1 (ChatScreenInner.tsx:558).
+const P2_PROGRESS_UPDATE_INTERVAL_MS = 50;
 
 const C = INCOGNITO_COLORS;
 
@@ -194,6 +222,14 @@ export default function Phase2ChatThread() {
     api.privateConversations.generateSecureMediaUploadUrl
   );
   const markRead = useMutation(api.privateConversations.markPrivateMessagesRead);
+  // P2_HEADER_PARITY: Phase-2-isolated presence writer. Writes ONLY to
+  // `privateUserPresence` (never `users.lastActive`) — see
+  // convex/privateConversations.ts:1531. Drives the header online dot +
+  // subtitle on the other side via `participantLastActive` returned by
+  // `getPrivateConversation`.
+  const updatePrivatePresence = useMutation(
+    api.privateConversations.updatePresence
+  );
   const sendInvite = useMutation(api.games.sendBottleSpinInvite);
   const respondInvite = useMutation(api.games.respondToBottleSpinInvite);
   // P2_TD_PARITY: inviter manually starts the game after invitee accepts
@@ -214,6 +250,11 @@ export default function Phase2ChatThread() {
   const leaveConversation = useMutation(
     api.privateConversations.leavePrivateConversation
   );
+  // MENU-CLEANUP: Phase-2 Unmatch path. Mirrors Phase-1's
+  // `api.matches.unmatch` but stays inside the Phase-2 swipe/match graph
+  // (`privateMatches` + caller-side `participantState.isHidden`). Phase-1
+  // tables are NEVER touched by this mutation.
+  const unmatchPrivate = useMutation(api.privateSwipes.unmatchPrivate);
 
   // --------------------------------------------------------------------- local state
   const [showInviteModal, setShowInviteModal] = useState(false);
@@ -232,6 +273,28 @@ export default function Phase2ChatThread() {
   // countdown can keep ticking even between query refreshes.
   const cooldownAnchorRef = useRef<number | null>(null);
 
+  // P2_TD_PARITY (spin-hint chip): Phase-1 ChatScreenInner.tsx:795-797 — when
+  // it is my turn to spin and the game modal is closed, show a short
+  // "Your turn — tap to spin" chip below the header for ~3s. Local state
+  // only — never persisted, never goes through the message thread.
+  const [showSpinHint, setShowSpinHint] = useState(false);
+  const spinHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSpinHintKeyRef = useRef<string | null>(null);
+
+  // P2_TD_PARITY (waiting-for-start banner): Phase-1
+  // ChatScreenInner.tsx:2821-2829 — invitee sees a soft hourglass banner
+  // immediately after acceptance, until the inviter taps Start. Driven by
+  // the live game session (state='active' && !gameStartedAt && amInvitee).
+
+  // P2_TD_PARITY (ephemeral choice toast): mirrors Phase-1's autoAdvance
+  // toasts inside BottleSpinGame, but for events the user sees from outside
+  // the modal (e.g. opponent picked truth/dare/skipped while my modal is
+  // closed). Dedupe key is `${role}:${lastActionAt}` so query refreshes never
+  // re-fire the same toast.
+  const [tdToast, setTdToast] = useState<string | null>(null);
+  const tdToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastToastKeyRef = useRef<string | null>(null);
+
   // SECURE-MEDIA REVIEW STATE (Phase-1 parity):
   // After camera capture or gallery pick, hold the asset URI + media type so
   // <Phase2CameraPhotoSheet> can review it and let the user pick Normal /
@@ -241,6 +304,80 @@ export default function Phase2ChatThread() {
     'photo'
   );
   const [pendingIsMirrored, setPendingIsMirrored] = useState(false);
+
+  // [P2_MEDIA_UPLOAD] Optimistic pending media bubbles (mirrors Phase-1
+  // ChatScreenInner.tsx:556 `pendingSecureMessages`). Array, not scalar, so
+  // the user can stage a second send before the first finishes uploading.
+  const [pendingPhase2Messages, setPendingPhase2Messages] = useState<
+    PendingPhase2Message[]
+  >([]);
+  // [P2_MEDIA_UPLOAD_FIX] Ref mirror of pending state. The previous
+  // `setPendingPhase2Messages((prev) => { pending = prev.find(...); return prev; })`
+  // pattern was unreliable because React 18 schedules updater functions and
+  // they may run AFTER the line that reads `pending`. The ref is mutated
+  // synchronously inside every helper, so async code (the upload runner +
+  // retry handler) can read the latest snapshot without going through state.
+  const pendingMessagesRef = useRef<PendingPhase2Message[]>([]);
+  // [P2_MEDIA_UPLOAD] Throttle map keyed by pending id, mirrors Phase-1
+  // ChatScreenInner.tsx:559. Prevents per-chunk progress callbacks from
+  // re-rendering the FlashList faster than ~20 fps.
+  const lastP2ProgressUpdateRef = useRef<Map<string, number>>(new Map());
+
+  // [P2_MEDIA_UPLOAD] Helpers (mirrors Phase-1 `addPendingSecureMessage`,
+  // `updatePendingSecureMessage`, `removePendingSecureMessage`). Local-only
+  // — never round-trips through Convex. Each helper writes to the ref
+  // synchronously THEN commits the new array to React state so the UI
+  // re-renders.
+  const addPendingPhase2Message = useCallback(
+    (msg: PendingPhase2Message) => {
+      pendingMessagesRef.current = [...pendingMessagesRef.current, msg];
+      setPendingPhase2Messages(pendingMessagesRef.current);
+    },
+    []
+  );
+  const updatePendingPhase2Message = useCallback(
+    (pendingId: string, patch: Partial<PendingPhase2Message>) => {
+      pendingMessagesRef.current = pendingMessagesRef.current.map((m) =>
+        m._id === pendingId ? { ...m, ...patch } : m
+      );
+      setPendingPhase2Messages(pendingMessagesRef.current);
+    },
+    []
+  );
+  const removePendingPhase2Message = useCallback((pendingId: string) => {
+    pendingMessagesRef.current = pendingMessagesRef.current.filter(
+      (m) => m._id !== pendingId
+    );
+    setPendingPhase2Messages(pendingMessagesRef.current);
+    lastP2ProgressUpdateRef.current.delete(pendingId);
+  }, []);
+
+  // [P2_MEDIA_UPLOAD] Reset pending bubbles + throttle map when conversation
+  // switches (mirrors Phase-1 ChatScreenInner.tsx:587-589).
+  useEffect(() => {
+    pendingMessagesRef.current = [];
+    setPendingPhase2Messages([]);
+    lastP2ProgressUpdateRef.current.clear();
+  }, [id]);
+
+  // P2_HEADER_PARITY: Heartbeat presence while the chat is open. Mirrors
+  // Phase-1 ChatScreenInner.tsx:1441-1457 but uses the Phase-2-isolated
+  // `privateUserPresence` table via api.privateConversations.updatePresence
+  // (Phase-1's `users.lastActive` is NEVER touched). Ticks once on mount
+  // and every 30s thereafter so the OTHER side sees a fresh "Online" dot
+  // and ladder subtitle in their header.
+  useEffect(() => {
+    if (!userId) return;
+    updatePrivatePresence({ authUserId: userId }).catch(() => {
+      // Silent fail — presence is best-effort.
+    });
+    const interval = setInterval(() => {
+      updatePrivatePresence({ authUserId: userId }).catch(() => {
+        // Silent fail — presence is best-effort.
+      });
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, [userId, updatePrivatePresence]);
 
   // SECURE-MEDIA OPEN STATE (Phase-1 parity, Phase-2 backend):
   //   - protectedViewer: holds the message currently shown in the secure
@@ -274,6 +411,13 @@ export default function Phase2ChatThread() {
   const otherPhotoUrl = (conversation as any)?.participantPhotoUrl as
     | string
     | undefined;
+  // P2_HEADER_PARITY: lastActive timestamp for the other participant, sourced
+  // from the Phase-2-isolated `privateUserPresence` table (NOT users.lastActive)
+  // via `api.privateConversations.getPrivateConversation`. Mirrors Phase-1's
+  // `otherUserLastActive` (ChatScreenInner.tsx:2697-2741) and powers the
+  // header presence dot + status subtitle ladder below.
+  const participantLastActive =
+    ((conversation as any)?.participantLastActive as number | undefined) ?? 0;
 
   const tdState = ((gameSession as any)?.state as GameState | undefined) ??
     undefined;
@@ -285,6 +429,24 @@ export default function Phase2ChatThread() {
   // started yet" from "game running" (Phase-1 ChatScreenInner.tsx:1197).
   const gameStartedAt = (gameSession as any)?.gameStartedAt as
     | number
+    | undefined;
+  // P2_TD_PARITY: surface the same session fields Phase-1 uses for the spin
+  // hint and choice toast dedupe (ChatScreenInner.tsx:804-805).
+  const truthDareLastActionAt = (gameSession as any)?.lastActionAt as
+    | number
+    | undefined;
+  const truthDareSpinTurnRole = (gameSession as any)?.spinTurnRole as
+    | 'inviter'
+    | 'invitee'
+    | undefined;
+  const truthDareTurnPhase = (gameSession as any)?.turnPhase as
+    | 'idle'
+    | 'spinning'
+    | 'choosing'
+    | 'complete'
+    | undefined;
+  const truthDareLastSpinResult = (gameSession as any)?.lastSpinResult as
+    | { role?: 'inviter' | 'invitee'; choice?: 'truth' | 'dare' | 'skipped' }
     | undefined;
 
   const currentUserName = useMemo(() => {
@@ -423,6 +585,122 @@ export default function Phase2ChatThread() {
     };
   }, []);
 
+  // P2_TD_PARITY: cleanup spin-hint + ephemeral toast timers on unmount.
+  // Mirrors Phase-1 ChatScreenInner.tsx:952-959 for the spin-hint timer.
+  useEffect(() => {
+    return () => {
+      if (spinHintTimerRef.current) {
+        clearTimeout(spinHintTimerRef.current);
+        spinHintTimerRef.current = null;
+      }
+      if (tdToastTimerRef.current) {
+        clearTimeout(tdToastTimerRef.current);
+        tdToastTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // P2_TD_PARITY: spin-hint trigger. Direct port of Phase-1
+  // ChatScreenInner.tsx:962-1007. Show "Your turn — tap to spin" once per
+  // turn, dedupe via `${spinTurnRole}:${lastActionAt}`, auto-hide after 3s.
+  useEffect(() => {
+    if (!gameSession || !userId) return;
+    if (tdState !== 'active') return;
+    if (truthDareTurnPhase !== 'idle') return;
+    if (!gameStartedAt) return;
+    if (showGameModal) return;
+    if (tdPaused) return;
+
+    const myRole = deriveMyRole(gameSession, userId);
+    const spinTurnRole = truthDareSpinTurnRole || 'inviter';
+    if (!myRole || spinTurnRole !== myRole) return;
+
+    const hintKey = `${spinTurnRole}:${truthDareLastActionAt ?? 0}`;
+    if (lastSpinHintKeyRef.current === hintKey) return;
+    lastSpinHintKeyRef.current = hintKey;
+
+    if (spinHintTimerRef.current) {
+      clearTimeout(spinHintTimerRef.current);
+    }
+
+    setShowSpinHint(true);
+    console.log('[P2_TD_SPIN_HINT_SHOW]', {
+      conversationId: id,
+      spinTurnRole,
+      lastActionAt: truthDareLastActionAt,
+    });
+
+    spinHintTimerRef.current = setTimeout(() => {
+      setShowSpinHint(false);
+      spinHintTimerRef.current = null;
+      console.log('[P2_TD_SPIN_HINT_HIDE]', { conversationId: id });
+    }, 3000);
+  }, [
+    id,
+    userId,
+    gameSession,
+    tdState,
+    truthDareTurnPhase,
+    gameStartedAt,
+    showGameModal,
+    tdPaused,
+    truthDareSpinTurnRole,
+    truthDareLastActionAt,
+  ]);
+
+  // P2_TD_PARITY: ephemeral choice toast. When the OTHER player's spin
+  // resolves to a choice (truth/dare/skipped) while my game modal is closed,
+  // surface a brief Phase-1-style toast — never persist a system message
+  // row. Dedupe via `${role}:${lastActionAt}`.
+  useEffect(() => {
+    if (!gameSession || !userId) return;
+    if (tdState !== 'active') return;
+    if (!gameStartedAt) return;
+    if (!truthDareLastSpinResult) return;
+    const choice = truthDareLastSpinResult.choice;
+    const role = truthDareLastSpinResult.role;
+    if (!choice || !role) return;
+
+    const toastKey = `${role}:${choice}:${truthDareLastActionAt ?? 0}`;
+    if (lastToastKeyRef.current === toastKey) return;
+    lastToastKeyRef.current = toastKey;
+
+    // Suppress for the side whose modal is currently open — they already see
+    // the inline result inside BottleSpinGame.
+    if (showGameModal) return;
+
+    const myRole = deriveMyRole(gameSession, userId);
+    const actorIsMe = !!myRole && role === myRole;
+    const actorName = actorIsMe ? currentUserName : otherUserName;
+
+    let label: string | null = null;
+    if (choice === 'truth') label = `${actorName} chose Truth`;
+    else if (choice === 'dare') label = `${actorName} chose Dare`;
+    else if (choice === 'skipped') label = `${actorName} skipped this turn`;
+    if (!label) return;
+
+    if (tdToastTimerRef.current) {
+      clearTimeout(tdToastTimerRef.current);
+    }
+    setTdToast(label);
+    console.log('[P2_TD_TOAST_SHOW]', { conversationId: id, label });
+    tdToastTimerRef.current = setTimeout(() => {
+      setTdToast(null);
+      tdToastTimerRef.current = null;
+    }, 2000);
+  }, [
+    id,
+    userId,
+    gameSession,
+    tdState,
+    gameStartedAt,
+    truthDareLastSpinResult,
+    truthDareLastActionAt,
+    showGameModal,
+    currentUserName,
+    otherUserName,
+  ]);
+
   // P2_TD_PARITY: 1-second tick while in cooldown so the live countdown
   // re-renders. Phase-1 ChatScreenInner.tsx:1636-1641. Stops ticking when
   // not in cooldown.
@@ -489,30 +767,14 @@ export default function Phase2ChatThread() {
     }, 3000);
   }, []);
 
-  // P2_TD_PARITY: send a `[SYSTEM:truthdare]` marker message via Phase-2
-  // private-message backend. Type is 'text' (not 'system') because Phase-1
-  // also uses 'text' + the marker so MessageBubble's existing system-message
-  // detector fires identically (ChatScreenInner.tsx:1276-1282).
-  const sendSystemMessage = useCallback(
-    async (content: string) => {
-      if (!id || !token) return;
-      try {
-        await sendPrivateMessage({
-          token,
-          conversationId: id as any,
-          type: 'text',
-          content: `[SYSTEM:truthdare]${content}`,
-          clientMessageId: `td_${Date.now()}_${Math.random()
-            .toString(36)
-            .slice(2, 8)}`,
-        });
-      } catch (err) {
-        // Non-fatal — system message failure must NEVER block the game flow.
-        console.warn('[P2_TD_SYSTEM_MSG] failed:', err);
-      }
-    },
-    [id, token, sendPrivateMessage]
-  );
+  // P2_TD_PARITY (REMOVED): the previous `sendSystemMessage` helper wrote
+  // `[SYSTEM:truthdare]…` rows into the conversation thread for game events
+  // (invite, accept, decline, choice, end). Phase-1 NEVER persists T/D
+  // events as chat rows — it surfaces them as ephemeral toasts/banners only
+  // (`components/screens/ChatScreenInner.tsx`). All Phase-2 call sites that
+  // used to invoke this helper now drive local UI state instead (spin hint,
+  // waiting-for-start banner, choice toast). The helper is intentionally
+  // removed so no future caller can accidentally write a T/D row.
 
   const handleTruthDarePress = useCallback(async () => {
     console.log('[P2_TD_PRESS]', {
@@ -553,9 +815,10 @@ export default function Phase2ChatThread() {
               authUserId: userId,
               conversationId: id,
             });
-            // Fire-and-forget system message; do NOT block opening the modal
-            // on its success.
-            void sendSystemMessage('Game started!');
+            // P2_TD_PARITY: do NOT write a "[SYSTEM:truthdare]Game started!"
+            // chat row. Phase-1 surfaces this transition by removing the
+            // waiting-for-start banner and opening BottleSpinGame, not via a
+            // persisted message.
             setTdPaused(false);
             setShowGameModal(true);
           } catch (err) {
@@ -635,7 +898,6 @@ export default function Phase2ChatThread() {
     otherUserName,
     showCooldownFor3s,
     startGame,
-    sendSystemMessage,
   ]);
 
   const handleSendInvite = useCallback(async () => {
@@ -666,12 +928,10 @@ export default function Phase2ChatThread() {
       });
       console.log('[P2_TD_PRESS] invite sent');
       setShowInviteModal(false);
-      // P2_TD_PARITY: announce the invite in the thread (Phase-1
-      // ChatScreenInner.tsx:1276-1282). Fire-and-forget so a system-message
-      // failure cannot block the invite UX.
-      void sendSystemMessage(
-        `${currentUserName} wants to play Truth or Dare!`
-      );
+      // P2_TD_PARITY: do NOT announce the invite as a chat row. Phase-1
+      // (ChatScreenInner.tsx) shows the inviter waiting bar (already rendered
+      // below) and the invitee's auto-opened TruthDareInviteCard — no
+      // persisted system message.
     } catch (err: any) {
       const msg = String(err?.message ?? err);
       console.warn('[P2_TD_PRESS] invite failed:', msg);
@@ -709,8 +969,6 @@ export default function Phase2ChatThread() {
     otherUserName,
     sendInvite,
     showCooldownFor3s,
-    currentUserName,
-    sendSystemMessage,
   ]);
 
   const handleAcceptInvite = useCallback(async () => {
@@ -722,15 +980,15 @@ export default function Phase2ChatThread() {
         accept: true,
       });
       setShowInviteModal(false);
-      // P2_TD_PARITY: Phase-1 ChatScreenInner.tsx:1300-1311 emits an accept
-      // system message immediately after the mutation. Fire-and-forget.
-      void sendSystemMessage(
-        `${currentUserName} is ready to play! Game starting...`
-      );
+      // P2_TD_PARITY: do NOT post an "X is ready to play" chat row. Phase-1
+      // surfaces acceptance through the live game session transition (state
+      // becomes 'active') which is read by the inviter to enable Start! and
+      // by the invitee to render the waiting-for-start banner below — no
+      // persisted system message.
     } catch (err: any) {
       Alert.alert('Could not accept', String(err?.message ?? err));
     }
-  }, [userId, id, respondInvite, sendSystemMessage, currentUserName]);
+  }, [userId, id, respondInvite]);
 
   const handleDeclineInvite = useCallback(async () => {
     if (!userId || !id) return;
@@ -741,14 +999,13 @@ export default function Phase2ChatThread() {
         accept: false,
       });
       setShowInviteModal(false);
-      // P2_TD_PARITY: Phase-1 ChatScreenInner.tsx:1304 — decline announcement.
-      void sendSystemMessage(
-        `${currentUserName} declined the game invite`
-      );
+      // P2_TD_PARITY: do NOT post an "X declined" chat row. The decline drops
+      // the session into 'cooldown'/'none', which the inviter sees through
+      // the existing cooldown toast / T/D button label.
     } catch (err: any) {
       Alert.alert('Could not decline', String(err?.message ?? err));
     }
-  }, [userId, id, respondInvite, sendSystemMessage, currentUserName]);
+  }, [userId, id, respondInvite]);
 
   const handleSendText = useCallback(
     async (text: string) => {
@@ -772,18 +1029,15 @@ export default function Phase2ChatThread() {
   );
 
   // P2_TD_PARITY: BottleSpinGame emits result strings (e.g. "Truth: <q>",
-  // "${name} ended the game"). Phase-1 wraps every such string with the
-  // `[SYSTEM:truthdare]` marker and uses type='text' so MessageBubble's
-  // existing system-message detector renders them as system rows
-  // (ChatScreenInner.tsx:1359-1402). It also intercepts "ended the game"
-  // to call endBottleSpinGame, which kicks the session into cooldown.
+  // "${name} ended the game"). Phase-1 surfaces these as ephemeral toasts
+  // inside BottleSpinGame (autoAdvance) and as outside-the-modal toasts
+  // driven from the live game session — never as persisted [SYSTEM:truthdare]
+  // chat rows. Phase-2 mirrors that here: we still intercept the End-Game
+  // string to call endBottleSpinGame (so the session transitions to
+  // cooldown and the modal closes), but we no longer write any chat row.
   const handleSendResultMessage = useCallback(
     async (msg: string) => {
-      if (!id || !token || !userId) return;
-
-      // P2_TD_PARITY: detect explicit End Game message via the same regex
-      // Phase-1 uses (ChatScreenInner.tsx:1368) and trigger the backend
-      // mutation. Fire-and-forget — the UI closes regardless.
+      if (!id || !userId) return;
       const isEndGameSystemMessage = /^[^\s].* ended the game$/.test(msg);
       if (isEndGameSystemMessage) {
         console.log('[P2_TD_END]', { id, msg });
@@ -794,22 +1048,11 @@ export default function Phase2ChatThread() {
           console.warn('[P2_TD_END] failed:', (err as any)?.message ?? err)
         );
       }
-
-      try {
-        await sendPrivateMessage({
-          token,
-          conversationId: id as any,
-          type: 'text',
-          content: `[SYSTEM:truthdare]${msg}`,
-          clientMessageId: `td_${Date.now()}_${Math.random()
-            .toString(36)
-            .slice(2, 8)}`,
-        });
-      } catch {
-        // Non-fatal — system message failure shouldn't block the game.
-      }
+      // No chat-row write: the choice/skipped/end events are surfaced via
+      // the local `tdToast` effect above and via the BottleSpinGame modal's
+      // own inline UI for the active player.
     },
-    [id, token, userId, sendPrivateMessage, endGame]
+    [id, userId, endGame]
   );
 
   // --------------------------------------------------------------------- attach handlers
@@ -897,8 +1140,179 @@ export default function Phase2ChatThread() {
     setPendingIsMirrored(false);
   }, []);
 
-  // Confirm callback from <Phase2CameraPhotoSheet>: upload + send with the
-  // user-chosen timer mapping. Phase-1 timer values:
+  // [P2_MEDIA_UPLOAD] Drive the pending bubble through upload (with real byte
+  // progress) → sending → server insert. On failure, mark the bubble
+  // upload_failed or send_failed and leave it in chat for the user to retry.
+  // Mirrors Phase-1 ChatScreenInner.tsx:2099-2213 + 2254-2390.
+  const runP2UploadAndSend = useCallback(
+    async (pendingId: string) => {
+      if (!id || !token || !userId) {
+        console.warn('[P2_MEDIA_UPLOAD_START] missing id/token/userId', {
+          hasId: !!id,
+          hasToken: !!token,
+          hasUserId: !!userId,
+        });
+        return;
+      }
+      // [P2_MEDIA_UPLOAD_FIX] Synchronous read from the ref — guaranteed to
+      // contain the row that handleConfirmSecureSend just pushed.
+      const pending = pendingMessagesRef.current.find(
+        (m) => m._id === pendingId
+      );
+      if (!pending) {
+        console.warn('[P2_MEDIA_UPLOAD_START] pending row not in ref', {
+          pendingId,
+          refLen: pendingMessagesRef.current.length,
+        });
+        return;
+      }
+
+      const isVideo = pending.type === 'video';
+      const mediaTypeForUpload: 'photo' | 'video' = isVideo ? 'video' : 'photo';
+      console.log('[P2_MEDIA_UPLOAD_START]', {
+        pendingId,
+        type: pending.type,
+        isProtected: pending.isProtected,
+        hasStorageId: !!pending.storageId,
+      });
+
+      try {
+        // ---------------------------------------------------------------- upload
+        let storageId = pending.storageId;
+        if (!storageId) {
+          updatePendingPhase2Message(pendingId, {
+            uploadStatus: 'uploading',
+            uploadProgress: 0,
+          });
+          lastP2ProgressUpdateRef.current.set(pendingId, 0);
+
+          console.log('[P2_MEDIA_UPLOAD_URL_REQUEST]', { pendingId });
+          storageId = (await uploadMediaToConvexWithProgress(
+            pending.localUri,
+            async () => {
+              const url = await generateMediaUploadUrl({ token });
+              console.log('[P2_MEDIA_UPLOAD_URL_OK]', {
+                pendingId,
+                hasUrl: !!url,
+              });
+              return url as unknown as string;
+            },
+            mediaTypeForUpload,
+            (pct) => {
+              const now = Date.now();
+              const last =
+                lastP2ProgressUpdateRef.current.get(pendingId) ?? 0;
+              if (
+                pct < 100 &&
+                now - last < P2_PROGRESS_UPDATE_INTERVAL_MS
+              ) {
+                return;
+              }
+              lastP2ProgressUpdateRef.current.set(pendingId, now);
+              const clamped = Math.max(0, Math.min(100, pct));
+              // Sample log at 0/25/50/75/100 so we don't flood logcat.
+              const rounded = Math.round(clamped);
+              if (rounded % 25 === 0) {
+                console.log('[P2_MEDIA_UPLOAD_PROGRESS]', {
+                  pendingId,
+                  pct: rounded,
+                });
+              }
+              updatePendingPhase2Message(pendingId, {
+                uploadProgress: clamped,
+              });
+            }
+          )) as unknown as string;
+
+          console.log('[P2_MEDIA_UPLOAD_STORAGE_ID]', {
+            pendingId,
+            storageId,
+          });
+          updatePendingPhase2Message(pendingId, {
+            storageId,
+            uploadProgress: 100,
+          });
+        }
+
+        // ---------------------------------------------------------------- send
+        updatePendingPhase2Message(pendingId, { uploadStatus: 'sending' });
+        console.log('[P2_MEDIA_SEND_START]', {
+          pendingId,
+          storageId,
+          isProtected: pending.isProtected,
+        });
+
+        if (!pending.isProtected) {
+          await sendPrivateMessage({
+            token,
+            conversationId: id as any,
+            type: isVideo ? 'video' : 'image',
+            content: pending.content,
+            imageStorageId: storageId as any,
+            clientMessageId: pending.clientMessageId,
+          });
+        } else {
+          await sendPrivateMessage({
+            token,
+            conversationId: id as any,
+            type: isVideo ? 'video' : 'image',
+            content: pending.content,
+            imageStorageId: storageId as any,
+            isProtected: true,
+            protectedMediaTimer: pending.protectedMediaTimer,
+            protectedMediaViewingMode: pending.protectedMediaViewingMode,
+            protectedMediaIsMirrored: pending.protectedMediaIsMirrored,
+            clientMessageId: pending.clientMessageId,
+          });
+        }
+
+        // ---------------------------------------------------------------- success
+        // Server insert succeeded. The optimistic bubble can now be dropped:
+        // the canonical message will arrive via getPrivateMessages and render
+        // in the same chronological position.
+        console.log('[P2_MEDIA_SEND_OK]', { pendingId });
+        removePendingPhase2Message(pendingId);
+      } catch (err: any) {
+        // [P2_MEDIA_UPLOAD] Split failure path mirrors Phase-1: keep the
+        // bubble in chat with the appropriate retry state. We do NOT show
+        // an Alert because the user already sees the failure state inline.
+        const msg = String(err?.message ?? err);
+        // [P2_MEDIA_UPLOAD_FIX] Read the latest storageId from the ref
+        // (it may have just been set inside the try block above).
+        const latestRow = pendingMessagesRef.current.find(
+          (m) => m._id === pendingId
+        );
+        const latestStorageId = latestRow?.storageId;
+        const failedDuringSend =
+          !!latestStorageId || msg.toLowerCase().includes('send');
+        const nextStatus: PendingPhase2Message['uploadStatus'] = latestStorageId
+          ? 'send_failed'
+          : failedDuringSend
+            ? 'send_failed'
+            : 'upload_failed';
+        updatePendingPhase2Message(pendingId, { uploadStatus: nextStatus });
+        console.warn('[P2_MEDIA_UPLOAD_FAILED]', {
+          pendingId,
+          nextStatus,
+          hasStorageId: !!latestStorageId,
+          err: msg,
+        });
+      }
+    },
+    [
+      id,
+      token,
+      userId,
+      generateMediaUploadUrl,
+      sendPrivateMessage,
+      updatePendingPhase2Message,
+      removePendingPhase2Message,
+    ]
+  );
+
+  // Confirm callback from <Phase2CameraPhotoSheet>: stage an optimistic
+  // pending bubble immediately, then upload + send in the background.
+  // Phase-1 timer values:
   //   -1 = Normal, 0 = View once, 30 = 30s, 60 = 60s
   //
   // Phase-2 backend mapping (no schema change):
@@ -911,7 +1325,7 @@ export default function Phase2ChatThread() {
   //                 (timerEndsAt = now + timer*1000 on first view)
   const handleConfirmSecureSend = useCallback(
     async (uri: string, options: Phase2CameraPhotoOptions) => {
-      if (!id || !token) {
+      if (!id || !token || !userId) {
         clearPendingMedia();
         return;
       }
@@ -920,62 +1334,87 @@ export default function Phase2ChatThread() {
       const timer = options.timer; // -1 | 0 | 30 | 60
       const isNormal = timer < 0;
 
+      // [P2_MEDIA_UPLOAD] Build the optimistic pending row BEFORE clearing
+      // the review-sheet state, so we never lose the user's chosen URI.
+      const pendingId = `pending_p2_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      const clientMessageId = `${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      const pending: PendingPhase2Message = {
+        _id: pendingId,
+        senderId: userId,
+        type: isVideo ? 'video' : 'image',
+        content: isNormal
+          ? isVideo
+            ? 'Video'
+            : 'Photo'
+          : isVideo
+            ? 'Secure Video'
+            : 'Secure Photo',
+        createdAt: Date.now(),
+        localUri: uri,
+        uploadStatus: 'uploading',
+        uploadProgress: 0,
+        isProtected: !isNormal,
+        protectedMediaTimer: isNormal ? undefined : (timer as 0 | 30 | 60),
+        protectedMediaViewingMode: isNormal ? undefined : options.viewingMode,
+        protectedMediaIsMirrored:
+          isNormal ? undefined : isVideo && isMirrored,
+        clientMessageId,
+      };
+      addPendingPhase2Message(pending);
       clearPendingMedia();
 
-      try {
-        const storageId = await uploadMediaBlob(
-          uri,
-          isVideo ? 'video/mp4' : 'image/jpeg'
-        );
-        if (!storageId) {
-          Alert.alert('Upload failed', 'Could not upload media.');
-          return;
-        }
-
-        const clientMessageId = `${Date.now()}_${Math.random()
-          .toString(36)
-          .slice(2, 8)}`;
-
-        if (isNormal) {
-          // Normal: not protected, no timer. MessageBubble renders via
-          // <MediaMessage /> using the imageUrl resolved by getPrivateMessages.
-          await sendPrivateMessage({
-            token,
-            conversationId: id as any,
-            type: isVideo ? 'video' : 'image',
-            content: isVideo ? 'Video' : 'Photo',
-            imageStorageId: storageId as any,
-            clientMessageId,
-          });
-        } else {
-          // Once / 30s / 60s: protected pipeline.
-          await sendPrivateMessage({
-            token,
-            conversationId: id as any,
-            type: isVideo ? 'video' : 'image',
-            content: isVideo ? 'Secure Video' : 'Secure Photo',
-            imageStorageId: storageId as any,
-            isProtected: true,
-            protectedMediaTimer: timer,
-            protectedMediaViewingMode: options.viewingMode,
-            // Mirror only for front-camera captured videos (Phase-1 rule).
-            protectedMediaIsMirrored: isVideo && isMirrored,
-            clientMessageId,
-          });
-        }
-      } catch (err: any) {
-        Alert.alert('Send failed', String(err?.message ?? err));
-      }
+      // Fire-and-forget: the bubble already shows progress; runP2UploadAndSend
+      // updates state internally and never throws to the caller.
+      void runP2UploadAndSend(pendingId);
     },
     [
       id,
       token,
+      userId,
       pendingMediaType,
       pendingIsMirrored,
-      uploadMediaBlob,
-      sendPrivateMessage,
+      addPendingPhase2Message,
       clearPendingMedia,
+      runP2UploadAndSend,
     ]
+  );
+
+  // [P2_MEDIA_UPLOAD] Tap-to-retry handler (Phase-1 parity:
+  // ChatScreenInner.tsx:2254-2390). Two paths:
+  //   - send_failed → reuse cached storageId, only re-run sendPrivateMessage.
+  //   - upload_failed (no storageId) → re-upload from localUri then send.
+  // runP2UploadAndSend already branches on the cached storageId, so the
+  // retry just resets the bubble to the appropriate starting state.
+  const handleRetryPendingPhase2Media = useCallback(
+    (pendingId: string) => {
+      // [P2_MEDIA_UPLOAD_FIX] Synchronous read from ref — no setState callback
+      // race. The upload runner also reads from the ref so the cached
+      // storageId (if any) survives the retry without re-uploading.
+      const pending = pendingMessagesRef.current.find(
+        (m) => m._id === pendingId
+      );
+      if (!pending) return;
+      if (pending.uploadStatus === 'send_failed' && pending.storageId) {
+        updatePendingPhase2Message(pendingId, {
+          uploadStatus: 'sending',
+        });
+      } else {
+        // upload_failed (or send_failed without a cached storageId for some
+        // reason): retry from the upload step.
+        updatePendingPhase2Message(pendingId, {
+          uploadStatus: 'uploading',
+          uploadProgress: 0,
+          storageId: undefined,
+        });
+        lastP2ProgressUpdateRef.current.set(pendingId, 0);
+      }
+      void runP2UploadAndSend(pendingId);
+    },
+    [updatePendingPhase2Message, runP2UploadAndSend]
   );
 
   // CAMERA-VIDEO-FIX: Phase-2 camera now uses the same custom camera-composer
@@ -1105,32 +1544,60 @@ export default function Phase2ChatThread() {
     router,
   ]);
 
-  const handleLeave = useCallback(() => {
+  // MENU-CLEANUP: Phase-2 Unmatch — replaces the old "End connection" path.
+  // Calls `api.privateSwipes.unmatchPrivate` (sets privateMatches.isActive
+  // false + caller's participantState.isHidden true) then best-effort
+  // `leavePrivateConversation` so the row drops off the chat list
+  // immediately, then navigates back. Phase-1 tables are never touched.
+  const handleUnmatch = useCallback(() => {
     setShowMenu(false);
-    if (!token || !id) return;
+    if (!userId || !id) return;
     Alert.alert(
-      'End connection?',
-      `This will hide your conversation with ${otherUserName}. They won't be notified.`,
+      'Unmatch?',
+      `This will remove your match and close the conversation with ${otherUserName}.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'End',
+          text: 'Unmatch',
           style: 'destructive',
           onPress: async () => {
             try {
-              await leaveConversation({
-                token,
+              const result = await unmatchPrivate({
+                authUserId: userId,
                 conversationId: id as any,
               });
+              if (!result?.success) {
+                throw new Error(
+                  (result as any)?.error || 'Failed to unmatch.'
+                );
+              }
+              if (token) {
+                try {
+                  await leaveConversation({
+                    token,
+                    conversationId: id as any,
+                  });
+                } catch {
+                  // best-effort hide — unmatch already flipped isActive=false
+                }
+              }
               router.replace('/(main)/(private)/(tabs)/chats' as any);
             } catch (err: any) {
-              Alert.alert('Could not end connection', String(err?.message ?? err));
+              Alert.alert('Could not unmatch', String(err?.message ?? err));
             }
           },
         },
       ]
     );
-  }, [token, id, otherUserName, leaveConversation, router]);
+  }, [
+    userId,
+    id,
+    otherUserName,
+    unmatchPrivate,
+    leaveConversation,
+    token,
+    router,
+  ]);
 
   const handleReportReason = useCallback(
     async (
@@ -1138,9 +1605,7 @@ export default function Phase2ChatThread() {
         | 'fake_profile'
         | 'inappropriate_photos'
         | 'harassment'
-        | 'spam'
         | 'underage'
-        | 'other'
     ) => {
       setShowReportSheet(false);
       if (!userId || !otherUserId) return;
@@ -1161,8 +1626,53 @@ export default function Phase2ChatThread() {
     [userId, otherUserId, reportUser]
   );
 
+  // MENU-CLEANUP: Phase-2 Scam quick action. Frontend-only mapping to
+  // backend `reason: 'other'` + description so no new backend literal is
+  // required. Moderators see the descriptive label in the audit row.
+  const handleScam = useCallback(async () => {
+    setShowMenu(false);
+    if (!userId || !otherUserId) return;
+    try {
+      await reportUser({
+        authUserId: userId,
+        reportedUserId: otherUserId as any,
+        reason: 'other',
+        description: 'Scam/fraudulent behavior',
+      });
+      Alert.alert(
+        'Reported as scam',
+        'Thanks — our team will review this report.'
+      );
+    } catch (err: any) {
+      Alert.alert('Could not submit report', String(err?.message ?? err));
+    }
+  }, [userId, otherUserId, reportUser]);
+
   // --------------------------------------------------------------------- render helpers
-  const messageList = (messages ?? []) as any[];
+  // [P2_MEDIA_UPLOAD] Merge server messages with optimistic pending bubbles,
+  // sort by (createdAt, _id) so the pending bubble lands in the right slot
+  // and survives clock skew between client + server (mirrors Phase-1
+  // ChatScreenInner.tsx:715-720).
+  const messageList = useMemo(() => {
+    const server = (messages ?? []) as any[];
+    if (pendingPhase2Messages.length === 0) return server;
+    const pendingAsRows = pendingPhase2Messages.map((p) => ({
+      // FlashList keyExtractor reads `id`; the rest of `item.*` is consumed
+      // by renderItem.
+      id: p._id,
+      _isPendingPhase2: true,
+      pending: p,
+      senderId: p.senderId,
+      type: p.type,
+      content: p.content,
+      createdAt: p.createdAt,
+    }));
+    return [...server, ...pendingAsRows].sort((a, b) => {
+      const diff = (a.createdAt ?? 0) - (b.createdAt ?? 0);
+      if (diff !== 0) return diff;
+      return String(a.id).localeCompare(String(b.id));
+    });
+  }, [messages, pendingPhase2Messages]);
 
   const renderItem = useCallback(
     ({ item, index }: { item: any; index: number }) => {
@@ -1171,6 +1681,36 @@ export default function Phase2ChatThread() {
       // or this is the most recent message in the list.
       const next = messageList[index + 1];
       const isLastInGroup = !next || next.senderId !== item.senderId;
+
+      // [P2_MEDIA_UPLOAD] Optimistic pending media bubble: render through the
+      // shared MessageBubble pending path (components/chat/MessageBubble.tsx
+      // :270-351). Phase-1 already ships the upload ring + sending spinner +
+      // tap-to-retry UI; we just need to pass the pending props.
+      if (item._isPendingPhase2) {
+        const p = item.pending as PendingPhase2Message;
+        return (
+          <MessageBubble
+            message={{
+              id: p._id,
+              senderId: p.senderId,
+              type: p.type,
+              content: p.content,
+              createdAt: p.createdAt,
+              isPending: true,
+              localUri: p.localUri,
+              uploadStatus: p.uploadStatus,
+              uploadProgress: p.uploadProgress,
+            }}
+            isOwn
+            otherUserName={otherUserName}
+            currentUserId={userId ?? undefined}
+            currentUserToken={token ?? undefined}
+            showAvatar={false}
+            isLastInGroup={isLastInGroup}
+            onRetryPendingMedia={handleRetryPendingPhase2Media}
+          />
+        );
+      }
 
       // PHASE-2 PARITY: every message type is now rendered through the
       // shared Phase-1 MessageBubble so avatar gutter, grouping spacing,
@@ -1246,7 +1786,14 @@ export default function Phase2ChatThread() {
         />
       );
     },
-    [userId, token, otherUserName, otherPhotoUrl, messageList]
+    [
+      userId,
+      token,
+      otherUserName,
+      otherPhotoUrl,
+      messageList,
+      handleRetryPendingPhase2Media,
+    ]
   );
 
   // --------------------------------------------------------------------- early-return: bad id
@@ -1352,16 +1899,39 @@ export default function Phase2ChatThread() {
                 <Ionicons name="person" size={20} color={C.textLight} />
               </View>
             )}
+            {/* P2_HEADER_PARITY: small presence dot overlaid on the avatar
+                bottom-right, mirroring Phase-1 ChatScreenInner.tsx:2697-2706.
+                Shown only when the backend has a presence record so we don't
+                paint a stale "offline" dot on first load. Online = green when
+                the participant heartbeat is < 60s old, neutral otherwise. */}
+            {participantLastActive > 0 && (
+              <View
+                style={[
+                  styles.headerPresenceDot,
+                  Date.now() - participantLastActive < 60_000
+                    ? styles.headerPresenceDotOnline
+                    : styles.headerPresenceDotOffline,
+                ]}
+              />
+            )}
           </View>
           <View style={styles.headerNameWrap}>
             <Text style={styles.headerName} numberOfLines={1}>
               {otherUserName}
             </Text>
-            {tdState === 'active' && (
-              <Text style={styles.headerStatus} numberOfLines={1}>
-                Truth or Dare in progress
-              </Text>
-            )}
+            {/* P2_HEADER_PARITY: presence ladder subtitle, identical strings
+                to Phase-1 ChatScreenInner.tsx:2729-2740. T/D state must NEVER
+                replace this subtitle — keep it rendered unconditionally so
+                the participant identity row stays stable across game phases. */}
+            <Text style={styles.headerStatus} numberOfLines={1}>
+              {(() => {
+                const diff = Date.now() - participantLastActive;
+                if (diff < 60_000) return 'Online';
+                if (diff < 5 * 60_000) return 'Active now';
+                if (participantLastActive > 0) return 'Recently active';
+                return 'Offline';
+              })()}
+            </Text>
           </View>
         </View>
 
@@ -1404,6 +1974,49 @@ export default function Phase2ChatThread() {
         </View>
       )}
 
+      {/* P2_TD_PARITY: waiting-for-start banner shown to the invitee after
+          they accept. Phase-1 ChatScreenInner.tsx:2821-2829. Driven entirely
+          by the live game session — no persisted system message needed. */}
+      {tdState === 'active' && !gameStartedAt && amInvitee && (
+        <View style={styles.waitingStartBanner}>
+          <Ionicons name="hourglass-outline" size={16} color="#2E7D32" />
+          <Text style={styles.waitingStartBannerText} numberOfLines={1}>
+            Waiting for {otherUserName} to start the game
+          </Text>
+        </View>
+      )}
+
+      {/* P2_TD_PARITY: my-turn spin hint chip. Phase-1 ChatScreenInner.tsx:
+          2805-2819. Auto-hides after 3s; dedupe handled in the trigger
+          effect via lastSpinHintKeyRef. */}
+      {showSpinHint && (
+        <View
+          style={[styles.spinHintAnchor, { top: insets.top + 56 }]}
+          pointerEvents="none"
+        >
+          <View style={styles.spinHintCaret} />
+          <View style={styles.spinHintChip}>
+            <View style={styles.spinHintDot} />
+            <Text style={styles.spinHintText}>Your turn — tap to spin</Text>
+          </View>
+        </View>
+      )}
+
+      {/* P2_TD_PARITY: ephemeral T/D choice toast (truth/dare/skipped) for
+          the side whose game modal is currently closed. Lives ~2s, dedupe
+          via lastToastKeyRef. Never persists into the message thread. */}
+      {tdToast && (
+        <View
+          style={[styles.tdToast, { top: insets.top + 64 }]}
+          pointerEvents="none"
+        >
+          <Ionicons name="wine-outline" size={14} color={COLORS.white} />
+          <Text style={styles.tdToastText} numberOfLines={1}>
+            {tdToast}
+          </Text>
+        </View>
+      )}
+
       {/* P2_TD_PARITY: Cooldown toast text mirrors Phase-1 ChatScreenInner.tsx:
           3068-3072. When `cooldownLiveText` is available we show "Cooldown
           ends in 29m 45s" (live, ticks every second). Falls back to a static
@@ -1437,7 +2050,7 @@ export default function Phase2ChatThread() {
             <View style={styles.loading}>
               <ActivityIndicator size="large" color={C.primary} />
             </View>
-          ) : (messages?.length ?? 0) === 0 ? (
+          ) : messageList.length === 0 ? (
             <View style={styles.emptyState}>
               <Ionicons
                 name="chatbubbles-outline"
@@ -1451,7 +2064,7 @@ export default function Phase2ChatThread() {
           ) : (
             <FlashList
               ref={listRef}
-              data={messages ?? []}
+              data={messageList}
               keyExtractor={(item: any) => String(item.id)}
               renderItem={renderItem}
               contentContainerStyle={styles.listContent}
@@ -1520,7 +2133,9 @@ export default function Phase2ChatThread() {
         </View>
       </Modal>
 
-      {/* 3-dot menu — Block / Report / End connection */}
+      {/* 3-dot menu — Unmatch / Block / Report / Scam / Cancel
+          MENU-CLEANUP: aligned with Phase-1. "End connection" replaced
+          by "Unmatch" (wired to api.privateSwipes.unmatchPrivate). */}
       <Modal
         visible={showMenu}
         transparent
@@ -1538,13 +2153,16 @@ export default function Phase2ChatThread() {
             <View style={styles.menuHandle} />
             <TouchableOpacity
               style={styles.menuItem}
-              onPress={() => {
-                setShowMenu(false);
-                setTimeout(() => setShowReportSheet(true), 200);
-              }}
+              onPress={handleUnmatch}
             >
-              <Ionicons name="flag-outline" size={20} color={C.text} />
-              <Text style={styles.menuItemText}>Report</Text>
+              <Ionicons
+                name="close-circle-outline"
+                size={20}
+                color={C.primary}
+              />
+              <Text style={[styles.menuItemText, { color: C.primary }]}>
+                Unmatch
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.menuItem}
@@ -1561,16 +2179,20 @@ export default function Phase2ChatThread() {
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.menuItem}
-              onPress={handleLeave}
+              onPress={() => {
+                setShowMenu(false);
+                setTimeout(() => setShowReportSheet(true), 200);
+              }}
             >
-              <Ionicons
-                name="close-circle-outline"
-                size={20}
-                color={C.primary}
-              />
-              <Text style={[styles.menuItemText, { color: C.primary }]}>
-                End connection
-              </Text>
+              <Ionicons name="flag-outline" size={20} color={C.text} />
+              <Text style={styles.menuItemText}>Report</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={handleScam}
+            >
+              <Ionicons name="alert-circle-outline" size={20} color={C.text} />
+              <Text style={styles.menuItemText}>Scam</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.menuItem, styles.menuCancel]}
@@ -1582,7 +2204,8 @@ export default function Phase2ChatThread() {
         </TouchableOpacity>
       </Modal>
 
-      {/* Report reason sheet */}
+      {/* Report reason sheet — MENU-CLEANUP: 4 reasons only
+          (Spam and Other removed). */}
       <Modal
         visible={showReportSheet}
         transparent
@@ -1603,9 +2226,7 @@ export default function Phase2ChatThread() {
               ['fake_profile', 'Fake profile'],
               ['inappropriate_photos', 'Inappropriate photos'],
               ['harassment', 'Harassment'],
-              ['spam', 'Spam'],
               ['underage', 'Underage'],
-              ['other', 'Other'],
             ] as const).map(([reason, label]) => (
               <TouchableOpacity
                 key={reason}
@@ -1724,6 +2345,10 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     marginRight: 10,
+    // P2_HEADER_PARITY: position relative is required so the absolutely
+    // positioned presence dot anchors to the avatar bottom-right (Phase-1
+    // ChatScreenInner.tsx styles `avatarContainer` does the same).
+    position: 'relative',
   },
   headerAvatar: {
     width: 40,
@@ -1735,6 +2360,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // P2_HEADER_PARITY: 10x10 dot with 2px white border, anchored to avatar
+  // bottom-right. Matches the Phase-1 presenceDot/presenceDotOnline/Offline
+  // shape (ChatScreenInner.tsx:3354-3371). Color set inline via the Online/
+  // Offline variants below based on the freshness of participantLastActive.
+  headerPresenceDot: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 2,
+    borderColor: C.background,
+  },
+  headerPresenceDotOnline: {
+    backgroundColor: '#22C55E',
+  },
+  headerPresenceDotOffline: {
+    backgroundColor: C.textLight,
+    opacity: 0.5,
+  },
   headerNameWrap: { flex: 1, minWidth: 0 },
   headerName: {
     fontSize: 16,
@@ -1742,11 +2388,14 @@ const styles = StyleSheet.create({
     color: C.text,
     flexShrink: 1,
   },
+  // P2_HEADER_PARITY: muted subtitle color matching Phase-1's headerStatus
+  // (ChatScreenInner.tsx:3383-3388). Previously used C.primary + bold weight
+  // because no subtitle was ever rendered; tone it down now that it carries
+  // the presence ladder text.
   headerStatus: {
     fontSize: 12,
-    color: C.primary,
+    color: C.textLight,
     marginTop: 2,
-    fontWeight: '500',
   },
   tdPill: {
     flexDirection: 'row',
@@ -1788,6 +2437,88 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   waitingText: { color: C.text, fontSize: 13, flexShrink: 1 },
+  // P2_TD_PARITY: waiting-for-start banner (Phase-1 styles 3478-3492).
+  waitingStartBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(46, 125, 50, 0.12)',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+  },
+  waitingStartBannerText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#2E7D32',
+    flexShrink: 1,
+  },
+  // P2_TD_PARITY: spin-hint chip (Phase-1 styles 3493-3538).
+  spinHintAnchor: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 30,
+    elevation: 30,
+    alignItems: 'flex-end',
+  },
+  spinHintCaret: {
+    width: 10,
+    height: 10,
+    marginRight: 34,
+    marginBottom: -5,
+    backgroundColor: COLORS.white,
+    borderLeftWidth: 1,
+    borderTopWidth: 1,
+    borderColor: 'rgba(17, 24, 39, 0.08)',
+    transform: [{ rotate: '45deg' }],
+  },
+  spinHintChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: COLORS.white,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(17, 24, 39, 0.08)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+  spinHintDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+    backgroundColor: C.primary,
+  },
+  spinHintText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.text,
+  },
+  // P2_TD_PARITY: ephemeral choice toast — same visual language as
+  // cooldownToast above so styling stays consistent within the thread.
+  tdToast: {
+    position: 'absolute',
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    borderRadius: 14,
+    zIndex: 50,
+    gap: 6,
+  },
+  tdToastText: {
+    color: COLORS.white,
+    fontSize: 13,
+    fontWeight: '500',
+    maxWidth: 260,
+  },
   cooldownToast: {
     position: 'absolute',
     alignSelf: 'center',
