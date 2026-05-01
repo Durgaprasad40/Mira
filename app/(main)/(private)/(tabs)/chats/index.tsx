@@ -39,6 +39,7 @@ import { P2 } from '@/lib/p2Instrumentation';
 
 const C = INCOGNITO_COLORS;
 const STANDOUT_PREVIEW_LIMIT = 3;
+const NEW_MATCH_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 type Phase2LastMessageType = 'text' | 'image' | 'video' | 'voice' | 'system';
 
@@ -904,8 +905,8 @@ export default function ChatsScreen() {
             const isSuperLike = item.matchSource === 'super_like';
             // Check if this is a T/D connection
             const isTodConnect = item.connectionSource === 'tod';
-            // Check if this is a very recent connection (within 30 minutes)
-            const isRecentConnect = Date.now() - item.lastMessageAt < 30 * 60 * 1000;
+            // Check if this is a recent connection (within 24 hours)
+            const isRecentConnect = Date.now() - item.lastMessageAt < NEW_MATCH_WINDOW_MS;
             return (
               <TouchableOpacity
                 style={styles.matchItem}
@@ -998,7 +999,6 @@ export default function ChatsScreen() {
       style={[styles.container, styles.gradientContainer, { paddingTop: insets.top }]}
     >
       <View style={styles.header}>
-        <Ionicons name="mail" size={24} color={C.primary} />
         <Text style={styles.headerTitle}>Messages</Text>
         {/* Likes button with badge - navigates to Phase-2 likes page */}
         <TouchableOpacity
