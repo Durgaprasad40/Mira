@@ -290,6 +290,8 @@ export const getUserPrivateConversations = query({
           lastMessage: lastMessage?.content || null,
           lastMessageAt: lastMessage?.createdAt || conversation.lastMessageAt || conversation.createdAt,
           lastMessageSenderId: lastMessage?.senderId || null,
+          lastMessageType: lastMessage?.type || null,
+          lastMessageIsProtected: lastMessage?.isProtected === true,
           hasRealMessages: !!lastRealMessage,
           unreadCount,
           connectionSource: conversation.connectionSource || 'desire_match',

@@ -33,11 +33,48 @@ import { useScreenTrace } from '@/lib/devTrace';
 // P2-002: Centralized blur helper
 import { getAvatarBlurRadius } from '@/lib/phase2UI';
 // P2-006: Connection source types
-import type { ConnectionSource } from '@/types';
+import type { ConnectionSource, IncognitoConversation } from '@/types';
 // P2-INSTRUMENTATION: Sentry breadcrumbs for Phase-2 debugging
 import { P2 } from '@/lib/p2Instrumentation';
 
 const C = INCOGNITO_COLORS;
+
+type Phase2LastMessageType = 'text' | 'image' | 'video' | 'voice' | 'system';
+
+type Phase2Conversation = IncognitoConversation & {
+  hasRealMessages?: boolean;
+  lastMessageSenderId?: string | null;
+  lastMessageType?: Phase2LastMessageType | string | null;
+  lastMessageIsProtected?: boolean;
+};
+
+const PREVIEW_MARKER_RE = /^\[(?:SYSTEM|INTERNAL|PRIVATE|MEDIA|PROTECTED|SECURE):[^\]]+\]/i;
+
+const getPhase2ConversationPreview = (convo: Phase2Conversation): string => {
+  const rawContent = typeof convo.lastMessage === 'string' ? convo.lastMessage.trim() : '';
+  const markerMatch = rawContent.match(PREVIEW_MARKER_RE);
+  const displayContent = markerMatch ? rawContent.slice(markerMatch[0].length).trim() : rawContent;
+  const type = convo.lastMessageType;
+  const sentByCurrentUser = !!convo.lastMessageSenderId && convo.lastMessageSenderId !== convo.participantId;
+  const previewPrefix = sentByCurrentUser ? 'You: ' : '';
+
+  if (convo.lastMessageIsProtected) {
+    return `${previewPrefix}${type === 'video' ? 'Secure video' : 'Secure photo'}`;
+  }
+  if (type === 'image') return `${previewPrefix}Photo`;
+  if (type === 'video') return `${previewPrefix}Video`;
+  if (type === 'voice') return `${previewPrefix}Voice message`;
+
+  if (type === 'system' || markerMatch) {
+    return textForPublicSurface(displayContent).trim() || 'New message';
+  }
+
+  if (displayContent) {
+    return `${previewPrefix}${textForPublicSurface(displayContent)}`;
+  }
+
+  return 'New message';
+};
 
 // Phase-2 connection sources mapped to icons
 const connectionIcon = (source: string) => {
@@ -482,6 +519,9 @@ export default function ChatsScreen() {
           participantLastActive: (bc as any).participantLastActive ?? 0,
           lastMessage: bc.lastMessage || 'Say hi!',
           lastMessageAt: bc.lastMessageAt,
+          lastMessageSenderId: (bc as any).lastMessageSenderId ?? null,
+          lastMessageType: (bc as any).lastMessageType ?? null,
+          lastMessageIsProtected: (bc as any).lastMessageIsProtected === true,
           hasRealMessages: (bc as any).hasRealMessages === true,
           unreadCount: bc.unreadCount,
           connectionSource: normalizeConnectionSource(source),
@@ -635,6 +675,21 @@ export default function ChatsScreen() {
 
     return new Map(
       normalizedBackend.map((convo) => [convo.id, (convo as any).hasRealMessages === true])
+    );
+  }, [normalizedBackend]);
+
+  const previewMetadataByConversationId = useMemo(() => {
+    if (!normalizedBackend) return null;
+
+    return new Map(
+      normalizedBackend.map((convo) => [
+        convo.id,
+        {
+          lastMessageSenderId: (convo as any).lastMessageSenderId ?? null,
+          lastMessageType: (convo as any).lastMessageType ?? null,
+          lastMessageIsProtected: (convo as any).lastMessageIsProtected === true,
+        },
+      ])
     );
   }, [normalizedBackend]);
 
@@ -940,6 +995,10 @@ export default function ChatsScreen() {
           messageThreads.map((convo) => {
             // PRESENCE: Calculate online status for green dot indicator
             const onlineStatus = getOnlineStatus((convo as any).participantLastActive);
+            const previewConvo = {
+              ...convo,
+              ...(previewMetadataByConversationId?.get(convo.id) ?? {}),
+            } as Phase2Conversation;
             return (
               <TouchableOpacity
                 key={convo.id}
@@ -1006,7 +1065,7 @@ export default function ChatsScreen() {
                     <Text style={styles.chatName}>{convo.participantName}</Text>
                     <Text style={styles.chatTime}>{getTimeAgo(convo.lastMessageAt)}</Text>
                   </View>
-                  <Text style={styles.chatLastMsg} numberOfLines={1}>{textForPublicSurface(convo.lastMessage)}</Text>
+                  <Text style={styles.chatLastMsg} numberOfLines={1}>{getPhase2ConversationPreview(previewConvo)}</Text>
                 </View>
                 {convo.unreadCount > 0 && (
                   <View style={styles.unreadBadge}>
