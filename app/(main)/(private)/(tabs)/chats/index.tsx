@@ -38,6 +38,7 @@ import type { ConnectionSource, IncognitoConversation } from '@/types';
 import { P2 } from '@/lib/p2Instrumentation';
 
 const C = INCOGNITO_COLORS;
+const STANDOUT_PREVIEW_LIMIT = 3;
 
 type Phase2LastMessageType = 'text' | 'image' | 'video' | 'voice' | 'system';
 
@@ -46,6 +47,14 @@ type Phase2Conversation = IncognitoConversation & {
   lastMessageSenderId?: string | null;
   lastMessageType?: Phase2LastMessageType | string | null;
   lastMessageIsProtected?: boolean;
+};
+
+type StandoutPreview = {
+  likeId: string;
+  displayName: string;
+  message: string;
+  photoUrl?: string | null;
+  shouldBlurPhoto: boolean;
 };
 
 const PREVIEW_MARKER_RE = /^\[(?:SYSTEM|INTERNAL|PRIVATE|MEDIA|PROTECTED|SECURE):[^\]]+\]/i;
@@ -254,6 +263,33 @@ export default function ChatsScreen() {
         likes: incomingLikes.map(l => ({ from: l.fromUserId?.slice(-8), action: l.action }))
       });
     }
+  }, [incomingLikes]);
+
+  const standoutPreviews = useMemo<StandoutPreview[]>(() => {
+    if (!incomingLikes) return [];
+
+    return incomingLikes
+      .filter((like) => {
+        const message = typeof like.message === 'string' ? like.message.trim() : '';
+        return like.action === 'super_like' && message.length > 0;
+      })
+      .slice(0, STANDOUT_PREVIEW_LIMIT)
+      .map((like) => {
+        const profile = like.profile;
+        const photoBlurSlots: boolean[] | undefined = Array.isArray((profile as any)?.photoBlurSlots)
+          ? (profile as any).photoBlurSlots
+          : undefined;
+        const message = typeof like.message === 'string' ? like.message.trim() : '';
+        const safeMessage = textForPublicSurface(message).trim();
+
+        return {
+          likeId: String(like.likeId),
+          displayName: profile?.displayName || 'Someone',
+          message: safeMessage || 'Sent you a standout message',
+          photoUrl: profile?.blurredPhotoUrl ?? null,
+          shouldBlurPhoto: (profile as any)?.photoBlurEnabled === true && Boolean(photoBlurSlots?.[0]),
+        };
+      });
   }, [incomingLikes]);
 
   // Note: Likes modal removed - now uses dedicated page at /(main)/(private)/phase2-likes
@@ -793,6 +829,59 @@ export default function ChatsScreen() {
     );
   };
 
+  const renderStandoutPreviewSection = () => {
+    if (standoutPreviews.length === 0) return null;
+
+    return (
+      <TouchableOpacity
+        style={styles.standoutPreviewSection}
+        onPress={() => router.push('/(main)/(private)/phase2-likes' as any)}
+        activeOpacity={0.85}
+      >
+        <View style={styles.standoutPreviewHeader}>
+          <View style={styles.standoutTitleRow}>
+            <View style={styles.standoutIconWrap}>
+              <Ionicons name="star" size={14} color="#FFFFFF" />
+            </View>
+            <Text style={styles.standoutPreviewTitle}>Standout messages</Text>
+            <View style={styles.countBadge}>
+              <Text style={styles.countBadgeText}>{standoutPreviews.length}</Text>
+            </View>
+          </View>
+          <View style={styles.standoutViewCta}>
+            <Text style={styles.standoutViewText}>View</Text>
+            <Ionicons name="chevron-forward" size={14} color={C.primary} />
+          </View>
+        </View>
+
+        {standoutPreviews.map((preview) => (
+          <View key={preview.likeId} style={styles.standoutPreviewRow}>
+            {preview.photoUrl ? (
+              <Image
+                source={{ uri: preview.photoUrl }}
+                style={styles.standoutAvatar}
+                contentFit="cover"
+                blurRadius={preview.shouldBlurPhoto ? 10 : 0}
+              />
+            ) : (
+              <View style={[styles.standoutAvatar, styles.standoutAvatarPlaceholder]}>
+                <Text style={styles.standoutAvatarInitial}>{preview.displayName?.[0] || '?'}</Text>
+              </View>
+            )}
+            <View style={styles.standoutPreviewCopy}>
+              <Text style={styles.standoutSenderName} numberOfLines={1}>
+                {preview.displayName}
+              </Text>
+              <Text style={styles.standoutMessagePreview} numberOfLines={1}>
+                {preview.message}
+              </Text>
+            </View>
+          </View>
+        ))}
+      </TouchableOpacity>
+    );
+  };
+
   // New Matches row - Phase-2 style (blurred avatars, tap → profile preview)
   const renderNewMatchesRow = () => {
     if (newMatches.length === 0) return null;
@@ -971,6 +1060,9 @@ export default function ChatsScreen() {
           <>
             {/* T&D Pending Connect Requests */}
             {renderPendingConnectRequests()}
+
+            {/* Standout message previews */}
+            {renderStandoutPreviewSection()}
 
             {/* New Matches Row */}
             {renderNewMatchesRow()}
@@ -1361,6 +1453,87 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: C.primary,
+  },
+  standoutPreviewSection: {
+    marginTop: 16,
+    marginBottom: 4,
+    marginHorizontal: 16,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: COLORS.superLike + '45',
+  },
+  standoutPreviewHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  standoutTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+    minWidth: 0,
+  },
+  standoutIconWrap: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: COLORS.superLike,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  standoutPreviewTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: C.text,
+  },
+  standoutViewCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 10,
+  },
+  standoutViewText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.primary,
+  },
+  standoutPreviewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 5,
+  },
+  standoutAvatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: C.accent,
+  },
+  standoutAvatarPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  standoutAvatarInitial: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.text,
+  },
+  standoutPreviewCopy: {
+    flex: 1,
+    minWidth: 0,
+    marginLeft: 10,
+  },
+  standoutSenderName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 1,
+  },
+  standoutMessagePreview: {
+    fontSize: 12,
+    color: C.textLight,
   },
   matchesList: {
     paddingLeft: 16,
