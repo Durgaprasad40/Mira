@@ -214,6 +214,20 @@ export const getUserPrivateConversations = query({
           .order('desc')
           .first();
 
+        const lastRealMessage = await ctx.db
+          .query('privateMessages')
+          .withIndex('by_conversation_created', (q) => q.eq('conversationId', p.conversationId))
+          .filter((q) =>
+            q.or(
+              q.eq(q.field('type'), 'text'),
+              q.eq(q.field('type'), 'image'),
+              q.eq(q.field('type'), 'video'),
+              q.eq(q.field('type'), 'voice')
+            )
+          )
+          .order('desc')
+          .first();
+
         // PHASE-2 ISOLATION: Use ONLY Phase-2 private photos
         // NO fallback to Phase-1 photos table or primaryPhotoUrl
         // If no Phase-2 photo exists, return null (UI will show placeholder)
@@ -276,6 +290,7 @@ export const getUserPrivateConversations = query({
           lastMessage: lastMessage?.content || null,
           lastMessageAt: lastMessage?.createdAt || conversation.lastMessageAt || conversation.createdAt,
           lastMessageSenderId: lastMessage?.senderId || null,
+          hasRealMessages: !!lastRealMessage,
           unreadCount,
           connectionSource: conversation.connectionSource || 'desire_match',
           createdAt: conversation.createdAt,

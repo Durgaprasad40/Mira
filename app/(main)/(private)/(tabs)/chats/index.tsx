@@ -482,6 +482,7 @@ export default function ChatsScreen() {
           participantLastActive: (bc as any).participantLastActive ?? 0,
           lastMessage: bc.lastMessage || 'Say hi!',
           lastMessageAt: bc.lastMessageAt,
+          hasRealMessages: (bc as any).hasRealMessages === true,
           unreadCount: bc.unreadCount,
           connectionSource: normalizeConnectionSource(source),
           // Preserve super_like info for UI badges
@@ -629,33 +630,28 @@ export default function ChatsScreen() {
     }
   }, [currentUserId, respondToConnect]);
 
+  const hasRealMessagesByConversationId = useMemo(() => {
+    if (!normalizedBackend) return null;
+
+    return new Map(
+      normalizedBackend.map((convo) => [convo.id, (convo as any).hasRealMessages === true])
+    );
+  }, [normalizedBackend]);
+
   // Separate conversations into "new matches" (no real messages) and "message threads" (has real messages)
-  // FIX: Use backend lastMessage field instead of local messages store for consistent cross-device state
+  // BUG-3 FIX: Use backend real-message state instead of placeholder display text
   const { newMatches, messageThreads } = useMemo(() => {
     const newM: typeof conversations = [];
     const threads: typeof conversations = [];
 
-    // System/placeholder messages that indicate "new match" state (no real conversation yet)
-    const NEW_MATCH_MESSAGES = [
-      'Say hi!',
-      'T&D connection accepted! Say hi!',
-      'T&D connection accepted! Say hi 👋',
-      'You matched! Say hi!',
-      'New match! Start the conversation.',
-    ];
-
     conversations.forEach((convo) => {
-      // Check backend-provided lastMessage to determine if it's a real conversation
-      const lastMsg = convo.lastMessage?.trim() || '';
-      const normalizedLastMsg = lastMsg.replace(/^\[SYSTEM:[^\]]+\]/, '').trim();
-      const isNewMatch = !normalizedLastMsg || NEW_MATCH_MESSAGES.some(
-        (placeholder) => normalizedLastMsg.toLowerCase() === placeholder.toLowerCase()
-      );
+      const hasRealMessages =
+        hasRealMessagesByConversationId?.get(convo.id) ?? (convo as any).hasRealMessages === true;
 
-      if (isNewMatch) {
-        newM.push(convo);
-      } else {
+      if (hasRealMessages) {
         threads.push(convo);
+      } else {
+        newM.push(convo);
       }
     });
 
@@ -665,7 +661,7 @@ export default function ChatsScreen() {
     threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
 
     return { newMatches: newM, messageThreads: threads };
-  }, [conversations]);
+  }, [conversations, hasRealMessagesByConversationId]);
 
   // Render T&D Pending Connect Requests
   const renderPendingConnectRequests = () => {
