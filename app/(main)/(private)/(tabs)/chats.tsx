@@ -11,7 +11,7 @@
  * Query: api.privateConversations.getUserPrivateConversations
  */
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, Alert, ActivityIndicator, Modal, AppState } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, FlatList, Alert, ActivityIndicator, Modal, AppState, RefreshControl, TextInput } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from 'expo-router';
@@ -32,11 +32,59 @@ import { useScreenTrace } from '@/lib/devTrace';
 // P2-002: Centralized blur helper
 import { getAvatarBlurRadius } from '@/lib/phase2UI';
 // P2-006: Connection source types
-import type { ConnectionSource } from '@/types';
+import type { ConnectionSource, IncognitoConversation } from '@/types';
 // P2-INSTRUMENTATION: Sentry breadcrumbs for Phase-2 debugging
 import { P2 } from '@/lib/p2Instrumentation';
 
 const C = INCOGNITO_COLORS;
+const LOADING_SKELETON_ROWS = [0, 1, 2, 3];
+const STANDOUT_PREVIEW_LIMIT = 3;
+const NEW_MATCH_RECENCY_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+type Phase2LastMessageType = 'text' | 'image' | 'video' | 'voice' | 'system';
+
+type Phase2Conversation = IncognitoConversation & {
+  hasRealMessages?: boolean;
+  lastMessageSenderId?: string | null;
+  lastMessageType?: Phase2LastMessageType | string | null;
+  lastMessageIsProtected?: boolean;
+};
+
+type StandoutPreview = {
+  likeId: string;
+  displayName: string;
+  message: string;
+  photoUrl?: string | null;
+  shouldBlurPhoto: boolean;
+};
+
+const PREVIEW_MARKER_RE = /^\[(?:SYSTEM|INTERNAL|PRIVATE|MEDIA|PROTECTED|SECURE):[^\]]+\]/i;
+
+const getPhase2ConversationPreview = (convo: Phase2Conversation): string => {
+  const rawContent = typeof convo.lastMessage === 'string' ? convo.lastMessage.trim() : '';
+  const markerMatch = rawContent.match(PREVIEW_MARKER_RE);
+  const displayContent = markerMatch ? rawContent.slice(markerMatch[0].length).trim() : rawContent;
+  const type = convo.lastMessageType;
+  const sentByCurrentUser = !!convo.lastMessageSenderId && convo.lastMessageSenderId !== convo.participantId;
+  const previewPrefix = sentByCurrentUser ? 'You: ' : '';
+
+  if (convo.lastMessageIsProtected) {
+    return `${previewPrefix}${type === 'video' ? 'Secure video' : 'Secure photo'}`;
+  }
+  if (type === 'image') return `${previewPrefix}Photo`;
+  if (type === 'video') return `${previewPrefix}Video`;
+  if (type === 'voice') return `${previewPrefix}Voice message`;
+
+  if (type === 'system' || markerMatch) {
+    return textForPublicSurface(displayContent).trim() || 'New message';
+  }
+
+  if (displayContent) {
+    return `${previewPrefix}${textForPublicSurface(displayContent)}`;
+  }
+
+  return 'New message';
+};
 
 // Phase-2 connection sources mapped to icons
 const connectionIcon = (source: string) => {
@@ -162,6 +210,9 @@ export default function ChatsScreen() {
   // P2-003: Error and retry state for queries
   const [retryKey, setRetryKey] = useState(0);
   const [hasQueryError, setHasQueryError] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Auth for queries and mutations
   const currentUserId = useAuthStore((s) => s.userId);
@@ -216,6 +267,31 @@ export default function ChatsScreen() {
         likes: incomingLikes.map(l => ({ from: l.fromUserId?.slice(-8), action: l.action }))
       });
     }
+  }, [incomingLikes]);
+
+  const standoutPreviews = useMemo<StandoutPreview[]>(() => {
+    if (!incomingLikes) return [];
+
+    return incomingLikes
+      .filter((like) => {
+        const message = typeof like.message === 'string' ? like.message.trim() : '';
+        return like.action === 'super_like' && message.length > 0;
+      })
+      .slice(0, STANDOUT_PREVIEW_LIMIT)
+      .map((like) => {
+        const photoBlurSlots: boolean[] | undefined = Array.isArray(like.profile?.photoBlurSlots)
+          ? like.profile.photoBlurSlots
+          : undefined;
+        const message = typeof like.message === 'string' ? like.message.trim() : '';
+
+        return {
+          likeId: String(like.likeId),
+          displayName: like.profile?.displayName || 'Someone',
+          message: textForPublicSurface(message),
+          photoUrl: like.profile?.blurredPhotoUrl ?? null,
+          shouldBlurPhoto: like.profile?.photoBlurEnabled === true && Boolean(photoBlurSlots?.[0]),
+        };
+      });
   }, [incomingLikes]);
 
   // Note: Likes modal removed - now uses dedicated page at /(main)/(private)/phase2-likes
@@ -454,6 +530,25 @@ export default function ChatsScreen() {
     setRetryKey((k) => k + 1);
   }, []);
 
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+    }
+    refreshTimeoutRef.current = setTimeout(() => {
+      setRefreshing(false);
+      refreshTimeoutRef.current = null;
+    }, 700);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+      }
+    };
+  }, []);
+
   // P1-003 FIX: Bidirectional sync from Phase-2 backend to local store
   // Reconciles additions, updates, AND removals (unmatch/block/delete)
   // FIX: Memoize normalizedBackend to prevent unnecessary reconciliation calls
@@ -477,6 +572,12 @@ export default function ChatsScreen() {
           lastMessage: bc.lastMessage || 'Say hi!',
           lastMessageAt: bc.lastMessageAt,
           unreadCount: bc.unreadCount,
+          hasRealMessages: (bc as any).hasRealMessages === true,
+          lastMessageSenderId: (bc as any).lastMessageSenderId
+            ? String((bc as any).lastMessageSenderId)
+            : null,
+          lastMessageType: (bc as any).lastMessageType ?? null,
+          lastMessageIsProtected: (bc as any).lastMessageIsProtected === true,
           connectionSource: normalizeConnectionSource(source),
           // Preserve super_like info for UI badges
           matchSource: source === 'desire_super_like' ? 'super_like' as const : undefined,
@@ -484,8 +585,24 @@ export default function ChatsScreen() {
           isPhotoBlurred: (bc as any).isPhotoBlurred ?? false,
           canViewClearPhoto: (bc as any).canViewClearPhoto ?? true,
         };
-      }) as import('@/types').IncognitoConversation[];
+      }) as Phase2Conversation[];
   }, [backendConversations]);
+
+  const hasRealMessagesByConversationId = useMemo(() => {
+    if (!normalizedBackend) return null;
+
+    return new Map(
+      normalizedBackend.map((convo) => [convo.id, convo.hasRealMessages === true])
+    );
+  }, [normalizedBackend]);
+
+  const conversationPreviewById = useMemo(() => {
+    if (!normalizedBackend) return null;
+
+    return new Map(
+      normalizedBackend.map((convo) => [convo.id, getPhase2ConversationPreview(convo)])
+    );
+  }, [normalizedBackend]);
 
   useEffect(() => {
     // Handle empty backend gracefully - reconcile with empty array to clear stale local data
@@ -624,27 +741,15 @@ export default function ChatsScreen() {
   }, [currentUserId, respondToConnect]);
 
   // Separate conversations into "new matches" (no real messages) and "message threads" (has real messages)
-  // FIX: Use backend lastMessage field instead of local messages store for consistent cross-device state
+  // BUG-3 FIX: Use backend real-message state instead of placeholder display text.
   const { newMatches, messageThreads } = useMemo(() => {
     const newM: typeof conversations = [];
     const threads: typeof conversations = [];
 
-    // System/placeholder messages that indicate "new match" state (no real conversation yet)
-    const NEW_MATCH_MESSAGES = [
-      'Say hi!',
-      'T&D connection accepted! Say hi!',
-      'T&D connection accepted! Say hi 👋',
-      'You matched! Say hi!',
-      'New match! Start the conversation.',
-    ];
-
     conversations.forEach((convo) => {
-      // Check backend-provided lastMessage to determine if it's a real conversation
-      const lastMsg = convo.lastMessage?.trim() || '';
-      const normalizedLastMsg = lastMsg.replace(/^\[SYSTEM:[^\]]+\]/, '').trim();
-      const isNewMatch = !normalizedLastMsg || NEW_MATCH_MESSAGES.some(
-        (placeholder) => normalizedLastMsg.toLowerCase() === placeholder.toLowerCase()
-      );
+      const backendHasRealMessages = hasRealMessagesByConversationId?.get(convo.id);
+      const localHasRealMessages = (convo as Phase2Conversation).hasRealMessages;
+      const isNewMatch = !(backendHasRealMessages ?? localHasRealMessages ?? false);
 
       if (isNewMatch) {
         newM.push(convo);
@@ -659,7 +764,28 @@ export default function ChatsScreen() {
     threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
 
     return { newMatches: newM, messageThreads: threads };
-  }, [conversations]);
+  }, [conversations, hasRealMessagesByConversationId]);
+
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const isSearchingMessages = normalizedSearchQuery.length > 0;
+
+  const filteredMessageThreads = useMemo(() => {
+    if (!isSearchingMessages) {
+      return messageThreads as Phase2Conversation[];
+    }
+
+    return (messageThreads as Phase2Conversation[]).filter((convo) => {
+      const participantName = convo.participantName?.toLowerCase() ?? '';
+      const previewText = (
+        conversationPreviewById?.get(convo.id) ?? getPhase2ConversationPreview(convo)
+      ).toLowerCase();
+
+      return (
+        participantName.includes(normalizedSearchQuery) ||
+        previewText.includes(normalizedSearchQuery)
+      );
+    });
+  }, [conversationPreviewById, isSearchingMessages, messageThreads, normalizedSearchQuery]);
 
   // Render T&D Pending Connect Requests
   const renderPendingConnectRequests = () => {
@@ -736,6 +862,90 @@ export default function ChatsScreen() {
     );
   };
 
+  const renderStandoutPreviewSection = () => {
+    if (standoutPreviews.length === 0) return null;
+
+    return (
+      <TouchableOpacity
+        style={styles.standoutPreviewSection}
+        onPress={() => router.push('/(main)/(private)/phase2-likes' as any)}
+        activeOpacity={0.85}
+      >
+        <View style={styles.standoutPreviewHeader}>
+          <View style={styles.standoutTitleRow}>
+            <View style={styles.standoutIconWrap}>
+              <Ionicons name="star" size={14} color="#FFFFFF" />
+            </View>
+            <Text style={styles.standoutPreviewTitle}>Standout messages</Text>
+            <View style={styles.countBadge}>
+              <Text style={styles.countBadgeText}>{standoutPreviews.length}</Text>
+            </View>
+          </View>
+          <View style={styles.standoutViewCta}>
+            <Text style={styles.standoutViewText}>View</Text>
+            <Ionicons name="chevron-forward" size={14} color={C.primary} />
+          </View>
+        </View>
+
+        {standoutPreviews.map((preview) => (
+          <View key={preview.likeId} style={styles.standoutPreviewRow}>
+            {preview.photoUrl ? (
+              <Image
+                source={{ uri: preview.photoUrl }}
+                style={styles.standoutAvatar}
+                contentFit="cover"
+                blurRadius={preview.shouldBlurPhoto ? 10 : 0}
+              />
+            ) : (
+              <View style={[styles.standoutAvatar, styles.standoutAvatarPlaceholder]}>
+                <Text style={styles.standoutAvatarInitial}>{preview.displayName?.[0] || '?'}</Text>
+              </View>
+            )}
+            <View style={styles.standoutPreviewCopy}>
+              <Text style={styles.standoutSenderName} numberOfLines={1}>
+                {preview.displayName}
+              </Text>
+              <Text style={styles.standoutMessagePreview} numberOfLines={1}>
+                "{preview.message}"
+              </Text>
+            </View>
+          </View>
+        ))}
+      </TouchableOpacity>
+    );
+  };
+
+  const renderMessageSearchBar = () => {
+    if (messageThreads.length === 0 && !isSearchingMessages) return null;
+
+    return (
+      <View style={styles.searchSection}>
+        <View style={styles.searchInputWrap}>
+          <Ionicons name="search" size={17} color={C.textLight} />
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search messages"
+            placeholderTextColor={C.textLight}
+            style={styles.searchInput}
+            returnKeyType="search"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {isSearchingMessages && (
+            <TouchableOpacity
+              onPress={() => setSearchQuery('')}
+              style={styles.searchClearButton}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Ionicons name="close-circle" size={17} color={C.textLight} />
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+    );
+  };
+
   // New Matches row - Phase-2 style (blurred avatars, tap → profile preview)
   const renderNewMatchesRow = () => {
     if (newMatches.length === 0) return null;
@@ -758,8 +968,8 @@ export default function ChatsScreen() {
             const isSuperLike = item.matchSource === 'super_like';
             // Check if this is a T/D connection
             const isTodConnect = item.connectionSource === 'tod';
-            // Check if this is a very recent connection (within 30 minutes)
-            const isRecentConnect = Date.now() - item.lastMessageAt < 30 * 60 * 1000;
+            // Check if this is a recent connection (within 24 hours)
+            const isRecentConnect = Date.now() - item.lastMessageAt < NEW_MATCH_RECENCY_THRESHOLD_MS;
             return (
               <TouchableOpacity
                 style={styles.matchItem}
@@ -835,150 +1045,219 @@ export default function ChatsScreen() {
     );
   };
 
+  const renderConversationRow = useCallback(({ item: convo }: { item: Phase2Conversation }) => {
+    // PRESENCE: Calculate online status for green dot indicator
+    const onlineStatus = getOnlineStatus((convo as any).participantLastActive);
+    const previewText = conversationPreviewById?.get(convo.id) ?? getPhase2ConversationPreview(convo);
+    const hasUnread = convo.unreadCount > 0;
+    return (
+      <TouchableOpacity
+        style={[styles.chatRow, hasUnread && styles.chatRowUnread]}
+        onPress={() => router.push(`/(main)/incognito-chat?id=${convo.id}` as any)}
+        onLongPress={() => setReportTarget({ id: convo.participantId, name: convo.participantName, conversationId: convo.id })}
+        activeOpacity={0.8}
+      >
+        {/* CLEAN UI: Profile photo only (no extra badges/icons) */}
+        <View style={styles.chatAvatarWrap}>
+          <View style={[styles.chatAvatarRing, hasUnread && styles.chatAvatarRingUnread]}>
+            {convo.connectionSource === 'tod' ? (
+              <TodAvatar
+                size={46}
+                photoUrl={convo.participantPhotoUrl || null}
+                isAnonymous={isTodConversationAnonymous(
+                  convo.participantName,
+                  convo.participantPhotoUrl
+                )}
+                photoBlurMode={getTodConversationPhotoBlurMode(
+                  convo.isPhotoBlurred,
+                  convo.canViewClearPhoto
+                )}
+                label={convo.participantName}
+                style={styles.chatAvatar}
+                backgroundColor={C.accent}
+                textColor={C.text}
+                iconColor={C.textLight}
+              />
+            ) : convo.participantPhotoUrl ? (
+              // PHOTO-BLUR-FIX: Use consistent blur based on backend flags
+              <Image
+                source={{ uri: convo.participantPhotoUrl }}
+                style={styles.chatAvatar}
+                blurRadius={getAvatarBlurRadius({
+                  isPhotoBlurred: convo.isPhotoBlurred,
+                  canViewClearPhoto: convo.canViewClearPhoto,
+                })}
+              />
+            ) : (
+              <View style={[styles.chatAvatar, styles.placeholderChatAvatar]}>
+                <Text style={styles.chatAvatarInitial}>{convo.participantName?.[0] || '?'}</Text>
+              </View>
+            )}
+          </View>
+          {/* PRESENCE: Online indicator (green dot) - kept for essential status */}
+          {onlineStatus === 'online' && (
+            <View style={styles.onlineDot} />
+          )}
+        </View>
+        {/* CLEAN UI: Name, Last message, Time only (no "Active" text, no intent labels) */}
+        <View style={styles.chatInfo}>
+          <View style={styles.chatNameRow}>
+            <View style={styles.chatNameCol}>
+              <Text style={[styles.chatName, hasUnread && styles.chatNameUnread]} numberOfLines={1}>
+                {convo.participantName}
+              </Text>
+            </View>
+            <Text style={[styles.chatTime, hasUnread && styles.chatTimeUnread]}>{getTimeAgo(convo.lastMessageAt)}</Text>
+          </View>
+          <View style={styles.chatMessageRow}>
+            <Text style={[styles.chatLastMsg, hasUnread && styles.chatLastMsgUnread]} numberOfLines={1}>{previewText}</Text>
+            {hasUnread && (
+              <View style={styles.unreadBadge}>
+                <Text style={styles.unreadText}>{convo.unreadCount}</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </TouchableOpacity>
+    );
+  }, [conversationPreviewById, router]);
+
+  const listHeaderComponent = (
+    <>
+      {/* P2-003: Loading state */}
+      {isQueryLoading && (
+        <View style={styles.loadingSkeletonContainer}>
+          {LOADING_SKELETON_ROWS.map((row) => (
+            <View key={row} style={styles.skeletonChatRow}>
+              <View style={styles.skeletonAvatarRing}>
+                <View style={styles.skeletonAvatar} />
+              </View>
+              <View style={styles.skeletonChatInfo}>
+                <View style={styles.skeletonNameRow}>
+                  <View style={[
+                    styles.skeletonLine,
+                    row === 1 ? styles.skeletonNameLineShort : styles.skeletonNameLine,
+                  ]} />
+                  <View style={styles.skeletonTimeLine} />
+                </View>
+                <View style={[
+                  styles.skeletonLine,
+                  row === 2 ? styles.skeletonMessageLineShort : styles.skeletonMessageLine,
+                ]} />
+              </View>
+              {row === 0 && <View style={styles.skeletonUnreadDot} />}
+            </View>
+          ))}
+        </View>
+      )}
+
+      {/* P2-003: Error state with retry */}
+      {hasQueryError && (
+        <View style={styles.errorContainer}>
+          <Ionicons name="cloud-offline-outline" size={64} color={C.textLight} />
+          <Text style={styles.errorTitle}>Couldn't load messages</Text>
+          <Text style={styles.errorSubtitle}>
+            Please check your connection and try again
+          </Text>
+          <TouchableOpacity style={styles.retryButton} onPress={handleRetryQuery}>
+            <Ionicons name="refresh" size={18} color="#FFFFFF" />
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Content - only show when not loading and no error */}
+      {!isQueryLoading && !hasQueryError && (
+        <>
+          {/* T&D Pending Connect Requests */}
+          {renderPendingConnectRequests()}
+
+          {/* Standout message previews */}
+          {renderStandoutPreviewSection()}
+
+          {/* New Matches Row */}
+          {renderNewMatchesRow()}
+
+          {/* Search normal message threads only */}
+          {renderMessageSearchBar()}
+
+          {/* Messages section header (only show if we have both new matches and threads) */}
+          {newMatches.length > 0 && messageThreads.length > 0 && (
+            <View style={styles.threadsSectionHeader}>
+              <Text style={styles.sectionTitle}>Messages</Text>
+            </View>
+          )}
+
+          {/* Empty state - only show if NO conversations at all */}
+          {conversations.length === 0 && (
+            <View style={styles.emptyContainer}>
+              <Ionicons name="lock-open-outline" size={64} color={C.textLight} />
+              <Text style={styles.emptyTitle}>No conversations yet</Text>
+              {/* P1-003 FIX: Updated copy to mention Deep Connect */}
+              <Text style={styles.emptySubtitle}>Match in Deep Connect, play Truth or Dare, or connect in a Room to start chatting</Text>
+            </View>
+          )}
+        </>
+      )}
+    </>
+  );
+
+  const hasIncomingLikes = (incomingLikesCount ?? 0) > 0;
+  const incomingLikesBadgeText = (incomingLikesCount ?? 0) > 99 ? '99+' : String(incomingLikesCount ?? 0);
+  const showSearchEmptyState =
+    !isQueryLoading &&
+    !hasQueryError &&
+    isSearchingMessages &&
+    messageThreads.length > 0 &&
+    filteredMessageThreads.length === 0;
+
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <Ionicons name="mail" size={24} color={C.primary} />
         <Text style={styles.headerTitle}>Messages</Text>
         {/* Likes button with badge - navigates to Phase-2 likes page */}
         <TouchableOpacity
-          style={styles.likesButton}
+          style={[styles.likesButton, hasIncomingLikes && styles.likesButtonActive]}
           onPress={() => router.push('/(main)/(private)/phase2-likes' as any)}
         >
-          <Ionicons name="heart" size={24} color={C.primary} />
-          {(incomingLikesCount ?? 0) > 0 && (
+          <Ionicons name="heart" size={22} color={hasIncomingLikes ? '#E94560' : C.textLight} />
+          {hasIncomingLikes && (
             <View style={styles.likesBadge}>
               <Text style={styles.likesBadgeText}>
-                {incomingLikesCount! > 9 ? '9+' : incomingLikesCount}
+                {incomingLikesBadgeText}
               </Text>
             </View>
           )}
         </TouchableOpacity>
       </View>
 
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.listContent}>
-        {/* P2-003: Loading state */}
-        {isQueryLoading && (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color={C.primary} />
-            <Text style={styles.loadingText}>Loading messages...</Text>
-          </View>
-        )}
-
-        {/* P2-003: Error state with retry */}
-        {hasQueryError && (
-          <View style={styles.errorContainer}>
-            <Ionicons name="cloud-offline-outline" size={64} color={C.textLight} />
-            <Text style={styles.errorTitle}>Couldn't load messages</Text>
-            <Text style={styles.errorSubtitle}>
-              Please check your connection and try again
-            </Text>
-            <TouchableOpacity style={styles.retryButton} onPress={handleRetryQuery}>
-              <Ionicons name="refresh" size={18} color="#FFFFFF" />
-              <Text style={styles.retryButtonText}>Retry</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* Content - only show when not loading and no error */}
-        {!isQueryLoading && !hasQueryError && (
-          <>
-            {/* T&D Pending Connect Requests */}
-            {renderPendingConnectRequests()}
-
-            {/* New Matches Row */}
-            {renderNewMatchesRow()}
-
-            {/* Messages section header (only show if we have both new matches and threads) */}
-            {newMatches.length > 0 && messageThreads.length > 0 && (
-              <View style={styles.threadsSectionHeader}>
-                <Text style={styles.sectionTitle}>Messages</Text>
-              </View>
-            )}
-
-            {/* Empty state - only show if NO conversations at all */}
-            {conversations.length === 0 ? (
-          <View style={styles.emptyContainer}>
-            <Ionicons name="lock-open-outline" size={64} color={C.textLight} />
-            <Text style={styles.emptyTitle}>No conversations yet</Text>
-            {/* P1-003 FIX: Updated copy to mention Deep Connect */}
-            <Text style={styles.emptySubtitle}>Match in Deep Connect, play Truth or Dare, or connect in a Room to start chatting</Text>
-          </View>
-        ) : (
-          /* Message threads */
-          messageThreads.map((convo) => {
-            // PRESENCE: Calculate online status for green dot indicator
-            const onlineStatus = getOnlineStatus((convo as any).participantLastActive);
-            return (
-              <TouchableOpacity
-                key={convo.id}
-                style={styles.chatRow}
-                onPress={() => router.push(`/(main)/incognito-chat?id=${convo.id}` as any)}
-                onLongPress={() => setReportTarget({ id: convo.participantId, name: convo.participantName, conversationId: convo.id })}
-                activeOpacity={0.8}
-              >
-                {/* CLEAN UI: Profile photo only (no extra badges/icons) */}
-                <View style={styles.chatAvatarWrap}>
-                  <View style={styles.chatAvatarRing}>
-                    {convo.connectionSource === 'tod' ? (
-                      <TodAvatar
-                        size={46}
-                        photoUrl={convo.participantPhotoUrl || null}
-                        isAnonymous={isTodConversationAnonymous(
-                          convo.participantName,
-                          convo.participantPhotoUrl
-                        )}
-                        photoBlurMode={getTodConversationPhotoBlurMode(
-                          convo.isPhotoBlurred,
-                          convo.canViewClearPhoto
-                        )}
-                        label={convo.participantName}
-                        style={styles.chatAvatar}
-                        backgroundColor={C.accent}
-                        textColor={C.text}
-                        iconColor={C.textLight}
-                      />
-                    ) : convo.participantPhotoUrl ? (
-                      // PHOTO-BLUR-FIX: Use consistent blur based on backend flags
-                      <Image
-                        source={{ uri: convo.participantPhotoUrl }}
-                        style={styles.chatAvatar}
-                        blurRadius={getAvatarBlurRadius({
-                          isPhotoBlurred: convo.isPhotoBlurred,
-                          canViewClearPhoto: convo.canViewClearPhoto,
-                        })}
-                      />
-                    ) : (
-                      <View style={[styles.chatAvatar, styles.placeholderChatAvatar]}>
-                        <Text style={styles.chatAvatarInitial}>{convo.participantName?.[0] || '?'}</Text>
-                      </View>
-                    )}
-                  </View>
-                  {/* PRESENCE: Online indicator (green dot) - kept for essential status */}
-                  {onlineStatus === 'online' && (
-                    <View style={styles.onlineDot} />
-                  )}
-                </View>
-                {/* CLEAN UI: Name, Last message, Time only (no "Active" text, no intent labels) */}
-                <View style={styles.chatInfo}>
-                  <View style={styles.chatNameRow}>
-                    <Text style={styles.chatName}>{convo.participantName}</Text>
-                    <Text style={styles.chatTime}>{getTimeAgo(convo.lastMessageAt)}</Text>
-                  </View>
-                  <Text style={styles.chatLastMsg} numberOfLines={1}>{textForPublicSurface(convo.lastMessage)}</Text>
-                </View>
-                {convo.unreadCount > 0 && (
-                  <View style={styles.unreadBadge}>
-                    <Text style={styles.unreadText}>{convo.unreadCount}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            );
-          })
-        )}
-          </>
-        )}
-      </ScrollView>
+      <FlatList
+        style={{ flex: 1 }}
+        data={!isQueryLoading && !hasQueryError && conversations.length > 0 ? filteredMessageThreads : []}
+        keyExtractor={(item) => item.id}
+        renderItem={renderConversationRow}
+        ListHeaderComponent={listHeaderComponent}
+        ListEmptyComponent={
+          showSearchEmptyState ? (
+            <View style={styles.searchEmptyState}>
+              <Ionicons name="search-outline" size={34} color={C.textLight} />
+              <Text style={styles.searchEmptyTitle}>No chats found</Text>
+              <Text style={styles.searchEmptySubtitle}>Try a name or phrase from a recent message.</Text>
+            </View>
+          ) : null
+        }
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={styles.listContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={C.primary}
+            colors={[C.primary]}
+            progressBackgroundColor={C.surface}
+          />
+        }
+      />
 
       {reportTarget && (
         <ReportModal
@@ -1092,22 +1371,78 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingVertical: 12,
+    paddingHorizontal: 16, paddingVertical: 14,
     borderBottomWidth: 1, borderBottomColor: C.surface,
   },
-  headerTitle: { fontSize: 20, fontWeight: '700', color: C.text, flex: 1, marginLeft: 10 },
+  headerTitle: { fontSize: 26, fontWeight: '800', color: C.text, flex: 1 },
   listContent: { paddingBottom: 16 },
   // P2-003: Loading state styles
-  loadingContainer: {
+  loadingSkeletonContainer: {
+    paddingTop: 16,
+  },
+  skeletonChatRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    marginBottom: 8,
+    marginHorizontal: 16,
+  },
+  skeletonAvatarRing: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    borderWidth: 2,
+    borderColor: C.primary + '30',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 40,
-    marginTop: 60,
   },
-  loadingText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: C.textLight,
+  skeletonAvatar: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: C.accent,
+  },
+  skeletonChatInfo: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  skeletonNameRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  skeletonLine: {
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: C.textLight + '22',
+  },
+  skeletonNameLine: {
+    width: '42%',
+  },
+  skeletonNameLineShort: {
+    width: '34%',
+  },
+  skeletonTimeLine: {
+    width: 36,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: C.textLight + '1A',
+  },
+  skeletonMessageLine: {
+    width: '68%',
+  },
+  skeletonMessageLineShort: {
+    width: '52%',
+  },
+  skeletonUnreadDot: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: C.primary + '30',
+    marginLeft: 8,
   },
   // P2-003: Error state styles
   errorContainer: {
@@ -1223,6 +1558,139 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: '#FFF',
+  },
+
+  // ── Standout Messages Preview ──
+  standoutPreviewSection: {
+    marginTop: 16,
+    marginBottom: 4,
+    marginHorizontal: 16,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: COLORS.superLike + '45',
+  },
+  standoutPreviewHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  standoutTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+    minWidth: 0,
+  },
+  standoutIconWrap: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: COLORS.superLike,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  standoutPreviewTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: C.text,
+  },
+  standoutViewCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 10,
+  },
+  standoutViewText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.primary,
+  },
+  standoutPreviewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 5,
+  },
+  standoutAvatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: C.accent,
+  },
+  standoutAvatarPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  standoutAvatarInitial: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.text,
+  },
+  standoutPreviewCopy: {
+    flex: 1,
+    minWidth: 0,
+    marginLeft: 10,
+  },
+  standoutSenderName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 1,
+  },
+  standoutMessagePreview: {
+    fontSize: 12,
+    color: C.textLight,
+  },
+
+  // ── Message Search ──
+  searchSection: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  searchInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 40,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.05)',
+  },
+  searchInput: {
+    flex: 1,
+    minWidth: 0,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    color: C.text,
+    fontSize: 14,
+  },
+  searchClearButton: {
+    padding: 2,
+  },
+  searchEmptyState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+    paddingVertical: 34,
+    marginHorizontal: 16,
+    marginTop: 8,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+  },
+  searchEmptyTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: C.text,
+    marginTop: 10,
+  },
+  searchEmptySubtitle: {
+    fontSize: 12,
+    color: C.textLight,
+    textAlign: 'center',
+    marginTop: 4,
   },
 
   // ── New Matches Section ──
@@ -1355,15 +1823,27 @@ const styles = StyleSheet.create({
   // ── Chat rows ──
   chatRow: {
     flexDirection: 'row', alignItems: 'center', padding: 14,
-    backgroundColor: C.surface, borderRadius: 12, marginBottom: 8,
+    backgroundColor: C.surface, borderRadius: 14, marginBottom: 8,
     marginHorizontal: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.04)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    elevation: 2,
+  },
+  chatRowUnread: {
+    borderColor: C.primary + '45',
+    backgroundColor: '#1A2750',
   },
   chatAvatarWrap: { position: 'relative' },
   chatAvatarRing: {
     width: 52, height: 52, borderRadius: 26,
-    borderWidth: 2, borderColor: C.primary,
+    borderWidth: 2, borderColor: C.primary + '70',
     alignItems: 'center', justifyContent: 'center',
   },
+  chatAvatarRingUnread: { borderColor: C.primary },
   chatAvatar: { width: 46, height: 46, borderRadius: 23, backgroundColor: C.accent },
   placeholderChatAvatar: { alignItems: 'center', justifyContent: 'center' },
   chatAvatarInitial: { fontSize: 18, fontWeight: '600', color: C.text },
@@ -1383,10 +1863,11 @@ const styles = StyleSheet.create({
     borderWidth: 2, borderColor: C.background,
   },
   chatInfo: { flex: 1, marginLeft: 12 },
-  chatNameRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-  chatNameCol: { flex: 1 },
+  chatNameRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 },
+  chatNameCol: { flex: 1, minWidth: 0, marginRight: 8 },
   nameWithStatus: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   chatName: { fontSize: 14, fontWeight: '600', color: C.text },
+  chatNameUnread: { fontWeight: '700' },
   chatIntentLabel: { fontSize: 11, color: C.primary, marginTop: 1, opacity: 0.85 },
   // PRESENCE: Online status styles
   onlineDot: {
@@ -1407,10 +1888,13 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   chatTime: { fontSize: 11, color: C.textLight },
-  chatLastMsg: { fontSize: 13, color: C.textLight },
+  chatTimeUnread: { color: C.primary, fontWeight: '700' },
+  chatMessageRow: { flexDirection: 'row', alignItems: 'center' },
+  chatLastMsg: { flex: 1, fontSize: 13, color: C.textLight, lineHeight: 18, marginRight: 8 },
+  chatLastMsgUnread: { color: C.text, fontWeight: '600' },
   unreadBadge: {
     minWidth: 20, height: 20, borderRadius: 10, backgroundColor: C.primary,
-    alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, marginLeft: 8,
+    alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6,
   },
   unreadText: { fontSize: 11, fontWeight: '700', color: '#FFFFFF' },
 
@@ -1528,12 +2012,21 @@ const styles = StyleSheet.create({
   // ── Likes Button & Badge ──
   likesButton: {
     position: 'relative',
-    padding: 4,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  likesButtonActive: {
+    backgroundColor: '#E945601A',
+    borderWidth: 1,
+    borderColor: '#E9456040',
   },
   likesBadge: {
     position: 'absolute',
-    top: -2,
-    right: -4,
+    top: -3,
+    right: -5,
     minWidth: 18,
     height: 18,
     borderRadius: 9,

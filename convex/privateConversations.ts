@@ -214,6 +214,20 @@ export const getUserPrivateConversations = query({
           .order('desc')
           .first();
 
+        const lastRealMessage = await ctx.db
+          .query('privateMessages')
+          .withIndex('by_conversation_created', (q) => q.eq('conversationId', p.conversationId))
+          .filter((q) =>
+            q.or(
+              q.eq(q.field('type'), 'text'),
+              q.eq(q.field('type'), 'image'),
+              q.eq(q.field('type'), 'video'),
+              q.eq(q.field('type'), 'voice')
+            )
+          )
+          .order('desc')
+          .first();
+
         // PHASE-2 ISOLATION: Use ONLY Phase-2 private photos
         // NO fallback to Phase-1 photos table or primaryPhotoUrl
         // If no Phase-2 photo exists, return null (UI will show placeholder)
@@ -273,6 +287,9 @@ export const getUserPrivateConversations = query({
           lastMessage: lastMessage?.content || null,
           lastMessageAt: lastMessage?.createdAt || conversation.lastMessageAt || conversation.createdAt,
           lastMessageSenderId: lastMessage?.senderId || null,
+          lastMessageType: lastMessage?.type || null,
+          lastMessageIsProtected: lastMessage?.isProtected === true,
+          hasRealMessages: !!lastRealMessage,
           unreadCount,
           connectionSource: conversation.connectionSource || 'desire_match',
           createdAt: conversation.createdAt,
@@ -903,6 +920,71 @@ export const getTotalUnreadCount = query({
       .collect();
 
     return participations.reduce((total, p) => total + p.unreadCount, 0);
+  },
+});
+
+/**
+ * Get Phase-2 unread conversation count for the Messages tab badge.
+ * Counts conversations with unread real private messages, not system-only placeholders.
+ */
+export const getPrivateUnreadConversationCount = query({
+  args: {
+    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { authUserId }) => {
+    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
+    let userId: Id<'users'> | null = null;
+
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    }
+
+    if (!userId && authUserId) {
+      userId = await resolveUserIdByAuthId(ctx, authUserId);
+    }
+
+    if (!userId) {
+      return 0;
+    }
+
+    const participations = await ctx.db
+      .query('privateConversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    const unreadParticipations = participations.filter(
+      (p) => p.isHidden !== true && p.unreadCount > 0
+    );
+
+    const countedConversationIds = new Set<string>();
+    let unreadConversationCount = 0;
+
+    for (const participation of unreadParticipations) {
+      const conversationId = participation.conversationId as string;
+      if (countedConversationIds.has(conversationId)) continue;
+
+      const conversation = await ctx.db.get(participation.conversationId);
+      if (!conversation) continue;
+      if (!conversation.participants.includes(userId)) continue;
+
+      const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
+      if (!otherParticipantId) continue;
+      if (await isBlockedBidirectional(ctx, userId, otherParticipantId)) continue;
+
+      const realUnreadCount = await computeUnreadCountFromPrivateMessages(
+        ctx,
+        participation.conversationId,
+        userId
+      );
+      if (realUnreadCount > 0) {
+        unreadConversationCount += 1;
+        countedConversationIds.add(conversationId);
+      }
+    }
+
+    return unreadConversationCount;
   },
 });
 
