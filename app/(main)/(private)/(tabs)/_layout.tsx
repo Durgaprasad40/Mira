@@ -44,17 +44,21 @@ export default function PrivateTabsLayout() {
   const currentUserId = authUserId || 'demo_user_1';
 
   // Store selectors and actions
-  const conversations = usePrivateChatStore((s) => s.conversations);
   const reconcileConversations = usePrivateChatStore((s) => s.reconcileConversations);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // SAFE QUERY 1: Private Conversations (for Messages badge)
+  // SAFE QUERY 1: Private Conversations (for sync/delivery)
   // Uses authUserId string, not token
   // ═══════════════════════════════════════════════════════════════════════════
   const backendConversations = useQuery(
     api.privateConversations.getUserPrivateConversations,
     currentUserId && !isDemoMode ? { authUserId: currentUserId } : 'skip'
   );
+  const privateUnreadConversationCount = useQuery(
+    api.privateConversations.getPrivateUnreadConversationCount,
+    currentUserId && !isDemoMode ? { authUserId: currentUserId } : 'skip'
+  );
+  const messagesBadgeCount = privateUnreadConversationCount ?? 0;
 
   // Delivery mutation
   const markAllDeliveredMutation = useMutation(api.privateConversations.markAllPrivateMessagesDelivered);
@@ -132,17 +136,6 @@ export default function PrivateTabsLayout() {
     const subscription = AppState.addEventListener('change', handleAppStateChange);
     return () => subscription.remove();
   }, [currentUserId, markAllDeliveredMutation]);
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // BADGE 1: Messages - count conversations with unread (not total messages)
-  // ═══════════════════════════════════════════════════════════════════════════
-  const conversationsWithUnread = useMemo(() => {
-    try {
-      return conversations.filter(c => (c.unreadCount || 0) > 0).length;
-    } catch {
-      return 0;
-    }
-  }, [conversations]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SAFE QUERY 2: Truth or Dare Pending Connect Requests (for T/D badge)
@@ -255,7 +248,7 @@ export default function PrivateTabsLayout() {
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="mail" size={size} color={color} />
           ),
-          tabBarBadge: conversationsWithUnread > 0 ? conversationsWithUnread : undefined,
+          tabBarBadge: messagesBadgeCount > 0 ? messagesBadgeCount : undefined,
           tabBarBadgeStyle: {
             backgroundColor: C.primary,
             fontSize: 10,

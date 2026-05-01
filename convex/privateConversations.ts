@@ -958,6 +958,67 @@ export const getTotalUnreadCount = query({
   },
 });
 
+export const getPrivateUnreadConversationCount = query({
+  args: {
+    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { authUserId }) => {
+    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
+    let userId: Id<'users'> | null = null;
+
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    }
+
+    if (!userId && authUserId) {
+      userId = await resolveUserIdByAuthId(ctx, authUserId);
+    }
+
+    if (!userId) {
+      return 0;
+    }
+
+    const participations = await ctx.db
+      .query('privateConversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    const unreadParticipations = participations.filter(
+      (p) => p.isHidden !== true && p.unreadCount > 0
+    );
+
+    const countedConversationIds = new Set<string>();
+    let unreadConversationCount = 0;
+
+    for (const participation of unreadParticipations) {
+      const conversationId = participation.conversationId as string;
+      if (countedConversationIds.has(conversationId)) continue;
+
+      const conversation = await ctx.db.get(participation.conversationId);
+      if (!conversation) continue;
+      if (!conversation.participants.includes(userId)) continue;
+
+      const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
+      if (!otherParticipantId) continue;
+      if (await isBlockedBidirectional(ctx, userId, otherParticipantId)) continue;
+
+      const realUnreadCount = await computeUnreadCountFromPrivateMessages(
+        ctx,
+        participation.conversationId,
+        userId
+      );
+      if (realUnreadCount > 0) {
+        unreadConversationCount += 1;
+        countedConversationIds.add(conversationId);
+      }
+    }
+
+    return unreadConversationCount;
+  },
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Mutation G: Mark Phase-2 Messages as Delivered (per conversation)
 // ═══════════════════════════════════════════════════════════════════════════
