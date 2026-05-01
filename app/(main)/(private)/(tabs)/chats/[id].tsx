@@ -1664,12 +1664,38 @@ export default function Phase2ChatThread() {
   }, [userId, otherUserId, reportUser]);
 
   // --------------------------------------------------------------------- render helpers
+  // MESSAGES-STABILIZE: Convex `useQuery` returns `undefined` whenever its
+  // args flip to `'skip'` (transient `userId`/`id` re-resolution during
+  // thread open, auth refresh, brief route param re-parse, etc.). Without
+  // caching, that flips the body render gate from FlashList back to the
+  // centered ActivityIndicator — the visible content → blank → content
+  // flicker the user reported. Cache the last non-undefined messages array
+  // in a ref so the body keeps showing the previous content while the
+  // subscription re-establishes. Reset on conversation switch so the
+  // previous thread's messages can never bleed into the new one. Backend
+  // remains source of truth — this ref is UI stabilization only.
+  const lastStableMessagesRef = useRef<any[] | null>(null);
+  useEffect(() => {
+    // New conversation → drop cache so a fresh thread starts from a clean
+    // skeleton state and never momentarily renders the prior thread.
+    lastStableMessagesRef.current = null;
+  }, [id]);
+  useEffect(() => {
+    if (messages !== undefined) {
+      lastStableMessagesRef.current = messages as any[];
+    }
+  }, [messages]);
+  const stableMessages: any[] | undefined =
+    messages !== undefined
+      ? (messages as any[])
+      : lastStableMessagesRef.current ?? undefined;
+
   // [P2_MEDIA_UPLOAD] Merge server messages with optimistic pending bubbles,
   // sort by (createdAt, _id) so the pending bubble lands in the right slot
   // and survives clock skew between client + server (mirrors Phase-1
   // ChatScreenInner.tsx:715-720).
   const messageList = useMemo(() => {
-    const server = (messages ?? []) as any[];
+    const server = (stableMessages ?? []) as any[];
     if (pendingPhase2Messages.length === 0) return server;
     const pendingAsRows = pendingPhase2Messages.map((p) => ({
       // FlashList keyExtractor reads `id`; the rest of `item.*` is consumed
@@ -1687,7 +1713,7 @@ export default function Phase2ChatThread() {
       if (diff !== 0) return diff;
       return String(a.id).localeCompare(String(b.id));
     });
-  }, [messages, pendingPhase2Messages]);
+  }, [stableMessages, pendingPhase2Messages]);
 
   const renderItem = useCallback(
     ({ item, index }: { item: any; index: number }) => {
@@ -2097,7 +2123,11 @@ export default function Phase2ChatThread() {
         keyboardVerticalOffset={0}
       >
         <View style={styles.listWrap}>
-          {messages === undefined ? (
+          {/* MESSAGES-STABILIZE: Gate on `stableMessages` so the spinner only
+              appears before the first successful query result. After that,
+              transient `messages === undefined` from a 'skip' arg flip
+              keeps showing the cached list instead of blanking the body. */}
+          {stableMessages === undefined ? (
             <View style={styles.loading}>
               <ActivityIndicator size="large" color={C.primary} />
             </View>
