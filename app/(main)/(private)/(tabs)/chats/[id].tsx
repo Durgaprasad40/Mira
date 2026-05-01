@@ -189,8 +189,6 @@ export default function Phase2ChatThread() {
       : null;
 
   // ROUTE-DEBUG: Force log on every mount/render to confirm thread screen is active.
-  console.log('🔥 THREAD SCREEN ACTIVE', id);
-
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
   const insets = useSafeAreaInsets();
