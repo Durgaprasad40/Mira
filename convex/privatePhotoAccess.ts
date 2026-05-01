@@ -279,7 +279,10 @@ export const getPendingPhotoAccessRequests = query({
         return {
           _id: request._id,
           viewerUserId: String(request.viewerUserId),
-          viewerName: viewerProfile?.displayName || 'Anonymous',
+          // ANON-LOADING-FIX: emit null (not "Anonymous") when displayName is
+          // missing. Client renders a graceful placeholder; "Anonymous" is
+          // reserved for intentional anonymous product modes.
+          viewerName: viewerProfile?.displayName || null,
           viewerAvatar: viewerProfile?.privatePhotoUrls?.[0] || undefined,
           createdAt: request.createdAt,
         };

@@ -75,7 +75,11 @@ export default function PrivateTabsLayout() {
           return {
             id: bc.id as string,
             participantId: bc.participantId as string,
-            participantName: bc.participantName,
+            // ANON-LOADING-FIX: backend may return null when displayName +
+            // handle are both missing. Coerce to '' so IncognitoConversation
+            // typing (string) is preserved; downstream renderers treat ''
+            // as a missing-name placeholder — never as the literal "Anonymous".
+            participantName: bc.participantName ?? '',
             participantAge: bc.participantAge || 0,
             participantPhotoUrl: bc.participantPhotoUrl || '',
             participantIntentKey: (bc as any).participantIntentKey ?? null,

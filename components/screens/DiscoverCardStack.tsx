@@ -361,8 +361,14 @@ function resolvePhase2IntentKeys(
 }
 
 function resolvePhase2CardName(displayName: unknown): string {
+  // ANON-LOADING-FIX: return empty string when the name is missing so the
+  // ProfileCard renders a skeleton placeholder. The literal word "Anonymous"
+  // is reserved for intentional anonymous product modes only and must NOT
+  // be shown for a loading/missing-data state.
   const trimmedName = typeof displayName === "string" ? displayName.trim() : "";
-  return trimmedName.length > 0 ? trimmedName : "Anonymous";
+  if (trimmedName.length === 0) return "";
+  if (trimmedName.toLowerCase() === "anonymous") return "";
+  return trimmedName;
 }
 
 function mapPhase2CardProfile(input: {

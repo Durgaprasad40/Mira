@@ -68,6 +68,8 @@ import { popHandoff } from '@/lib/memoryHandoff';
 import { deriveMyRole } from '@/lib/bottleSpin';
 import { uploadMediaToConvexWithProgress } from '@/lib/uploadUtils';
 import { getCachedMediaUri } from '@/lib/mediaCache';
+// ANON-LOADING-FIX: stable name resolver — never show "Anonymous" while loading.
+import { resolveStableName } from '@/lib/identity';
 
 // [P2_MEDIA_UPLOAD] Mirror Phase-1 ChatScreenInner.PendingSecureMessage
 // (components/screens/ChatScreenInner.tsx:171-182). Drives the optimistic
@@ -407,9 +409,22 @@ export default function Phase2ChatThread() {
   const otherUserId = (conversation as any)?.participantId as
     | string
     | undefined;
-  const otherUserName =
-    ((conversation as any)?.participantName as string | undefined) ??
-    'Anonymous';
+  // ANON-LOADING-FIX:
+  //   participantName may be undefined (query loading), null (backend has no
+  //   private profile/handle yet), or the literal string "Anonymous" from
+  //   pre-fix backends. Use resolveStableName + a ref of the last good name
+  //   so the header never flickers to "Anonymous" during hydration. For
+  //   non-render uses (Alerts, prop strings), fall back to a neutral
+  //   "this user" label — never "Anonymous".
+  const lastStableOtherNameRef = useRef<string | undefined>(undefined);
+  const stableOtherUserName = resolveStableName(
+    (conversation as any)?.participantName as string | null | undefined,
+    lastStableOtherNameRef.current,
+  );
+  if (stableOtherUserName) {
+    lastStableOtherNameRef.current = stableOtherUserName;
+  }
+  const otherUserName = stableOtherUserName ?? 'this user';
   const otherPhotoUrl = (conversation as any)?.participantPhotoUrl as
     | string
     | undefined;
@@ -1939,9 +1954,22 @@ export default function Phase2ChatThread() {
             )}
           </View>
           <View style={styles.headerNameWrap}>
-            <Text style={styles.headerName} numberOfLines={1}>
-              {otherUserName}
-            </Text>
+            {stableOtherUserName ? (
+              <Text style={styles.headerName} numberOfLines={1}>
+                {stableOtherUserName}
+              </Text>
+            ) : (
+              // ANON-LOADING-FIX: skeleton placeholder while real name is
+              // unknown — never print "Anonymous" for a loading state.
+              <View
+                style={{
+                  width: 120,
+                  height: 14,
+                  borderRadius: 4,
+                  backgroundColor: C.accent,
+                }}
+              />
+            )}
             {/* P2_HEADER_PARITY: presence ladder subtitle, identical strings
                 to Phase-1 ChatScreenInner.tsx:2729-2740. T/D state must NEVER
                 replace this subtitle — keep it rendered unconditionally so

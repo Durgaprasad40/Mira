@@ -362,10 +362,16 @@ export const swipe = mutation({
           source: isSuperLikeMatch ? 'super_like' : 'like'
         });
 
-        const [fromDisplayName, toDisplayName] = await Promise.all([
+        // ANON-LOADING-FIX: getPhase2DisplayName may now return null. Use
+        // 'Someone' as a graceful generic label so match notifications never
+        // read "You matched with null" or leak the intentional-anonymous-only
+        // word "Anonymous" for a missing-data state.
+        const [fromDisplayNameRaw, toDisplayNameRaw] = await Promise.all([
           getPhase2DisplayName(ctx, fromUserId),
           getPhase2DisplayName(ctx, toUserId),
         ]);
+        const fromDisplayName = fromDisplayNameRaw ?? 'Someone';
+        const toDisplayName = toDisplayNameRaw ?? 'Someone';
 
         // Notify the other user (toUser) about the match
         // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only

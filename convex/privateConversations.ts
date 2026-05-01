@@ -236,10 +236,14 @@ export const getUserPrivateConversations = query({
         // PHASE-2 PRIVACY FIX: ALWAYS use handle from users table, never stored displayName
         // Stored displayName may contain old full names from before the fix
         // Phase-2 must NEVER expose first name or last name
+        // ANON-LOADING-FIX: emit null (not the literal string "Anonymous") when
+        // both displayName and handle are missing. The client must render a
+        // loading placeholder; "Anonymous" is reserved for intentional
+        // anonymous product modes only.
         const displayName =
           otherPrivateProfile?.displayName ||
           otherUser?.handle ||
-          'Anonymous';
+          null;
 
         // Compute unread count from source of truth (privateMessages table)
         // P2-002 FIX: Use denormalized unreadCount from participant record (avoids race condition)
@@ -722,7 +726,11 @@ export const sendPrivateMessage = mutation({
           .first();
 
         const notificationBody = 'You have a new message';
-        const senderLabel = await getPhase2DisplayName(ctx, senderId);
+        // ANON-LOADING-FIX: getPhase2DisplayName may now return null when the
+        // sender's private profile is missing. Use a graceful generic label so
+        // notification text never reads "null sent you a message" or leaks the
+        // intentional-mode-only word "Anonymous".
+        const senderLabel = (await getPhase2DisplayName(ctx, senderId)) ?? 'Someone';
 
         if (existingNotif) {
           await ctx.db.patch(existingNotif._id, {
@@ -855,10 +863,14 @@ export const getPrivateConversation = query({
     // PHASE-2 PRIVACY FIX: ALWAYS use handle from users table, never stored displayName
     // Stored displayName may contain old full names from before the fix
     // Phase-2 must NEVER expose first name or last name
+    // ANON-LOADING-FIX: emit null (not the literal string "Anonymous") when
+    // both displayName and handle are missing. The client must render a
+    // loading placeholder; "Anonymous" is reserved for intentional
+    // anonymous product modes only.
     const displayName =
       otherPrivateProfile?.displayName ||
       otherUser?.handle ||
-      'Anonymous';
+      null;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // PHOTO ACCESS CONTROL: Check if other user has blur enabled and access status

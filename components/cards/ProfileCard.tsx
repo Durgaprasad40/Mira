@@ -337,8 +337,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // IDENTITY SIMPLIFICATION: Single `name` field for all phases
   // Phase-1 shows full name, Phase-2 shows nickname (via name field)
   // ═══════════════════════════════════════════════════════════════════════════
+  // ANON-LOADING-FIX: empty string is the "name not yet known" sentinel.
+  // The render sites below show a small skeleton bar in that case rather
+  // than printing the literal word "Anonymous", which is reserved for
+  // intentional anonymous product modes.
   const displayName = useMemo(() => {
-    return name || 'Anonymous';
+    return name || '';
   }, [name]);
   const ageLabel = useMemo(() => {
     return typeof age === 'number' && age > 0 ? String(age) : null;
@@ -1716,9 +1720,22 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </View>
         )}
         <View style={styles.gridOverlay}>
-          <Text style={styles.gridName} numberOfLines={1}>
-            {displayName}{ageLabel ? `, ${ageLabel}` : ''}
-          </Text>
+          {/* ANON-LOADING-FIX: empty displayName means "not yet known" — show
+              a skeleton bar instead of the literal word "Anonymous". */}
+          {displayName ? (
+            <Text style={styles.gridName} numberOfLines={1}>
+              {displayName}{ageLabel ? `, ${ageLabel}` : ''}
+            </Text>
+          ) : (
+            <View
+              style={{
+                width: 80,
+                height: 14,
+                borderRadius: 4,
+                backgroundColor: TC.border,
+              }}
+            />
+          )}
           {isVerified && <Ionicons name="checkmark-circle" size={14} color={COLORS.superLike} />}
         </View>
       </TouchableOpacity>
@@ -2124,9 +2141,22 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 REQUIREMENT: Visible on ALL photos for consistent identity
                 ───────────────────────────────────────────────────────────────────────── */}
             <View style={styles.phase1NameRow}>
-              <Text style={styles.phase1Name} numberOfLines={1}>
-                {displayName}
-              </Text>
+              {/* ANON-LOADING-FIX: empty displayName means "not yet known" —
+                  show a skeleton bar instead of the literal word "Anonymous". */}
+              {displayName ? (
+                <Text style={styles.phase1Name} numberOfLines={1}>
+                  {displayName}
+                </Text>
+              ) : (
+                <View
+                  style={{
+                    width: 120,
+                    height: 18,
+                    borderRadius: 4,
+                    backgroundColor: TC.border,
+                  }}
+                />
+              )}
               {ageLabel && <Text style={styles.phase1Age}>{ageLabel}</Text>}
               {gender && GENDER_ICONS[gender] && (
                 <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}26` }]}>

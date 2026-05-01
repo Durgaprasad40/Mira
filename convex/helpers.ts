@@ -405,16 +405,18 @@ export async function validateOwnership(
  * Phase-2 privacy rules:
  * - Use displayName from userPrivateProfiles table (NOT the real name from users table)
  * - This prevents leaking real names into Phase-2/private surfaces
- * - Falls back to "Anonymous" if no private profile exists
+ * - Returns null if no private profile / displayName exists; callers must
+ *   present a loading placeholder rather than the literal word "Anonymous",
+ *   which is reserved for intentional anonymous product modes.
  *
  * @param ctx - Convex query or mutation context
  * @param userId - The Convex user ID
- * @returns Phase-2 display name (from private profile) or "Anonymous"
+ * @returns Phase-2 display name (from private profile) or null when unknown
  */
 export async function getPhase2DisplayName(
   ctx: QueryCtx | MutationCtx,
   userId: Id<"users">
-): Promise<string> {
+): Promise<string | null> {
   // Look up private profile for Phase-2 display name
   const privateProfile = await ctx.db
     .query('userPrivateProfiles')
@@ -425,8 +427,9 @@ export async function getPhase2DisplayName(
     return privateProfile.displayName;
   }
 
-  // Fallback: return "Anonymous" to never leak real name
-  return 'Anonymous';
+  // Unknown — never leak the real name; never wire-emit the string "Anonymous"
+  // for a missing-data state. Callers render a placeholder.
+  return null;
 }
 
 /**

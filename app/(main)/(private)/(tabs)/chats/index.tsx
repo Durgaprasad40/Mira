@@ -547,7 +547,11 @@ export default function ChatsScreen() {
         return {
           id: bc.id as string,
           participantId: bc.participantId as string,
-          participantName: bc.participantName,
+          // ANON-LOADING-FIX: backend may now return null when displayName +
+          // handle are both missing. Coerce to '' so IncognitoConversation
+          // typing (string) is preserved; the row renderer treats '' as a
+          // missing-name placeholder and shows a skeleton — never "Anonymous".
+          participantName: bc.participantName ?? '',
           participantAge: bc.participantAge || 0,
           participantPhotoUrl: bc.participantPhotoUrl || '',
           // P1-004 FIX: Include participantIntentKey from backend for intent label lookup
@@ -1142,7 +1146,13 @@ export default function ChatsScreen() {
                       />
                     ) : (
                       <View style={[styles.chatAvatar, styles.placeholderChatAvatar]}>
-                        <Text style={styles.chatAvatarInitial}>{convo.participantName?.[0] || '?'}</Text>
+                        {/* ANON-LOADING-FIX: treat missing/legacy "Anonymous"
+                            string as unknown — show '?' rather than 'A'. */}
+                        <Text style={styles.chatAvatarInitial}>{(() => {
+                          const n = (convo.participantName ?? '').trim();
+                          if (!n || n.toLowerCase() === 'anonymous') return '?';
+                          return n[0];
+                        })()}</Text>
                       </View>
                     )}
                   </View>
@@ -1154,7 +1164,28 @@ export default function ChatsScreen() {
                 {/* CLEAN UI: Name, Last message, Time only (no "Active" text, no intent labels) */}
                 <View style={styles.chatInfo}>
                   <View style={styles.chatNameRow}>
-                    <Text style={styles.chatName}>{convo.participantName}</Text>
+                    {/* ANON-LOADING-FIX: never render the literal "Anonymous"
+                        as the row name during loading. Show a skeleton bar
+                        instead so identity stays stable across hydration.
+                        Intentional TOD anonymous rows are handled by the
+                        TodAvatar branch above (which preserves the existing
+                        isTodConversationAnonymous flow). */}
+                    {(() => {
+                      const n = (convo.participantName ?? '').trim();
+                      const isUnknown = !n || n.toLowerCase() === 'anonymous';
+                      return isUnknown ? (
+                        <View
+                          style={{
+                            width: 110,
+                            height: 14,
+                            borderRadius: 4,
+                            backgroundColor: C.accent,
+                          }}
+                        />
+                      ) : (
+                        <Text style={styles.chatName}>{n}</Text>
+                      );
+                    })()}
                     <Text style={styles.chatTime}>{getTimeAgo(convo.lastMessageAt)}</Text>
                   </View>
                   <Text style={styles.chatLastMsg} numberOfLines={1}>{getPhase2ConversationPreview(previewConvo)}</Text>
