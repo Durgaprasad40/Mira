@@ -33,8 +33,9 @@ import {
 import { ConfessionMood, ConfessionAuthorVisibility } from '@/types';
 import ReactionBar, { EmojiCount } from './ReactionBar';
 
-// Blur radius for blur_photo mode
-const BLUR_PHOTO_RADIUS = 20;
+// Blur radius for blur_photo mode (matches T/D blurred-identity strength so
+// blurred photos read with the same intensity across both surfaces).
+const BLUR_PHOTO_RADIUS = 24;
 
 // Responsive avatar size
 const AVATAR_SIZE = moderateScale(22, 0.3);
