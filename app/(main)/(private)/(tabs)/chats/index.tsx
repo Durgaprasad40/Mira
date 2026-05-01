@@ -865,14 +865,25 @@ export default function ChatsScreen() {
           style={styles.likesButton}
           onPress={() => router.push('/(main)/(private)/phase2-likes' as any)}
         >
-          <Ionicons name="heart" size={24} color={C.primary} />
-          {(incomingLikesCount ?? 0) > 0 && (
-            <View style={styles.likesBadge}>
-              <Text style={styles.likesBadgeText}>
-                {incomingLikesCount! > 9 ? '9+' : incomingLikesCount}
-              </Text>
-            </View>
-          )}
+          {(() => {
+            const hasIncomingLikes = (incomingLikesCount ?? 0) > 0;
+            return (
+              <>
+                <Ionicons
+                  name="heart"
+                  size={24}
+                  color={hasIncomingLikes ? C.primary : C.textLight}
+                />
+                {hasIncomingLikes && (
+                  <View style={styles.likesBadge}>
+                    <Text style={styles.likesBadgeText}>
+                      {incomingLikesCount! > 99 ? '99+' : incomingLikesCount}
+                    </Text>
+                  </View>
+                )}
+              </>
+            );
+          })()}
         </TouchableOpacity>
       </View>
 
