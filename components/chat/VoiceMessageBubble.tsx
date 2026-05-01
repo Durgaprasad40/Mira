@@ -30,6 +30,7 @@ import {
   ActionSheetIOS,
   Platform,
   Alert,
+  InteractionManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
@@ -38,6 +39,14 @@ import { COLORS } from '@/lib/constants';
 // Global reference to currently playing sound (ensures only one plays at a time)
 let currentPlayingSound: Audio.Sound | null = null;
 let currentPlayingId: string | null = null;
+
+// VOICE-PRELOAD-DEDUPE: Module-level set of audio URIs currently being preloaded.
+// Prevents duplicate Audio.Sound.createAsync() calls when a VoiceMessageBubble briefly
+// unmounts and remounts during thread hydration — the most common trigger is the
+// optimistic-id → backend-id swap inside FlashList (keyExtractor uses item.id, so the
+// row is destroyed and recreated). The "second" instance simply skips its preload and
+// will load on first user tap via the existing handlePlayPause fallback.
+const inFlightPreloads = new Set<string>();
 
 // VOICE-TICKS: Tick status helper types (same as MessageBubble)
 type TickStatus = 'sent' | 'delivered' | 'read';
@@ -140,11 +149,19 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
     if (!audioUri || audioUri.trim() === '') return;
     if (soundRef.current) return;
     if (isPreloadingRef.current) return;
+    // VOICE-PRELOAD-DEDUPE: If another bubble instance is already preloading this
+    // exact URI (typical during the brief optimistic→backend message-id swap on
+    // thread open), skip our own preload. The bubble will still play on first
+    // tap via the existing handlePlayPause fallback (lines below).
+    if (inFlightPreloads.has(audioUri)) return;
 
     let isMounted = true;
+    let preloadStarted = false;
     isPreloadingRef.current = true;
+    inFlightPreloads.add(audioUri);
 
     const preloadAudio = async () => {
+      preloadStarted = true;
       try {
         if (__DEV__) console.log('[VOICE-PRELOAD] Preloading:', messageId.slice(-6));
 
@@ -175,13 +192,41 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
         // Don't mark as unavailable - will fallback to load on play
       } finally {
         isPreloadingRef.current = false;
+        inFlightPreloads.delete(audioUri);
       }
     };
 
-    preloadAudio();
+    // VOICE-PRELOAD-DEFER: Wait for navigation/interaction to settle before
+    // touching the native audio bridge so thread-open animation stays smooth.
+    // VOICE-PRELOAD-STABILIZE: After interactions, also require the bubble to
+    // remain mounted for ~700ms before starting native createAsync. This skips
+    // preload entirely during the unstable thread-open hydration window where
+    // the optimistic→backend message-id swap unmounts/remounts FlashList rows.
+    // If the bubble survives the window, we preload as before; if it does not,
+    // tap-to-play in handlePlayPause loads on demand (existing fallback).
+    let stabilityTimer: ReturnType<typeof setTimeout> | null = null;
+    const interactionHandle = InteractionManager.runAfterInteractions(() => {
+      if (!isMounted) return;
+      stabilityTimer = setTimeout(() => {
+        stabilityTimer = null;
+        if (!isMounted) return;
+        preloadAudio();
+      }, 700);
+    });
 
     return () => {
       isMounted = false;
+      interactionHandle?.cancel?.();
+      if (stabilityTimer) {
+        clearTimeout(stabilityTimer);
+        stabilityTimer = null;
+      }
+      // If the deferred preload never started, release the locks so a future
+      // mount with the same URI is free to retry.
+      if (!preloadStarted) {
+        isPreloadingRef.current = false;
+        inFlightPreloads.delete(audioUri);
+      }
       // Note: Main cleanup is handled by the other useEffect
     };
   }, [audioUri, messageId]);
