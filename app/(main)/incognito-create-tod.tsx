@@ -182,7 +182,7 @@ export default function CreateTodScreen() {
   const cleanupPendingTodUploads = useMutation(api.truthDare.cleanupPendingTodUploads);
 
   const maxLength = 280;
-  const minLength = 30;
+  const minLength = 20;
   const trimmedLength = content.trim().length;
   const canSubmit = trimmedLength >= minLength && !isSubmitting && !!effectiveUserId;
 
@@ -274,7 +274,8 @@ export default function CreateTodScreen() {
   }
 
   useEffect(() => {
-    if (visibility !== 'public' || ownerIdentity.photoCandidates.length === 0) {
+    // Prefetch best photo for any visibility that ends up sending one (public + no_photo).
+    if ((visibility !== 'public' && visibility !== 'no_photo') || ownerIdentity.photoCandidates.length === 0) {
       return;
     }
 
@@ -320,6 +321,9 @@ export default function CreateTodScreen() {
         try {
           await trackPendingTodUploads({
             storageIds: [storageId as any],
+            // Required: server uses two-tier auth (identity → authUserId fallback);
+            // omitting this throws Unauthorized in demo/custom-auth mode.
+            authUserId: effectiveUserId,
           });
         } catch (trackError) {
           debugTodWarn('[T/D] Failed to track pending post upload:', trackError);
@@ -338,21 +342,52 @@ export default function CreateTodScreen() {
         });
         debugTodLog(`[T/D REPORT] created visibility=anonymous`);
       } else if (visibility === 'no_photo') {
-        // Without photo: identity visible, blur photo treatment
-        // FIX: Send photoBlurMode: 'blur' to trigger blur treatment in renderer
-        // Backend server-side fallback will add photo from profile if needed
+        // Without photo: identity visible, blur applied client-side over real photo.
+        // We must send a real ownerPhotoUrl (or storageId) so TodAvatar can render
+        // the actual photo behind the blur. Otherwise TodAvatar falls through to
+        // the initial-letter placeholder. Mirror the public branch resolve+upload
+        // flow, then send the resulting URL with photoBlurMode='blur'.
+        const photoResultNoPhoto =
+          prefetchedPhotoResultRef.current?.cacheKey === ownerPhotoCandidatesKey
+            ? prefetchedPhotoResultRef.current.result
+            : await resolveBestPhoto(ownerIdentity.photoCandidates || []);
+
+        let ownerPhotoUrlNoPhoto: string | undefined;
+        let ownerPhotoStorageIdNoPhoto: any;
+
+        if (photoResultNoPhoto.url) {
+          if (photoResultNoPhoto.type === 'file') {
+            try {
+              ownerPhotoStorageIdNoPhoto = await uploadMediaToConvex(
+                photoResultNoPhoto.url,
+                () => generateUploadUrl({ authUserId: effectiveUserId }),
+                'photo'
+              );
+              await trackUploadedStorageId(ownerPhotoStorageIdNoPhoto);
+            } catch (uploadError) {
+              // Upload failed - proceed without photo (renderer will fall back gracefully)
+              debugTodWarn('[T/D] Photo upload failed for no_photo mode, proceeding without photo:', uploadError);
+            }
+          } else {
+            ownerPhotoUrlNoPhoto = photoResultNoPhoto.url;
+          }
+        }
+
         await createPrompt({
           type: postType,
           text: content.trim(),
           authUserId: effectiveUserId,
           isAnonymous: false,
-          photoBlurMode: 'blur', // FIX: blur mode triggers blurred photo treatment
+          photoBlurMode: 'blur', // blur treatment applied client-side over the real photo
           ownerName: ownerIdentity.name,
           ownerAge: ownerIdentity.age,
           ownerGender: ownerIdentity.gender,
-          // NO ownerPhotoUrl - backend will add from profile via server-side fallback
+          ownerPhotoUrl: ownerPhotoUrlNoPhoto,
+          ownerPhotoStorageId: ownerPhotoStorageIdNoPhoto,
         });
-        debugTodLog(`[T/D REPORT] created visibility=no_photo photoBlurMode=blur`);
+
+        const photoStatusNoPhoto = ownerPhotoUrlNoPhoto ? 'url' : ownerPhotoStorageIdNoPhoto ? 'uploaded' : 'none';
+        debugTodLog(`[T/D REPORT] created visibility=no_photo photoBlurMode=blur photoStatus=${photoStatusNoPhoto} resolveResult=${photoResultNoPhoto.type}`);
       } else {
         // Everyone (public): identity + photo (photo is optional - graceful fallback)
         const photoResult =
@@ -405,6 +440,7 @@ export default function CreateTodScreen() {
         try {
           await releasePendingTodUploads({
             storageIds: uploadedStorageIds as any,
+            authUserId: effectiveUserId,
           });
         } catch (releaseError) {
           debugTodWarn('[T/D] Failed to release pending post uploads:', releaseError);
@@ -420,6 +456,7 @@ export default function CreateTodScreen() {
         try {
           await cleanupPendingTodUploads({
             storageIds: uploadedStorageIds as any,
+            authUserId: effectiveUserId,
           });
         } catch (cleanupError) {
           debugTodWarn('[T/D] Failed to clean up pending post uploads:', cleanupError);

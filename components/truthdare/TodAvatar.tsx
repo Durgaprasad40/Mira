@@ -1,11 +1,22 @@
 import React from 'react';
-import { Platform, StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-native';
-import { BlurView } from 'expo-blur';
-import { Image } from 'expo-image';
+import { StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-native';
+// CONFESS-PARITY: use react-native Image's native `blurRadius` prop, identical
+// to the Confessions tab (`components/confessions/ConfessionCard.tsx` line 358,
+// `BLUR_PHOTO_RADIUS = 20`). Previously this component layered a `BlurView` +
+// `rgba(5,7,14,0.32)` dark overlay on top of `expo-image`'s `<Image>`, which
+// produced a "shaded/dark" look rather than a real photographic blur. Mirror
+// Confess exactly so blurred-identity T/D posts (prompts + answers/comments)
+// render the actual face genuinely blurred, not darkened.
+import { Image as RNImage } from 'react-native';
+import { Image as ExpoImage } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { FONT_SIZE } from '@/lib/constants';
 
 const TEXT_MAX_SCALE = 1.2;
+// T/D blur strength — slightly stronger than Confess (20) so faces are less
+// recognizable in blurred-identity posts. Kept low enough that the photo still
+// reads as a real person. No dark overlay/tint added.
+const BLUR_PHOTO_RADIUS = 24;
 
 type TodAvatarProps = {
   size: number;
@@ -54,19 +65,18 @@ export const TodAvatar = React.memo(function TodAvatar({
       {isAnonymous ? (
         <Ionicons name="eye-off" size={resolvedIconSize} color={iconColor} />
       ) : photoUrl ? (
-        <>
-          <Image source={{ uri: photoUrl }} style={[styles.image, { borderRadius: radius }]} contentFit="cover" />
-          {showBlur && (
-            <>
-              <BlurView
-                intensity={Platform.OS === 'ios' ? 80 : 100}
-                tint="dark"
-                style={StyleSheet.absoluteFill}
-              />
-              <View style={styles.blurOverlay} />
-            </>
-          )}
-        </>
+        showBlur ? (
+          // CONFESS-PARITY: real native blur via RN Image `blurRadius`, no dark
+          // overlay, no BlurView. Identical technique to ConfessionCard line 358.
+          <RNImage
+            source={{ uri: photoUrl }}
+            style={[styles.image, { borderRadius: radius }]}
+            resizeMode="cover"
+            blurRadius={BLUR_PHOTO_RADIUS}
+          />
+        ) : (
+          <ExpoImage source={{ uri: photoUrl }} style={[styles.image, { borderRadius: radius }]} contentFit="cover" />
+        )
       ) : label?.trim() ? (
         <Text
           maxFontSizeMultiplier={TEXT_MAX_SCALE}
@@ -92,10 +102,6 @@ const styles = StyleSheet.create({
   image: {
     width: '100%',
     height: '100%',
-  },
-  blurOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(5, 7, 14, 0.32)',
   },
   initial: {
     fontWeight: '700',

@@ -27,7 +27,7 @@ const REPORT_HIDE_THRESHOLD = 5;
 const RATE_LIMIT_ERROR = 'Rate limit exceeded. Please try again later.';
 const TOD_SYSTEM_OWNER_ID = 'system';
 
-const MIN_PROMPT_CHARS = 30;
+const MIN_PROMPT_CHARS = 20;
 const MAX_PROMPT_CHARS = 280;
 const MAX_ANSWER_CHARS = 400;
 const MIN_MEDIA_VIEW_DURATION_SEC = 1;
@@ -799,16 +799,28 @@ export const createPrompt = mutation({
     let finalOwnerPhotoUrl = resolvedPhotoUrl;
 
     const isPublicPost = args.isAnonymous === false;
-    const needsIdentityFallback = isPublicPost && (!finalOwnerName || finalOwnerName.trim() === '');
+    const needsNameFallback = isPublicPost && (!finalOwnerName || finalOwnerName.trim() === '');
+    // BLUR-PARITY FIX: For any non-anonymous post (including the blurred-identity
+    // "Without photo" branch), ensure a real photo URL is persisted so the
+    // renderer can apply the Confess-style native blur. Without this, posts
+    // created before the composer-side fix or with an empty private-profile
+    // photo set would land with `ownerPhotoUrl=undefined`, causing TodAvatar
+    // to fall through to the initial-letter placeholder.
+    const needsPhotoFallback = isPublicPost && !finalOwnerPhotoUrl;
+    const needsIdentityFallback = needsNameFallback || needsPhotoFallback;
 
     if (needsIdentityFallback) {
       // Fetch user's canonical profile for identity
       const userProfile = await ctx.db.get(ownerUserId);
       if (userProfile) {
-        // Prefer the user's display `name` over `handle` so the T/D identity
-        // card matches what the client writes (and what profile cards show).
-        // See matching change in `getTodDisplayName` for identity consistency.
-        finalOwnerName = userProfile.name || userProfile.handle || undefined;
+        // Only overwrite name when name is actually missing — the photo-only
+        // fallback path must not clobber a client-supplied display name.
+        if (needsNameFallback) {
+          // Prefer the user's display `name` over `handle` so the T/D identity
+          // card matches what the client writes (and what profile cards show).
+          // See matching change in `getTodDisplayName` for identity consistency.
+          finalOwnerName = userProfile.name || userProfile.handle || undefined;
+        }
 
         // Calculate age from dateOfBirth if not provided
         if (!finalOwnerAge && userProfile.dateOfBirth) {

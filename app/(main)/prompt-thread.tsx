@@ -1179,6 +1179,9 @@ export default function PromptThreadScreen() {
         try {
           await trackPendingTodUploads({
             storageIds: [storageId as any],
+            // Required: server uses two-tier auth (identity → authUserId fallback);
+            // omitting this throws Unauthorized in demo/custom-auth mode.
+            authUserId: userId,
           });
         } catch (trackError) {
           debugTodWarn('[T/D] Failed to track pending upload:', trackError);
@@ -1284,6 +1287,7 @@ export default function PromptThreadScreen() {
         try {
           await releasePendingTodUploads({
             storageIds: uploadedStorageIds as any,
+            authUserId: userId,
           });
         } catch (releaseError) {
           debugTodWarn('[T/D] Failed to release pending uploads after answer submit:', releaseError);
@@ -1308,6 +1312,7 @@ export default function PromptThreadScreen() {
         try {
           await cleanupPendingTodUploads({
             storageIds: uploadedStorageIds as any,
+            authUserId: userId,
           });
         } catch (cleanupError) {
           debugTodWarn('[T/D] Failed to clean up pending uploads after failed answer submit:', cleanupError);
