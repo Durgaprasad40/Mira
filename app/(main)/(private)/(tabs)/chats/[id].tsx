@@ -1675,22 +1675,26 @@ export default function Phase2ChatThread() {
   // previous thread's messages can never bleed into the new one. Backend
   // remains source of truth — this ref is UI stabilization only.
   const lastStableMessagesRef = useRef<any[] | null>(null);
-  // P2_THREAD_STABLE: Once the body has rendered FlashList content with at
-  // least one row, lock the overlay-spinner and overlay-empty states OFF
-  // for the rest of this conversation. Even if a transient query refresh
-  // (e.g. backend-driven re-fetch from inbox markAllDelivered after open,
-  // Convex subscription update, or auth/userId re-resolution) momentarily
-  // drops `stableMessages` or `messageList.length`, we must NEVER swap the
-  // list back to a centered spinner or empty state after the user has
-  // already seen content — that's the visible content → blank → content
-  // flicker. Reset on conversation switch so a brand-new thread still
-  // gets its initial skeleton.
-  const hasRenderedContentRef = useRef(false);
+  // P2_THREAD_FIRST_PAINT: Replaces the older `hasRenderedContentRef` lock.
+  // The previous lock flipped the moment `messageList.length > 0`, which
+  // produced a cascading multi-stage open: (1) centered spinner; (2)
+  // spinner disappears + 36 bubbles pop in (lock flips here); (3) header
+  // T/D pill state changes when `gameSession` resolves a tick later. The
+  // user perceived that 3-step cascade as "appears / changes / appears".
+  //
+  // The new lock only flips once ALL of (conversation, stableMessages,
+  // currentUser, gameSession) are defined. Until then we hold a single
+  // stable loading overlay; the moment everything is ready the overlay
+  // is removed in one frame and content + T/D pill + header presence
+  // appear together. After the lock flips, transient query refreshes can
+  // never bring the overlay back (matches the prior "never replace
+  // content with loading/blank" guarantee). Reset on conversation switch.
+  const hasInitialPayloadRef = useRef(false);
   useEffect(() => {
     // New conversation → drop caches so a fresh thread starts from a clean
     // skeleton state and never momentarily renders the prior thread.
     lastStableMessagesRef.current = null;
-    hasRenderedContentRef.current = false;
+    hasInitialPayloadRef.current = false;
   }, [id]);
   useEffect(() => {
     if (messages !== undefined) {
@@ -1701,6 +1705,21 @@ export default function Phase2ChatThread() {
     messages !== undefined
       ? (messages as any[])
       : lastStableMessagesRef.current ?? undefined;
+
+  // P2_THREAD_FIRST_PAINT: Coordinated opening gate. All four queries must
+  // resolve before we lift the loading overlay so the body, header T/D
+  // pill, presence dot, and message bubbles all appear in the same frame.
+  // `gameSession` is included because the T/D pill in the header depends
+  // on it and we don't want it visibly swapping right after messages
+  // appear. The synchronous render-time ref mutation is safe (no setState).
+  const isInitialPayloadReady =
+    conversation !== undefined &&
+    stableMessages !== undefined &&
+    currentUser !== undefined &&
+    gameSession !== undefined;
+  if (isInitialPayloadReady) {
+    hasInitialPayloadRef.current = true;
+  }
 
   // [P2_MEDIA_UPLOAD] Merge server messages with optimistic pending bubbles,
   // sort by (createdAt, _id) so the pending bubble lands in the right slot
@@ -2135,19 +2154,21 @@ export default function Phase2ChatThread() {
         keyboardVerticalOffset={0}
       >
         <View style={styles.listWrap}>
-          {/* P2_THREAD_STABLE: Always-mounted FlashList shell + absolute-fill
-              overlays. The previous 3-way conditional (spinner | empty |
-              FlashList) UNMOUNTED FlashList every time `stableMessages`
-              flipped to undefined or `messageList.length` dipped to 0
-              (e.g., transient query refresh after inbox markAllDelivered,
-              Convex subscription tick, optimistic→server message-id swap).
-              That remount is the visible content → blank → content flicker.
-              Now the list is always mounted; spinner/empty render as
-              absolute-fill overlays ONLY before the first content frame
-              (the `hasRenderedContentRef` lock — set during render the
-              moment we see a non-empty messageList — keeps them off
-              forever after that). True deleted/missing-conversation state
-              is still surfaced by the bad-id early-return above and by
+          {/* P2_THREAD_FIRST_PAINT: Always-mounted FlashList + a single
+              first-paint loading overlay. The list is laid out once at
+              mount with an empty array so its container, scroller, and
+              FlashList itself never unmount during a query refresh. The
+              loading overlay sits ABOVE the empty list (absoluteFill) so
+              the user only ever sees the overlay until `isInitialPayloadReady`
+              flips true — at which point conversation, stableMessages,
+              currentUser, and gameSession are all defined, the overlay
+              is removed in one frame, and the message bubbles, header
+              T/D pill, and presence dot all appear together. After
+              `hasInitialPayloadRef.current` latches true, transient
+              query refreshes (Convex subscription tick, inbox
+              markAllDelivered, optimistic→server id swap) cannot bring
+              the overlay back. True deleted/missing-conversation states
+              are still surfaced by the bad-id early-return above and by
               backend-driven navigation away (unmatch / block / leave). */}
           <FlashList
             ref={listRef}
@@ -2157,15 +2178,7 @@ export default function Phase2ChatThread() {
             contentContainerStyle={styles.listContent}
             onContentSizeChange={handleContentSizeChange}
           />
-          {(() => {
-            // Synchronous render-time lock flip. Refs are safe to mutate
-            // during render as long as we're not calling setState.
-            if (messageList.length > 0) {
-              hasRenderedContentRef.current = true;
-            }
-            return null;
-          })()}
-          {!hasRenderedContentRef.current && stableMessages === undefined && (
+          {!hasInitialPayloadRef.current && (
             <View
               style={[styles.loading, StyleSheet.absoluteFillObject]}
               pointerEvents="none"
@@ -2173,23 +2186,21 @@ export default function Phase2ChatThread() {
               <ActivityIndicator size="large" color={C.primary} />
             </View>
           )}
-          {!hasRenderedContentRef.current &&
-            stableMessages !== undefined &&
-            messageList.length === 0 && (
-              <View
-                style={[styles.emptyState, StyleSheet.absoluteFillObject]}
-                pointerEvents="none"
-              >
-                <Ionicons
-                  name="chatbubbles-outline"
-                  size={42}
-                  color={C.textLight}
-                />
-                <Text style={styles.emptyText}>
-                  Say hi to {otherUserName} to get started
-                </Text>
-              </View>
-            )}
+          {hasInitialPayloadRef.current && messageList.length === 0 && (
+            <View
+              style={[styles.emptyState, StyleSheet.absoluteFillObject]}
+              pointerEvents="none"
+            >
+              <Ionicons
+                name="chatbubbles-outline"
+                size={42}
+                color={C.textLight}
+              />
+              <Text style={styles.emptyText}>
+                Say hi to {otherUserName} to get started
+              </Text>
+            </View>
+          )}
         </View>
 
         <MessageInput
