@@ -104,6 +104,7 @@ export default function PrivateLayout() {
   const mountedRef = useRef(false);
   /** DEV: first renders only — verify pathname no longer sticks on "/" */
   const p2PathTraceRenderRef = useRef(0);
+  const firstFilterMirrorDoneRef = useRef(false);
 
   // CRASH FIX: Track mount lifecycle
   useEffect(() => {
@@ -357,10 +358,23 @@ export default function PrivateLayout() {
     const prev = useFilterStore.getState().privateIntentKeys;
     const isSame =
       prev.length === cleaned.length && prev.every((v, i) => v === cleaned[i]);
-    if (isSame) return;
+    const isInitialMirror = !firstFilterMirrorDoneRef.current;
+    if (isSame) {
+      if (isInitialMirror) {
+        firstFilterMirrorDoneRef.current = true;
+        if (__DEV__) {
+          console.log('[P2_PREF_FILTER_SYNC_INITIAL]', { privateIntentKeys: cleaned });
+        }
+      }
+      return;
+    }
     useFilterStore.getState().setPrivateIntentKeys(cleaned);
+    firstFilterMirrorDoneRef.current = true;
     if (__DEV__) {
-      console.log('[P2_PREF_FILTER_SYNC]', { privateIntentKeys: cleaned });
+      console.log(
+        isInitialMirror ? '[P2_PREF_FILTER_SYNC_INITIAL]' : '[P2_PREF_FILTER_SYNC]',
+        { privateIntentKeys: cleaned }
+      );
     }
   }, [isInPhase2, isDemoMode, convexPrivateProfile]);
 

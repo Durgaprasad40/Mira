@@ -63,7 +63,6 @@ import {
   lineHeight,
   moderateScale,
 } from "@/lib/constants";
-import { PRIVATE_INTENT_CATEGORIES } from "@/lib/privateConstants";
 import { getTrustBadges } from "@/lib/trustBadges";
 import { useAuthStore } from "@/stores/authStore";
 import { useDiscoverStore } from "@/stores/discoverStore";
@@ -93,6 +92,7 @@ import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
 // usePrivateChatStore - read-only for retention UI hints (conversations count)
 import { usePrivateChatStore } from "@/stores/privateChatStore";
+import { usePrivateProfileStore } from "@/stores/privateProfileStore";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
 import { useLocationStore, useLiveDistance } from "@/stores/locationStore";
@@ -559,6 +559,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const authReady = useAuthStore((s) => s.authReady);
   const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
   const authVersion = useAuthStore((s) => s.authVersion);
+  const phase2HasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [showNotificationPopover, setShowNotificationPopover] = useState(false);
@@ -1458,30 +1459,38 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Reset index when filter changes (always show first matching profile)
   const intentFilterKey = useMemo(() => JSON.stringify([...intentFilters].sort()), [intentFilters]);
   const prevFilterRef = useRef<string | null>(null);
+  const phase2InitialFilterCapturedRef = useRef(false);
+  const [phase2InitialFilterReady, setPhase2InitialFilterReady] = useState(false);
   // P2-001 FIX: Track pending filter change to apply after swipe completes
   const pendingFilterResetRef = useRef<boolean>(false);
   useEffect(() => {
     if (!isPhase2) {
+      phase2InitialFilterCapturedRef.current = false;
+      prevFilterRef.current = null;
+      setPhase2InitialFilterReady(false);
       return;
     }
 
-    if (prevFilterRef.current === null) {
-      // First hydration should not clear the global cache.
+    if (!phase2HasHydrated) {
+      phase2InitialFilterCapturedRef.current = false;
+      prevFilterRef.current = null;
+      setPhase2InitialFilterReady(false);
+      return;
+    }
+
+    if (!phase2InitialFilterCapturedRef.current) {
+      // First post-hydration filter observation is the Convex/profile baseline,
+      // not a user selection. Do not reset cache or emit analytics here.
+      phase2InitialFilterCapturedRef.current = true;
       prevFilterRef.current = intentFilterKey;
+      setPhase2InitialFilterReady(true);
+      if (__DEV__) {
+        console.log('[P2_FILTER_INITIAL_CAPTURE]', { intentFilterKey, intentFilters });
+      }
       return;
     }
 
     if (prevFilterRef.current === intentFilterKey) {
-      return;
-    }
-
-    const isColdBootFilterHydration =
-      prevFilterRef.current === "[]" &&
-      intentFilters.length > 0 &&
-      usePhase2DiscoverCacheStore.getState().profilesMap.size > 0;
-
-    if (isColdBootFilterHydration) {
-      prevFilterRef.current = intentFilterKey;
       return;
     }
 
@@ -1500,7 +1509,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // Track Phase-2 intent filter selection (use first key for backward compat)
     trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
     prevFilterRef.current = intentFilterKey;
-  }, [hardResetPhase2Cache, intentFilterKey, intentFilters, isPhase2, showPhaseTransition]);
+  }, [hardResetPhase2Cache, intentFilterKey, intentFilters, isPhase2, phase2HasHydrated, showPhaseTransition]);
 
   // ══════════════════════════════════════════════════════════════════════════
   // STABLE QUEUE MODEL: Prevents back card from changing during swipe animation
@@ -2963,13 +2972,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
   }, [hasResolvedPhase2Query, isPhase2, isPhase2NetworkIssueSettled, privateDiscoverArgs]);
 
-  const phase2FilterLabels = useMemo(
-    () => intentFilters
-      .map((key) => PRIVATE_INTENT_CATEGORIES.find((category) => category.key === key)?.label ?? key)
-      .join(", "),
-    [intentFilters],
-  );
-
   const phase2EmptyState = useMemo(() => {
     if (!isPhase2) return null;
 
@@ -2990,8 +2992,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       return {
         icon: "options-outline" as const,
         iconColor: "rgba(255, 206, 102, 0.96)",
-        title: "Those filters are narrowing the room",
-        subtitle: `Nothing in Deep Connect matches ${phase2FilterLabels || "this filter set"} yet. Clear filters or try again for a wider pass.`,
+        title: "Deep Connect is quiet right now",
+        subtitle: "No matching profiles are available at the moment. Check again later or gently adjust your preferences.",
         primaryAction: "clear_filters" as const,
         primaryLabel: "Clear filters",
         secondaryAction: "retry" as const,
@@ -3002,14 +3004,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     return {
       icon: "sparkles-outline" as const,
       iconColor: "rgba(233, 69, 96, 0.95)",
-      title: "The room is quiet right now",
-      subtitle: "We’ll surface new people the moment they arrive. Adjust your filters or check back shortly.",
+      title: "Deep Connect is quiet right now",
+      subtitle: "No matching profiles are available at the moment. Check again later or gently adjust your preferences.",
       primaryAction: "retry" as const,
       primaryLabel: "Try again",
       secondaryAction: intentFilters.length > 0 ? ("clear_filters" as const) : null,
       secondaryLabel: intentFilters.length > 0 ? "Clear filters" : null,
     };
-  }, [intentFilters, isPhase2, isPhase2NetworkIssueSettled, phase2FilterLabels, sourceProfiles.length]);
+  }, [intentFilters, isPhase2, isPhase2NetworkIssueSettled, sourceProfiles.length]);
 
   const notificationPopover = showNotificationPopover ? (
     <NotificationPopover
@@ -3020,16 +3022,47 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     />
   ) : null;
   const hasProfiles = profiles.length > 0;
-  const queryResolved = phase2Profiles !== undefined;
+  const phase2QueryResolved = phase2Profiles !== undefined;
+  const phase2ReadyToDecide =
+    !isPhase2 ||
+    (
+      phase2HasHydrated &&
+      phase2InitialFilterReady &&
+      phase2QueryResolved
+    );
+  const queryResolved = phase2QueryResolved;
   const cachedHas = phase2CacheBelongsToViewer && cachedProfilesMap.size > 0;
   const state =
     hasProfiles
       ? "cards"
-      : !queryResolved && !cachedSearchingDone && !cachedHas
+      : isPhase2 && !phase2ReadyToDecide
+        ? "searching"
+        : !queryResolved && !cachedSearchingDone && !cachedHas
         ? "searching"
         : cachedHas
           ? "cards"
           : "empty";
+
+  const phase2ReadyToDecideLoggedRef = useRef(false);
+  useEffect(() => {
+    if (!isPhase2) {
+      phase2ReadyToDecideLoggedRef.current = false;
+      return;
+    }
+    if (!phase2ReadyToDecide) {
+      phase2ReadyToDecideLoggedRef.current = false;
+      return;
+    }
+    if (__DEV__ && !phase2ReadyToDecideLoggedRef.current) {
+      phase2ReadyToDecideLoggedRef.current = true;
+      console.log('[P2_READY_TO_DECIDE]', {
+        phase2HasHydrated,
+        phase2InitialFilterReady,
+        phase2QueryResolved,
+        intentFilters,
+      });
+    }
+  }, [intentFilters, isPhase2, phase2HasHydrated, phase2InitialFilterReady, phase2QueryResolved, phase2ReadyToDecide]);
 
   useEffect(() => {
     if (isPhase2 && state === "cards" && !cachedSearchingDone) {
@@ -3083,7 +3116,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   function SearchingOverlay() {
     return (
-      <View style={styles.phase2SearchingOverlay}>
+      <View key="p2-searching-overlay" style={styles.phase2SearchingOverlay}>
         <LinearGradient
           colors={['#0F0F1A', '#141428', '#1A1A2E', '#16213E', '#1A1A2E', '#141428', '#0F0F1A']}
           locations={[0, 0.15, 0.35, 0.5, 0.65, 0.85, 1]}
@@ -3242,14 +3275,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   entering={FadeInUp.duration(350).delay(200)}
                   style={styles.phase2EmptyTitle}
                 >
-                  {phase2EmptyState?.title ?? "The room is quiet right now"}
+                  {phase2EmptyState?.title ?? "Deep Connect is quiet right now"}
                 </Animated.Text>
                 <Animated.Text
                   {...DISCOVER_TEXT_PROPS}
                   entering={FadeInUp.duration(350).delay(280)}
                   style={styles.phase2EmptySubtitle}
                 >
-                  {phase2EmptyState?.subtitle ?? "We’ll surface new people the moment they arrive. Adjust your filters or check back shortly."}
+                  {phase2EmptyState?.subtitle ?? "No matching profiles are available at the moment. Check again later or gently adjust your preferences."}
                 </Animated.Text>
 
                 <Animated.View entering={FadeIn.duration(300).delay(400)} style={styles.phase2EmptyActions}>
