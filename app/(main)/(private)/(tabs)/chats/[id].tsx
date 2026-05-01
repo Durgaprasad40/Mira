@@ -1675,10 +1675,22 @@ export default function Phase2ChatThread() {
   // previous thread's messages can never bleed into the new one. Backend
   // remains source of truth — this ref is UI stabilization only.
   const lastStableMessagesRef = useRef<any[] | null>(null);
+  // P2_THREAD_STABLE: Once the body has rendered FlashList content with at
+  // least one row, lock the overlay-spinner and overlay-empty states OFF
+  // for the rest of this conversation. Even if a transient query refresh
+  // (e.g. backend-driven re-fetch from inbox markAllDelivered after open,
+  // Convex subscription update, or auth/userId re-resolution) momentarily
+  // drops `stableMessages` or `messageList.length`, we must NEVER swap the
+  // list back to a centered spinner or empty state after the user has
+  // already seen content — that's the visible content → blank → content
+  // flicker. Reset on conversation switch so a brand-new thread still
+  // gets its initial skeleton.
+  const hasRenderedContentRef = useRef(false);
   useEffect(() => {
-    // New conversation → drop cache so a fresh thread starts from a clean
+    // New conversation → drop caches so a fresh thread starts from a clean
     // skeleton state and never momentarily renders the prior thread.
     lastStableMessagesRef.current = null;
+    hasRenderedContentRef.current = false;
   }, [id]);
   useEffect(() => {
     if (messages !== undefined) {
@@ -2123,35 +2135,61 @@ export default function Phase2ChatThread() {
         keyboardVerticalOffset={0}
       >
         <View style={styles.listWrap}>
-          {/* MESSAGES-STABILIZE: Gate on `stableMessages` so the spinner only
-              appears before the first successful query result. After that,
-              transient `messages === undefined` from a 'skip' arg flip
-              keeps showing the cached list instead of blanking the body. */}
-          {stableMessages === undefined ? (
-            <View style={styles.loading}>
+          {/* P2_THREAD_STABLE: Always-mounted FlashList shell + absolute-fill
+              overlays. The previous 3-way conditional (spinner | empty |
+              FlashList) UNMOUNTED FlashList every time `stableMessages`
+              flipped to undefined or `messageList.length` dipped to 0
+              (e.g., transient query refresh after inbox markAllDelivered,
+              Convex subscription tick, optimistic→server message-id swap).
+              That remount is the visible content → blank → content flicker.
+              Now the list is always mounted; spinner/empty render as
+              absolute-fill overlays ONLY before the first content frame
+              (the `hasRenderedContentRef` lock — set during render the
+              moment we see a non-empty messageList — keeps them off
+              forever after that). True deleted/missing-conversation state
+              is still surfaced by the bad-id early-return above and by
+              backend-driven navigation away (unmatch / block / leave). */}
+          <FlashList
+            ref={listRef}
+            data={messageList}
+            keyExtractor={(item: any) => String(item.id)}
+            renderItem={renderItem}
+            contentContainerStyle={styles.listContent}
+            onContentSizeChange={handleContentSizeChange}
+          />
+          {(() => {
+            // Synchronous render-time lock flip. Refs are safe to mutate
+            // during render as long as we're not calling setState.
+            if (messageList.length > 0) {
+              hasRenderedContentRef.current = true;
+            }
+            return null;
+          })()}
+          {!hasRenderedContentRef.current && stableMessages === undefined && (
+            <View
+              style={[styles.loading, StyleSheet.absoluteFillObject]}
+              pointerEvents="none"
+            >
               <ActivityIndicator size="large" color={C.primary} />
             </View>
-          ) : messageList.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Ionicons
-                name="chatbubbles-outline"
-                size={42}
-                color={C.textLight}
-              />
-              <Text style={styles.emptyText}>
-                Say hi to {otherUserName} to get started
-              </Text>
-            </View>
-          ) : (
-            <FlashList
-              ref={listRef}
-              data={messageList}
-              keyExtractor={(item: any) => String(item.id)}
-              renderItem={renderItem}
-              contentContainerStyle={styles.listContent}
-              onContentSizeChange={handleContentSizeChange}
-            />
           )}
+          {!hasRenderedContentRef.current &&
+            stableMessages !== undefined &&
+            messageList.length === 0 && (
+              <View
+                style={[styles.emptyState, StyleSheet.absoluteFillObject]}
+                pointerEvents="none"
+              >
+                <Ionicons
+                  name="chatbubbles-outline"
+                  size={42}
+                  color={C.textLight}
+                />
+                <Text style={styles.emptyText}>
+                  Say hi to {otherUserName} to get started
+                </Text>
+              </View>
+            )}
         </View>
 
         <MessageInput
