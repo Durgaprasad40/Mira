@@ -194,6 +194,67 @@ const isRetryableTodError = (error: unknown): boolean => {
 
 const PRESENCE_HEARTBEAT_INTERVAL = 15000; // 15 seconds
 
+/**
+ * P2_THREAD_OPEN_GATE
+ *
+ * Hidden helper that subscribes to the same four Convex queries the Phase-2
+ * thread (`chats/[id].tsx`) needs on first paint:
+ *   - api.privateConversations.getPrivateConversation
+ *   - api.privateConversations.getPrivateMessages
+ *   - api.users.getUserById          (current user)
+ *   - api.games.getBottleSpinSession (T/D pill)
+ *
+ * The Convex client shares a single subscription cache across the React tree.
+ * By starting these subscriptions on the Messages tab BEFORE we navigate, the
+ * thread route mounts with all four results already cached, which means its
+ * `isInitialPayloadReady` gate is `true` on the very first render and the
+ * dark loading shell is never shown. The user perceives one stable Messages
+ * list → final thread, with no intermediate "thread mounted but waiting"
+ * paint.
+ *
+ * Renders nothing. Calls `onReady()` exactly once when all four queries have
+ * resolved (defined, not skip). The parent guarantees `conversationId` and
+ * `userId` are non-empty before mounting this — so there's no `'skip'` arg
+ * branch needed here.
+ */
+function Phase2ChatThreadPrefetcher({
+  conversationId,
+  userId,
+  onReady,
+}: {
+  conversationId: string;
+  userId: string;
+  onReady: () => void;
+}) {
+  const conv = useQuery(api.privateConversations.getPrivateConversation, {
+    conversationId: conversationId as any,
+    authUserId: userId,
+  });
+  const msgs = useQuery(api.privateConversations.getPrivateMessages, {
+    conversationId: conversationId as any,
+    authUserId: userId,
+    limit: 100,
+  });
+  const cu = useQuery(api.users.getUserById, {
+    userId: userId as any,
+    viewerId: userId as any,
+  });
+  const gs = useQuery(api.games.getBottleSpinSession, { conversationId });
+  const ready =
+    conv !== undefined &&
+    msgs !== undefined &&
+    cu !== undefined &&
+    gs !== undefined;
+  const firedRef = useRef(false);
+  useEffect(() => {
+    if (ready && !firedRef.current) {
+      firedRef.current = true;
+      onReady();
+    }
+  }, [ready, onReady]);
+  return null;
+}
+
 export default function ChatsScreen() {
   useScreenTrace("P2_CHATS");
   const router = useRouter();
@@ -206,6 +267,41 @@ export default function ChatsScreen() {
   const reconcileConversations = usePrivateChatStore((s) => s.reconcileConversations);
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string; conversationId: string } | null>(null);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // P2_THREAD_OPEN_GATE
+  // Track which conversation row the user just tapped. While `openingId` is
+  // non-null we prefetch the thread payload (see Phase2ChatThreadPrefetcher
+  // above) and only navigate once Convex has cached all four required
+  // queries — guaranteeing the thread paints final UI on its first frame.
+  // The failsafe timer ensures we never block the user for more than
+  // OPENING_FAILSAFE_MS even if a query is unusually slow; in that
+  // worst-case we fall back to the thread's own loading shell, which is
+  // exactly the previous behavior.
+  // ─────────────────────────────────────────────────────────────────────────
+  const [openingId, setOpeningId] = useState<string | null>(null);
+  const openingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (openingTimeoutRef.current) {
+        clearTimeout(openingTimeoutRef.current);
+        openingTimeoutRef.current = null;
+      }
+    };
+  }, []);
+  // Clear the opening state if the tab loses focus (e.g., user switched
+  // tabs mid-tap) so a stale prefetcher doesn't trigger a delayed push.
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        if (openingTimeoutRef.current) {
+          clearTimeout(openingTimeoutRef.current);
+          openingTimeoutRef.current = null;
+        }
+        setOpeningId(null);
+      };
+    }, [])
+  );
 
   // P2-003: Error and retry state for queries
   const [retryKey, setRetryKey] = useState(0);
@@ -222,6 +318,48 @@ export default function ChatsScreen() {
   // Note: useConvexAuth was removed as it caused release crashes
   // The query will return undefined until auth is ready, which is handled gracefully
   const isAuthReadyForQueries = !!(currentUserId && authReady);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // P2_THREAD_OPEN_GATE: navigate + tap handler.
+  // `OPENING_FAILSAFE_MS` is intentionally short — the goal is "warm cache"
+  // not "artificial delay". In the typical case Convex returns all four
+  // results in well under this budget and we navigate the moment the
+  // prefetcher's `onReady` fires (usually <300ms). The failsafe only
+  // matters on a cold connection or during a backend hiccup.
+  // ─────────────────────────────────────────────────────────────────────────
+  const OPENING_FAILSAFE_MS = 800;
+  const navigateToThread = useCallback(
+    (id: string) => {
+      if (openingTimeoutRef.current) {
+        clearTimeout(openingTimeoutRef.current);
+        openingTimeoutRef.current = null;
+      }
+      setOpeningId(null);
+      router.push({
+        pathname: '/(main)/(private)/(tabs)/chats/[id]',
+        params: { id: String(id) },
+      } as any);
+    },
+    [router]
+  );
+  const handleOpenConversation = useCallback(
+    (id: string) => {
+      // Ignore taps on other rows while one open is in flight (single-flight).
+      if (openingId) return;
+      console.log('[P2_CHAT_OPEN] chat-row', id);
+      // No userId yet (rare — auth hydrating) → fall through to immediate
+      // navigation; the thread route's own loading shell will cover it.
+      if (!currentUserId) {
+        navigateToThread(id);
+        return;
+      }
+      setOpeningId(id);
+      openingTimeoutRef.current = setTimeout(() => {
+        navigateToThread(id);
+      }, OPENING_FAILSAFE_MS);
+    },
+    [openingId, currentUserId, navigateToThread]
+  );
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P2_LIKES: Incoming likes (people who liked current user, pending match)
@@ -915,23 +1053,26 @@ export default function ChatsScreen() {
               <TouchableOpacity
                 style={styles.matchItem}
                 activeOpacity={0.7}
-                // Phase-2: tap opens chat thread directly (conversation already exists)
-                onPress={() => {
-                  console.log('[P2_CHAT_OPEN] match-row', item.id);
-                  router.push({
-                    pathname: '/(main)/(private)/(tabs)/chats/[id]',
-                    params: { id: String(item.id) },
-                  } as any);
-                }}
+                // P2_THREAD_OPEN_GATE: route through the prefetch handler so
+                // the thread mounts with all four queries already cached;
+                // see Phase2ChatThreadPrefetcher above.
+                disabled={!!openingId && openingId !== String(item.id)}
+                onPress={() => handleOpenConversation(String(item.id))}
               >
                 <View pointerEvents="none" style={{ alignItems: 'center' }}>
                 <View style={styles.matchAvatarContainer}>
-                  {/* NEW badge for very recent connections */}
-                  {isRecentConnect && (
+                  {/* P2_THREAD_OPEN_GATE: row-level opening spinner — replaces
+                      the NEW chip while the thread payload is being prefetched
+                      so the user has clear feedback that their tap was received. */}
+                  {openingId === String(item.id) ? (
+                    <View style={styles.newConnectionBadge}>
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    </View>
+                  ) : isRecentConnect ? (
                     <View style={styles.newConnectionBadge}>
                       <Text style={styles.newConnectionText}>NEW</Text>
                     </View>
-                  )}
+                  ) : null}
                   <View style={[
                     styles.matchRing,
                     isSuperLike && { borderColor: COLORS.superLike, borderWidth: 3 },
@@ -1095,17 +1236,13 @@ export default function ChatsScreen() {
               ...convo,
               ...(previewMetadataByConversationId?.get(convo.id) ?? {}),
             } as Phase2Conversation;
+            const isOpeningThisRow = openingId === String(convo.id);
             return (
               <TouchableOpacity
                 key={convo.id}
                 style={styles.chatRow}
-                onPress={() => {
-                  console.log('[P2_CHAT_OPEN] chat-row', convo.id);
-                  router.push({
-                    pathname: '/(main)/(private)/(tabs)/chats/[id]',
-                    params: { id: String(convo.id) },
-                  } as any);
-                }}
+                disabled={!!openingId && !isOpeningThisRow}
+                onPress={() => handleOpenConversation(String(convo.id))}
                 onLongPress={() => setReportTarget({ id: convo.participantId, name: convo.participantName, conversationId: convo.id })}
                 activeOpacity={0.8}
               >
@@ -1190,11 +1327,15 @@ export default function ChatsScreen() {
                   </View>
                   <Text style={styles.chatLastMsg} numberOfLines={1}>{getPhase2ConversationPreview(previewConvo)}</Text>
                 </View>
-                {convo.unreadCount > 0 && (
+                {isOpeningThisRow ? (
+                  <View style={styles.unreadBadge}>
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  </View>
+                ) : convo.unreadCount > 0 ? (
                   <View style={styles.unreadBadge}>
                     <Text style={styles.unreadText}>{convo.unreadCount}</Text>
                   </View>
-                )}
+                ) : null}
                 </View>
               </TouchableOpacity>
             );
@@ -1203,6 +1344,27 @@ export default function ChatsScreen() {
           </>
         )}
       </ScrollView>
+
+      {/*
+       * P2_THREAD_PREFETCH_GATE:
+       * When the user taps a row, we set `openingId` and mount this hidden
+       * helper. It subscribes (via Convex's shared `useQuery` cache) to the
+       * exact 4 queries the thread screen needs: conversation, messages,
+       * current user, and bottle-spin session. As soon as all four resolve
+       * to a defined value, `onReady` fires and we navigate. Because the
+       * thread screen will then mount with those subscriptions already warm,
+       * its own `isInitialPayloadReady` gate flips on the first render and
+       * the loading shell never shows. A failsafe timer (OPENING_FAILSAFE_MS)
+       * navigates anyway if the warm-up is unexpectedly slow, so the user
+       * is never blocked.
+       */}
+      {openingId && currentUserId ? (
+        <Phase2ChatThreadPrefetcher
+          conversationId={openingId}
+          userId={currentUserId}
+          onReady={() => navigateToThread(openingId)}
+        />
+      ) : null}
 
       {reportTarget && (
         <ReportModal
