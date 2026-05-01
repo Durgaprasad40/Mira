@@ -1906,6 +1906,40 @@ export default function Phase2ChatThread() {
     );
   }
 
+  // --------------------------------------------------------------------- early-return: loading shell
+  // P2_THREAD_FIRST_PAINT: Single full-screen loading shell shown while the
+  // initial payload (conversation + stableMessages + currentUser +
+  // gameSession) is still resolving. The user sees ONE stable screen —
+  // never a real header/composer/FlashList paired with a body spinner that
+  // later swaps in messages and a final T/D pill state. Once
+  // `hasInitialPayloadRef.current` latches true (set during render in the
+  // gate block above), this early-return is bypassed for the rest of the
+  // route session; transient query refreshes (Convex tick, inbox
+  // markAllDelivered, optimistic→server id swap) can never bring the
+  // shell back. The conversation-switch effect resets the ref on [id]
+  // change so a brand-new thread re-enters this shell instead of briefly
+  // rendering the previous thread's frame. The loading shell uses the
+  // same gradient + safe-area padding as the real thread, so the
+  // transition into the real thread is a single in-place reveal — no
+  // background flash, no composer slide-in, no header pop-in.
+  if (!hasInitialPayloadRef.current) {
+    return (
+      <LinearGradient
+        colors={['#101426', '#1A1633', '#16213E']}
+        locations={[0, 0.55, 1]}
+        style={[
+          styles.container,
+          styles.gradientContainer,
+          { paddingTop: insets.top },
+        ]}
+      >
+        <View style={styles.loading} pointerEvents="none">
+          <ActivityIndicator size="large" color={C.primary} />
+        </View>
+      </LinearGradient>
+    );
+  }
+
   // --------------------------------------------------------------------- T/D button
   // P2_TD_PARITY: Phase-1 button label (ChatScreenInner.tsx:2778-2782) is
   // strictly one of: 'Sent' | 'Start!' | 'T/D'. Phase-1 NEVER renders
@@ -2154,22 +2188,19 @@ export default function Phase2ChatThread() {
         keyboardVerticalOffset={0}
       >
         <View style={styles.listWrap}>
-          {/* P2_THREAD_FIRST_PAINT: Always-mounted FlashList + a single
-              first-paint loading overlay. The list is laid out once at
-              mount with an empty array so its container, scroller, and
-              FlashList itself never unmount during a query refresh. The
-              loading overlay sits ABOVE the empty list (absoluteFill) so
-              the user only ever sees the overlay until `isInitialPayloadReady`
-              flips true — at which point conversation, stableMessages,
-              currentUser, and gameSession are all defined, the overlay
-              is removed in one frame, and the message bubbles, header
-              T/D pill, and presence dot all appear together. After
-              `hasInitialPayloadRef.current` latches true, transient
-              query refreshes (Convex subscription tick, inbox
-              markAllDelivered, optimistic→server id swap) cannot bring
-              the overlay back. True deleted/missing-conversation states
-              are still surfaced by the bad-id early-return above and by
-              backend-driven navigation away (unmatch / block / leave). */}
+          {/* P2_THREAD_FIRST_PAINT: This main return is reached ONLY after
+              `hasInitialPayloadRef.current` is true (see early-return
+              loading shell above). Everything below — header, T/D pill,
+              FlashList, composer — appears together in a single in-place
+              reveal. The list never re-mounts after this point: transient
+              Convex refreshes are absorbed by `lastStableMessagesRef`, and
+              true deleted/missing-conversation states are surfaced by the
+              bad-id early-return above and by backend-driven navigation
+              away (unmatch / block / leave). The empty overlay is shown
+              only for a real empty conversation (server returned []) and
+              cannot be triggered by a transient `messages === undefined`
+              tick because the early-return blocks the first frame until
+              `stableMessages` is defined. */}
           <FlashList
             ref={listRef}
             data={messageList}
@@ -2178,15 +2209,7 @@ export default function Phase2ChatThread() {
             contentContainerStyle={styles.listContent}
             onContentSizeChange={handleContentSizeChange}
           />
-          {!hasInitialPayloadRef.current && (
-            <View
-              style={[styles.loading, StyleSheet.absoluteFillObject]}
-              pointerEvents="none"
-            >
-              <ActivityIndicator size="large" color={C.primary} />
-            </View>
-          )}
-          {hasInitialPayloadRef.current && messageList.length === 0 && (
+          {messageList.length === 0 && (
             <View
               style={[styles.emptyState, StyleSheet.absoluteFillObject]}
               pointerEvents="none"
