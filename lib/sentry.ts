@@ -45,6 +45,9 @@ const SENTRY_DSN = process.env.EXPO_PUBLIC_SENTRY_DSN || '';
 // Environment detection
 const IS_DEV = __DEV__;
 const ENVIRONMENT = IS_DEV ? 'development' : 'production';
+const SENTRY_VERBOSE_MODE = IS_DEV ? false : DEBUG_SENTRY_VERBOSE;
+const SENTRY_TRACES_SAMPLE_RATE = IS_DEV ? 0 : (DEBUG_SENTRY_VERBOSE ? 1.0 : 0.2);
+const SENTRY_PROFILES_SAMPLE_RATE = IS_DEV ? 0 : (DEBUG_SENTRY_VERBOSE ? 1.0 : 0);
 
 // App version (set via EAS build or package.json)
 const APP_VERSION = process.env.EXPO_PUBLIC_APP_VERSION || '1.0.0';
@@ -132,9 +135,8 @@ export function initSentry(): void {
       // Enable Sentry when DSN is configured
       enabled: true,
 
-      // DEBUG_SENTRY_VERBOSE toggle: when true, enables full native SDK debug output
-      // DEV DEBUG MODE: Full visibility enabled
-      debug: DEBUG_SENTRY_VERBOSE,
+      // Keep native SDK debug output off in development to avoid bridge/log overhead.
+      debug: SENTRY_VERBOSE_MODE,
 
       // Session tracking for crash-free rate
       enableAutoSessionTracking: true,
@@ -142,11 +144,11 @@ export function initSentry(): void {
       // Capture all errors (100%)
       sampleRate: 1.0,
 
-      // DEV DEBUG MODE: Full tracing (100%) for maximum visibility
-      tracesSampleRate: DEBUG_SENTRY_VERBOSE ? 1.0 : (IS_DEV ? 1.0 : 0.2),
+      // Keep navigation tracing off in development; production keeps the existing policy.
+      tracesSampleRate: SENTRY_TRACES_SAMPLE_RATE,
 
-      // DEV DEBUG MODE: Full profiling (100%) for maximum visibility
-      profilesSampleRate: DEBUG_SENTRY_VERBOSE ? 1.0 : (IS_DEV ? 0.5 : 0),
+      // Keep native profiling off in development; production keeps the existing policy.
+      profilesSampleRate: SENTRY_PROFILES_SAMPLE_RATE,
 
       // Stack traces on all messages
       attachStacktrace: true,
@@ -174,7 +176,7 @@ export function initSentry(): void {
       // APP-WIDE: Accept all events, tag with feature context
       beforeSend(event, hint) {
         // DEV DEBUG MODE: Log every event to console for visibility
-        if (DEBUG_SENTRY_VERBOSE && IS_DEV) {
+        if (SENTRY_VERBOSE_MODE && IS_DEV) {
           originalConsoleLog('[SENTRY EVENT]', {
             type: event.exception ? 'exception' : 'message',
             message: event.message || event.exception?.values?.[0]?.value,
@@ -194,7 +196,7 @@ export function initSentry(): void {
           feature: feature || 'unknown',
           feature_group: featureGroup,
           screen: screen || 'unknown',
-          debug_mode: DEBUG_SENTRY_VERBOSE ? 'verbose' : 'normal',
+          debug_mode: SENTRY_VERBOSE_MODE ? 'verbose' : 'normal',
         };
 
         // Add feature context
@@ -204,12 +206,12 @@ export function initSentry(): void {
             feature,
             screen,
             feature_group: featureGroup,
-            debug_verbose: DEBUG_SENTRY_VERBOSE,
+            debug_verbose: SENTRY_VERBOSE_MODE,
           },
         };
 
         // DEV DEBUG MODE: Capture ALL events, no filtering
-        if (DEBUG_SENTRY_VERBOSE) {
+        if (SENTRY_VERBOSE_MODE) {
           // Scrub sensitive data but don't filter any events
           if (event.extra) {
             event.extra = scrubSensitiveData(event.extra) as Record<string, unknown>;
@@ -241,19 +243,19 @@ export function initSentry(): void {
       },
 
       // APP-WIDE: Filter low-value breadcrumbs, tag with feature
-      // DEBUG_SENTRY_VERBOSE: bypass filtering for full diagnostic visibility
+      // SENTRY_VERBOSE_MODE: bypass filtering for full diagnostic visibility
       beforeBreadcrumb(breadcrumb) {
         // In verbose mode, keep all breadcrumbs for maximum visibility
-        if (!DEBUG_SENTRY_VERBOSE) {
+        if (!SENTRY_VERBOSE_MODE) {
           // LOG_NOISE_FIX: Filter out low-value debug console breadcrumbs
           if (breadcrumb?.category === 'console') {
-            const message = breadcrumb?.message || '';
+            const msg = breadcrumb?.message || '';
 
             if (
-              message.includes('CHATROOM_') ||
-              message.includes('[VideoCache]') ||
-              message.includes('[PHASE2_DISCOVER_FE]') ||
-              message.includes('[DISCOVER_READY]')
+              msg.includes('CHATROOM_') ||
+              msg.includes('[VideoCache]') ||
+              msg.includes('[PHASE2_DISCOVER_FE]') ||
+              msg.includes('[DISCOVER_READY]')
             ) {
               return null;
             }
@@ -311,7 +313,7 @@ export function initSentry(): void {
     });
 
     if (IS_DEV) {
-      originalConsoleLog(`[Sentry] Initialized - debug=${DEBUG_SENTRY_VERBOSE ? 'VERBOSE' : 'off'}`);
+      originalConsoleLog(`[Sentry] Initialized - debug=${SENTRY_VERBOSE_MODE ? 'VERBOSE' : 'off'}`);
     }
   } catch (error) {
     originalConsoleError('[Sentry] Failed to initialize:', error);
