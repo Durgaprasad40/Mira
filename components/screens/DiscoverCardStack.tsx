@@ -2983,8 +2983,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         subtitle: "We couldn't refresh the deck just now. Pull down on the top card or try again in a moment.",
         primaryAction: "retry" as const,
         primaryLabel: "Try again",
-        secondaryAction: intentFilters.length > 0 ? ("clear_filters" as const) : null,
-        secondaryLabel: intentFilters.length > 0 ? "Clear filters" : null,
+        secondaryAction: null,
+        secondaryLabel: null,
       };
     }
 
@@ -2992,24 +2992,24 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       return {
         icon: "options-outline" as const,
         iconColor: "rgba(255, 206, 102, 0.96)",
-        title: "Deep Connect is quiet right now",
-        subtitle: "No matching profiles are available at the moment. Check again later or gently adjust your preferences.",
-        primaryAction: "clear_filters" as const,
-        primaryLabel: "Clear filters",
-        secondaryAction: "retry" as const,
-        secondaryLabel: "Try again",
+        title: "You’ve seen everyone for now",
+        subtitle: "Adjust your preferences to discover more profiles.",
+        primaryAction: "adjust_preferences" as const,
+        primaryLabel: "Adjust preferences",
+        secondaryAction: null,
+        secondaryLabel: null,
       };
     }
 
     return {
       icon: "sparkles-outline" as const,
       iconColor: "rgba(233, 69, 96, 0.95)",
-      title: "Deep Connect is quiet right now",
-      subtitle: "No matching profiles are available at the moment. Check again later or gently adjust your preferences.",
-      primaryAction: "retry" as const,
-      primaryLabel: "Try again",
-      secondaryAction: intentFilters.length > 0 ? ("clear_filters" as const) : null,
-      secondaryLabel: intentFilters.length > 0 ? "Clear filters" : null,
+      title: "You’ve seen everyone for now",
+      subtitle: "Adjust your preferences to discover more profiles.",
+      primaryAction: "adjust_preferences" as const,
+      primaryLabel: "Adjust preferences",
+      secondaryAction: null,
+      secondaryLabel: null,
     };
   }, [intentFilters, isPhase2, isPhase2NetworkIssueSettled, sourceProfiles.length]);
 
@@ -3124,6 +3124,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           pointerEvents="none"
         />
         <Animated.View style={[styles.phase2SearchingGlow, searchingGlowPulseStyle]} pointerEvents="none" />
+        {/*
+         * Loading visual is intentionally minimal: a pulsing radial glow + a
+         * soft pulsing icon. No title/subtitle copy here — keeping it text-free
+         * makes the loading state feel like deck preparation rather than a
+         * Deep-Connect-branded message, and avoids any accidental resemblance
+         * to the final empty state.
+         */}
         <Animated.View style={[styles.phase2IconOuter, searchingIconPulseStyle]}>
           <View style={styles.phase2IconInner}>
             <Ionicons
@@ -3133,18 +3140,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             />
           </View>
         </Animated.View>
-        <Text
-          {...DISCOVER_TEXT_PROPS}
-          style={styles.phase2EmptyTitle}
-        >
-          Curating your circle
-        </Text>
-        <Text
-          {...DISCOVER_TEXT_PROPS}
-          style={styles.phase2EmptySubtitle}
-        >
-          We’re finding people who fit your moment
-        </Text>
       </View>
     );
   }
@@ -3275,14 +3270,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   entering={FadeInUp.duration(350).delay(200)}
                   style={styles.phase2EmptyTitle}
                 >
-                  {phase2EmptyState?.title ?? "Deep Connect is quiet right now"}
+                  {phase2EmptyState?.title ?? "You’ve seen everyone for now"}
                 </Animated.Text>
                 <Animated.Text
                   {...DISCOVER_TEXT_PROPS}
                   entering={FadeInUp.duration(350).delay(280)}
                   style={styles.phase2EmptySubtitle}
                 >
-                  {phase2EmptyState?.subtitle ?? "No matching profiles are available at the moment. Check again later or gently adjust your preferences."}
+                  {phase2EmptyState?.subtitle ?? "Adjust your preferences to discover more profiles."}
                 </Animated.Text>
 
                 <Animated.View entering={FadeIn.duration(300).delay(400)} style={styles.phase2EmptyActions}>
@@ -3291,16 +3286,27 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                       style={styles.phase2PrimaryAction}
                       activeOpacity={0.9}
                       onPress={() => {
-                        if (phase2EmptyState.primaryAction === "clear_filters") {
+                        if (phase2EmptyState.primaryAction === "adjust_preferences") {
+                          // Navigate to the preferences page only.
+                          // Do NOT clear filters and do NOT emit
+                          // phase2_intent_filter_selected — the user must
+                          // adjust preferences manually on that page.
                           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-                          setPrivateIntentKeys([]);
+                          router.push({
+                            pathname: "/(main)/discovery-preferences",
+                            params: { mode: isPhase2 ? 'phase2' : 'phase1' },
+                          } as any);
                           return;
                         }
                         triggerPhase2Refresh("button");
                       }}
                     >
                       <Ionicons
-                        name={phase2EmptyState.primaryAction === "clear_filters" ? "funnel-outline" : "refresh"}
+                        name={
+                          phase2EmptyState.primaryAction === "adjust_preferences"
+                            ? "options-outline"
+                            : "refresh"
+                        }
                         size={SIZES.icon.sm}
                         color="rgba(255,255,255,0.92)"
                         style={{ marginRight: SPACING.sm }}
@@ -3314,11 +3320,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                       style={styles.phase2SecondaryAction}
                       activeOpacity={0.82}
                       onPress={() => {
-                        if (phase2EmptyState.secondaryAction === "clear_filters") {
-                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-                          setPrivateIntentKeys([]);
-                          return;
-                        }
                         triggerPhase2Refresh("button");
                       }}
                     >
