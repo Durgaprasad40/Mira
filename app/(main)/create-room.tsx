@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,9 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  ScrollView,
+  Modal,
+  Keyboard,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -33,8 +36,27 @@ export default function CreateRoomScreen() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [successData, setSuccessData] = useState<{
+    roomId: string;
+    joinCode: string;
+    name: string;
+    password: string;
+  } | null>(null);
 
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
+
+  // KEYBOARD-FIX: Track keyboard visibility to give Create button breathing room
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
+    const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   // COIN-UX-FIX: Query user's coin balance
   const walletQuery = useQuery(
@@ -87,24 +109,27 @@ export default function CreateRoomScreen() {
         authUserId: userId!,
       });
 
-      Alert.alert(
-        'Room Created',
-        `Invite code: ${result.joinCode}\nPassword: ${trimmedPassword}\n\nShare both to let someone in.`,
-        [
-          {
-            text: 'Go to Room',
-            onPress: () => {
-              router.replace(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any);
-            },
-          },
-        ]
-      );
+      // Dismiss keyboard before showing the premium success modal
+      Keyboard.dismiss();
+      setSuccessData({
+        roomId: String(result.roomId),
+        joinCode: String(result.joinCode ?? ''),
+        name: trimmedName,
+        password: trimmedPassword,
+      });
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to create room');
     } finally {
       setIsSubmitting(false);
     }
-  }, [roomName, password, userId, createPrivateRoomMut, router]);
+  }, [roomName, password, userId, createPrivateRoomMut]);
+
+  const handleGoToRoom = useCallback(() => {
+    if (!successData) return;
+    const { roomId } = successData;
+    setSuccessData(null);
+    router.replace(`/(main)/(private)/(tabs)/chat-rooms/${roomId}` as any);
+  }, [successData, router]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -118,9 +143,25 @@ export default function CreateRoomScreen() {
       </View>
 
       <KeyboardAvoidingView
-        style={styles.content}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.kav}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 56 : 0}
       >
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[
+            styles.scrollContent,
+            {
+              // KEYBOARD-FIX: Add generous bottom space when keyboard is open so
+              // the Create Room button can scroll above the keyboard with breathing room.
+              paddingBottom: keyboardVisible
+                ? Math.max(insets.bottom + 80, 96)
+                : Math.max(insets.bottom + 24, 32),
+            },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
         {/* Room Name Input */}
         <Text style={styles.label}>Room Name</Text>
         <TextInput
@@ -199,7 +240,7 @@ export default function CreateRoomScreen() {
             <Text style={[styles.coinStatusText, hasEnoughCoins ? styles.coinStatusTextOk : styles.coinStatusTextWarn]}>
               {hasEnoughCoins
                 ? 'You have enough coins to create this room'
-                : 'Chat and engage with more people to earn coins'}
+                : 'Earn coins through genuine conversations'}
             </Text>
           </View>
         </View>
@@ -221,7 +262,62 @@ export default function CreateRoomScreen() {
             </Text>
           )}
         </TouchableOpacity>
+        </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Premium success modal (replaces system Alert) */}
+      <Modal
+        visible={!!successData}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setSuccessData(null)}
+      >
+        <View style={styles.successOverlay}>
+          <View style={styles.successCard}>
+            <View style={styles.successIconWrap}>
+              <Ionicons name="checkmark-circle" size={56} color="#22C55E" />
+            </View>
+            <Text style={styles.successTitle}>Room created</Text>
+            <Text style={styles.successSubtitle}>
+              Your private room is ready
+            </Text>
+
+            <View style={styles.successDivider} />
+
+            <View style={styles.successRow}>
+              <Text style={styles.successLabel}>Room code</Text>
+              <Text style={styles.successValue} numberOfLines={1}>
+                {successData?.joinCode ?? ''}
+              </Text>
+            </View>
+            <View style={styles.successRow}>
+              <Text style={styles.successLabel}>Room name</Text>
+              <Text style={styles.successValue} numberOfLines={1}>
+                {successData?.name ?? ''}
+              </Text>
+            </View>
+            <View style={styles.successRow}>
+              <Text style={styles.successLabel}>Password</Text>
+              <Text style={styles.successValue} numberOfLines={1}>
+                {successData?.password ?? ''}
+              </Text>
+            </View>
+
+            <Text style={styles.successHelper}>
+              Share this room code and password with people you trust.
+            </Text>
+
+            <TouchableOpacity
+              style={styles.successPrimaryBtn}
+              onPress={handleGoToRoom}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.successPrimaryBtnText}>Go to Room</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -248,16 +344,22 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: C.text,
   },
-  content: {
+  kav: {
     flex: 1,
-    padding: 20,
+  },
+  scroll: {
+    flex: 1,
+  },
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 16,
   },
   label: {
     fontSize: 14,
     fontWeight: '600',
     color: C.text,
-    marginBottom: 8,
-    marginTop: 16,
+    marginBottom: 6,
+    marginTop: 12,
   },
   input: {
     backgroundColor: C.surface,
@@ -296,17 +398,17 @@ const styles = StyleSheet.create({
   },
   // COIN-UX-FIX: Coin info section styles
   coinSection: {
-    marginTop: 24,
+    marginTop: 16,
     backgroundColor: C.surface,
     borderRadius: 12,
-    padding: 16,
+    padding: 14,
   },
   coinHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 12,
-    paddingBottom: 12,
+    marginBottom: 8,
+    paddingBottom: 8,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255,255,255,0.1)',
   },
@@ -319,7 +421,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 8,
+    paddingVertical: 6,
   },
   coinLabel: {
     fontSize: 14,
@@ -342,8 +444,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginTop: 12,
-    paddingTop: 12,
+    marginTop: 10,
+    paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: 'rgba(255,255,255,0.1)',
   },
@@ -364,12 +466,90 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 16,
     alignItems: 'center',
-    marginTop: 32,
+    marginTop: 20,
   },
   createBtnDisabled: {
     opacity: 0.6,
   },
   createBtnText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  // Premium success modal
+  successOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  successCard: {
+    width: '100%',
+    maxWidth: 380,
+    backgroundColor: '#13111C',
+    borderRadius: 20,
+    paddingTop: 22,
+    paddingBottom: 20,
+    paddingHorizontal: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  successIconWrap: {
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  successTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    textAlign: 'center',
+  },
+  successSubtitle: {
+    fontSize: 13,
+    color: 'rgba(224,224,224,0.7)',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  successDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    marginVertical: 16,
+  },
+  successRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+  },
+  successLabel: {
+    fontSize: 13,
+    color: 'rgba(224,224,224,0.65)',
+    flexShrink: 0,
+    marginRight: 12,
+  },
+  successValue: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FFFFFF',
+    flex: 1,
+    textAlign: 'right',
+  },
+  successHelper: {
+    fontSize: 12,
+    color: 'rgba(224,224,224,0.6)',
+    textAlign: 'center',
+    marginTop: 12,
+    marginBottom: 18,
+    lineHeight: 17,
+  },
+  successPrimaryBtn: {
+    backgroundColor: C.primary,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  successPrimaryBtnText: {
     fontSize: 16,
     fontWeight: '700',
     color: '#FFFFFF',

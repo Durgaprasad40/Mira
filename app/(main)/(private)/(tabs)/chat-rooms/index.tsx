@@ -682,8 +682,8 @@ export default function ChatRoomsScreen() {
       Alert.alert(
         'Room Created',
         hasPassword
-          ? `Your room is password-protected.\n\nRoom code: ${result.joinCode}\nPassword: ${pwd}\n\nShare these with friends to invite them!`
-          : `Your room code is: ${result.joinCode}\n\nShare this code with friends to invite them!`,
+          ? `Room code: ${result.joinCode}\nRoom name: ${args.name}\nPassword: ${pwd}\n\nShare this room code and password with people you trust.`
+          : `Room code: ${result.joinCode}\nRoom name: ${args.name}\n\nShare this room code with people you trust.`,
         [
           {
             text: 'Go to Room',
