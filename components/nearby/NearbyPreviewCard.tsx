@@ -42,6 +42,9 @@ export interface NearbyPreviewData {
   tagline?: string;
   sharedInterests?: string[];
   isVerified?: boolean;
+  crossingCount?: number;
+  lastCrossedAt?: number;
+  areaName?: string;
 }
 
 interface NearbyPreviewCardProps {
@@ -63,6 +66,29 @@ function prettifyInterest(raw: string): string {
   return raw
     .replace(/_/g, ' ')
     .replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function formatCrossingCount(count?: number): string | null {
+  if (typeof count !== 'number' || count < 1) return null;
+  const safeCount = Math.floor(count);
+  return safeCount === 1 ? 'Crossed once' : `Crossed ${safeCount} times`;
+}
+
+function formatLastCrossed(timestamp?: number): string | null {
+  if (typeof timestamp !== 'number') return null;
+  const now = new Date();
+  const crossed = new Date(timestamp);
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const crossedStart = new Date(
+    crossed.getFullYear(),
+    crossed.getMonth(),
+    crossed.getDate(),
+  ).getTime();
+  const daysAgo = Math.max(0, Math.floor((todayStart - crossedStart) / (24 * 60 * 60 * 1000)));
+
+  if (daysAgo === 0) return 'Last crossed today';
+  if (daysAgo < 7) return `Last crossed ${daysAgo}d ago`;
+  return 'Last crossed last week';
 }
 
 export function NearbyPreviewCard({
@@ -101,6 +127,10 @@ export function NearbyPreviewCard({
   if (!user) return null;
 
   const freshness = user.freshnessLabel ? FRESHNESS_COPY[user.freshnessLabel] : null;
+  const crossingCountText = formatCrossingCount(user.crossingCount);
+  const lastCrossedText = formatLastCrossed(user.lastCrossedAt);
+  const areaName = user.areaName?.trim();
+  const hasCrossingMeta = Boolean(crossingCountText || areaName || lastCrossedText);
 
   return (
     <Modal
@@ -140,6 +170,27 @@ export function NearbyPreviewCard({
                 </View>
               )}
             </View>
+
+            {hasCrossingMeta && (
+              <View style={styles.crossingMeta}>
+                <View style={styles.crossingMetaTop}>
+                  {crossingCountText && (
+                    <View style={styles.crossingCountPill}>
+                      <Ionicons name="repeat-outline" size={12} color={COLORS.primary} />
+                      <Text style={styles.crossingCountText}>{crossingCountText}</Text>
+                    </View>
+                  )}
+                  {areaName ? (
+                    <Text style={styles.areaNameText} numberOfLines={1}>
+                      {areaName}
+                    </Text>
+                  ) : null}
+                </View>
+                {lastCrossedText ? (
+                  <Text style={styles.lastCrossedText}>{lastCrossedText}</Text>
+                ) : null}
+              </View>
+            )}
 
             {user.tagline ? (
               <Text style={styles.tagline} numberOfLines={2}>
@@ -268,6 +319,40 @@ const styles = StyleSheet.create({
   freshnessChipText: {
     fontSize: 11,
     color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+  crossingMeta: {
+    marginBottom: 10,
+    gap: 5,
+  },
+  crossingMetaTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  crossingCountPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  crossingCountText: {
+    color: COLORS.text,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  areaNameText: {
+    flexShrink: 1,
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  lastCrossedText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
     fontWeight: '500',
   },
   tagline: {

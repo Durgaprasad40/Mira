@@ -256,6 +256,9 @@ interface NearbyUser {
   isVerified: boolean;
   strongPrivacyMode: boolean;
   hideDistance: boolean;
+  crossingCount?: number;
+  lastCrossedAt?: number;
+  areaName?: string;
   // Phase-3 preview payload (server-provided, privacy-safe).
   //   - tagline: short (<= 80 chars) teaser drawn from the target's own
   //     profile fields (prompt answer → first activity → bio snippet).
@@ -1500,6 +1503,9 @@ export default function NearbyScreen() {
       tagline: user.tagline,
       sharedInterests: user.sharedInterests,
       isVerified: user.isVerified,
+      crossingCount: user.crossingCount,
+      lastCrossedAt: user.lastCrossedAt,
+      areaName: user.areaName,
     };
     setPreviewUser(preview);
     trackEvent({

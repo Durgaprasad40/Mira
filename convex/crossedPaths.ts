@@ -2109,7 +2109,22 @@ export const getNearbyUsers = query({
       .sort((a, b) => b[1].createdAt - a[1].createdAt);
     const otherUserIds = historyEntries.map(([id]) => id);
     if (otherUserIds.length === 0) return [];
-    const dismissedOtherUserIds = await getDismissedOtherUserIds(ctx, userId, otherUserIds);
+
+    const crossedPathEntries = await Promise.all(
+      otherUserIds.map(async (otherUserId) => [
+        otherUserId,
+        await getCrossedPathForPair(ctx, userId, otherUserId as Id<'users'>),
+      ] as const),
+    );
+    const crossedPathByOtherUserId = new Map<string, Doc<'crossedPaths'>>();
+    const dismissedOtherUserIds = new Set<string>();
+    for (const [otherUserId, crossedPath] of crossedPathEntries) {
+      if (!crossedPath) continue;
+      crossedPathByOtherUserId.set(otherUserId, crossedPath);
+      if (isPairDismissedForViewer(crossedPath, userId)) {
+        dismissedOtherUserIds.add(otherUserId);
+      }
+    }
 
     const [
       exclusions,
@@ -2186,6 +2201,10 @@ export const getNearbyUsers = query({
 
       const photoCount = photoCountsMap.get(user._id as string) || 0;
       if (photoCount < 2) continue;
+
+      const crossedPath = crossedPathByOtherUserId.get(otherUserId);
+      const crossingCount = Math.max(1, crossedPath?.count ?? 1);
+      const lastCrossedAt = crossedPath?.lastCrossedAt ?? entry.createdAt;
 
       const crossingAge = now - entry.createdAt;
       const freshness: 'solid' | 'faded' = crossingAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
@@ -2279,6 +2298,9 @@ export const getNearbyUsers = query({
           isVerified: user.isVerified || candidateStatus === 'verified',
           strongPrivacyMode: user.strongPrivacyMode ?? false,
           hideDistance: user.hideDistance ?? false,
+          crossingCount,
+          lastCrossedAt,
+          areaName: entry.areaName,
           // Phase-3 preview payload.
           tagline,
           sharedInterests: shared.length > 0 ? shared : undefined,
