@@ -82,6 +82,19 @@ interface PrivateChatViewProps {
   isKeyboardOpen?: boolean;
   /** Safe area top inset - for header padding when sheet is full-screen */
   safeAreaTop?: number;
+  /**
+   * P2-CHATROOM-COMPOSER-MEASURE: ChatSheet supplies a callback ref so it can
+   * measure the composer wrapper's screen position after the keyboard opens
+   * and apply an extra lift if the OEM IME (e.g. OnePlus) leaves the
+   * composer overlapping the reported keyboard top. Modal-mode branch only.
+   */
+  onComposerRef?: (node: View | null) => void;
+  /**
+   * P2-CHATROOM-COMPOSER-MEASURE: Forwarded to the composer wrapper's
+   * onLayout so ChatSheet can re-measure when the wrapper's size changes
+   * (e.g. multi-line input growth, mute notice appears).
+   */
+  onComposerLayout?: (e: LayoutChangeEvent) => void;
 }
 
 // Message type from Convex query
@@ -127,6 +140,8 @@ export default function PrivateChatView({
   onSheetClose,
   isKeyboardOpen = false,
   safeAreaTop = 0,
+  onComposerRef,
+  onComposerLayout,
 }: PrivateChatViewProps) {
   const flatListRef = useRef<FlatList>(null);
   const [headerHeight, setHeaderHeight] = useState(0);
@@ -919,8 +934,16 @@ export default function PrivateChatView({
             )}
           </View>
 
-          {/* Composer - auto height, anchored at bottom of sheet */}
-          <View style={styles.inputWrapper}>
+          {/* Composer - auto height, anchored at bottom of sheet.
+              P2-CHATROOM-COMPOSER-MEASURE: ref + onLayout are forwarded by
+              ChatSheet so it can re-measure the wrapper's screen position
+              after the keyboard opens (or the wrapper height changes) and
+              apply an extra lift if the OEM IME overlaps the composer. */}
+          <View
+            ref={onComposerRef}
+            onLayout={onComposerLayout}
+            style={styles.inputWrapper}
+          >
             {mutedByPeer && (
               <View style={styles.mutedNotice}>
                 <Ionicons

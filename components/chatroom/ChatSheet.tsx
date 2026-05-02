@@ -17,6 +17,16 @@
  * Android differences in nav-bar/window sizing while Chat Rooms suppresses
  * the surrounding group-chat KeyboardAvoidingView.
  *
+ * COMPOSER-MEASURE LIFT (P2-CHATROOM-COMPOSER-MEASURE):
+ * On top of the layout-driven anchoring, we measure the composer wrapper's
+ * actual screen position via `View.measureInWindow` after the keyboard opens
+ * (and on wrapper layout changes). If the composer's bottom edge sits at or
+ * within `COMPOSER_KEYBOARD_PADDING` of the keyboard top, we apply an extra
+ * upward `translateY` on the sheet so the composer always shows visible
+ * breathing room above the keyboard (or any OEM IME toolbar that wasn't
+ * included in the keyboard's reported `screenY`). The lift is clamped so
+ * the sheet's visible top edge never crosses above `safeTop + 8`.
+ *
  * ANIMATION: Reanimated only (no RN Animated mixing) to avoid frozen object
  * errors. Keyboard event listeners drive shared keyboard-top values which the
  * animated style reads on each frame.
@@ -50,6 +60,20 @@ const RESTING_HEIGHT_RATIO = 0.55;
 
 // Threshold to consider keyboard "open" (accounts for minor fluctuations)
 const KEYBOARD_OPEN_THRESHOLD = 50;
+
+// P2-CHATROOM-COMPOSER-MEASURE: Padding (px) we want between the composer's
+// bottom edge and the keyboard's reported top. Picked at 8px so the composer
+// always shows a small visible gap above the keyboard (or IME toolbar) rather
+// than sitting flush against it. Applies to all OEMs equally.
+const COMPOSER_KEYBOARD_PADDING = 8;
+
+// P2-CHATROOM-COMPOSER-MEASURE: Delay (ms) after `keyboardDidShow` before we
+// measure the composer's screen position. Must exceed the 250ms `withTiming`
+// that animates the sheet up to the keyboard top, plus a small Android layout
+// settle buffer. Used as an additional safety net beyond the `onLayout`-
+// driven measurement, in case the wrapper's size doesn't change but its
+// screen Y does (e.g. parent reflow).
+const COMPOSER_MEASURE_DELAY_MS = 280;
 
 function getScreenBottomY(): number {
   return Dimensions.get('screen').height;
@@ -120,6 +144,86 @@ export default function ChatSheet({
   const keyboardTopY = useSharedValue(getScreenBottomY());
   const screenBottomY = useSharedValue(getScreenBottomY());
 
+  // P2-CHATROOM-COMPOSER-MEASURE: Extra upward shift applied via translateY on
+  // the sheet whenever a real-screen measurement of the composer wrapper
+  // shows its bottom edge sitting at/below the keyboard's reported top
+  // (within `COMPOSER_KEYBOARD_PADDING`). Reset to 0 on keyboard hide and
+  // when the sheet unmounts. Defaults to 0 so this branch is a no-op until
+  // the first measurement fires.
+  const composerExtraLift = useSharedValue(0);
+
+  // P2-CHATROOM-COMPOSER-MEASURE: Callback ref + pending-measure timer for
+  // the composer wrapper inside PrivateChatView. PrivateChatView attaches
+  // `onComposerRef` to its inputWrapper <View>; we keep the latest node here
+  // and re-measure after keyboard show / wrapper layout changes.
+  const composerNodeRef = useRef<View | null>(null);
+  const composerMeasureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  const setComposerNodeRef = useCallback((node: View | null) => {
+    composerNodeRef.current = node;
+  }, []);
+
+  // P2-CHATROOM-COMPOSER-MEASURE: Read the composer's current screen-bottom
+  // and compare to `keyboardTopY`. If the wrapper sits at/within
+  // `COMPOSER_KEYBOARD_PADDING` of the keyboard top, push the sheet up by
+  // the missing gap so the composer shows a visible margin above the
+  // keyboard (or any OEM IME toolbar that wasn't included in `screenY`).
+  const measureComposerOverlap = useCallback(() => {
+    const node = composerNodeRef.current;
+    if (!node) return;
+    node.measureInWindow((_x, y, _w, height) => {
+      if (
+        !Number.isFinite(y) ||
+        !Number.isFinite(height) ||
+        height <= 0
+      ) {
+        return;
+      }
+      const composerBottomY = y + height;
+      const kbTop = keyboardTopY.value;
+      const screenBottom = screenBottomY.value;
+      // If the keyboard isn't actually open, don't apply any lift.
+      if (screenBottom - kbTop <= KEYBOARD_OPEN_THRESHOLD) {
+        composerExtraLift.value = withTiming(0, { duration: 150 });
+        return;
+      }
+      // Required lift: composer should sit at least COMPOSER_KEYBOARD_PADDING
+      // above the keyboard top. If composerBottomY > kbTop - padding, lift by
+      // (composerBottomY - kbTop + padding).
+      const overlap =
+        composerBottomY - (kbTop - COMPOSER_KEYBOARD_PADDING);
+      if (overlap > 0) {
+        composerExtraLift.value = withTiming(overlap, { duration: 180 });
+      } else {
+        composerExtraLift.value = withTiming(0, { duration: 180 });
+      }
+    });
+  }, [composerExtraLift, keyboardTopY, screenBottomY]);
+
+  const scheduleComposerMeasure = useCallback(
+    (delayMs: number) => {
+      if (composerMeasureTimerRef.current) {
+        clearTimeout(composerMeasureTimerRef.current);
+      }
+      composerMeasureTimerRef.current = setTimeout(() => {
+        composerMeasureTimerRef.current = null;
+        measureComposerOverlap();
+      }, delayMs);
+    },
+    [measureComposerOverlap],
+  );
+
+  // P2-CHATROOM-COMPOSER-MEASURE: PrivateChatView forwards the wrapper's
+  // onLayout to this handler. While the keyboard is open, a wrapper height
+  // change (e.g. multi-line input growth, mute notice appearing) means our
+  // last measurement is stale -> re-measure on next frame.
+  const handleComposerLayout = useCallback(() => {
+    // Use a short delay to let layout settle before measuring.
+    scheduleComposerMeasure(50);
+  }, [scheduleComposerMeasure]);
+
   // P0 GAP FIX: Measure container position when layout changes
   // This calculates how far the container's bottom edge is from the screen bottom.
   const handleContainerLayout = useCallback((event: LayoutChangeEvent) => {
@@ -175,6 +279,12 @@ export default function ChatSheet({
           });
         });
       }
+
+      // P2-CHATROOM-COMPOSER-MEASURE: Schedule a measurement after the
+      // 250ms sheet animation settles. If the composer's actual screen
+      // bottom is at/below the keyboard top (within
+      // COMPOSER_KEYBOARD_PADDING), we apply an additional translateY lift.
+      scheduleComposerMeasure(COMPOSER_MEASURE_DELAY_MS);
     };
 
     const handleKeyboardHide = () => {
@@ -183,6 +293,14 @@ export default function ChatSheet({
       screenBottomY.value = screenBottom;
       keyboardTopY.value = withTiming(screenBottom, { duration: 200 });
       setIsKeyboardOpen(false);
+
+      // P2-CHATROOM-COMPOSER-MEASURE: Cancel any pending measurement and
+      // release the extra lift; the sheet returns to its resting layout.
+      if (composerMeasureTimerRef.current) {
+        clearTimeout(composerMeasureTimerRef.current);
+        composerMeasureTimerRef.current = null;
+      }
+      composerExtraLift.value = withTiming(0, { duration: 200 });
     };
 
     const showSub = Keyboard.addListener(showEvent, handleKeyboardShow);
@@ -191,8 +309,21 @@ export default function ChatSheet({
     return () => {
       showSub.remove();
       hideSub.remove();
+      // P2-CHATROOM-COMPOSER-MEASURE: Cancel any pending measure on unmount.
+      if (composerMeasureTimerRef.current) {
+        clearTimeout(composerMeasureTimerRef.current);
+        composerMeasureTimerRef.current = null;
+      }
     };
-  }, [keyboardTopY, screenBottomY, containerBottomOffset, containerHeight, containerY]);
+  }, [
+    keyboardTopY,
+    screenBottomY,
+    containerBottomOffset,
+    containerHeight,
+    containerY,
+    composerExtraLift,
+    scheduleComposerMeasure,
+  ]);
 
   // Safe area top for expanded mode calculations
   const safeTop = insets.top;
@@ -220,6 +351,10 @@ export default function ChatSheet({
         borderTopLeftRadius: 16,
         borderTopRightRadius: 16,
         opacity: opacity.value,
+        // P2-CHATROOM-COMPOSER-MEASURE: lift is 0 here (no measurement yet),
+        // but we still apply the transform so style merging stays consistent
+        // with the keyboard-open branch.
+        transform: [{ translateY: 0 }],
       };
     }
 
@@ -272,6 +407,15 @@ export default function ChatSheet({
       void offset;
       void cHeight;
 
+      // P2-CHATROOM-COMPOSER-MEASURE: Apply the measured composer-overlap
+      // lift on top of the layout-driven `sheetTop`. Clamp so the sheet's
+      // visible top edge never crosses above `safeTop + 8` in screen coords.
+      // Visible top in screen coords = sheetTop + cY - lift.
+      const rawLift = composerExtraLift.value;
+      const visibleTopScreen = sheetTop + cY;
+      const maxLift = Math.max(0, visibleTopScreen - (safeTop + 8));
+      const clampedLift = Math.max(0, Math.min(rawLift, maxLift));
+
       return {
         position: 'absolute' as const,
         top: sheetTop,
@@ -283,6 +427,7 @@ export default function ChatSheet({
         borderTopLeftRadius: 16,
         borderTopRightRadius: 16,
         opacity: opacity.value,
+        transform: [{ translateY: -clampedLift }],
       };
     } else {
       // RESTING MODE: Use top + height (same properties as keyboard-open for clean transitions)
@@ -298,6 +443,10 @@ export default function ChatSheet({
         borderTopLeftRadius: 16,
         borderTopRightRadius: 16,
         opacity: opacity.value,
+        // P2-CHATROOM-COMPOSER-MEASURE: At rest the lift should be 0 (we
+        // reset it on keyboardDidHide), but we still emit the transform so
+        // Reanimated style merging stays consistent across mode changes.
+        transform: [{ translateY: 0 }],
       };
     }
   }, [restingHeight, safeTop]);
@@ -361,6 +510,12 @@ export default function ChatSheet({
                 onSheetClose: handleClose,
                 isKeyboardOpen: isKeyboardOpen,
                 safeAreaTop: insets.top,
+                // P2-CHATROOM-COMPOSER-MEASURE: PrivateChatView attaches
+                // these to its inputWrapper <View> in modal mode so we can
+                // measure the composer's screen position and lift the sheet
+                // when an OEM IME overlaps it.
+                onComposerRef: setComposerNodeRef,
+                onComposerLayout: handleComposerLayout,
               });
             }
             return child;
