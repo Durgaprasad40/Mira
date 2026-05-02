@@ -11,10 +11,12 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -71,6 +73,8 @@ export default function ProfilePopover({
 }: ProfilePopoverProps) {
   // Auth for Convex
   const authUserId = useAuthStore((s) => s.userId);
+  // Safe-area insets for footer breathing room above Android nav / iOS home indicator
+  const insets = useSafeAreaInsets();
 
   // Convex mutation for saving chat room profile
   const updateChatRoomProfile = useMutation(api.chatRooms.createOrUpdateChatRoomProfile);
@@ -418,7 +422,20 @@ export default function ProfilePopover({
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           keyboardVerticalOffset={0}
         >
-          <View style={styles.editModalSheet}>
+          {/* Backdrop: tap outside the sheet to dismiss */}
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={handleCloseEditProfile}
+            accessibilityLabel="Close edit profile"
+          />
+          {/* Sheet: absorbs taps so they don't bubble to the backdrop */}
+          <Pressable
+            style={[
+              styles.editModalSheet,
+              { paddingBottom: Math.max(insets.bottom + 16, 24) },
+            ]}
+            onPress={() => {}}
+          >
             <View style={styles.editModalHandle} />
 
             <ScrollView
@@ -512,7 +529,7 @@ export default function ProfilePopover({
                 </TouchableOpacity>
               </View>
             </ScrollView>
-          </View>
+          </Pressable>
         </KeyboardAvoidingView>
       </Modal>
 
@@ -656,7 +673,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 20,
     paddingHorizontal: 24,
     paddingTop: 12,
-    paddingBottom: 40,
+    // paddingBottom is applied inline using safe-area inset (Math.max(insets.bottom + 16, 24))
     maxHeight: '90%',
   },
   editModalScrollContent: {
