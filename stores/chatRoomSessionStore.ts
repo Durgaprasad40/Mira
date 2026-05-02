@@ -16,8 +16,8 @@
  * - On leave: session cleared, navigate to Chat Rooms HOME
  *
  * Coin system:
- * - User earns +1 coin per message sent
- * - Coins are tracked in this store (chatroom-safe)
+ * - Coins are awarded by backend engagement rules
+ * - This store keeps demo/session display state only
  */
 import { create } from 'zustand';
 
@@ -63,7 +63,7 @@ interface ChatRoomSessionState {
   /** Get last visited timestamp for a room */
   getLastVisitedAt: (roomId: string) => number;
 
-  /** Increment coins by 1 (called on message send) */
+  /** Legacy no-op; backend engagement scoring owns coin awards */
   incrementCoins: () => void;
 }
 
@@ -134,8 +134,6 @@ export const useChatRoomSessionStore = create<ChatRoomSessionState>()((set, get)
   },
 
   incrementCoins: () => {
-    set((state) => ({
-      coins: state.coins + 1,
-    }));
+    // No-op: random public messages no longer earn coins.
   },
 }));

@@ -573,6 +573,23 @@ export default defineSchema({
     .index('by_auth_user_id', ['authUserId'])
     .index('by_deleted_at', ['deletedAt']),
 
+  // Wallet ledger: auditable balance changes for engagement rewards and spend events.
+  walletLedger: defineTable({
+    userId: v.id('users'),
+    delta: v.number(),
+    reason: v.string(),
+    sourceType: v.string(),
+    sourceId: v.optional(v.string()),
+    peerUserId: v.optional(v.id('users')),
+    roomId: v.optional(v.id('chatRooms')),
+    dayKey: v.optional(v.string()),
+    dedupeKey: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_user_createdAt', ['userId', 'createdAt'])
+    .index('by_dedupeKey', ['dedupeKey'])
+    .index('by_user_day', ['userId', 'dayKey']),
+
   // Photos table
   photos: defineTable({
     userId: v.id('users'),

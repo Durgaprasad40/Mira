@@ -23,7 +23,7 @@ export default function WalletSection({ coins }: WalletSectionProps) {
         <Text style={styles.coins}>{coins}</Text>
         <Text style={styles.coinLabel}>coins</Text>
       </View>
-      <Text style={styles.hint}>1 message = 1 coin earned</Text>
+      <Text style={styles.hint}>Earn coins through genuine conversations.</Text>
     </View>
   );
 }

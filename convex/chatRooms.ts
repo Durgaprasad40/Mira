@@ -1894,16 +1894,9 @@ export const sendMessage = mutation({
     // 6. Update member's lastMessageAt for rate limiting tracking
     await ctx.db.patch(membership._id, { lastMessageAt: now });
 
-    // 7. REWARD: Add +1 coin to sender's wallet for successful message send
-    // This only fires for NEW messages (dedup returns early at line 670)
-    // PRIVATE-ROOM-COIN-FIX: Skip coin reward for private room messages (zero coin effect)
-    if (room.isPublic) {
-      const senderUser = await ctx.db.get(senderId);
-      if (senderUser) {
-        const currentCoins = senderUser.walletCoins ?? 0;
-        await ctx.db.patch(senderId, { walletCoins: currentCoins + 1 });
-      }
-    } else {
+    // Wallet rewards are ledger-backed and based on genuine engagement.
+    // Random public room messages no longer earn coins.
+    if (!room.isPublic) {
       console.log('PRIVATE_ROOM_NO_COIN_DEBIT_ON_MESSAGE', { roomId, senderId: senderId.slice(0, 12), isPublic: room.isPublic });
     }
 
@@ -4497,7 +4490,7 @@ export const seedDemoUser = mutation({
 // ═══════════════════════════════════════════════════════════════════════════
 // GET USER WALLET COINS
 // Returns the current user's wallet coin balance for real-time UI display.
-// The balance is updated atomically when messages are sent (see sendMessage).
+// The balance is updated through wallet ledger helpers for auditable engagement rewards.
 // ═══════════════════════════════════════════════════════════════════════════
 export const getUserWalletCoins = query({
   args: {
