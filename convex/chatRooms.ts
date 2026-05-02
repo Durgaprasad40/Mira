@@ -5010,7 +5010,9 @@ export const getDmThreads = query({
       .query('chatRoomHiddenDmConversations')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
-    const hiddenConversationIds = new Set(hiddenRows.map((h) => h.conversationId as string));
+    const hiddenAtByConversationId = new Map<string, number>(
+      hiddenRows.map((h) => [h.conversationId as string, h.hiddenAt])
+    );
 
     const participantRows = await ctx.db
       .query('conversationParticipants')
@@ -5028,17 +5030,30 @@ export const getDmThreads = query({
       unreadCount: number;
     };
 
-    const threads: ThreadRow[] = [];
+    const threadsByRoomPeer = new Map<string, ThreadRow>();
 
     for (const row of participantRows) {
       try {
         const conversation = await ctx.db.get(row.conversationId);
         if (!conversation) continue;
         if (!conversation.sourceRoomId) continue;
-        if (hiddenConversationIds.has(conversation._id as string)) continue;
+
+        const lastMsg = await ctx.db
+          .query('messages')
+          .withIndex('by_conversation_created', (q) =>
+            q.eq('conversationId', conversation._id)
+          )
+          .order('desc')
+          .first();
+
+        const lastMessageAt =
+          lastMsg?.createdAt ?? conversation.lastMessageAt ?? conversation.createdAt;
+        const hiddenAt = hiddenAtByConversationId.get(conversation._id as string);
+        if (hiddenAt !== undefined && hiddenAt >= lastMessageAt) continue;
 
         const peerId = conversation.participants.find((p) => p !== userId);
         if (!peerId) continue;
+        const dedupeKey = `${conversation.sourceRoomId as string}:${peerId as string}`;
 
         const peer = await ctx.db.get(peerId);
         if (!peer) continue;
@@ -5057,14 +5072,6 @@ export const getDmThreads = query({
         const peerGender: 'male' | 'female' | 'other' =
           g === 'male' || g === 'female' ? g : 'other';
 
-        const lastMsg = await ctx.db
-          .query('messages')
-          .withIndex('by_conversation_created', (q) =>
-            q.eq('conversationId', conversation._id)
-          )
-          .order('desc')
-          .first();
-
         let lastMessage = '';
         if (lastMsg) {
           if (lastMsg.type === 'text') {
@@ -5080,25 +5087,38 @@ export const getDmThreads = query({
           }
         }
 
-        const lastMessageAt =
-          lastMsg?.createdAt ?? conversation.lastMessageAt ?? conversation.createdAt;
-
-        threads.push({
-          id: conversation._id as string,
-          peerId: peerId as string,
-          peerName,
-          peerAvatar,
-          peerGender,
-          lastMessage,
-          lastMessageAt,
-          unreadCount: row.unreadCount ?? 0,
-        });
+        const unreadCount = row.unreadCount ?? 0;
+        const existingThread = threadsByRoomPeer.get(dedupeKey);
+        if (!existingThread) {
+          threadsByRoomPeer.set(dedupeKey, {
+            id: conversation._id as string,
+            peerId: peerId as string,
+            peerName,
+            peerAvatar,
+            peerGender,
+            lastMessage,
+            lastMessageAt,
+            unreadCount,
+          });
+        } else {
+          existingThread.unreadCount += unreadCount;
+          if (lastMessageAt > existingThread.lastMessageAt) {
+            existingThread.id = conversation._id as string;
+            existingThread.peerId = peerId as string;
+            existingThread.peerName = peerName;
+            existingThread.peerAvatar = peerAvatar;
+            existingThread.peerGender = peerGender;
+            existingThread.lastMessage = lastMessage;
+            existingThread.lastMessageAt = lastMessageAt;
+          }
+        }
       } catch {
         // Skip malformed thread; keep popover + screen alive
         continue;
       }
     }
 
+    const threads = Array.from(threadsByRoomPeer.values());
     threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
     return threads;
   },
@@ -5600,20 +5620,46 @@ export const hideDmThread = mutation({
       if (!conv || !conv.participants.includes(userId)) {
         return { success: false as const };
       }
-      const existing = await ctx.db
-        .query('chatRoomHiddenDmConversations')
-        .withIndex('by_user_conversation', (q) =>
-          q.eq('userId', userId).eq('conversationId', threadId)
-        )
-        .first();
-      if (existing) {
-        return { success: true as const };
+      const now = Date.now();
+      const targetConversationIds = new Set([threadId]);
+      const peerId = conv.participants.find((p) => p !== userId);
+
+      if (conv.sourceRoomId && peerId) {
+        const siblingConversations = await ctx.db
+          .query('conversations')
+          .withIndex('by_source_room', (q) => q.eq('sourceRoomId', conv.sourceRoomId))
+          .collect();
+
+        for (const sibling of siblingConversations) {
+          if (
+            sibling.participants.length === 2 &&
+            sibling.participants.includes(userId) &&
+            sibling.participants.includes(peerId)
+          ) {
+            targetConversationIds.add(sibling._id);
+          }
+        }
       }
-      await ctx.db.insert('chatRoomHiddenDmConversations', {
-        userId,
-        conversationId: threadId,
-        hiddenAt: Date.now(),
-      });
+
+      for (const conversationId of targetConversationIds) {
+        const existing = await ctx.db
+          .query('chatRoomHiddenDmConversations')
+          .withIndex('by_user_conversation', (q) =>
+            q.eq('userId', userId).eq('conversationId', conversationId)
+          )
+          .first();
+
+        if (existing) {
+          await ctx.db.patch(existing._id, { hiddenAt: now });
+        } else {
+          await ctx.db.insert('chatRoomHiddenDmConversations', {
+            userId,
+            conversationId,
+            hiddenAt: now,
+          });
+        }
+      }
+
       return { success: true as const };
     } catch {
       return { success: false as const };

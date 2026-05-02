@@ -219,6 +219,26 @@ export const sendMessage = mutation({
     if (recipientId && await isBlockedBidirectional(ctx, senderId, recipientId)) {
       throw new Error('Cannot send message');
     }
+
+    // Phase-2 Chat Rooms: if recipient muted sender in the originating room,
+    // block the private DM. One-way (recipient is muter, sender is target).
+    // Scoped by conversation.sourceRoomId so Phase-1 DMs are unaffected.
+    const sourceRoomId = conversation.sourceRoomId;
+    if (sourceRoomId && recipientId) {
+      const mutedByRecipient = await ctx.db
+        .query('chatRoomPerUserMutes')
+        .withIndex('by_room_muter_target', (q) =>
+          q
+            .eq('roomId', sourceRoomId)
+            .eq('muterId', recipientId)
+            .eq('targetUserId', senderId)
+        )
+        .first();
+      if (mutedByRecipient) {
+        throw new Error("You can't message this user right now.");
+      }
+    }
+
     if (recipientId) {
       const recipient = await ctx.db.get(recipientId);
       if (isUnavailableDmUser(recipient)) {
@@ -310,6 +330,18 @@ export const sendMessage = mutation({
     await ctx.db.patch(conversationId, {
       lastMessageAt: now,
     });
+
+    if (conversation.sourceRoomId && recipientId) {
+      const hiddenRow = await ctx.db
+        .query('chatRoomHiddenDmConversations')
+        .withIndex('by_user_conversation', (q) =>
+          q.eq('userId', recipientId).eq('conversationId', conversationId)
+        )
+        .first();
+      if (hiddenRow) {
+        await ctx.db.delete(hiddenRow._id);
+      }
+    }
 
     // C1/C2/C3-REPAIR: Update recipient's unreadCount via recomputation (race-safe)
     // recipientId already defined from D1 blocking check above
