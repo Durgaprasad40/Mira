@@ -168,7 +168,7 @@ export default function ExploreCategoryScreen() {
       return 'Category unavailable';
     }
     if (status === 'viewer_missing') {
-      return 'Explore is unavailable';
+      return 'Vibes is unavailable';
     }
     if (status === 'discovery_paused') {
       return 'Discover is paused';
@@ -193,10 +193,10 @@ export default function ExploreCategoryScreen() {
       return 'Finish profile verification to browse people nearby.';
     }
     if (status === 'invalid_category' || !cat) {
-      return 'This Explore category is no longer available.';
+      return 'This Vibes category is no longer available.';
     }
     if (status === 'viewer_missing') {
-      return "We couldn't load your Explore profile right now.";
+      return "We couldn't load your Vibes profile right now.";
     }
     if (status === 'discovery_paused') {
       return 'Unpause discovery to browse people in this vibe again.';
@@ -238,7 +238,7 @@ export default function ExploreCategoryScreen() {
             {cat?.title ?? 'Category unavailable'}
           </Text>
           <Text style={styles.headerSubtitle}>
-            {cat ? 'People matching this vibe' : 'This Explore category is no longer available'}
+            {cat ? 'People matching this vibe' : 'This Vibes category is no longer available'}
           </Text>
         </View>
         <TouchableOpacity onPress={handleRefresh} hitSlop={8} style={styles.headerBtn}>
@@ -307,7 +307,7 @@ export default function ExploreCategoryScreen() {
           <Text style={styles.emptySubtitle}>{unavailableSubtitle}</Text>
           {isUnavailableCategory ? (
             <TouchableOpacity style={styles.retryButton} onPress={handleReturnToExplore}>
-              <Text style={styles.retryButtonText}>Back to Explore</Text>
+              <Text style={styles.retryButtonText}>Back to Vibes</Text>
             </TouchableOpacity>
           ) : showLoadMorePrompt && hasMore ? (
             <TouchableOpacity style={styles.retryButton} onPress={handleLoadMore}>

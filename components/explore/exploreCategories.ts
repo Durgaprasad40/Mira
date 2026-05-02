@@ -86,8 +86,8 @@ const TILE_COLORS = {
 const RELATIONSHIP_TILES: ExploreCategory[] = [
   {
     id: "serious_vibes",
-    label: "Serious Vibes",
-    title: "Serious Vibes",
+    label: "Serious Intentions",
+    title: "Serious Intentions",
     icon: "💑",
     color: TILE_COLORS.pink,
     kind: "relationship",
@@ -104,8 +104,8 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
   },
   {
     id: "exploring_vibes",
-    label: "Exploring Vibes",
-    title: "Exploring Vibes",
+    label: "Still Exploring",
+    title: "Still Exploring",
     icon: "🤔",
     color: TILE_COLORS.sky,
     kind: "relationship",
@@ -122,8 +122,8 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
   },
   {
     id: "open_to_vibes",
-    label: "Open to Vibes",
-    title: "Open to Vibes",
+    label: "Open-Minded",
+    title: "Open-Minded",
     icon: "📉",
     color: TILE_COLORS.purple,
     kind: "relationship",

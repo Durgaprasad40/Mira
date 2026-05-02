@@ -184,11 +184,11 @@ export const IAP_PRODUCTS: IAPProduct[] = [
 // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 // These are the ONLY valid values for relationshipIntent across the entire app
 export const RELATIONSHIP_INTENTS: { value: RelationshipIntent; label: string; emoji: string }[] = [
-  { value: 'serious_vibes', label: 'Serious Vibes', emoji: '💑' },
+  { value: 'serious_vibes', label: 'Serious Intentions', emoji: '💑' },
   { value: 'keep_it_casual', label: 'Keep It Casual', emoji: '🎉' },
-  { value: 'exploring_vibes', label: 'Exploring Vibes', emoji: '🤔' },
+  { value: 'exploring_vibes', label: 'Still Exploring', emoji: '🤔' },
   { value: 'see_where_it_goes', label: 'See Where It Goes', emoji: '📈' },
-  { value: 'open_to_vibes', label: 'Open to Vibes', emoji: '📉' },
+  { value: 'open_to_vibes', label: 'Open-Minded', emoji: '📉' },
   { value: 'just_friends', label: 'Just Friends', emoji: '👋' },
   { value: 'open_to_anything', label: 'Open to Anything', emoji: '✨' },
   { value: 'single_parent', label: 'Single Parent', emoji: '👨‍👧' },

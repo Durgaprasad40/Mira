@@ -481,10 +481,10 @@ export default function ExploreScreen() {
     <View style={styles.emptyContainer}>
       <Ionicons name="sparkles-outline" size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
       <Text {...TEXT_PROPS} style={styles.emptyTitle}>
-        Explore is getting ready
+        Vibes is getting ready
       </Text>
       <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
-        We&apos;re preparing the next set of Explore categories. Check back in a bit.
+        We&apos;re preparing the next set of Vibes. Check back in a bit.
       </Text>
     </View>
   );
@@ -497,12 +497,12 @@ export default function ExploreScreen() {
       </Text>
       <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
         {nearbyUnavailable
-          ? "Fresh Explore profiles are quiet right now. Enable location for Nearby and check back soon."
-          : "Fresh Explore profiles are quiet right now. Check back soon for new people."}
+          ? "Fresh profiles are quiet right now. Enable location for Nearby and check back soon."
+          : "Fresh profiles are quiet right now. Check back soon for new people."}
       </Text>
       <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
         <Text {...TEXT_PROPS} style={styles.retryButtonText}>
-          Refresh Explore
+          Refresh Vibes
         </Text>
       </TouchableOpacity>
     </View>
@@ -513,7 +513,7 @@ export default function ExploreScreen() {
     <View style={styles.loadingContainer}>
       <View style={styles.loadingCopyContainer}>
         <Text {...TEXT_PROPS} style={styles.emptyTitle}>
-          Refreshing Explore
+          Refreshing Vibes
         </Text>
         <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
           Pulling in fresh people, nearby energy, and the latest category counts.
@@ -536,14 +536,14 @@ export default function ExploreScreen() {
     <View style={styles.emptyContainer}>
       <Ionicons name="alert-circle-outline" size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
       <Text {...TEXT_PROPS} style={styles.emptyTitle}>
-        Couldn&apos;t refresh Explore
+        Couldn&apos;t refresh Vibes
       </Text>
       <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
-        {error ?? 'We hit a snag while refreshing Explore. Try again in a moment.'}
+        {error ?? 'We hit a snag while refreshing Vibes. Try again in a moment.'}
       </Text>
       <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
         <Text {...TEXT_PROPS} style={styles.retryButtonText}>
-          Refresh Explore
+          Refresh Vibes
         </Text>
       </TouchableOpacity>
     </View>
@@ -573,11 +573,11 @@ export default function ExploreScreen() {
       {/* Header - Always renders immediately (shell UI pattern) */}
       <View style={styles.header}>
         <Text {...TEXT_PROPS} style={styles.headerTitle}>
-          Explore
+          Vibes
         </Text>
         <TouchableOpacity
           accessibilityRole="button"
-          accessibilityLabel="Refresh Explore"
+          accessibilityLabel="Refresh Vibes"
           onPress={handleRefresh}
           hitSlop={8}
           style={styles.headerActionButton}
@@ -615,14 +615,14 @@ export default function ExploreScreen() {
         renderLoadingState()
       ) : countsStatus === "viewer_missing" ? (
         renderUnavailableState(
-          "Explore is unavailable",
-          "We couldn't load your Explore profile right now.",
+          "Vibes is unavailable",
+          "We couldn't load your Vibes profile right now.",
           "person-circle-outline"
         )
       ) : countsStatus === "discovery_paused" ? (
         renderUnavailableState(
           "Discover is paused",
-          "Unpause discovery to browse Explore categories again.",
+          "Unpause discovery to browse Vibes again.",
           "pause-circle-outline"
         )
       ) : isError && !hasLoadedDataOnceRef.current ? (

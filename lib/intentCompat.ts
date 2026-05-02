@@ -11,7 +11,7 @@ export function computeIntentCompat(
 ): { compat: IntentCompat; theirPrimaryLabel: string; theirPrimaryEmoji: string } {
   const theirPrimary = theirIntents[0] || 'exploring_vibes';
   const found = RELATIONSHIP_INTENTS.find((r) => r.value === theirPrimary);
-  const theirPrimaryLabel = found?.label || 'Exploring Vibes';
+  const theirPrimaryLabel = found?.label || 'Still Exploring';
   const theirPrimaryEmoji = found?.emoji || '🤔';
 
   if (!myIntents.length || !theirIntents.length) {

@@ -182,12 +182,12 @@ function getActivityIcon(activity: string): string {
 
 function formatIntentLabel(intent: string): string {
   const labels: Record<string, string> = {
-    long_term: 'Serious Vibes',
+    long_term: 'Serious Intentions',
     short_term: "Keepin' It Casual",
     fwb: 'Friends with Benefits',
-    figuring_out: 'Exploring Vibes',
+    figuring_out: 'Still Exploring',
     short_to_long: 'See Where It Goes',
-    long_to_short: 'Open to Vibes',
+    long_to_short: 'Open-Minded',
     new_friends: 'Just Friends',
     open_to_anything: 'Open to Anything',
     single_parent: 'Single Parent',

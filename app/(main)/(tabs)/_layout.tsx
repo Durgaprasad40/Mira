@@ -227,7 +227,7 @@ export default function MainTabsLayout() {
         <Tabs.Screen
           name="explore"
           options={{
-            title: "Explore",
+            title: "Vibes",
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="search" size={size} color={color} />
             ),
