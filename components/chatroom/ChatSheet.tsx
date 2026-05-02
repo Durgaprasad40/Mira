@@ -61,13 +61,25 @@ const RESTING_HEIGHT_RATIO = 0.55;
 // Threshold to consider keyboard "open" (accounts for minor fluctuations)
 const KEYBOARD_OPEN_THRESHOLD = 50;
 
-// P2-CHATROOM-SHEET-BOTTOM: Padding (px) we want between the sheet's
-// bottom edge and the keyboard's reported top. Picked at 8px so the
-// composer (pinned at sheet bottom) always shows a small visible gap
-// above the keyboard rather than sitting flush against it. Applied as a
-// HEIGHT reduction (not a transform), so the sheet's actual bottom edge
-// is guaranteed to stay above `keyboardTopY` on every Android OEM.
-const KEYBOARD_BOTTOM_GAP = 8;
+// P2-CHATROOM-SHEET-BOTTOM: Base device-independent comfort margin (px)
+// between the sheet's bottom edge and the keyboard's reported top.
+//
+// Why so large? RN's `KeyboardEvent.endCoordinates.screenY` reports the
+// top of the IME's primary key area on Android. Many OEMs (OnePlus's
+// stock IME, Gboard's suggestion strip in some configurations, Samsung's
+// gesture-nav floating handle) draw additional chrome ABOVE that
+// coordinate that RN does not include in `endCoordinates`. KB-AUDIT
+// runtime traces on OnePlus CPH2691 showed the math correctly placing
+// the composer 8 px above `endCoordinates.screenY`, but user reports
+// continued to show the composer obscured — i.e. the visible IME extends
+// higher than the reported coordinate. This margin is applied uniformly
+// (no manufacturer hardcoding) and is intentionally generous so the
+// composer always clears OEM IME chrome.
+//
+// At runtime the effective gap is `KEYBOARD_BOTTOM_GAP + insets.bottom`
+// (the latter is the gesture-nav area, which on devices with a software
+// nav button is 0). Applied as a HEIGHT reduction (not a transform).
+const KEYBOARD_BOTTOM_GAP = 40;
 
 function getScreenBottomY(): number {
   return Dimensions.get('screen').height;
