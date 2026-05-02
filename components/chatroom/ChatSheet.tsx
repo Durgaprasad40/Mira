@@ -126,6 +126,26 @@ export default function ChatSheet({
       // Animate to new keyboard height for smooth sheet transition
       keyboardHeight.value = withTiming(height, { duration: 250 });
       setIsKeyboardOpen(true);
+
+      // ONEPLUS-OVERLAP FIX: On Android with softwareKeyboardLayoutMode="resize",
+      // the OS resizes the window when the keyboard opens. The container layout
+      // event for that resize sometimes lands AFTER the keyboard event on certain
+      // OEM ROMs (e.g. OnePlus), leaving stale containerHeight/containerY values
+      // in the animated style during the transition. Re-measure on the next frame
+      // so the sheet's anchored bottom matches the actual post-resize container.
+      if (Platform.OS === 'android') {
+        requestAnimationFrame(() => {
+          const containerView = containerRef.current;
+          if (!containerView) return;
+          containerView.measureInWindow((x, y, width, h) => {
+            const containerBottomY = y + h;
+            const winHeight = Dimensions.get('window').height;
+            containerBottomOffset.value = winHeight - containerBottomY;
+            containerHeight.value = h;
+            containerY.value = y;
+          });
+        });
+      }
     };
 
     const handleKeyboardHide = () => {
@@ -141,7 +161,7 @@ export default function ChatSheet({
       showSub.remove();
       hideSub.remove();
     };
-  }, [keyboardHeight]);
+  }, [keyboardHeight, containerBottomOffset, containerHeight, containerY]);
 
   // Safe area top for expanded mode calculations
   const safeTop = insets.top;
@@ -179,9 +199,19 @@ export default function ChatSheet({
     // (Reanimated merges styles, so unused properties aren't cleared)
 
     if (isOpen) {
-      // KEYBOARD OPEN: EXPAND UPWARD to show more messages
-      // effectiveBottom = how much space keyboard takes from container bottom (DO NOT CHANGE)
-      const effectiveBottom = kbHeight - offset + KEYBOARD_TOOLBAR_HEIGHT;
+      // KEYBOARD OPEN: EXPAND UPWARD to show more messages.
+      // ONEPLUS-OVERLAP FIX: On Android with softwareKeyboardLayoutMode="resize"
+      // the OS already shrinks the window so cHeight reflects the available area
+      // above the keyboard. Subtracting kbHeight here would double-count, and on
+      // OEM ROMs whose IME-reported height does not exactly match the OS resize
+      // (e.g. OnePlus, where the gap leaves the composer behind the keyboard)
+      // the math becomes negative and the sheet bottom escapes below the visible
+      // window. Trust the OS resize on Android and only apply the manual offset
+      // on iOS (which does not resize the window). The clamp keeps the value
+      // safely non-negative even if the iOS reporting is slightly off.
+      const effectiveBottom = Platform.OS === 'ios'
+        ? Math.max(0, kbHeight - offset + KEYBOARD_TOOLBAR_HEIGHT)
+        : 0;
 
       // EXPAND FIX: Calculate expanded top position
       // The sheet should expand to use space from safe area to keyboard
