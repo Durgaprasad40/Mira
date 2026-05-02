@@ -156,6 +156,10 @@ const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 // A user stays on the map regardless of the age of their published location
 // until a later coarse republish replaces it or an exclusion fires.
 
+// Foreground crossed-path detection should only compare against recent stored
+// foreground locations, not old published/current-user snapshots.
+const FOREGROUND_FRESHNESS_MS = 12 * 60 * 60 * 1000; // 12 hours
+
 // Crossed paths history — Safe Nearby v2: retention shortened from 4 weeks
 // to 14 days so the historical surface aligns with GHOST_CUTOFF_MS and
 // matches the hybrid model's promise of "events within the last two weeks".
@@ -616,8 +620,8 @@ export const detectCrossedUsers = mutation({
       if (user.recordCrossedPaths === false) continue;
       // Skip if no published location
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
-      // Skip if published location is stale (>6 days)
-      if (now - user.publishedAt > FADED_WINDOW_MS) continue;
+      // Skip stale foreground snapshots so old stored locations do not create crossings.
+      if (now - user.publishedAt > FOREGROUND_FRESHNESS_MS) continue;
 
       // Compute distance using published location
       const distance = calculateDistanceMeters(
@@ -892,9 +896,10 @@ export const recordLocation = mutation({
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) { preFilterRejects.push({ candidate: user._id as string, reason: 'profile_incomplete' }); continue; }
 
-      // Location freshness check
+      // Location freshness check: foreground detection must not compare against
+      // very old stored locations.
       const userLocationUpdatedAt = user.lastLocationUpdatedAt ?? user.lastActive;
-      if (now - userLocationUpdatedAt > FADED_WINDOW_MS) { preFilterRejects.push({ candidate: user._id as string, reason: 'location_stale' }); continue; }
+      if (now - userLocationUpdatedAt > FOREGROUND_FRESHNESS_MS) { preFilterRejects.push({ candidate: user._id as string, reason: 'location_stale' }); continue; }
 
       const distance = calculateDistanceMeters(
         latitude,
