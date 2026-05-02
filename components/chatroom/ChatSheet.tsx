@@ -11,16 +11,15 @@
  *   - Composer remains pinned at the bottom of the sheet, above the keyboard.
  *
  * KEYBOARD MATH (D2 — decoupled from container resize):
- * The keyboard-open math computes sheet position from SCREEN_HEIGHT and the
- * reported keyboard frame, independent of `containerHeight`. This is needed
- * because Chat Rooms suppresses the surrounding group-chat
- * KeyboardAvoidingView while the private sheet is open (so the background
- * doesn't move), which removes the indirect resize cascade the previous
- * formula depended on. See `[roomId].tsx` keyboard listeners.
+ * The keyboard-open math anchors the sheet bottom to the keyboard's reported
+ * top edge (`endCoordinates.screenY`) instead of deriving that edge from a
+ * static screen/window height minus keyboard height. This avoids OEM-specific
+ * Android differences in nav-bar/window sizing while Chat Rooms suppresses
+ * the surrounding group-chat KeyboardAvoidingView.
  *
  * ANIMATION: Reanimated only (no RN Animated mixing) to avoid frozen object
- * errors. Keyboard event listeners drive a shared keyboard-height value
- * which the animated style reads on each frame.
+ * errors. Keyboard event listeners drive shared keyboard-top values which the
+ * animated style reads on each frame.
  *
  * P0 GAP FIX: Dynamically measures container position so the sheet anchors
  * correctly against tab bar height, safe areas, and coordinate system
@@ -45,7 +44,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
-const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 // Resting sheet height as percentage of screen
 const RESTING_HEIGHT_RATIO = 0.55;
@@ -53,10 +51,29 @@ const RESTING_HEIGHT_RATIO = 0.55;
 // Threshold to consider keyboard "open" (accounts for minor fluctuations)
 const KEYBOARD_OPEN_THRESHOLD = 50;
 
-// Keyboard height fine-tuning constant
-// Keyboard event height usually includes toolbar, so this may be 0 or small.
-// Adjust if there's still a gap (+) or overlap (-) between composer and keyboard.
-const KEYBOARD_TOOLBAR_HEIGHT = 0;
+function getScreenBottomY(): number {
+  return Dimensions.get('screen').height;
+}
+
+function resolveKeyboardTopY(event: any): number {
+  const screenBottomY = getScreenBottomY();
+  const screenY = event?.endCoordinates?.screenY;
+  if (
+    typeof screenY === 'number' &&
+    Number.isFinite(screenY) &&
+    screenY > 0 &&
+    screenY < screenBottomY
+  ) {
+    return Math.max(0, Math.min(screenBottomY, screenY));
+  }
+
+  const height = event?.endCoordinates?.height;
+  if (typeof height === 'number' && Number.isFinite(height) && height > 0) {
+    return Math.max(0, screenBottomY - height);
+  }
+
+  return screenBottomY;
+}
 
 interface ChatSheetProps {
   visible: boolean;
@@ -76,7 +93,7 @@ export default function ChatSheet({
   const insets = useSafeAreaInsets();
 
   // Heights
-  const restingHeight = SCREEN_HEIGHT * RESTING_HEIGHT_RATIO;
+  const restingHeight = getScreenBottomY() * RESTING_HEIGHT_RATIO;
 
   // State
   const [isVisible, setIsVisible] = useState(false);
@@ -97,10 +114,11 @@ export default function ChatSheet({
   // ANIMATION FIX: Use Reanimated shared value for opacity (not RN Animated)
   const opacity = useSharedValue(0);
 
-  // KEYBOARD FIX: Use keyboard event listeners instead of useAnimatedKeyboard()
-  // useAnimatedKeyboard() doesn't report height correctly on some Android/Samsung devices
-  // Keyboard events are reliable and provide the actual keyboard height
-  const keyboardHeight = useSharedValue(0);
+  // KEYBOARD FIX: Use keyboard event listeners instead of useAnimatedKeyboard().
+  // Store the keyboard top screen coordinate so the sheet can sit directly
+  // above it without depending on device-specific height/window math.
+  const keyboardTopY = useSharedValue(getScreenBottomY());
+  const screenBottomY = useSharedValue(getScreenBottomY());
 
   // P0 GAP FIX: Measure container position when layout changes
   // This calculates how far the container's bottom edge is from the screen bottom.
@@ -113,14 +131,16 @@ export default function ChatSheet({
       // Container bottom in screen coordinates
       const containerBottomY = y + height;
       // Distance from container bottom to screen bottom
-      const offsetFromScreenBottom = SCREEN_HEIGHT - containerBottomY;
+      const screenBottom = getScreenBottomY();
+      const offsetFromScreenBottom = screenBottom - containerBottomY;
 
       // Update shared values (accessible from UI thread in useAnimatedStyle)
+      screenBottomY.value = screenBottom;
       containerBottomOffset.value = offsetFromScreenBottom;
       containerHeight.value = height;
       containerY.value = y;
     });
-  }, [containerBottomOffset, containerHeight, containerY]);
+  }, [containerBottomOffset, containerHeight, containerY, screenBottomY]);
 
   // KEYBOARD FIX: Track keyboard state via event listeners (reliable on all Android devices)
   useEffect(() => {
@@ -128,9 +148,11 @@ export default function ChatSheet({
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
 
     const handleKeyboardShow = (e: any) => {
-      const height = e.endCoordinates.height;
-      // Animate to new keyboard height for smooth sheet transition
-      keyboardHeight.value = withTiming(height, { duration: 250 });
+      const screenBottom = getScreenBottomY();
+      const keyboardTop = resolveKeyboardTopY(e);
+      screenBottomY.value = screenBottom;
+      // Animate to the keyboard top for smooth sheet transition.
+      keyboardTopY.value = withTiming(keyboardTop, { duration: 250 });
       setIsKeyboardOpen(true);
 
       // ONEPLUS-OVERLAP FIX: On Android with softwareKeyboardLayoutMode="resize",
@@ -145,8 +167,9 @@ export default function ChatSheet({
           if (!containerView) return;
           containerView.measureInWindow((x, y, width, h) => {
             const containerBottomY = y + h;
-            const winHeight = Dimensions.get('window').height;
-            containerBottomOffset.value = winHeight - containerBottomY;
+            const measuredScreenBottom = getScreenBottomY();
+            screenBottomY.value = measuredScreenBottom;
+            containerBottomOffset.value = measuredScreenBottom - containerBottomY;
             containerHeight.value = h;
             containerY.value = y;
           });
@@ -155,8 +178,10 @@ export default function ChatSheet({
     };
 
     const handleKeyboardHide = () => {
-      // Animate back to 0 for smooth sheet return
-      keyboardHeight.value = withTiming(0, { duration: 200 });
+      // Animate back to the screen bottom for smooth sheet return.
+      const screenBottom = getScreenBottomY();
+      screenBottomY.value = screenBottom;
+      keyboardTopY.value = withTiming(screenBottom, { duration: 200 });
       setIsKeyboardOpen(false);
     };
 
@@ -167,7 +192,7 @@ export default function ChatSheet({
       showSub.remove();
       hideSub.remove();
     };
-  }, [keyboardHeight, containerBottomOffset, containerHeight, containerY]);
+  }, [keyboardTopY, screenBottomY, containerBottomOffset, containerHeight, containerY]);
 
   // Safe area top for expanded mode calculations
   const safeTop = insets.top;
@@ -177,14 +202,12 @@ export default function ChatSheet({
   // In resting mode: position at bottom with fixed height.
   // In keyboard mode: EXPAND UPWARD to use available space, keep bottom anchored to keyboard.
   const animatedSheetStyle = useAnimatedStyle(() => {
-    const kbHeight = keyboardHeight.value;
+    const keyboardTop = keyboardTopY.value;
+    const screenBottom = screenBottomY.value;
     const offset = containerBottomOffset.value;
     const cHeight = containerHeight.value;
     const cY = containerY.value;
-    const isOpen = kbHeight > KEYBOARD_OPEN_THRESHOLD;
-
-    // Calculate stable top position: where the sheet top would be in resting mode
-    const stableTop = cHeight > 0 ? cHeight - restingHeight : SCREEN_HEIGHT - restingHeight;
+    const isOpen = screenBottom - keyboardTop > KEYBOARD_OPEN_THRESHOLD;
 
     // If container hasn't been measured yet, use simple bottom positioning
     if (cHeight === 0) {
@@ -208,11 +231,9 @@ export default function ChatSheet({
       // KEYBOARD OPEN: BLOCK-LIFT (decoupled from container resize).
       //
       // Lift the entire sheet upward as a single block, anchoring its
-      // BOTTOM edge flush above the keyboard. This formula is computed
-      // from the reported keyboard frame and SCREEN_HEIGHT, NOT from the
-      // measured `containerHeight`. The sheet only shrinks when the
-      // keyboard is so tall that lifting `restingHeight` would push it
-      // above the safe-area top.
+      // BOTTOM edge flush above the keyboard's top screen coordinate. The
+      // sheet only shrinks when the keyboard is so tall that lifting
+      // `restingHeight` would push it above the safe-area top.
       //
       // WHY DECOUPLED: the previous formula used `availableBottom = cHeight
       // - keyboardEatsBottom`, which depended on the parent layout
@@ -223,32 +244,28 @@ export default function ChatSheet({
       // see app/(main)/(private)/(tabs)/chat-rooms/[roomId].tsx). The
       // OS-level `softwareKeyboardLayoutMode="resize"` alone does not
       // propagate a fresh measurement into our absoluteFillObject
-      // container in time on every Android OEM/Metro build, so cHeight
-      // can stay at the pre-keyboard value and the old math positioned
-      // the sheet's composer behind the keyboard. SCREEN_HEIGHT is the
-      // activity window height (portrait-locked app), kbHeight comes
-      // straight from the keyboard event, and `cY` is the container's
-      // top in screen coords (re-measured on keyboardDidShow above), so
-      // converting to a container-relative `top` stays correct without
-      // depending on cHeight.
-      const visibleScreenBottom = SCREEN_HEIGHT - kbHeight;
+      // container in time on every Android OEM/release build, so cHeight
+      // can stay at the pre-keyboard value. The keyboard event's `screenY`
+      // is the keyboard top; `cY` is the container's top in the same screen
+      // coordinate space, so converting to a container-relative `top`
+      // stays correct without subtracting keyboard height from a stale
+      // window/screen height.
+      const visibleScreenBottom = keyboardTop;
 
-      // Sheet top in screen coords if it kept restingHeight with its
-      // bottom flush above the keyboard.
-      const idealSheetTopScreen = visibleScreenBottom - restingHeight;
+      // Convert the keyboard top to container-relative bottom first. This
+      // keeps the sheet bottom flush with the keyboard even if Android reports
+      // a non-zero container Y after resize.
+      const sheetBottom = Math.max(0, visibleScreenBottom - cY);
 
-      // Never cross the safe-area top (+8px breathing room).
-      const minSheetTopScreen = safeTop + 8;
-      const sheetTopScreen = Math.max(minSheetTopScreen, idealSheetTopScreen);
+      // Sheet top if it kept restingHeight with its bottom flush above the
+      // keyboard, clamped against the safe-area top (+8px breathing room).
+      const idealSheetTop = sheetBottom - restingHeight;
+      const minSheetTop = Math.max(0, safeTop + 8 - cY);
+      const sheetTop = Math.min(sheetBottom, Math.max(minSheetTop, idealSheetTop));
 
       // Sheet keeps `restingHeight` unless clamped against the safe area;
       // then it shrinks to occupy the visible band above the keyboard.
-      const sheetHeight = Math.max(100, visibleScreenBottom - sheetTopScreen);
-
-      // Convert screen-coord top to container-relative top. cY reflects
-      // the container's current screen position; cHeight is intentionally
-      // not used.
-      const sheetTop = Math.max(0, sheetTopScreen - cY);
+      const sheetHeight = Math.max(0, sheetBottom - sheetTop);
 
       // Suppress unused-value warning — `offset` is kept tracked for
       // potential future use, but the new math does not consume it.
