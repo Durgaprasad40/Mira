@@ -1,32 +1,22 @@
-import React, { useMemo, useCallback, useRef, useState, useEffect } from 'react';
+import React, { useCallback, useRef } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
+  Pressable,
   StyleSheet,
   TextInput,
   ActivityIndicator,
 } from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
-  runOnJS,
-} from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
-
-// Debug logging for device verification - CRITICAL for Android debugging
-const DEBUG_CONFESS = __DEV__;
 import {
   COLORS,
   SPACING,
   SIZES,
   FONT_SIZE,
   FONT_WEIGHT,
-  HAIRLINE,
   moderateScale,
   lineHeight,
 } from '@/lib/constants';
@@ -47,14 +37,15 @@ interface ReplyPreview {
   createdAt: number;
 }
 
-// Gender labels for display
-const GENDER_LABELS: Record<string, string> = {
-  male: 'M',
-  female: 'F',
-  non_binary: 'NB',
-  lesbian: 'F',
-  other: '',
-};
+function getConfessGenderSymbol(gender?: string): { symbol: string; color: string } | null {
+  if (!gender) return null;
+  const normalized = gender.trim().toLowerCase();
+  if (normalized === 'male' || normalized === 'm') return { symbol: '♂', color: '#4A90D9' };
+  if (normalized === 'female' || normalized === 'f' || normalized === 'lesbian') {
+    return { symbol: '♀', color: COLORS.primary };
+  }
+  return null;
+}
 
 interface ConfessionCardProps {
   id: string;
@@ -179,52 +170,44 @@ export default function ConfessionCard({
   if (isEditing) {
     console.log('[EDIT_RENDER] Card in edit mode:', { id, isEditing, editTextLength: editText?.length });
   }
-  // ══════════════════════════════════════════════════════════════════════════
-  // PRODUCTION FIX: GestureDetector with direct Animated.View child
-  // Previous bug: Pressable between GestureDetector and Animated.View blocked native gestures
-  // Fix: GestureDetector -> Animated.View (direct child) with composed Tap + LongPress
-  // ══════════════════════════════════════════════════════════════════════════
-
   // Resolve handlers (new props take precedence over legacy)
   const tapHandler = onCardPress || onPress;
   const longPressHandler = onCardLongPress || onLongPress;
-  // Disable gestures when in edit mode to allow TextInput interaction
   const tapEnabled = !isEditing && (enableTapToOpenThread || !!onPress);
   const longPressEnabled = !isEditing && (enableLongPressMenu || !!onLongPress);
 
-  // Animation
-  const cardScale = useSharedValue(1);
-  const cardAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: cardScale.value }],
-  }));
-
   // CRITICAL: Track if long-press fired to block tap navigation
   const longPressTriggeredRef = useRef(false);
-
-  // Owner check for logging
   const isOwner = authorId === viewerId;
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // JS CALLBACKS - Called from native gesture handlers via runOnJS
-  // ══════════════════════════════════════════════════════════════════════════
-
-  const handleTap = useCallback(() => {
-    // Check if long-press already handled this gesture
+  const handleCardPress = useCallback(() => {
     if (longPressTriggeredRef.current) {
-      if (__DEV__) console.log(`[CONFESS_TAP] blocked after long press`);
+      longPressTriggeredRef.current = false;
       return;
     }
     if (!tapEnabled) {
-      if (__DEV__) console.log(`[CONFESS_CARD] screen=${screenContext} tap disabled`);
       return;
     }
-    if (__DEV__) console.log(`[CONFESS_TAP] screen=${screenContext}`);
+    if (!id) {
+      if (__DEV__) {
+        console.warn('[CONFESS_CARD_PRESS_BLOCKED_MISSING_ID]', { screen: screenContext });
+      }
+      return;
+    }
+    if (__DEV__) {
+      console.log('[CONFESS_CARD_PRESS]', { screen: screenContext, hasId: true });
+    }
     tapHandler?.();
-  }, [tapEnabled, screenContext, tapHandler]);
+  }, [id, screenContext, tapEnabled, tapHandler]);
 
-  const handleLongPressActivate = useCallback(() => {
-    // Set flag FIRST to block any subsequent tap
+  const handleCardLongPress = useCallback(() => {
+    if (!longPressEnabled) {
+      return;
+    }
     longPressTriggeredRef.current = true;
+    setTimeout(() => {
+      longPressTriggeredRef.current = false;
+    }, 1000);
 
     if (__DEV__) {
       console.log(`[CONFESS_LONG_PRESS] triggered screen=${screenContext} owner=${isOwner}`);
@@ -240,68 +223,7 @@ export default function ConfessionCard({
       longPressHandler();
       if (__DEV__) console.log(`[CONFESS_LONG_PRESS] menu opened`);
     }
-  }, [screenContext, isOwner, longPressHandler]);
-
-  const handleGestureReset = useCallback(() => {
-    // Reset flag after gesture completes
-    longPressTriggeredRef.current = false;
-  }, []);
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // NATIVE GESTURE CONFIGURATION - Tap and LongPress composed with Exclusive
-  // Exclusive ensures only ONE gesture wins - LongPress listed first has priority
-  // ══════════════════════════════════════════════════════════════════════════
-
-  // Long press gesture - 300ms threshold
-  const longPressGesture = Gesture.LongPress()
-    .minDuration(300)
-    .enabled(longPressEnabled)
-    .onBegin(() => {
-      'worklet';
-      // Reset flag at start of gesture
-      runOnJS(handleGestureReset)();
-      // Visual feedback
-      cardScale.value = withTiming(0.985, { duration: 60 });
-      if (__DEV__) {
-        runOnJS(console.log)(`[CONFESS_CARD] screen=${screenContext} gesture BEGIN`);
-      }
-    })
-    .onStart(() => {
-      'worklet';
-      // Long press threshold reached - SUCCESS
-      runOnJS(handleLongPressActivate)();
-    })
-    .onFinalize(() => {
-      'worklet';
-      // Reset animation
-      cardScale.value = withTiming(1, { duration: 150 });
-    });
-
-  // Tap gesture - for opening thread
-  const tapGesture = Gesture.Tap()
-    .enabled(tapEnabled)
-    .maxDuration(299) // Must be shorter than long-press threshold
-    .onBegin(() => {
-      'worklet';
-      // Reset flag at start of gesture
-      runOnJS(handleGestureReset)();
-      // Visual feedback
-      cardScale.value = withTiming(0.985, { duration: 60 });
-      if (__DEV__) {
-        runOnJS(console.log)(`[CONFESS_CARD] screen=${screenContext} tap BEGIN`);
-      }
-    })
-    .onEnd((_, success) => {
-      'worklet';
-      // Reset animation
-      cardScale.value = withTiming(1, { duration: 150 });
-      if (success) {
-        runOnJS(handleTap)();
-      }
-    });
-
-  // Composed gesture: LongPress takes priority (listed first in Exclusive)
-  const composedGesture = Gesture.Exclusive(longPressGesture, tapGesture);
+  }, [isOwner, longPressEnabled, longPressHandler, screenContext]);
 
   // Determine effective visibility mode (backward compat: use isAnonymous if authorVisibility not set)
   const effectiveVisibility: ConfessionAuthorVisibility = authorVisibility || (isAnonymous ? 'anonymous' : 'open');
@@ -319,22 +241,8 @@ export default function ConfessionCard({
   };
   const tagDisplayText = getTagDisplayText();
 
-  // Build display name with age and gender based on visibility mode
-  const getDisplayName = (): string => {
-    if (isFullyAnonymous) return 'Anonymous';
-    if (!authorName) return 'Someone';
-
-    let name = authorName;
-    // For blur_photo and open modes, show age and gender
-    if (authorAge) {
-      name += `, ${authorAge}`;
-    }
-    if (authorGender && GENDER_LABELS[authorGender]) {
-      name += ` ${GENDER_LABELS[authorGender]}`;
-    }
-    return name;
-  };
-  const displayName = getDisplayName();
+  const displayName = isFullyAnonymous ? 'Anonymous' : authorName || 'Someone';
+  const authorGenderSymbol = !isFullyAnonymous ? getConfessGenderSymbol(authorGender) : null;
 
   // Check if we have a tappable tag to display
   const hasTag = taggedUserId && taggedUserName;
@@ -372,7 +280,31 @@ export default function ConfessionCard({
           <Ionicons name="person" size={SIZES.icon.xs} color={COLORS.primary} />
         </View>
       )}
-      <Text maxFontSizeMultiplier={1.2} style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>{displayName}</Text>
+      <View style={styles.authorIdentityText}>
+        <Text
+          maxFontSizeMultiplier={1.2}
+          style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}
+          numberOfLines={1}
+        >
+          {displayName}
+        </Text>
+        {!isFullyAnonymous && authorAge ? (
+          <Text
+            maxFontSizeMultiplier={1.2}
+            style={[styles.authorAge, styles.authorNamePublic]}
+          >
+            , {authorAge}
+          </Text>
+        ) : null}
+        {authorGenderSymbol ? (
+          <Text
+            maxFontSizeMultiplier={1.2}
+            style={[styles.authorGenderSymbol, { color: authorGenderSymbol.color }]}
+          >
+            {authorGenderSymbol.symbol}
+          </Text>
+        ) : null}
+      </View>
       {/* Blur indicator badge */}
       {isBlurPhoto && (
         <View style={styles.blurBadge}>
@@ -382,13 +314,17 @@ export default function ConfessionCard({
     </>
   );
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // RENDER - GestureDetector with DIRECT Animated.View child (CRITICAL for Android)
-  // Previous bug: Pressable between GestureDetector and Animated.View blocked native gestures
-  // ══════════════════════════════════════════════════════════════════════════
   return (
-    <GestureDetector gesture={composedGesture}>
-      <Animated.View style={[styles.card, isTaggedForMe && styles.cardHighlighted, cardAnimatedStyle]}>
+    <Pressable
+      onPress={tapEnabled ? handleCardPress : undefined}
+      onLongPress={longPressEnabled ? handleCardLongPress : undefined}
+      delayLongPress={300}
+      style={({ pressed }) => [
+        styles.card,
+        isTaggedForMe && styles.cardHighlighted,
+        pressed && tapEnabled && styles.cardPressed,
+      ]}
+    >
       {/* Author row */}
       <View style={styles.authorRow}>
         {isAuthorTappable ? (
@@ -552,7 +488,7 @@ export default function ConfessionCard({
                 <TouchableOpacity
                   onPress={(e) => {
                     e.stopPropagation?.();
-                    tapHandler?.();
+                    handleCardPress();
                   }}
                 >
                   <Text maxFontSizeMultiplier={1.2} style={styles.viewAllReplies}>
@@ -575,8 +511,7 @@ export default function ConfessionCard({
           )}
         </>
       )}
-      </Animated.View>
-    </GestureDetector>
+    </Pressable>
   );
 }
 
@@ -606,6 +541,9 @@ const styles = StyleSheet.create({
     borderLeftWidth: 3,
     borderLeftColor: COLORS.primary,
     paddingLeft: 18 - 3 + StyleSheet.hairlineWidth,
+  },
+  cardPressed: {
+    opacity: 0.98,
   },
   forYouBadge: {
     flexDirection: 'row',
@@ -651,7 +589,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.xs, // Clean spacing
-    flexShrink: 1,
+    flex: 1,
+    minWidth: 0,
   },
   authorIdentityTappable: {
     flexDirection: 'row',
@@ -660,16 +599,35 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.xxs,
     paddingRight: SPACING.xs,
     borderRadius: SIZES.radius.xs,
+    flex: 1,
+    minWidth: 0,
+  },
+  authorIdentityText: {
+    flexDirection: 'row',
+    alignItems: 'center',
     flexShrink: 1,
+    minWidth: 0,
   },
   authorName: {
     fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.textLight,
     flexShrink: 1,
+    minWidth: 0,
   },
   authorNamePublic: {
     color: COLORS.primary,
+  },
+  authorAge: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '600',
+    flexShrink: 0,
+  },
+  authorGenderSymbol: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '700',
+    marginLeft: SPACING.xxs,
+    flexShrink: 0,
   },
   blurBadge: {
     marginLeft: SPACING.xs,

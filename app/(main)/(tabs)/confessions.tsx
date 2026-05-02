@@ -113,6 +113,16 @@ function computeAge(dateOfBirth: string | undefined): number | undefined {
 // P0-1: Blur radius for blur_photo identity mode (matches ConfessionCard)
 const BLUR_PHOTO_RADIUS = 20;
 
+function getConfessGenderSymbol(gender?: string): { symbol: string; color: string } | null {
+  if (!gender) return null;
+  const normalized = gender.trim().toLowerCase();
+  if (normalized === 'male' || normalized === 'm') return { symbol: '♂', color: '#4A90D9' };
+  if (normalized === 'female' || normalized === 'f' || normalized === 'lesbian') {
+    return { symbol: '♀', color: COLORS.primary };
+  }
+  return null;
+}
+
 function getTimeAgoSimple(timestamp: number): string {
   const diff = Date.now() - timestamp;
   const minutes = Math.floor(diff / 60000);
@@ -668,7 +678,16 @@ export default function ConfessionsScreen() {
     });
   }, [currentUserId, isDemoMode, markAllTaggedConfessionsSeen, markTaggedSeenMutation, taggedConfessions]);
 
-  const handleOpenThread = useCallback((confessionId: string) => {
+  const handleOpenThread = useCallback((confessionId?: string | null) => {
+    if (!confessionId) {
+      if (__DEV__) {
+        console.warn('[CONFESS_CARD_PRESS_BLOCKED_MISSING_ID]', { source: 'handleOpenThread' });
+      }
+      return;
+    }
+    if (__DEV__) {
+      console.log('[CONFESS_THREAD_NAVIGATE]', { source: 'confessions', hasId: true });
+    }
     safePush(
       router,
       {
@@ -911,15 +930,6 @@ export default function ConfessionsScreen() {
     );
   }, [menuTargetConfession, router]);
 
-  // Helper to get gender symbol
-  const getGenderSymbol = (gender?: string) => {
-    if (!gender) return null;
-    const g = gender.toLowerCase();
-    if (g === 'male' || g === 'm') return { symbol: '♂', color: '#4A90D9' };
-    if (g === 'female' || g === 'f') return { symbol: '♀', color: COLORS.primary };
-    return null;
-  };
-
   const renderHeader = useCallback(() => (
     <View>
       {/* 1. TRENDING SECTION (always first) - Premium card with full border */}
@@ -929,11 +939,15 @@ export default function ConfessionsScreen() {
           || (trendingHero.isAnonymous ? 'anonymous' : 'open');
         const trendingIsAnonymous = trendingVisibility === 'anonymous';
         const trendingIsBlurPhoto = trendingVisibility === 'blur_photo' || trendingVisibility === 'blur';
+        const trendingGenderSymbol = getConfessGenderSymbol(trendingHero.authorGender);
         return (
         <TouchableOpacity
           style={styles.trendingCard}
           activeOpacity={0.88}
-          onPress={() => handleOpenThread(trendingHero.id)}
+          onPress={() => {
+            if (__DEV__) console.log('[CONFESS_CARD_PRESS]', { screen: 'confessions', source: 'trending', hasId: !!trendingHero.id });
+            handleOpenThread(trendingHero.id);
+          }}
           onLongPress={() => handleOpenMenuSheet(trendingHero.id, trendingHero.userId)}
           delayLongPress={300}
         >
@@ -967,18 +981,28 @@ export default function ConfessionsScreen() {
                 <Ionicons name="person" size={10} color={COLORS.primary} />
               </View>
             )}
-            <Text maxFontSizeMultiplier={1.2} style={[styles.trendingAuthorName, !trendingIsAnonymous && styles.trendingAuthorNamePublic]}>
-              {trendingIsAnonymous ? 'Anonymous' : (
-                <>
-                  {trendingHero.authorName || 'Someone'}
-                  {trendingHero.authorAge ? `, ${trendingHero.authorAge}` : ''}
-                  {getGenderSymbol(trendingHero.authorGender) && (
-                    <Text maxFontSizeMultiplier={1.2} style={{ color: getGenderSymbol(trendingHero.authorGender)!.color }}> {getGenderSymbol(trendingHero.authorGender)!.symbol}</Text>
-                  )}
-                </>
-              )}
-            </Text>
-            <View style={{ flex: 1 }} />
+            <View style={styles.trendingIdentityText}>
+              <Text
+                maxFontSizeMultiplier={1.2}
+                style={[styles.trendingAuthorName, !trendingIsAnonymous && styles.trendingAuthorNamePublic]}
+                numberOfLines={1}
+              >
+                {trendingIsAnonymous ? 'Anonymous' : trendingHero.authorName || 'Someone'}
+              </Text>
+              {!trendingIsAnonymous && trendingHero.authorAge ? (
+                <Text maxFontSizeMultiplier={1.2} style={styles.trendingAuthorAge}>
+                  , {trendingHero.authorAge}
+                </Text>
+              ) : null}
+              {trendingGenderSymbol ? (
+                <Text
+                  maxFontSizeMultiplier={1.2}
+                  style={[styles.genderSymbol, { color: trendingGenderSymbol.color }]}
+                >
+                  {trendingGenderSymbol.symbol}
+                </Text>
+              ) : null}
+            </View>
             <Text maxFontSizeMultiplier={1.2} style={styles.trendingTime}>{getTimeAgoSimple(trendingHero.createdAt)}</Text>
           </View>
 
@@ -1008,11 +1032,16 @@ export default function ConfessionsScreen() {
           || (myAny.isAnonymous ? 'anonymous' : 'open');
         const myIsAnonymous = myVisibility === 'anonymous';
         const myIsBlurPhoto = myVisibility === 'blur_photo' || myVisibility === 'blur';
+        const myGenderSymbol = getConfessGenderSymbol((myLatestConfession as any).authorGender);
         return (
         <TouchableOpacity
           style={styles.myConfessionCard}
           activeOpacity={0.88}
-          onPress={() => handleOpenThread((myLatestConfession as any).id || (myLatestConfession as any)._id)}
+          onPress={() => {
+            const confessionId = (myLatestConfession as any).id || (myLatestConfession as any)._id;
+            if (__DEV__) console.log('[CONFESS_CARD_PRESS]', { screen: 'confessions', source: 'my-confession', hasId: !!confessionId });
+            handleOpenThread(confessionId);
+          }}
           onLongPress={() => handleOpenMenuSheet(
             (myLatestConfession as any).id || (myLatestConfession as any)._id,
             (myLatestConfession as any).userId
@@ -1043,18 +1072,28 @@ export default function ConfessionsScreen() {
                 <Ionicons name="person" size={10} color={COLORS.primary} />
               </View>
             )}
-            <Text maxFontSizeMultiplier={1.2} style={[styles.myConfessionAuthorName, !myIsAnonymous && styles.myConfessionAuthorNamePublic]}>
-              {myIsAnonymous ? 'Anonymous' : (
-                <>
-                  {(myLatestConfession as any).authorName || 'You'}
-                  {(myLatestConfession as any).authorAge ? `, ${(myLatestConfession as any).authorAge}` : ''}
-                  {getGenderSymbol((myLatestConfession as any).authorGender) && (
-                    <Text maxFontSizeMultiplier={1.2} style={{ color: getGenderSymbol((myLatestConfession as any).authorGender)!.color }}> {getGenderSymbol((myLatestConfession as any).authorGender)!.symbol}</Text>
-                  )}
-                </>
-              )}
-            </Text>
-            <View style={{ flex: 1 }} />
+            <View style={styles.myConfessionIdentityText}>
+              <Text
+                maxFontSizeMultiplier={1.2}
+                style={[styles.myConfessionAuthorName, !myIsAnonymous && styles.myConfessionAuthorNamePublic]}
+                numberOfLines={1}
+              >
+                {myIsAnonymous ? 'Anonymous' : (myLatestConfession as any).authorName || 'You'}
+              </Text>
+              {!myIsAnonymous && (myLatestConfession as any).authorAge ? (
+                <Text maxFontSizeMultiplier={1.2} style={styles.myConfessionAuthorAge}>
+                  , {(myLatestConfession as any).authorAge}
+                </Text>
+              ) : null}
+              {myGenderSymbol ? (
+                <Text
+                  maxFontSizeMultiplier={1.2}
+                  style={[styles.genderSymbol, { color: myGenderSymbol.color }]}
+                >
+                  {myGenderSymbol.symbol}
+                </Text>
+              ) : null}
+            </View>
             <Text maxFontSizeMultiplier={1.2} style={styles.myConfessionTime}>{getTimeAgoSimple(myLatestConfession.createdAt)}</Text>
           </View>
 
@@ -1617,8 +1656,9 @@ const styles = StyleSheet.create({
   },
   genderSymbol: {
     fontSize: FONT_SIZE.md,
-    fontWeight: '600',
-    marginLeft: SPACING.xs,
+    fontWeight: '700',
+    marginLeft: SPACING.xxs,
+    flexShrink: 0,
   },
   trendingBadge: {
     flexDirection: 'row',
@@ -1644,6 +1684,12 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
     marginBottom: SPACING.sm,
   },
+  trendingIdentityText: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
+  },
   trendingAvatar: {
     width: 20,
     height: 20,
@@ -1664,14 +1710,22 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.textLight,
-    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
   trendingAuthorNamePublic: {
     color: COLORS.primary,
   },
+  trendingAuthorAge: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '600',
+    color: COLORS.primary,
+    flexShrink: 0,
+  },
   trendingTime: {
     fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
+    flexShrink: 0,
   },
   trendingText: {
     fontSize: moderateScale(15, 0.4),
@@ -1775,6 +1829,12 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
     marginBottom: SPACING.sm,
   },
+  myConfessionIdentityText: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
+  },
   myConfessionAvatar: {
     width: 20,
     height: 20,
@@ -1795,13 +1855,22 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.textLight,
+    flexShrink: 1,
+    minWidth: 0,
   },
   myConfessionAuthorNamePublic: {
     color: COLORS.primary,
   },
+  myConfessionAuthorAge: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '600',
+    color: COLORS.primary,
+    flexShrink: 0,
+  },
   myConfessionTime: {
     fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
+    flexShrink: 0,
   },
   myConfessionText: {
     fontSize: moderateScale(15, 0.4),
