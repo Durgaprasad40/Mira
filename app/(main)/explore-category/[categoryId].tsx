@@ -280,7 +280,7 @@ export default function ExploreCategoryScreen() {
       ) : isError && items.length === 0 ? (
         <View style={styles.emptyState}>
           <Ionicons name="alert-circle-outline" size={64} color={COLORS.textLight} style={styles.emptyIcon} />
-          <Text style={styles.emptyTitle}>This vibe is unavailable</Text>
+          <Text style={styles.emptyTitle}>Category unavailable</Text>
           <Text style={styles.emptySubtitle}>{error ?? 'Unable to load this vibe right now.'}</Text>
           <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
             <Text style={styles.retryButtonText}>Try again</Text>

@@ -1,9 +1,9 @@
 /**
  * DISCOVER-CATEGORY-FIX: Hook for fetching profiles by category from backend
  *
- * Uses the new single-category assignment system to fetch profiles
- * assigned to a specific category. This ensures mutual exclusivity -
- * each profile only appears in one category.
+ * Uses backend Explore assignment to fetch profiles assigned to a category.
+ * Relationship categories are exclusive; Right Now categories are a separate
+ * exclusive overlay.
  *
  * Features:
  * - Uses `getExploreCategoryProfiles` query with category-based filtering
@@ -216,11 +216,12 @@ export function useExploreCategoryProfiles({
         const nextProfiles = result?.profiles ?? EMPTY_PROFILES;
         const nextTotalCount = result?.totalCount ?? 0;
         const nextStatus = normalizeExploreCategoryStatus(result?.status, nextProfiles.length > 0);
+        const nextHasMore = offset + nextProfiles.length < nextTotalCount;
 
         const nextState = {
           profiles: nextProfiles,
           totalCount: nextTotalCount,
-          hasMore: false,
+          hasMore: nextHasMore,
           status: nextStatus,
           partialBatchExhausted: false,
           isLoading: false,

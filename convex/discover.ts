@@ -24,6 +24,7 @@ import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import {
   FRONTEND_EXPLORE_CATEGORY_IDS,
+  FRONTEND_RELATIONSHIP_INTENT_IDS,
   normalizeExploreCategoryId,
   normalizeRelationshipIntentValues,
 } from '../lib/discoveryNaming';
@@ -1202,6 +1203,16 @@ const EXPLORE_CATEGORY_IDS = [
 ] as const;
 
 type ExploreCategoryId = (typeof EXPLORE_CATEGORY_IDS)[number];
+type RelationshipExploreCategoryId = (typeof FRONTEND_RELATIONSHIP_INTENT_IDS)[number];
+
+const RIGHT_NOW_EXPLORE_CATEGORY_IDS = [
+  'free_tonight',
+  'nearby',
+  'online_now',
+  'active_today',
+] as const;
+
+type RightNowExploreCategoryId = (typeof RIGHT_NOW_EXPLORE_CATEGORY_IDS)[number];
 
 type ExploreCandidateBase = {
   id: Id<'users'>;
@@ -1238,6 +1249,14 @@ type ExploreProfileResult = Omit<ExploreCandidateBase, 'rankingScore' | 'ranking
 
 function isExploreCategoryId(value: string | undefined): value is ExploreCategoryId {
   return typeof value === 'string' && (EXPLORE_CATEGORY_IDS as readonly string[]).includes(value);
+}
+
+function isRelationshipExploreCategoryId(categoryId: ExploreCategoryId): categoryId is RelationshipExploreCategoryId {
+  return (FRONTEND_RELATIONSHIP_INTENT_IDS as readonly string[]).includes(categoryId);
+}
+
+function isRightNowExploreCategoryId(categoryId: ExploreCategoryId): categoryId is RightNowExploreCategoryId {
+  return (RIGHT_NOW_EXPLORE_CATEGORY_IDS as readonly string[]).includes(categoryId);
 }
 
 function normalizePublicExploreCategoryId(value: string | undefined): ExploreCategoryId | undefined {
@@ -1311,31 +1330,15 @@ function createEmptyExploreCounts(): Record<string, number> {
 }
 
 // ---------------------------------------------------------------------------
-// Exclusive Explore bucketing
+// R3 Explore bucketing
 // ---------------------------------------------------------------------------
-// Product rule: a single profile belongs to exactly ONE Explore category at a
-// time. Without an ordering, counts and listings overlap (e.g. an online,
-// nearby profile that stated "just_friends" and opted into "free_tonight"
-// could appear in multiple tiles). The rule is applied consistently by:
-//   1. `assignExploreCategory` → deterministically picks the single owning
-//      category for a candidate.
-//   2. `countExploreCategories` → increments exactly one counter per candidate.
-//   3. `getExploreCategoryProfiles` → uses the same assignment when listing
-//      profiles for a tile, so counts and listings stay in lockstep.
-//
-// Priority (highest wins, first match in this list is the assignment):
-//   A. `free_tonight` — activity opt-in.
-//   B. RELATIONSHIP INTENT (9) — user-stated dating intent.
-//   C. RIGHT NOW (3: nearby → online_now → active_today) — derived/contextual
-//      "residual" bucket. Only candidates that did not match an explicit
-//      free-tonight opt-in or intent land here, so Right Now tiles keep
-//      surfacing fresh profiles that wouldn't otherwise show up.
+// Product rule: Explore now has two independent layers. A candidate can own
+// exactly one Relationship category and exactly one Right Now category.
+// Relationship counts/listings stay exclusive by intent priority. Right Now
+// counts/listings are a dynamic overlay with their own priority.
 //
 // NOTE: order matters; do not reorder without product review.
-const EXPLORE_ASSIGNMENT_PRIORITY: readonly ExploreCategoryId[] = [
-  // A. Free tonight (activity opt-in)
-  'free_tonight',
-  // B. Relationship intent
+const RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY: readonly RelationshipExploreCategoryId[] = [
   'serious_vibes',
   'keep_it_casual',
   'exploring_vibes',
@@ -1345,40 +1348,63 @@ const EXPLORE_ASSIGNMENT_PRIORITY: readonly ExploreCategoryId[] = [
   'open_to_anything',
   'single_parent',
   'new_to_dating',
-  // C. Right Now (residual)
+];
+
+const RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY: readonly RightNowExploreCategoryId[] = [
+  'free_tonight',
   'nearby',
   'online_now',
   'active_today',
 ];
 
-// Invariant: priority list must cover every category exactly once.
-// Enforced at module load so tests/codegen fail fast on drift.
+// Invariants: each layer priority list must cover its category set exactly once.
 (() => {
-  const priorityIds = new Set<string>(EXPLORE_ASSIGNMENT_PRIORITY);
-  if (priorityIds.size !== EXPLORE_ASSIGNMENT_PRIORITY.length) {
-    throw new Error('EXPLORE_ASSIGNMENT_PRIORITY has duplicate entries');
+  const relationshipPriorityIds = new Set<string>(RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY);
+  if (relationshipPriorityIds.size !== RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY.length) {
+    throw new Error('RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY has duplicate entries');
   }
-  if (priorityIds.size !== EXPLORE_CATEGORY_IDS.length) {
+  if (relationshipPriorityIds.size !== FRONTEND_RELATIONSHIP_INTENT_IDS.length) {
     throw new Error(
-      `EXPLORE_ASSIGNMENT_PRIORITY covers ${priorityIds.size} ids but EXPLORE_CATEGORY_IDS has ${EXPLORE_CATEGORY_IDS.length}`,
+      `RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY covers ${relationshipPriorityIds.size} ids but relationship category set has ${FRONTEND_RELATIONSHIP_INTENT_IDS.length}`,
     );
   }
-  for (const id of EXPLORE_CATEGORY_IDS) {
-    if (!priorityIds.has(id)) {
-      throw new Error(`EXPLORE_ASSIGNMENT_PRIORITY is missing category: ${id}`);
+  for (const id of FRONTEND_RELATIONSHIP_INTENT_IDS) {
+    if (!relationshipPriorityIds.has(id)) {
+      throw new Error(`RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY is missing category: ${id}`);
+    }
+  }
+
+  const rightNowPriorityIds = new Set<string>(RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY);
+  if (rightNowPriorityIds.size !== RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY.length) {
+    throw new Error('RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY has duplicate entries');
+  }
+  if (rightNowPriorityIds.size !== RIGHT_NOW_EXPLORE_CATEGORY_IDS.length) {
+    throw new Error(
+      `RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY covers ${rightNowPriorityIds.size} ids but Right Now category set has ${RIGHT_NOW_EXPLORE_CATEGORY_IDS.length}`,
+    );
+  }
+  for (const id of RIGHT_NOW_EXPLORE_CATEGORY_IDS) {
+    if (!rightNowPriorityIds.has(id)) {
+      throw new Error(`RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY is missing category: ${id}`);
     }
   }
 })();
 
-/**
- * Returns the single Explore category that owns this candidate, or `null` if
- * the candidate matches no Explore category. Callers MUST use this helper
- * wherever an exclusive assignment is required (counts, listings, analytics).
- */
-function assignExploreCategory(
+function assignRelationshipExploreCategory(
   candidate: ExploreCandidateBase,
-): ExploreCategoryId | null {
-  for (const categoryId of EXPLORE_ASSIGNMENT_PRIORITY) {
+): RelationshipExploreCategoryId | null {
+  for (const categoryId of RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY) {
+    if (matchesExploreCategory(candidate, categoryId)) {
+      return categoryId;
+    }
+  }
+  return null;
+}
+
+function assignRightNowExploreCategory(
+  candidate: ExploreCandidateBase,
+): RightNowExploreCategoryId | null {
+  for (const categoryId of RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY) {
     if (matchesExploreCategory(candidate, categoryId)) {
       return categoryId;
     }
@@ -1389,9 +1415,14 @@ function assignExploreCategory(
 function countExploreCategories(candidates: ExploreCandidateBase[]): Record<string, number> {
   const counts = createEmptyExploreCounts();
   for (const candidate of candidates) {
-    const assigned = assignExploreCategory(candidate);
-    if (assigned) {
-      counts[assigned] += 1;
+    const relationshipOwner = assignRelationshipExploreCategory(candidate);
+    if (relationshipOwner) {
+      counts[relationshipOwner] += 1;
+    }
+
+    const rightNowOwner = assignRightNowExploreCategory(candidate);
+    if (rightNowOwner) {
+      counts[rightNowOwner] += 1;
     }
   }
   return counts;
@@ -1694,10 +1725,13 @@ async function buildExploreCandidates(
       };
 
       if (activeCategoryId) {
-        // Exclusive bucketing: listing uses the same assignment the counts use,
-        // so tapping a tile shows only candidates whose OWNING category is this
-        // one. A profile will never appear in more than one tile.
-        if (assignExploreCategory(candidate) !== activeCategoryId) continue;
+        if (isRelationshipExploreCategoryId(activeCategoryId)) {
+          if (assignRelationshipExploreCategory(candidate) !== activeCategoryId) continue;
+        } else if (isRightNowExploreCategoryId(activeCategoryId)) {
+          if (assignRightNowExploreCategory(candidate) !== activeCategoryId) continue;
+        } else {
+          continue;
+        }
       }
       candidates.push(candidate);
     }

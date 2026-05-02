@@ -45,6 +45,9 @@ const DEMO_CATEGORY_COUNTS: Record<string, number> = {
   new_to_dating: 6,
   // Right Now categories
   nearby: 4,
+  online_now: 6,
+  active_today: 11,
+  free_tonight: 3,
 };
 
 function normalizeExploreCategoryCountsStatus(
