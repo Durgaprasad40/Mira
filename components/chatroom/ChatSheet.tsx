@@ -2,24 +2,29 @@
  * ChatSheet - Bottom sheet container for one-on-one chat
  *
  * Layout behavior:
- * - RESTING STATE: 55% height sheet at bottom, above tab bar
- * - KEYBOARD OPEN: Sheet keeps its resting height and is translated upward
- *   as a single block so its bottom sits flush above the keyboard.
+ * - RESTING STATE: 55% height sheet at bottom, above tab bar.
+ * - KEYBOARD OPEN: Sheet keeps its resting height and is lifted as a single
+ *   block so its bottom sits flush above the keyboard.
  *   - Sheet only shrinks if the keyboard is so tall that the lifted sheet
  *     would otherwise push above the safe-area top.
  *   - Rounded sheet corners preserved (sheet still feels like a sheet).
  *   - Composer remains pinned at the bottom of the sheet, above the keyboard.
  *
- * SYNC FIX: Uses Reanimated's useAnimatedKeyboard() for frame-perfect
- * synchronization with keyboard animation. The sheet moves WITH the keyboard,
- * not after it.
+ * KEYBOARD MATH (D2 — decoupled from container resize):
+ * The keyboard-open math computes sheet position from SCREEN_HEIGHT and the
+ * reported keyboard frame, independent of `containerHeight`. This is needed
+ * because Chat Rooms suppresses the surrounding group-chat
+ * KeyboardAvoidingView while the private sheet is open (so the background
+ * doesn't move), which removes the indirect resize cascade the previous
+ * formula depended on. See `[roomId].tsx` keyboard listeners.
  *
- * ANIMATION FIX: Uses only Reanimated (no RN Animated mixing) to avoid
- * frozen object errors.
+ * ANIMATION: Reanimated only (no RN Animated mixing) to avoid frozen object
+ * errors. Keyboard event listeners drive a shared keyboard-height value
+ * which the animated style reads on each frame.
  *
- * P0 GAP FIX: Dynamically measures container position to calculate exact
- * bottom offset. This eliminates guesswork about tab bar height, safe areas,
- * and coordinate system mismatches.
+ * P0 GAP FIX: Dynamically measures container position so the sheet anchors
+ * correctly against tab bar height, safe areas, and coordinate system
+ * mismatches.
  */
 import React, { useEffect, useCallback, useState, useRef } from 'react';
 import {
@@ -200,38 +205,55 @@ export default function ChatSheet({
     // (Reanimated merges styles, so unused properties aren't cleared)
 
     if (isOpen) {
-      // KEYBOARD OPEN: BLOCK-MOVE.
-      // Lift the entire sheet upward as a single block while preserving its
-      // resting height/shape. The sheet only shrinks when the keyboard is so
-      // tall that even a fully translated sheet would push above the safe area.
+      // KEYBOARD OPEN: BLOCK-LIFT (decoupled from container resize).
       //
-      // Previously this branch stretched the sheet from `safeTop` down to the
-      // keyboard top, which made the chat box look elongated when the keyboard
-      // opened. The new math keeps `restingHeight` and just translates the
-      // sheet upward so its bottom sits flush above the keyboard.
+      // Lift the entire sheet upward as a single block, anchoring its
+      // BOTTOM edge flush above the keyboard. This formula is computed
+      // from the reported keyboard frame and SCREEN_HEIGHT, NOT from the
+      // measured `containerHeight`. The sheet only shrinks when the
+      // keyboard is so tall that lifting `restingHeight` would push it
+      // above the safe-area top.
       //
-      // Android with softwareKeyboardLayoutMode="resize": cHeight is already
-      // the post-resize area above the keyboard, so no extra subtraction is
-      // needed. iOS does not resize the window, so subtract kbHeight (clamped
-      // >= 0 for OEM/IME reporting safety) to get the available area.
-      const keyboardEatsBottom = Platform.OS === 'ios'
-        ? Math.max(0, kbHeight - offset + KEYBOARD_TOOLBAR_HEIGHT)
-        : 0;
-      const availableBottom = cHeight - keyboardEatsBottom;
+      // WHY DECOUPLED: the previous formula used `availableBottom = cHeight
+      // - keyboardEatsBottom`, which depended on the parent layout
+      // shrinking when the keyboard opened. That cascade fired indirectly
+      // when the parent <KeyboardAvoidingView behavior="height"> reflowed
+      // its content. In Chat Rooms, that KAV is now suppressed while the
+      // private sheet is open (so the background group chat stays fixed —
+      // see app/(main)/(private)/(tabs)/chat-rooms/[roomId].tsx). The
+      // OS-level `softwareKeyboardLayoutMode="resize"` alone does not
+      // propagate a fresh measurement into our absoluteFillObject
+      // container in time on every Android OEM/Metro build, so cHeight
+      // can stay at the pre-keyboard value and the old math positioned
+      // the sheet's composer behind the keyboard. SCREEN_HEIGHT is the
+      // activity window height (portrait-locked app), kbHeight comes
+      // straight from the keyboard event, and `cY` is the container's
+      // top in screen coords (re-measured on keyboardDidShow above), so
+      // converting to a container-relative `top` stays correct without
+      // depending on cHeight.
+      const visibleScreenBottom = SCREEN_HEIGHT - kbHeight;
 
-      // Minimum top within the container: don't push above the status bar.
-      const minTop = Math.max(0, safeTop - cY + 8);
+      // Sheet top in screen coords if it kept restingHeight with its
+      // bottom flush above the keyboard.
+      const idealSheetTopScreen = visibleScreenBottom - restingHeight;
 
-      // Where the sheet would sit if it kept restingHeight with its bottom
-      // flush above the keyboard.
-      const desiredTop = availableBottom - restingHeight;
+      // Never cross the safe-area top (+8px breathing room).
+      const minSheetTopScreen = safeTop + 8;
+      const sheetTopScreen = Math.max(minSheetTopScreen, idealSheetTopScreen);
 
-      // Translate up to desiredTop unless that would cross the safe-area top.
-      const sheetTop = Math.max(minTop, desiredTop);
+      // Sheet keeps `restingHeight` unless clamped against the safe area;
+      // then it shrinks to occupy the visible band above the keyboard.
+      const sheetHeight = Math.max(100, visibleScreenBottom - sheetTopScreen);
 
-      // Sheet keeps its restingHeight when not clamped; otherwise shrinks to
-      // fit the available area without going behind the keyboard.
-      const sheetHeight = Math.max(100, availableBottom - sheetTop);
+      // Convert screen-coord top to container-relative top. cY reflects
+      // the container's current screen position; cHeight is intentionally
+      // not used.
+      const sheetTop = Math.max(0, sheetTopScreen - cY);
+
+      // Suppress unused-value warning — `offset` is kept tracked for
+      // potential future use, but the new math does not consume it.
+      void offset;
+      void cHeight;
 
       return {
         position: 'absolute' as const,
@@ -239,8 +261,8 @@ export default function ChatSheet({
         left: 0,
         right: 0,
         height: sheetHeight,
-        // Keep the rounded sheet corners — visually it's still the same sheet,
-        // just lifted up; do not flatten into a full-screen surface.
+        // Keep the rounded sheet corners — visually it's still the same
+        // sheet, just lifted up; do not flatten into a full-screen surface.
         borderTopLeftRadius: 16,
         borderTopRightRadius: 16,
         opacity: opacity.value,
