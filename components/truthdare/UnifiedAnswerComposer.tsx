@@ -39,6 +39,10 @@ const LOCK_ICON_SIZE = SIZES.icon.sm;
 const REMOVE_MEDIA_ICON_SIZE = moderateScale(26, 0.25);
 const RECORD_STOP_ICON_SIZE = SIZES.icon.md;
 const ATTACH_ICON_SIZE = moderateScale(22, 0.25);
+// Media chooser accent colors (UI-only)
+const MEDIA_GALLERY_COLOR = '#00B894'; // green/teal
+const MEDIA_CAMERA_COLOR = '#E94560'; // pink/red
+const MEDIA_VOICE_COLOR = '#FF9800'; // orange/yellow
 const IDENTITY_OPTION_ICON_SIZE = SIZES.icon.sm;
 const VISIBILITY_ICON_SIZE = SIZES.icon.xs;
 const FOOTER_ICON_SIZE = SIZES.icon.xs;
@@ -138,6 +142,10 @@ export function UnifiedAnswerComposer({
 
   // Media visibility state - only applies to photo/video, default private
   const [mediaVisibility, setMediaVisibility] = useState<'private' | 'public'>('private');
+
+  // UI-only: tracks last tapped media tile so the helper line under the row can
+  // show a short context message. Does NOT affect upload / capture / recording.
+  const [lastMediaIntent, setLastMediaIntent] = useState<'gallery' | 'camera' | 'voice' | null>(null);
 
   // Fullscreen media preview state (includes isFrontCamera for unmirror)
   const [fullscreenMedia, setFullscreenMedia] = useState<{
@@ -722,40 +730,49 @@ export function UnifiedAnswerComposer({
             )}
 
             {/* Attachment buttons */}
-            {/* Batch C: Added helper line + Once-view / ≤ 60s chips, neutral icon color, calmer pressed feedback */}
+            {/* Media chooser: colorful tiles + dynamic helper line below (UI-only state) */}
             {!attachment && !isRecording && (
               <View style={styles.attachmentBlock}>
-                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachmentHelperText}>
-                  Optional: add one photo, video, or voice.
-                </Text>
                 <View style={styles.attachmentButtons}>
                   {/* VISUAL MEDIA LOCK: Hide Gallery/Camera when visual media is locked */}
                   {!visualMediaLocked && (
                     <>
-                      <TouchableOpacity style={styles.attachBtn} onPress={pickFromGallery} activeOpacity={0.7}>
-                        <Ionicons name="images-outline" size={ATTACH_ICON_SIZE} color={C.textLight} />
+                      <TouchableOpacity
+                        style={[styles.attachBtn, styles.attachBtnGallery]}
+                        onPress={() => { setLastMediaIntent('gallery'); pickFromGallery(); }}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons name="images" size={ATTACH_ICON_SIZE} color={MEDIA_GALLERY_COLOR} />
                         <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Gallery</Text>
-                        <View style={styles.attachChip}>
-                          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachChipText}>Once-view</Text>
-                        </View>
                       </TouchableOpacity>
-                      <TouchableOpacity style={styles.attachBtn} onPress={openMediaCamera} activeOpacity={0.7}>
-                        <Ionicons name="camera-outline" size={ATTACH_ICON_SIZE} color={C.textLight} />
+                      <TouchableOpacity
+                        style={[styles.attachBtn, styles.attachBtnCamera]}
+                        onPress={() => { setLastMediaIntent('camera'); openMediaCamera(); }}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons name="camera" size={ATTACH_ICON_SIZE} color={MEDIA_CAMERA_COLOR} />
                         <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Camera</Text>
-                        <View style={styles.attachChip}>
-                          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachChipText}>Once-view</Text>
-                        </View>
                       </TouchableOpacity>
                     </>
                   )}
-                  <TouchableOpacity style={styles.attachBtn} onPress={startRecording} activeOpacity={0.7}>
-                    <Ionicons name="mic-outline" size={ATTACH_ICON_SIZE} color={C.textLight} />
+                  <TouchableOpacity
+                    style={[styles.attachBtn, styles.attachBtnVoice]}
+                    onPress={() => { setLastMediaIntent('voice'); startRecording(); }}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="mic" size={ATTACH_ICON_SIZE} color={MEDIA_VOICE_COLOR} />
                     <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Voice</Text>
-                    <View style={styles.attachChip}>
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachChipText}>≤ 60s</Text>
-                    </View>
                   </TouchableOpacity>
                 </View>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachmentHelperText}>
+                  {lastMediaIntent === 'gallery'
+                    ? 'Choose a photo or video from your gallery.'
+                    : lastMediaIntent === 'camera'
+                    ? 'Take a photo or record a short video.'
+                    : lastMediaIntent === 'voice'
+                    ? 'Record a voice reply up to 60 seconds.'
+                    : 'Optional: add a photo, video, or voice.'}
+                </Text>
               </View>
             )}
 
@@ -1155,8 +1172,9 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZE.sm,
     lineHeight: lineHeight(FONT_SIZE.sm, 1.35),
     color: C.textLight,
-    marginBottom: SPACING.xs + 2,
+    marginTop: SPACING.sm,
     paddingHorizontal: moderateScale(2, 0.25),
+    textAlign: 'center',
   },
   attachmentButtons: {
     flexDirection: 'row',
@@ -1167,24 +1185,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: SPACING.xs,
-    paddingVertical: SPACING.sm,
+    paddingVertical: SPACING.sm + 2,
     paddingHorizontal: SPACING.xs,
     backgroundColor: C.surface,
-    borderRadius: moderateScale(10, 0.25),
+    borderRadius: moderateScale(12, 0.25),
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
   attachBtnText: { fontSize: FONT_SIZE.sm, lineHeight: lineHeight(FONT_SIZE.sm, 1.2), fontWeight: '600', color: C.text },
-  // Batch C: small subtle chip ("Once-view" / "≤ 60s")
-  attachChip: {
-    paddingHorizontal: SPACING.sm - 2,
-    paddingVertical: moderateScale(1, 0.25),
-    borderRadius: SIZES.radius.xs + 2,
-    backgroundColor: C.background,
+  // Premium colored tile variants (UI-only accents; behavior unchanged)
+  attachBtnGallery: {
+    backgroundColor: MEDIA_GALLERY_COLOR + '14',
+    borderColor: MEDIA_GALLERY_COLOR + '33',
   },
-  attachChipText: {
-    fontSize: FONT_SIZE.xxs,
-    lineHeight: lineHeight(FONT_SIZE.xxs, 1.2),
-    fontWeight: '600',
-    color: C.textLight,
+  attachBtnCamera: {
+    backgroundColor: MEDIA_CAMERA_COLOR + '14',
+    borderColor: MEDIA_CAMERA_COLOR + '33',
+  },
+  attachBtnVoice: {
+    backgroundColor: MEDIA_VOICE_COLOR + '14',
+    borderColor: MEDIA_VOICE_COLOR + '33',
   },
 
   // Identity picker
