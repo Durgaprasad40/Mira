@@ -12,7 +12,7 @@
  *
  * Features:
  * - Permission state UI (checking/denied/settings/ready)
- * - Safe current-location map render with coordinate validation
+ * - Safe map render with coordinate validation
  * - Demo mode fallback
  * - Nearby user markers with privacy fuzzing
  * - Marker tap → full profile view (Discover-style)
@@ -228,12 +228,12 @@ type LocationUIState =
   | 'error'
   | 'ready';
 
-/** Nearby user from query (Phase-2.5 payload contract).
+/** Nearby user from query (crossed-path payload contract).
  *
  * No raw/stored coordinates or numeric distance are transported. The server
  * emits only:
- *   - cellId: stable coarse grid cell identifier (~300m)
- *   - displayLat/displayLng: per-request randomized point INSIDE that cell
+ *   - cellId: stable coarse crossed-path grid cell identifier (~300m)
+ *   - displayLat/displayLng: per-request randomized point INSIDE that crossed-path cell
  *   - distanceBucket: 'very_close' | 'nearby' | 'in_your_area'
  *   - freshnessLabel: 'recent' | 'earlier' | 'stale'
  */
@@ -246,8 +246,8 @@ interface NearbyUser {
   displayLng: number;
   distanceBucket?: 'very_close' | 'nearby' | 'in_your_area';
   freshness: 'solid' | 'faded';
-  // Phase-2.5: three-tier coarse recency label.
-  // 'recent' = <=24h, 'earlier' = <=7d, 'stale' = <=14d (ghost cutoff).
+  // Three-tier coarse crossed-path recency label.
+  // 'recent' = <=24h, 'earlier' = <=7d, 'stale' = <=14d.
   freshnessLabel?: 'recent' | 'earlier' | 'stale';
   photoUrl: string | null;
   isVerified: boolean;
@@ -1869,7 +1869,7 @@ export default function NearbyScreen() {
           <Ionicons name="navigate-circle-outline" size={moderateScale(64, 0.3)} color={COLORS.textLight} />
           <Text style={styles.title} maxFontSizeMultiplier={1.2}>Turn on location for Nearby</Text>
           <Text style={styles.subtitle} maxFontSizeMultiplier={1.2}>
-            Nearby needs location access to place your map and show people around you.
+            Nearby needs location access to place your map and show crossed paths in your area.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
             <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.2}>Turn On Location</Text>
@@ -1898,7 +1898,7 @@ export default function NearbyScreen() {
           <Ionicons name="location-outline" size={moderateScale(64, 0.3)} color={COLORS.textLight} />
           <Text style={styles.title} maxFontSizeMultiplier={1.2}>Enable Location Services</Text>
           <Text style={styles.subtitle} maxFontSizeMultiplier={1.2}>
-            Turn on Location Services to keep Nearby live and up to date.
+            Turn on Location Services to keep crossed-path detection available.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
             <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.2}>Open Settings</Text>
@@ -1929,7 +1929,7 @@ export default function NearbyScreen() {
           <Ionicons name="shield-checkmark-outline" size={moderateScale(64, 0.3)} color={COLORS.textLight} />
           <Text style={styles.title} maxFontSizeMultiplier={1.2}>Verify to use Nearby</Text>
           <Text style={styles.subtitle} maxFontSizeMultiplier={1.2}>
-            Finish verification to unlock Nearby and browse people who meet the same trust rules.
+            Finish verification to unlock Nearby and browse people you've crossed paths with.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={handleOpenVerification}>
             <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.2}>Verify Now</Text>
@@ -2115,8 +2115,8 @@ export default function NearbyScreen() {
                 <ActivityIndicator size="small" color={COLORS.primary} />
                 <Text style={styles.loadingText} maxFontSizeMultiplier={1.2}>
                   {isRetrying || hasRetainedNearbyResult
-                    ? 'Refreshing Nearby…'
-                    : 'Searching nearby…'}
+                    ? 'Refreshing crossed paths…'
+                    : 'Checking crossed paths…'}
                 </Text>
               </View>
               <View style={styles.loadingSkeletonRow}>
@@ -2171,17 +2171,17 @@ export default function NearbyScreen() {
                 <View style={styles.emptyIconBubble}>
                   <Ionicons name="people-outline" size={SIZES.icon.lg} color={COLORS.primary} />
                 </View>
-                <Text style={styles.emptyTitle} maxFontSizeMultiplier={1.2}>No one is currently in your area</Text>
-                <Text style={styles.emptyTrust} maxFontSizeMultiplier={1.2}>Approximate area only — not live tracking</Text>
-                <Text style={styles.emptyHint} maxFontSizeMultiplier={1.2}>Move the map to explore other areas</Text>
+                <Text style={styles.emptyTitle} maxFontSizeMultiplier={1.2}>You haven't crossed paths nearby</Text>
+                <Text style={styles.emptyTrust} maxFontSizeMultiplier={1.2}>Approx area where you crossed</Text>
+                <Text style={styles.emptyHint} maxFontSizeMultiplier={1.2}>Not their current location. No crossings in the last 14 days yet.</Text>
                 <View style={styles.emptyActionRow}>
                   <TouchableOpacity
                     style={[styles.emptyActionButton, isRetrying && styles.emptyActionButtonDisabled]}
                     onPress={handleRetryQuery}
                     activeOpacity={0.85}
                     disabled={isRetrying}
-                    accessibilityLabel="Refresh nearby"
-                    accessibilityHint="Search again for people nearby"
+                    accessibilityLabel="Refresh crossed paths"
+                    accessibilityHint="Check again for crossed-path events nearby"
                     accessibilityState={{ disabled: isRetrying, busy: isRetrying }}
                   >
                     {isRetrying ? (

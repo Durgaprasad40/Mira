@@ -1029,6 +1029,8 @@ export default defineSchema({
     lastCrossedAt: v.number(),
     lastLocation: v.optional(v.string()),
     unlockExpiresAt: v.optional(v.number()),
+    // Legacy fields: store approximate/grid-snapped crossing coordinates only.
+    // Public queries must never return these fields or raw user lat/lng.
     crossingLatitude: v.optional(v.number()),
     crossingLongitude: v.optional(v.number()),
     // BUGFIX #28: Track last notification time to prevent duplicate notifications
@@ -1044,7 +1046,7 @@ export default defineSchema({
     user1Id: v.id('users'),           // ordered pair (user1Id < user2Id)
     user2Id: v.id('users'),
     areaName: v.string(),             // e.g. "Near Banjara Hills"
-    // Approximate crossing location (rounded to ~500m grid for privacy)
+    // Approximate crossing location (rounded to ~300m grid for privacy)
     crossedLatApprox: v.optional(v.number()),
     crossedLngApprox: v.optional(v.number()),
     // Reason tags for notification: "interest:coffee", "lookingFor:long_term"
@@ -1053,7 +1055,7 @@ export default defineSchema({
     hiddenByUser1: v.optional(v.boolean()),
     hiddenByUser2: v.optional(v.boolean()),
     createdAt: v.number(),
-    expiresAt: v.number(),            // auto-expire after 30 days
+    expiresAt: v.number(),            // auto-expire after 14 days
     lastNotifiedAt: v.optional(v.number()), // 24h cooldown tracking
   })
     .index('by_user1', ['user1Id'])

@@ -52,9 +52,9 @@ interface NearbyPreviewCardProps {
 }
 
 const FRESHNESS_COPY: Record<'recent' | 'earlier' | 'stale', { text: string; icon: keyof typeof Ionicons.glyphMap }> = {
-  recent: { text: 'Recently here', icon: 'time-outline' },
-  earlier: { text: 'Earlier', icon: 'hourglass-outline' },
-  stale: { text: 'A while ago', icon: 'calendar-outline' },
+  recent: { text: 'Crossed nearby', icon: 'time-outline' },
+  earlier: { text: 'Crossed earlier', icon: 'hourglass-outline' },
+  stale: { text: 'Crossed last week', icon: 'calendar-outline' },
 };
 
 function prettifyInterest(raw: string): string {

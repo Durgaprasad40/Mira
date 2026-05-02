@@ -124,11 +124,9 @@ async function prefetchSwipes(
 // Constants
 // ---------------------------------------------------------------------------
 
-// Nearby map: 0 – 1 km radius. Persistent eligibility model — once a user
-// has published a coarse location, they stay visible to eligible viewers
-// within this radius until their next coarse republish moves them out, or
-// an explicit exclusion fires (pause/incognito/disabled/skip/block).
-// No 100 m minimum floor: co-located users (0 m / 10 m / 50 m…) are eligible.
+// Legacy published-location map radius constants. getNearbyUsers no longer
+// uses these for feed inclusion; Nearby inclusion is crossPathHistory-based.
+// No 100 m minimum floor: co-located users (0 m / 10 m / 50 m...) are eligible.
 const NEARBY_MIN_METERS = 0;    // No minimum floor; co-located users remain eligible
 const NEARBY_MAX_METERS = 1000; // Maximum distance for nearby map
 
@@ -163,6 +161,7 @@ const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 // matches the hybrid model's promise of "events within the last two weeks".
 const HISTORY_EXPIRY_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const MAX_HISTORY_ENTRIES = 15; // Max crossed paths list entries
+const GENERIC_CROSSING_AREA_NAME = 'Nearby area';
 
 // Grid size for approximate crossing location (privacy: round to ~300m)
 const LOCATION_GRID_METERS = 300;
@@ -171,18 +170,12 @@ const LOCATION_GRID_METERS = 300;
 // Phase-2 Nearby constants
 // ---------------------------------------------------------------------------
 
-// Ghost cutoff — users whose last coarse publish is older than this are
-// hidden from ALL Nearby surfaces (map + crossed paths list). It only
-// evicts users who opened the app a long time ago and never came back,
-// so neither surface fills up with abandoned accounts.
+// Legacy published-location ghost cutoff. Active Nearby feed inclusion now
+// comes from crossPathHistory.expiresAt, not published snapshot age.
 const GHOST_CUTOFF_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 
-// Safe Nearby v2 — Map pin TTL: a published snapshot is visible on the
-// LIVE MAP for at most 6 hours after `publishedAt`. After 6h the user is
-// removed from the map but stays available in the Crossed Paths list
-// (Surface 2) until GHOST_CUTOFF_MS via the crossPathHistory pipeline.
-// This prevents the map from acting as a "last known location" tracker
-// while still letting the historical surface keep context.
+// Legacy published-location map pin TTL. The crossed-path Nearby feed does
+// not include candidates from publishedAt freshness.
 const NEARBY_MAP_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 // Safe Nearby v2 — Snapshot regeneration movement threshold. Even after
@@ -888,23 +881,29 @@ export const recordLocation = mutation({
           continue;
         }
 
+        const approxLocation = roundToGrid(latitude, longitude);
         const newCount = crossedPath.count + 1;
         const updates: Record<string, unknown> = {
           count: newCount,
           lastCrossedAt: now,
-          // Store latest crossing location
-          crossingLatitude: latitude,
-          crossingLongitude: longitude,
+          // Legacy coordinate fields store grid-snapped approximate crossing
+          // coordinates only. Never write raw GPS here and never return these
+          // fields from public queries.
+          crossingLatitude: approxLocation.lat,
+          crossingLongitude: approxLocation.lng,
         };
 
         await ctx.db.patch(crossedPath._id, updates);
       } else {
+        const approxLocation = roundToGrid(latitude, longitude);
         // BUGFIX #28: Insert new record, then check for race condition duplicate
         const newId = await ctx.db.insert('crossedPaths', {
           user1Id,
           user2Id,
           count: 1,
           lastCrossedAt: now,
+          crossingLatitude: approxLocation.lat,
+          crossingLongitude: approxLocation.lng,
         });
 
         // BUGFIX #28: Re-query to detect concurrent insert race condition
@@ -930,13 +929,14 @@ export const recordLocation = mutation({
 
       // --- Cross-path history entry (MUTUAL — both users see this) ---
       // BUGFIX #28: Check 24h duplicate control for same pair
-      const existingHistory = await ctx.db
+      const pairHistories = await ctx.db
         .query('crossPathHistory')
         .withIndex('by_users', (q) =>
           q.eq('user1Id', user1Id).eq('user2Id', user2Id),
         )
-        .order('desc')
-        .first();
+        .collect();
+      const existingHistory = [...pairHistories]
+        .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 
       if (existingHistory && now - existingHistory.createdAt < NOTIFICATION_COOLDOWN_MS) {
         // Already have a recent history entry for this pair — skip
@@ -951,13 +951,26 @@ export const recordLocation = mutation({
         continue;
       }
 
-      // Derive area name from city or generic label
-      const areaName = nearbyUser.city
-        ? `Near ${nearbyUser.city}`
-        : 'Nearby area';
-
-      // Compute approximate crossing location (privacy: rounded to ~500m grid)
+      // Compute approximate crossing location (privacy: rounded to ~300m grid)
       const approxLocation = roundToGrid(latitude, longitude);
+      const pairCellKey = makePairCellKeyFromParts(
+        user1Id,
+        user2Id,
+        approxLocation.lat,
+        approxLocation.lng,
+      );
+      const existingSameCellCrossings = pairCellKey
+        ? pairHistories.filter(
+          (entry) => entry.expiresAt > now && makePairCellKey(entry) === pairCellKey,
+        ).length
+        : 0;
+
+      // Sensitive-place protection: repeated crossings in the same approximate
+      // cell keep the event, but store generic copy so a home/work-like area is
+      // not upgraded into a named place through repetition.
+      const areaName = existingSameCellCrossings > 0
+        ? GENERIC_CROSSING_AREA_NAME
+        : (nearbyUser.city ? `Near ${nearbyUser.city}` : GENERIC_CROSSING_AREA_NAME);
 
       // BUGFIX #28: Insert history entry, then check for race condition duplicate
       const newHistoryId = await ctx.db.insert('crossPathHistory', {
@@ -1640,33 +1653,62 @@ async function detectCrossingsForSample(
       if (now - crossedPath.lastCrossedAt < NOTIFICATION_COOLDOWN_MS) {
         continue; // pair cooldown
       }
+      const approxLocation = roundToGrid(lat, lng);
       await ctx.db.patch(crossedPath._id, {
         count: crossedPath.count + 1,
         lastCrossedAt: now,
-        crossingLatitude: lat,
-        crossingLongitude: lng,
+        // Legacy coordinate fields store grid-snapped approximate crossing
+        // coordinates only. Never write raw GPS here and never return these
+        // fields from public queries.
+        crossingLatitude: approxLocation.lat,
+        crossingLongitude: approxLocation.lng,
       });
     } else {
+      const approxLocation = roundToGrid(lat, lng);
       await ctx.db.insert('crossedPaths', {
         user1Id,
         user2Id,
         count: 1,
         lastCrossedAt: now,
+        crossingLatitude: approxLocation.lat,
+        crossingLongitude: approxLocation.lng,
       });
     }
 
     // History cooldown (same pattern as recordLocation).
-    const existingHistory = await ctx.db
+    const pairHistories = await ctx.db
       .query('crossPathHistory')
       .withIndex('by_users', (q: any) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
-      .order('desc')
-      .first();
+      .collect();
+    const existingHistory = [...pairHistories]
+      .sort(
+        (a: Doc<'crossPathHistory'>, b: Doc<'crossPathHistory'>) =>
+          b.createdAt - a.createdAt,
+      )[0] ?? null;
     if (existingHistory && now - existingHistory.createdAt < NOTIFICATION_COOLDOWN_MS) {
       continue;
     }
 
-    const areaName = peerUser.city ? `Near ${peerUser.city}` : 'Nearby area';
     const approxLocation = roundToGrid(lat, lng);
+    const pairCellKey = makePairCellKeyFromParts(
+      user1Id,
+      user2Id,
+      approxLocation.lat,
+      approxLocation.lng,
+    );
+    const existingSameCellCrossings = pairCellKey
+      ? pairHistories.filter(
+        (entry: Doc<'crossPathHistory'>) =>
+          entry.expiresAt > now && makePairCellKey(entry) === pairCellKey,
+      ).length
+      : 0;
+
+    // Sensitive-place protection: repeated crossings in the same approximate
+    // cell keep the event, but store generic copy so a home/work-like area is
+    // not upgraded into a named place through repetition.
+    const areaName = existingSameCellCrossings > 0
+      ? GENERIC_CROSSING_AREA_NAME
+      : (peerUser.city ? `Near ${peerUser.city}` : GENERIC_CROSSING_AREA_NAME);
     await ctx.db.insert('crossPathHistory', {
       user1Id,
       user2Id,
@@ -1792,17 +1834,18 @@ export const cleanupExpiredLocationSamples = internalMutation({
 });
 
 // ---------------------------------------------------------------------------
-// getNearbyUsers — map markers with cellId + per-request randomized coord
-// STABILITY FIX S1: Uses indexed query instead of full table scan
-// STABILITY FIX S6: Pre-fetches blocks before loop (eliminates N+1)
+// getNearbyUsers — crossed-path-event based map markers
 //
-// Phase-2.5 data-minimization contract:
-//   - Response NEVER includes raw publishedLat/publishedLng/publishedAt or
-//     numeric distance. Those are server-only signals used for filtering.
-//   - Response includes cellId (coarse grid cell), displayLat/displayLng
-//     (per-request random point inside that cell), distanceBucket
-//     ('very_close' | 'nearby' | 'in_your_area'), and freshnessLabel
-//     ('recent' | 'earlier' | 'stale').
+// Privacy contract:
+//   - Nearby feed inclusion MUST come from active crossPathHistory rows only.
+//     Do not include users merely because publishedLat/publishedLng is near
+//     the viewer.
+//   - Public Nearby/crossed-path queries must never return raw users.latitude,
+//     users.longitude, crossedPaths.crossingLatitude, or crossingLongitude.
+//   - Response coordinates must represent only approximate crossed-path event
+//     locations: crossedLatApprox/crossedLngApprox plus per-request display
+//     jitter. Never return current/latest candidate location.
+//   - No numeric distance leaves the server; distanceBucket is a coarse label.
 // ---------------------------------------------------------------------------
 
 export const getNearbyUsers = query({
@@ -1826,83 +1869,99 @@ export const getNearbyUsers = query({
     const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
     if (currentUser.verificationStatus !== 'verified' && !isDevBypass) return [];
 
-    // Use current user's published location for distance checks
-    // (they should have published when opening Nearby screen)
+    // Viewer coordinates are server-only and used solely for optional coarse
+    // distance buckets. They are never returned to the client.
     const myLat = currentUser.publishedLat ?? currentUser.latitude;
     const myLng = currentUser.publishedLng ?? currentUser.longitude;
-    if (!myLat || !myLng) return [];
 
     // Get current user's age for filtering
     const myAge = calculateAge(currentUser.dateOfBirth);
 
-    // STABILITY FIX S1: Use indexed query for verified users only (production).
-    // In DEV bypass: widen to all users so unverified demo peers render on map.
-    // All downstream filters (isActive, incognito, nearbyEnabled, pause,
-    // visibility mode, distance, age, blocks, swipes, freshness) still apply.
-    const verifiedUsers = isDevBypass
-      ? await ctx.db.query('users').collect()
-      : await ctx.db
-          .query('users')
-          .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
-          .collect();
+    // Inclusion source: active, non-hidden crossed-path history only.
+    // This deliberately does NOT read candidate publishedLat/publishedLng.
+    const [asUser1, asUser2] = await Promise.all([
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .collect(),
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .collect(),
+    ]);
 
-    // STABILITY FIX S6/C2: Pre-fetch blocks and swipes before loop
-    // P1 EXCLUSION: Load full negative-relationship exclusion set in parallel
-    // with swipes. Keep `blockedIds` as an alias so downstream uses are unchanged.
-    const [exclusions, swipedUsersMap] = await Promise.all([
+    const latestHistoryByUser = new Map<string, Doc<'crossPathHistory'>>();
+    for (const entry of [...asUser1, ...asUser2]) {
+      if (entry.expiresAt <= now) continue;
+      const isUser1 = entry.user1Id === userId;
+      if (isUser1 && entry.hiddenByUser1) continue;
+      if (!isUser1 && entry.hiddenByUser2) continue;
+      if (
+        typeof entry.crossedLatApprox !== 'number' ||
+        typeof entry.crossedLngApprox !== 'number'
+      ) {
+        continue;
+      }
+
+      const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
+      const previous = latestHistoryByUser.get(otherUserId as string);
+      if (!previous || entry.createdAt > previous.createdAt) {
+        latestHistoryByUser.set(otherUserId as string, entry);
+      }
+    }
+
+    const historyEntries = [...latestHistoryByUser.entries()]
+      .sort((a, b) => b[1].createdAt - a[1].createdAt);
+    const otherUserIds = historyEntries.map(([id]) => id);
+    if (otherUserIds.length === 0) return [];
+
+    const [
+      exclusions,
+      swipedUsersMap,
+      photoCountsMap,
+      primaryPhotoUrlMap,
+      fetchedUsers,
+    ] = await Promise.all([
       loadDiscoveryExclusions(ctx, userId),
       prefetchSwipes(ctx, userId),
+      prefetchPhotoCounts(ctx, otherUserIds),
+      prefetchPhase1PrimaryPhotoUrls(ctx, otherUserIds),
+      Promise.all(otherUserIds.map((id) => ctx.db.get(id as Id<'users'>))),
     ]);
     const blockedIds = exclusions.blockedUserIds;
     const unmatchedUserIds = exclusions.unmatchedUserIds;
     const viewerReportedIds = exclusions.viewerReportedIds;
 
-    // First pass: collect candidate user IDs that pass basic filters
-    const candidateUserIds: string[] = [];
-    const candidateUsers: typeof verifiedUsers = [];
+    const usersMap = new Map<string, Doc<'users'>>();
+    otherUserIds.forEach((id, i) => {
+      const user = fetchedUsers[i];
+      if (user) usersMap.set(id, user as Doc<'users'>);
+    });
 
-    for (const user of verifiedUsers) {
-      if (user._id === userId) continue;
+    // Build results from crossed-path event coordinates. No current/latest
+    // candidate location is used for inclusion or returned to the frontend.
+    const viewerActivities = new Set(currentUser.activities ?? []);
+    const viewerIntent = new Set(currentUser.relationshipIntent ?? []);
+
+    const results = [];
+
+    for (const [otherUserId, entry] of historyEntries) {
+      const user = usersMap.get(otherUserId);
+      if (!user || user._id === userId) continue;
       if (!user.isActive) continue;
 
-      // Incognito mode: Hidden users don't appear on map
+      // Candidate privacy gates. These remain server-side so a client cannot
+      // opt into seeing someone who is hidden, paused, blocked, unmatched, or
+      // reported.
       if (user.incognitoMode === true) continue;
-
-      // Nearby visibility opt-out: Respect user preference
       if (user.nearbyEnabled === false) continue;
-
-      // Nearby pause: User has temporarily hidden from Nearby
       if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) continue;
 
-      // Persistent eligibility model: Nearby visibility is NOT coupled to
-      // lastActive / nearbyVisibilityMode freshness. A user remains visible
-      // until explicit exclusions fire (pause/incognito/disabled/skip/block)
-      // or a later coarse republish moves them out of range.
+      const candidateStatus = user.verificationStatus || 'unverified';
+      if (candidateStatus !== 'verified' && !isDevBypass) continue;
 
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
-
-      // Must have published location (persistent: no freshness TTL — the last
-      // coarse published position stays eligible until the next republish).
-      if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
-
-      // Safe Nearby v2 — Live map TTL: a snapshot is only visible on the
-      // map for NEARBY_MAP_TTL_MS (6 hours) after publish. Beyond that the
-      // user is removed from the map entirely; they may still appear in the
-      // historical Crossed Paths surface, which uses its own retention.
-      // The longer GHOST_CUTOFF_MS (14d) acts as a defense-in-depth backstop
-      // and is also enforced by the historical surface.
-      if (now - user.publishedAt > NEARBY_MAP_TTL_MS) continue;
-      if (now - user.publishedAt > GHOST_CUTOFF_MS) continue;
-
-      // Distance check — 0 to 1 km range (no minimum floor; co-located users eligible)
-      const distance = calculateDistanceMeters(
-        myLat,
-        myLng,
-        user.publishedLat,
-        user.publishedLng,
-      );
-      if (distance < NEARBY_MIN_METERS || distance > NEARBY_MAX_METERS) continue;
 
       // Age filtering (both directions)
       const otherAge = calculateAge(user.dateOfBirth);
@@ -1913,80 +1972,38 @@ export const getNearbyUsers = query({
       if (!currentUser.lookingFor.includes(user.gender)) continue;
       if (!user.lookingFor.includes(currentUser.gender)) continue;
 
-      // Block check (using pre-fetched set)
-      if (blockedIds.has(user._id as string)) continue;
-      // P1 EXCLUSION: hide unmatched pairs (bidirectional) and reported users
-      // (one-way) from the Nearby map.
-      if (unmatchedUserIds.has(user._id as string)) continue;
-      if (viewerReportedIds.has(user._id as string)) continue;
+      if (blockedIds.has(otherUserId)) continue;
+      if (unmatchedUserIds.has(otherUserId)) continue;
+      if (viewerReportedIds.has(otherUserId)) continue;
 
       // Skip filter (using pre-fetched map)
-      const existingSwipe = swipedUsersMap.get(user._id as string);
+      const existingSwipe = swipedUsersMap.get(otherUserId);
       if (existingSwipe) {
         if (existingSwipe.action !== 'pass') continue;
         if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) continue;
       }
 
-      candidateUserIds.push(user._id as string);
-      candidateUsers.push(user);
-    }
-
-    // STABILITY FIX: Fetch photo counts and phase-1 primary photos only for candidates.
-    const [photoCountsMap, primaryPhotoUrlMap] = await Promise.all([
-      prefetchPhotoCounts(ctx, candidateUserIds),
-      prefetchPhase1PrimaryPhotoUrls(ctx, candidateUserIds),
-    ]);
-
-    // Second pass: filter by photo count and build results.
-    // Phase-2.5 hardening + Phase-3 ranking & preview fields:
-    //   - NO raw / stored coordinates leave the server (cellId + per-request
-    //     randomized displayLatLng inside the cell only).
-    //   - NO numeric distance (distanceBucket only).
-    //   - freshnessLabel is three-tier: 'recent' | 'earlier' | 'stale'.
-    //   - Phase-3: each result carries a lightweight `tagline` and up to
-    //     three `sharedInterests` so the client can render a preview card
-    //     without a second round-trip. No sensitive data leaves the server.
-    //   - Phase-3: results are sorted by a simple score (freshness,
-    //     completeness, compatibility, activity) with a small random
-    //     tiebreak so the map does not look statically ordered.
-    const viewerActivities = new Set(currentUser.activities ?? []);
-    const viewerIntent = new Set(currentUser.relationshipIntent ?? []);
-
-    const freshnessScore: Record<string, number> = { recent: 30, earlier: 10, stale: 0 };
-
-    const results = [];
-    const rankById = new Map<string, number>();
-
-    for (let i = 0; i < candidateUsers.length; i++) {
-      const user = candidateUsers[i];
       const photoUrl = primaryPhotoUrlMap.get(user._id as string) ?? null;
       if (!photoUrl) continue;
 
       const photoCount = photoCountsMap.get(user._id as string) || 0;
       if (photoCount < 2) continue;
 
-      const locationAge = now - user.publishedAt!;
-      const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
+      const crossingAge = now - entry.createdAt;
+      const freshness: 'solid' | 'faded' = crossingAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
       const freshnessLabel: 'recent' | 'earlier' | 'stale' =
-        locationAge <= NEARBY_RECENT_WINDOW_MS
+        crossingAge <= NEARBY_RECENT_WINDOW_MS
           ? 'recent'
-          : locationAge <= NEARBY_EARLIER_WINDOW_MS
+          : crossingAge <= NEARBY_EARLIER_WINDOW_MS
           ? 'earlier'
           : 'stale';
 
-      // Server-side distance (never returned).
-      const realDistance = calculateDistanceMeters(
-        myLat,
-        myLng,
-        user.publishedLat!,
-        user.publishedLng!,
-      );
-
-      // Strong Privacy Mode: shift the cell, then re-snap.
-      let cellLat = user.publishedLat!;
-      let cellLng = user.publishedLng!;
+      // Start from the stored approximate crossed-path event coordinate.
+      // Strong Privacy Mode shifts the approximate cell again, then re-snaps.
+      let cellLat = entry.crossedLatApprox!;
+      let cellLng = entry.crossedLngApprox!;
       if (user.strongPrivacyMode === true) {
-        const seed = simpleHash(String(user._id));
+        const seed = simpleHash(`${String(user._id)}:${String(entry._id)}`);
         const bearingRad = (seed % 360) * (Math.PI / 180);
         const distanceMeters = 200 + (seed % 201);
         const fuzzed = offsetCoords(cellLat, cellLng, distanceMeters, bearingRad);
@@ -1995,16 +2012,22 @@ export const getNearbyUsers = query({
         cellLng = resnapped.lng;
       }
 
-      // Snapshot-bound seed: stable for this snapshot (userId + publishedAt);
-      // changes when the user republishes, so jitter rotates with each snapshot.
-      const displaySeed = `${String(user._id)}:${user.publishedAt ?? 0}`;
+      // Event-bound seed: stable for this crossed-path event and unrelated to
+      // the candidate's current/latest location.
+      const displaySeed = `crossed:${String(entry._id)}:${entry.createdAt}`;
       const display = makeDisplayLatLng(cellLat, cellLng, displaySeed);
       const cellId = makeCellId(cellLat, cellLng);
 
-      const bucketingDistance = user.strongPrivacyMode === true
-        ? calculateDistanceMeters(myLat, myLng, cellLat, cellLng)
-        : realDistance;
-      const bucket = bucketNearbyDistance(bucketingDistance);
+      let distanceBucket: NearbyDistanceBucket | undefined;
+      if (
+        user.hideDistance !== true &&
+        typeof myLat === 'number' &&
+        typeof myLng === 'number'
+      ) {
+        distanceBucket = bucketNearbyDistance(
+          calculateDistanceMeters(myLat, myLng, cellLat, cellLng),
+        ).label;
+      }
 
       // --- Phase-3: preview fields + ranking signals ---
 
@@ -2041,69 +2064,48 @@ export const getNearbyUsers = query({
         tagline = clipText(user.bio, 80);
       }
 
-      // Profile completeness (0..3): bio >=20 chars, >=3 photos, >=1 prompt.
-      const completeness =
-        ((user.bio && user.bio.length >= 20) ? 1 : 0) +
-        (photoCount >= 3 ? 1 : 0) +
-        (((user.profilePrompts ?? []).length >= 1) ? 1 : 0);
-
-      // Activity signal: prefer recent `lastActive`, capped and coarse.
-      const lastActive = typeof user.lastActive === 'number' ? user.lastActive : 0;
-      const activityAge = lastActive > 0 ? now - lastActive : Infinity;
-      const activityScore =
-        activityAge <= 24 * 60 * 60 * 1000 ? 10 :
-        activityAge <= 7 * 24 * 60 * 60 * 1000 ? 5 : 0;
-
-      // Final score. Weights are intentionally small & simple — freshness
-      // dominates, followed by compatibility, then completeness, then
-      // activity. A small random epsilon keeps same-score users shuffled.
-      const score =
-        (freshnessScore[freshnessLabel] ?? 0)
-        + shared.length * 7
-        + completeness * 5
-        + activityScore
-        + (user.isVerified ? 5 : 0)
-        + Math.random() * 4; // 0..4 jitter
-
-      rankById.set(user._id as string, score);
-
       results.push({
-        id: user._id,
-        name: user.name,
-        age: calculateAge(user.dateOfBirth),
-        cellId,
-        displayLat: display.lat,
-        displayLng: display.lng,
-        distanceBucket: user.hideDistance === true ? undefined : bucket.label,
-        freshness,
-        freshnessLabel,
-        photoUrl,
-        isVerified: user.isVerified,
-        strongPrivacyMode: user.strongPrivacyMode ?? false,
-        hideDistance: user.hideDistance ?? false,
-        // Phase-3 preview payload.
-        tagline,
-        sharedInterests: shared.length > 0 ? shared : undefined,
+        crossedAt: entry.createdAt,
+        item: {
+          id: user._id,
+          name: user.name,
+          age: calculateAge(user.dateOfBirth),
+          cellId,
+          displayLat: display.lat,
+          displayLng: display.lng,
+          distanceBucket,
+          freshness,
+          freshnessLabel,
+          photoUrl,
+          isVerified: user.isVerified || candidateStatus === 'verified',
+          strongPrivacyMode: user.strongPrivacyMode ?? false,
+          hideDistance: user.hideDistance ?? false,
+          // Phase-3 preview payload.
+          tagline,
+          sharedInterests: shared.length > 0 ? shared : undefined,
+        },
       });
     }
 
-    // Phase-3 sort: verified first, then by descending score, then random.
-    // Score already includes freshness weight and a small random epsilon.
-    results.sort((a, b) => {
-      if (a.isVerified !== b.isVerified) return a.isVerified ? -1 : 1;
-      const sa = rankById.get(a.id as string) ?? 0;
-      const sb = rankById.get(b.id as string) ?? 0;
-      return sb - sa;
-    });
+    // Main Nearby feed order is latest crossed-path event first. It is not
+    // ranked by latest published location or exact distance.
+    results.sort((a, b) => b.crossedAt - a.crossedAt);
 
-    return results;
+    return results.map((result) => result.item);
   },
 });
 
 // ---------------------------------------------------------------------------
-// getCrossPathHistory — crossed paths history list (30-day retention)
+// getCrossPathHistory — crossed paths history list (14-day retention)
 // Returns crossed paths with approximate location and reason tags.
 // Filters out hidden entries for the requesting user.
+//
+// Privacy contract:
+//   - Never return raw users.latitude/users.longitude or crossedPaths legacy
+//     crossingLatitude/crossingLongitude fields.
+//   - Only return approximate crossed-path coordinates from crossPathHistory.
+//   - Area copy is downgraded to a generic label when repeated same-cell
+//     crossings could expose a sensitive routine location.
 // ---------------------------------------------------------------------------
 
 export const getCrossPathHistory = query({
@@ -2157,7 +2159,7 @@ export const getCrossPathHistory = query({
 
     const all = [...asUser1, ...asUser2]
       .filter((entry) => {
-        // Filter expired entries (4 weeks)
+        // Filter expired entries (14 days)
         if (entry.expiresAt <= now) return false;
 
         // Filter hidden entries for this user
@@ -2185,6 +2187,8 @@ export const getCrossPathHistory = query({
       })
       .sort((a, b) => b.createdAt - a.createdAt) // newest first
       .slice(0, MAX_HISTORY_ENTRIES);
+
+    const pairCellCounts = buildPairCellCounts(all);
 
     // Collect unique other user IDs
     const otherUserIds = [...new Set(
@@ -2248,8 +2252,15 @@ export const getCrossPathHistory = query({
         whyExplanation = `You were in the same area within the last 24 hours. ${reasonText || 'You have something in common.'}`;
       }
 
-      // Area name: Only reveal after repeated crossings (privacy)
-      const displayAreaName = crossingCount > 1 ? entry.areaName : 'Nearby area';
+      // Area name: only reveal after repeated crossings, and never reveal when
+      // repeat crossings cluster in the same approximate cell.
+      const pairCellKey = makePairCellKey(entry);
+      const pairCellCount = pairCellKey ? (pairCellCounts.get(pairCellKey) ?? 1) : 1;
+      const displayAreaName = getPrivacySafeAreaName(
+        entry.areaName,
+        crossingCount,
+        pairCellCount,
+      );
 
       // P0-3: Strong Privacy consistency for crossed-path history.
       // When the other user has Strong Privacy Mode on, both the approximate
@@ -2442,6 +2453,8 @@ export const cleanupExpiredHistory = internalMutation({
 // Returns ONLY crossed path history entries (NO user/photo joins).
 // Filtering: delay + window + optional radius.
 // Client handles user/photo resolution separately to avoid N+1.
+// Privacy: returns only approximate crossed-path coordinates and generic area
+// copy. Never return raw user coordinates or legacy crossedPaths coordinates.
 // ---------------------------------------------------------------------------
 
 export const getDelayedCrossedPathEntries = query({
@@ -2482,6 +2495,7 @@ export const getDelayedCrossedPathEntries = query({
     // Merge and filter
     const filtered = [...asUser1, ...asUser2].filter((entry) => {
       // Time window check
+      if (entry.expiresAt <= now) return false;
       if (entry.createdAt < visibleAfter) return false;
       if (entry.createdAt > visibleBefore) return false;
 
@@ -2520,7 +2534,7 @@ export const getDelayedCrossedPathEntries = query({
       createdAt: entry.createdAt,
       crossedLatApprox: entry.crossedLatApprox ?? null,
       crossedLngApprox: entry.crossedLngApprox ?? null,
-      areaName: entry.areaName,
+      areaName: GENERIC_CROSSING_AREA_NAME,
       reasonTags: entry.reasonTags ?? [],
     }));
   },
@@ -2529,6 +2543,9 @@ export const getDelayedCrossedPathEntries = query({
 // ---------------------------------------------------------------------------
 // getCrossedPaths — crossed paths list (no unlock system)
 // Returns crossing counts and user info for display.
+// Privacy: legacy crossedPaths crossingLatitude/crossingLongitude are not
+// returned and are not used for public distance labels; labels use active
+// crossPathHistory approximate event coordinates when available.
 // ---------------------------------------------------------------------------
 
 export const getCrossedPaths = query({
@@ -2563,24 +2580,10 @@ export const getCrossedPaths = query({
 
     const allCrossedPaths = [...asUser1, ...asUser2];
 
-    // Sort by recency first (most recent), then distance second (closer first)
+    // Sort by recency only. Do not rank by legacy crossingLatitude/Longitude
+    // because older rows may contain pre-hardening raw coordinates.
     allCrossedPaths.sort((a, b) => {
-      // Primary: recency (most recent first)
-      const recencyDiff = b.lastCrossedAt - a.lastCrossedAt;
-      if (Math.abs(recencyDiff) > 60 * 60 * 1000) { // More than 1 hour difference
-        return recencyDiff;
-      }
-      // Secondary: distance (closer first) if we have location data
-      if (myLat && myLng) {
-        const distA = a.crossingLatitude && a.crossingLongitude
-          ? calculateDistanceMeters(myLat, myLng, a.crossingLatitude, a.crossingLongitude)
-          : Infinity;
-        const distB = b.crossingLatitude && b.crossingLongitude
-          ? calculateDistanceMeters(myLat, myLng, b.crossingLatitude, b.crossingLongitude)
-          : Infinity;
-        return distA - distB;
-      }
-      return recencyDiff;
+      return b.lastCrossedAt - a.lastCrossedAt;
     });
 
     const topCrossedPaths = allCrossedPaths.slice(0, limit);
@@ -2618,14 +2621,46 @@ export const getCrossedPaths = query({
       const photoUrl = photosMap.get(otherUserId as string) ?? null;
       if (!photoUrl) continue;
 
-      // Calculate distance range if we have location data
+      const orderedUser1 = userId < otherUserId ? userId : otherUserId;
+      const orderedUser2 = userId < otherUserId ? otherUserId : userId;
+      const latestHistories = await ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', orderedUser1).eq('user2Id', orderedUser2),
+        )
+        .collect();
+      const latestHistory = latestHistories
+        .filter((entry) => entry.expiresAt > now)
+        .sort((a, b) => b.createdAt - a.createdAt)[0];
+
+      let approxLat = latestHistory?.crossedLatApprox;
+      let approxLng = latestHistory?.crossedLngApprox;
+      if (
+        otherUser.strongPrivacyMode === true &&
+        approxLat !== undefined &&
+        approxLng !== undefined
+      ) {
+        const seed = simpleHash(String(otherUser._id));
+        const bearingRad = (seed % 360) * (Math.PI / 180);
+        const offsetMeters = 200 + (seed % 201);
+        const fuzzed = offsetCoords(approxLat, approxLng, offsetMeters, bearingRad);
+        approxLat = fuzzed.lat;
+        approxLng = fuzzed.lng;
+      }
+
+      // Calculate distance range from active approximate history only.
       let distanceRange: string | null = null;
-      if (myLat && myLng && cp.crossingLatitude && cp.crossingLongitude) {
+      if (
+        typeof myLat === 'number' &&
+        typeof myLng === 'number' &&
+        approxLat !== undefined &&
+        approxLng !== undefined
+      ) {
         const distanceMeters = calculateDistanceMeters(
           myLat,
           myLng,
-          cp.crossingLatitude,
-          cp.crossingLongitude,
+          approxLat,
+          approxLng,
         );
         distanceRange = formatDistanceRange(distanceMeters);
       }
@@ -3096,7 +3131,8 @@ function bucketNearbyDistance(meters: number): { label: NearbyDistanceBucket; mi
  * Returns approximate location that doesn't reveal exact position.
  */
 function roundToGrid(lat: number, lng: number): { lat: number; lng: number } {
-  // 1 degree latitude ≈ 111km, so 500m ≈ 0.0045 degrees
+  // 1 degree latitude is about 111km, so LOCATION_GRID_METERS sets the
+  // precision floor used by Nearby and crossed-path event locations.
   const gridSize = LOCATION_GRID_METERS / 111000;
   return {
     lat: Math.round(lat / gridSize) * gridSize,
@@ -3128,6 +3164,45 @@ function clipText(raw: unknown, max: number): string | undefined {
  */
 function makeCellId(gridLat: number, gridLng: number): string {
   return `cell:${gridLat.toFixed(5)}_${gridLng.toFixed(5)}`;
+}
+
+function makePairCellKeyFromParts(
+  user1Id: Id<'users'>,
+  user2Id: Id<'users'>,
+  lat?: number,
+  lng?: number,
+): string | null {
+  if (typeof lat !== 'number' || typeof lng !== 'number') return null;
+  return `${String(user1Id)}:${String(user2Id)}:${makeCellId(lat, lng)}`;
+}
+
+function makePairCellKey(entry: Doc<'crossPathHistory'>): string | null {
+  return makePairCellKeyFromParts(
+    entry.user1Id,
+    entry.user2Id,
+    entry.crossedLatApprox,
+    entry.crossedLngApprox,
+  );
+}
+
+function buildPairCellCounts(entries: Doc<'crossPathHistory'>[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    const key = makePairCellKey(entry);
+    if (!key) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function getPrivacySafeAreaName(
+  areaName: string | undefined,
+  crossingCount: number,
+  pairCellCount: number,
+): string {
+  if (crossingCount <= 1) return GENERIC_CROSSING_AREA_NAME;
+  if (pairCellCount > 1) return GENERIC_CROSSING_AREA_NAME;
+  return areaName || GENERIC_CROSSING_AREA_NAME;
 }
 
 /**
