@@ -27,8 +27,10 @@ import { useAuthStore } from '@/stores/authStore';
 import { INCOGNITO_COLORS, FONT_SIZE, lineHeight, moderateScale } from '@/lib/constants';
 // P2-001/002: Import responsive utilities
 import { SPACING, SIZES } from '@/lib/responsive';
-// THEME: Import chat theme store
 import { useChatThemeColors } from '@/stores/chatThemeStore';
+// Public room uses a constant premium background (NOT theme-controlled).
+// Theme picker continues to apply to private DM only.
+import RoomBackground from '@/components/chatroom/RoomBackground';
 import {
   DEMO_CHAT_ROOMS,
   getDemoMessagesForRoom,
@@ -417,7 +419,6 @@ export default function ChatRoomScreen() {
     roomIdStr.length > 10 &&
     !!authUserId;
 
-  // THEME: Get current chat theme colors
   const themeColors = useChatThemeColors();
   const enterRoom = useChatRoomSessionStore((s) => s.enterRoom);
   const exitRoom = useChatRoomSessionStore((s) => s.exitRoom);
@@ -3698,8 +3699,13 @@ export default function ChatRoomScreen() {
   // ═══════════════════════════════════════════════════════════════════════
   // RENDER - KAV + FlatList + flexGrow + justifyContent:flex-end
   // ═══════════════════════════════════════════════════════════════════════
+  const Background = isPrivateRoom ? View : RoomBackground;
+  const backgroundStyle = isPrivateRoom
+    ? [styles.container, { backgroundColor: themeColors.background }]
+    : styles.container;
+
   return (
-    <View style={[styles.container, { backgroundColor: themeColors.background }]}>
+    <Background style={backgroundStyle}>
       {/* ─── HEADER ─── */}
       <ChatRoomsHeader
         title={roomName}
@@ -4167,7 +4173,7 @@ export default function ChatRoomScreen() {
       </ChatSheet>
 
       {/* COIN-FLASH-FIX: CoinFeedback animation removed - was causing yellow flash during send */}
-    </View>
+    </Background>
   );
 }
 
