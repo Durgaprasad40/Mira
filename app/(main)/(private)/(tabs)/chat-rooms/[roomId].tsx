@@ -915,8 +915,9 @@ export default function ChatRoomScreen() {
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
       () => {
         setKeyboardVisible(false);
-        // Android fix: Force KeyboardAvoidingView to recalculate layout
-        if (Platform.OS === 'android') {
+        // Android fix: Force group-chat KAV to recalculate layout only when
+        // the group composer owns keyboard behavior. ChatSheet owns it while open.
+        if (Platform.OS === 'android' && !isPrivateChatOpen) {
           setKavKey((k) => k + 1);
         }
       }
@@ -926,7 +927,7 @@ export default function ChatRoomScreen() {
       showListener.remove();
       hideListener.remove();
     };
-  }, []);
+  }, [isPrivateChatOpen]);
 
   // Near-bottom tracking for smart auto-scroll (don't jump when user reads older messages)
   const isNearBottomRef = useRef(true);
@@ -3856,7 +3857,7 @@ export default function ChatRoomScreen() {
       <KeyboardAvoidingView
         key={Platform.OS === 'android' ? kavKey : undefined}
         style={styles.keyboardAvoid}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={isPrivateChatOpen ? undefined : (Platform.OS === 'ios' ? 'padding' : 'height')}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
         <View style={styles.chatArea}>
