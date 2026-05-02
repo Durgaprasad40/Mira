@@ -60,6 +60,7 @@ import {
   Linking,
   Platform,
   Animated,
+  Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -68,6 +69,7 @@ import Supercluster from 'supercluster';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 import { useLocationStore, useBestLocation } from '@/stores/locationStore';
 import { useAuthStore } from '@/stores/authStore';
 import { safePush } from '@/lib/safeRouter';
@@ -239,6 +241,7 @@ type LocationUIState =
  */
 interface NearbyUser {
   id: string;
+  historyId?: string;
   name: string;
   age: number;
   cellId: string;
@@ -456,6 +459,7 @@ export default function NearbyScreen() {
   const [isMapReady, setIsMapReady] = useState(false);
   const [retainedNearbyUsersResult, setRetainedNearbyUsersResult] = useState<NearbyUsersQueryResult | null>(null);
   const [nearbyRefreshKey, setNearbyRefreshKey] = useState(0);
+  const [removedNearbyUserIds, setRemovedNearbyUserIds] = useState<Set<string>>(() => new Set());
   // Phase-3: preview card state. When non-null, the single-step preview
   // modal is shown and the user has not yet committed to opening the full
   // profile. All preview data comes from the already-fetched payload — no
@@ -826,6 +830,7 @@ export default function NearbyScreen() {
   // Publish location mutation (live mode only)
   // ---------------------------------------------------------------------------
   const publishLocationMutation = useMutation(api.crossedPaths.publishLocation);
+  const hideCrossedPathMutation = useMutation(api.crossedPaths.hideCrossedPath);
 
   // Track last published coords to avoid spam
   const lastPublishedRef = useRef<{ lat: number; lng: number; publishedAt: number } | null>(null);
@@ -1182,6 +1187,10 @@ export default function NearbyScreen() {
         skippedCount++;
         return false;
       }
+      if (removedNearbyUserIds.has(user.id)) {
+        skippedCount++;
+        return false;
+      }
       validCount++;
       return true;
     });
@@ -1193,7 +1202,7 @@ export default function NearbyScreen() {
     }
 
     return processed;
-  }, [displayNearbyUsersResult, userId]);
+  }, [displayNearbyUsersResult, removedNearbyUserIds, userId]);
 
   // ---------------------------------------------------------------------------
   // Sort visible markers fairly before clustering
@@ -1483,6 +1492,7 @@ export default function NearbyScreen() {
 
     const preview: NearbyPreviewData = {
       id: user.id,
+      historyId: user.historyId,
       name: user.name,
       age: user.age,
       photoUrl: user.photoUrl,
@@ -1539,6 +1549,39 @@ export default function NearbyScreen() {
     log.info('[NEARBY]', 'preview → like (profile)', { id: user.id });
     safePush(router, `/(main)/profile/${user.id}${freshnessParam}` as any, 'nearby->profile-like');
   }, [router]);
+
+  const handlePreviewRemove = useCallback((user: NearbyPreviewData) => {
+    Alert.alert(
+      'Remove from Nearby?',
+      "You won't see this person in Nearby or crossed paths again unless you restore them later.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            if (!userId || !user.historyId) return;
+            try {
+              await hideCrossedPathMutation({
+                authUserId: userId,
+                historyId: user.historyId as Id<'crossPathHistory'>,
+              });
+              setRemovedNearbyUserIds((current) => {
+                const next = new Set(current);
+                next.add(user.id);
+                return next;
+              });
+              setPreviewUser(null);
+              requestNearbyRefresh({ force: true });
+            } catch (error) {
+              if (__DEV__) console.error('[NEARBY] Remove failed:', error);
+              Alert.alert('Error', 'Failed to remove. Please try again.');
+            }
+          },
+        },
+      ],
+    );
+  }, [hideCrossedPathMutation, requestNearbyRefresh, userId]);
 
   // ---------------------------------------------------------------------------
   // Map control handlers
@@ -2280,6 +2323,7 @@ export default function NearbyScreen() {
         onClose={handleClosePreview}
         onViewProfile={handlePreviewViewProfile}
         onLike={handlePreviewLike}
+        onRemove={!isDemo ? handlePreviewRemove : undefined}
       />
     </SafeAreaView>
   );

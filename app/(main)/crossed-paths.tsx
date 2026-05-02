@@ -354,7 +354,7 @@ export default function CrossedPathsScreen() {
   const handleHidePress = useCallback((item: CrossedPathItem) => {
     Alert.alert(
       'Hide this person?',
-      `${item.otherUserName} will be hidden from your crossed paths list. You can still see them if you cross paths again.`,
+      `${item.otherUserName} will stay removed from Nearby and crossed paths unless you restore them later.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -386,8 +386,8 @@ export default function CrossedPathsScreen() {
 
   const handleDeletePress = useCallback((item: CrossedPathItem) => {
     Alert.alert(
-      'Remove permanently?',
-      `This will permanently remove ${item.otherUserName} from your crossed paths history. This action cannot be undone.`,
+      'Remove this person?',
+      `${item.otherUserName} will stay removed from Nearby and crossed paths unless you restore them later.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {

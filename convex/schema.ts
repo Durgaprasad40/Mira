@@ -1035,6 +1035,10 @@ export default defineSchema({
     crossingLongitude: v.optional(v.number()),
     // BUGFIX #28: Track last notification time to prevent duplicate notifications
     lastNotifiedAt: v.optional(v.number()),
+    // Pair-level viewer dismissals. If set, that viewer no longer sees this
+    // pair in Nearby/crossed paths and no longer receives pair notifications.
+    dismissedByUser1At: v.optional(v.number()),
+    dismissedByUser2At: v.optional(v.number()),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])

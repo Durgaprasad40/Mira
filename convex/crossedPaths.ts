@@ -271,6 +271,159 @@ function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>, now: 
   return `crossed_paths:${sorted[0]}:${sorted[1]}:${bucket}`;
 }
 
+function orderUserPair(userA: Id<'users'>, userB: Id<'users'>): { user1Id: Id<'users'>; user2Id: Id<'users'> } {
+  return userA < userB
+    ? { user1Id: userA, user2Id: userB }
+    : { user1Id: userB, user2Id: userA };
+}
+
+async function getCrossedPathForPair(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userA: Id<'users'>,
+  userB: Id<'users'>,
+): Promise<Doc<'crossedPaths'> | null> {
+  const { user1Id, user2Id } = orderUserPair(userA, userB);
+  return await ctx.db
+    .query('crossedPaths')
+    .withIndex('by_users', (q: any) =>
+      q.eq('user1Id', user1Id).eq('user2Id', user2Id),
+    )
+    .first();
+}
+
+function isPairDismissedForViewer(
+  crossedPath: Doc<'crossedPaths'> | null | undefined,
+  viewerId: Id<'users'>,
+): boolean {
+  if (!crossedPath) return false;
+  const dismissals = crossedPath as Doc<'crossedPaths'> & {
+    dismissedByUser1At?: number;
+    dismissedByUser2At?: number;
+  };
+  if (dismissals.user1Id === viewerId) {
+    return typeof dismissals.dismissedByUser1At === 'number';
+  }
+  if (dismissals.user2Id === viewerId) {
+    return typeof dismissals.dismissedByUser2At === 'number';
+  }
+  return false;
+}
+
+function getPairDismissPatchForViewer(
+  user1Id: Id<'users'>,
+  user2Id: Id<'users'>,
+  viewerId: Id<'users'>,
+  now: number,
+): { dismissedByUser1At?: number; dismissedByUser2At?: number } {
+  if (viewerId === user1Id) return { dismissedByUser1At: now };
+  if (viewerId === user2Id) return { dismissedByUser2At: now };
+  return {};
+}
+
+function getHistoryHiddenPatchForViewer(
+  user1Id: Id<'users'>,
+  user2Id: Id<'users'>,
+  viewerId: Id<'users'>,
+): { hiddenByUser1?: boolean; hiddenByUser2?: boolean } {
+  if (viewerId === user1Id) return { hiddenByUser1: true };
+  if (viewerId === user2Id) return { hiddenByUser2: true };
+  return {};
+}
+
+function getHistoryHiddenPatchForDismissedPair(
+  crossedPath: Doc<'crossedPaths'> | null | undefined,
+  user1Id: Id<'users'>,
+  user2Id: Id<'users'>,
+): { hiddenByUser1?: boolean; hiddenByUser2?: boolean } {
+  const patch: { hiddenByUser1?: boolean; hiddenByUser2?: boolean } = {};
+  if (crossedPath && isPairDismissedForViewer(crossedPath, user1Id)) {
+    patch.hiddenByUser1 = true;
+  }
+  if (crossedPath && isPairDismissedForViewer(crossedPath, user2Id)) {
+    patch.hiddenByUser2 = true;
+  }
+  return patch;
+}
+
+async function setPairDismissedForViewer(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  viewerId: Id<'users'>,
+  otherUserId: Id<'users'>,
+  now: number,
+): Promise<{ user1Id: Id<'users'>; user2Id: Id<'users'> }> {
+  const { user1Id, user2Id } = orderUserPair(viewerId, otherUserId);
+  const dismissPatch = getPairDismissPatchForViewer(user1Id, user2Id, viewerId, now);
+  const crossedPath = await getCrossedPathForPair(ctx, user1Id, user2Id);
+
+  if (crossedPath) {
+    await ctx.db.patch(crossedPath._id, dismissPatch);
+  } else {
+    // Rare legacy case: a history row exists without its pair row. Insert a
+    // dismiss-only pair row so future crossings stay hidden for this viewer.
+    await ctx.db.insert('crossedPaths', {
+      user1Id,
+      user2Id,
+      count: 0,
+      lastCrossedAt: now,
+      ...dismissPatch,
+    });
+  }
+
+  return { user1Id, user2Id };
+}
+
+async function hideActiveHistoryRowsForViewer(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  viewerId: Id<'users'>,
+  user1Id: Id<'users'>,
+  user2Id: Id<'users'>,
+  now: number,
+) {
+  const hiddenPatch = getHistoryHiddenPatchForViewer(user1Id, user2Id, viewerId);
+  if (!hiddenPatch.hiddenByUser1 && !hiddenPatch.hiddenByUser2) return;
+
+  const histories = await ctx.db
+    .query('crossPathHistory')
+    .withIndex('by_users', (q: any) =>
+      q.eq('user1Id', user1Id).eq('user2Id', user2Id),
+    )
+    .collect();
+
+  for (const entry of histories as Doc<'crossPathHistory'>[]) {
+    if (entry.expiresAt <= now) continue;
+    const alreadyHidden =
+      (hiddenPatch.hiddenByUser1 && entry.hiddenByUser1 === true) ||
+      (hiddenPatch.hiddenByUser2 && entry.hiddenByUser2 === true);
+    if (alreadyHidden) continue;
+    await ctx.db.patch(entry._id, hiddenPatch);
+  }
+}
+
+async function getDismissedOtherUserIds(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  viewerId: Id<'users'>,
+  otherUserIds: string[],
+): Promise<Set<string>> {
+  const uniqueOtherUserIds = [...new Set(otherUserIds)];
+  const checks = await Promise.all(
+    uniqueOtherUserIds.map(async (otherUserId) => {
+      const crossedPath = await getCrossedPathForPair(
+        ctx,
+        viewerId,
+        otherUserId as Id<'users'>,
+      );
+      return crossedPath && isPairDismissedForViewer(crossedPath, viewerId)
+        ? otherUserId
+        : null;
+    }),
+  );
+  return new Set(checks.filter((id): id is string => id !== null));
+}
+
 // ---------------------------------------------------------------------------
 // publishLocation — updates published location (max once per 6 hours)
 // Called when Nearby screen is opened. Others see publishedLat/Lng, not live GPS.
@@ -951,6 +1104,20 @@ export const recordLocation = mutation({
         continue;
       }
 
+      const pairDismissalState = await getCrossedPathForPair(ctx, user1Id, user2Id);
+      const hiddenForDismissedViewers = getHistoryHiddenPatchForDismissedPair(
+        pairDismissalState,
+        user1Id,
+        user2Id,
+      );
+      const hiddenByUser1 = hiddenForDismissedViewers.hiddenByUser1 === true;
+      const hiddenByUser2 = hiddenForDismissedViewers.hiddenByUser2 === true;
+      if (hiddenByUser1 && hiddenByUser2) {
+        // Both viewers removed this pair. Keep the pair row for suppression,
+        // but do not create history or notifications.
+        continue;
+      }
+
       // Compute approximate crossing location (privacy: rounded to ~300m grid)
       const approxLocation = roundToGrid(latitude, longitude);
       const pairCellKey = makePairCellKeyFromParts(
@@ -980,6 +1147,7 @@ export const recordLocation = mutation({
         crossedLatApprox: approxLocation.lat,
         crossedLngApprox: approxLocation.lng,
         reasonTags,
+        ...hiddenForDismissedViewers,
         createdAt: now,
         expiresAt: now + HISTORY_EXPIRY_MS,
       });
@@ -1030,6 +1198,12 @@ export const recordLocation = mutation({
       );
 
       if (canNotify && currentCrossedPath) {
+        const user1Dismissed = isPairDismissedForViewer(currentCrossedPath, user1Id);
+        const user2Dismissed = isPairDismissedForViewer(currentCrossedPath, user2Id);
+        if (user1Dismissed && user2Dismissed) {
+          continue;
+        }
+
         // Rate limiting: Check if user has received too many notifications in the last 24 hours
         const recentNotificationsUser1 = await ctx.db
           .query('notifications')
@@ -1100,10 +1274,12 @@ export const recordLocation = mutation({
         // Only send notification if:
         // 1. Under rate limit (max 3/hour)
         // 2. No existing notification with same dedupeKey within cooldown window
-        const shouldNotifyUser1 = recentNotificationsUser1.length < MAX_NOTIFICATIONS_PER_DAY &&
+        const shouldNotifyUser1 = !user1Dismissed &&
+          recentNotificationsUser1.length < MAX_NOTIFICATIONS_PER_DAY &&
           (!existingNotifUser1 || now - existingNotifUser1.createdAt >= NOTIFICATION_COOLDOWN_MS);
 
-        const shouldNotifyUser2 = recentNotificationsUser2.length < MAX_NOTIFICATIONS_PER_DAY &&
+        const shouldNotifyUser2 = !user2Dismissed &&
+          recentNotificationsUser2.length < MAX_NOTIFICATIONS_PER_DAY &&
           (!existingNotifUser2 || now - existingNotifUser2.createdAt >= NOTIFICATION_COOLDOWN_MS);
 
         if (shouldNotifyUser1) {
@@ -1689,6 +1865,18 @@ async function detectCrossingsForSample(
       continue;
     }
 
+    const pairDismissalState = await getCrossedPathForPair(ctx, user1Id, user2Id);
+    const hiddenForDismissedViewers = getHistoryHiddenPatchForDismissedPair(
+      pairDismissalState,
+      user1Id,
+      user2Id,
+    );
+    const hiddenByUser1 = hiddenForDismissedViewers.hiddenByUser1 === true;
+    const hiddenByUser2 = hiddenForDismissedViewers.hiddenByUser2 === true;
+    if (hiddenByUser1 && hiddenByUser2) {
+      continue;
+    }
+
     const approxLocation = roundToGrid(lat, lng);
     const pairCellKey = makePairCellKeyFromParts(
       user1Id,
@@ -1716,6 +1904,7 @@ async function detectCrossingsForSample(
       crossedLatApprox: approxLocation.lat,
       crossedLngApprox: approxLocation.lng,
       reasonTags,
+      ...hiddenForDismissedViewers,
       createdAt: now,
       expiresAt: now + HISTORY_EXPIRY_MS,
     });
@@ -1741,6 +1930,10 @@ async function detectCrossingsForSample(
       now - currentCrossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS;
     if (!canNotify) continue;
 
+    const user1Dismissed = isPairDismissedForViewer(currentCrossedPath, user1Id);
+    const user2Dismissed = isPairDismissedForViewer(currentCrossedPath, user2Id);
+    if (user1Dismissed && user2Dismissed) continue;
+
     await ctx.db.patch(currentCrossedPath._id, { lastNotifiedAt: now });
 
     const reasonText = formatReasonForNotification(reasonTags[0] ?? 'common');
@@ -1763,6 +1956,8 @@ async function detectCrossingsForSample(
       [user1Id, user2Id],
       [user2Id, user1Id],
     ] as const) {
+      if (isPairDismissedForViewer(currentCrossedPath, recipient)) continue;
+
       const existing = await ctx.db
         .query('notifications')
         .withIndex('by_user_dedupe', (q: any) =>
@@ -1914,6 +2109,7 @@ export const getNearbyUsers = query({
       .sort((a, b) => b[1].createdAt - a[1].createdAt);
     const otherUserIds = historyEntries.map(([id]) => id);
     if (otherUserIds.length === 0) return [];
+    const dismissedOtherUserIds = await getDismissedOtherUserIds(ctx, userId, otherUserIds);
 
     const [
       exclusions,
@@ -1946,6 +2142,8 @@ export const getNearbyUsers = query({
     const results = [];
 
     for (const [otherUserId, entry] of historyEntries) {
+      if (dismissedOtherUserIds.has(otherUserId)) continue;
+
       const user = usersMap.get(otherUserId);
       if (!user || user._id === userId) continue;
       if (!user.isActive) continue;
@@ -2068,6 +2266,7 @@ export const getNearbyUsers = query({
         crossedAt: entry.createdAt,
         item: {
           id: user._id,
+          historyId: entry._id,
           name: user.name,
           age: calculateAge(user.dateOfBirth),
           cellId,
@@ -2157,7 +2356,7 @@ export const getCrossPathHistory = query({
       .withIndex('by_user2', (q) => q.eq('user2Id', userId))
       .collect();
 
-    const all = [...asUser1, ...asUser2]
+    const filteredHistory = [...asUser1, ...asUser2]
       .filter((entry) => {
         // Filter expired entries (14 days)
         if (entry.expiresAt <= now) return false;
@@ -2184,6 +2383,21 @@ export const getCrossPathHistory = query({
         }
 
         return true;
+      });
+
+    const filteredOtherUserIds = filteredHistory.map((entry) =>
+      entry.user1Id === userId ? String(entry.user2Id) : String(entry.user1Id),
+    );
+    const dismissedOtherUserIds = await getDismissedOtherUserIds(
+      ctx,
+      userId,
+      filteredOtherUserIds,
+    );
+
+    const all = filteredHistory
+      .filter((entry) => {
+        const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
+        return !dismissedOtherUserIds.has(otherUserId as string);
       })
       .sort((a, b) => b.createdAt - a.createdAt) // newest first
       .slice(0, MAX_HISTORY_ENTRIES);
@@ -2360,6 +2574,7 @@ export const hideCrossedPath = mutation({
   },
   handler: async (ctx, args) => {
     const { authUserId, historyId } = args;
+    const now = Date.now();
 
     // P2 SECURITY: Resolve auth ID to Convex user ID server-side
     const userId = await resolveUserIdByAuthId(ctx, authUserId);
@@ -2380,12 +2595,17 @@ export const hideCrossedPath = mutation({
       return { success: false, reason: 'unauthorized' };
     }
 
-    // Set the appropriate hidden flag
-    if (isUser1) {
-      await ctx.db.patch(historyId, { hiddenByUser1: true });
-    } else {
-      await ctx.db.patch(historyId, { hiddenByUser2: true });
-    }
+    const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
+    const { user1Id, user2Id } = await setPairDismissedForViewer(
+      ctx,
+      userId,
+      otherUserId,
+      now,
+    );
+
+    // Backward compatibility: hide current and existing active history rows
+    // for this viewer only. The other viewer's visibility is untouched.
+    await hideActiveHistoryRowsForViewer(ctx, userId, user1Id, user2Id, now);
 
     return { success: true };
   },
@@ -2403,6 +2623,7 @@ export const deleteCrossedPath = mutation({
   },
   handler: async (ctx, args) => {
     const { authUserId, historyId } = args;
+    const now = Date.now();
 
     // P2 SECURITY: Resolve auth ID to Convex user ID server-side
     const userId = await resolveUserIdByAuthId(ctx, authUserId);
@@ -2420,8 +2641,17 @@ export const deleteCrossedPath = mutation({
       return { success: false, reason: 'unauthorized' };
     }
 
-    // Delete the entry
-    await ctx.db.delete(historyId);
+    const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
+    const { user1Id, user2Id } = await setPairDismissedForViewer(
+      ctx,
+      userId,
+      otherUserId,
+      now,
+    );
+
+    // Viewer-scoped remove: keep shared rows for the other user, but hide all
+    // active history rows from the requester and suppress future resurfacing.
+    await hideActiveHistoryRowsForViewer(ctx, userId, user1Id, user2Id, now);
 
     return { success: true };
   },
@@ -2526,17 +2756,29 @@ export const getDelayedCrossedPathEntries = query({
 
     // Sort newest first
     filtered.sort((a, b) => b.createdAt - a.createdAt);
+    const dismissedOtherUserIds = await getDismissedOtherUserIds(
+      ctx,
+      userId,
+      filtered.map((entry) =>
+        entry.user1Id === userId ? String(entry.user2Id) : String(entry.user1Id),
+      ),
+    );
 
     // Return minimal entry data — NO user/photo joins
-    return filtered.map((entry) => ({
-      id: entry._id,
-      otherUserId: entry.user1Id === userId ? entry.user2Id : entry.user1Id,
-      createdAt: entry.createdAt,
-      crossedLatApprox: entry.crossedLatApprox ?? null,
-      crossedLngApprox: entry.crossedLngApprox ?? null,
-      areaName: GENERIC_CROSSING_AREA_NAME,
-      reasonTags: entry.reasonTags ?? [],
-    }));
+    return filtered
+      .filter((entry) => {
+        const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
+        return !dismissedOtherUserIds.has(otherUserId as string);
+      })
+      .map((entry) => ({
+        id: entry._id,
+        otherUserId: entry.user1Id === userId ? entry.user2Id : entry.user1Id,
+        createdAt: entry.createdAt,
+        crossedLatApprox: entry.crossedLatApprox ?? null,
+        crossedLngApprox: entry.crossedLngApprox ?? null,
+        areaName: GENERIC_CROSSING_AREA_NAME,
+        reasonTags: entry.reasonTags ?? [],
+      }));
   },
 });
 
@@ -2578,7 +2820,9 @@ export const getCrossedPaths = query({
       .withIndex('by_user2', (q) => q.eq('user2Id', userId))
       .take(limit);
 
-    const allCrossedPaths = [...asUser1, ...asUser2];
+    const allCrossedPaths = [...asUser1, ...asUser2].filter(
+      (cp) => cp.count > 0 && !isPairDismissedForViewer(cp, userId),
+    );
 
     // Sort by recency only. Do not rank by legacy crossingLatitude/Longitude
     // because older rows may contain pre-hardening raw coordinates.
@@ -2742,7 +2986,9 @@ export const getCrossedPathsCount = query({
       .withIndex('by_user2', (q) => q.eq('user2Id', userId))
       .collect();
 
-    return asUser1.length + asUser2.length;
+    return [...asUser1, ...asUser2].filter(
+      (cp) => cp.count > 0 && !isPairDismissedForViewer(cp, userId),
+    ).length;
   },
 });
 
@@ -2774,7 +3020,9 @@ export const getCrossedPathSummary = query({
         .collect(),
     ]);
 
-    const allCrossedPaths = [...asUser1, ...asUser2];
+    const allCrossedPaths = [...asUser1, ...asUser2].filter(
+      (path) => path.count > 0 && !isPairDismissedForViewer(path, userId),
+    );
     const count = allCrossedPaths.length;
 
     // Find the latest createdAt timestamp

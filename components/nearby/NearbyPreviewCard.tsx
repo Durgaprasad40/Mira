@@ -34,6 +34,7 @@ import { COLORS } from '@/lib/constants';
 
 export interface NearbyPreviewData {
   id: string;
+  historyId?: string;
   name: string;
   age: number;
   photoUrl: string | null;
@@ -49,6 +50,7 @@ interface NearbyPreviewCardProps {
   onClose: () => void;
   onViewProfile: (user: NearbyPreviewData) => void;
   onLike?: (user: NearbyPreviewData) => void;
+  onRemove?: (user: NearbyPreviewData) => void;
 }
 
 const FRESHNESS_COPY: Record<'recent' | 'earlier' | 'stale', { text: string; icon: keyof typeof Ionicons.glyphMap }> = {
@@ -69,6 +71,7 @@ export function NearbyPreviewCard({
   onClose,
   onViewProfile,
   onLike,
+  onRemove,
 }: NearbyPreviewCardProps) {
   const opacity = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(16)).current;
@@ -178,6 +181,17 @@ export function NearbyPreviewCard({
                 </TouchableOpacity>
               )}
             </View>
+
+            {onRemove && (
+              <TouchableOpacity
+                style={styles.removeAction}
+                onPress={() => onRemove(user)}
+                accessibilityRole="button"
+                accessibilityLabel="Remove from Nearby"
+              >
+                <Text style={styles.removeActionText}>Remove</Text>
+              </TouchableOpacity>
+            )}
           </Animated.View>
         </Pressable>
       </Pressable>
@@ -309,6 +323,17 @@ const styles = StyleSheet.create({
   ctaPrimaryText: {
     color: '#fff',
     fontSize: 14,
+    fontWeight: '600',
+  },
+  removeAction: {
+    alignSelf: 'center',
+    marginTop: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  removeActionText: {
+    color: COLORS.error,
+    fontSize: 13,
     fontWeight: '600',
   },
 });
