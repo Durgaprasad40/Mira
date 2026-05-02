@@ -307,6 +307,32 @@ function MessageBubbleComponent({
 
   // System messages (native type) - no avatar, centered
   if (message.type === 'system') {
+    // P2-TOD-CHAT-EVENTS: Transient T/D event chips ('tod_temp') auto-hide
+    // 5 minutes after the viewer has seen them. "Seen" semantics differ by
+    // role:
+    //   - Own (sent) chip: viewer already knows about the action they took,
+    //     so we measure 5 minutes from `createdAt`.
+    //   - Other (received) chip: hide 5 minutes after the read receipt
+    //     (`readAt`) is set by `markPrivateMessagesRead`.
+    // A 30-minute hard cap from createdAt is the final safety net so an
+    // abandoned chip never lingers when the recipient never opens the thread.
+    // Permanent ('tod_perm') and all other system subtypes render normally
+    // with no auto-hide. UI-only suppression — the underlying privateMessages
+    // row is unaffected.
+    if (message.systemSubtype === 'tod_temp') {
+      const FIVE_MIN = 5 * 60 * 1000;
+      const THIRTY_MIN = 30 * 60 * 1000;
+      const now = Date.now();
+      if (isOwn && now - message.createdAt > FIVE_MIN) {
+        return null;
+      }
+      if (!isOwn && message.readAt && now - message.readAt > FIVE_MIN) {
+        return null;
+      }
+      if (now - message.createdAt > THIRTY_MIN) {
+        return null;
+      }
+    }
     return <SystemMessage text={message.content} subtype={message.systemSubtype as any} />;
   }
 

@@ -10,6 +10,12 @@ type SystemSubtype =
   | 'permission_granted'
   | 'permission_revoked'
   | 'expired'
+  // P2-TOD-CHAT-EVENTS: Phase-2 Truth-or-Dare in-chat event chips.
+  // 'tod_perm' stays in transcript; 'tod_temp' is hidden by MessageBubble
+  // 5 minutes after the viewer's readAt is set. Phase-1 'truthdare' marker
+  // path is unchanged.
+  | 'tod_perm'
+  | 'tod_temp'
   | 'truthdare';
 
 interface SystemMessageProps {
@@ -25,6 +31,10 @@ const SUBTYPE_ICONS: Record<string, { name: string; color: string }> = {
   permission_revoked: { name: 'lock-closed-outline', color: '#F44336' },
   expired: { name: 'timer-outline', color: COLORS.textMuted },
   truthdare: { name: 'dice', color: COLORS.secondary },
+  // P2-TOD-CHAT-EVENTS: reuse the dice icon for both Phase-2 T/D event
+  // chips so the visual language matches the existing 'truthdare' marker.
+  tod_perm: { name: 'dice', color: COLORS.secondary },
+  tod_temp: { name: 'dice', color: COLORS.secondary },
 };
 
 export function SystemMessage({ text, subtype }: SystemMessageProps) {

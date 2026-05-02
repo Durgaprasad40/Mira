@@ -21,6 +21,51 @@ import { softMaskText } from './softMask';
 
 // Message types that count toward unread badges (excludes system messages)
 const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice'];
+const EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS = 60 * 1000;
+
+type PrivateSecureMediaVisibilityFields = {
+  isProtected?: boolean;
+  isExpired?: boolean;
+  timerEndsAt?: number;
+  expiredAt?: number;
+};
+
+function getPrivateSecureMediaExpiredAt(
+  message: PrivateSecureMediaVisibilityFields,
+  nowMs: number
+): number | null {
+  if (!message.isProtected) return null;
+  if (typeof message.expiredAt === 'number') return message.expiredAt;
+  if (
+    typeof message.timerEndsAt === 'number' &&
+    (message.isExpired === true || message.timerEndsAt <= nowMs)
+  ) {
+    return message.timerEndsAt;
+  }
+  return null;
+}
+
+function shouldHideExpiredPrivateSecureMedia(
+  message: PrivateSecureMediaVisibilityFields,
+  nowMs: number
+): boolean {
+  const expiredAt = getPrivateSecureMediaExpiredAt(message, nowMs);
+  return (
+    typeof expiredAt === 'number' &&
+    nowMs - expiredAt >= EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS
+  );
+}
+
+function getPrivateConversationPreviewContent(
+  message: (PrivateSecureMediaVisibilityFields & { content?: string }) | null,
+  nowMs: number
+): string | null {
+  if (!message) return null;
+  if (getPrivateSecureMediaExpiredAt(message, nowMs) !== null) {
+    return 'Secure media expired';
+  }
+  return message.content || null;
+}
 
 // Helper: Check if either user has blocked the other (shared across phases)
 async function isBlockedBidirectional(
@@ -167,6 +212,7 @@ export const getUserPrivateConversations = query({
 
     // P2-001 FIX: Batch-fetch presence for all participants in ONE query
     const presenceMap = await batchFetchPresence(ctx, otherParticipantIds);
+    const nowMs = Date.now();
 
     // Fetch conversation details and other participant info
     const results = await Promise.all(
@@ -207,12 +253,20 @@ export const getUserPrivateConversations = query({
           }
         }
 
-        // Get last message
-        const lastMessage = await ctx.db
+        // Get last visible message. Expired Phase-2 secure media stays visible
+        // for a short grace window, then disappears from previews without
+        // deleting the shared message row.
+        const lastMessageCandidates = await ctx.db
           .query('privateMessages')
           .withIndex('by_conversation_created', (q) => q.eq('conversationId', p.conversationId))
           .order('desc')
-          .first();
+          .take(25);
+        const lastMessage =
+          lastMessageCandidates.find(
+            (m) =>
+              !m.isProtected ||
+              (!m.isExpired && getPrivateSecureMediaExpiredAt(m, nowMs) === null)
+          ) ?? null;
 
         const lastRealMessage = await ctx.db
           .query('privateMessages')
@@ -277,6 +331,9 @@ export const getUserPrivateConversations = query({
 
         // P2-001 FIX: Use batch-fetched presence instead of N+1 query
         const participantLastActive = presenceMap.get(otherParticipantId as string) ?? 0;
+        const lastMessageExpiredAt = lastMessage
+          ? getPrivateSecureMediaExpiredAt(lastMessage, nowMs)
+          : null;
 
         return {
           id: conversation._id,
@@ -291,11 +348,11 @@ export const getUserPrivateConversations = query({
           // P1-004 FIX: Include first privateIntentKey for intent label lookup
           // Backend stores array (multi-select), we take the first/primary one for display
           participantIntentKey: otherPrivateProfile?.privateIntentKeys?.[0] ?? null,
-          lastMessage: lastMessage?.content || null,
-          lastMessageAt: lastMessage?.createdAt || conversation.lastMessageAt || conversation.createdAt,
+          lastMessage: getPrivateConversationPreviewContent(lastMessage, nowMs),
+          lastMessageAt: lastMessage?.createdAt || conversation.createdAt,
           lastMessageSenderId: lastMessage?.senderId || null,
           lastMessageType: lastMessage?.type || null,
-          lastMessageIsProtected: lastMessage?.isProtected === true,
+          lastMessageIsProtected: lastMessage?.isProtected === true && lastMessageExpiredAt === null,
           hasRealMessages: !!lastRealMessage,
           unreadCount,
           connectionSource: conversation.connectionSource || 'desire_match',
@@ -403,28 +460,31 @@ export const getPrivateMessages = query({
     // Fetch latest messages (desc order), then reverse for chronological display
     const messages = await messagesQuery.order('desc').take(limit);
 
+    // PHASE-2 SECURE-MEDIA EXPIRY GATE: backend-derived expiry used to redact
+    // playable URLs even when the frontend hasn't yet flipped `isExpired`.
+    // Mirrors Phase-1 `getMediaUrl` which returns `{ url: null, isExpired: true }`
+    // once the deadline passes. Belt-and-braces with the cron sweep below.
+    const nowMs = Date.now();
+    const visibleMessages = messages.filter(
+      (m) => !shouldHideExpiredPrivateSecureMedia(m, nowMs)
+    );
+
     // P0-003: Batch-fetch audio URLs for voice messages (Phase-1 parity)
-    const audioStorageIds = messages.filter((m) => m.audioStorageId).map((m) => m.audioStorageId!);
+    const audioStorageIds = visibleMessages.filter((m) => m.audioStorageId).map((m) => m.audioStorageId!);
     const audioUrls = await Promise.all(
       audioStorageIds.map((id) => ctx.storage.getUrl(id))
     );
     const audioUrlMap = new Map(audioStorageIds.map((id, i) => [id as string, audioUrls[i]]));
 
     // P1-001: Batch-fetch image URLs for protected media (same pattern as audio)
-    const imageStorageIds = messages.filter((m) => m.imageStorageId).map((m) => m.imageStorageId!);
+    const imageStorageIds = visibleMessages.filter((m) => m.imageStorageId).map((m) => m.imageStorageId!);
     const imageUrls = await Promise.all(
       imageStorageIds.map((id) => ctx.storage.getUrl(id))
     );
     const imageUrlMap = new Map(imageStorageIds.map((id, i) => [id as string, imageUrls[i]]));
 
-    // PHASE-2 SECURE-MEDIA EXPIRY GATE: backend-derived expiry used to redact
-    // playable URLs even when the frontend hasn't yet flipped `isExpired`.
-    // Mirrors Phase-1 `getMediaUrl` which returns `{ url: null, isExpired: true }`
-    // once the deadline passes. Belt-and-braces with the cron sweep below.
-    const nowMs = Date.now();
-
     // Return in chronological order with media URLs resolved
-    return messages.reverse().map((m) => {
+    return visibleMessages.reverse().map((m) => {
       const shouldHideReadAt =
         hideReadReceiptsFromViewer === true && m.senderId === userId;
       // Base message fields
@@ -434,6 +494,9 @@ export const getPrivateMessages = query({
         senderId: m.senderId,
         type: m.type,
         content: m.content,
+        // P2-TOD-CHAT-EVENTS: surface the system subtype so the client can
+        // distinguish permanent vs transient T/D event chips.
+        systemSubtype: m.systemSubtype,
         deliveredAt: m.deliveredAt,
         readAt: shouldHideReadAt ? undefined : m.readAt,
         createdAt: m.createdAt,
@@ -448,8 +511,11 @@ export const getPrivateMessages = query({
         };
       }
 
-      // P1-001: Protected media messages: include image URL and metadata
-      if (m.isProtected && m.imageStorageId) {
+      // P1-001: Protected media messages: include image URL and metadata.
+      // Keep this branch even after the cleanup cron clears imageStorageId so
+      // expired secure media renders as an expired card during its grace window
+      // instead of falling through as a plain "Secure photo/video" message.
+      if (m.isProtected && (m.type === 'image' || m.type === 'video')) {
         // PHASE-2 SECURE-MEDIA EXPIRY GATE: derive expiry from `isExpired`
         // (frontend-flipped) OR from `timerEndsAt <= now` (deadline elapsed
         // even if the client never round-tripped). When expired, never expose
@@ -457,19 +523,23 @@ export const getPrivateMessages = query({
         // state via Phase2ProtectedMediaBubble (`isExpired` branch).
         const timerEnded =
           typeof m.timerEndsAt === 'number' && m.timerEndsAt <= nowMs;
-        const derivedExpired = !!m.isExpired || timerEnded;
+        const expiredAt = getPrivateSecureMediaExpiredAt(m, nowMs);
+        const derivedExpired = !!m.isExpired || expiredAt !== null || timerEnded;
         return {
           ...baseMessage,
           isProtected: true,
           imageUrl: derivedExpired
             ? null
-            : imageUrlMap.get(m.imageStorageId as string) ?? null,
+            : m.imageStorageId
+              ? imageUrlMap.get(m.imageStorageId as string) ?? null
+              : null,
           protectedMediaTimer: m.protectedMediaTimer,
           protectedMediaViewingMode: m.protectedMediaViewingMode,
           protectedMediaIsMirrored: m.protectedMediaIsMirrored,
           viewedAt: m.viewedAt,
           timerEndsAt: m.timerEndsAt,
           isExpired: derivedExpired,
+          expiredAt: expiredAt ?? m.expiredAt,
         };
       }
 
@@ -479,7 +549,7 @@ export const getPrivateMessages = query({
       // sender did NOT request expiry, so the message is not in the protected
       // pipeline but we still resolve the storage URL so the recipient can
       // view it. Schema is unchanged; this is an additive query enhancement.
-      if ((m.type === 'image' || m.type === 'video') && m.imageStorageId) {
+      if (!m.isProtected && (m.type === 'image' || m.type === 'video') && m.imageStorageId) {
         return {
           ...baseMessage,
           imageUrl: imageUrlMap.get(m.imageStorageId as string) ?? null,
@@ -1473,6 +1543,8 @@ export const markPrivateSecureMediaExpired = mutation({
     messageId: v.id('privateMessages'),
   },
   handler: async (ctx, { token, messageId }) => {
+    const now = Date.now();
+
     // Validate session
     const userId = await validateSessionToken(ctx, token);
     if (!userId) {
@@ -1493,12 +1565,18 @@ export const markPrivateSecureMediaExpired = mutation({
 
     // Skip if already expired (idempotent)
     if (message.isExpired) {
+      if (!message.expiredAt) {
+        await ctx.db.patch(messageId, {
+          expiredAt: message.timerEndsAt ?? now,
+        });
+      }
       return { success: true, alreadyExpired: true };
     }
 
     // Update the message
     await ctx.db.patch(messageId, {
       isExpired: true,
+      expiredAt: message.timerEndsAt ?? now,
     });
 
     console.log('[markPrivateSecureMediaExpired]', {
@@ -1580,6 +1658,7 @@ export const cleanupExpiredPrivateProtectedMedia = internalMutation({
       await ctx.db.patch(m._id, {
         imageStorageId: undefined,
         isExpired: true,
+        expiredAt: m.expiredAt ?? (timerEnded ? m.timerEndsAt : now),
       });
       redactedCount += 1;
     }

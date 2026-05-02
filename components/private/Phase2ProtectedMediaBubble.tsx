@@ -9,7 +9,7 @@
  *
  * Rendering rules:
  *   - Not yet viewed (no viewedAt)            → locked / "Tap to view" state
- *   - Currently viewing (timerEndsAt > now)   → "Viewing…" state with shield
+ *   - Active timer (timerEndsAt > now)        → tappable "Tap to continue"
  *   - Expired (isExpired)                     → "Expired" state, non-interactive
  *
  * VISUAL PARITY (border + size polish):
@@ -19,7 +19,7 @@
  *   visible 2px accent border (rose for own, light slate for received)
  *   replaces the previous near-invisible hairline so the secure frame is
  *   obvious against the dark chat background. All three states (locked,
- *   viewing, expired) use identical dimensions.
+ *   active timer, expired) use identical dimensions.
  *
  * The actual media is rendered by Phase2ProtectedMediaViewer (modal); this
  * bubble is a chat-row tile that triggers the viewer via onPress.
@@ -91,10 +91,36 @@ export function Phase2ProtectedMediaBubble({
   mediaKind = 'image',
   onDownloaded,
 }: Phase2ProtectedMediaBubbleProps) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
   const state = useMemo<'expired' | 'viewing' | 'locked'>(() => {
     if (isExpired) return 'expired';
-    if (viewedAt && timerEndsAt && timerEndsAt > Date.now()) return 'viewing';
+    if (viewedAt && timerEndsAt) {
+      return timerEndsAt > nowMs ? 'viewing' : 'expired';
+    }
     return 'locked';
+  }, [isExpired, viewedAt, timerEndsAt, nowMs]);
+
+  // Keep the active timer card live while the viewer can still reopen it.
+  useEffect(() => {
+    if (!viewedAt || !timerEndsAt || isExpired) return;
+
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const syncNow = () => {
+      const nextNow = Date.now();
+      setNowMs(nextNow);
+      if (interval && nextNow >= timerEndsAt) {
+        clearInterval(interval);
+        interval = undefined;
+      }
+    };
+    syncNow();
+
+    if (timerEndsAt <= Date.now()) return;
+    interval = setInterval(syncNow, 1000);
+    return () => {
+      if (interval) clearInterval(interval);
+    };
   }, [isExpired, viewedAt, timerEndsAt]);
 
   // LOAD-FIRST: receiver-only download gate. Sender bypasses (they may preview
@@ -149,6 +175,10 @@ export function Phase2ProtectedMediaBubble({
     typeof protectedMediaTimer === 'number' && protectedMediaTimer > 0
       ? `${protectedMediaTimer}s`
       : 'Once';
+  const activeTimerLabel =
+    state === 'viewing' && timerEndsAt
+      ? `${Math.max(0, Math.ceil((timerEndsAt - nowMs) / 1000))}s left`
+      : timerLabel;
   const modeLabel = protectedMediaViewingMode === 'hold' ? 'Hold' : 'Tap';
 
   // Frame styling shared by all states so the OUTER card looks identical
@@ -175,20 +205,21 @@ export function Phase2ProtectedMediaBubble({
     );
   }
 
-  // VIEWING — same frame, animated shield + countdown badge.
+  // ACTIVE TIMER — reopenable until the backend timerEndsAt deadline.
   if (state === 'viewing') {
     return (
-      <View
-        style={frameStyle}
-        accessibilityRole="image"
-        accessibilityLabel="Secure media currently viewing"
+      <Pressable
+        onPress={onOpen}
+        style={({ pressed }) => [...frameStyle, pressed && styles.cardPressed]}
+        accessibilityRole="button"
+        accessibilityLabel="Tap to continue secure media"
       >
         <Ionicons name="shield-checkmark" size={20} color={C.primary} />
-        <Text style={styles.titleText}>Viewing…</Text>
+        <Text style={styles.titleText}>Tap to continue</Text>
         <View style={styles.timerBadge}>
-          <Text style={styles.timerBadgeText}>{timerLabel}</Text>
+          <Text style={styles.timerBadgeText}>{activeTimerLabel}</Text>
         </View>
-      </View>
+      </Pressable>
     );
   }
 

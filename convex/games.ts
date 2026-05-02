@@ -2,13 +2,106 @@ import { mutation, query, type MutationCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { type Doc, Id } from './_generated/dataModel';
 import { asUserId } from './id';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, getPhase2DisplayName } from './helpers';
 import {
   BOTTLE_SPIN_COOLDOWN_MS,
   BOTTLE_SPIN_PENDING_INVITE_TIMEOUT_MS,
   BOTTLE_SPIN_NOT_STARTED_TIMEOUT_MS,
   BOTTLE_SPIN_INACTIVITY_TIMEOUT_MS,
 } from '../lib/bottleSpin';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2-TOD-CHAT-EVENTS: Phase-2 Truth-or-Dare in-chat system messages
+// ───────────────────────────────────────────────────────────────────────────
+// Bottle-spin lifecycle events are emitted as `type: 'system'` rows on the
+// privateMessages table so they appear inline in the Phase-2 chat thread.
+//
+// Subtype semantics:
+//   - 'tod_perm' → permanent transcript chip (invite, spin, bottle pick, T/D
+//     choice). Stays in the thread for the 24h retention window.
+//   - 'tod_temp' → transient chip (accept, start, skip, end, timeout). Hidden
+//     by the client 5 minutes after the viewer's `readAt` is set.
+//
+// Strict isolation: writes only to Phase-2 tables (`privateMessages`,
+// `privateConversations`). Skips unread-counter increment so game chips do
+// not produce inbox badges or push-style notifications.
+// ═══════════════════════════════════════════════════════════════════════════
+
+type TodSystemSubtype = 'tod_perm' | 'tod_temp';
+
+async function insertTodSystemMessage(
+  ctx: MutationCtx,
+  args: {
+    conversationId: string;
+    authUserId: string;
+    content: string;
+    subtype: TodSystemSubtype;
+    eventKey: string;
+  }
+): Promise<void> {
+  const conversationId = ctx.db.normalizeId(
+    'privateConversations',
+    args.conversationId
+  );
+  if (!conversationId) {
+    // Bottle-spin sessions can technically reference a non-Phase-2 chat (legacy
+    // demo path). Skip silently — never throw, since this is a side-effect of
+    // a game mutation that has already succeeded.
+    console.log(
+      '[P2_TOD_CHAT_EVENT_SKIP] non-Phase-2 conversationId:',
+      args.conversationId.slice(-8)
+    );
+    return;
+  }
+
+  const senderId = await resolveUserIdByAuthId(ctx, args.authUserId);
+  if (!senderId) {
+    console.log(
+      '[P2_TOD_CHAT_EVENT_SKIP] could not resolve senderId for authUserId:',
+      args.authUserId.slice(-8)
+    );
+    return;
+  }
+
+  // Verify the conversation still exists and the actor is a participant
+  // (defence-in-depth — the calling game mutation already authenticated).
+  const conversation = await ctx.db.get(conversationId);
+  if (!conversation) return;
+  if (!conversation.participants.includes(senderId)) return;
+
+  const existing = await ctx.db
+    .query('privateMessages')
+    .withIndex('by_conversation_system_event', (q) =>
+      q.eq('conversationId', conversationId).eq('systemEventKey', args.eventKey)
+    )
+    .first();
+  if (existing) return;
+
+  const now = Date.now();
+  await ctx.db.insert('privateMessages', {
+    conversationId,
+    senderId,
+    type: 'system',
+    systemSubtype: args.subtype,
+    systemEventKey: args.eventKey,
+    content: args.content,
+    createdAt: now,
+  });
+
+  // Bump lastMessageAt so the chat list shows recent activity, but DO NOT
+  // touch unread counts or privateNotifications — game chips are not inbox
+  // events.
+  await ctx.db.patch(conversationId, { lastMessageAt: now });
+}
+
+async function todDisplayName(
+  ctx: MutationCtx,
+  authUserId: string
+): Promise<string> {
+  const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  if (!userId) return 'Someone';
+  return (await getPhase2DisplayName(ctx, userId)) ?? 'Someone';
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GAME LIMITS: Bottle Spin Skip Tracking (Convex-backed persistence)
@@ -416,12 +509,22 @@ export const sendBottleSpinInvite = mutation({
     }
 
     // Create new invite session using the auth IDs passed by the Messages UI.
-    await ctx.db.insert('bottleSpinSessions', {
+    const sessionId = await ctx.db.insert('bottleSpinSessions', {
       conversationId,
       inviterId: authUserId,
       inviteeId: otherUserId,
       status: 'pending',
       createdAt: now,
+    });
+
+    // P2-TOD-CHAT-EVENTS: Permanent transcript chip — invite sent.
+    const inviterName = await todDisplayName(ctx, authUserId);
+    await insertTodSystemMessage(ctx, {
+      conversationId,
+      authUserId,
+      content: `${inviterName} invited you to play Truth or Dare`,
+      subtype: 'tod_perm',
+      eventKey: `tod:${sessionId}:invite_sent:${authUserId}:${otherUserId}`,
     });
 
     return { success: true };
@@ -483,6 +586,17 @@ export const respondToBottleSpinInvite = mutation({
         lastSpinResult: undefined,
         // gameStartedAt remains undefined - set when inviter manually starts
       });
+
+      // P2-TOD-CHAT-EVENTS: Transient chip — invite accepted.
+      const accepterName = await todDisplayName(ctx, authUserId);
+      await insertTodSystemMessage(ctx, {
+        conversationId,
+        authUserId,
+        content: `${accepterName} accepted the invite`,
+        subtype: 'tod_temp',
+        eventKey: `tod:${session._id}:invite_accepted:${authUserId}`,
+      });
+
       return { success: true, status: 'active' as const };
     } else {
       // Reject: set cooldown
@@ -491,6 +605,17 @@ export const respondToBottleSpinInvite = mutation({
         respondedAt: now,
         cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS,
       });
+
+      // P2-TOD-CHAT-EVENTS: Transient chip — invite declined.
+      const declinerName = await todDisplayName(ctx, authUserId);
+      await insertTodSystemMessage(ctx, {
+        conversationId,
+        authUserId,
+        content: `${declinerName} declined the invite`,
+        subtype: 'tod_temp',
+        eventKey: `tod:${session._id}:invite_declined:${authUserId}`,
+      });
+
       return { success: true, status: 'rejected' as const };
     }
   },
@@ -536,6 +661,16 @@ export const endBottleSpinGame = mutation({
       endedAt: now,
       endedReason: 'manual',
       cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS,
+    });
+
+    // P2-TOD-CHAT-EVENTS: Transient chip — game ended manually.
+    const enderName = await todDisplayName(ctx, authUserId);
+    await insertTodSystemMessage(ctx, {
+      conversationId,
+      authUserId,
+      content: `${enderName} ended the game`,
+      subtype: 'tod_temp',
+      eventKey: `tod:${session._id}:manual_end:${authUserId}`,
     });
 
     return { success: true };
@@ -587,6 +722,15 @@ export const startBottleSpinGame = mutation({
       lastActionAt: now,
     });
 
+    // P2-TOD-CHAT-EVENTS: Transient chip — game started.
+    await insertTodSystemMessage(ctx, {
+      conversationId,
+      authUserId,
+      content: `Game started`,
+      subtype: 'tod_temp',
+      eventKey: `tod:${session._id}:game_started`,
+    });
+
     return { success: true, gameStartedAt: now };
   },
 });
@@ -618,6 +762,7 @@ export const cleanupExpiredSession = mutation({
       .collect();
 
     let cleanedCount = 0;
+    const cleanedSessionIds: string[] = [];
 
     // Mark expired pending sessions
     if (endedReason === 'invite_expired') {
@@ -636,6 +781,7 @@ export const cleanupExpiredSession = mutation({
             : { cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS }),
         });
         cleanedCount++;
+        cleanedSessionIds.push(session._id);
       }
     }
 
@@ -656,7 +802,25 @@ export const cleanupExpiredSession = mutation({
             : { cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS }),
         });
         cleanedCount++;
+        cleanedSessionIds.push(session._id);
       }
+    }
+
+    // P2-TOD-CHAT-EVENTS: Transient chip — timeout / expiry. Only emit when we
+    // actually transitioned a session to 'expired' so we never spam the chat
+    // on idempotent cleanup retries.
+    if (cleanedCount > 0) {
+      const expiryCopy =
+        endedReason === 'invite_expired'
+          ? 'Game invite expired'
+          : 'Game ended due to inactivity';
+      await insertTodSystemMessage(ctx, {
+        conversationId,
+        authUserId,
+        content: expiryCopy,
+        subtype: 'tod_temp',
+        eventKey: `tod:${cleanedSessionIds.sort().join(',')}:expired:${endedReason}`,
+      });
     }
 
     return { success: true, cleanedCount };
@@ -717,12 +881,70 @@ export const setBottleSpinTurn = mutation({
     // SPIN-TURN-FIX: Determine caller's role for ownership enforcement.
     const callerRole: 'inviter' | 'invitee' = session.inviterId === authUserId ? 'inviter' : 'invitee';
 
+    const turnPhaseOrder = {
+      idle: 0,
+      spinning: 1,
+      choosing: 2,
+      complete: 3,
+    } as const;
+    const sessionTurnPhase = session.turnPhase ?? 'idle';
+    const isCompleteToIdleReset =
+      sessionTurnPhase === 'complete' &&
+      turnPhase === 'idle' &&
+      currentTurnRole === undefined;
+    const isStaleOlderPhase =
+      turnPhaseOrder[turnPhase] < turnPhaseOrder[sessionTurnPhase] &&
+      !isCompleteToIdleReset;
+    const isStalePostResetPhase =
+      sessionTurnPhase === 'idle' &&
+      (turnPhase === 'choosing' || turnPhase === 'complete');
+
+    // Stale delayed retries can arrive after the live turn has already moved
+    // forward. Ignore them before patching so old requests cannot rewrite turn
+    // state or emit duplicate system chips with a newer lastActionAt key.
+    if (isStaleOlderPhase || isStalePostResetPhase) {
+      return { success: true, selectedTargetRole: session.currentTurnRole };
+    }
+
     // SPIN-TURN-FIX: Only the current spin-turn owner can initiate a spin.
     if (turnPhase === 'spinning') {
       const currentSpinTurnRole = session.spinTurnRole || 'inviter';
       if (callerRole !== currentSpinTurnRole) {
         throw new Error('Not your turn to spin');
       }
+    }
+
+    // Idempotency guard for retried taps/mutations. If the active session is
+    // already in the requested transition state, do not patch again and do not
+    // emit another T/D system chip.
+    if (
+      turnPhase === 'spinning' &&
+      session.turnPhase === 'spinning' &&
+      session.currentTurnRole
+    ) {
+      return { success: true, selectedTargetRole: session.currentTurnRole };
+    }
+    if (
+      turnPhase === 'choosing' &&
+      session.turnPhase === 'choosing' &&
+      session.currentTurnRole === currentTurnRole
+    ) {
+      return { success: true, selectedTargetRole: session.currentTurnRole };
+    }
+    if (
+      turnPhase === 'complete' &&
+      session.turnPhase === 'complete' &&
+      lastSpinResult &&
+      session.lastSpinResult === lastSpinResult
+    ) {
+      return { success: true, selectedTargetRole: session.currentTurnRole };
+    }
+    if (
+      turnPhase === 'idle' &&
+      session.turnPhase === 'idle' &&
+      currentTurnRole === undefined
+    ) {
+      return { success: true, selectedTargetRole: session.currentTurnRole };
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -763,6 +985,8 @@ export const setBottleSpinTurn = mutation({
     }
 
     const now = Date.now();
+    const previousActionAt =
+      session.lastActionAt ?? session.gameStartedAt ?? session.createdAt;
 
     // TD-LIFECYCLE: Persist turn state, streak tracking, and bump lastActionAt
     // so the inactivity timeout only fires when the game is genuinely idle.
@@ -775,6 +999,65 @@ export const setBottleSpinTurn = mutation({
       consecutiveSelectedCount: nextConsecutiveCount,
       lastActionAt: now,
     });
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // P2-TOD-CHAT-EVENTS: Emit in-chat system messages for the user-visible
+    // turn transitions. We only emit on the transition that actually
+    // produced new state to avoid duplicate chips on idempotent retries.
+    // ═══════════════════════════════════════════════════════════════════════
+    if (turnPhase === 'spinning' && selectedTargetRole) {
+      const callerName = await todDisplayName(ctx, authUserId);
+      // Permanent: spinner identity stays in transcript.
+      await insertTodSystemMessage(ctx, {
+        conversationId,
+        authUserId,
+        content: `${callerName} spun the bottle`,
+        subtype: 'tod_perm',
+        eventKey: `tod:${session._id}:spun:${previousActionAt}:${authUserId}`,
+      });
+      // Permanent: bottle target. Resolve the target's display name from the
+      // session.inviterId/inviteeId mapping so we never leak the wrong name.
+      const targetAuthUserId =
+        selectedTargetRole === 'inviter' ? session.inviterId : session.inviteeId;
+      const targetName = await todDisplayName(ctx, targetAuthUserId);
+      await insertTodSystemMessage(ctx, {
+        conversationId,
+        authUserId,
+        content: `Bottle landed on ${targetName}`,
+        subtype: 'tod_perm',
+        eventKey: `tod:${session._id}:landed:${previousActionAt}:${selectedTargetRole}`,
+      });
+    } else if (turnPhase === 'choosing' && lastSpinResult === 'skip') {
+      // Skip during the choose step — transient.
+      const skipperName = await todDisplayName(ctx, authUserId);
+      await insertTodSystemMessage(ctx, {
+        conversationId,
+        authUserId,
+        content: `${skipperName} skipped this turn`,
+        subtype: 'tod_temp',
+        eventKey: `tod:${session._id}:skip_choosing:${previousActionAt}:${authUserId}`,
+      });
+    } else if (turnPhase === 'complete' && lastSpinResult) {
+      const actorName = await todDisplayName(ctx, authUserId);
+      if (lastSpinResult === 'truth' || lastSpinResult === 'dare') {
+        const label = lastSpinResult === 'truth' ? 'Truth' : 'Dare';
+        await insertTodSystemMessage(ctx, {
+          conversationId,
+          authUserId,
+          content: `${actorName} chose ${label}`,
+          subtype: 'tod_perm',
+          eventKey: `tod:${session._id}:choice:${previousActionAt}:${authUserId}:${lastSpinResult}`,
+        });
+      } else if (lastSpinResult === 'skip') {
+        await insertTodSystemMessage(ctx, {
+          conversationId,
+          authUserId,
+          content: `${actorName} skipped this turn`,
+          subtype: 'tod_temp',
+          eventKey: `tod:${session._id}:choice:${previousActionAt}:${authUserId}:skip`,
+        });
+      }
+    }
 
     // Return the selected target so frontend knows the animation direction.
     return {

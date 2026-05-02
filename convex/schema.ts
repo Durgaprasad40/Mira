@@ -776,6 +776,13 @@ export default defineSchema({
       v.literal('system')
     ),
     content: v.string(),
+    // P2-TOD-CHAT-EVENTS: Optional system message subtype used to discriminate
+    // in-chat T/D notifications ('tod_perm' = permanent event chip,
+    // 'tod_temp' = transient chip that hides 5min after viewer reads it).
+    // Mirrors the Phase-1 `messages.systemSubtype` field.
+    systemSubtype: v.optional(v.string()),
+    // Optional deterministic key for idempotent system event inserts.
+    systemEventKey: v.optional(v.string()),
     imageStorageId: v.optional(v.id('_storage')),
     audioStorageId: v.optional(v.id('_storage')),
     audioDurationMs: v.optional(v.number()),
@@ -786,6 +793,7 @@ export default defineSchema({
     viewedAt: v.optional(v.number()),
     timerEndsAt: v.optional(v.number()),
     isExpired: v.optional(v.boolean()),
+    expiredAt: v.optional(v.number()),
     deliveredAt: v.optional(v.number()),
     readAt: v.optional(v.number()),
     createdAt: v.number(),
@@ -793,6 +801,7 @@ export default defineSchema({
   })
     .index('by_conversation', ['conversationId'])
     .index('by_conversation_created', ['conversationId', 'createdAt'])
+    .index('by_conversation_system_event', ['conversationId', 'systemEventKey'])
     .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
 
   privateTypingStatus: defineTable({

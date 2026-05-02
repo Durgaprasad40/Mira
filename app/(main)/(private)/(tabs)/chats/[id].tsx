@@ -96,6 +96,28 @@ type PendingPhase2Message = {
 
 // [P2_MEDIA_UPLOAD] 50ms throttle matches Phase-1 (ChatScreenInner.tsx:558).
 const P2_PROGRESS_UPDATE_INTERVAL_MS = 50;
+const EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS = 60 * 1000;
+
+function getPhase2SecureMediaExpiredAt(message: any, nowMs: number): number | null {
+  if (!message?.isProtected) return null;
+  if (message.type !== 'image' && message.type !== 'video') return null;
+  if (typeof message.expiredAt === 'number') return message.expiredAt;
+  if (
+    typeof message.timerEndsAt === 'number' &&
+    (message.isExpired === true || message.timerEndsAt <= nowMs)
+  ) {
+    return message.timerEndsAt;
+  }
+  return null;
+}
+
+function shouldHideExpiredPhase2SecureMedia(message: any, nowMs: number): boolean {
+  const expiredAt = getPhase2SecureMediaExpiredAt(message, nowMs);
+  return (
+    typeof expiredAt === 'number' &&
+    nowMs - expiredAt >= EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS
+  );
+}
 
 const C = INCOGNITO_COLORS;
 
@@ -265,6 +287,7 @@ export default function Phase2ChatThread() {
   const [showCooldownToast, setShowCooldownToast] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showReportSheet, setShowReportSheet] = useState(false);
+  const [secureMediaNowMs, setSecureMediaNowMs] = useState(() => Date.now());
   const cooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // P2_TD_PARITY: 1-second tick to drive live countdown text in cooldown
   // toast (Phase-1 ChatScreenInner.tsx:839,1636-1641). Only ticks while
@@ -296,6 +319,8 @@ export default function Phase2ChatThread() {
   const [tdToast, setTdToast] = useState<string | null>(null);
   const tdToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastToastKeyRef = useRef<string | null>(null);
+  const lastAutoPromptKeyRef = useRef<string | null>(null);
+  const closedAfterActionPromptKeyRef = useRef<string | null>(null);
 
   // SECURE-MEDIA REVIEW STATE (Phase-1 parity):
   // After camera capture or gallery pick, hold the asset URI + media type so
@@ -460,9 +485,34 @@ export default function Phase2ChatThread() {
     | 'choosing'
     | 'complete'
     | undefined;
+  const truthDareCurrentTurnRole = (gameSession as any)?.currentTurnRole as
+    | 'inviter'
+    | 'invitee'
+    | undefined;
+  const truthDareBackendTurnRole = (gameSession as any)?.backendTurnRole as
+    | 'inviter'
+    | 'invitee'
+    | undefined;
+  const truthDareChooserRole =
+    truthDareCurrentTurnRole ?? truthDareBackendTurnRole;
+  const truthDareSessionId = (gameSession as any)?.sessionId as
+    | string
+    | undefined;
   const truthDareLastSpinResult = (gameSession as any)?.lastSpinResult as
     | { role?: 'inviter' | 'invitee'; choice?: 'truth' | 'dare' | 'skipped' }
     | undefined;
+  const myTruthDareRole =
+    gameSession && userId ? deriveMyRole(gameSession, userId) : null;
+  const truthDareAutoPromptKey =
+    truthDareSessionId && truthDareTurnPhase
+      ? `${truthDareSessionId}:${truthDareTurnPhase}:${truthDareLastActionAt ?? 0}`
+      : null;
+  const isTruthDareChoosingForMe =
+    tdState === 'active' &&
+    truthDareTurnPhase === 'choosing' &&
+    !!truthDareChooserRole &&
+    !!myTruthDareRole &&
+    truthDareChooserRole === myTruthDareRole;
 
   const currentUserName = useMemo(() => {
     const u = currentUser as any;
@@ -514,6 +564,55 @@ export default function Phase2ChatThread() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tdState, tdPaused, gameStartedAt]);
+
+  // P2_TD_AUTO_PROMPT: live chooser prompt. The header T/D button already
+  // opens BottleSpinGame manually, but the selected player must not need to
+  // tap it after the bottle lands. Listen to the backend turn state and open
+  // the existing compact action sheet when this device owns the choosing turn.
+  useEffect(() => {
+    if (!truthDareAutoPromptKey) return;
+    if (tdState !== 'active') return;
+    if (truthDareTurnPhase !== 'choosing') return;
+    if (!truthDareChooserRole || !myTruthDareRole) return;
+    if (truthDareChooserRole !== myTruthDareRole) return;
+    if (closedAfterActionPromptKeyRef.current === truthDareAutoPromptKey) {
+      return;
+    }
+
+    if (
+      lastAutoPromptKeyRef.current === truthDareAutoPromptKey &&
+      showGameModal
+    ) {
+      if (__DEV__) {
+        console.log('[P2_TD_AUTO_PROMPT] already_shown', {
+          conversationId: id,
+          promptKey: truthDareAutoPromptKey,
+        });
+      }
+      return;
+    }
+
+    lastAutoPromptKeyRef.current = truthDareAutoPromptKey;
+    setTdPaused(false);
+    setShowInviteModal(false);
+    setShowGameModal(true);
+    if (__DEV__) {
+      console.log('[P2_TD_AUTO_PROMPT] show', {
+        conversationId: id,
+        promptKey: truthDareAutoPromptKey,
+        chooserRole: truthDareChooserRole,
+        myRole: myTruthDareRole,
+      });
+    }
+  }, [
+    id,
+    tdState,
+    truthDareTurnPhase,
+    truthDareChooserRole,
+    myTruthDareRole,
+    truthDareAutoPromptKey,
+    showGameModal,
+  ]);
 
   // P2_TD_RECEIVER_PARITY: Auto-open the invite modal on the invitee's
   // device as soon as the live game-session query reports a pending invite
@@ -1069,6 +1168,31 @@ export default function Phase2ChatThread() {
     },
     [id, userId, endGame]
   );
+
+  const handleBottleGameClose = useCallback(() => {
+    if (isTruthDareChoosingForMe && truthDareAutoPromptKey) {
+      closedAfterActionPromptKeyRef.current = truthDareAutoPromptKey;
+      if (__DEV__) {
+        console.log('[P2_TD_AUTO_PROMPT] closed_after_action', {
+          conversationId: id,
+          promptKey: truthDareAutoPromptKey,
+        });
+      }
+    }
+    setShowGameModal(false);
+  }, [id, isTruthDareChoosingForMe, truthDareAutoPromptKey]);
+
+  const handleBottleGameCancel = useCallback(() => {
+    if (isTruthDareChoosingForMe) {
+      setTdPaused(false);
+      setShowGameModal(true);
+      return;
+    }
+    // TD-PAUSE parity: user-initiated close outside an active chooser turn
+    // should not be immediately reopened by the broad active-session effect.
+    setTdPaused(true);
+    setShowGameModal(false);
+  }, [isTruthDareChoosingForMe]);
 
   // --------------------------------------------------------------------- attach handlers
   // PLUS-MENU REAL IMPL (Phase-2 parity with Phase-1 ChatScreenInner):
@@ -1706,6 +1830,22 @@ export default function Phase2ChatThread() {
       ? (messages as any[])
       : lastStableMessagesRef.current ?? undefined;
 
+  useEffect(() => {
+    const server = (stableMessages ?? []) as any[];
+    const hasExpiringSecureMedia = server.some(
+      (m) =>
+        m?.isProtected === true &&
+        (m.type === 'image' || m.type === 'video') &&
+        (m.isExpired === true || typeof m.timerEndsAt === 'number')
+    );
+    if (!hasExpiringSecureMedia) return;
+
+    const interval = setInterval(() => {
+      setSecureMediaNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [stableMessages]);
+
   // P2_THREAD_FIRST_PAINT: Coordinated opening gate. All four queries must
   // resolve before we lift the loading overlay so the body, header T/D
   // pill, presence dot, and message bubbles all appear in the same frame.
@@ -1726,7 +1866,9 @@ export default function Phase2ChatThread() {
   // and survives clock skew between client + server (mirrors Phase-1
   // ChatScreenInner.tsx:715-720).
   const messageList = useMemo(() => {
-    const server = (stableMessages ?? []) as any[];
+    const server = ((stableMessages ?? []) as any[]).filter(
+      (m) => !shouldHideExpiredPhase2SecureMedia(m, secureMediaNowMs)
+    );
     if (pendingPhase2Messages.length === 0) return server;
     const pendingAsRows = pendingPhase2Messages.map((p) => ({
       // FlashList keyExtractor reads `id`; the rest of `item.*` is consumed
@@ -1744,7 +1886,7 @@ export default function Phase2ChatThread() {
       if (diff !== 0) return diff;
       return String(a.id).localeCompare(String(b.id));
     });
-  }, [stableMessages, pendingPhase2Messages]);
+  }, [stableMessages, pendingPhase2Messages, secureMediaNowMs]);
 
   const renderItem = useCallback(
     ({ item, index }: { item: any; index: number }) => {
@@ -1804,6 +1946,10 @@ export default function Phase2ChatThread() {
             senderId: item.senderId,
             type: item.type,
             content: item.content ?? '',
+            // P2-TOD-CHAT-EVENTS: forward the T/D system subtype so
+            // MessageBubble can drive the SystemMessage chip + the
+            // tod_temp 5-minute auto-hide.
+            systemSubtype: item.systemSubtype,
             createdAt: item.createdAt,
             deliveredAt: item.deliveredAt,
             readAt: item.readAt,
@@ -2472,12 +2618,8 @@ export default function Phase2ChatThread() {
       {showGameModal && tdState === 'active' && id && userId && (
         <BottleSpinGame
           visible={showGameModal}
-          onClose={() => setShowGameModal(false)}
-          onCancel={() => {
-            // TD-PAUSE parity: user-initiated close should NOT auto-reopen.
-            setTdPaused(true);
-            setShowGameModal(false);
-          }}
+          onClose={handleBottleGameClose}
+          onCancel={handleBottleGameCancel}
           conversationId={id}
           userId={userId}
           currentUserName={currentUserName}
