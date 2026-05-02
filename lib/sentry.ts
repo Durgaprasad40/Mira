@@ -45,9 +45,10 @@ const SENTRY_DSN = process.env.EXPO_PUBLIC_SENTRY_DSN || '';
 // Environment detection
 const IS_DEV = __DEV__;
 const ENVIRONMENT = IS_DEV ? 'development' : 'production';
-const SENTRY_VERBOSE_MODE = IS_DEV ? false : DEBUG_SENTRY_VERBOSE;
-const SENTRY_TRACES_SAMPLE_RATE = IS_DEV ? 0 : (DEBUG_SENTRY_VERBOSE ? 1.0 : 0.2);
-const SENTRY_PROFILES_SAMPLE_RATE = IS_DEV ? 0 : (DEBUG_SENTRY_VERBOSE ? 1.0 : 0);
+const SENTRY_DEBUG_FROM_ENV = process.env.EXPO_PUBLIC_SENTRY_DEBUG === 'true';
+const SENTRY_VERBOSE_MODE = IS_DEV || SENTRY_DEBUG_FROM_ENV || DEBUG_SENTRY_VERBOSE;
+const SENTRY_TRACES_SAMPLE_RATE = IS_DEV ? 0 : (SENTRY_VERBOSE_MODE ? 1.0 : 0.2);
+const SENTRY_PROFILES_SAMPLE_RATE = IS_DEV ? 0 : (SENTRY_VERBOSE_MODE ? 1.0 : 0);
 
 // App version (set via EAS build or package.json)
 const APP_VERSION = process.env.EXPO_PUBLIC_APP_VERSION || '1.0.0';
@@ -135,7 +136,7 @@ export function initSentry(): void {
       // Enable Sentry when DSN is configured
       enabled: true,
 
-      // Keep native SDK debug output off in development to avoid bridge/log overhead.
+      // Enable SDK debug logs in development/demo, or when explicitly requested by env.
       debug: SENTRY_VERBOSE_MODE,
 
       // Session tracking for crash-free rate
@@ -161,10 +162,10 @@ export function initSentry(): void {
       enableAutoPerformanceTracing: false,
 
       // Normalize error depths - increased for debug mode
-      normalizeDepth: DEBUG_SENTRY_VERBOSE ? 12 : 8,
+      normalizeDepth: SENTRY_VERBOSE_MODE ? 12 : 8,
 
       // Breadcrumb limit - increased for debug mode
-      maxBreadcrumbs: DEBUG_SENTRY_VERBOSE ? 100 : 50,
+      maxBreadcrumbs: SENTRY_VERBOSE_MODE ? 100 : 50,
 
       // Remove heavy integrations that cause jank
       integrations: (integrations) => {
@@ -313,7 +314,7 @@ export function initSentry(): void {
     });
 
     if (IS_DEV) {
-      originalConsoleLog(`[Sentry] Initialized - debug=${SENTRY_VERBOSE_MODE ? 'VERBOSE' : 'off'}`);
+      originalConsoleLog(`[Sentry] Initialized - debug=${SENTRY_VERBOSE_MODE ? 'on' : 'off'}`);
     }
   } catch (error) {
     originalConsoleError('[Sentry] Failed to initialize:', error);
