@@ -3,11 +3,12 @@
  *
  * Layout behavior:
  * - RESTING STATE: 55% height sheet at bottom, above tab bar
- * - KEYBOARD OPEN: Full-screen sheet from status bar to keyboard top
- *   - Header pinned at top (below status bar)
- *   - Messages fill the middle (flex: 1)
- *   - Composer anchored at bottom (directly above keyboard)
- *   - Background fills entire screen
+ * - KEYBOARD OPEN: Sheet keeps its resting height and is translated upward
+ *   as a single block so its bottom sits flush above the keyboard.
+ *   - Sheet only shrinks if the keyboard is so tall that the lifted sheet
+ *     would otherwise push above the safe-area top.
+ *   - Rounded sheet corners preserved (sheet still feels like a sheet).
+ *   - Composer remains pinned at the bottom of the sheet, above the keyboard.
  *
  * SYNC FIX: Uses Reanimated's useAnimatedKeyboard() for frame-perfect
  * synchronization with keyboard animation. The sheet moves WITH the keyboard,
@@ -199,35 +200,49 @@ export default function ChatSheet({
     // (Reanimated merges styles, so unused properties aren't cleared)
 
     if (isOpen) {
-      // KEYBOARD OPEN: EXPAND UPWARD to show more messages.
-      // ONEPLUS-OVERLAP FIX: On Android with softwareKeyboardLayoutMode="resize"
-      // the OS already shrinks the window so cHeight reflects the available area
-      // above the keyboard. Subtracting kbHeight here would double-count, and on
-      // OEM ROMs whose IME-reported height does not exactly match the OS resize
-      // (e.g. OnePlus, where the gap leaves the composer behind the keyboard)
-      // the math becomes negative and the sheet bottom escapes below the visible
-      // window. Trust the OS resize on Android and only apply the manual offset
-      // on iOS (which does not resize the window). The clamp keeps the value
-      // safely non-negative even if the iOS reporting is slightly off.
-      const effectiveBottom = Platform.OS === 'ios'
+      // KEYBOARD OPEN: BLOCK-MOVE.
+      // Lift the entire sheet upward as a single block while preserving its
+      // resting height/shape. The sheet only shrinks when the keyboard is so
+      // tall that even a fully translated sheet would push above the safe area.
+      //
+      // Previously this branch stretched the sheet from `safeTop` down to the
+      // keyboard top, which made the chat box look elongated when the keyboard
+      // opened. The new math keeps `restingHeight` and just translates the
+      // sheet upward so its bottom sits flush above the keyboard.
+      //
+      // Android with softwareKeyboardLayoutMode="resize": cHeight is already
+      // the post-resize area above the keyboard, so no extra subtraction is
+      // needed. iOS does not resize the window, so subtract kbHeight (clamped
+      // >= 0 for OEM/IME reporting safety) to get the available area.
+      const keyboardEatsBottom = Platform.OS === 'ios'
         ? Math.max(0, kbHeight - offset + KEYBOARD_TOOLBAR_HEIGHT)
         : 0;
+      const availableBottom = cHeight - keyboardEatsBottom;
 
-      // EXPAND FIX: Calculate expanded top position
-      // The sheet should expand to use space from safe area to keyboard
-      const expandedTop = Math.max(0, safeTop - cY + 8); // 8px padding below status bar
+      // Minimum top within the container: don't push above the status bar.
+      const minTop = Math.max(0, safeTop - cY + 8);
 
-      // Calculate explicit height using expanded top (more space for messages)
-      const sheetHeight = cHeight - expandedTop - effectiveBottom;
+      // Where the sheet would sit if it kept restingHeight with its bottom
+      // flush above the keyboard.
+      const desiredTop = availableBottom - restingHeight;
+
+      // Translate up to desiredTop unless that would cross the safe-area top.
+      const sheetTop = Math.max(minTop, desiredTop);
+
+      // Sheet keeps its restingHeight when not clamped; otherwise shrinks to
+      // fit the available area without going behind the keyboard.
+      const sheetHeight = Math.max(100, availableBottom - sheetTop);
 
       return {
         position: 'absolute' as const,
-        top: expandedTop, // EXPAND: Use full available space above
+        top: sheetTop,
         left: 0,
         right: 0,
-        height: Math.max(sheetHeight, 100), // Minimum 100px to prevent collapse
-        borderTopLeftRadius: 0, // No rounded corners when expanded to top
-        borderTopRightRadius: 0,
+        height: sheetHeight,
+        // Keep the rounded sheet corners — visually it's still the same sheet,
+        // just lifted up; do not flatten into a full-screen surface.
+        borderTopLeftRadius: 16,
+        borderTopRightRadius: 16,
         opacity: opacity.value,
       };
     } else {
