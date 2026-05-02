@@ -384,7 +384,10 @@ export default function ChatRoomScreen() {
   const router = useRouter();
   const convex = useConvex();
   const insets = useSafeAreaInsets();
-  const footerInsetSpacing = Math.max(insets.bottom, SPACING.md);
+  // The Phase-2 tab bar already reserves the bottom safe-area inset.
+  // Adding it again here double-counts the inset and creates a visible
+  // gap between the composer and tab bar, especially on Samsung devices.
+  const footerInsetSpacing = 0;
 
   // ─────────────────────────────────────────────────────────────────────────
   // P0 FIX: Normalize and validate roomId before any usage
