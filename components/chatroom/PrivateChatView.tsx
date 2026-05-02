@@ -47,6 +47,12 @@ import type { Id } from '@/convex/_generated/dataModel';
 
 const C = INCOGNITO_COLORS;
 
+// Backend error fragment thrown by convex/messages.ts sendMessage when the
+// recipient has muted the sender in the originating Chat Room. Convex wraps
+// thrown errors with a prefix, so we substring-match instead of equality.
+const MUTED_BY_RECIPIENT_ERROR_FRAGMENT =
+  "You can't message this user right now";
+
 // DM info for display (peer details)
 interface DmInfo {
   id: string;
@@ -136,6 +142,10 @@ export default function PrivateChatView({
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
   const [loadOlderError, setLoadOlderError] = useState<string | null>(null);
+  // Inline notice when the recipient has muted the sender in the source
+  // Chat Room. Driven by sendMessage rejection; cleared on peer change,
+  // retry attempt, and successful send.
+  const [mutedByPeer, setMutedByPeer] = useState(false);
 
   // Auth
   const authUserId = useAuthStore((s) => s.userId);
@@ -244,6 +254,7 @@ export default function PrivateChatView({
   // This ensures text isn't carried across different chat partners
   useEffect(() => {
     setInputText('');
+    setMutedByPeer(false);
   }, [dm.peerId]);
 
   // THREAD-REOPEN: Reset scroll state when DM changes (new thread or reopen)
@@ -506,6 +517,9 @@ export default function PrivateChatView({
     if (!trimmed || !threadId || !authUserId) return;
 
     setInputText('');
+    // Optimistic clear: hide any prior muted notice while we attempt to send.
+    // It will reappear in the catch block if the backend still rejects.
+    setMutedByPeer(false);
 
     try {
       await sendConversationMessage({
@@ -534,6 +548,10 @@ export default function PrivateChatView({
       });
     } catch (error) {
       if (__DEV__) console.error('[DM] Failed to send message:', error);
+      const message = String((error as { message?: unknown })?.message ?? '');
+      if (message.includes(MUTED_BY_RECIPIENT_ERROR_FRAGMENT)) {
+        setMutedByPeer(true);
+      }
       // Restore input on error
       setInputText(trimmed);
     }
@@ -543,6 +561,9 @@ export default function PrivateChatView({
   const handleSendMedia = useCallback(
     async (uri: string, mediaType: 'image' | 'video' | 'doodle' | 'audio') => {
       if (!threadId || !authUserId) return;
+
+      // Optimistic clear: hide any prior muted notice while we attempt to send.
+      setMutedByPeer(false);
 
       try {
         // Step 1: Upload media to Convex storage
@@ -580,6 +601,10 @@ export default function PrivateChatView({
         onSendComplete?.();
       } catch (error) {
         if (__DEV__) console.error('[DM] Media send failed:', error);
+        const message = String((error as { message?: unknown })?.message ?? '');
+        if (message.includes(MUTED_BY_RECIPIENT_ERROR_FRAGMENT)) {
+          setMutedByPeer(true);
+        }
       }
     },
     [threadId, authUserId, generateUploadUrl, sendConversationMessage, scrollToLatest, onSendComplete]
@@ -896,6 +921,22 @@ export default function PrivateChatView({
 
           {/* Composer - auto height, anchored at bottom of sheet */}
           <View style={styles.inputWrapper}>
+            {mutedByPeer && (
+              <View style={styles.mutedNotice}>
+                <Ionicons
+                  name="volume-mute-outline"
+                  size={16}
+                  color="#FFB74D"
+                  style={styles.mutedNoticeIcon}
+                />
+                <View style={styles.mutedNoticeTextWrap}>
+                  <Text style={styles.mutedNoticeTitle}>You have been muted</Text>
+                  <Text style={styles.mutedNoticeBody}>
+                    You can&apos;t message this person until they unmute you.
+                  </Text>
+                </View>
+              </View>
+            )}
             <ChatComposer
               value={inputText}
               onChangeText={setInputText}
@@ -953,6 +994,22 @@ export default function PrivateChatView({
             />
           )}
           <View style={{ paddingBottom: insets.bottom }}>
+            {mutedByPeer && (
+              <View style={styles.mutedNotice}>
+                <Ionicons
+                  name="volume-mute-outline"
+                  size={16}
+                  color="#FFB74D"
+                  style={styles.mutedNoticeIcon}
+                />
+                <View style={styles.mutedNoticeTextWrap}>
+                  <Text style={styles.mutedNoticeTitle}>You have been muted</Text>
+                  <Text style={styles.mutedNoticeBody}>
+                    You can&apos;t message this person until they unmute you.
+                  </Text>
+                </View>
+              </View>
+            )}
             <ChatComposer
               value={inputText}
               onChangeText={setInputText}
@@ -1182,5 +1239,36 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: 14,
     color: C.textLight,
+  },
+  // Inline notice shown above the composer when sendMessage is rejected
+  // because the recipient muted the sender. Subtle warning, not destructive.
+  mutedNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(255, 183, 77, 0.10)',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255, 183, 77, 0.35)',
+    borderBottomColor: 'rgba(255, 183, 77, 0.35)',
+  },
+  mutedNoticeIcon: {
+    marginTop: 1,
+    marginRight: 8,
+  },
+  mutedNoticeTextWrap: {
+    flex: 1,
+  },
+  mutedNoticeTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#FFB74D',
+    marginBottom: 2,
+  },
+  mutedNoticeBody: {
+    fontSize: 12,
+    color: C.textLight,
+    lineHeight: 16,
   },
 });
