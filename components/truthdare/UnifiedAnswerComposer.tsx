@@ -39,7 +39,6 @@ const LOCK_ICON_SIZE = SIZES.icon.sm;
 const REMOVE_MEDIA_ICON_SIZE = moderateScale(26, 0.25);
 const RECORD_STOP_ICON_SIZE = SIZES.icon.md;
 const ATTACH_ICON_SIZE = moderateScale(22, 0.25);
-const IDENTITY_HEADER_ICON_SIZE = SIZES.icon.xs;
 const IDENTITY_OPTION_ICON_SIZE = SIZES.icon.sm;
 const VISIBILITY_ICON_SIZE = SIZES.icon.xs;
 const FOOTER_ICON_SIZE = SIZES.icon.xs;
@@ -723,147 +722,178 @@ export function UnifiedAnswerComposer({
             )}
 
             {/* Attachment buttons */}
+            {/* Batch C: Added helper line + Once-view / ≤ 60s chips, neutral icon color, calmer pressed feedback */}
             {!attachment && !isRecording && (
-              <View style={styles.attachmentButtons}>
-                {/* VISUAL MEDIA LOCK: Hide Gallery/Camera when visual media is locked */}
-                {!visualMediaLocked && (
-                  <>
-                    <TouchableOpacity style={styles.attachBtn} onPress={pickFromGallery}>
-                      <Ionicons name="images-outline" size={ATTACH_ICON_SIZE} color="#00B894" />
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Gallery</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.attachBtn} onPress={openMediaCamera}>
-                      <Ionicons name="camera-outline" size={ATTACH_ICON_SIZE} color="#E94560" />
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Camera</Text>
-                    </TouchableOpacity>
-                  </>
-                )}
-                <TouchableOpacity style={styles.attachBtn} onPress={startRecording}>
-                  <Ionicons name="mic-outline" size={ATTACH_ICON_SIZE} color="#FF9800" />
-                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Voice</Text>
-                </TouchableOpacity>
+              <View style={styles.attachmentBlock}>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachmentHelperText}>
+                  Optional: add one photo, video, or voice.
+                </Text>
+                <View style={styles.attachmentButtons}>
+                  {/* VISUAL MEDIA LOCK: Hide Gallery/Camera when visual media is locked */}
+                  {!visualMediaLocked && (
+                    <>
+                      <TouchableOpacity style={styles.attachBtn} onPress={pickFromGallery} activeOpacity={0.7}>
+                        <Ionicons name="images-outline" size={ATTACH_ICON_SIZE} color={C.textLight} />
+                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Gallery</Text>
+                        <View style={styles.attachChip}>
+                          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachChipText}>Once-view</Text>
+                        </View>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.attachBtn} onPress={openMediaCamera} activeOpacity={0.7}>
+                        <Ionicons name="camera-outline" size={ATTACH_ICON_SIZE} color={C.textLight} />
+                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Camera</Text>
+                        <View style={styles.attachChip}>
+                          <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachChipText}>Once-view</Text>
+                        </View>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                  <TouchableOpacity style={styles.attachBtn} onPress={startRecording} activeOpacity={0.7}>
+                    <Ionicons name="mic-outline" size={ATTACH_ICON_SIZE} color={C.textLight} />
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Voice</Text>
+                    <View style={styles.attachChip}>
+                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachChipText}>≤ 60s</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
 
             {/* Identity Picker - only show for new answers */}
-            {/* P1-003 FIX: Simplified identity options with clearer descriptions */}
+            {/* Identity Correction: side-by-side compact tiles with dynamic description below */}
+            {/* Backend values unchanged: anonymous / no_photo / profile */}
             {isNewAnswer && (
               <View style={styles.identitySection}>
                 <View style={styles.identityHeader}>
-                  <Ionicons name="person-outline" size={IDENTITY_HEADER_ICON_SIZE} color={C.textLight} />
-                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identityTitle}>Your identity</Text>
+                  <View style={styles.identityHeaderText}>
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identityTitle}>Reply as</Text>
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identitySubtitle}>Choose how they'll see you</Text>
+                  </View>
                 </View>
-                <View style={styles.identityOptions}>
-                  {/* Anonymous (DEFAULT) - P1-003: Clearer description */}
+                <View style={styles.identityTilesRow}>
+                  {/* Anonymous (DEFAULT) */}
                   <TouchableOpacity
-                    style={[styles.identityOption, identityMode === 'anonymous' && styles.identityOptionActive]}
+                    style={[styles.identityTile, identityMode === 'anonymous' && styles.identityTileActive]}
                     onPress={() => setIdentityMode('anonymous')}
+                    activeOpacity={0.7}
                   >
-                    <View style={styles.radioOuter}>
-                      {identityMode === 'anonymous' && <View style={styles.radioInner} />}
-                    </View>
-                    <Ionicons name="eye-off" size={IDENTITY_OPTION_ICON_SIZE} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
-                    <View style={styles.identityTextContainer}>
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.identityText, identityMode === 'anonymous' && { color: C.primary }]}>
-                        Anonymous
-                      </Text>
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identitySubtext}>Hidden identity</Text>
-                    </View>
-                    <View style={styles.defaultBadge}>
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.defaultBadgeText}>Default</Text>
-                    </View>
+                    <Ionicons
+                      name="eye-off"
+                      size={IDENTITY_OPTION_ICON_SIZE}
+                      color={identityMode === 'anonymous' ? C.primary : C.textLight}
+                    />
+                    <Text
+                      maxFontSizeMultiplier={TEXT_MAX_SCALE}
+                      numberOfLines={1}
+                      style={[styles.identityTileLabel, identityMode === 'anonymous' && styles.identityTileLabelActive]}
+                    >
+                      Anonymous
+                    </Text>
                   </TouchableOpacity>
 
-                  {/* Profile - P1-003: Moved up, more prominent */}
+                  {/* Blur photo (no_photo) */}
                   <TouchableOpacity
-                    style={[styles.identityOption, identityMode === 'profile' && styles.identityOptionActive]}
-                    onPress={() => setIdentityMode('profile')}
-                  >
-                    <View style={styles.radioOuter}>
-                      {identityMode === 'profile' && <View style={styles.radioInner} />}
-                    </View>
-                    <Ionicons name="person" size={IDENTITY_OPTION_ICON_SIZE} color={identityMode === 'profile' ? C.primary : C.textLight} />
-                    <View style={styles.identityTextContainer}>
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.identityText, identityMode === 'profile' && { color: C.primary }]}>
-                        Show profile
-                      </Text>
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identitySubtext}>Name, age, photo visible</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* No photo - P1-003: Clearer description, moved to last position */}
-                  <TouchableOpacity
-                    style={[styles.identityOption, identityMode === 'no_photo' && styles.identityOptionActive]}
+                    style={[styles.identityTile, identityMode === 'no_photo' && styles.identityTileActive]}
                     onPress={() => setIdentityMode('no_photo')}
+                    activeOpacity={0.7}
                   >
-                    <View style={styles.radioOuter}>
-                      {identityMode === 'no_photo' && <View style={styles.radioInner} />}
-                    </View>
-                    <Ionicons name="person-outline" size={IDENTITY_OPTION_ICON_SIZE} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
-                    <View style={styles.identityTextContainer}>
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.identityText, identityMode === 'no_photo' && { color: C.primary }]}>
-                        Blur photo
-                      </Text>
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identitySubtext}>Photo blurred</Text>
-                    </View>
+                    <Ionicons
+                      name="image-outline"
+                      size={IDENTITY_OPTION_ICON_SIZE}
+                      color={identityMode === 'no_photo' ? C.primary : C.textLight}
+                    />
+                    <Text
+                      maxFontSizeMultiplier={TEXT_MAX_SCALE}
+                      numberOfLines={1}
+                      style={[styles.identityTileLabel, identityMode === 'no_photo' && styles.identityTileLabelActive]}
+                    >
+                      Blur photo
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Full profile */}
+                  <TouchableOpacity
+                    style={[styles.identityTile, identityMode === 'profile' && styles.identityTileActive]}
+                    onPress={() => setIdentityMode('profile')}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons
+                      name="person"
+                      size={IDENTITY_OPTION_ICON_SIZE}
+                      color={identityMode === 'profile' ? C.primary : C.textLight}
+                    />
+                    <Text
+                      maxFontSizeMultiplier={TEXT_MAX_SCALE}
+                      numberOfLines={1}
+                      style={[styles.identityTileLabel, identityMode === 'profile' && styles.identityTileLabelActive]}
+                    >
+                      Full profile
+                    </Text>
                   </TouchableOpacity>
                 </View>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identityDescription}>
+                  {identityMode === 'anonymous'
+                    ? 'No name, no photo'
+                    : identityMode === 'no_photo'
+                    ? 'They see your name; photo is blurred'
+                    : 'Name, age, and clear photo'}
+                </Text>
+              </View>
+            )}
 
-                {/* Media Visibility Selector - for photo/video/voice on new answers */}
-                {/* P1-005 FIX: Include voice messages in visibility options */}
-                {/* P1-002 FIX: Clearer labels with icons */}
-                {attachment && (
-                  <View style={styles.visibilitySection}>
-                  <View style={styles.visibilitySeparator} />
-                  <View style={styles.visibilityHeader}>
-                      <Ionicons name="eye-outline" size={VISIBILITY_ICON_SIZE} color={C.textLight} />
-                      <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.visibilityTitle}>Who can view your {attachment.kind === 'audio' ? 'voice message' : attachment.kind}?</Text>
-                  </View>
-                    <View style={styles.visibilitySegmented}>
-                      <TouchableOpacity
-                        style={[
-                          styles.segmentBtn,
-                          mediaVisibility === 'private' && styles.segmentBtnActive,
-                        ]}
-                        onPress={() => setMediaVisibility('private')}
-                      >
-                        <Ionicons
-                          name="lock-closed"
-                          size={VISIBILITY_ICON_SIZE}
-                          color={mediaVisibility === 'private' ? '#FFF' : C.textLight}
-                          style={styles.segmentIcon}
-                        />
-                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[
-                          styles.segmentBtnText,
-                          mediaVisibility === 'private' && styles.segmentBtnTextActive,
-                        ]}>Just them</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[
-                          styles.segmentBtn,
-                          mediaVisibility === 'public' && styles.segmentBtnActive,
-                        ]}
-                        onPress={() => setMediaVisibility('public')}
-                      >
-                        <Ionicons
-                          name="people"
-                          size={VISIBILITY_ICON_SIZE}
-                          color={mediaVisibility === 'public' ? '#FFF' : C.textLight}
-                          style={styles.segmentIcon}
-                        />
-                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[
-                          styles.segmentBtnText,
-                          mediaVisibility === 'public' && styles.segmentBtnTextActive,
-                        ]}>Everyone</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.visibilityHelperText}>
-                      {mediaVisibility === 'private'
-                        ? 'Only the prompt creator can view this'
-                        : 'Anyone viewing this thread can see it'}
-                    </Text>
-                  </View>
-                )}
+            {/* Batch B: Media Visibility Selector — own card, sibling of identity card */}
+            {/* Same gating as before: only when this is a new answer AND an attachment is present */}
+            {/* P1-005 FIX: Include voice messages in visibility options */}
+            {/* P1-002 FIX: Clearer labels with icons */}
+            {isNewAnswer && attachment && (
+              <View style={styles.visibilitySection}>
+                <View style={styles.visibilityHeader}>
+                  <Ionicons name="eye-outline" size={VISIBILITY_ICON_SIZE} color={C.textLight} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.visibilityTitle}>Who can view your {attachment.kind === 'audio' ? 'voice message' : attachment.kind}?</Text>
+                </View>
+                <View style={styles.visibilitySegmented}>
+                  <TouchableOpacity
+                    style={[
+                      styles.segmentBtn,
+                      mediaVisibility === 'private' && styles.segmentBtnActive,
+                    ]}
+                    onPress={() => setMediaVisibility('private')}
+                  >
+                    <Ionicons
+                      name="lock-closed"
+                      size={VISIBILITY_ICON_SIZE}
+                      color={mediaVisibility === 'private' ? '#FFF' : C.textLight}
+                      style={styles.segmentIcon}
+                    />
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[
+                      styles.segmentBtnText,
+                      mediaVisibility === 'private' && styles.segmentBtnTextActive,
+                    ]}>Just them</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.segmentBtn,
+                      mediaVisibility === 'public' && styles.segmentBtnActive,
+                    ]}
+                    onPress={() => setMediaVisibility('public')}
+                  >
+                    <Ionicons
+                      name="people"
+                      size={VISIBILITY_ICON_SIZE}
+                      color={mediaVisibility === 'public' ? '#FFF' : C.textLight}
+                      style={styles.segmentIcon}
+                    />
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[
+                      styles.segmentBtnText,
+                      mediaVisibility === 'public' && styles.segmentBtnTextActive,
+                    ]}>Everyone</Text>
+                  </TouchableOpacity>
+                </View>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.visibilityHelperText}>
+                  {mediaVisibility === 'private'
+                    ? 'Only the prompt creator can view this'
+                    : 'Anyone viewing this thread can see it'}
+                </Text>
               </View>
             )}
           </View>
@@ -1117,21 +1147,45 @@ const styles = StyleSheet.create({
   },
 
   // Attachment buttons
+  // Batch C: wrapper for helper text + tiles
+  attachmentBlock: {
+    marginBottom: SPACING.sm,
+  },
+  attachmentHelperText: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.35),
+    color: C.textLight,
+    marginBottom: SPACING.xs + 2,
+    paddingHorizontal: moderateScale(2, 0.25),
+  },
   attachmentButtons: {
     flexDirection: 'row',
     gap: SPACING.sm,
-    marginBottom: SPACING.sm,
   },
   attachBtn: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     gap: SPACING.xs,
-    paddingVertical: moderateScale(10, 0.35),
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.xs,
     backgroundColor: C.surface,
     borderRadius: moderateScale(10, 0.25),
   },
   attachBtnText: { fontSize: FONT_SIZE.sm, lineHeight: lineHeight(FONT_SIZE.sm, 1.2), fontWeight: '600', color: C.text },
+  // Batch C: small subtle chip ("Once-view" / "≤ 60s")
+  attachChip: {
+    paddingHorizontal: SPACING.sm - 2,
+    paddingVertical: moderateScale(1, 0.25),
+    borderRadius: SIZES.radius.xs + 2,
+    backgroundColor: C.background,
+  },
+  attachChipText: {
+    fontSize: FONT_SIZE.xxs,
+    lineHeight: lineHeight(FONT_SIZE.xxs, 1.2),
+    fontWeight: '600',
+    color: C.textLight,
+  },
 
   // Identity picker
   identitySection: {
@@ -1144,48 +1198,70 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.sm - 2,
-    marginBottom: SPACING.sm - 2,
+    marginBottom: SPACING.sm,
   },
-  identityTitle: { fontSize: FONT_SIZE.caption, lineHeight: lineHeight(FONT_SIZE.caption, 1.2), fontWeight: '600', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.3 },
-  identityOptions: { gap: SPACING.xs },
-  identityOption: {
+  // Batch A: container that stacks the new title + subtitle
+  identityHeaderText: { flex: 1 },
+  identityTitle: {
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.2),
+    fontWeight: '600',
+    color: C.text,
+  },
+  // Batch A: new subtitle under "Reply as"
+  identitySubtitle: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.35),
+    color: C.textLight,
+    marginTop: moderateScale(2, 0.25),
+  },
+  // Identity Correction: side-by-side tiles + dynamic description
+  identityTilesRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     gap: SPACING.sm,
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.sm - 2,
-    borderRadius: SIZES.radius.sm,
   },
-  identityOptionActive: { backgroundColor: C.primary + '10' },
-  // P1-003 FIX: Added container for text + subtext
-  identityTextContainer: { flex: 1 },
-  identityText: { fontSize: FONT_SIZE.body2, lineHeight: lineHeight(FONT_SIZE.body2, 1.2), color: C.text, fontWeight: '500' },
-  identitySubtext: { fontSize: FONT_SIZE.sm, lineHeight: lineHeight(FONT_SIZE.sm, 1.35), color: C.textLight, marginTop: moderateScale(1, 0.25) },
-  radioOuter: {
-    width: moderateScale(18, 0.25),
-    height: moderateScale(18, 0.25),
-    borderRadius: SIZES.radius.full,
-    borderWidth: 2,
-    borderColor: C.textLight,
+  identityTile: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: SPACING.xs,
+    paddingVertical: SPACING.sm + 2,
+    paddingHorizontal: SPACING.xs,
+    borderRadius: SIZES.radius.sm,
+    backgroundColor: C.background,
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
-  radioInner: { width: moderateScale(10, 0.25), height: moderateScale(10, 0.25), borderRadius: SIZES.radius.full, backgroundColor: C.primary },
-  defaultBadge: {
-    backgroundColor: C.primary + '20',
-    paddingHorizontal: SPACING.sm - 2,
-    paddingVertical: SPACING.xxs,
-    borderRadius: SIZES.radius.xs + 2,
+  identityTileActive: {
+    backgroundColor: C.primary + '14',
+    borderColor: C.primary,
   },
-  defaultBadgeText: { fontSize: FONT_SIZE.xxs, lineHeight: lineHeight(FONT_SIZE.xxs, 1.2), fontWeight: '700', color: C.primary },
+  identityTileLabel: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
+    fontWeight: '600',
+    color: C.text,
+    textAlign: 'center',
+  },
+  identityTileLabelActive: {
+    color: C.primary,
+  },
+  identityDescription: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.35),
+    color: C.textLight,
+    textAlign: 'center',
+    marginTop: SPACING.sm,
+  },
 
   // Media visibility selector (segmented control)
   // P1-002 FIX: Added header styles for clearer visibility section
-  visibilitySection: { marginTop: SPACING.xs },
-  visibilitySeparator: {
-    height: 1,
-    backgroundColor: C.background,
-    marginVertical: SPACING.sm,
+  // Batch B: Now rendered as its own standalone card, sibling of the identity card.
+  visibilitySection: {
+    backgroundColor: C.surface,
+    borderRadius: moderateScale(10, 0.25),
+    padding: moderateScale(10, 0.35),
+    marginBottom: SPACING.sm,
   },
   visibilityHeader: {
     flexDirection: 'row',
@@ -1193,7 +1269,7 @@ const styles = StyleSheet.create({
     gap: SPACING.sm - 2,
     marginBottom: SPACING.sm,
   },
-  visibilityTitle: { fontSize: FONT_SIZE.caption, lineHeight: lineHeight(FONT_SIZE.caption, 1.2), fontWeight: '600', color: C.textLight },
+  visibilityTitle: { fontSize: FONT_SIZE.body2, lineHeight: lineHeight(FONT_SIZE.body2, 1.2), fontWeight: '600', color: C.text, flex: 1 },
   visibilitySegmented: {
     flexDirection: 'row',
     gap: SPACING.sm,
