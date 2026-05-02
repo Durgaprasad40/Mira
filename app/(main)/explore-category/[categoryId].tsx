@@ -7,6 +7,7 @@ import { useExploreCategoryProfiles } from '@/hooks/useExploreCategoryProfiles';
 import { EXPLORE_CATEGORIES } from '@/components/explore/exploreCategories';
 import { useExplorePrefsStore } from '@/stores/explorePrefsStore';
 import { DiscoverCardStack } from '@/components/screens/DiscoverCardStack';
+import { safeReplace } from '@/lib/safeRouter';
 import { COLORS } from '@/lib/constants';
 
 const HEADER_H = 48;
@@ -116,11 +117,16 @@ export default function ExploreCategoryScreen() {
     setPageOffset((currentOffset) => currentOffset + PAGE_SIZE);
   }, []);
 
+  const handleReturnToExplore = useCallback(() => {
+    safeReplace(router, '/(main)/(tabs)/explore' as any, 'explore-category->explore');
+  }, [router]);
+
   // Use the profiles directly from the hook (already filtered by category)
   const items = profiles;
   const isInitialLoading = isLoading && items.length === 0;
   const isRefreshingLoadedPage = isLoading && items.length > 0;
   const profileActionScope = `${normalizedCategoryId ?? 'invalid'}:${refreshKey}:${pageOffset}`;
+  const isUnavailableCategory = status === 'invalid_category' || !cat;
 
   useEffect(() => {
     if (!isLoading) {
@@ -159,7 +165,7 @@ export default function ExploreCategoryScreen() {
       return 'Verify to use Nearby';
     }
     if (status === 'invalid_category' || !cat) {
-      return 'This vibe is unavailable';
+      return 'Category unavailable';
     }
     if (status === 'viewer_missing') {
       return 'Explore is unavailable';
@@ -187,7 +193,7 @@ export default function ExploreCategoryScreen() {
       return 'Finish profile verification to browse people nearby.';
     }
     if (status === 'invalid_category' || !cat) {
-      return 'This Explore vibe is not live right now.';
+      return 'This Explore category is no longer available.';
     }
     if (status === 'viewer_missing') {
       return "We couldn't load your Explore profile right now.";
@@ -229,10 +235,10 @@ export default function ExploreCategoryScreen() {
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.title} numberOfLines={1}>
-            {cat?.title ?? 'Unavailable vibe'}
+            {cat?.title ?? 'Category unavailable'}
           </Text>
           <Text style={styles.headerSubtitle}>
-            {cat ? 'People matching this vibe' : 'This Explore vibe is not live right now'}
+            {cat ? 'People matching this vibe' : 'This Explore category is no longer available'}
           </Text>
         </View>
         <TouchableOpacity onPress={handleRefresh} hitSlop={8} style={styles.headerBtn}>
@@ -299,11 +305,15 @@ export default function ExploreCategoryScreen() {
           />
           <Text style={styles.emptyTitle}>{unavailableTitle}</Text>
           <Text style={styles.emptySubtitle}>{unavailableSubtitle}</Text>
-          {showLoadMorePrompt && hasMore && (
+          {isUnavailableCategory ? (
+            <TouchableOpacity style={styles.retryButton} onPress={handleReturnToExplore}>
+              <Text style={styles.retryButtonText}>Back to Explore</Text>
+            </TouchableOpacity>
+          ) : showLoadMorePrompt && hasMore ? (
             <TouchableOpacity style={styles.retryButton} onPress={handleLoadMore}>
               <Text style={styles.retryButtonText}>Load more people</Text>
             </TouchableOpacity>
-          )}
+          ) : null}
         </View>
       )}
     </View>

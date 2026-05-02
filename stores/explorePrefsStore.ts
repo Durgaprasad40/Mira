@@ -18,6 +18,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { EXPLORE_CATEGORIES } from '@/components/explore/exploreCategories';
 
 interface ExplorePrefsState {
   // Category click counts (for frequency-based sorting)
@@ -65,6 +66,40 @@ const RETURN_HOOK_MIN_GAP_MS = 10 * 60 * 1000;
 // Show swipe progress every N swipes
 const SWIPE_PROGRESS_INTERVAL = 3;
 
+const ACTIVE_EXPLORE_CATEGORY_IDS = new Set(EXPLORE_CATEGORIES.map((category) => category.id));
+
+function isActiveExploreCategoryId(categoryId: string | null | undefined): categoryId is string {
+  return typeof categoryId === 'string' && ACTIVE_EXPLORE_CATEGORY_IDS.has(categoryId);
+}
+
+function sanitizeCategoryClickCounts(categoryClickCounts: unknown): Record<string, number> {
+  if (
+    !categoryClickCounts ||
+    typeof categoryClickCounts !== 'object' ||
+    Array.isArray(categoryClickCounts)
+  ) {
+    return {};
+  }
+
+  const cleaned: Record<string, number> = {};
+  for (const [categoryId, clickCount] of Object.entries(categoryClickCounts)) {
+    if (isActiveExploreCategoryId(categoryId) && typeof clickCount === 'number' && Number.isFinite(clickCount)) {
+      cleaned[categoryId] = clickCount;
+    }
+  }
+  return cleaned;
+}
+
+function sanitizeLastVisitedCategoryId(categoryId: unknown): string | null {
+  if (typeof categoryId !== 'string') return null;
+  return isActiveExploreCategoryId(categoryId) ? categoryId : null;
+}
+
+function sanitizeLastVisitTimestamp(timestamp: unknown, lastVisitedCategoryId: string | null): number | null {
+  if (!lastVisitedCategoryId) return null;
+  return typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : null;
+}
+
 export const useExplorePrefsStore = create<ExplorePrefsState>()(
   persist(
     (set, get) => ({
@@ -80,6 +115,8 @@ export const useExplorePrefsStore = create<ExplorePrefsState>()(
 
       // Track when user taps a category tile
       trackCategoryClick: (categoryId: string) => {
+        if (!isActiveExploreCategoryId(categoryId)) return;
+
         set((state) => ({
           categoryClickCounts: {
             ...state.categoryClickCounts,
@@ -92,18 +129,24 @@ export const useExplorePrefsStore = create<ExplorePrefsState>()(
 
       // Calculate smart score: count + (clickWeight * 2)
       getCategoryScore: (categoryId: string, profileCount: number) => {
+        if (!isActiveExploreCategoryId(categoryId)) return profileCount;
+
         const clickCount = get().categoryClickCounts[categoryId] ?? 0;
         return profileCount + (clickCount * 2);
       },
 
       // Check if category is frequently clicked (for "Your vibe" tag)
       isFrequentCategory: (categoryId: string) => {
+        if (!isActiveExploreCategoryId(categoryId)) return false;
+
         const clickCount = get().categoryClickCounts[categoryId] ?? 0;
         return clickCount >= FREQUENT_CLICK_THRESHOLD;
       },
 
       // Check if should show return boost for a category
       shouldShowReturnBoost: (categoryId: string) => {
+        if (!isActiveExploreCategoryId(categoryId)) return false;
+
         const { lastVisitedCategoryId, lastVisitTimestamp } = get();
         if (lastVisitedCategoryId !== categoryId) return false;
         if (!lastVisitTimestamp) return false;
@@ -116,6 +159,8 @@ export const useExplorePrefsStore = create<ExplorePrefsState>()(
 
       // Track category visit within session (for time-based nudge)
       trackCategoryVisit: (categoryId: string) => {
+        if (!isActiveExploreCategoryId(categoryId)) return;
+
         set((state) => ({
           sessionCategoryVisits: {
             ...state.sessionCategoryVisits,
@@ -126,6 +171,8 @@ export const useExplorePrefsStore = create<ExplorePrefsState>()(
 
       // Check if this is a revisit within the same session
       isRevisitInSession: (categoryId: string) => {
+        if (!isActiveExploreCategoryId(categoryId)) return false;
+
         const visits = get().sessionCategoryVisits[categoryId] ?? 0;
         return visits > 1; // More than 1 means revisit
       },
@@ -173,6 +220,7 @@ export const useExplorePrefsStore = create<ExplorePrefsState>()(
       shouldShowReturnHook: () => {
         const { lastExploreExitTimestamp, lastVisitedCategoryId } = get();
         if (!lastExploreExitTimestamp || !lastVisitedCategoryId) return false;
+        if (!isActiveExploreCategoryId(lastVisitedCategoryId)) return false;
 
         const timeSinceExit = Date.now() - lastExploreExitTimestamp;
         if (timeSinceExit <= RETURN_HOOK_MIN_GAP_MS) return false;
@@ -186,7 +234,8 @@ export const useExplorePrefsStore = create<ExplorePrefsState>()(
 
       // Get the category to return to
       getReturnCategory: () => {
-        return get().lastVisitedCategoryId;
+        const lastVisitedCategoryId = get().lastVisitedCategoryId;
+        return isActiveExploreCategoryId(lastVisitedCategoryId) ? lastVisitedCategoryId : null;
       },
 
       // Reset all preferences
@@ -207,10 +256,29 @@ export const useExplorePrefsStore = create<ExplorePrefsState>()(
       storage: createJSONStorage(() => AsyncStorage),
       // Only persist these fields, not session state
       partialize: (state) => ({
-        categoryClickCounts: state.categoryClickCounts,
-        lastVisitedCategoryId: state.lastVisitedCategoryId,
-        lastVisitTimestamp: state.lastVisitTimestamp,
+        categoryClickCounts: sanitizeCategoryClickCounts(state.categoryClickCounts),
+        lastVisitedCategoryId: sanitizeLastVisitedCategoryId(state.lastVisitedCategoryId),
+        lastVisitTimestamp: sanitizeLastVisitTimestamp(
+          state.lastVisitTimestamp,
+          sanitizeLastVisitedCategoryId(state.lastVisitedCategoryId),
+        ),
       }),
+      merge: (persistedState, currentState) => {
+        const persisted = (persistedState ?? {}) as Partial<ExplorePrefsState>;
+        const lastVisitedCategoryId = sanitizeLastVisitedCategoryId(persisted.lastVisitedCategoryId);
+
+        return {
+          ...currentState,
+          ...persisted,
+          categoryClickCounts: sanitizeCategoryClickCounts(persisted.categoryClickCounts),
+          lastVisitedCategoryId,
+          lastVisitTimestamp: sanitizeLastVisitTimestamp(persisted.lastVisitTimestamp, lastVisitedCategoryId),
+          sessionCategoryVisits: currentState.sessionCategoryVisits,
+          sessionSwipeCount: currentState.sessionSwipeCount,
+          shownTriggers: currentState.shownTriggers,
+          lastExploreExitTimestamp: currentState.lastExploreExitTimestamp,
+        };
+      },
     }
   )
 );

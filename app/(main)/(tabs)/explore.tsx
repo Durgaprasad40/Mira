@@ -30,7 +30,6 @@ import {
   EXPLORE_CATEGORIES,
   RELATIONSHIP_CATEGORIES,
   RIGHT_NOW_CATEGORIES,
-  INTEREST_CATEGORIES,
 } from "@/components/explore/exploreCategories";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { COLORS, FONT_SIZE, SPACING, SIZES, lineHeight, moderateScale } from "@/lib/constants";
@@ -326,7 +325,6 @@ export default function ExploreScreen() {
   // Section data (static category arrays)
   const relationshipItems = RELATIONSHIP_CATEGORIES;
   const rightNowItems = RIGHT_NOW_CATEGORIES;
-  const interestItems = INTEREST_CATEGORIES;
   const columnCount = windowWidth >= 1080 ? 4 : windowWidth >= 760 ? 3 : windowWidth >= 320 ? 2 : 1;
   const tileWidth = useMemo(() => {
     const availableWidth = Math.max(windowWidth - GRID_PADDING * 2 - GRID_GAP * (columnCount - 1), 0);
@@ -350,7 +348,7 @@ export default function ExploreScreen() {
   );
 
   // Check if any items exist (for empty state)
-  const hasAnyItems = relationshipItems.length > 0 || rightNowItems.length > 0 || interestItems.length > 0;
+  const hasAnyItems = relationshipItems.length > 0 || rightNowItems.length > 0;
 
   // Category counts
   const categoryCounts = useMemo(() => {
@@ -677,23 +675,6 @@ export default function ExploreScreen() {
               )}
               <View style={[styles.sectionGrid, sectionGridStyle]}>
                 {renderSectionGrid(rightNowItems)}
-              </View>
-            </View>
-          )}
-
-          {/* 🎯 Interests Section */}
-          {interestItems.length > 0 && (
-            <View style={styles.section}>
-              <View style={styles.sectionHeader}>
-                <Text {...TEXT_PROPS} style={styles.sectionIcon}>
-                  🎯
-                </Text>
-                <Text {...TEXT_PROPS} style={styles.sectionTitle}>
-                  Interests
-                </Text>
-              </View>
-              <View style={[styles.sectionGrid, sectionGridStyle]}>
-                {renderSectionGrid(interestItems)}
               </View>
             </View>
           )}

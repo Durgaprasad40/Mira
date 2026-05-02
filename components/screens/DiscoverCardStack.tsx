@@ -532,13 +532,6 @@ const CATEGORY_TAG_LABELS: Record<string, string> = {
   online_now: "Online now",
   active_today: "Active today",
   free_tonight: "Free tonight",
-  coffee_date: "Loves coffee",
-  nature_lovers: "Nature lover",
-  binge_watchers: "Binge watcher",
-  travel: "Loves to travel",
-  gaming: "Into gaming",
-  fitness: "Fitness enthusiast",
-  music: "Music lover",
 };
 
 // 🔒 LOCKED: Do not change Discover stack orchestration (Phase-1/2 modes, queue) without audit approval

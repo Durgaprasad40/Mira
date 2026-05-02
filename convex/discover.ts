@@ -1194,18 +1194,6 @@ const EXTRA_EXPLORE_CATEGORY_IDS = [
   'online_now',
   'active_today',
   'free_tonight',
-  'coffee_date',
-  'sports',
-  'nature_lovers',
-  'binge_watchers',
-  'foodie',
-  'travel',
-  'art_culture',
-  'gaming',
-  'fitness',
-  'music',
-  'nightlife',
-  'brunch',
 ] as const;
 
 const EXPLORE_CATEGORY_IDS = [
@@ -1273,10 +1261,6 @@ function candidateMatchesAnyIntent(candidate: { relationshipIntent: string[] }, 
   return targets.some((intent) => normalizedCandidateIntents.includes(intent as any));
 }
 
-function candidateMatchesAnyActivity(candidate: { activities: string[] }, targets: string[]): boolean {
-  return targets.some((activity) => candidate.activities.includes(activity));
-}
-
 function isNearMeCandidate(candidate: { distance?: number }): boolean {
   return typeof candidate.distance === 'number' && candidate.distance <= 5;
 }
@@ -1317,30 +1301,6 @@ function matchesExploreCategory(candidate: ExploreCandidateBase, categoryId: Exp
       return isActiveTodayCandidate(candidate);
     case 'free_tonight':
       return candidate.activities.includes('free_tonight');
-    case 'coffee_date':
-      return candidateMatchesAnyActivity(candidate, ['coffee']);
-    case 'sports':
-      return candidateMatchesAnyActivity(candidate, ['sports']);
-    case 'nature_lovers':
-      return candidateMatchesAnyActivity(candidate, ['outdoors']);
-    case 'binge_watchers':
-      return candidateMatchesAnyActivity(candidate, ['movies']);
-    case 'foodie':
-      return candidateMatchesAnyActivity(candidate, ['foodie']);
-    case 'travel':
-      return candidateMatchesAnyActivity(candidate, ['travel']);
-    case 'art_culture':
-      return candidateMatchesAnyActivity(candidate, ['art_culture']);
-    case 'gaming':
-      return candidateMatchesAnyActivity(candidate, ['gaming']);
-    case 'fitness':
-      return candidateMatchesAnyActivity(candidate, ['gym_partner', 'gym']);
-    case 'music':
-      return candidateMatchesAnyActivity(candidate, ['concerts', 'music_lover']);
-    case 'nightlife':
-      return candidateMatchesAnyActivity(candidate, ['nightlife']);
-    case 'brunch':
-      return candidateMatchesAnyActivity(candidate, ['brunch']);
     default:
       return false;
   }
@@ -1355,8 +1315,8 @@ function createEmptyExploreCounts(): Record<string, number> {
 // ---------------------------------------------------------------------------
 // Product rule: a single profile belongs to exactly ONE Explore category at a
 // time. Without an ordering, counts and listings overlap (e.g. an online,
-// nearby profile that stated "just_friends" and tagged "coffee" used to appear
-// in 6 tiles). The rule is applied consistently by:
+// nearby profile that stated "just_friends" and opted into "free_tonight"
+// could appear in multiple tiles). The rule is applied consistently by:
 //   1. `assignExploreCategory` → deterministically picks the single owning
 //      category for a candidate.
 //   2. `countExploreCategories` → increments exactly one counter per candidate.
@@ -1364,36 +1324,18 @@ function createEmptyExploreCounts(): Record<string, number> {
 //      profiles for a tile, so counts and listings stay in lockstep.
 //
 // Priority (highest wins, first match in this list is the assignment):
-//   A. INTERESTS (12) — user-authored activity tags are the strongest
-//      self-declared signal. Assigning these first also fixes the "Interests
-//      section empty" bug: previously any interest-tagged profile that was
-//      also nearby/online/had an intent was double-counted elsewhere, so the
-//      interest tiles shared their population with everything else.
-//   B. `free_tonight` — activity opt-in.
-//   C. RELATIONSHIP INTENT (9) — user-stated dating intent.
-//   D. RIGHT NOW (3: nearby → online_now → active_today) — derived/contextual
+//   A. `free_tonight` — activity opt-in.
+//   B. RELATIONSHIP INTENT (9) — user-stated dating intent.
+//   C. RIGHT NOW (3: nearby → online_now → active_today) — derived/contextual
 //      "residual" bucket. Only candidates that did not match an explicit
-//      activity or intent land here, so Right Now tiles keep surfacing fresh
-//      profiles that wouldn't otherwise show up.
+//      free-tonight opt-in or intent land here, so Right Now tiles keep
+//      surfacing fresh profiles that wouldn't otherwise show up.
 //
 // NOTE: order matters; do not reorder without product review.
 const EXPLORE_ASSIGNMENT_PRIORITY: readonly ExploreCategoryId[] = [
-  // A. Interests (most specific)
-  'coffee_date',
-  'sports',
-  'nature_lovers',
-  'binge_watchers',
-  'foodie',
-  'travel',
-  'art_culture',
-  'gaming',
-  'fitness',
-  'music',
-  'nightlife',
-  'brunch',
-  // B. Free tonight (activity opt-in)
+  // A. Free tonight (activity opt-in)
   'free_tonight',
-  // C. Relationship intent
+  // B. Relationship intent
   'serious_vibes',
   'keep_it_casual',
   'exploring_vibes',
@@ -1403,7 +1345,7 @@ const EXPLORE_ASSIGNMENT_PRIORITY: readonly ExploreCategoryId[] = [
   'open_to_anything',
   'single_parent',
   'new_to_dating',
-  // D. Right Now (residual)
+  // C. Right Now (residual)
   'nearby',
   'online_now',
   'active_today',
@@ -1633,7 +1575,7 @@ async function buildExploreCandidates(
     categoryId?: string;
     maxPerGender: number;
   }
-): Promise<{ status: 'ready' | 'viewer_not_found'; currentUser: any | null; candidates: ExploreCandidateBase[] }> {
+): Promise<{ status: 'ready' | 'viewer_not_found' | 'invalid_category'; currentUser: any | null; candidates: ExploreCandidateBase[] }> {
   const resolvedViewer = await resolveExploreViewer(ctx, args.rawUserId);
   if (!resolvedViewer) {
     return { status: 'viewer_not_found', currentUser: null, candidates: [] };
@@ -1655,6 +1597,9 @@ async function buildExploreCandidates(
   const normalizedRelationshipIntentFilter = normalizeRelationshipIntentValues(args.relationshipIntent);
   const viewerAge = calculateAge(currentUser.dateOfBirth);
   const activeCategoryId = normalizePublicExploreCategoryId(args.categoryId);
+  if (args.categoryId && !activeCategoryId) {
+    return { status: 'invalid_category', currentUser, candidates: [] };
+  }
 
   const userBuckets = await Promise.all(
     effectiveGender.map((gender) =>

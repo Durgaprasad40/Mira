@@ -44,25 +44,12 @@ const PASS_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 const ONLINE_NOW_MS = 10 * 60 * 1000;
 const ACTIVE_TODAY_MS = 24 * 60 * 60 * 1000;
 
-// 24-category exclusive Explore priority list (mirrors EXPLORE_ASSIGNMENT_PRIORITY
+// 13-category exclusive Explore priority list (mirrors EXPLORE_ASSIGNMENT_PRIORITY
 // in convex/discover.ts). See that file for the canonical definition.
 const EXPLORE_ASSIGNMENT_PRIORITY: readonly string[] = [
-  // A. Interests
-  'coffee_date',
-  'sports',
-  'nature_lovers',
-  'binge_watchers',
-  'foodie',
-  'travel',
-  'art_culture',
-  'gaming',
-  'fitness',
-  'music',
-  'nightlife',
-  'brunch',
-  // B. Free tonight
+  // A. Free tonight
   'free_tonight',
-  // C. Relationship intent
+  // B. Relationship intent
   'serious_vibes',
   'keep_it_casual',
   'exploring_vibes',
@@ -72,7 +59,7 @@ const EXPLORE_ASSIGNMENT_PRIORITY: readonly string[] = [
   'open_to_anything',
   'single_parent',
   'new_to_dating',
-  // D. Right Now (residual)
+  // C. Right Now (residual)
   'nearby',
   'online_now',
   'active_today',
@@ -195,20 +182,6 @@ function exploreCandidateMatchesCategory(
     case 'online_now': return candidate.isActiveNow === true;
     case 'active_today': return candidate.wasActiveToday === true;
     case 'free_tonight': return acts.includes('free_tonight');
-    case 'coffee_date': return acts.includes('coffee');
-    case 'sports': return acts.includes('sports');
-    case 'nature_lovers': return acts.includes('outdoors');
-    case 'binge_watchers': return acts.includes('movies');
-    case 'foodie': return acts.includes('foodie');
-    case 'travel': return acts.includes('travel');
-    case 'art_culture': return acts.includes('art_culture');
-    case 'gaming': return acts.includes('gaming');
-    case 'fitness':
-      return acts.includes('gym_partner') || acts.includes('gym');
-    case 'music':
-      return acts.includes('concerts') || acts.includes('music_lover');
-    case 'nightlife': return acts.includes('nightlife');
-    case 'brunch': return acts.includes('brunch');
     default: return false;
   }
 }

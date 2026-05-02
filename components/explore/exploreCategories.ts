@@ -54,13 +54,6 @@ const hasIntent = (p: any, ...targets: string[]): boolean => {
   return targets.some((t) => intents.includes(t));
 };
 
-const hasActivity = (p: any, ...targets: string[]): boolean => {
-  const activities: string[] = Array.isArray(p?.activities) ? p.activities : [];
-  const tags: string[] = Array.isArray(p?.tags) ? p.tags : [];
-  const combined = [...activities, ...tags];
-  return targets.some((t) => combined.includes(t));
-};
-
 const minutesAgo = (ts?: number) =>
   ts ? (Date.now() - ts) / 60000 : Number.POSITIVE_INFINITY;
 
@@ -98,7 +91,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "💑",
     color: TILE_COLORS.pink,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "serious_vibes", "see_where_it_goes"),
+    predicate: (p) => hasIntent(p, "serious_vibes"),
   },
   {
     id: "keep_it_casual",
@@ -107,7 +100,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "🎉",
     color: TILE_COLORS.orange,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "keep_it_casual", "open_to_vibes"),
+    predicate: (p) => hasIntent(p, "keep_it_casual"),
   },
   {
     id: "exploring_vibes",
@@ -116,7 +109,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "🤔",
     color: TILE_COLORS.sky,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "exploring_vibes", "open_to_anything"),
+    predicate: (p) => hasIntent(p, "exploring_vibes"),
   },
   {
     id: "see_where_it_goes",
@@ -125,7 +118,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "📈",
     color: TILE_COLORS.indigo,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "see_where_it_goes", "serious_vibes"),
+    predicate: (p) => hasIntent(p, "see_where_it_goes"),
   },
   {
     id: "open_to_vibes",
@@ -134,7 +127,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "📉",
     color: TILE_COLORS.purple,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "open_to_vibes", "keep_it_casual"),
+    predicate: (p) => hasIntent(p, "open_to_vibes"),
   },
   {
     id: "just_friends",
@@ -143,7 +136,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "👋",
     color: TILE_COLORS.teal,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "just_friends", "open_to_anything"),
+    predicate: (p) => hasIntent(p, "just_friends"),
   },
   {
     id: "open_to_anything",
@@ -152,7 +145,7 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "✨",
     color: TILE_COLORS.gold,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "open_to_anything", "exploring_vibes"),
+    predicate: (p) => hasIntent(p, "open_to_anything"),
   },
   {
     id: "single_parent",
@@ -218,132 +211,15 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
 ];
 
 // ============================================
-// INTEREST CATEGORIES (12 tiles)
-// IDs match the backend live Explore category set exactly.
-// ============================================
-const INTEREST_TILES: ExploreCategory[] = [
-  {
-    id: "coffee_date",
-    label: "Coffee",
-    title: "Coffee",
-    icon: "☕",
-    color: TILE_COLORS.amber,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "coffee"),
-  },
-  {
-    id: "sports",
-    label: "Sports",
-    title: "Sports",
-    icon: "⚽",
-    color: TILE_COLORS.blue,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "sports"),
-  },
-  {
-    id: "nature_lovers",
-    label: "Outdoors",
-    title: "Outdoors",
-    icon: "🌿",
-    color: TILE_COLORS.emerald,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "outdoors"),
-  },
-  {
-    id: "binge_watchers",
-    label: "Movies",
-    title: "Movies",
-    icon: "🎬",
-    color: TILE_COLORS.coral,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "movies"),
-  },
-  {
-    id: "foodie",
-    label: "Foodie",
-    title: "Foodie",
-    icon: "🍕",
-    color: TILE_COLORS.orange,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "foodie"),
-  },
-  {
-    id: "travel",
-    label: "Travel",
-    title: "Travel",
-    icon: "✈️",
-    color: TILE_COLORS.sky,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "travel"),
-  },
-  {
-    id: "art_culture",
-    label: "Art & Culture",
-    title: "Art & Culture",
-    icon: "🎨",
-    color: TILE_COLORS.rose,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "art_culture"),
-  },
-  {
-    id: "gaming",
-    label: "Gaming",
-    title: "Gaming",
-    icon: "🎮",
-    color: TILE_COLORS.purple,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "gaming"),
-  },
-  {
-    id: "fitness",
-    label: "Fitness",
-    title: "Fitness",
-    icon: "💪",
-    color: TILE_COLORS.lime,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "gym_partner", "gym"),
-  },
-  {
-    id: "music",
-    label: "Concerts",
-    title: "Concerts",
-    icon: "🎵",
-    color: TILE_COLORS.pink,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "music_lover", "concerts"),
-  },
-  {
-    id: "nightlife",
-    label: "Nightlife",
-    title: "Nightlife",
-    icon: "🍸",
-    color: TILE_COLORS.indigo,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "nightlife"),
-  },
-  {
-    id: "brunch",
-    label: "Brunch",
-    title: "Brunch",
-    icon: "🥂",
-    color: TILE_COLORS.gold,
-    kind: "interest",
-    predicate: (p) => hasActivity(p, "brunch"),
-  },
-];
-
-// ============================================
 // COMBINED EXPORT (all categories)
 // ============================================
 export const EXPLORE_CATEGORIES: ExploreCategory[] = [
   ...RELATIONSHIP_TILES,
   ...RIGHT_NOW_TILES,
-  ...INTEREST_TILES,
 ];
 
 export const RELATIONSHIP_CATEGORIES = RELATIONSHIP_TILES;
 export const RIGHT_NOW_CATEGORIES = RIGHT_NOW_TILES;
-export const INTEREST_CATEGORIES = INTEREST_TILES;
 
 // ============================================
 // COUNT HELPER FUNCTION
