@@ -164,9 +164,14 @@ export function InAppMediaCamera({
 
     try {
       setIsProcessing(true);
+      // Disable the device shutter sound for the private T/D reply capture.
+      // expo-camera v17 supports `shutterSound: false`. Some platforms
+      // (e.g. iOS in JP/KR) enforce the shutter sound at OS level and may ignore
+      // this option; on those devices the sound will still play.
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.85,
         skipProcessing: false,
+        shutterSound: false,
       });
 
       // STABILITY FIX: C-6 - Guard setState after async operation
