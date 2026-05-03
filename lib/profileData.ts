@@ -44,6 +44,8 @@ export interface ProfileData {
   height?: number | null;
   smoking?: string | null;
   drinking?: string | null;
+  education?: string | null;
+  religion?: string | null;
   /** Phase-2 Deep Connect: mirrors private profile setup flag when provided by the API */
   isSetupComplete?: boolean;
 }
@@ -141,6 +143,8 @@ export function toProfileData(p: any): ProfileData {
     height: p.height ?? null,
     smoking: p.smoking ?? null,
     drinking: p.drinking ?? null,
+    education: p.education ?? null,
+    religion: p.religion ?? null,
     isSetupComplete: typeof p.isSetupComplete === "boolean" ? p.isSetupComplete : undefined,
   };
 

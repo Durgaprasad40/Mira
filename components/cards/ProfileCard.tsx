@@ -48,6 +48,7 @@ import * as Haptics from 'expo-haptics';
 import { cmToFeetInches } from '@/lib/utils';
 import { trackAction } from '@/lib/sentry';
 import { getRenderableProfilePhotos } from '@/lib/profileData';
+import { formatPhase2DistanceMiles } from '@/lib/phase2Distance';
 import {
   DEBUG_PHOTO_RENDER,
   DEBUG_DISCOVER_PLANNER,
@@ -57,9 +58,23 @@ import {
 } from '@/lib/debugFlags';
 import type { PresenceStatus } from '@/hooks/usePresence';
 
-import { COLORS, INCOGNITO_COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
+import {
+  COLORS,
+  INCOGNITO_COLORS,
+  RELATIONSHIP_INTENTS,
+  ACTIVITY_FILTERS,
+  EDUCATION_OPTIONS,
+  RELIGION_OPTIONS,
+} from '@/lib/constants';
 import type { TrustBadge } from '@/lib/trustBadges';
-import { PRIVATE_INTENT_CATEGORIES, PRIVATE_DESIRE_TAGS } from '@/lib/privateConstants';
+import {
+  PRIVATE_INTENT_CATEGORIES,
+  PRIVATE_DESIRE_TAGS,
+  PHASE2_PROMPT_PRIORITY,
+  PHASE2_PROMPT_SECTION_LABEL,
+  getPhase2PromptSection,
+  type Phase2PromptSection,
+} from '@/lib/privateConstants';
 import { MatchSignalBadge } from './MatchSignalBadge';
 
 const PHASE1_ACTIVE_CARD_LOOKAHEAD = 2;
@@ -101,9 +116,9 @@ export interface ProfileCardProps {
   distance?: number;
   photos: { url: string }[];
   /** First profile prompt to display on discover card */
-  profilePrompt?: { question: string; answer: string };
+  profilePrompt?: { promptId?: string | null; question: string; answer: string };
   /** All profile prompts for Phase-2 photo-index reveal */
-  profilePrompts?: { question: string; answer: string }[];
+  profilePrompts?: { promptId?: string | null; question: string; answer: string }[];
   /** Trust badges computed via getTrustBadges() */
   trustBadges?: TrustBadge[];
   /** Enable photo carousel + swipe mode (Discover card) */
@@ -157,6 +172,10 @@ export interface ProfileCardProps {
   height?: number | null;
   smoking?: string | null;
   drinking?: string | null;
+  education?: string | null;
+  religion?: string | null;
+  /** Optional profile/user id for DEV-only diagnostics. */
+  profileId?: string;
   // Legacy props for non-Discover usage (explore grid etc.)
   user?: any;
   onPress?: () => void;
@@ -284,7 +303,6 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // IDENTITY SIMPLIFICATION: firstName/lastName removed
   age,
   bio,
-  city,
   isVerified,
   distance,
   photos,
@@ -312,6 +330,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   height: profileHeight,
   smoking,
   drinking,
+  education = null,
+  religion = null,
+  profileId,
   onPress,
   matchScore,
   theyLikedMe,
@@ -358,13 +379,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // Standardized thresholds: Online Now = 10 min, recently active = 24h
   const isActiveNow = presenceStatus === 'online';
   const isActiveToday = presenceStatus === 'active_today';
-  const phase2AreaLabel = isPhase2 && city ? 'Nearby area' : null;
+  // Phase-2 Deep Connect: distance only (miles), no city / area / "Nearby"
+  // bucket. If `distance` is undefined / negative / hidden, the formatter
+  // returns null and the row renders nothing — privacy is honoured by the
+  // backend simply omitting `distance`.
   const phase2DistanceLabel = useMemo(() => {
-    if (!isPhase2 || distance === undefined || distance < 0) return null;
-    if (distance < 5) return 'Nearby';
-    if (distance < 25) return 'In your city';
-    if (distance < 80) return 'Same region';
-    return 'Far away';
+    return isPhase2 ? formatPhase2DistanceMiles(distance) : null;
   }, [distance, isPhase2]);
 
   // LOG_NOISE_FIX: Presence logging gated behind DEBUG_CARD_PRESENCE (default: false)
@@ -1267,57 +1287,49 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // ═══════════════════════════════════════════════════════════════════════════
 
   // Phase-2: Get interests as chip labels (max 4 for card)
+  // Dedupe input keys first so duplicate `activities` entries don't yield
+  // duplicate chips on screen.
   const phase2Interests = useMemo(() => {
     if (!isPhase2 || !activities || activities.length === 0) return [];
-    return activities
+    const uniqueActivities = Array.from(new Set(activities));
+    return uniqueActivities
       .map(key => ACTIVITY_FILTERS.find(a => a.value === key))
       .filter(Boolean)
       .slice(0, 4)
       .map(a => ({ emoji: a!.emoji, label: a!.label }));
   }, [isPhase2, activities]);
 
-  // Phase-2: Get desire tags as chip labels (max 2 for card - secondary info)
+  // Phase-2: Desire tag chip labels.
+  // Dedupe input keys; preserve the order the user selected them.
+  // No silent cap here — the card row uses `flexWrap: 'wrap'`, and an
+  // overflow guard is applied in the merged Looking-For row below.
   const phase2Desires = useMemo(() => {
     if (!isPhase2 || !desireTagKeys || desireTagKeys.length === 0) return [];
-    return desireTagKeys
+    const uniqueDesireKeys = Array.from(new Set(desireTagKeys));
+    return uniqueDesireKeys
       .map(key => PRIVATE_DESIRE_TAGS.find(d => d.key === key))
       .filter(Boolean)
-      .slice(0, 2)
       .map(d => d!.label);
   }, [isPhase2, desireTagKeys]);
 
-  // Phase-2: Get first intent label for identity slide
-  const phase2IntentLabel = useMemo(() => {
-    if (!isPhase2 || !privateIntentKeys || privateIntentKeys.length === 0) {
-      // LOG_NOISE_FIX: Gated behind DEBUG_P2_UI
-      if (__DEV__ && DEBUG_P2_UI && isPhase2) {
-        console.log(`[P2_INTENT] ${name}: no intent`);
-      }
-      return null;
-    }
-    const category = PRIVATE_INTENT_CATEGORIES.find(c => c.key === privateIntentKeys[0]);
-    const label = category?.label ?? (privateIntentKeys[0] ? 'Other' : null);
-
-    // LOG_NOISE_FIX: Gated behind DEBUG_P2_UI
-    if (__DEV__ && DEBUG_P2_UI) {
-      console.log(`[P2_INTENT] ${name}: ${label || 'none'}`);
-    }
-
-    return label;
-  }, [isPhase2, privateIntentKeys, name]);
-
+  // Phase-2: Looking-For intent chips. Dedupe; preserve selection order.
+  // No silent cap — show every selected intent. Overflow is handled by
+  // wrap + a single "+N" pill in the render path if the combined
+  // intent + desire row exceeds PHASE2_LOOKING_FOR_VISIBLE_CHIPS.
   const phase2IntentChips = useMemo(() => {
     if (!isPhase2 || !privateIntentKeys || privateIntentKeys.length === 0) return [];
-    return privateIntentKeys
+    const uniqueIntentKeys = Array.from(new Set(privateIntentKeys));
+    return uniqueIntentKeys
       .map((key) => {
         const category = PRIVATE_INTENT_CATEGORIES.find((item) => item.key === key);
         return category ? { key, label: category.label } : null;
       })
-      .filter(Boolean)
-      .slice(0, 2) as { key: string; label: string }[];
+      .filter(Boolean) as { key: string; label: string }[];
   }, [isPhase2, privateIntentKeys]);
 
-  // Phase-2: Lifestyle chips (height, smoking, drinking)
+  // Phase-2: Lifestyle chips (height, smoking, drinking). Each lifestyle
+  // dimension is independent — a non-empty value for one MUST NOT hide
+  // the others. Labels are conversational per V4 typography pass.
   const phase2Lifestyle = useMemo(() => {
     if (!isPhase2) return [];
     const items: { icon: string; label: string }[] = [];
@@ -1328,21 +1340,71 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     if (smoking && smoking !== 'prefer_not_to_say') {
       const smokingLabels: Record<string, string> = {
         never: 'Non-smoker',
-        socially: 'Social smoker',
-        regularly: 'Smoker',
+        socially: 'Smokes sometimes',
+        regularly: 'Smokes regularly',
       };
       if (smokingLabels[smoking]) items.push({ icon: 'flame-outline', label: smokingLabels[smoking] });
     }
     if (drinking && drinking !== 'prefer_not_to_say') {
       const drinkingLabels: Record<string, string> = {
         never: "Doesn't drink",
-        socially: 'Social drinker',
-        regularly: 'Regular drinker',
+        socially: 'Drinks sometimes',
+        regularly: 'Drinks regularly',
       };
       if (drinkingLabels[drinking]) items.push({ icon: 'wine-outline', label: drinkingLabels[drinking] });
     }
     return items;
   }, [isPhase2, profileHeight, smoking, drinking]);
+
+  // Phase-2: Merged Looking-For chip list (intents first, then desires).
+  // Visible cap is only an overflow safety; with 3-4 selections everything
+  // shows. If the user selects an unusually large number of tags, the row
+  // wraps and a single "+N" pill stands in for the remainder so the card
+  // never blows past two lines.
+  const PHASE2_LOOKING_FOR_VISIBLE_CHIPS = 8;
+  const phase2LookingForChips = useMemo(() => {
+    if (!isPhase2) return { visible: [] as Array<
+      | { type: 'intent'; key: string; label: string }
+      | { type: 'desire'; label: string }
+    >, overflow: 0 };
+    const merged: Array<
+      | { type: 'intent'; key: string; label: string }
+      | { type: 'desire'; label: string }
+    > = [
+      ...phase2IntentChips.map((c) => ({ type: 'intent' as const, key: c.key, label: c.label })),
+      ...phase2Desires.map((label) => ({ type: 'desire' as const, label })),
+    ];
+    if (merged.length <= PHASE2_LOOKING_FOR_VISIBLE_CHIPS) {
+      return { visible: merged, overflow: 0 };
+    }
+    return {
+      visible: merged.slice(0, PHASE2_LOOKING_FOR_VISIBLE_CHIPS),
+      overflow: merged.length - PHASE2_LOOKING_FOR_VISIBLE_CHIPS,
+    };
+  }, [isPhase2, phase2IntentChips, phase2Desires]);
+
+  if (__DEV__ && isPhase2) {
+    // [P2_LOOKING_FOR_CHIPS] Verifies all selected intent + desire
+    // keys are reaching the renderer (cap was previously slice(0,2)).
+    console.log('[P2_LOOKING_FOR_CHIPS]', {
+      profileId,
+      rawIntentKeys: privateIntentKeys ?? [],
+      rawDesireTagKeys: desireTagKeys ?? [],
+      renderedLabels: [
+        ...phase2IntentChips.map((c) => c.label),
+        ...phase2Desires,
+      ],
+    });
+    // [P2_LIFESTYLE_CHIPS] Verifies smoking & drinking both render
+    // independently when both are set.
+    console.log('[P2_LIFESTYLE_CHIPS]', {
+      profileId,
+      height: profileHeight ?? null,
+      smoking: smoking ?? null,
+      drinking: drinking ?? null,
+      renderedLabels: phase2Lifestyle.map((item) => item.label),
+    });
+  }
 
   // State must be declared before useMemo that depends on it
   const [photoIndex, setPhotoIndex] = useState(0);
@@ -1374,114 +1436,337 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // PHASE-2: ADAPTIVE PHOTO-STORY DISTRIBUTION
-  // - Identity (name + age + badge) is ALWAYS visible on every photo
-  // - Secondary content is DISTRIBUTED across photos based on photo count
-  // - Priority: intent → desires → interests → prompt1 → lifestyle → prompt2 → bio
-  // - STRICT: No repetition of informational units across photos (identity excluded)
-  // - 5+ photos: after unique units are exhausted, use tasteful non-duplicative fallback
+  // PHASE-2: PHOTO-BY-PHOTO CONTENT DISTRIBUTION V3 (COMPOSITE)
+  // - Photo 0 is identity-only (presence + distance pill on the right).
+  // - Photos 1..N are composite: { primary, secondary }.
+  //   * primary = bio (once) | prompt (each used once) | leftover secondary
+  //     promoted to primary | fallback.
+  //   * secondary = compact chip row picked from a per-photo preference list,
+  //     each kind consumed at most once across the deck.
+  // - Prompt answers are deduped by promptId, falling back to normalized question.
   // ═══════════════════════════════════════════════════════════════════════════
-  type ContentSlot = 'intent' | 'desires' | 'interests' | 'prompt1' | 'lifestyle' | 'prompt2' | 'bio' | 'fallback';
+  type Phase2Prompt = {
+    promptId?: string | null;
+    question: string;
+    answer: string;
+    key: string;
+    section: Phase2PromptSection;
+    sectionLabel: string;
+  };
 
-  // Priority-ordered content slots (same priority for ALL users = premium consistency)
-  const CONTENT_PRIORITY: ContentSlot[] = [
-    'intent',     // 1. What they're looking for
-    'desires',    // 2. What they desire in a connection
-    'interests',  // 3. Shared hobbies/activities
-    'prompt1',    // 4. First personality prompt
-    'lifestyle',  // 5. Height/smoking/drinking
-    'prompt2',    // 6. Second personality prompt (if available)
-    'bio',        // 7. Bio snippet
-  ];
+  type Phase2SecondaryKind =
+    | 'lifestyle'
+    | 'lookingFor'
+    | 'interests'
+    | 'education'
+    | 'religion';
 
-  // Get first prompt (for prompt1 slot)
-  const phase2Prompt1 = useMemo(() => {
-    if (!isPhase2) return null;
-    if (profilePrompts && profilePrompts.length > 0) return profilePrompts[0];
-    return profilePrompt ?? null;
-  }, [isPhase2, profilePrompts, profilePrompt]);
+  type Phase2Primary =
+    | { kind: 'identity' }
+    | { kind: 'bio'; text: string }
+    | { kind: 'prompt'; prompt: Phase2Prompt }
+    | { kind: 'lifestyle' }
+    | { kind: 'lookingFor' }
+    | { kind: 'interests' }
+    | { kind: 'education' }
+    | { kind: 'religion' }
+    | { kind: 'fallback'; index: number; total: number };
 
-  // Get second prompt (for prompt2 slot) - only if different from first
-  const phase2Prompt2 = useMemo(() => {
-    if (!isPhase2) return null;
-    if (profilePrompts && profilePrompts.length > 1) return profilePrompts[1];
-    return null;
-  }, [isPhase2, profilePrompts]);
+  type Phase2PlannedPhoto = {
+    primary: Phase2Primary;
+    secondary: Phase2SecondaryKind | null;
+  };
 
-  // Check if a slot has data
-  const slotHasData = useCallback((slot: ContentSlot): boolean => {
-    switch (slot) {
-      case 'intent': return !!phase2IntentLabel;
-      case 'desires': return phase2Desires.length > 0;
-      case 'interests': return phase2Interests.length > 0;
-      case 'prompt1': return !!phase2Prompt1;
-      case 'lifestyle': return phase2Lifestyle.length > 0;
-      case 'prompt2': return !!phase2Prompt2;
-      case 'bio': return !!bio && bio.length > 0;
-      case 'fallback': return true;
-      default: return false;
-    }
-  }, [phase2IntentLabel, phase2Desires, phase2Interests, phase2Prompt1, phase2Lifestyle, phase2Prompt2, bio]);
-
-  type Phase2PlannedSlot =
-    | { slot: Exclude<ContentSlot, 'fallback'> }
-    | { slot: 'fallback'; index: number; total: number };
-
-  // Build a strict no-repeat plan for Phase-2 content slots.
-  // 2/3/4 photos: show the strongest distinct units first.
-  // 5+ photos: after unique units exhaust, use per-photo fallback (no restating earlier sections).
-  const phase2Plan = useMemo((): Phase2PlannedSlot[] => {
+  const phase2UniquePrompts = useMemo<Phase2Prompt[]>(() => {
     if (!isPhase2) return [];
 
-    const uniqueSlots = CONTENT_PRIORITY
-      .filter((slot) => slot !== 'fallback')
-      .filter((slot) => slotHasData(slot));
+    const rawPrompts =
+      Array.isArray(profilePrompts) && profilePrompts.length > 0
+        ? profilePrompts
+        : profilePrompt
+          ? [profilePrompt]
+          : [];
+    const seen = new Set<string>();
+    const normalized: Phase2Prompt[] = [];
 
-    // If nothing exists, fall back for all photos (and at least 1 photo).
-    if (uniqueSlots.length === 0) {
-      const total = Math.max(photoCount, 1);
-      return Array.from({ length: total }, (_, i) => ({
-        slot: 'fallback' as const,
-        index: i,
-        total,
-      }));
+    for (const prompt of rawPrompts) {
+      const question = typeof prompt?.question === 'string' ? prompt.question.trim() : '';
+      const answer = typeof prompt?.answer === 'string' ? prompt.answer.trim() : '';
+      if (!question || !answer) continue;
+
+      const promptId =
+        typeof prompt.promptId === 'string' && prompt.promptId.trim().length > 0
+          ? prompt.promptId.trim()
+          : null;
+      const normalizedQuestion = question.toLowerCase().replace(/\s+/g, ' ');
+      const key = promptId ? `id:${promptId}` : `q:${normalizedQuestion}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const section = getPhase2PromptSection(promptId);
+      const sectionLabel = PHASE2_PROMPT_SECTION_LABEL[section];
+      normalized.push({ promptId, question, answer, key, section, sectionLabel });
     }
 
-    const plan: Phase2PlannedSlot[] = [];
+    // Stable priority sort: Personality (0) → Values (1) → Quick (2) → Unknown (3).
+    // Index-tracking keeps original order intact within each priority bucket.
+    const indexed = normalized.map((item, index) => ({ item, index }));
+    indexed.sort((a, b) => {
+      const pa = PHASE2_PROMPT_PRIORITY[a.item.section];
+      const pb = PHASE2_PROMPT_PRIORITY[b.item.section];
+      if (pa !== pb) return pa - pb;
+      return a.index - b.index;
+    });
+    return indexed.map((entry) => entry.item);
+  }, [isPhase2, profilePrompts, profilePrompt]);
+
+  const phase2EducationItem = useMemo(() => {
+    if (!isPhase2) return null;
+    if (!education || education === 'prefer_not_to_say') return null;
+    const label =
+      EDUCATION_OPTIONS.find((option) => option.value === education)?.label ?? education;
+    return { icon: 'school-outline', label };
+  }, [isPhase2, education]);
+
+  const phase2ReligionItem = useMemo(() => {
+    if (!isPhase2) return null;
+    if (!religion || religion === 'prefer_not_to_say') return null;
+    const label =
+      RELIGION_OPTIONS.find((option) => option.value === religion)?.label ?? religion;
+    return { icon: 'sparkles-outline', label };
+  }, [isPhase2, religion]);
+
+  const hasPhase2LookingFor =
+    phase2IntentChips.length > 0 || phase2Desires.length > 0;
+
+  const phase2Plan = useMemo((): Phase2PlannedPhoto[] => {
+    if (!isPhase2) return [];
+
     const total = Math.max(photoCount, 1);
+    const photos: Phase2PlannedPhoto[] = [];
+    const consumedPromptKeys = new Set<string>();
+    const consumedSecondaries = new Set<Phase2SecondaryKind>();
+    let bioConsumed = false;
+    const bioText = typeof bio === 'string' ? bio.trim() : '';
+    const hasBio = bioText.length > 0;
 
-    for (let i = 0; i < total; i++) {
-      if (i < uniqueSlots.length) {
-        plan.push({ slot: uniqueSlots[i] as Exclude<ContentSlot, 'fallback'> });
-      } else {
-        plan.push({ slot: 'fallback', index: i, total });
+    const isAvailable = (kind: Phase2SecondaryKind): boolean => {
+      if (consumedSecondaries.has(kind)) return false;
+      switch (kind) {
+        case 'lifestyle':
+          return phase2Lifestyle.length > 0;
+        case 'lookingFor':
+          return hasPhase2LookingFor;
+        case 'interests':
+          return phase2Interests.length > 0;
+        case 'education':
+          return !!phase2EducationItem;
+        case 'religion':
+          return !!phase2ReligionItem;
       }
+    };
+
+    const consumePrompt = (): Phase2Prompt | null => {
+      const next = phase2UniquePrompts.find((p) => !consumedPromptKeys.has(p.key));
+      if (!next) return null;
+      consumedPromptKeys.add(next.key);
+      return next;
+    };
+
+    const consumeSecondary = (
+      preference: Phase2SecondaryKind[],
+    ): Phase2SecondaryKind | null => {
+      for (const kind of preference) {
+        if (isAvailable(kind)) {
+          consumedSecondaries.add(kind);
+          return kind;
+        }
+      }
+      return null;
+    };
+
+    // Build a primary for the next non-identity photo. Bio is preferred first,
+    // then prompts in order, then leftover secondaries promoted to primary, then
+    // a neutral fallback pill.
+    const buildPrimary = (): Phase2Primary => {
+      if (hasBio && !bioConsumed) {
+        bioConsumed = true;
+        return { kind: 'bio', text: bioText };
+      }
+      const prompt = consumePrompt();
+      if (prompt) return { kind: 'prompt', prompt };
+      const promotion = consumeSecondary([
+        'lookingFor',
+        'interests',
+        'lifestyle',
+        'education',
+        'religion',
+      ]);
+      if (promotion) return { kind: promotion } as Phase2Primary;
+      return { kind: 'fallback', index: photos.length, total };
+    };
+
+    // Photo 0: identity only — presence + distance handled in identity layer.
+    photos.push({ primary: { kind: 'identity' }, secondary: null });
+
+    // Photo 1: bio (or first prompt) + lifestyle.
+    if (total >= 2) {
+      photos.push({
+        primary: buildPrimary(),
+        secondary: consumeSecondary([
+          'lifestyle',
+          'lookingFor',
+          'interests',
+          'education',
+          'religion',
+        ]),
+      });
     }
 
-    if (__DEV__ && DEBUG_P2_UI) {
-      const debug = plan.map((p) => (p.slot === 'fallback' ? 'fallback' : p.slot)).join(',');
-      console.log(`[P2_PLAN] ${name} ${total}p: ${debug}`);
+    // Photo 2: prompt + Looking For (intent + desires).
+    if (total >= 3) {
+      photos.push({
+        primary: buildPrimary(),
+        secondary: consumeSecondary([
+          'lookingFor',
+          'interests',
+          'lifestyle',
+          'education',
+          'religion',
+        ]),
+      });
     }
 
-    return plan;
-  }, [isPhase2, slotHasData, photoCount, name]);
+    // Photo 3: prompt + interests (fallback to education/religion).
+    if (total >= 4) {
+      photos.push({
+        primary: buildPrimary(),
+        secondary: consumeSecondary([
+          'interests',
+          'education',
+          'religion',
+          'lifestyle',
+          'lookingFor',
+        ]),
+      });
+    }
 
-  const currentPlanned = useMemo((): Phase2PlannedSlot | null => {
+    // Photo 4: prompt + education.
+    if (total >= 5) {
+      photos.push({
+        primary: buildPrimary(),
+        secondary: consumeSecondary([
+          'education',
+          'religion',
+          'interests',
+          'lifestyle',
+          'lookingFor',
+        ]),
+      });
+    }
+
+    // Photo 5: prompt + religion.
+    if (total >= 6) {
+      photos.push({
+        primary: buildPrimary(),
+        secondary: consumeSecondary([
+          'religion',
+          'education',
+          'interests',
+          'lifestyle',
+          'lookingFor',
+        ]),
+      });
+    }
+
+    // Photo 6+: prompt-only photos. If prompts are exhausted, buildPrimary will
+    // promote any leftover unused secondary, then fall back to neutral pill.
+    while (photos.length < total) {
+      photos.push({ primary: buildPrimary(), secondary: null });
+    }
+
+    return photos;
+  }, [
+    isPhase2,
+    photoCount,
+    bio,
+    phase2UniquePrompts,
+    phase2Lifestyle,
+    phase2Interests,
+    hasPhase2LookingFor,
+    phase2EducationItem,
+    phase2ReligionItem,
+  ]);
+
+  const currentPlanned = useMemo((): Phase2PlannedPhoto | null => {
     if (!isPhase2 || phase2Plan.length === 0) return null;
-    return phase2Plan[photoIndex] ?? phase2Plan[phase2Plan.length - 1] ?? { slot: 'fallback', index: photoIndex, total: Math.max(photoCount, 1) };
+    return (
+      phase2Plan[photoIndex] ??
+      phase2Plan[phase2Plan.length - 1] ??
+      { primary: { kind: 'identity' }, secondary: null }
+    );
   }, [isPhase2, phase2Plan, photoIndex]);
 
-  const currentContentSlot = useMemo((): ContentSlot | null => {
-    return currentPlanned?.slot ?? null;
-  }, [currentPlanned]);
+  const describePhase2Primary = useCallback((primary: Phase2Primary): string => {
+    if (primary.kind === 'bio') return 'bio';
+    if (primary.kind === 'prompt') return `prompt:${primary.prompt.key}`;
+    if (primary.kind === 'fallback') return `fallback:${primary.index}`;
+    return primary.kind;
+  }, []);
+
+  const describePhase2Photo = useCallback(
+    (photo: Phase2PlannedPhoto): string => {
+      const primary = describePhase2Primary(photo.primary);
+      const secondary = photo.secondary ?? '∅';
+      return `${primary}+${secondary}`;
+    },
+    [describePhase2Primary],
+  );
+
+  const phase2PlanLogKey = useMemo(() => {
+    if (!isPhase2) return '';
+    return phase2Plan.map(describePhase2Photo).join('|');
+  }, [isPhase2, phase2Plan, describePhase2Photo]);
+  const lastPhase2PlanLogRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!__DEV__ || !DEBUG_P2_UI || !isPhase2 || !phase2PlanLogKey) return;
+    if (lastPhase2PlanLogRef.current === phase2PlanLogKey) return;
+    lastPhase2PlanLogRef.current = phase2PlanLogKey;
+
+    const promptKeys = phase2Plan.flatMap((photo) =>
+      photo.primary.kind === 'prompt' ? [photo.primary.prompt.key] : [],
+    );
+    const duplicatePromptKeys = promptKeys.filter(
+      (key, index) => promptKeys.indexOf(key) !== index,
+    );
+
+    console.log('[P2_PLAN_V3]', {
+      profile: name,
+      idTail: profileId?.slice?.(-6) ?? null,
+      photoCount: Math.max(photoCount, 1),
+      slots: phase2Plan.map(describePhase2Photo),
+    });
+    if (duplicatePromptKeys.length > 0) {
+      console.warn('[P2_PLAN_V3_DUP_PROMPT]', {
+        profile: name,
+        idTail: profileId?.slice?.(-6) ?? null,
+        duplicatePromptKeys,
+      });
+    }
+  }, [
+    describePhase2Photo,
+    isPhase2,
+    name,
+    phase2Plan,
+    phase2PlanLogKey,
+    photoCount,
+    profileId,
+  ]);
 
   const phase2FallbackCopy = useMemo(() => {
-    if (currentPlanned?.slot !== 'fallback') return null;
-    const idx = currentPlanned.index;
-    const total = currentPlanned.total;
+    if (currentPlanned?.primary.kind !== 'fallback') return null;
+    const idx = currentPlanned.primary.index;
+    const total = currentPlanned.primary.total;
 
-    // Premium, non-informational microcopy (never repeats profile content).
-    // Deterministic per slide; safe to reuse across users.
     const lines = [
       'Deep Connect • Private profile',
       'Private Mode • More to explore',
@@ -1489,9 +1774,6 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       'Private profile • Gallery',
     ];
     const line = lines[idx % lines.length] ?? 'Deep Connect • Private profile';
-
-    // Subtle progress hint without being mechanical.
-    // Example: "Slide 5/7"
     const progress = total > 1 ? `Slide ${idx + 1}/${total}` : null;
     return { line, progress };
   }, [currentPlanned]);
@@ -1898,12 +2180,20 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       {/* Info overlay at bottom - uses gradient instead of solid bg */}
       {/* PHASE-2: Photo-index-based content reveal system */}
       {/* PREMIUM UX: Fixed gradient, stable identity, smooth content transitions */}
+      {isPhase2 && (
+        <LinearGradient
+          colors={['transparent', 'rgba(0,0,0,0.55)', 'rgba(0,0,0,0.78)']}
+          locations={[0, 0.55, 1]}
+          style={styles.phase2Scrim}
+          pointerEvents="none"
+        />
+      )}
       {isPhase2 ? (
         <View style={[styles.overlay, styles.overlayDark, styles.phase2Overlay]} pointerEvents="none">
           {/* ═══════════════════════════════════════════════════════════════════════════
               PHASE-2 PARITY: ENHANCED IDENTITY LAYER
               Name + Age + Gender + Badge = always visible (persistent anchor)
-              Photo-1 only: Presence status + city
+              Photo-1 only: Presence status + distance
               ═══════════════════════════════════════════════════════════════════════════ */}
           <View style={styles.phase2IdentitySection}>
             {/* LAYER A: PERSISTENT IDENTITY (ALL PHOTOS) - Name + Age + Gender */}
@@ -1925,31 +2215,28 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               ) : null}
             </View>
 
-            {/* LAYER B: PHOTO-1-ONLY METADATA - Presence + Area */}
+            {/* LAYER B: PHOTO-1-ONLY METADATA — left: presence, right: distance */}
             {photoIndex === 0 && (
               <View style={styles.phase2MetadataRow}>
-                {/* Online/recently active status badges */}
-                {isActiveNow && (
-                  <View style={styles.phase2StatusBadge}>
-                    <View style={styles.phase2OnlineDot} />
-                    <Text style={styles.phase2StatusText}>Online</Text>
-                  </View>
-                )}
-                {isActiveToday && !isActiveNow && (
-                  <View style={styles.phase2StatusBadge}>
-                    <Text style={styles.phase2StatusText}>Recently active</Text>
-                  </View>
-                )}
-                {/* Privacy-preserving area */}
-                {phase2AreaLabel && (
-                  <View style={styles.phase2CityBadge}>
-                    <Ionicons name="location-outline" size={10} color="rgba(255,255,255,0.6)" />
-                    <Text style={styles.phase2CityText}>{phase2AreaLabel}</Text>
-                  </View>
-                )}
+                {/* Left: Online / Recently active */}
+                <View style={styles.phase2MetadataLeft}>
+                  {isActiveNow && (
+                    <View style={styles.phase2StatusBadge}>
+                      <View style={styles.phase2OnlineDot} />
+                      <Text style={styles.phase2StatusText}>Online</Text>
+                    </View>
+                  )}
+                  {isActiveToday && !isActiveNow && (
+                    <View style={styles.phase2StatusBadge}>
+                      <Text style={styles.phase2StatusText}>Recently active</Text>
+                    </View>
+                  )}
+                </View>
+                {/* Right: distance only (miles) — pushed to the right corner.
+                    No city / locality / "Nearby". Renders nothing if hidden. */}
                 {phase2DistanceLabel && (
-                  <View style={styles.phase2CityBadge}>
-                    <Text style={styles.phase2CityText}>{phase2DistanceLabel}</Text>
+                  <View style={styles.phase2DistancePill}>
+                    <Text style={styles.phase2DistanceText}>{phase2DistanceLabel}</Text>
                   </View>
                 )}
               </View>
@@ -1957,157 +2244,243 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </View>
 
           {/* ═══════════════════════════════════════════════════════════════════════════
-              PREMIUM UX: DATA-AWARE CONTENT REVEAL
-              - Maps photoIndex to content queue (not fixed indices)
-              - Every photo shows meaningful content (no empty states)
-              - First render: No animation (prevents flicker)
-              - Subsequent: Smooth 150ms fade transitions
+              PHASE-2 V3 COMPOSITE REVEAL
+              - Photo 0: identity only (handled in identity layer above).
+              - Photos 1..N: primary on top + compact secondary chip row below.
+              - First render: no animation (prevents flicker).
+              - Subsequent: smooth 150ms fade transitions.
               ═══════════════════════════════════════════════════════════════════════════ */}
 
-          {/* Intent slot */}
-          {currentContentSlot === 'intent' && phase2IntentLabel && photoIndex > 0 && (
+          {currentPlanned && currentPlanned.primary.kind !== 'identity' && (
             <Animated.View
-              key={`intent-${photoIndex}`}
+              key={`p2v3-${photoIndex}-${describePhase2Photo(currentPlanned)}`}
               entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
               exiting={FadeOut.duration(150)}
               style={styles.phase2RevealSection}
             >
-              <View style={styles.phase2IntentChip}>
-                <Text style={styles.phase2IntentChipText}>{phase2IntentLabel}</Text>
-              </View>
-            </Animated.View>
-          )}
-
-          {/* Desires slot - What they're looking for in a connection */}
-          {currentContentSlot === 'desires' && phase2Desires.length > 0 && (
-            <Animated.View
-              key={`desires-${photoIndex}`}
-              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
-              exiting={FadeOut.duration(150)}
-              style={styles.phase2RevealSection}
-            >
-              <View style={styles.phase2ChipsRow}>
-                {phase2Desires.map((label, idx) => (
-                  <View key={idx} style={styles.phase2DesireChip}>
-                    <Text style={styles.phase2DesireText}>{label}</Text>
-                  </View>
-                ))}
-              </View>
-            </Animated.View>
-          )}
-
-          {/* Interests slot */}
-          {currentContentSlot === 'interests' && phase2Interests.length > 0 && (
-            <Animated.View
-              key={`interests-${photoIndex}`}
-              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
-              exiting={FadeOut.duration(150)}
-              style={styles.phase2RevealSection}
-            >
-              <View style={styles.phase2ChipsRow}>
-                {phase2Interests.map((item, idx) => (
-                  <View key={idx} style={styles.phase2InterestChip}>
-                    <Text style={styles.phase2InterestText}>{item.emoji} {item.label}</Text>
-                  </View>
-                ))}
-              </View>
-            </Animated.View>
-          )}
-
-          {/* Prompt1 slot - First personality prompt */}
-          {currentContentSlot === 'prompt1' && phase2Prompt1 && (
-            <Animated.View
-              key={`prompt1-${photoIndex}`}
-              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
-              exiting={FadeOut.duration(150)}
-              style={styles.phase2RevealSection}
-            >
-              <View style={styles.phase2PromptCard}>
-                <Text style={styles.phase2PromptQuestion} numberOfLines={1}>
-                  {phase2Prompt1.question}
-                </Text>
-                <Text style={styles.phase2PromptAnswer} numberOfLines={2}>
-                  {phase2Prompt1.answer}
-                </Text>
-              </View>
-            </Animated.View>
-          )}
-
-          {/* Lifestyle slot */}
-          {currentContentSlot === 'lifestyle' && phase2Lifestyle.length > 0 && (
-            <Animated.View
-              key={`lifestyle-${photoIndex}`}
-              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
-              exiting={FadeOut.duration(150)}
-              style={styles.phase2RevealSection}
-            >
-              <View style={styles.phase2ChipsRow}>
-                {phase2Lifestyle.map((item, idx) => (
-                  <View key={idx} style={styles.phase2LifestyleChip}>
-                    <Ionicons name={item.icon as any} size={12} color="rgba(255,255,255,0.8)" />
-                    <Text style={styles.phase2LifestyleText}>{item.label}</Text>
-                  </View>
-                ))}
-              </View>
-            </Animated.View>
-          )}
-
-          {/* Prompt2 slot - Second personality prompt */}
-          {currentContentSlot === 'prompt2' && phase2Prompt2 && (
-            <Animated.View
-              key={`prompt2-${photoIndex}`}
-              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
-              exiting={FadeOut.duration(150)}
-              style={styles.phase2RevealSection}
-            >
-              <View style={styles.phase2PromptCard}>
-                <Text style={styles.phase2PromptQuestion} numberOfLines={1}>
-                  {phase2Prompt2.question}
-                </Text>
-                <Text style={styles.phase2PromptAnswer} numberOfLines={2}>
-                  {phase2Prompt2.answer}
-                </Text>
-              </View>
-            </Animated.View>
-          )}
-
-          {/* Bio slot - Short bio snippet */}
-          {currentContentSlot === 'bio' && bio && bio.length > 0 && (
-            <Animated.View
-              key={`bio-${photoIndex}`}
-              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
-              exiting={FadeOut.duration(150)}
-              style={styles.phase2RevealSection}
-            >
-              <View style={styles.phase2BioCard}>
-                <Text style={styles.phase2BioText} numberOfLines={2}>
-                  {bio}
-                </Text>
-              </View>
-            </Animated.View>
-          )}
-
-          {/* Fallback slot - premium non-duplicative late-photo behavior */}
-          {currentContentSlot === 'fallback' && (
-            <Animated.View
-              key={`fallback-${photoIndex}`}
-              entering={isFirstRenderRef.current ? undefined : FadeIn.duration(150)}
-              exiting={FadeOut.duration(150)}
-              style={styles.phase2RevealSection}
-            >
-              <View style={styles.phase2FallbackPill}>
-                <Ionicons name="lock-closed-outline" size={12} color="rgba(255,255,255,0.72)" />
-                <View style={styles.phase2FallbackTextBlock}>
-                  <Text style={styles.phase2FallbackText} numberOfLines={1}>
-                    {phase2FallbackCopy?.line ?? 'Deep Connect • Private profile'}
+              {/* PRIMARY: bio | prompt | promoted-secondary | fallback
+                  Each block opens with an uppercase section label that
+                  acts as the only "chrome" — no card backgrounds, no
+                  borders. Body text floats over the bottom scrim. */}
+              {currentPlanned.primary.kind === 'bio' && (
+                <View style={styles.phase2PrimaryBlock}>
+                  <Text style={styles.phase2SectionLabel}>BIO</Text>
+                  <Text style={styles.phase2BioBody} numberOfLines={3}>
+                    {currentPlanned.primary.text}
                   </Text>
-                  {phase2FallbackCopy?.progress ? (
-                    <Text style={styles.phase2FallbackSubtext} numberOfLines={1}>
-                      {phase2FallbackCopy.progress}
-                    </Text>
-                  ) : null}
                 </View>
-              </View>
+              )}
+
+              {currentPlanned.primary.kind === 'prompt' && (
+                <View style={styles.phase2PrimaryBlock}>
+                  <Text style={styles.phase2SectionLabel}>
+                    {currentPlanned.primary.prompt.sectionLabel}
+                  </Text>
+                  <Text style={styles.phase2PromptQuestionV4} numberOfLines={1}>
+                    {currentPlanned.primary.prompt.question}
+                  </Text>
+                  <Text style={styles.phase2PromptAnswerV4} numberOfLines={3}>
+                    {currentPlanned.primary.prompt.answer}
+                  </Text>
+                </View>
+              )}
+
+              {currentPlanned.primary.kind === 'lifestyle' &&
+                phase2Lifestyle.length > 0 && (
+                  <View style={styles.phase2PrimaryBlock}>
+                    <Text style={styles.phase2SectionLabel}>LIFESTYLE</Text>
+                    <View style={styles.phase2ChipsRow}>
+                      {phase2Lifestyle.map((item) => (
+                        <View key={`pri-life-${item.label}`} style={styles.phase2ChipUnified}>
+                          <Ionicons name={item.icon as any} size={12} color="rgba(255,255,255,0.92)" />
+                          <Text style={styles.phase2ChipUnifiedText}>{item.label}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+
+              {currentPlanned.primary.kind === 'lookingFor' && hasPhase2LookingFor && (
+                <View style={styles.phase2PrimaryBlock}>
+                  <Text style={styles.phase2SectionLabel}>LOOKING FOR</Text>
+                  <View style={styles.phase2ChipsRow}>
+                    {phase2LookingForChips.visible.map((item) => (
+                      <View
+                        key={
+                          item.type === 'intent'
+                            ? `pri-intent-${item.key}`
+                            : `pri-desire-${item.label}`
+                        }
+                        style={styles.phase2ChipUnified}
+                      >
+                        <Text style={styles.phase2ChipUnifiedText}>{item.label}</Text>
+                      </View>
+                    ))}
+                    {phase2LookingForChips.overflow > 0 && (
+                      <View key="pri-lf-overflow" style={styles.phase2ChipUnified}>
+                        <Text style={styles.phase2ChipUnifiedText}>
+                          +{phase2LookingForChips.overflow}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              )}
+
+              {currentPlanned.primary.kind === 'interests' &&
+                phase2Interests.length > 0 && (
+                  <View style={styles.phase2PrimaryBlock}>
+                    <Text style={styles.phase2SectionLabel}>INTERESTS</Text>
+                    <View style={styles.phase2ChipsRow}>
+                      {phase2Interests.map((item) => (
+                        <View key={`pri-int-${item.label}`} style={styles.phase2ChipUnified}>
+                          <Text style={styles.phase2ChipUnifiedText}>
+                            {item.emoji} {item.label}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+
+              {currentPlanned.primary.kind === 'education' && phase2EducationItem && (
+                <View style={styles.phase2PrimaryBlock}>
+                  <Text style={styles.phase2SectionLabel}>EDUCATION</Text>
+                  <View style={styles.phase2ChipsRow}>
+                    <View style={styles.phase2ChipUnified}>
+                      <Ionicons
+                        name={phase2EducationItem.icon as any}
+                        size={12}
+                        color="rgba(255,255,255,0.92)"
+                      />
+                      <Text style={styles.phase2ChipUnifiedText}>{phase2EducationItem.label}</Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+
+              {currentPlanned.primary.kind === 'religion' && phase2ReligionItem && (
+                <View style={styles.phase2PrimaryBlock}>
+                  <Text style={styles.phase2SectionLabel}>RELIGION</Text>
+                  <View style={styles.phase2ChipsRow}>
+                    <View style={styles.phase2ChipUnified}>
+                      <Ionicons
+                        name={phase2ReligionItem.icon as any}
+                        size={12}
+                        color="rgba(255,255,255,0.92)"
+                      />
+                      <Text style={styles.phase2ChipUnifiedText}>{phase2ReligionItem.label}</Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+
+              {currentPlanned.primary.kind === 'fallback' && (
+                <View style={styles.phase2FallbackPill}>
+                  <Ionicons name="lock-closed-outline" size={12} color="rgba(255,255,255,0.72)" />
+                  <View style={styles.phase2FallbackTextBlock}>
+                    <Text style={styles.phase2FallbackText} numberOfLines={1}>
+                      {phase2FallbackCopy?.line ?? 'Deep Connect • Private profile'}
+                    </Text>
+                    {phase2FallbackCopy?.progress ? (
+                      <Text style={styles.phase2FallbackSubtext} numberOfLines={1}>
+                        {phase2FallbackCopy.progress}
+                      </Text>
+                    ) : null}
+                  </View>
+                </View>
+              )}
+
+              {/* SECONDARY: compact chip row below primary, one per photo.
+                  Each row is preceded by its own section label so the user
+                  always knows which dimension they are looking at. */}
+              {currentPlanned.secondary === 'lifestyle' && phase2Lifestyle.length > 0 && (
+                <View style={styles.phase2SecondaryRow}>
+                  <Text style={styles.phase2SectionLabel}>LIFESTYLE</Text>
+                  <View style={styles.phase2ChipsRow}>
+                    {phase2Lifestyle.map((item) => (
+                      <View key={`sec-life-${item.label}`} style={styles.phase2ChipUnified}>
+                        <Ionicons name={item.icon as any} size={12} color="rgba(255,255,255,0.92)" />
+                        <Text style={styles.phase2ChipUnifiedText}>{item.label}</Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {currentPlanned.secondary === 'lookingFor' && hasPhase2LookingFor && (
+                <View style={styles.phase2SecondaryRow}>
+                  <Text style={styles.phase2SectionLabel}>LOOKING FOR</Text>
+                  <View style={styles.phase2ChipsRow}>
+                    {phase2LookingForChips.visible.map((item) => (
+                      <View
+                        key={
+                          item.type === 'intent'
+                            ? `sec-intent-${item.key}`
+                            : `sec-desire-${item.label}`
+                        }
+                        style={styles.phase2ChipUnified}
+                      >
+                        <Text style={styles.phase2ChipUnifiedText}>{item.label}</Text>
+                      </View>
+                    ))}
+                    {phase2LookingForChips.overflow > 0 && (
+                      <View key="sec-lf-overflow" style={styles.phase2ChipUnified}>
+                        <Text style={styles.phase2ChipUnifiedText}>
+                          +{phase2LookingForChips.overflow}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              )}
+
+              {currentPlanned.secondary === 'interests' && phase2Interests.length > 0 && (
+                <View style={styles.phase2SecondaryRow}>
+                  <Text style={styles.phase2SectionLabel}>INTERESTS</Text>
+                  <View style={styles.phase2ChipsRow}>
+                    {phase2Interests.map((item) => (
+                      <View key={`sec-int-${item.label}`} style={styles.phase2ChipUnified}>
+                        <Text style={styles.phase2ChipUnifiedText}>
+                          {item.emoji} {item.label}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {currentPlanned.secondary === 'education' && phase2EducationItem && (
+                <View style={styles.phase2SecondaryRow}>
+                  <Text style={styles.phase2SectionLabel}>EDUCATION</Text>
+                  <View style={styles.phase2ChipsRow}>
+                    <View style={styles.phase2ChipUnified}>
+                      <Ionicons
+                        name={phase2EducationItem.icon as any}
+                        size={12}
+                        color="rgba(255,255,255,0.92)"
+                      />
+                      <Text style={styles.phase2ChipUnifiedText}>{phase2EducationItem.label}</Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+
+              {currentPlanned.secondary === 'religion' && phase2ReligionItem && (
+                <View style={styles.phase2SecondaryRow}>
+                  <Text style={styles.phase2SectionLabel}>RELIGION</Text>
+                  <View style={styles.phase2ChipsRow}>
+                    <View style={styles.phase2ChipUnified}>
+                      <Ionicons
+                        name={phase2ReligionItem.icon as any}
+                        size={12}
+                        color="rgba(255,255,255,0.92)"
+                      />
+                      <Text style={styles.phase2ChipUnifiedText}>{phase2ReligionItem.label}</Text>
+                    </View>
+                  </View>
+                </View>
+              )}
             </Animated.View>
           )}
         </View>
@@ -3061,12 +3434,40 @@ const styles = StyleSheet.create({
     marginLeft: 4,
     marginRight: 4,
   },
-  // PHASE2_PARITY: Metadata row (presence + city)
+  // PHASE2_PARITY: Metadata row — left = presence badges, right = distance pill
   phase2MetadataRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    justifyContent: 'space-between',
     marginTop: 4,
+  },
+  // Left half of the metadata row holds the Online / Recently active badges
+  // and preserves their original 8px inter-badge gap.
+  phase2MetadataLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 1,
+  },
+  // Right-corner distance pill. `marginLeft: 'auto'` pushes it to the right
+  // edge even if the left group is empty (e.g. user is offline and not
+  // recently active). Slightly bigger horizontal padding + a touch more
+  // backdrop opacity so the bumped text reads cleanly without the pill
+  // feeling crowded.
+  phase2DistancePill: {
+    marginLeft: 'auto',
+    backgroundColor: 'rgba(0,0,0,0.36)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  // +2px over the previous 11px so the label is glanceable, but kept at
+  // weight 500 (not bold) to stay premium-secondary, not shouty.
+  phase2DistanceText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.95)',
+    letterSpacing: 0.2,
   },
   // PHASE2_PARITY: Status badge (Online/recently active)
   phase2StatusBadge: {
@@ -3148,6 +3549,10 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
   },
+  // V3 composite: secondary chip row sits below the primary block
+  phase2SecondaryRow: {
+    marginTop: 8,
+  },
   phase2InterestChip: {
     backgroundColor: 'rgba(255,255,255,0.1)',
     borderRadius: 14,
@@ -3190,44 +3595,93 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     color: 'rgba(255,255,255,0.75)',
   },
-  // Photo 4 & 6+: Prompt card
-  phase2PromptCard: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
+  // V4 PREMIUM TYPOGRAPHY — text-on-gradient, no heavy boxes
+  // Uppercase section label that floats above each primary/secondary block.
+  phase2SectionLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.55)',
+    letterSpacing: 1.4,
+    textTransform: 'uppercase' as const,
+    marginBottom: 6,
+  },
+  // Wrapper for primary text (bio / prompt) — no background, no border.
+  phase2PrimaryBlock: {
+    paddingVertical: 2,
+  },
+  // Bio body — no italic, larger and brighter than V3.
+  phase2BioBody: {
+    fontSize: 16,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.96)',
+    lineHeight: 22,
+  },
+  // Prompt question — sentence case, low-weight context line.
+  phase2PromptQuestionV4: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.72)',
+    lineHeight: 18,
+    marginBottom: 4,
+  },
+  // Prompt answer — the hero line on the card.
+  phase2PromptAnswerV4: {
+    fontSize: 17,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.97)',
+    lineHeight: 23,
+  },
+  // Unified chip palette — single neutral glass style for every secondary row.
+  phase2ChipUnified: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.1)',
     borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  phase2ChipUnifiedText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.92)',
+    letterSpacing: 0.1,
+  },
+  // Bottom gradient scrim — sits behind the entire phase-2 overlay for legibility.
+  phase2Scrim: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: '55%',
+    zIndex: 2,
+  },
+  // Legacy V3 styles kept so any incidental reference still resolves.
+  phase2PromptCard: {
+    paddingVertical: 2,
   },
   phase2PromptQuestion: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: 'rgba(255,255,255,0.5)',
-    textTransform: 'uppercase' as const,
-    letterSpacing: 0.5,
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.72)',
     marginBottom: 4,
   },
   phase2PromptAnswer: {
-    fontSize: 14,
-    fontWeight: '400',
-    color: 'rgba(255,255,255,0.85)',
-    lineHeight: 20,
+    fontSize: 17,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.97)',
+    lineHeight: 23,
   },
-  // Bio slot styles
   phase2BioCard: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
+    paddingVertical: 2,
   },
   phase2BioText: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '400',
-    color: 'rgba(255,255,255,0.85)',
-    lineHeight: 20,
-    fontStyle: 'italic',
+    color: 'rgba(255,255,255,0.96)',
+    lineHeight: 22,
   },
 
   // Phase-2 fallback (late photos after unique content exhausts)

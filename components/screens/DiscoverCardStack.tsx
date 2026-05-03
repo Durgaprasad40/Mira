@@ -70,6 +70,26 @@ import { useFilterStore } from "@/stores/filterStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { ProfileCardPreview } from "@/components/cards/ProfileCardPreview";
 import { WelcomeOverlay, SwipeGuidanceHint } from "@/components/ui";
+import {
+  DC_BUTTON_DIAMETER,
+  DC_BUTTON_DIAMETER_COMPACT,
+  DC_ICON_SIZE,
+  DC_STAR_ICON_SIZE,
+  DC_BUTTON_GAP,
+  DC_ROW_PADDING_X,
+  DC_ROW_PADDING_BOTTOM,
+  DC_PRESS_SCALE,
+  DC_BUTTON_SHADOW,
+  DC_GLASS_BORDER_WIDTH,
+  DC_GLASS_BORDER_LIGHT,
+  DC_GLASS_BORDER_PASS,
+  DC_GLASS_HIGHLIGHT_COLORS_LIGHT,
+  DC_GLASS_HIGHLIGHT_COLORS_PASS,
+  DC_GLASS_HIGHLIGHT_LOCATIONS,
+  DC_GLASS_HIGHLIGHT_START,
+  DC_GLASS_HIGHLIGHT_END,
+  getDeepConnectBottomLayout,
+} from "./_internal/deepConnectActionRow.tokens";
 import { isDemoMode } from "@/hooks/useConvex";
 import { getDiscoverPrefetchSnapshot, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
 import {
@@ -393,6 +413,8 @@ function mapPhase2CardProfile(input: {
   height?: number | null;
   smoking?: string | null;
   drinking?: string | null;
+  education?: string | null;
+  religion?: string | null;
   profilePrompts?: { question: string; answer: string }[];
   lastActive?: number;
   createdAt?: number;
@@ -428,6 +450,8 @@ function mapPhase2CardProfile(input: {
     height: input.height ?? null,
     smoking: input.smoking ?? null,
     drinking: input.drinking ?? null,
+    education: input.education ?? null,
+    religion: input.religion ?? null,
     profilePrompts: input.profilePrompts ?? [],
     lastActive: input.lastActive,
     createdAt: input.createdAt,
@@ -1266,6 +1290,27 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           console.log(`[P2_DATA] ${resolvedPhase2Name}(${p.userId?.slice?.(-6)}) ${photoUrls.length}p`);
         }
 
+        // [P2_PROMPT_DUP] One-shot dev probe — warns when backend
+        // promptAnswers contain duplicate promptId values for the same
+        // profile. Used to confirm the data-side hypothesis behind the
+        // OnePlus prompt-repetition report.
+        if (__DEV__ && Array.isArray(p.promptAnswers) && p.promptAnswers.length > 1) {
+          const seen = new Set<string>();
+          const dups: string[] = [];
+          for (const ans of p.promptAnswers) {
+            const id = ans?.promptId;
+            if (!id) continue;
+            if (seen.has(id)) dups.push(id);
+            else seen.add(id);
+          }
+          if (dups.length > 0) {
+            console.warn(
+              `[P2_PROMPT_DUP] ${resolvedPhase2Name}(${p.userId?.slice?.(-6)}): duplicate promptIds in profilePrompts:`,
+              dups,
+            );
+          }
+        }
+
         return mapPhase2CardProfile({
           profileId: p._id,
           userId: p.userId,
@@ -1287,6 +1332,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           height: p.height ?? null,
           smoking: p.smoking ?? null,
           drinking: p.drinking ?? null,
+          education: p.education ?? null,
+          religion: p.religion ?? null,
           profilePrompts: p.promptAnswers ?? [],
         });
       });
@@ -3490,12 +3537,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // FIX 10: Layout with safe area compliance across devices
   const cardTop = hideHeader ? 0 : insets.top + HEADER_H;
+  // Phase-2 (Deep Connect): single safe-area helper drives every bottom anchor
+  // so the action row, card, and transition hint stay in lockstep across
+  // devices. Phase-1 keeps the original three-formula layout unchanged.
+  const phase2BottomLayout = isPhase2 ? getDeepConnectBottomLayout(insets) : null;
   // Keep the action row consistently above the gesture area while preserving existing interactions.
-  const actionRowBottom = Math.max(insets.bottom, SPACING.md) + SPACING.sm;
+  const actionRowBottom = phase2BottomLayout
+    ? phase2BottomLayout.actionRowBottom
+    : Math.max(insets.bottom, SPACING.md) + SPACING.sm;
   // Leave room for the action bar so card content isn't hidden behind the floating controls.
-  const cardBottom = actionRowBottom + DISCOVER_ACTION_BAR_CLEARANCE;
+  const cardBottom = phase2BottomLayout
+    ? phase2BottomLayout.cardBottom
+    : actionRowBottom + DISCOVER_ACTION_BAR_CLEARANCE;
   const floatingPillTop = cardTop + SPACING.sm;
-  const phaseTransitionHintBottom = Math.max(insets.bottom + SPACING.xl, DISCOVER_TRANSITION_HINT_MIN_BOTTOM);
+  const phaseTransitionHintBottom = phase2BottomLayout
+    ? phase2BottomLayout.transitionHintBottom
+    : Math.max(insets.bottom + SPACING.xl, DISCOVER_TRANSITION_HINT_MIN_BOTTOM);
 
   const likesLeft = likesRemaining();
   const standOutsLeft = standOutsRemaining();
@@ -3590,8 +3647,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           <SearchingOverlay />
         ) : (
           <>
-            {/* Back card */}
-            {next && (
+            {/* Back card — guard against next === current (queue drained to 1
+                profile, or transient race after refill) so the same prompt
+                content can never visually stack on the front card. */}
+            {next && next.id !== current?.id && (
               <Animated.View
                 style={[styles.card, { zIndex: 0 }, nextCardAnimatedStyle]}
               >
@@ -3599,6 +3658,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   <ProfileCard
                     key={next.id}
                     phase="phase2"
+                    profileId={next.userId ?? next.id}
                     name={next.name}
                     age={next.age}
                     bio={next.bio}
@@ -3625,6 +3685,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     height={next.height}
                     smoking={next.smoking}
                     drinking={next.drinking}
+                    education={next.education}
+                    religion={next.religion}
                   />
                 ) : (
                   <ProfileCardPreview
@@ -3648,6 +3710,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   <ProfileCard
                     key={current.id}
                     phase={isPhase2 ? "phase2" : undefined}
+                    profileId={current.userId ?? current.id}
                     name={current.name}
                     age={current.age}
                     bio={current.bio}
@@ -3677,6 +3740,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     height={current.height}
                     smoking={current.smoking}
                     drinking={current.drinking}
+                    education={current.education}
+                    religion={current.religion}
                   />
                   <SwipeOverlay direction={overlayDirection} opacity={overlayOpacity} dark={dark} />
                 </Animated.View>
@@ -3693,16 +3758,46 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           PREMIUM 3-BUTTON ACTION BAR
           Floating, semi-transparent, with premium shadows and spacing
           ══════════════════════════════════════════════════════════════════════════ */}
-      <View style={[styles.actions, styles.premiumActions, { bottom: actionRowBottom }]} pointerEvents="box-none">
+      <View
+        style={[
+          styles.actions,
+          styles.premiumActions,
+          // Phase-2 overrides: stable token-based gap + padding so the row
+          // doesn't drift wider on 411dp devices vs 360dp devices.
+          isPhase2 && styles.deepConnectActions,
+          { bottom: actionRowBottom },
+        ]}
+        pointerEvents="box-none"
+      >
         {/* Skip (X) - Light feedback */}
         <AnimatedActionButton
-          style={[styles.actionButton, styles.premiumSkipBtn, !current && styles.premiumBtnDisabled]}
+          style={[
+            styles.actionButton,
+            styles.premiumSkipBtn,
+            isPhase2 && styles.deepConnectSkipBtn,
+            !current && styles.premiumBtnDisabled,
+          ]}
           onPress={() => animateSwipeRef.current("left")}
           disabled={!current}
-          feedbackScale={0.92}
+          feedbackScale={isPhase2 ? DC_PRESS_SCALE : 0.92}
           hapticType="light"
         >
-          <Ionicons name="close" size={DISCOVER_ACTION_ICON_SIZE} color="#F44336" />
+          {/* Phase-2: subtle bottom dark wash for spherical glass depth */}
+          {isPhase2 && (
+            <LinearGradient
+              colors={DC_GLASS_HIGHLIGHT_COLORS_PASS}
+              locations={DC_GLASS_HIGHLIGHT_LOCATIONS}
+              start={DC_GLASS_HIGHLIGHT_START}
+              end={DC_GLASS_HIGHLIGHT_END}
+              pointerEvents="none"
+              style={styles.deepConnectGlassOverlay}
+            />
+          )}
+          <Ionicons
+            name="close"
+            size={isPhase2 ? DC_ICON_SIZE : DISCOVER_ACTION_ICON_SIZE}
+            color="#F44336"
+          />
         </AnimatedActionButton>
 
         {/* Stand Out (star) - Medium feedback */}
@@ -3710,6 +3805,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           style={[
             styles.actionButton,
             styles.premiumStandOutBtn,
+            isPhase2 && styles.deepConnectStandOutBtn,
             (hasReachedStandOutLimit() || !current) && styles.premiumBtnDisabled,
           ]}
           onPress={() => {
@@ -3719,24 +3815,59 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             }
           }}
           disabled={hasReachedStandOutLimit() || !current}
-          feedbackScale={0.9}
+          feedbackScale={isPhase2 ? DC_PRESS_SCALE : 0.9}
           hapticType="medium"
         >
-          <Ionicons name="star" size={DISCOVER_STANDOUT_ICON_SIZE} color={COLORS.white} />
-          <View style={styles.premiumStandOutBadge}>
-            <Text {...DISCOVER_TEXT_PROPS} style={styles.premiumStandOutBadgeText}>{standOutsLeft}</Text>
-          </View>
+          {/* Phase-2: top white sheen + bottom darkening for orb depth */}
+          {isPhase2 && (
+            <LinearGradient
+              colors={DC_GLASS_HIGHLIGHT_COLORS_LIGHT}
+              locations={DC_GLASS_HIGHLIGHT_LOCATIONS}
+              start={DC_GLASS_HIGHLIGHT_START}
+              end={DC_GLASS_HIGHLIGHT_END}
+              pointerEvents="none"
+              style={styles.deepConnectGlassOverlayCompact}
+            />
+          )}
+          <Ionicons
+            name="star"
+            size={isPhase2 ? DC_STAR_ICON_SIZE : DISCOVER_STANDOUT_ICON_SIZE}
+            color={COLORS.white}
+          />
+          {/* Numeric "remaining" badge intentionally hidden in both phases.
+              standOutsLeft is still computed and passed to /stand-out via
+              router.push, and hasReachedStandOutLimit() still gates onPress. */}
         </AnimatedActionButton>
 
         {/* Like (heart) - Medium feedback with stronger scale */}
         <AnimatedActionButton
-          style={[styles.actionButton, styles.premiumLikeBtn, !current && styles.premiumBtnDisabled]}
+          style={[
+            styles.actionButton,
+            styles.premiumLikeBtn,
+            isPhase2 && styles.deepConnectLikeBtn,
+            !current && styles.premiumBtnDisabled,
+          ]}
           onPress={() => animateSwipeRef.current("right")}
           disabled={!current}
-          feedbackScale={0.9}
+          feedbackScale={isPhase2 ? DC_PRESS_SCALE : 0.9}
           hapticType="medium"
         >
-          <Ionicons name="heart" size={DISCOVER_ACTION_ICON_SIZE} color={COLORS.white} />
+          {/* Phase-2: top white sheen + bottom darkening for orb depth */}
+          {isPhase2 && (
+            <LinearGradient
+              colors={DC_GLASS_HIGHLIGHT_COLORS_LIGHT}
+              locations={DC_GLASS_HIGHLIGHT_LOCATIONS}
+              start={DC_GLASS_HIGHLIGHT_START}
+              end={DC_GLASS_HIGHLIGHT_END}
+              pointerEvents="none"
+              style={styles.deepConnectGlassOverlay}
+            />
+          )}
+          <Ionicons
+            name="heart"
+            size={isPhase2 ? DC_ICON_SIZE : DISCOVER_ACTION_ICON_SIZE}
+            color={COLORS.white}
+          />
         </AnimatedActionButton>
       </View>
 
@@ -4453,29 +4584,72 @@ const styles = StyleSheet.create({
     opacity: 0.35,
     shadowOpacity: 0.08,
   },
-  premiumStandOutBadge: {
-    position: "absolute",
-    top: -SPACING.sm + SPACING.xxs,
-    right: -SPACING.sm + SPACING.xxs,
-    minWidth: moderateScale(22, 0.25),
-    height: moderateScale(22, 0.25),
-    borderRadius: moderateScale(11, 0.25),
-    backgroundColor: COLORS.white,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 2,
-    borderColor: "#2196F3",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.12,
-    shadowRadius: 3,
-    elevation: 3,
+  // ══════════════════════════════════════════════════════════════════════════════
+  // PHASE-2 (DEEP CONNECT) ACTION-ROW OVERRIDES
+  // Applied via mode-gated style merge; Phase-1 styles above remain unchanged.
+  // Tokens come from `_internal/deepConnectActionRow.tokens.ts`.
+  // ══════════════════════════════════════════════════════════════════════════════
+  deepConnectActions: {
+    // Replaces `gap: SPACING.xxl - SPACING.xs` with one stable cappedScale value.
+    // marginHorizontal fallback ensures consistent spacing on RN versions where
+    // flex `gap` is unreliable (older Android Hermes builds).
+    gap: DC_BUTTON_GAP,
+    paddingHorizontal: DC_ROW_PADDING_X,
+    paddingBottom: DC_ROW_PADDING_BOTTOM,
   },
-  premiumStandOutBadgeText: {
-    fontSize: FONT_SIZE.sm,
-    fontWeight: "800",
-    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
-    color: "#2196F3",
+  deepConnectSkipBtn: {
+    width: DC_BUTTON_DIAMETER,
+    height: DC_BUTTON_DIAMETER,
+    borderRadius: DC_BUTTON_DIAMETER / 2,
+    // Frosted-white feel: brighter base + slightly stronger accent border to
+    // give the Pass button a clean, calm presence (not a weak grey circle).
+    backgroundColor: "rgba(255,255,255,0.97)",
+    borderWidth: DC_GLASS_BORDER_WIDTH,
+    borderColor: DC_GLASS_BORDER_PASS,
+    shadowColor: "#000",
+    ...DC_BUTTON_SHADOW,
+  },
+  deepConnectStandOutBtn: {
+    width: DC_BUTTON_DIAMETER_COMPACT,
+    height: DC_BUTTON_DIAMETER_COMPACT,
+    borderRadius: DC_BUTTON_DIAMETER_COMPACT / 2,
+    // Lit edge — sells the "premium glass orb" silhouette.
+    borderWidth: DC_GLASS_BORDER_WIDTH,
+    borderColor: DC_GLASS_BORDER_LIGHT,
+    // Neutral lift only — no coloured glow ring.
+    shadowColor: "#000",
+    ...DC_BUTTON_SHADOW,
+  },
+  deepConnectLikeBtn: {
+    width: DC_BUTTON_DIAMETER,
+    height: DC_BUTTON_DIAMETER,
+    borderRadius: DC_BUTTON_DIAMETER / 2,
+    borderWidth: DC_GLASS_BORDER_WIDTH,
+    borderColor: DC_GLASS_BORDER_LIGHT,
+    // Neutral lift only — no coloured glow ring.
+    shadowColor: "#000",
+    ...DC_BUTTON_SHADOW,
+  },
+
+  // Inner glass-highlight overlays. Rendered as a child of each Phase-2
+  // button via LinearGradient. `borderRadius` matches the parent button so
+  // the gradient is clipped to the circle without needing `overflow:'hidden'`
+  // (which on iOS would also clip the halo shadow).
+  deepConnectGlassOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: DC_BUTTON_DIAMETER / 2,
+  },
+  deepConnectGlassOverlayCompact: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: DC_BUTTON_DIAMETER_COMPACT / 2,
   },
 
   // Daily limit reached

@@ -133,6 +133,52 @@ export const PHASE2_ALL_PROMPTS = [
   ...PHASE2_SECTION3_PROMPTS,
 ] as const;
 
+// ============================================================
+// Phase-2 prompt section / priority lookup
+//   Used by the Discover card planner to push typed Personality /
+//   Values prompts to the front of the deck and demote multiple-choice
+//   "Quick" prompts to the tail. promptId is the only piece of section
+//   metadata that survives backend storage, so this is a pure client-side
+//   reverse-lookup against the catalog above.
+// ============================================================
+
+export type Phase2PromptSection =
+  | 'personality' // Section 3 — typed
+  | 'values'      // Section 2 — typed
+  | 'quick'       // Section 1 — multiple-choice
+  | 'unknown';    // legacy / off-catalog
+
+// Lower = shown earlier on the card.
+export const PHASE2_PROMPT_PRIORITY: Record<Phase2PromptSection, number> = {
+  personality: 0,
+  values: 1,
+  quick: 2,
+  unknown: 3,
+};
+
+// Display label rendered above the prompt body on the Phase-2 card.
+export const PHASE2_PROMPT_SECTION_LABEL: Record<Phase2PromptSection, string> = {
+  personality: 'PERSONALITY',
+  values: 'VALUES',
+  quick: 'QUICK QUESTION',
+  unknown: 'PROMPT',
+};
+
+const PHASE2_PROMPT_SECTION_BY_ID: Record<string, Phase2PromptSection> = (() => {
+  const map: Record<string, Phase2PromptSection> = {};
+  for (const p of PHASE2_SECTION3_PROMPTS) map[p.id] = 'personality';
+  for (const p of PHASE2_SECTION2_PROMPTS) map[p.id] = 'values';
+  for (const p of PHASE2_SECTION1_PROMPTS) map[p.id] = 'quick';
+  return map;
+})();
+
+export function getPhase2PromptSection(
+  promptId?: string | null,
+): Phase2PromptSection {
+  if (!promptId) return 'unknown';
+  return PHASE2_PROMPT_SECTION_BY_ID[promptId] ?? 'unknown';
+}
+
 // Type for prompt answer
 export interface Phase2PromptAnswer {
   promptId: string;
