@@ -86,6 +86,19 @@ export default function PrivateTabsLayout() {
             participantLastActive: (bc as any).participantLastActive ?? 0,
             lastMessage: bc.lastMessage || 'Say hi!',
             lastMessageAt: bc.lastMessageAt,
+            // P2_TOD_NEWMATCH_PARITY: include the same preview/real-message
+            // metadata that chats/index.tsx normalizedBackend writes. Without
+            // these fields, a store row added via this layout (which has no
+            // 500ms auth-confirm gate) lacks hasRealMessages, so the
+            // newMatches/messageThreads split's `(convo as any).hasRealMessages`
+            // fallback in chats/index.tsx is non-deterministic until the
+            // Messages tab's own normalizedBackend Map populates. For T/D
+            // accept flow, that race could push the fresh conversation into
+            // the wrong bucket on first paint of the Messages tab.
+            lastMessageSenderId: (bc as any).lastMessageSenderId ?? null,
+            lastMessageType: (bc as any).lastMessageType ?? null,
+            lastMessageIsProtected: (bc as any).lastMessageIsProtected === true,
+            hasRealMessages: (bc as any).hasRealMessages === true,
             unreadCount: bc.unreadCount,
             connectionSource: normalizeConnectionSource(source),
             matchSource: source === 'desire_super_like' ? 'super_like' as const : undefined,
