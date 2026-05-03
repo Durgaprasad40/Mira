@@ -816,7 +816,10 @@ export default function TruthOrDareScreen() {
   }, []);
 
   const openThread = useCallback((promptId: string) => {
-    router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId } });
+    router.push({
+      pathname: '/(main)/prompt-thread' as any,
+      params: { promptId, source: 'phase2-tod' },
+    });
   }, [router]);
 
   const openCreateTod = useCallback(() => {
@@ -825,7 +828,10 @@ export default function TruthOrDareScreen() {
 
   // Open thread for adding comment (same as opening thread, composer auto-shows)
   const openThreadForComment = useCallback((promptId: string) => {
-    router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId, autoOpenComposer: 'new' } });
+    router.push({
+      pathname: '/(main)/prompt-thread' as any,
+      params: { promptId, autoOpenComposer: 'new', source: 'phase2-tod' },
+    });
   }, [router]);
 
   // Long-press to show delete popup (owner only)

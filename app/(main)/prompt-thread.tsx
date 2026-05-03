@@ -1,10 +1,11 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput, Animated, Pressable,
+  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput, Animated, Pressable, BackHandler,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -21,6 +22,7 @@ import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import type { TodReportReason } from '@/types';
 
 const C = INCOGNITO_COLORS;
+const PHASE2_TOD_HOME_ROUTE = '/(main)/(private)/(tabs)/truth-or-dare';
 
 // Premium color palette for elevated UI
 const PREMIUM = {
@@ -184,8 +186,28 @@ export default function PromptThreadScreen() {
   const params = useLocalSearchParams<{
     promptId: string;
     autoOpenComposer?: 'new' | 'edit';
+    source?: string;
   }>();
-  const { promptId, autoOpenComposer } = params;
+  const { promptId, autoOpenComposer, source } = params;
+  const shouldReturnToPhase2TodHome = source === 'phase2-tod';
+  const handleBackToSource = useCallback(() => {
+    if (shouldReturnToPhase2TodHome) {
+      router.replace(PHASE2_TOD_HOME_ROUTE as any);
+      return;
+    }
+    router.back();
+  }, [router, shouldReturnToPhase2TodHome]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!shouldReturnToPhase2TodHome) return undefined;
+      const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+        handleBackToSource();
+        return true;
+      });
+      return () => subscription.remove();
+    }, [handleBackToSource, shouldReturnToPhase2TodHome])
+  );
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
 
@@ -588,7 +610,7 @@ export default function PromptThreadScreen() {
         setReportModalVisible(false);
         if (result.isNowHidden) {
           Alert.alert('Reported', 'This prompt has been hidden due to multiple reports.');
-          router.back();
+          handleBackToSource();
         } else {
           Alert.alert('Reported', 'Thank you for your report. We will review it.');
         }
@@ -621,7 +643,7 @@ export default function PromptThreadScreen() {
     } finally {
       setIsSubmittingReport(false);
     }
-  }, [userId, promptId, reportingAnswerId, isReportingPrompt, selectedReportReason, reportReasonText, reportAnswer, reportPromptMutation, router]);
+  }, [userId, promptId, reportingAnswerId, isReportingPrompt, selectedReportReason, reportReasonText, reportAnswer, reportPromptMutation, handleBackToSource]);
 
   // Close report modal
   const closeReportModal = useCallback(() => {
@@ -666,14 +688,14 @@ export default function PromptThreadScreen() {
     try {
       await deletePrompt({ promptId, authUserId: userId });
       setShowPromptActionPopup(false);
-      router.back(); // Navigate back after successful delete
+      handleBackToSource(); // Navigate back after successful delete
     } catch (error: any) {
       console.error('[T/D] Delete prompt failed:', error);
       Alert.alert('Error', error?.message || 'Failed to delete prompt. Please try again.');
     } finally {
       setIsDeletingPrompt(false);
     }
-  }, [userId, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, router]);
+  }, [userId, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, handleBackToSource]);
 
   // Handle inline edit - start editing
   const handleStartEditPrompt = useCallback(() => {
@@ -1714,7 +1736,7 @@ export default function PromptThreadScreen() {
         style={[styles.container, { paddingTop: insets.top }]}
       >
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+          <TouchableOpacity onPress={handleBackToSource} style={styles.backBtn}>
             <Ionicons name="chevron-back" size={24} color={PREMIUM.textPrimary} />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Thread</Text>
@@ -1780,7 +1802,7 @@ export default function PromptThreadScreen() {
     >
       {/* Premium Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+        <TouchableOpacity onPress={handleBackToSource} style={styles.backBtn}>
           <Ionicons name="chevron-back" size={24} color={PREMIUM.textPrimary} />
         </TouchableOpacity>
         <LinearGradient
