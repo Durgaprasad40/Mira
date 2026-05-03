@@ -9,6 +9,7 @@ interface Phase2DiscoverCacheState {
   searchingDone: boolean;
   mergeProfiles: (userId: string | null | undefined, profiles: ProfileData[]) => void;
   consume: (profileId: string) => void;
+  purgeUserIds: (ids: Set<string>) => void;
   setQueue: (ids: string[]) => void;
   markSearchingDone: () => void;
   resetForUser: (userId: string | null | undefined) => void;
@@ -64,6 +65,35 @@ export const usePhase2DiscoverCacheStore = create<Phase2DiscoverCacheState>()((s
         consumedIds,
         profilesMap,
         queue: state.queue.filter((id) => id !== profileId),
+      };
+    }),
+
+  purgeUserIds: (ids) =>
+    set((state) => {
+      if (ids.size === 0) return state;
+
+      const idsToPurge = new Set(ids);
+      const profilesMap = new Map(state.profilesMap);
+
+      for (const [profileId, profile] of profilesMap) {
+        if (idsToPurge.has(profileId) || (profile.userId && idsToPurge.has(profile.userId))) {
+          idsToPurge.add(profileId);
+          if (profile.userId) {
+            idsToPurge.add(profile.userId);
+          }
+          profilesMap.delete(profileId);
+        }
+      }
+
+      const consumedIds = new Set(state.consumedIds);
+      for (const id of idsToPurge) {
+        consumedIds.add(id);
+      }
+
+      return {
+        consumedIds,
+        profilesMap,
+        queue: state.queue.filter((id) => !idsToPurge.has(id)),
       };
     }),
 

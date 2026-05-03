@@ -117,11 +117,9 @@ export default function Phase2LikesScreen() {
       }
 
       if (result?.isMatch) {
-        // PHASE-2 ISOLATION: do not route to Phase-1 match-celebration. Open
-        // the Phase-2 conversation directly. Backend already created the
-        // match, conversation, participants, and phase2_match notification.
+        const matchResult = result as any;
         router.push(
-          `/(main)/(private)/(tabs)/chats/${result.conversationId}` as any
+          `/(main)/match-celebration?matchId=${matchResult.matchId}&userId=${like.fromUserId}&mode=phase2&conversationId=${matchResult.conversationId}&source=${matchResult.source || 'deep_connect'}&alreadyMatched=${matchResult.alreadyMatched ? '1' : '0'}` as any
         );
       } else {
         Toast.show('Liked! Keep swiping to find more matches.');

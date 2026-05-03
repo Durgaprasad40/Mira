@@ -399,8 +399,9 @@ export default function Phase2FullProfileScreen() {
         incrementStandOuts();
 
         if (result?.isMatch) {
+          const matchResult = result as any;
           router.push(
-            `/(main)/match-celebration?matchId=${result.matchId}&userId=${profileUserId}&mode=phase2&conversationId=${result.conversationId || ''}` as any
+            `/(main)/match-celebration?matchId=${matchResult.matchId}&userId=${profileUserId}&mode=phase2&conversationId=${matchResult.conversationId || ''}&source=${matchResult.source || 'deep_connect'}&alreadyMatched=${matchResult.alreadyMatched ? '1' : '0'}` as any
           );
         } else {
           Toast.show('Stand Out sent! They will see your message.');
@@ -597,9 +598,10 @@ export default function Phase2FullProfileScreen() {
       });
 
       if (result?.isMatch) {
+        const matchResult = result as any;
         // P2-ISOLATION-FIX: Pass conversationId to prevent Phase 1 API fallback
         router.push(
-          `/(main)/match-celebration?matchId=${result.matchId}&userId=${profileUserId}&mode=phase2&conversationId=${result.conversationId}` as any
+          `/(main)/match-celebration?matchId=${matchResult.matchId}&userId=${profileUserId}&mode=phase2&conversationId=${matchResult.conversationId}&source=${matchResult.source || 'deep_connect'}&alreadyMatched=${matchResult.alreadyMatched ? '1' : '0'}` as any
         );
       } else {
         Toast.show('Liked! They will see it in their likes.');

@@ -143,9 +143,9 @@ const DEMO_MATCH_RATE = 0.2;
  * Frontend only tracks idempotency and logs the event.
  * Frontend must reflect backend state, not create local conversations.
  */
-function handlePhase2Match(profile: { id: string; name: string; age?: number; photoUrl?: string }): boolean {
+function handlePhase2Match(profile: { id: string; name: string; age?: number; photoUrl?: string; matchKey?: string }): boolean {
   // Check idempotency via shared session module
-  if (!markPhase2Matched(profile.id)) {
+  if (!markPhase2Matched(profile.matchKey ?? profile.id)) {
     return false;
   }
 
@@ -394,6 +394,11 @@ function resolvePhase2CardName(displayName: unknown): string {
   return trimmedName;
 }
 
+function isPhase2ConnectedProfile(profile: ProfileData, connectedUserIds: Set<string>): boolean {
+  if (connectedUserIds.size === 0) return false;
+  return connectedUserIds.has(profile.id) || (profile.userId ? connectedUserIds.has(profile.userId) : false);
+}
+
 function mapPhase2CardProfile(input: {
   profileId: string;
   userId?: string;
@@ -591,7 +596,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // P2_MATCH: Match celebration state for Phase-2
   const [phase2MatchCelebration, setPhase2MatchCelebration] = useState<{
     visible: boolean;
-    matchedProfile: { name: string; photoUrl?: string; conversationId?: string } | null;
+    matchedProfile: {
+      name: string;
+      photoUrl?: string;
+      conversationId?: string;
+      alreadyMatched?: boolean;
+      source?: 'deep_connect' | 'truth_dare' | 'rematch';
+    } | null;
   }>({ visible: false, matchedProfile: null });
 
   // Read-only: existing conversations count for match reminder (no new queries)
@@ -1112,6 +1123,31 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   const phase2Profiles = useQuery(api.privateDiscover.getProfiles, privateDiscoverArgs);
 
+  const phase2ConversationsArgs = useMemo(
+    () =>
+      isPhase2 && !isDemoMode && !externalProfiles && typeof userId === "string" && userId.trim().length > 0
+        ? { authUserId: userId }
+        : "skip" as const,
+    [externalProfiles, isDemoMode, isPhase2, userId],
+  );
+  const phase2Conversations = useQuery(
+    api.privateConversations.getUserPrivateConversations,
+    phase2ConversationsArgs,
+  );
+  const connectedPhase2UserIds = useMemo(() => {
+    if (!isPhase2 || !Array.isArray(phase2Conversations)) {
+      return new Set<string>();
+    }
+
+    const ids = new Set<string>();
+    for (const conversation of phase2Conversations as Array<{ participantId?: unknown }>) {
+      if (typeof conversation.participantId === "string" && conversation.participantId.length > 0) {
+        ids.add(conversation.participantId);
+      }
+    }
+    return ids;
+  }, [isPhase2, phase2Conversations]);
+
   // ═══════════════════════════════════════════════════════════════════════════
   // VIEWER PROFILE QUERY - For computing common points with candidates
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1375,6 +1411,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     searchingDone: cachedSearchingDone,
     mergeProfiles: mergeCachedProfiles,
     consume: consumeCachedProfile,
+    purgeUserIds: purgeCachedUserIds,
     setQueue: setCachedQueue,
     markSearchingDone: markCachedSearchingDone,
     resetForUser: resetPhase2CacheForUser,
@@ -1388,6 +1425,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       searchingDone: s.searchingDone,
       mergeProfiles: s.mergeProfiles,
       consume: s.consume,
+      purgeUserIds: s.purgeUserIds,
       setQueue: s.setQueue,
       markSearchingDone: s.markSearchingDone,
       resetForUser: s.resetForUser,
@@ -1445,32 +1483,52 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       phase1StableProfilesMapRef.current.set(p.id, p);
     }
   }
+  const phase2CacheBelongsToViewer = cachedViewerUserId === (userId ?? null);
+  const phase2RelationshipSafeValidProfiles = useMemo(
+    () =>
+      isPhase2
+        ? validProfiles.filter((profile) => !isPhase2ConnectedProfile(profile, connectedPhase2UserIds))
+        : validProfiles,
+    [connectedPhase2UserIds, isPhase2, validProfiles],
+  );
+  const phase2RenderableCachedProfileCount = useMemo(() => {
+    if (!isPhase2 || !phase2CacheBelongsToViewer) return 0;
+    let count = 0;
+    for (const profile of cachedProfilesMap.values()) {
+      if (!cachedConsumedIds.has(profile.id) && !isPhase2ConnectedProfile(profile, connectedPhase2UserIds)) {
+        count += 1;
+      }
+    }
+    return count;
+  }, [cachedConsumedIds, cachedProfilesMap, connectedPhase2UserIds, isPhase2, phase2CacheBelongsToViewer]);
+
   useEffect(() => {
     if (!isPhase2) return;
-    mergeCachedProfiles(userId, validProfiles);
-  }, [isPhase2, mergeCachedProfiles, userId, validProfiles]);
+    mergeCachedProfiles(userId, phase2RelationshipSafeValidProfiles);
+  }, [isPhase2, mergeCachedProfiles, phase2RelationshipSafeValidProfiles, userId]);
 
-  const phase2CacheBelongsToViewer = cachedViewerUserId === (userId ?? null);
   const phase2ProfilesRaw = useMemo(() => {
     const merged = phase2CacheBelongsToViewer
       ? new Map(cachedProfilesMap)
       : new Map<string, ProfileData>();
 
-    for (const profile of validProfiles) {
+    for (const profile of phase2RelationshipSafeValidProfiles) {
       if (!cachedConsumedIds.has(profile.id)) {
         merged.set(profile.id, profile);
       }
     }
 
-    return Array.from(merged.values());
-  }, [cachedConsumedIds, cachedProfilesMap, phase2CacheBelongsToViewer, validProfiles]);
+    return Array.from(merged.values()).filter(
+      (profile) => !isPhase2ConnectedProfile(profile, connectedPhase2UserIds),
+    );
+  }, [cachedConsumedIds, cachedProfilesMap, connectedPhase2UserIds, phase2CacheBelongsToViewer, phase2RelationshipSafeValidProfiles]);
   const phase1ProfilesRaw = Array.from(phase1StableProfilesMapRef.current.values());
   // FLICKER_FIX: Log when falling back to stable cache
   const usingStableCache = isPhase2
-    ? validProfiles.length === 0 && phase2CacheBelongsToViewer && cachedProfilesMap.size > 0
+    ? validProfiles.length === 0 && phase2CacheBelongsToViewer && phase2RenderableCachedProfileCount > 0
     : effectiveConvexProfiles === undefined && phase1StableProfilesMapRef.current.size > 0;
   if (__DEV__ && isPhase2 && usingStableCache) {
-    console.log('[DISCOVER_GUARD] Using stable cache:', cachedProfilesMap.size, 'profiles (validProfiles was empty)');
+    console.log('[DISCOVER_GUARD] Using stable cache:', phase2RenderableCachedProfileCount, 'profiles (validProfiles was empty)');
   }
   const profilesRaw = isPhase2 ? phase2ProfilesRaw : phase1ProfilesRaw;
   const activeConsumedIds = isPhase2 ? cachedConsumedIds : phase1ConsumedIdsRef.current;
@@ -1478,8 +1536,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // FIX: Defensive filter — never show current user's profile in Discover
   // Backend already excludes, but this protects against stale cache contamination
   const profiles = useMemo(
-    () => profilesRaw.filter((p) => p.id !== userId && !activeConsumedIds.has(p.id)),
-    [activeConsumedIds, profilesRaw, userId],
+    () =>
+      profilesRaw.filter(
+        (p) =>
+          p.id !== userId &&
+          !activeConsumedIds.has(p.id) &&
+          !(isPhase2 && isPhase2ConnectedProfile(p, connectedPhase2UserIds)),
+      ),
+    [activeConsumedIds, connectedPhase2UserIds, isPhase2, profilesRaw, userId],
   );
 
   // Phase-2 fallback decks (demo/external) still need local filtering.
@@ -1645,6 +1709,55 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       profileMapRef.current.set(p.id, p);
     }
   }, [sourceProfiles, isPhase2]);
+
+  const purgePhase2ProfilesFromDeck = useCallback(
+    (ids: Set<string>, reason: "match_result" | "focus_connected") => {
+      if (!isPhase2 || ids.size === 0) return 0;
+
+      const idsToPurge = new Set(ids);
+      const removedProfileIds = new Set<string>();
+
+      for (const [profileId, profile] of profileMapRef.current) {
+        if (idsToPurge.has(profileId) || (profile.userId && idsToPurge.has(profile.userId))) {
+          idsToPurge.add(profileId);
+          if (profile.userId) {
+            idsToPurge.add(profile.userId);
+          }
+          removedProfileIds.add(profileId);
+          profileMapRef.current.delete(profileId);
+        }
+      }
+
+      const cacheState = usePhase2DiscoverCacheStore.getState();
+      for (const [profileId, profile] of cacheState.profilesMap) {
+        if (idsToPurge.has(profileId) || (profile.userId && idsToPurge.has(profile.userId))) {
+          idsToPurge.add(profileId);
+          if (profile.userId) {
+            idsToPurge.add(profile.userId);
+          }
+          removedProfileIds.add(profileId);
+        }
+      }
+      for (const queueId of cacheState.queue) {
+        if (idsToPurge.has(queueId)) {
+          removedProfileIds.add(queueId);
+        }
+      }
+
+      purgeCachedUserIds(idsToPurge);
+
+      const removed = removedProfileIds.size;
+      if (removed > 0) {
+        setQueueVersion((version) => version + 1);
+        if (__DEV__) {
+          console.log('[P2_CACHE_PURGE_CONNECTED]', `removed=${removed}`, reason);
+        }
+      }
+
+      return removed;
+    },
+    [isPhase2, purgeCachedUserIds],
+  );
 
   const triggerPhase2Refresh = useCallback(
     (source: "button" | "pull" = "button") => {
@@ -1984,6 +2097,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Shared values are stable across renders, so only isFocused drives this effect.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFocused]);
+
+  useEffect(() => {
+    if (!isPhase2 || !isFocused || connectedPhase2UserIds.size === 0) return;
+    purgePhase2ProfilesFromDeck(connectedPhase2UserIds, "focus_connected");
+  }, [connectedPhase2UserIds, isFocused, isPhase2, purgePhase2ProfilesFromDeck]);
 
   // Get current active pan values based on slot
   const activePanX = activeSlot === 0 ? panAX : panBX;
@@ -2628,8 +2746,33 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         if (result?.isMatch && !navigatingRef.current) {
           // DL-001 FIX: Phase-2 matches stay on Deep Connect, no navigation
           if (isPhase2) {
+            const alreadyMatched = (result as any)?.alreadyMatched === true;
+            const matchKey = (result as any)?.matchId ?? swipedProfile.userId ?? swipedProfile.id;
+            purgePhase2ProfilesFromDeck(
+              new Set([
+                swipedProfile.id,
+                ...(swipedProfile.userId ? [swipedProfile.userId] : []),
+              ]),
+              "match_result",
+            );
+            if (alreadyMatched) {
+              setPhase2MatchCelebration({
+                visible: true,
+                matchedProfile: {
+                  name: swipedProfile.name,
+                  photoUrl: swipedProfile.photos?.[0]?.url,
+                  conversationId: (result as any)?.conversationId,
+                  alreadyMatched: true,
+                  source: (result as any)?.source ?? 'deep_connect',
+                },
+              });
+              releaseSwipeLock(activeSwipeId);
+              return;
+            }
+
             const isNewMatch = handlePhase2Match({
               id: swipedProfile.id,
+              matchKey,
               name: swipedProfile.name,
               age: swipedProfile.age,
               photoUrl: swipedProfile.photos?.[0]?.url,
@@ -2645,6 +2788,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                   name: swipedProfile.name,
                   photoUrl: swipedProfile.photos?.[0]?.url,
                   conversationId: (result as any)?.conversationId,
+                  alreadyMatched: false,
+                  source: (result as any)?.source ?? 'deep_connect',
                 },
               });
             }
@@ -2712,6 +2857,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       incrementLikes,
       incrementStandOuts,
       demo.recordSwipe,
+      purgePhase2ProfilesFromDeck,
       releaseSwipeLock,
       resetPosition,
       token,
@@ -3984,9 +4130,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 entering={FadeIn.delay(350).duration(400)}
                 style={styles.p2MatchTextSection}
               >
-                <Text {...DISCOVER_TEXT_PROPS} style={styles.p2MatchPremiumTitle}>It's a connection 🔥</Text>
+                <Text {...DISCOVER_TEXT_PROPS} style={styles.p2MatchPremiumTitle}>
+                  {phase2MatchCelebration.matchedProfile.alreadyMatched
+                    ? "You're already matched"
+                    : phase2MatchCelebration.matchedProfile.source === 'rematch'
+                      ? "Connection restored"
+                      : "It's a Deep Connect match 🔥"}
+                </Text>
                 <Text {...DISCOVER_TEXT_PROPS} style={styles.p2MatchPremiumSubtitle}>
-                  You and {phase2MatchCelebration.matchedProfile.name} share a connection
+                  {phase2MatchCelebration.matchedProfile.alreadyMatched
+                    ? `You and ${phase2MatchCelebration.matchedProfile.name} already have a chat waiting.`
+                    : `You and ${phase2MatchCelebration.matchedProfile.name} chose each other in Deep Connect.`}
                 </Text>
               </Animated.View>
 
@@ -4009,7 +4163,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 >
                   <View style={styles.p2MatchBtnGradient}>
                     <Ionicons name="chatbubble-ellipses" size={SIZES.icon.md} color="#FFF" />
-                    <Text {...DISCOVER_TEXT_PROPS} style={styles.p2MatchStartChatText}>Start Chat</Text>
+                    <Text {...DISCOVER_TEXT_PROPS} style={styles.p2MatchStartChatText}>
+                      {phase2MatchCelebration.matchedProfile.alreadyMatched ? 'Continue Chat' : 'Open Chat'}
+                    </Text>
                   </View>
                 </TouchableOpacity>
 
