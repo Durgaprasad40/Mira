@@ -142,14 +142,24 @@ function countPromptsAnswered(
 
 /**
  * Normalize and sanitize Phase-2 prompts to standard format.
- * Trims question/answer and filters out empty prompts.
+ * Trims question/answer, filters out empty prompts, and dedupes by promptId
+ * (keeps first non-empty entry per id) to defend against legacy writes that
+ * bypassed setPromptAnswer's local dedup.
  */
 function normalizePhase2Prompts(
   prompts?: { promptId: string; question: string; answer: string }[]
 ): { question: string; answer: string }[] {
   if (!prompts || !Array.isArray(prompts)) return [];
+  const seenPromptIds = new Set<string>();
   return prompts
-    .filter(p => p.answer?.trim().length > 0)
+    .filter(p => {
+      if (!p.answer?.trim().length) return false;
+      if (p.promptId) {
+        if (seenPromptIds.has(p.promptId)) return false;
+        seenPromptIds.add(p.promptId);
+      }
+      return true;
+    })
     .map(p => ({
       question: p.question?.trim() ?? '',
       answer: p.answer?.trim() ?? '',

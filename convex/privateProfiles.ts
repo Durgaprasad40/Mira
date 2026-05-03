@@ -129,11 +129,25 @@ function sanitizePromptAnswers(
     };
   }
 
-  const sanitized = promptAnswers.map((prompt) => ({
+  const trimmed = promptAnswers.map((prompt) => ({
     ...prompt,
     question: prompt.question.trim(),
     answer: prompt.answer.trim(),
   }));
+
+  // Defensive dedupe by promptId — keep the LAST entry for each promptId so
+  // bulk writes that accidentally re-include a stale row don't end up rendering
+  // the same prompt twice. Empty promptIds are kept as-is.
+  const seenIds = new Set<string>();
+  const sanitized: typeof trimmed = [];
+  for (let i = trimmed.length - 1; i >= 0; i--) {
+    const prompt = trimmed[i];
+    if (prompt.promptId) {
+      if (seenIds.has(prompt.promptId)) continue;
+      seenIds.add(prompt.promptId);
+    }
+    sanitized.unshift(prompt);
+  }
 
   for (const prompt of sanitized) {
     if (
@@ -704,13 +718,19 @@ export const updateFieldsByAuthId = mutation({
       return { success: false, error: 'profile_not_found' };
     }
 
-    // Build clean updates (only defined values)
+    // Build clean updates (only defined, non-null values).
+    // The userPrivateProfiles table schema declares optional fields as
+    // v.optional(v.<type>) — null is NOT a valid stored value. The arg
+    // validator above accepts null so older clients don't crash at the
+    // mutation boundary, but we MUST strip nulls before patching or the
+    // database will reject the write. Stripping null also preserves
+    // any existing valid value: a missing key in patch leaves the
+    // current row value untouched.
     const { authUserId, token, ...updates } = args;
     const cleanUpdates: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(updates)) {
-      if (value !== undefined) {
-        cleanUpdates[key] = value;
-      }
+      if (value === undefined || value === null) continue;
+      cleanUpdates[key] = value;
     }
 
     if (bioValidation.value !== undefined) {

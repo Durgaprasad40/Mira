@@ -435,7 +435,13 @@ export const getProfiles = query({
     // Return only blurred data — never expose original photos
     // Cast to access optional schema fields that may not be in generated types yet
     return limited.map(({ profile: p }) => {
-      const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
+      const profile = p as typeof p & {
+        hobbies?: string[];
+        isVerified?: boolean;
+        privateIntentKey?: string;
+        education?: string;
+        religion?: string;
+      };
       // Backward compat: older records may only have privateIntentKey (single)
       const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
       // Privacy: hide age from others in Deep Connect (viewer is never self here — excluded above)
@@ -478,6 +484,8 @@ export const getProfiles = query({
         height: p.height,
         smoking: p.smoking,
         drinking: p.drinking,
+        education: profile.education,
+        religion: profile.religion,
         isSetupComplete: p.isSetupComplete,
         privateBio: p.privateBio,
         revealPolicy: p.revealPolicy ?? 'mutual_only',
@@ -545,7 +553,13 @@ export const getProfileCard = query({
     if (blockedByOwner) return null;
 
     // Cast to access optional schema fields that may not be in generated types yet
-    const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
+    const profile = p as typeof p & {
+      hobbies?: string[];
+      isVerified?: boolean;
+      privateIntentKey?: string;
+      education?: string;
+      religion?: string;
+    };
     // Backward compat: older records may only have privateIntentKey (single)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
@@ -592,6 +606,8 @@ export const getProfileCard = query({
       // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
+      education: profile.education,
+      religion: profile.religion,
       ...(distanceKm !== undefined ? { distanceKm } : {}),
     };
   },
@@ -653,7 +669,13 @@ export const getProfileByUserId = query({
     if (blockedByOwner) return null;
 
     // Cast to access optional schema fields that may not be in generated types yet
-    const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
+    const profile = p as typeof p & {
+      hobbies?: string[];
+      isVerified?: boolean;
+      privateIntentKey?: string;
+      education?: string;
+      religion?: string;
+    };
 
     // Backward compat: older records may only have privateIntentKey (single), not privateIntentKeys (array)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
@@ -700,6 +722,12 @@ export const getProfileByUserId = query({
       // Legacy single key for backward compat
       privateIntentKey: intentKeys[0] ?? null,
       desireTagKeys: p.privateDesireTagKeys,
+      promptAnswers: p.promptAnswers,
+      height: p.height,
+      smoking: p.smoking,
+      drinking: p.drinking,
+      education: profile.education,
+      religion: profile.religion,
       privateBio: p.privateBio,
       revealPolicy: p.revealPolicy ?? 'mutual_only',
       // P1-009: mutual reveal for this pair — client uses to skip blur

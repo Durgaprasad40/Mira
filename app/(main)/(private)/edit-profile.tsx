@@ -739,10 +739,24 @@ export default function EditProfileScreen() {
             throw new Error('Please sign in to save changes.');
           }
 
+          // Strip null / undefined values from the update payload.
+          // The Convex schema for userPrivateProfiles defines these
+          // optional fields as v.optional(v.<type>) — null is NOT an
+          // accepted value. Sending `height: null` (or any other
+          // explicit null) triggers a validator error and clobbers
+          // the field on the server. By skipping nulls here we both
+          // satisfy the schema and preserve any previously stored
+          // value for the user.
+          const sanitizedUpdates: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(updates)) {
+            if (value === null || value === undefined) continue;
+            sanitizedUpdates[key] = value;
+          }
+
           await updatePrivateProfile({
             token,
             authUserId: userId,
-            ...updates,
+            ...sanitizedUpdates,
           });
         }
 
@@ -1074,18 +1088,26 @@ export default function EditProfileScreen() {
           }
 
           // Single backend write: merge profile fields + blur settings.
+          // Null-valued local state (e.g. user never entered a height) is
+          // stripped centrally in persistProfileUpdate; this call site
+          // intentionally passes raw locals so that updating one field to
+          // a real value doesn't accidentally clear the others.
+          const mergedUpdates: Record<string, unknown> = {
+            privateBio: nextBio,
+            photoBlurSlots,
+            photoBlurEnabled,
+          };
+          if (typeof localHeight === 'number' && localHeight > 0) mergedUpdates.height = localHeight;
+          if (typeof localWeight === 'number' && localWeight > 0) mergedUpdates.weight = localWeight;
+          if (localSmoking) mergedUpdates.smoking = localSmoking;
+          if (localDrinking) mergedUpdates.drinking = localDrinking;
+          if (localEducation) mergedUpdates.education = localEducation;
+          if (localReligion) mergedUpdates.religion = localReligion;
+
           await updatePrivateProfile({
             token,
             authUserId: userId,
-            privateBio: nextBio,
-            height: localHeight,
-            weight: localWeight,
-            smoking: localSmoking,
-            drinking: localDrinking,
-            education: localEducation,
-            religion: localReligion,
-            photoBlurSlots,
-            photoBlurEnabled,
+            ...mergedUpdates,
           });
         }
 
