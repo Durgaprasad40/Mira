@@ -4,6 +4,11 @@ import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { resolveUserIdByAuthId } from './helpers';
 import { shouldCreatePhase2DeepConnectNotification } from './phase2NotificationPrefs';
+import {
+  createPhase2MatchNotificationIfMissing,
+  ensurePhase2MatchAndConversation,
+  findPhase2MatchConversationStatus,
+} from './phase2MatchHelpers';
 
 // 24-hour auto-delete rule (same as Confessions)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
@@ -1097,6 +1102,121 @@ export const getPendingConnectRequests = query({
   },
 });
 
+// Cheap reactive count for the Phase-2 T/D request tray and badge surfaces.
+export const getPendingTodConnectRequestsCount = query({
+  args: { authUserId: v.string() },
+  handler: async (ctx, { authUserId }) => {
+    const userId = await getOptionalAuthenticatedTodUserId(ctx, authUserId, 'getPendingTodConnectRequestsCount');
+    if (!userId) return 0;
+
+    const requests = await ctx.db
+      .query('todConnectRequests')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+      .filter((q) => q.eq(q.field('status'), 'pending'))
+      .collect();
+
+    let count = 0;
+    for (const req of requests) {
+      if (await hasBlockBetween(ctx, req.fromUserId, userId as string)) {
+        continue;
+      }
+      count += 1;
+    }
+    return count;
+  },
+});
+
+// Rich inbox list for pending incoming Phase-2 Truth or Dare connect requests.
+export const getPendingTodConnectRequestInbox = query({
+  args: { authUserId: v.string() },
+  handler: async (ctx, { authUserId }) => {
+    const userId = await getOptionalAuthenticatedTodUserId(ctx, authUserId, 'getPendingTodConnectRequestInbox');
+    if (!userId) return [];
+
+    const requests = await ctx.db
+      .query('todConnectRequests')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+      .filter((q) => q.eq(q.field('status'), 'pending'))
+      .order('desc')
+      .collect();
+
+    const enriched = await Promise.all(
+      requests.map(async (req) => {
+        let senderDbId: Id<'users'> | null = null;
+        try {
+          const direct = await ctx.db.get(req.fromUserId as Id<'users'>);
+          if (direct) {
+            senderDbId = direct._id;
+          }
+        } catch {
+          // Legacy rows may carry auth ids instead of Convex ids.
+        }
+        if (!senderDbId) {
+          senderDbId = await resolveUserIdByAuthId(ctx, req.fromUserId);
+        }
+        if (!senderDbId) {
+          return null;
+        }
+
+        if (await hasBlockBetween(ctx, senderDbId as string, userId as string)) {
+          return null;
+        }
+
+        const sender = await ctx.db.get(senderDbId);
+        const prompt = await ctx.db.get(req.promptId as Id<'todPrompts'>);
+        if (!prompt) {
+          return null;
+        }
+
+        const senderIdentity = getPromptConnectIdentity(prompt, sender);
+        const answer = await ctx.db.get(req.answerId as Id<'todAnswers'>);
+        const answerIdentity = answer ? getNormalizedTodAnswerIdentity(answer) : null;
+        const answerPreview =
+          answer &&
+          !answerIdentity?.isAnonymous &&
+          answer.text &&
+          answer.text.trim().length > 0
+            ? answer.text.trim().slice(0, 180)
+            : null;
+
+        const connectionStatus = await findPhase2MatchConversationStatus(
+          ctx,
+          userId as Id<'users'>,
+          senderDbId as Id<'users'>,
+        );
+
+        return {
+          requestId: req._id as string,
+          createdAt: req.createdAt,
+          promptId: req.promptId,
+          answerId: req.answerId,
+          fromUserId: senderDbId as string,
+          senderName: senderIdentity.name,
+          senderPhotoUrl: senderIdentity.photoUrl,
+          senderPhotoBlurMode: senderIdentity.photoBlurMode,
+          senderIsAnonymous: senderIdentity.isAnonymous,
+          senderAge: senderIdentity.age,
+          senderGender: senderIdentity.gender,
+          promptType: prompt.type,
+          promptText: prompt.text,
+          answerPreview,
+          relationship: connectionStatus.isConnected
+            ? {
+                state: 'connected' as const,
+                conversationId: connectionStatus.conversationId as string | undefined,
+                matchId: connectionStatus.matchId as string | undefined,
+              }
+            : {
+                state: 'none' as const,
+              },
+        };
+      })
+    );
+
+    return enriched.filter((request): request is NonNullable<typeof request> => request !== null);
+  },
+});
+
 // Send a T&D connect request (prompt owner → answer author)
 export const sendTodConnectRequest = mutation({
   args: {
@@ -1141,6 +1261,22 @@ export const sendTodConnectRequest = mutation({
 
     if (await hasBlockBetween(ctx, fromUserId as string, toUserId as string)) {
       return { success: false, reason: 'Connect unavailable for this user' };
+    }
+
+    const existingConnection = await findPhase2MatchConversationStatus(
+      ctx,
+      fromUserId as Id<'users'>,
+      toUserId as Id<'users'>,
+    );
+    if (existingConnection.isConnected) {
+      return {
+        success: true,
+        action: 'already_connected' as const,
+        conversationId: existingConnection.conversationId as string | null,
+        matchId: existingConnection.matchId as string | undefined,
+        alreadyMatched: true,
+        source: 'truth_dare' as const,
+      };
     }
 
     // Check for existing pending/connected request for this user pair
@@ -1331,82 +1467,27 @@ export const respondToConnect = mutation({
         : getDefaultConnectIdentity(recipient);
       // Anonymous identity is allowed: identity is revealed on accept by design.
 
-      // Order participants for consistent deduplication (lower ID first)
-      const participantIds = [senderDbId as Id<'users'>, recipientDbId as Id<'users'>].sort();
-
-      // P0-2: Look up existing Phase-2 conversation for this user pair.
-      const senderParticipations = await ctx.db
-        .query('privateConversationParticipants')
-        .withIndex('by_user', (q) => q.eq('userId', senderDbId as Id<'users'>))
-        .collect();
-
-      let existingConversationId: Id<'privateConversations'> | null = null;
-
-      for (const sp of senderParticipations) {
-        const recipientInConvo = await ctx.db
-          .query('privateConversationParticipants')
-          .withIndex('by_user_conversation', (q) =>
-            q.eq('userId', recipientDbId as Id<'users'>).eq('conversationId', sp.conversationId)
-          )
-          .first();
-
-        if (recipientInConvo) {
-          existingConversationId = sp.conversationId;
-          break;
-        }
-      }
-
       const now = Date.now();
-      let conversationId: Id<'privateConversations'>;
-      let conversationCreated = false;
+      const ensured = await ensurePhase2MatchAndConversation(ctx, {
+        userAId: senderDbId as Id<'users'>,
+        userBId: recipientDbId as Id<'users'>,
+        now,
+        source: 'truth_dare',
+        // The privateMatches schema stores Deep Connect-like match kinds.
+        // The public response below carries the T/D source for UI behavior.
+        matchKind: 'like',
+        connectionSource: 'tod',
+        reactivateInactive: true,
+        unhideExistingConversation: true,
+        updateLastMessageAt: true,
+        existingConversationMeansAlreadyMatched: true,
+      });
 
-      if (existingConversationId) {
-        // Reuse existing Phase-2 conversation
-        conversationId = existingConversationId;
-        await ctx.db.patch(conversationId, { lastMessageAt: now });
-        // Make sure the conversation is visible to both sides if previously hidden.
-        const sp = await ctx.db
-          .query('privateConversationParticipants')
-          .withIndex('by_user_conversation', (q) =>
-            q.eq('userId', senderDbId as Id<'users'>).eq('conversationId', conversationId)
-          )
-          .first();
-        if (sp?.isHidden) {
-          await ctx.db.patch(sp._id, { isHidden: false });
-        }
-        const rp = await ctx.db
-          .query('privateConversationParticipants')
-          .withIndex('by_user_conversation', (q) =>
-            q.eq('userId', recipientDbId as Id<'users'>).eq('conversationId', conversationId)
-          )
-          .first();
-        if (rp?.isHidden) {
-          await ctx.db.patch(rp._id, { isHidden: false });
-        }
-      } else {
-        // Create new Phase-2 conversation
-        conversationId = await ctx.db.insert('privateConversations', {
-          participants: participantIds,
-          isPreMatch: false,
-          connectionSource: 'tod',
-          createdAt: now,
-          lastMessageAt: now,
-        });
-        conversationCreated = true;
+      const matchId = ensured.matchId;
+      const conversationId = ensured.conversationId;
+      const conversationCreated = ensured.conversationCreated;
 
-        await ctx.db.insert('privateConversationParticipants', {
-          conversationId,
-          userId: senderDbId as Id<'users'>,
-          unreadCount: 1, // Sender will see the system message as unread
-        });
-
-        await ctx.db.insert('privateConversationParticipants', {
-          conversationId,
-          userId: recipientDbId as Id<'users'>,
-          unreadCount: 0, // Recipient is accepting; they'll see it immediately
-        });
-
-        // Initial system message in Phase-2 messages table.
+      if (conversationCreated) {
         await ctx.db.insert('privateMessages', {
           conversationId,
           senderId: recipientDbId as Id<'users'>,
@@ -1414,12 +1495,26 @@ export const respondToConnect = mutation({
           content: '[SYSTEM:truthdare]T&D connection accepted! Say hi!',
           createdAt: now,
         });
+
+        const senderParticipant = await ctx.db
+          .query('privateConversationParticipants')
+          .withIndex('by_user_conversation', (q) =>
+            q.eq('userId', senderDbId as Id<'users'>).eq('conversationId', conversationId)
+          )
+          .first();
+        if (senderParticipant) {
+          await ctx.db.patch(senderParticipant._id, {
+            unreadCount: senderParticipant.unreadCount + 1,
+          });
+        }
       }
 
       console.log('[TOD_CONNECT_RESPOND] Accepted:', {
         requestId,
+        matchId,
         conversationId,
         conversationCreated,
+        alreadyMatched: ensured.alreadyMatched,
         sender: (senderDbId as string).slice(-8),
         recipient: (recipientDbId as string).slice(-8),
       });
@@ -1434,20 +1529,17 @@ export const respondToConnect = mutation({
       // Phase-2 in-app notification for the inviter (sender) confirming the
       // T&D connect was accepted and a Phase-2 conversation now exists.
       // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only.
-      if (await shouldCreatePhase2DeepConnectNotification(ctx, senderDbId as Id<'users'>)) {
-        await ctx.db.insert('privateNotifications', {
+      if (!ensured.alreadyMatched) {
+        await createPhase2MatchNotificationIfMissing(ctx, {
           userId: senderDbId as Id<'users'>,
-          type: 'phase2_match',
+          matchId,
+          conversationId,
           title: 'Truth or Dare connect accepted',
           body: `${recipientIdentity.name} accepted your T&D connect.`,
           data: {
-            privateConversationId: conversationId as string,
             otherUserId: recipientDbId as string,
           },
-          phase: 'phase2',
-          dedupeKey: `p2_tod_accept:${requestId}`,
-          createdAt: now,
-          expiresAt: now + 7 * 24 * 60 * 60 * 1000,
+          now,
         });
       }
 
@@ -1455,6 +1547,9 @@ export const respondToConnect = mutation({
         success: true,
         action: 'connected' as const,
         conversationId: conversationId as string,
+        matchId: matchId as string,
+        source: 'truth_dare' as const,
+        alreadyMatched: ensured.alreadyMatched,
         // Sender profile (for recipient's display)
         senderUserId: request.fromUserId,
         senderDbId: senderDbId as string,
@@ -2247,6 +2342,13 @@ export const listActivePromptsWithTop2Answers = query({
               reactionCounts,
               myReaction,
               isAnonymous: normalizedIdentity.isAnonymous,
+              authorName: normalizedIdentity.authorName,
+              authorPhotoUrl: normalizedIdentity.authorPhotoUrl,
+              authorAge: normalizedIdentity.authorAge,
+              authorGender: normalizedIdentity.authorGender,
+              photoBlurMode: normalizedIdentity.photoBlurMode,
+              identityMode: normalizedIdentity.identityMode,
+              isFrontCamera: answer.isFrontCamera ?? false,
               visibility: answer.visibility,
               viewMode: answer.viewMode,
               viewDurationSec: answer.viewDurationSec,

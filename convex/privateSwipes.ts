@@ -12,6 +12,11 @@ import { Id } from './_generated/dataModel';
 import { getPhase2DisplayName, validateSessionToken, resolveUserIdByAuthId } from './helpers';
 import { shouldCreatePhase2DeepConnectNotification } from './phase2NotificationPrefs';
 import { dispatchPrivatePush } from './privateNotifications';
+import {
+  createPhase2MatchNotificationIfMissing,
+  ensurePhase2MatchAndConversation,
+  getPhase2UserPair,
+} from './phase2MatchHelpers';
 
 // Helper: Check if either user has blocked the other
 async function isBlockedBidirectional(
@@ -83,7 +88,35 @@ export const swipe = mutation({
 
     // FIX 2: Idempotency safety - return success instead of throwing error
     if (existingLike) {
-      return { success: true, isMatch: false };
+      if (action === 'like' || action === 'super_like') {
+        const { user1Id, user2Id } = getPhase2UserPair(fromUserId, toUserId);
+        const existingMatch = await ctx.db
+          .query('privateMatches')
+          .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+          .first();
+
+        if (existingMatch?.isActive === true) {
+          const ensured = await ensurePhase2MatchAndConversation(ctx, {
+            userAId: fromUserId,
+            userBId: toUserId,
+            now,
+            source: 'deep_connect',
+            matchKind: existingMatch.matchSource === 'super_like' ? 'super_like' : 'like',
+            connectionSource: existingMatch.matchSource === 'super_like' ? 'desire_super_like' : 'desire_match',
+          });
+
+          return {
+            success: true,
+            isMatch: true,
+            matchId: ensured.matchId,
+            conversationId: ensured.conversationId,
+            alreadyMatched: true,
+            source: ensured.source,
+          };
+        }
+      }
+
+      return { success: true, isMatch: false, alreadyMatched: false, source: 'deep_connect' };
     }
 
     // FIX 1: Target user Phase-2 validation
@@ -96,6 +129,32 @@ export const swipe = mutation({
     if (action === 'like' || action === 'super_like') {
       if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
         throw new Error('Cannot like this user');
+      }
+
+      const { user1Id, user2Id } = getPhase2UserPair(fromUserId, toUserId);
+      const existingMatch = await ctx.db
+        .query('privateMatches')
+        .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+        .first();
+
+      if (existingMatch?.isActive === true) {
+        const ensured = await ensurePhase2MatchAndConversation(ctx, {
+          userAId: fromUserId,
+          userBId: toUserId,
+          now,
+          source: 'deep_connect',
+          matchKind: existingMatch.matchSource === 'super_like' ? 'super_like' : 'like',
+          connectionSource: existingMatch.matchSource === 'super_like' ? 'desire_super_like' : 'desire_match',
+        });
+
+        return {
+          success: true,
+          isMatch: true,
+          matchId: ensured.matchId,
+          conversationId: ensured.conversationId,
+          alreadyMatched: true,
+          source: ensured.source,
+        };
       }
     }
 
@@ -134,183 +193,37 @@ export const swipe = mutation({
       );
 
       if (hasReciprocalLike) {
-        // Ordered pair for match (user1Id < user2Id)
-        const user1Id = fromUserId < toUserId ? fromUserId : toUserId;
-        const user2Id = fromUserId < toUserId ? toUserId : fromUserId;
-
-        // Check if match already exists (race condition protection)
-        const existingMatch = await ctx.db
-          .query('privateMatches')
-          .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
-          .first();
-
-        if (existingMatch) {
-          // Match already exists - return idempotently
-          console.log('[MATCH_IDEMPOTENT] Returning existing match for pair:', {
-            user1: (user1Id as string)?.slice(-8),
-            user2: (user2Id as string)?.slice(-8),
-            matchId: (existingMatch._id as string)?.slice(-8),
-          });
-          return { success: true, isMatch: true, matchId: existingMatch._id };
-        }
-
-        // Determine match source
         const reciprocalAction = reciprocalLike.action;
         const isSuperLikeMatch = action === 'super_like' || reciprocalAction === 'super_like';
-
-        // Create match in privateMatches (Phase-2 table)
-        const matchId = await ctx.db.insert('privateMatches', {
-          user1Id,
-          user2Id,
-          matchedAt: now,
-          isActive: true,
-          matchSource: isSuperLikeMatch ? 'super_like' : 'like',
+        const ensured = await ensurePhase2MatchAndConversation(ctx, {
+          userAId: fromUserId,
+          userBId: toUserId,
+          now,
+          source: 'deep_connect',
+          matchKind: isSuperLikeMatch ? 'super_like' : 'like',
+          connectionSource: isSuperLikeMatch ? 'desire_super_like' : 'desire_match',
+          reactivateInactive: true,
         });
 
-        // Race condition protection: verify we're the winner
-        const allMatches = await ctx.db
-          .query('privateMatches')
-          .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
-          .collect();
+        const { user1Id, user2Id } = getPhase2UserPair(fromUserId, toUserId);
+        const matchId = ensured.matchId;
+        const conversationId = ensured.conversationId;
 
-        if (allMatches.length > 1) {
-          // Duplicates detected - determine winner by _id
-          allMatches.sort((a, b) => a._id.localeCompare(b._id));
-          const winnerMatchId = allMatches[0]._id;
-
-          if (matchId !== winnerMatchId) {
-            // Our match lost the race - delete it
-            await ctx.db.delete(matchId);
-            return { success: true, isMatch: true, matchId: winnerMatchId };
-          }
-
-          // We are the winner - delete duplicates
-          for (let i = 1; i < allMatches.length; i++) {
-            await ctx.db.delete(allMatches[i]._id);
-          }
-        }
-
-        // P1-009: Record mutual photo reveal for this matched pair.
-        // Sorted pair (userAId < userBId) — same convention as privateMatches.
-        // Idempotent: only insert if no reveal exists for this pair.
-        const existingReveal = await ctx.db
-          .query('privateReveals')
-          .withIndex('by_pair', (q) => q.eq('userAId', user1Id).eq('userBId', user2Id))
-          .first();
-        if (!existingReveal) {
-          await ctx.db.insert('privateReveals', {
-            userAId: user1Id,
-            userBId: user2Id,
-            createdAt: now,
-          });
-        }
-
-        // ONE-PAIR-ONE-THREAD: Check if conversation already exists for this pair
-        // This prevents duplicate threads when T/D or other paths already created one
-        const sortedParticipants = [fromUserId, toUserId].sort() as [Id<'users'>, Id<'users'>];
-
-        // Query for existing conversation using participant lookup
-        const fromUserConvos = await ctx.db
-          .query('privateConversationParticipants')
-          .withIndex('by_user', (q) => q.eq('userId', fromUserId))
-          .collect();
-
-        let existingConversationId: Id<'privateConversations'> | null = null;
-        for (const pc of fromUserConvos) {
-          const toUserInConvo = await ctx.db
-            .query('privateConversationParticipants')
-            .withIndex('by_user_conversation', (q) =>
-              q.eq('userId', toUserId).eq('conversationId', pc.conversationId)
-            )
-            .first();
-          if (toUserInConvo) {
-            existingConversationId = pc.conversationId;
-            break;
-          }
-        }
-
-        let conversationId: Id<'privateConversations'>;
-        let conversationCreated = false;
-
-        if (existingConversationId) {
-          // Reuse existing conversation, update matchId if needed
-          conversationId = existingConversationId;
-          const existingConvo = await ctx.db.get(existingConversationId);
-          if (existingConvo && !existingConvo.matchId) {
-            // Link match to existing conversation (e.g., T/D conversation now has a match)
-            await ctx.db.patch(existingConversationId, { matchId });
-          }
-          console.log('[CONVO_IDEMPOTENT] Reusing existing conversation for pair:', {
-            user1: (fromUserId as string)?.slice(-8),
-            user2: (toUserId as string)?.slice(-8),
+        if (ensured.alreadyMatched) {
+          console.log('[P2_MATCH_ALREADY_EXISTS]', {
+            user1: (user1Id as string)?.slice(-8),
+            user2: (user2Id as string)?.slice(-8),
+            matchId: (matchId as string)?.slice(-8),
             conversationId: (conversationId as string)?.slice(-8),
           });
-        } else {
-          // Create Phase-2 conversation
-          conversationId = await ctx.db.insert('privateConversations', {
+          return {
+            success: true,
+            isMatch: true,
             matchId,
-            participants: sortedParticipants,
-            isPreMatch: false,
-            createdAt: now,
-            connectionSource: isSuperLikeMatch ? 'desire_super_like' : 'desire_match',
-          });
-          conversationCreated = true;
-
-          // Create conversation participants for efficient queries
-          await ctx.db.insert('privateConversationParticipants', {
             conversationId,
-            userId: fromUserId,
-            unreadCount: 0,
-          });
-          await ctx.db.insert('privateConversationParticipants', {
-            conversationId,
-            userId: toUserId,
-            unreadCount: 0,
-          });
-
-          // RACE CONDITION PROTECTION: Check for duplicate conversations
-          const allPairConvos = await ctx.db
-            .query('privateConversations')
-            .filter((q) =>
-              q.eq(q.field('participants'), sortedParticipants)
-            )
-            .collect();
-
-          if (allPairConvos.length > 1) {
-            // Duplicates detected - keep the one with lowest _id (deterministic winner)
-            allPairConvos.sort((a, b) => a._id.localeCompare(b._id));
-            const winnerConvoId = allPairConvos[0]._id;
-
-            if (conversationId !== winnerConvoId) {
-              // Our conversation lost - delete it and its participants, use winner
-              const ourParticipants = await ctx.db
-                .query('privateConversationParticipants')
-                .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-                .collect();
-              for (const p of ourParticipants) {
-                await ctx.db.delete(p._id);
-              }
-              await ctx.db.delete(conversationId);
-              conversationId = winnerConvoId;
-              console.log('[PRIVATE_SWIPE] Lost race, using winner conversation:', winnerConvoId);
-            } else {
-              // We won - delete duplicates
-              for (let i = 1; i < allPairConvos.length; i++) {
-                const dupeConvo = allPairConvos[i];
-                const dupeParticipants = await ctx.db
-                  .query('privateConversationParticipants')
-                  .withIndex('by_conversation', (q) => q.eq('conversationId', dupeConvo._id))
-                  .collect();
-                for (const p of dupeParticipants) {
-                  await ctx.db.delete(p._id);
-                }
-                await ctx.db.delete(dupeConvo._id);
-              }
-              console.log('[PRIVATE_SWIPE] Won race, deleted', allPairConvos.length - 1, 'duplicates');
-            }
-          } else {
-            console.log('[PRIVATE_SWIPE] Created new conversation for pair:', conversationId);
-          }
+            alreadyMatched: true,
+            source: ensured.source,
+          };
         }
 
         // Seed super_like message if present
@@ -373,55 +286,35 @@ export const swipe = mutation({
         const fromDisplayName = fromDisplayNameRaw ?? 'Someone';
         const toDisplayName = toDisplayNameRaw ?? 'Someone';
 
-        // Notify the other user (toUser) about the match
-        // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only
-        if (await shouldCreatePhase2DeepConnectNotification(ctx, toUserId)) {
-          await ctx.db.insert('privateNotifications', {
-            userId: toUserId,
-            type: 'phase2_match',
-            title: 'New Match! 🎉',
-            body: `You matched with ${fromDisplayName} in Deep Connect!`,
-            data: { matchId: matchId as string, privateConversationId: conversationId as string },
-            phase: 'phase2',
-            dedupeKey: `p2_match:${matchId}:${toUserId}`,
-            createdAt: now,
-            expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
-          });
-          // PHASE-2 PUSH: surface OS notification for new match (gated by same pref)
-          await dispatchPrivatePush(ctx, {
-            userId: toUserId,
-            type: 'phase2_match',
-            title: 'New Match! 🎉',
-            body: `You matched with ${fromDisplayName} in Deep Connect!`,
-            data: { matchId: matchId as string, privateConversationId: conversationId as string },
-          });
-        }
+        // Notify both users exactly once per match/user pair.
+        await createPhase2MatchNotificationIfMissing(ctx, {
+          userId: toUserId,
+          matchId,
+          conversationId,
+          title: 'New Match! 🎉',
+          body: `You matched with ${fromDisplayName} in Deep Connect!`,
+          now,
+          push: true,
+        });
 
-        // Notify the current user (fromUser) about the match
-        // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only
-        if (await shouldCreatePhase2DeepConnectNotification(ctx, fromUserId)) {
-          await ctx.db.insert('privateNotifications', {
-            userId: fromUserId,
-            type: 'phase2_match',
-            title: 'New Match! 🎉',
-            body: `You matched with ${toDisplayName} in Deep Connect!`,
-            data: { matchId: matchId as string, privateConversationId: conversationId as string },
-            phase: 'phase2',
-            dedupeKey: `p2_match:${matchId}:${fromUserId}`,
-            createdAt: now,
-            expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
-          });
-          // PHASE-2 PUSH: surface OS notification for new match (gated by same pref)
-          await dispatchPrivatePush(ctx, {
-            userId: fromUserId,
-            type: 'phase2_match',
-            title: 'New Match! 🎉',
-            body: `You matched with ${toDisplayName} in Deep Connect!`,
-            data: { matchId: matchId as string, privateConversationId: conversationId as string },
-          });
-        }
+        await createPhase2MatchNotificationIfMissing(ctx, {
+          userId: fromUserId,
+          matchId,
+          conversationId,
+          title: 'New Match! 🎉',
+          body: `You matched with ${toDisplayName} in Deep Connect!`,
+          now,
+          push: true,
+        });
 
-        return { success: true, isMatch: true, matchId, conversationId };
+        return {
+          success: true,
+          isMatch: true,
+          matchId,
+          conversationId,
+          alreadyMatched: false,
+          source: ensured.source,
+        };
       } else {
         // NO RECIPROCAL LIKE YET - send "someone liked you" notification
         // This is the pending like state - match will be created when other user likes back
@@ -463,7 +356,7 @@ export const swipe = mutation({
       }
     }
 
-    return { success: true, isMatch: false };
+    return { success: true, isMatch: false, alreadyMatched: false, source: 'deep_connect' };
   },
 });
 
