@@ -95,7 +95,17 @@ export function NotificationPopover({
             notification.data?.privateConversationId ??
             notification.data?.conversationId;
           if (p2ConvoId) {
-            router.push(`/(main)/incognito-chat?id=${encodeURIComponent(p2ConvoId)}&${notifParams}${dedupeParam}` as any);
+            // PHASE2_NOTIF_BACK_FIX: Switch to Messages tab home first, then
+            // push the chat thread. This ensures back from the thread returns
+            // to the Messages list (not DeepConnect or wherever the bell was
+            // tapped from). The legacy /(main)/incognito-chat redirect would
+            // <Redirect> in place, leaving the originating tab in the back stack.
+            router.push('/(main)/(private)/(tabs)/chats' as any);
+            setTimeout(() => {
+              router.push(
+                `/(main)/(private)/(tabs)/chats/${encodeURIComponent(p2ConvoId)}?${notifParams}${dedupeParam}` as any
+              );
+            }, 50);
           }
           break;
         }
@@ -104,16 +114,31 @@ export function NotificationPopover({
             notification.data?.privateConversationId ??
             notification.data?.conversationId;
           if (p2ConvoId) {
-            router.push(`/(main)/incognito-chat?id=${encodeURIComponent(p2ConvoId)}&${notifParams}${dedupeParam}` as any);
+            // PHASE2_NOTIF_BACK_FIX: see phase2_private_message above.
+            router.push('/(main)/(private)/(tabs)/chats' as any);
+            setTimeout(() => {
+              router.push(
+                `/(main)/(private)/(tabs)/chats/${encodeURIComponent(p2ConvoId)}?${notifParams}${dedupeParam}` as any
+              );
+            }, 50);
           } else {
-            router.push(`/(main)/(private)?${notifParams}${dedupeParam}` as any);
+            router.push(`/(main)/(private)/(tabs)/chats?${notifParams}${dedupeParam}` as any);
           }
           break;
         }
         case 'phase2_like':
           router.push(`/(main)/(private)?${notifParams}${dedupeParam}` as any);
           break;
-        case 'phase2_deep_connect':
+        case 'phase2_deep_connect': {
+          const requestId = notification.data?.threadId;
+          const requestParam = requestId
+            ? `&focusRequestId=${encodeURIComponent(requestId)}`
+            : '';
+          router.push(
+            `/(main)/(private)/(tabs)/truth-or-dare?openRequests=1${requestParam}&${notifParams}${dedupeParam}` as any
+          );
+          break;
+        }
         case 'phase2_chat_room': {
           const roomId = notification.data?.chatRoomId;
           if (roomId) {
