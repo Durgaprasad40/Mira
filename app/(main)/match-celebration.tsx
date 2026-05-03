@@ -11,7 +11,7 @@ import {
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { COLORS } from "@/lib/constants";
+import { COLORS, INCOGNITO_COLORS } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -29,14 +29,34 @@ import { Toast } from "@/components/ui/Toast";
 export default function MatchCelebrationScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { matchId, userId: otherUserId } = useLocalSearchParams<{
+  const {
+    matchId,
+    userId: otherUserId,
+    mode,
+    phase,
+    conversationId,
+    source,
+    alreadyMatched,
+  } = useLocalSearchParams<{
     matchId: string;
     userId: string;
+    mode?: string;
+    phase?: string;
+    conversationId?: string;
+    source?: string;
+    alreadyMatched?: string;
   }>();
   const userId = useAuthStore((s) => s.userId);
+  const isPhase2 = mode === 'phase2' || phase === 'phase2';
+  const isPhase2AlreadyMatched = isPhase2 && alreadyMatched === '1';
+  const phase2Source =
+    source === 'truth_dare' || source === 'rematch' || source === 'deep_connect'
+      ? source
+      : 'deep_connect';
+  const phase2IsTruthDare = phase2Source === 'truth_dare';
 
   const isDemo = isDemoMode || matchId?.startsWith("demo_") || userId?.startsWith("demo_");
-  const matchIdValue = matchId ? (matchId as unknown as Id<"matches">) : null;
+  const matchIdValue = !isPhase2 && matchId ? (matchId as unknown as Id<"matches">) : null;
   const otherUserIdValue = otherUserId
     ? (otherUserId as unknown as Id<"users">)
     : null;
@@ -44,21 +64,27 @@ export default function MatchCelebrationScreen() {
   // FIX: Backend expects { matchId, userId }, not { token, authUserId }
   const matchQuery = useQuery(
     api.matches.getMatch as any,
-    !isDemo && matchIdValue && userId
+    !isPhase2 && !isDemo && matchIdValue && userId
       ? { matchId: matchIdValue, userId }
       : "skip",
   );
   // FIX: Backend expects { userId, viewerId }, not { token, authUserId }
   const otherUserQuery = useQuery(
     api.users.getUserById as any,
-    !isDemo && otherUserIdValue && userId
+    !isPhase2 && !isDemo && otherUserIdValue && userId
       ? { userId: otherUserIdValue, viewerId: userId }
+      : "skip",
+  );
+  const phase2OtherProfileQuery = useQuery(
+    api.privateDiscover.getProfileByUserId as any,
+    isPhase2 && !isDemo && otherUserIdValue && userId
+      ? { userId: otherUserIdValue, viewerAuthUserId: userId }
       : "skip",
   );
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
-    !isDemo && userId ? { userId } : "skip",
+    !isPhase2 && !isDemo && userId ? { userId } : "skip",
   );
 
   // In demo mode, use demo data directly; in live mode, use Convex queries
@@ -70,14 +96,42 @@ export default function MatchCelebrationScreen() {
       : { name: "Someone", photos: [{ url: "https://via.placeholder.com/400" }] };
   }, [isDemo, otherUserId]);
 
-  const match = isDemo ? { _id: matchId } : matchQuery;
-  const otherUser = isDemo ? demoOtherUser : otherUserQuery;
+  const match = isPhase2 ? { _id: matchId } : isDemo ? { _id: matchId } : matchQuery;
+  const phase2OtherUser = phase2OtherProfileQuery
+    ? {
+        name: phase2OtherProfileQuery.name ?? phase2OtherProfileQuery.displayNameInitial ?? 'Someone',
+        photos: Array.isArray(phase2OtherProfileQuery.photos) ? phase2OtherProfileQuery.photos : [],
+      }
+    : null;
+  const otherUser = isPhase2 ? phase2OtherUser : isDemo ? demoOtherUser : otherUserQuery;
   const demoCurrentUser = isDemo ? getDemoCurrentUser() : null;
   const currentUser = isDemo
     ? demoCurrentUser
       ? { name: demoCurrentUser.name, photos: demoCurrentUser.photos }
       : { name: 'You', photos: [{ url: 'https://via.placeholder.com/400' }] }
-    : currentUserQuery;
+    : isPhase2
+      ? { name: 'You', photos: [] }
+      : currentUserQuery;
+  const currentPhotoUrl = currentUser?.photos?.[0]?.url;
+  const otherPhotoUrl = otherUser?.photos?.[0]?.url;
+  const phase2Gradient = phase2IsTruthDare
+    ? ['#24143E', '#7C6AEF', '#FF7849'] as const
+    : ['#101426', INCOGNITO_COLORS.primary, '#E94560'] as const;
+  const gradientColors = isPhase2 ? phase2Gradient : [COLORS.primary, COLORS.secondary] as const;
+  const titleText = isPhase2AlreadyMatched
+    ? "You're already matched"
+    : isPhase2
+      ? phase2IsTruthDare
+        ? 'Truth or Dare connection'
+        : "It's a Deep Connect match"
+      : "🎉 It's a Match! 🎉";
+  const subtitleText = isPhase2AlreadyMatched
+    ? `You and ${otherUser?.name ?? 'this person'} already have a conversation.`
+    : isPhase2
+      ? phase2IsTruthDare
+        ? `You and ${otherUser?.name ?? 'this person'} connected through Truth or Dare.`
+        : `You and ${otherUser?.name ?? 'this person'} chose each other in Deep Connect.`
+      : `You and ${otherUser?.name ?? 'this person'} liked each other!`;
 
   const ensureConversation = useMutation(api.conversations.getOrCreateForMatch);
   const sendMessageMut = useMutation(api.messages.sendMessage);
@@ -111,11 +165,11 @@ export default function MatchCelebrationScreen() {
   }, [isDemo]);
 
   // Animation values (React Native Animated)
-  const scale1 = useRef(new Animated.Value(0)).current;
-  const scale2 = useRef(new Animated.Value(0)).current;
+  const scale1 = useRef(new Animated.Value(isPhase2AlreadyMatched ? 1 : 0)).current;
+  const scale2 = useRef(new Animated.Value(isPhase2AlreadyMatched ? 1 : 0)).current;
   const rotation = useRef(new Animated.Value(0)).current;
   const confettiOpacity = useRef(new Animated.Value(0)).current;
-  const heartScale = useRef(new Animated.Value(0)).current;
+  const heartScale = useRef(new Animated.Value(isPhase2AlreadyMatched ? 1 : 0)).current;
 
   const confettiPieces = useMemo(() => {
     type ConfettiPiece = {
@@ -141,6 +195,7 @@ export default function MatchCelebrationScreen() {
   }, []);
 
   useEffect(() => {
+    if (isPhase2AlreadyMatched) return;
     // Celebration animation sequence
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
@@ -203,7 +258,7 @@ export default function MatchCelebrationScreen() {
       clearTimeout(timeout2);
       rotateLoop.stop();
     };
-  }, []);
+  }, [isPhase2AlreadyMatched]);
 
   const rotationDeg = rotation.interpolate({
     inputRange: [0, 1],
@@ -254,6 +309,26 @@ export default function MatchCelebrationScreen() {
         }, 50);
         navTimeoutRefs.current.push(t);
       });
+      sendingRef.current = false;
+      return;
+    }
+
+    if (isPhase2) {
+      const p2ConversationId =
+        typeof conversationId === 'string' && conversationId.trim().length > 0
+          ? conversationId.trim()
+          : null;
+      if (!p2ConversationId) {
+        Toast.show("Couldn't open chat. Please try from Messages.");
+        sendingRef.current = false;
+        return;
+      }
+      if (hasNavigatedRef.current) {
+        sendingRef.current = false;
+        return;
+      }
+      hasNavigatedRef.current = true;
+      router.replace(`/(main)/(private)/(tabs)/chats/${p2ConversationId}` as any);
       sendingRef.current = false;
       return;
     }
@@ -326,6 +401,10 @@ export default function MatchCelebrationScreen() {
     if (isDemo) {
       useDemoStore.getState().setNewMatchUserId(null);
     }
+    if (isPhase2) {
+      router.replace('/(main)/(private)/(tabs)/deep-connect' as any);
+      return;
+    }
     router.back();
   };
 
@@ -354,7 +433,7 @@ export default function MatchCelebrationScreen() {
 
   return (
     <LinearGradient
-      colors={[COLORS.primary, COLORS.secondary]}
+      colors={gradientColors}
       style={[styles.container, { paddingTop: insets.top }]}
     >
       {/* Confetti Effect */}
@@ -377,19 +456,20 @@ export default function MatchCelebrationScreen() {
       </Animated.View>
 
       <View style={styles.content}>
-        <Text style={styles.title}>🎉 It's a Match! 🎉</Text>
-        <Text style={styles.subtitle}>
-          You and {otherUser.name} liked each other!
-        </Text>
+        <Text style={styles.title}>{titleText}</Text>
+        <Text style={styles.subtitle}>{subtitleText}</Text>
 
         <View style={styles.photosContainer}>
           <Animated.View
             style={[styles.photoWrapper, { transform: [{ scale: scale1 }] }]}
           >
-            <Image
-              source={{ uri: currentUser.photos?.[0]?.url }}
-              style={styles.photo}
-            />
+            {currentPhotoUrl ? (
+              <Image source={{ uri: currentPhotoUrl }} style={styles.photo} />
+            ) : (
+              <View style={[styles.photo, styles.photoFallback]}>
+                <Ionicons name="person" size={46} color="rgba(255,255,255,0.75)" />
+              </View>
+            )}
             <View style={styles.photoBadge}>
               <Text style={styles.photoName}>{currentUser.name}</Text>
             </View>
@@ -409,10 +489,13 @@ export default function MatchCelebrationScreen() {
           <Animated.View
             style={[styles.photoWrapper, { transform: [{ scale: scale2 }] }]}
           >
-            <Image
-              source={{ uri: otherUser.photos?.[0]?.url }}
-              style={styles.photo}
-            />
+            {otherPhotoUrl ? (
+              <Image source={{ uri: otherPhotoUrl }} style={styles.photo} />
+            ) : (
+              <View style={[styles.photo, styles.photoFallback]}>
+                <Ionicons name="person" size={46} color="rgba(255,255,255,0.75)" />
+              </View>
+            )}
             <View style={styles.photoBadge}>
               <Text style={styles.photoName}>{otherUser.name}</Text>
             </View>
@@ -421,7 +504,7 @@ export default function MatchCelebrationScreen() {
 
         <View style={styles.actions}>
           <Button
-            title={sending ? "Sending…" : "Say Hi 👋"}
+            title={isPhase2 ? (isPhase2AlreadyMatched ? "Continue Chat" : "Open Chat") : sending ? "Sending…" : "Say Hi 👋"}
             variant="primary"
             onPress={handleSendMessage}
             loading={sending}
@@ -499,6 +582,11 @@ const styles = StyleSheet.create({
     borderRadius: 50,
     borderWidth: 4,
     borderColor: COLORS.white,
+  },
+  photoFallback: {
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.18)",
   },
   photoBadge: {
     marginTop: 12,
