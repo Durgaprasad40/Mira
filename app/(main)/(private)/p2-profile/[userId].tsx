@@ -27,6 +27,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Id } from '@/convex/_generated/dataModel';
 import { Image } from 'expo-image';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -35,31 +36,86 @@ import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useDiscoverStore } from '@/stores/discoverStore';
 import { useInteractionStore } from '@/stores/interactionStore';
-import { INCOGNITO_COLORS, COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
+import {
+  INCOGNITO_COLORS,
+  COLORS,
+  ACTIVITY_FILTERS,
+  EDUCATION_OPTIONS,
+  RELIGION_OPTIONS,
+} from '@/lib/constants';
 import { cmToFeetInches } from '@/lib/utils';
 import {
   PRIVATE_INTENT_CATEGORIES,
   PRIVATE_DESIRE_TAGS,
+  getPhase2PromptSection,
+  type Phase2PromptSection,
 } from '@/lib/privateConstants';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useScreenTrace } from '@/lib/devTrace';
 import { Toast } from '@/components/ui/Toast';
 // P2-004: Centralized gender icon utility
 import { getGenderIcon } from '@/lib/genderIcon';
+import { formatPhase2DistanceMiles } from '@/lib/phase2Distance';
+// Phase-2 (Deep Connect) action-row tokens — opened-profile mirrors the
+// homepage swipe-card action row exactly so the two surfaces feel identical.
+import {
+  DC_BUTTON_DIAMETER,
+  DC_BUTTON_DIAMETER_COMPACT,
+  DC_ICON_SIZE,
+  DC_STAR_ICON_SIZE,
+  DC_BUTTON_GAP,
+  DC_ROW_PADDING_X,
+  DC_PRESS_SCALE,
+  DC_BUTTON_SHADOW,
+  DC_GLASS_BORDER_WIDTH,
+  DC_GLASS_BORDER_LIGHT,
+  DC_GLASS_BORDER_PASS,
+  DC_GLASS_HIGHLIGHT_COLORS_LIGHT,
+  DC_GLASS_HIGHLIGHT_COLORS_PASS,
+  DC_GLASS_HIGHLIGHT_LOCATIONS,
+  DC_GLASS_HIGHLIGHT_START,
+  DC_GLASS_HIGHLIGHT_END,
+  getDeepConnectBottomLayout,
+} from '@/components/screens/_internal/deepConnectActionRow.tokens';
 
 const C = INCOGNITO_COLORS;
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const PHOTO_HEIGHT = SCREEN_HEIGHT * 0.55;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PHASE-2 DEEP CONNECT — deeper misty-blue premium palette.
+// Reads clearly as blue (never as white/cream/settings-page).
+// Local-only; does not export, does not mutate INCOGNITO_COLORS.
+// ═══════════════════════════════════════════════════════════════════════════
+const P2 = {
+  pageBg: '#DCE5F2',          // misty soft blue page surface (clearly blue)
+  cardBg: '#E8EEF8',          // pale blue glass card (never reads as white)
+  cardBgAlt: '#E1E9F4',       // slightly cooler card variant
+  border: '#C7D3E5',          // cool blue hairline
+  text: '#0F1E3D',            // deep navy ink
+  textMuted: '#445B81',       // slate-blue body
+  textSubtle: '#7889A3',      // gentle label / placeholder
+  chipBg: '#D2DCEC',          // blue-gray chip fill (single system)
+  chipBgStrong: '#C5D2E6',    // grouped/emphasised chip variant
+  accent: C.primary,          // brand accent — verified tick only
+} as const;
+
+// ═══════════════════════════════════════════════════════════════════════════
 // FLOATING ACTION BUTTONS COMPONENT
-// Premium micro-interactions with spring animations
+//
+// Mirrors the Phase-2 (Deep Connect) homepage swipe-card action row exactly:
+//   • Same diameters (62 / 54 / 62 via cappedScale tokens)
+//   • Same lit-edge glass border (1.5px, white/red-accent)
+//   • Same neutral drop shadow (DC_BUTTON_SHADOW)
+//   • Same 3-stop inner sheen LinearGradient (orb depth, not flat circle)
+//   • Same press scale (DC_PRESS_SCALE, 0.9)
+//   • Same gap + horizontal padding (DC_BUTTON_GAP / DC_ROW_PADDING_X)
+//   • Numeric "remaining" badge intentionally hidden (per product spec)
 // ═══════════════════════════════════════════════════════════════════════════
 interface FloatingActionButtonsProps {
   onPass: () => void;
   onStandOut: () => void;
   onLike: () => void;
-  standOutsRemaining: number;
   standOutDisabled: boolean;
   bottomInset: number;
 }
@@ -68,7 +124,6 @@ function FloatingActionButtons({
   onPass,
   onStandOut,
   onLike,
-  standOutsRemaining,
   standOutDisabled,
   bottomInset,
 }: FloatingActionButtonsProps) {
@@ -88,43 +143,59 @@ function FloatingActionButtons({
     transform: [{ scale: likeScale.value }],
   }));
 
-  // Press handlers with spring animation
+  // Press handlers — single shared scale matches DC_PRESS_SCALE so all three
+  // buttons feel identical on press, just like the homepage row.
   const onPassPressIn = () => {
-    passScale.value = withSpring(0.92, { damping: 15, stiffness: 400 });
+    passScale.value = withSpring(DC_PRESS_SCALE, { damping: 15, stiffness: 400 });
   };
   const onPassPressOut = () => {
     passScale.value = withSpring(1, { damping: 12, stiffness: 350 });
   };
 
   const onStandOutPressIn = () => {
-    standOutScale.value = withSpring(0.92, { damping: 15, stiffness: 400 });
+    standOutScale.value = withSpring(DC_PRESS_SCALE, { damping: 15, stiffness: 400 });
   };
   const onStandOutPressOut = () => {
     standOutScale.value = withSpring(1, { damping: 12, stiffness: 350 });
   };
 
   const onLikePressIn = () => {
-    likeScale.value = withSpring(0.92, { damping: 15, stiffness: 400 });
+    likeScale.value = withSpring(DC_PRESS_SCALE, { damping: 15, stiffness: 400 });
   };
   const onLikePressOut = () => {
     likeScale.value = withSpring(1, { damping: 12, stiffness: 350 });
   };
 
+  // Match the homepage: anchor row above the safe-area inset using the same
+  // helper, so the opened profile and the swipe card share one visual rhythm.
+  const { actionRowBottom } = getDeepConnectBottomLayout({ bottom: bottomInset });
+  // Opened-profile-only lift: +25% above the homepage anchor. The opened
+  // profile has no card-deck below the row, so the homepage's tight anchor
+  // reads as "too low / too close to the nav edge" here. Lift only this
+  // surface; do NOT change the homepage helper.
+  const liftedActionRowBottom = Math.round(actionRowBottom * 1.25);
+
   // [P2_PROFILE_ACTION_BAR] Debug logging
   if (__DEV__) {
     console.log('[P2_PROFILE_ACTION_BAR]', {
-      style: 'premium_floating',
+      style: 'deep_connect_mirror',
       background: 'transparent',
-      microInteractions: true,
-      buttonSizes: { pass: 56, standOut: 68, like: 56 },
-      standOutsRemaining,
+      pass: { diameter: DC_BUTTON_DIAMETER, icon: DC_ICON_SIZE },
+      standOut: { diameter: DC_BUTTON_DIAMETER_COMPACT, icon: DC_STAR_ICON_SIZE },
+      like: { diameter: DC_BUTTON_DIAMETER, icon: DC_ICON_SIZE },
+      gap: DC_BUTTON_GAP,
+      pressScale: DC_PRESS_SCALE,
+      badge: 'hidden',
       standOutDisabled,
+      actionRowBottom,
+      liftedActionRowBottom,
+      liftPercent: 25,
     });
   }
 
   return (
-    <View style={[floatingStyles.cluster, { paddingBottom: Math.max(bottomInset, 24) + 8 }]}>
-      {/* Pass button - side button */}
+    <View style={[floatingStyles.cluster, { bottom: liftedActionRowBottom }]} pointerEvents="box-none">
+      {/* Pass — white surface with subtle red lit edge */}
       <Animated.View style={passAnimStyle}>
         <Pressable
           style={floatingStyles.passButton}
@@ -132,11 +203,21 @@ function FloatingActionButtons({
           onPressIn={onPassPressIn}
           onPressOut={onPassPressOut}
         >
-          <Ionicons name="close" size={28} color="#FF5252" />
+          <LinearGradient
+            colors={DC_GLASS_HIGHLIGHT_COLORS_PASS}
+            locations={DC_GLASS_HIGHLIGHT_LOCATIONS}
+            start={DC_GLASS_HIGHLIGHT_START}
+            end={DC_GLASS_HIGHLIGHT_END}
+            pointerEvents="none"
+            style={floatingStyles.glassOverlay}
+          />
+          <Ionicons name="close" size={DC_ICON_SIZE} color="#F44336" />
         </Pressable>
       </Animated.View>
 
-      {/* Stand Out button - CENTER, LARGER */}
+      {/* Stand Out — compact blue orb with white lit edge. Numeric badge
+          intentionally omitted (per product spec, until Stand Out limits are
+          finalised). hasReachedStandOutLimit() still gates the press. */}
       <Animated.View style={standOutAnimStyle}>
         <Pressable
           style={[
@@ -148,14 +229,19 @@ function FloatingActionButtons({
           onPressOut={onStandOutPressOut}
           disabled={standOutDisabled}
         >
-          <Ionicons name="star" size={28} color="#FFF" />
-          <View style={floatingStyles.standOutBadge}>
-            <Text style={floatingStyles.standOutBadgeText}>{standOutsRemaining}</Text>
-          </View>
+          <LinearGradient
+            colors={DC_GLASS_HIGHLIGHT_COLORS_LIGHT}
+            locations={DC_GLASS_HIGHLIGHT_LOCATIONS}
+            start={DC_GLASS_HIGHLIGHT_START}
+            end={DC_GLASS_HIGHLIGHT_END}
+            pointerEvents="none"
+            style={floatingStyles.glassOverlayCompact}
+          />
+          <Ionicons name="star" size={DC_STAR_ICON_SIZE} color="#FFF" />
         </Pressable>
       </Animated.View>
 
-      {/* Like button - side button */}
+      {/* Like — brand-tint orb with white lit edge */}
       <Animated.View style={likeAnimStyle}>
         <Pressable
           style={floatingStyles.likeButton}
@@ -163,95 +249,92 @@ function FloatingActionButtons({
           onPressIn={onLikePressIn}
           onPressOut={onLikePressOut}
         >
-          <Ionicons name="heart" size={28} color="#FFF" />
+          <LinearGradient
+            colors={DC_GLASS_HIGHLIGHT_COLORS_LIGHT}
+            locations={DC_GLASS_HIGHLIGHT_LOCATIONS}
+            start={DC_GLASS_HIGHLIGHT_START}
+            end={DC_GLASS_HIGHLIGHT_END}
+            pointerEvents="none"
+            style={floatingStyles.glassOverlay}
+          />
+          <Ionicons name="heart" size={DC_ICON_SIZE} color="#FFF" />
         </Pressable>
       </Animated.View>
     </View>
   );
 }
 
-// Premium floating button styles - separate from main styles for clarity
+// Floating button styles — values come from the Deep Connect tokens file so
+// the opened-profile row and the homepage swipe-card row stay in lockstep.
 const floatingStyles = StyleSheet.create({
   cluster: {
     position: 'absolute',
-    bottom: 0,
     left: 0,
     right: 0,
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingTop: 12,
-    gap: 24,
-    // NO background - fully transparent
+    gap: DC_BUTTON_GAP,
+    paddingHorizontal: DC_ROW_PADDING_X,
+    // No background — fully transparent like the homepage row.
   },
   passButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#FFFFFF',
+    width: DC_BUTTON_DIAMETER,
+    height: DC_BUTTON_DIAMETER,
+    borderRadius: DC_BUTTON_DIAMETER / 2,
+    backgroundColor: 'rgba(255,255,255,0.97)',
     alignItems: 'center',
     justifyContent: 'center',
-    // Soft shadow
+    overflow: 'hidden',
+    borderWidth: DC_GLASS_BORDER_WIDTH,
+    borderColor: DC_GLASS_BORDER_PASS,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.12,
-    shadowRadius: 16,
-    elevation: 8,
+    ...DC_BUTTON_SHADOW,
   },
   standOutButton: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
+    width: DC_BUTTON_DIAMETER_COMPACT,
+    height: DC_BUTTON_DIAMETER_COMPACT,
+    borderRadius: DC_BUTTON_DIAMETER_COMPACT / 2,
     backgroundColor: '#2196F3',
     alignItems: 'center',
     justifyContent: 'center',
-    position: 'relative',
-    // Colored glow shadow
-    shadowColor: '#2196F3',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    elevation: 10,
-  },
-  standOutBadge: {
-    position: 'absolute',
-    top: -4,
-    right: -4,
-    minWidth: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: '#FFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 5,
-    // Subtle badge shadow
+    overflow: 'hidden',
+    borderWidth: DC_GLASS_BORDER_WIDTH,
+    borderColor: DC_GLASS_BORDER_LIGHT,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  standOutBadgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#2196F3',
-  },
-  buttonDisabled: {
-    opacity: 0.4,
+    ...DC_BUTTON_SHADOW,
   },
   likeButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: DC_BUTTON_DIAMETER,
+    height: DC_BUTTON_DIAMETER,
+    borderRadius: DC_BUTTON_DIAMETER / 2,
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    // Brand color glow
-    shadowColor: C.primary,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.35,
-    shadowRadius: 16,
-    elevation: 8,
+    overflow: 'hidden',
+    borderWidth: DC_GLASS_BORDER_WIDTH,
+    borderColor: DC_GLASS_BORDER_LIGHT,
+    shadowColor: '#000',
+    ...DC_BUTTON_SHADOW,
+  },
+  glassOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: DC_BUTTON_DIAMETER / 2,
+  },
+  glassOverlayCompact: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: DC_BUTTON_DIAMETER_COMPACT / 2,
+  },
+  buttonDisabled: {
+    opacity: 0.35,
   },
 });
 
@@ -344,6 +427,29 @@ export default function Phase2FullProfileScreen() {
   const photoBlurEnabled = profile?.photoBlurEnabled === true;
   const photoBlurSlots: boolean[] = Array.isArray(profile?.photoBlurSlots) ? profile.photoBlurSlots : [];
 
+  // [P2_PROMPT_DUP] One-shot dev probe — warns when this profile's
+  // promptAnswers contain duplicate promptId values. Used to confirm the
+  // data-side hypothesis behind the OnePlus prompt-repetition report.
+  useEffect(() => {
+    if (!__DEV__) return;
+    const prompts = (profile as any)?.promptAnswers;
+    if (!Array.isArray(prompts) || prompts.length < 2) return;
+    const seen = new Set<string>();
+    const dups: string[] = [];
+    for (const ans of prompts) {
+      const id = ans?.promptId;
+      if (!id) continue;
+      if (seen.has(id)) dups.push(id);
+      else seen.add(id);
+    }
+    if (dups.length > 0) {
+      console.warn(
+        `[P2_PROMPT_DUP] expanded(${profileUserId?.slice?.(-6)}): duplicate promptIds in promptAnswers:`,
+        dups,
+      );
+    }
+  }, [profile, profileUserId]);
+
   // ═══════════════════════════════════════════════════════════════════════════
   // P0 HOOK ORDER FIX: ALL HOOKS MUST BE DECLARED BEFORE EARLY RETURNS
   // These hooks were previously after the early returns, causing React error:
@@ -354,12 +460,14 @@ export default function Phase2FullProfileScreen() {
   const photos = profile?.photos || [];
   const hasMultiplePhotos = photos.length > 1;
 
+  // PERF: animated:false snaps instantly (no 300ms RN scroll curve), matches
+  // discovery-card UX. Pair with getItemLayout below for O(1) layout.
   const goNextPhoto = useCallback(() => {
     if (photos.length <= 1) return;
     const nextIndex = currentPhotoIndex + 1;
     if (nextIndex >= photos.length) return;
     setCurrentPhotoIndex(nextIndex);
-    photoListRef.current?.scrollToIndex({ index: nextIndex, animated: true });
+    photoListRef.current?.scrollToIndex({ index: nextIndex, animated: false });
   }, [photos.length, currentPhotoIndex]);
 
   const goPrevPhoto = useCallback(() => {
@@ -367,37 +475,47 @@ export default function Phase2FullProfileScreen() {
     const prevIndex = currentPhotoIndex - 1;
     if (prevIndex < 0) return;
     setCurrentPhotoIndex(prevIndex);
-    photoListRef.current?.scrollToIndex({ index: prevIndex, animated: true });
+    photoListRef.current?.scrollToIndex({ index: prevIndex, animated: false });
   }, [photos.length, currentPhotoIndex]);
+
+  // PERF: O(1) layout for FlatList scrollToIndex. Avoids RN measuring rows.
+  const getPhotoItemLayout = useCallback(
+    (_data: ArrayLike<unknown> | null | undefined, index: number) => ({
+      length: SCREEN_WIDTH,
+      offset: SCREEN_WIDTH * index,
+      index,
+    }),
+    [],
+  );
 
   // Tap feedback animations (Reanimated hooks)
   const leftTapScale = useSharedValue(1);
   const rightTapScale = useSharedValue(1);
 
+  // PERF: Removed opacity flash on tap — was causing visible "dim then snap"
+  // before the next photo committed. Keep micro-scale only, no opacity.
   const leftTapStyle = useAnimatedStyle(() => ({
     transform: [{ scale: leftTapScale.value }],
-    opacity: leftTapScale.value < 1 ? 0.85 : 1,
   }));
 
   const rightTapStyle = useAnimatedStyle(() => ({
     transform: [{ scale: rightTapScale.value }],
-    opacity: rightTapScale.value < 1 ? 0.85 : 1,
   }));
 
   const onLeftPressIn = useCallback(() => {
-    leftTapScale.value = withSpring(0.98, { damping: 15, stiffness: 400 });
+    leftTapScale.value = withSpring(0.99, { damping: 18, stiffness: 500 });
   }, [leftTapScale]);
 
   const onLeftPressOut = useCallback(() => {
-    leftTapScale.value = withSpring(1, { damping: 15, stiffness: 400 });
+    leftTapScale.value = withSpring(1, { damping: 18, stiffness: 500 });
   }, [leftTapScale]);
 
   const onRightPressIn = useCallback(() => {
-    rightTapScale.value = withSpring(0.98, { damping: 15, stiffness: 400 });
+    rightTapScale.value = withSpring(0.99, { damping: 18, stiffness: 500 });
   }, [rightTapScale]);
 
   const onRightPressOut = useCallback(() => {
-    rightTapScale.value = withSpring(1, { damping: 15, stiffness: 400 });
+    rightTapScale.value = withSpring(1, { damping: 18, stiffness: 500 });
   }, [rightTapScale]);
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -408,7 +526,7 @@ export default function Phase2FullProfileScreen() {
   if (__DEV__ && profile) {
     console.log('[P2_PROFILE_MAPPED_DATA]', {
       userId: profile.userId?.slice?.(-8),
-      displayName: profile.displayName,
+      displayName: profile.name,
       // Bio
       hasBio: !!profile.bio,
       bioLength: profile.bio?.length ?? 0,
@@ -422,6 +540,8 @@ export default function Phase2FullProfileScreen() {
       intentKeysCount: profile.intentKeys?.length ?? 0,
       promptAnswersCount: profile.promptAnswers?.length ?? 0,
       hasLifestyle: !!(profile.height || profile.smoking || profile.drinking),
+      hasEducation: !!(profile as any).education,
+      hasReligion: !!(profile as any).religion,
     });
   }
 
@@ -441,10 +561,10 @@ export default function Phase2FullProfileScreen() {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color={C.text} />
+          <Ionicons name="arrow-back" size={24} color={P2.text} />
         </TouchableOpacity>
         <View style={styles.emptyContainer}>
-          <Ionicons name="person-outline" size={64} color={C.textLight} />
+          <Ionicons name="person-outline" size={64} color={P2.textSubtle} />
           <Text style={styles.emptyTitle}>Profile not available</Text>
           <Text style={styles.emptySubtitle}>
             This profile may have been removed or is not accessible
@@ -455,6 +575,11 @@ export default function Phase2FullProfileScreen() {
   }
 
   const profileDistanceKm = (profile as { distanceKm?: number }).distanceKm;
+  // Phase-2 Deep Connect: miles only, with " away" suffix.
+  // Returns null when distance is missing/hidden — row renders nothing.
+  const profileDistanceLabel = formatPhase2DistanceMiles(profileDistanceKm, {
+    includeAway: true,
+  });
 
   // Handle like action
   const handleLike = async () => {
@@ -520,8 +645,8 @@ export default function Phase2FullProfileScreen() {
 
     // Navigate to Stand Out screen (same as discovery card flow)
     // P0-001 FIX: Include mode=phase2 to ensure Phase-2 swipe mutation is used
-    // P0-002 FIX: Use displayName only (no name/nickname fallback)
-    const profileName = profile.displayName || 'Someone';
+    // P0-002 FIX: Use backend display name only (returned as `name` here).
+    const profileName = profile.name || 'Someone';
     const standOutsLeft = standOutsRemaining();
     router.push(
       `/(main)/stand-out?profileId=${profileUserId}&name=${encodeURIComponent(profileName)}&standOutsLeft=${standOutsLeft}&mode=phase2` as any
@@ -530,13 +655,21 @@ export default function Phase2FullProfileScreen() {
 
   // P2-004: Using centralized getGenderIcon from lib/genderIcon.ts
 
-  // Render photo carousel item with conditional blur
+  // Render photo carousel item with conditional blur.
+  // PERF: cachePolicy memory-disk + recyclingKey lets expo-image keep
+  // adjacent slides decoded; priority=high for the active slot speeds the
+  // first paint after a tap. transition=0 disables the fade-in that masked
+  // the snap.
   const renderPhotoItem = ({ item, index }: { item: { url: string }; index: number }) => (
     <Image
       source={{ uri: item.url }}
       style={styles.heroPhoto}
       contentFit="cover"
       blurRadius={photoBlurEnabled && photoBlurSlots[index] ? 15 : 0}
+      cachePolicy="memory-disk"
+      recyclingKey={item.url}
+      priority={index === currentPhotoIndex ? 'high' : 'normal'}
+      transition={0}
     />
   );
 
@@ -550,6 +683,51 @@ export default function Phase2FullProfileScreen() {
     return PRIVATE_DESIRE_TAGS.find((t) => t.key === key)?.label || key;
   };
 
+  const uniqueStrings = (values: unknown): string[] => {
+    if (!Array.isArray(values)) return [];
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const value of values) {
+      if (typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      const key = trimmed.toLowerCase();
+      if (!trimmed || seen.has(key)) continue;
+      seen.add(key);
+      result.push(trimmed);
+    }
+    return result;
+  };
+
+  const getValidPrompts = () => {
+    const prompts = Array.isArray(profile.promptAnswers) ? profile.promptAnswers : [];
+    const seen = new Set<string>();
+    return prompts
+      .map((prompt: any) => {
+        const question = typeof prompt?.question === 'string' ? prompt.question.trim() : '';
+        const answer = typeof prompt?.answer === 'string' ? prompt.answer.trim() : '';
+        if (!question || !answer) return null;
+        const promptId =
+          typeof prompt?.promptId === 'string' && prompt.promptId.trim().length > 0
+            ? prompt.promptId.trim()
+            : null;
+        const key = promptId ? `id:${promptId}` : `q:${question.toLowerCase().replace(/\s+/g, ' ')}`;
+        if (seen.has(key)) return null;
+        seen.add(key);
+        // Resolve which Phase-2 section this prompt belongs to so the renderer
+        // can collapse choice prompts into a single "Quick Picks" chip group
+        // and render typed Values/Personality prompts as full cards.
+        const section: Phase2PromptSection = getPhase2PromptSection(promptId);
+        return { ...prompt, promptId, question, answer, key, section };
+      })
+      .filter(Boolean) as Array<{
+        promptId?: string | null;
+        question: string;
+        answer: string;
+        key: string;
+        section: Phase2PromptSection;
+      }>;
+  };
+
   // Get hobby/interest info with emoji
   const getHobbyInfo = (key: string) => {
     const activity = ACTIVITY_FILTERS.find((a) => a.value === key);
@@ -561,13 +739,13 @@ export default function Phase2FullProfileScreen() {
     const items: { icon: string; label: string }[] = [];
     const heightStr = cmToFeetInches(profile.height);
     if (heightStr) items.push({ icon: 'resize-outline', label: heightStr });
-    if (profile.smoking) {
+    if (profile.smoking && profile.smoking !== 'prefer_not_to_say') {
       const smokingLabels: Record<string, string> = {
         never: 'Non-smoker', socially: 'Social smoker', regularly: 'Smoker'
       };
       items.push({ icon: 'flame-outline', label: smokingLabels[profile.smoking] || profile.smoking });
     }
-    if (profile.drinking) {
+    if (profile.drinking && profile.drinking !== 'prefer_not_to_say') {
       const drinkingLabels: Record<string, string> = {
         never: "Doesn't drink", socially: 'Drinks socially', regularly: 'Drinks regularly'
       };
@@ -575,6 +753,45 @@ export default function Phase2FullProfileScreen() {
     }
     return items;
   };
+
+  const getEducationReligionItems = () => {
+    const profileAny = profile as any;
+    const items: { icon: string; label: string }[] = [];
+    const education = typeof profileAny.education === 'string' ? profileAny.education.trim() : '';
+    const religion = typeof profileAny.religion === 'string' ? profileAny.religion.trim() : '';
+    const educationLabel =
+      education && education !== 'prefer_not_to_say'
+        ? EDUCATION_OPTIONS.find((option) => option.value === education)?.label ?? education
+        : null;
+    const religionLabel =
+      religion && religion !== 'prefer_not_to_say'
+        ? RELIGION_OPTIONS.find((option) => option.value === religion)?.label ?? religion
+        : null;
+
+    if (educationLabel) items.push({ icon: 'school-outline', label: educationLabel });
+    if (religionLabel) items.push({ icon: 'sparkles-outline', label: religionLabel });
+    return items;
+  };
+
+  const intentKeys = uniqueStrings(profile.intentKeys);
+  const desireKeys = uniqueStrings(profile.desireTagKeys);
+  const validPrompts = getValidPrompts();
+  // Bucket by Phase-2 prompt section so the UI can render quick choice
+  // prompts as a single chip strip and typed prompts (Values/Personality)
+  // as full premium cards. 'unknown' (legacy / off-catalog) falls back to
+  // Personality so nothing is dropped silently.
+  const quickPrompts = validPrompts.filter((p) => p.section === 'quick');
+  const valuesPrompts = validPrompts.filter((p) => p.section === 'values');
+  const personalityPrompts = validPrompts.filter(
+    (p) => p.section === 'personality' || p.section === 'unknown',
+  );
+  const lifestyleItems = getLifestyleItems();
+  const educationReligionItems = getEducationReligionItems();
+  const rawInterestKeys =
+    Array.isArray(profile.hobbies) && profile.hobbies.length > 0
+      ? profile.hobbies
+      : profile.activities;
+  const interestKeys = uniqueStrings(rawInterestKeys);
 
   return (
     <View style={styles.container}>
@@ -598,9 +815,15 @@ export default function Phase2FullProfileScreen() {
                 showsHorizontalScrollIndicator={false}
                 renderItem={renderPhotoItem}
                 keyExtractor={(item, i) => `photo_${i}`}
+                getItemLayout={getPhotoItemLayout}
+                initialNumToRender={2}
+                maxToRenderPerBatch={2}
+                windowSize={3}
+                removeClippedSubviews
                 onMomentumScrollEnd={(e) => {
                   const index = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
-                  setCurrentPhotoIndex(index);
+                  // PERF: avoid redundant re-render when tap-handler already set state.
+                  setCurrentPhotoIndex((prev) => (prev === index ? prev : index));
                 }}
                 scrollEnabled={hasMultiplePhotos}
               />
@@ -647,12 +870,17 @@ export default function Phase2FullProfileScreen() {
             </>
           ) : (
             <View style={styles.noPhotoPlaceholder}>
-              <Ionicons name="person" size={80} color={C.textLight} />
+              <Ionicons name="person" size={80} color={P2.textSubtle} />
             </View>
           )}
 
-          {/* Gradient overlay at bottom of photo */}
-          <View style={styles.heroGradient} />
+          {/* Top scrim only — minimal, just enough for back-button readability.
+              No bottom scrim per product direction: photo must end crisply. */}
+          <LinearGradient
+            colors={["rgba(0,0,0,0.45)", "rgba(0,0,0,0)"]}
+            style={styles.heroTopScrim}
+            pointerEvents="none"
+          />
 
           {/* Back button */}
           <TouchableOpacity
@@ -666,194 +894,226 @@ export default function Phase2FullProfileScreen() {
         </View>
 
         {/* ═══════════════════════════════════════════════════════════════════
-            IDENTITY SECTION
+            DETAILS WRAPPER — misty-blue surface that hosts every card.
+            Photo ends crisp above; this view begins the premium content area.
+            (No transition strip — the photo's clean edge is the transition.)
         ═══════════════════════════════════════════════════════════════════ */}
-        <View style={styles.identitySection}>
-          {/* P0-002 FIX: Use displayName only */}
-          <View style={styles.nameRow}>
-            <Text style={styles.nameText}>{profile.displayName}</Text>
-            {typeof profile.age === 'number' && profile.age > 0 ? (
-              <Text style={styles.ageText}>, {profile.age}</Text>
-            ) : null}
-            <Ionicons
-              name={getGenderIcon(profile.gender) as any}
-              size={20}
-              color={C.textLight}
-              style={styles.genderIcon}
-            />
-            {profile.isVerified && (
-              <Ionicons name="checkmark-circle" size={20} color={C.primary} style={styles.verifiedIcon} />
+        <View style={styles.detailsWrapper}>
+          {/* ─── IDENTITY CARD ─────────────────────────────────────────── */}
+          <View style={styles.identityCard}>
+            {/* P0-002 FIX: Use backend display name only (returned as `name` here). */}
+            <View style={styles.nameRow}>
+              <Text style={styles.nameText}>{profile.name}</Text>
+              {typeof profile.age === 'number' && profile.age > 0 ? (
+                <Text style={styles.ageText}>{profile.age}</Text>
+              ) : null}
+              <Ionicons
+                name={getGenderIcon(profile.gender) as any}
+                size={18}
+                color={P2.textMuted}
+                style={styles.genderIcon}
+              />
+              {profile.isVerified && (
+                <Ionicons name="checkmark-circle" size={18} color={P2.accent} style={styles.verifiedIcon} />
+              )}
+            </View>
+            {/* Phase-2 Deep Connect: distance only (miles). No city / locality
+                / area name. If distance is hidden or missing, render nothing. */}
+            {profileDistanceLabel && (
+              <View style={styles.distanceRow}>
+                <Ionicons name="location-outline" size={14} color={P2.textSubtle} />
+                <Text style={styles.distanceText}>{profileDistanceLabel}</Text>
+              </View>
             )}
           </View>
-          {profile.city && (
-            <View style={styles.locationRow}>
-              <Ionicons name="location-outline" size={16} color={C.textLight} />
-              <Text style={styles.locationText}>{profile.city}</Text>
+
+          {/* ─── ABOUT ─────────────────────────────────────────────────── */}
+          {profile.bio && (
+            <View style={styles.cardSection}>
+              <Text style={styles.sectionTitle}>About</Text>
+              <Text style={styles.bioText}>{profile.bio}</Text>
             </View>
           )}
-          {typeof profileDistanceKm === 'number' && profileDistanceKm >= 0 && (
-            <View style={styles.locationRow}>
-              <Text style={styles.locationText}>
-                {profileDistanceKm < 1 ? '< 1 km away' : `${profileDistanceKm} km away`}
-              </Text>
-            </View>
-          )}
-        </View>
 
-        {/* ═══════════════════════════════════════════════════════════════════
-            ABOUT SECTION (Bio with proper heading)
-        ═══════════════════════════════════════════════════════════════════ */}
-        {profile.bio && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>About</Text>
-            <Text style={styles.bioText}>{profile.bio}</Text>
-          </View>
-        )}
-
-        {/* ═══════════════════════════════════════════════════════════════════
-            LOOKING FOR (INTENTIONS) SECTION
-        ═══════════════════════════════════════════════════════════════════ */}
-        {profile.intentKeys && profile.intentKeys.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Looking For</Text>
-            <View style={styles.intentChipsRow}>
-              {profile.intentKeys.map((key: string, i: number) => {
-                const intent = getIntentInfo(key);
-                if (!intent) return null;
-                return (
-                  <View
-                    key={i}
-                    style={[styles.intentChip, { borderColor: intent.color + '60' }]}
-                  >
-                    <Ionicons name={intent.icon as any} size={16} color={intent.color} />
-                    <Text style={[styles.intentChipText, { color: intent.color }]}>
-                      {intent.label}
-                    </Text>
-                  </View>
-                );
-              })}
-            </View>
-          </View>
-        )}
-
-        {/* ═══════════════════════════════════════════════════════════════════
-            DESIRES SECTION (max 4 tags for premium feel)
-        ═══════════════════════════════════════════════════════════════════ */}
-        {profile.desireTagKeys && profile.desireTagKeys.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Desires</Text>
-            <View style={styles.tagsRow}>
-              {/* Deep Connect UI: Show max 4 desire tags */}
-              {profile.desireTagKeys.slice(0, 4).map((key: string, i: number) => (
-                <View key={i} style={styles.desireTag}>
-                  <Text style={styles.desireTagText}>{getDesireTagLabel(key)}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        )}
-
-        {/* ═══════════════════════════════════════════════════════════════════
-            PROMPTS SECTION (exactly 2 prompts: first two valid answers)
-        ═══════════════════════════════════════════════════════════════════ */}
-        {profile.promptAnswers && profile.promptAnswers.length > 0 && (() => {
-          const validPrompts = profile.promptAnswers.filter(
-            (p: { answer: string }) => p.answer && p.answer.trim().length > 0
-          );
-          if (validPrompts.length === 0) return null;
-
-          const displayPrompts = validPrompts.slice(0, 2);
-
-          return (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>About Them</Text>
-              {displayPrompts.map((prompt: { promptId: string; question: string; answer: string }, i: number) => (
-                <View key={prompt.promptId || i} style={styles.promptCard}>
-                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
-                </View>
-              ))}
-            </View>
-          );
-        })()}
-
-        {/* ═══════════════════════════════════════════════════════════════════
-            LIFESTYLE SECTION (height, smoking, drinking) - Premium chips
-        ═══════════════════════════════════════════════════════════════════ */}
-        {(() => {
-          const lifestyleItems = getLifestyleItems();
-          if (lifestyleItems.length === 0) return null;
-          return (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Lifestyle</Text>
-              <View style={styles.lifestyleChipsRow}>
-                {lifestyleItems.map((item, i) => (
-                  <View key={i} style={styles.lifestyleChip}>
-                    <Ionicons name={item.icon as any} size={14} color={C.textLight} />
-                    <Text style={styles.lifestyleChipText}>{item.label}</Text>
-                  </View>
-                ))}
-              </View>
-            </View>
-          );
-        })()}
-
-        {/* ═══════════════════════════════════════════════════════════════════
-            HOBBIES & INTERESTS SECTION (max 6 for premium feel)
-        ═══════════════════════════════════════════════════════════════════ */}
-        {(() => {
-          // Try hobbies first, fall back to activities
-          const interests = profile.hobbies?.length > 0 ? profile.hobbies : profile.activities;
-
-          // [P2_PROFILE_INTERESTS_RENDER] Debug logging
-          if (__DEV__) {
-            const willRender = interests && interests.length > 0;
-            console.log('[P2_PROFILE_INTERESTS_RENDER]', {
-              hasHobbies: !!profile.hobbies,
-              hobbiesCount: profile.hobbies?.length ?? 0,
-              hasActivities: !!profile.activities,
-              activitiesCount: profile.activities?.length ?? 0,
-              usingSource: profile.hobbies?.length > 0 ? 'hobbies' : 'activities',
-              willRender,
-              interestsToShow: willRender ? interests.slice(0, 6) : [],
-            });
-          }
-
-          if (!interests || interests.length === 0) return null;
-
-          return (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Interests</Text>
-              <View style={styles.tagsRow}>
-                {/* Deep Connect UI: Show max 6 interests with emojis */}
-                {interests.slice(0, 6).map((hobby: string, i: number) => {
-                  const info = getHobbyInfo(hobby);
+          {/* ─── LOOKING FOR (intent chips) ────────────────────────────── */}
+          {intentKeys.length > 0 && (
+            <View style={styles.cardSection}>
+              <Text style={styles.sectionTitle}>Looking For</Text>
+              <View style={styles.chipsRow}>
+                {intentKeys.map((key: string, i: number) => {
+                  const intent = getIntentInfo(key);
+                  if (!intent) return null;
                   return (
-                    <View key={i} style={styles.hobbyTag}>
-                      {info.emoji && <Text style={styles.hobbyEmoji}>{info.emoji}</Text>}
-                      <Text style={styles.hobbyTagText}>{info.label}</Text>
+                    <View key={`intent-${key || 'k'}-${i}`} style={styles.chip}>
+                      <Text style={styles.chipText}>{intent.label}</Text>
                     </View>
                   );
                 })}
               </View>
             </View>
-          );
-        })()}
+          )}
+
+          {/* ─── DESIRES ───────────────────────────────────────────────── */}
+          {desireKeys.length > 0 && (
+            <View style={styles.cardSection}>
+              <Text style={styles.sectionTitle}>Desires</Text>
+              <View style={styles.chipsRow}>
+                {desireKeys.slice(0, 4).map((key: string, i: number) => (
+                  <View key={`desire-${key || 'k'}-${i}`} style={styles.chip}>
+                    <Text style={styles.chipText}>{getDesireTagLabel(key)}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {/* ─── QUICK PICKS (choice prompts collapsed to answer-only chips) ─ */}
+          {quickPrompts.length > 0 && (
+            <View style={styles.cardSection}>
+              <Text style={styles.sectionTitle}>Quick Picks</Text>
+              <View style={styles.chipsRow}>
+                {quickPrompts.map((prompt, i: number) => (
+                  <View
+                    key={`quick-${prompt.key}-${i}`}
+                    style={styles.chipStrong}
+                  >
+                    <Text style={styles.chipText}>{prompt.answer}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {/* ─── VALUES (typed prompts; one card per question) ─────────── */}
+          {valuesPrompts.length > 0 && (
+            <View style={styles.promptsGroup}>
+              <Text style={[styles.sectionTitle, styles.promptsGroupTitle]}>Values</Text>
+              {valuesPrompts.map((prompt, i: number) => (
+                <View key={`values-${prompt.key}-${i}`} style={styles.promptCard}>
+                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* ─── PERSONALITY (typed prompts; one card per question) ────── */}
+          {personalityPrompts.length > 0 && (
+            <View style={styles.promptsGroup}>
+              <Text style={[styles.sectionTitle, styles.promptsGroupTitle]}>Personality</Text>
+              {personalityPrompts.map((prompt, i: number) => (
+                <View key={`personality-${prompt.key}-${i}`} style={styles.promptCard}>
+                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* ─── LIFESTYLE (height + smoking + drinking) ──────────────── */}
+          {lifestyleItems.length > 0 && (
+            <View style={styles.cardSection}>
+              <Text style={styles.sectionTitle}>Lifestyle</Text>
+              <View style={styles.chipsRow}>
+                {lifestyleItems.map((item, i) => (
+                  <View key={i} style={styles.chipWithIcon}>
+                    <Ionicons name={item.icon as any} size={14} color={P2.textMuted} />
+                    <Text style={styles.chipText}>{item.label}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {/* ─── INTERESTS ─────────────────────────────────────────────── */}
+          {(() => {
+            // [P2_PROFILE_INTERESTS_RENDER] Debug logging
+            if (__DEV__) {
+              const willRender = interestKeys.length > 0;
+              console.log('[P2_PROFILE_INTERESTS_RENDER]', {
+                hasHobbies: !!profile.hobbies,
+                hobbiesCount: profile.hobbies?.length ?? 0,
+                hasActivities: !!profile.activities,
+                activitiesCount: profile.activities?.length ?? 0,
+                usingSource:
+                  Array.isArray(profile.hobbies) && profile.hobbies.length > 0
+                    ? 'hobbies'
+                    : 'activities',
+                willRender,
+                interestsToShow: willRender ? interestKeys.slice(0, 6) : [],
+              });
+            }
+
+            if (interestKeys.length === 0) return null;
+
+            return (
+              <View style={styles.cardSection}>
+                <Text style={styles.sectionTitle}>Interests</Text>
+                <View style={styles.chipsRow}>
+                  {interestKeys.slice(0, 6).map((hobby: string, i: number) => {
+                    const info = getHobbyInfo(hobby);
+                    return (
+                      <View key={i} style={styles.chipWithIcon}>
+                        {info.emoji && <Text style={styles.chipEmoji}>{info.emoji}</Text>}
+                        <Text style={styles.chipText}>{info.label}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+            );
+          })()}
+
+          {/* ─── EDUCATION + RELIGION (split into two cards) ──────────── */}
+          {(() => {
+            const edu = educationReligionItems.find((i) => i.icon === 'school-outline');
+            const rel = educationReligionItems.find((i) => i.icon === 'sparkles-outline');
+            return (
+              <>
+                {edu && (
+                  <View style={styles.cardSection}>
+                    <Text style={styles.sectionTitle}>Education</Text>
+                    <View style={styles.detailRow}>
+                      <Ionicons name={edu.icon as any} size={16} color={P2.textMuted} />
+                      <Text style={styles.detailText}>{edu.label}</Text>
+                    </View>
+                  </View>
+                )}
+                {rel && (
+                  <View style={styles.cardSection}>
+                    <Text style={styles.sectionTitle}>Religion</Text>
+                    <View style={styles.detailRow}>
+                      <Ionicons name={rel.icon as any} size={16} color={P2.textMuted} />
+                      <Text style={styles.detailText}>{rel.label}</Text>
+                    </View>
+                  </View>
+                )}
+              </>
+            );
+          })()}
+        </View>
 
         {/* ═══════════════════════════════════════════════════════════════════
-            BOTTOM SPACER: Ensures content is visible above floating action buttons
-            Height = button height (60) + vertical padding (16+16) + safe area + extra
+            BOTTOM SPACER: Keeps the last card clear of the floating action row.
+            Uses the same DC tokens as the row itself so the gap is correct on
+            every device (Samsung 360dp ↔ OnePlus 411dp ↔ iPhone 390dp).
         ═══════════════════════════════════════════════════════════════════ */}
         {(() => {
-          const FLOATING_CLUSTER_HEIGHT = 60; // Largest button height
-          const FLOATING_CLUSTER_PADDING = 32; // Top + bottom padding around buttons
+          const { actionRowBottom, actionRowClearance } = getDeepConnectBottomLayout({
+            bottom: insets.bottom,
+          });
+          // Mirror the +25% opened-profile lift here so the spacer matches the
+          // floating row's actual bottom anchor and the last card never sits
+          // underneath the buttons.
+          const liftedActionRowBottom = Math.round(actionRowBottom * 1.25);
           const EXTRA_BREATHING_ROOM = 20;
-          const bottomPadding = FLOATING_CLUSTER_HEIGHT + FLOATING_CLUSTER_PADDING + Math.max(insets.bottom, 16) + EXTRA_BREATHING_ROOM;
+          const bottomPadding = liftedActionRowBottom + actionRowClearance + EXTRA_BREATHING_ROOM;
 
           if (__DEV__) {
             console.log('[P2_PROFILE_BOTTOM_PADDING]', {
-              clusterHeight: FLOATING_CLUSTER_HEIGHT,
-              clusterPadding: FLOATING_CLUSTER_PADDING,
+              actionRowBottom,
+              liftedActionRowBottom,
+              actionRowClearance,
               insetsBottom: insets.bottom,
               extraRoom: EXTRA_BREATHING_ROOM,
               totalPadding: bottomPadding,
@@ -875,7 +1135,6 @@ export default function Phase2FullProfileScreen() {
         onPass={handlePass}
         onStandOut={handleStandOut}
         onLike={handleLike}
-        standOutsRemaining={standOutsRemaining()}
         standOutDisabled={hasReachedStandOutLimit()}
         bottomInset={insets.bottom}
       />
@@ -884,15 +1143,21 @@ export default function Phase2FullProfileScreen() {
 }
 
 const styles = StyleSheet.create({
+  // ═════════════════════════════════════════════════════════════════════════
+  // PREMIUM MISTY-BLUE REDESIGN
+  // Photo ends crisp directly into the misty-blue details surface — no
+  // gradient band, no fade. Pale-blue glass cards sit on the misty-blue page.
+  // ═════════════════════════════════════════════════════════════════════════
   container: {
     flex: 1,
-    backgroundColor: C.background,
+    backgroundColor: P2.pageBg,
   },
   scrollView: {
     flex: 1,
   },
   scrollContent: {
     paddingBottom: 20,
+    backgroundColor: P2.pageBg,
   },
   loadingContainer: {
     flex: 1,
@@ -908,42 +1173,41 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontSize: 20,
     fontWeight: '600',
-    color: C.text,
+    color: P2.text,
     marginTop: 16,
   },
   emptySubtitle: {
     fontSize: 14,
-    color: C.textLight,
+    color: P2.textMuted,
     textAlign: 'center',
     marginTop: 8,
   },
 
-  // Hero photo section
+  // ─── Hero photo (no bottom scrim — photo ends crisp) ──────────────────
   heroSection: {
     width: SCREEN_WIDTH,
     height: PHOTO_HEIGHT,
     position: 'relative',
+    backgroundColor: '#000',
   },
   heroPhoto: {
     width: SCREEN_WIDTH,
     height: PHOTO_HEIGHT,
-    backgroundColor: C.surface,
+    backgroundColor: '#000',
   },
   noPhotoPlaceholder: {
     width: SCREEN_WIDTH,
     height: PHOTO_HEIGHT,
-    backgroundColor: C.surface,
+    backgroundColor: P2.chipBg,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  heroGradient: {
+  heroTopScrim: {
     position: 'absolute',
-    bottom: 0,
+    top: 0,
     left: 0,
     right: 0,
-    height: 100,
-    backgroundColor: 'transparent',
-    // Simple fade effect using background
+    height: 90,
   },
   photoIndicators: {
     position: 'absolute',
@@ -957,13 +1221,17 @@ const styles = StyleSheet.create({
   photoIndicator: {
     flex: 1,
     height: 3,
-    backgroundColor: 'rgba(255,255,255,0.4)',
+    backgroundColor: 'rgba(255,255,255,0.35)',
     borderRadius: 2,
   },
   photoIndicatorActive: {
     backgroundColor: '#FFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.25,
+    shadowRadius: 2,
+    elevation: 2,
   },
-  // TAP ZONES FOR PHOTO NAVIGATION (invisible, full height)
   photoTapZoneLeft: {
     position: 'absolute',
     top: 0,
@@ -986,172 +1254,190 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   backButtonBg: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.4)',
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(0,0,0,0.32)',
     alignItems: 'center',
     justifyContent: 'center',
   },
 
-  // Identity section
-  identitySection: {
+  // ─── Details wrapper (misty-blue page bg under all cards) ────────────
+  // Photo ends crisp directly above; no transition strip, no fade.
+  detailsWrapper: {
+    backgroundColor: P2.pageBg,
+    paddingTop: 16,
+    paddingHorizontal: 16,
+    gap: 12,
+  },
+
+  // ─── Identity card ────────────────────────────────────────────────────
+  identityCard: {
+    backgroundColor: P2.cardBg,
+    borderRadius: 20,
     paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 12,
+    paddingVertical: 20,
+    borderWidth: 1,
+    borderColor: P2.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 12,
+    elevation: 1,
   },
   nameRow: {
     flexDirection: 'row',
     alignItems: 'baseline',
+    flexWrap: 'wrap',
   },
   nameText: {
-    fontSize: 28,
+    fontSize: 30,
     fontWeight: '700',
-    color: C.text,
+    color: P2.text,
+    letterSpacing: -0.4,
   },
   ageText: {
-    fontSize: 24,
-    fontWeight: '400',
-    color: C.text,
+    fontSize: 28,
+    fontWeight: '300',
+    color: P2.textMuted,
+    marginLeft: 10,
+    letterSpacing: -0.3,
   },
   genderIcon: {
-    marginLeft: 10,
+    marginLeft: 12,
   },
   verifiedIcon: {
     marginLeft: 6,
   },
-  locationRow: {
+  distanceRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 6,
+    marginTop: 8,
     gap: 4,
   },
-  locationText: {
-    fontSize: 15,
-    color: C.textLight,
+  distanceText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: P2.textMuted,
+    letterSpacing: 0.1,
   },
 
-  // Sections
-  section: {
+  // ─── Section card (used by About, Looking For, Lifestyle, Interests …)
+  cardSection: {
+    backgroundColor: P2.cardBg,
+    borderRadius: 20,
     paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderTopWidth: 1,
-    borderTopColor: C.surface,
+    paddingVertical: 20,
+    borderWidth: 1,
+    borderColor: P2.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 12,
+    elevation: 1,
   },
   sectionTitle: {
-    fontSize: 14,
+    fontSize: 11,
     fontWeight: '700',
-    color: C.textLight,
+    color: P2.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 12,
+    letterSpacing: 1.4,
+    marginBottom: 14,
   },
   bioText: {
     fontSize: 16,
-    color: C.text,
-    lineHeight: 24,
+    fontWeight: '400',
+    color: P2.text,
+    lineHeight: 25,
+    letterSpacing: 0.05,
   },
 
-  // Intent chips
-  intentChipsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  intentChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: C.surface,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 1.5,
-  },
-  intentChipText: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
-
-  // Desire tags
-  tagsRow: {
+  // ─── Single chip system (used by Looking For, Desires, Lifestyle, Interests)
+  chipsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
   },
-  desireTag: {
-    backgroundColor: C.primary + '20',
+  chip: {
+    backgroundColor: P2.chipBg,
     paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: C.primary + '40',
+    paddingVertical: 9,
+    borderRadius: 100,
   },
-  desireTagText: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: C.primary,
-  },
-
-  // Prompt cards
-  promptCard: {
-    backgroundColor: C.surface,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-  },
-  promptQuestion: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: C.textLight,
-    marginBottom: 8,
-  },
-  promptAnswer: {
-    fontSize: 16,
-    color: C.text,
-    lineHeight: 24,
-  },
-
-  // Hobby tags
-  hobbyTag: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: C.accent,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 16,
-  },
-  hobbyEmoji: {
-    fontSize: 14,
-  },
-  hobbyTagText: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: C.text,
-  },
-
-  // Lifestyle section - premium chip style
-  lifestyleChipsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  lifestyleChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: C.surface,
+  // Slightly stronger fill for Quick Picks — same family, no new colour.
+  chipStrong: {
+    backgroundColor: P2.chipBgStrong,
     paddingHorizontal: 14,
     paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: C.accent,
+    borderRadius: 100,
   },
-  lifestyleChipText: {
+  chipWithIcon: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: P2.chipBg,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 100,
+  },
+  chipText: {
     fontSize: 13,
+    fontWeight: '600',
+    color: P2.text,
+    letterSpacing: 0.1,
+  },
+  chipEmoji: {
+    fontSize: 14,
+  },
+
+  // ─── Detail row (Education / Religion single value) ───────────────────
+  detailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  detailText: {
+    fontSize: 16,
     fontWeight: '500',
-    color: C.text,
+    color: P2.text,
+    letterSpacing: 0.1,
+  },
+
+  // ─── Prompts group + prompt card ──────────────────────────────────────
+  promptsGroup: {
+    gap: 10,
+  },
+  promptsGroupTitle: {
+    marginLeft: 4,
+    marginBottom: 8,
+  },
+  promptCard: {
+    backgroundColor: P2.cardBg,
+    borderRadius: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 22,
+    borderWidth: 1,
+    borderColor: P2.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 12,
+    elevation: 1,
+  },
+  promptQuestion: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: P2.textMuted,
+    marginBottom: 10,
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  promptAnswer: {
+    fontSize: 19,
+    fontWeight: '500',
+    color: P2.text,
+    lineHeight: 28,
+    letterSpacing: -0.1,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
