@@ -13,7 +13,7 @@ import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   RefreshControl, Platform, Animated, Pressable, Alert, Modal,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -21,8 +21,11 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { TodAvatar } from '@/components/truthdare/TodAvatar';
+import { TodConnectRequestsIndicator } from '@/components/truthdare/TodConnectRequestsIndicator';
+import { TodConnectRequestsSheet } from '@/components/truthdare/TodConnectRequestsSheet';
 import { useAuthStore } from '@/stores/authStore';
 import { useScreenTrace } from '@/lib/devTrace';
+import { resolveAnswerPreviewIdentity } from '@/lib/todAnswerIdentity';
 
 // Premium color palette - softer, more energetic dark theme
 const PREMIUM = {
@@ -235,15 +238,24 @@ const SkeletonCard = React.memo(function SkeletonCard() {
 /* ─── Compact Comment Preview Row - Premium styling ─── */
 const CommentPreviewRow = React.memo(function CommentPreviewRow({ answer }: { answer: any }) {
   const isMedia = answer.type === 'photo' || answer.type === 'video' || answer.type === 'voice';
-  const displayName = answer.isAnonymous !== false ? 'Anonymous' : (answer.authorName || 'User');
+  const identity = resolveAnswerPreviewIdentity(answer);
 
   return (
     <View style={styles.commentRow}>
-      <View style={styles.commentAvatar}>
-        <Ionicons name="person" size={10} color={PREMIUM.textMuted} />
-      </View>
+      <TodAvatar
+        size={18}
+        photoUrl={identity.photoUrl}
+        isAnonymous={identity.isAnonymous}
+        photoBlurMode={identity.photoBlurMode}
+        label={identity.displayName}
+        style={styles.commentAvatar}
+        backgroundColor={PREMIUM.bgHighlight}
+        iconColor={PREMIUM.textMuted}
+        textColor={PREMIUM.textPrimary}
+        iconSize={10}
+      />
       <Text style={styles.commentText} numberOfLines={1} ellipsizeMode="tail">
-        <Text style={styles.commentName}>{displayName}</Text>
+        <Text style={styles.commentName}>{identity.displayName}</Text>
         {'  '}
         {isMedia ? (
           <Text style={styles.commentMedia}>
@@ -258,19 +270,30 @@ const CommentPreviewRow = React.memo(function CommentPreviewRow({ answer }: { an
 });
 
 /* ─── Section Header Component - Premium styling ─── */
-function SectionHeader({ label, isTrending }: { label: string; isTrending: boolean }) {
+function SectionHeader({
+  label,
+  isTrending,
+  rightSlot,
+}: {
+  label: string;
+  isTrending: boolean;
+  rightSlot?: React.ReactNode;
+}) {
   if (isTrending) {
     return (
       <View style={styles.trendingSectionHeader}>
-        <LinearGradient
-          colors={[PREMIUM.coral, PREMIUM.coralSoft]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={styles.trendingIconBg}
-        >
-          <Ionicons name="flame" size={12} color="#FFF" />
-        </LinearGradient>
-        <Text style={styles.trendingSectionLabel}>Trending</Text>
+        <View style={styles.trendingSectionHeaderLeft}>
+          <LinearGradient
+            colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={styles.trendingIconBg}
+          >
+            <Ionicons name="flame" size={12} color="#FFF" />
+          </LinearGradient>
+          <Text style={styles.trendingSectionLabel}>Trending</Text>
+        </View>
+        {rightSlot}
       </View>
     );
   }
@@ -644,12 +667,19 @@ const PromptCard = React.memo(function PromptCard({
 export default function TruthOrDareScreen() {
   useScreenTrace("P2_TRUTH_OR_DARE");
   const router = useRouter();
+  const params = useLocalSearchParams<{
+    openRequests?: string;
+    focusRequestId?: string;
+  }>();
   const insets = useSafeAreaInsets();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [queryPaused, setQueryPaused] = useState(false);
   const [bootstrapTimedOut, setBootstrapTimedOut] = useState(false);
+  const [requestInboxVisible, setRequestInboxVisible] = useState(false);
+  const [focusedRequestId, setFocusedRequestId] = useState<string | null>(null);
   const firstRenderRef = useRef(true);
   const dataReceivedRef = useRef(false);
+  const lastOpenRequestsKeyRef = useRef<string | null>(null);
 
   // B2-HIGH FIX: Prevent stuck spinner and setState-after-unmount
   const mountedRef = useRef(true);
@@ -707,6 +737,37 @@ export default function TruthOrDareScreen() {
     api.truthDare.listActivePromptsWithTop2Answers,
     userId && !queryPaused ? { viewerUserId: userId } : 'skip'
   );
+
+  const pendingConnectRequestCount = useQuery(
+    api.truthDare.getPendingTodConnectRequestsCount,
+    userId ? { authUserId: userId } : 'skip'
+  );
+  const connectRequestCount = pendingConnectRequestCount ?? 0;
+
+  const openConnectRequests = useCallback((focusRequestId?: string | null) => {
+    setFocusedRequestId(focusRequestId ?? null);
+    setRequestInboxVisible(true);
+  }, []);
+
+  const openConnectRequestsFromTray = useCallback(() => {
+    openConnectRequests(null);
+  }, [openConnectRequests]);
+
+  const closeConnectRequests = useCallback(() => {
+    setRequestInboxVisible(false);
+  }, []);
+
+  useEffect(() => {
+    if (params.openRequests !== '1') return;
+    const focusParam =
+      typeof params.focusRequestId === 'string' && params.focusRequestId.length > 0
+        ? params.focusRequestId
+        : null;
+    const openKey = `${params.openRequests}:${focusParam ?? ''}`;
+    if (lastOpenRequestsKeyRef.current === openKey) return;
+    lastOpenRequestsKeyRef.current = openKey;
+    openConnectRequests(focusParam);
+  }, [openConnectRequests, params.focusRequestId, params.openRequests]);
 
   // Update cache when data arrives + log diagnostics
   useEffect(() => {
@@ -899,7 +960,13 @@ export default function TruthOrDareScreen() {
   const renderItem = useCallback(({ item }: { item: FeedItem }) => {
     if (item.type === 'section') {
       const isTrending = item.label.toLowerCase().includes('trending');
-      return <SectionHeader label={item.label} isTrending={isTrending} />;
+      const rightSlot = isTrending && connectRequestCount > 0 ? (
+        <TodConnectRequestsIndicator
+          count={connectRequestCount}
+          onPress={openConnectRequestsFromTray}
+        />
+      ) : null;
+      return <SectionHeader label={item.label} isTrending={isTrending} rightSlot={rightSlot} />;
     }
 
     if (item.type === 'trending') {
@@ -929,7 +996,7 @@ export default function TruthOrDareScreen() {
         isOwner={isOwner}
       />
     );
-  }, [openThread, openThreadForComment, handleLongPressPrompt, userId]);
+  }, [connectRequestCount, openConnectRequestsFromTray, openThread, openThreadForComment, handleLongPressPrompt, userId]);
 
   const getKey = useCallback((item: FeedItem, idx: number) => {
     if (item.type === 'section') return `section_${idx}`;
@@ -1097,6 +1164,13 @@ export default function TruthOrDareScreen() {
         </LinearGradient>
       </TouchableOpacity>
 
+      <TodConnectRequestsSheet
+        visible={requestInboxVisible}
+        authUserId={userId}
+        focusRequestId={focusedRequestId}
+        onClose={closeConnectRequests}
+      />
+
       {/* Delete confirmation popup - compact and contextual */}
       <Modal
         visible={!!deletePopupPromptId}
@@ -1197,9 +1271,14 @@ const styles = StyleSheet.create({
   trendingSectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: 16,
     paddingTop: 16,
-    paddingBottom: 10,
+    paddingBottom: 8,
+  },
+  trendingSectionHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
   },
   trendingIconBg: {

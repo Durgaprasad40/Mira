@@ -187,8 +187,10 @@ export default function PromptThreadScreen() {
     promptId: string;
     autoOpenComposer?: 'new' | 'edit';
     source?: string;
+    requestId?: string;
+    highlightAnswerId?: string;
   }>();
-  const { promptId, autoOpenComposer, source } = params;
+  const { promptId, autoOpenComposer, source, requestId, highlightAnswerId } = params;
   const shouldReturnToPhase2TodHome = source === 'phase2-tod';
   const handleBackToSource = useCallback(() => {
     if (shouldReturnToPhase2TodHome) {
@@ -253,6 +255,9 @@ export default function PromptThreadScreen() {
   const [successSheet, setSuccessSheet] = useState<{
     visible: boolean;
     conversationId: string;
+    matchId?: string;
+    source?: 'truth_dare' | 'deep_connect' | 'rematch';
+    alreadyMatched?: boolean;
     senderName: string;
     senderPhotoUrl: string;
     senderPhotoBlurMode?: 'none' | 'blur';
@@ -263,6 +268,8 @@ export default function PromptThreadScreen() {
     recipientIsAnonymous?: boolean;
   } | null>(null);
   const [processedPendingRequestIds, setProcessedPendingRequestIds] = useState<Set<string>>(new Set());
+  const [highlightedAnswerId, setHighlightedAnswerId] = useState<string | null>(null);
+  const [showRequestContextBanner, setShowRequestContextBanner] = useState(false);
 
   // Filter pending requests for this specific prompt
   const pendingRequestsForPrompt = useMemo(() => {
@@ -417,6 +424,7 @@ export default function PromptThreadScreen() {
 
   // M-003 FIX: Track scroll timeout for cleanup
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestHighlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMountedRef = useRef(true);
 
   // M-003 FIX: Cleanup on unmount
@@ -427,6 +435,10 @@ export default function PromptThreadScreen() {
       if (scrollTimeoutRef.current) {
         clearTimeout(scrollTimeoutRef.current);
         scrollTimeoutRef.current = null;
+      }
+      if (requestHighlightTimeoutRef.current) {
+        clearTimeout(requestHighlightTimeoutRef.current);
+        requestHighlightTimeoutRef.current = null;
       }
     };
   }, []);
@@ -447,11 +459,15 @@ export default function PromptThreadScreen() {
   const pendingConnectResponsesRef = useRef<Set<string>>(new Set());
   const pendingScrollAnswerIdRef = useRef<string | null>(null);
   const autoOpenHandledRef = useRef<string | null>(null);
+  const requestHighlightHandledRef = useRef<string | null>(null);
 
   useEffect(() => {
     setServerExpiryLocked(false);
     pendingScrollAnswerIdRef.current = null;
     autoOpenHandledRef.current = null;
+    requestHighlightHandledRef.current = null;
+    setHighlightedAnswerId(null);
+    setShowRequestContextBanner(false);
   }, [promptId]);
 
   // Auto-open composer if requested from feed
@@ -500,6 +516,54 @@ export default function PromptThreadScreen() {
     pendingScrollAnswerIdRef.current = null;
     scrollToEnd();
   }, [answers]);
+
+  useEffect(() => {
+    if (source !== 'phase2-tod' || !highlightAnswerId || answers.length === 0) return;
+    const highlightKey = `${requestId ?? ''}:${highlightAnswerId}`;
+    if (requestHighlightHandledRef.current === highlightKey) return;
+
+    const answerIndex = answers.findIndex((answer) => String(answer._id) === String(highlightAnswerId));
+    if (answerIndex < 0) return;
+
+    requestHighlightHandledRef.current = highlightKey;
+    setHighlightedAnswerId(String(highlightAnswerId));
+    setShowRequestContextBanner(true);
+
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+    }
+    scrollTimeoutRef.current = setTimeout(() => {
+      if (isMountedRef.current && listRef.current) {
+        try {
+          listRef.current.scrollToIndex({
+            index: answerIndex,
+            animated: true,
+            viewPosition: 0.35,
+          });
+        } catch {
+          // The banner still gives context if a virtualized row cannot be measured.
+        }
+      }
+      scrollTimeoutRef.current = null;
+    }, 250);
+
+    if (requestHighlightTimeoutRef.current) {
+      clearTimeout(requestHighlightTimeoutRef.current);
+    }
+    requestHighlightTimeoutRef.current = setTimeout(() => {
+      if (isMountedRef.current) {
+        setHighlightedAnswerId(null);
+        setShowRequestContextBanner(false);
+      }
+      requestHighlightTimeoutRef.current = null;
+    }, 4500);
+  }, [answers, highlightAnswerId, requestId, source]);
+
+  const handleScrollToIndexFailed = useCallback((info: { index: number; averageItemLength: number }) => {
+    if (!listRef.current) return;
+    const offset = Math.max(0, info.averageItemLength * info.index);
+    listRef.current.scrollToOffset({ offset, animated: true });
+  }, []);
 
   // Handle emoji reaction
   const handleReact = useCallback(async (answerId: string, emoji: string) => {
@@ -804,7 +868,6 @@ export default function PromptThreadScreen() {
   }, [menuAnswerId, menuAnswerOwnerId, menuIsOwnAnswer, handleReport, handleCloseMenu]);
 
   // RECEIVER: Handle accept T&D connect request
-  // FIX: Show success sheet instead of navigating directly to chat
   const handleAcceptConnect = useCallback(async (requestId: string) => {
     if (!userId) return;
     if (pendingConnectResponsesRef.current.has(`connect:${requestId}`)) return;
@@ -819,10 +882,14 @@ export default function PromptThreadScreen() {
         action: 'connect',
         authUserId: userId,
       });
+      const connectResult = result as any;
       if (__DEV__) {
         debugTodLog('[T/D ACCEPT RESULT]', {
           success: result.success,
           conversationId: result.conversationId?.slice(-8),
+          matchId: connectResult.matchId?.slice?.(-8),
+          alreadyMatched: connectResult.alreadyMatched,
+          source: connectResult.source,
           action: result.action,
           senderName: result.senderName,
         });
@@ -836,11 +903,24 @@ export default function PromptThreadScreen() {
         if (!isMountedRef.current) {
           return;
         }
-        // FIX: Show success sheet instead of navigating directly
-        debugTodLog('[T/D ACCEPT] Showing success sheet instead of direct navigation');
+        const matchId = typeof connectResult.matchId === 'string' ? connectResult.matchId : null;
+        const senderDbId = typeof connectResult.senderDbId === 'string' ? connectResult.senderDbId : null;
+
+        if (!connectResult.alreadyMatched && matchId && senderDbId) {
+          debugTodLog('[T/D ACCEPT] Opening source-aware Phase-2 match celebration');
+          router.push(
+            `/(main)/match-celebration?matchId=${matchId}&userId=${senderDbId}&mode=phase2&conversationId=${result.conversationId}&source=truth_dare&alreadyMatched=0` as any
+          );
+          return;
+        }
+
+        debugTodLog('[T/D ACCEPT] Showing already-matched continuation sheet');
         setSuccessSheet({
           visible: true,
           conversationId: result.conversationId,
+          matchId: connectResult.matchId,
+          source: connectResult.source || 'truth_dare',
+          alreadyMatched: !!connectResult.alreadyMatched,
           senderName: result.senderName || 'Someone',
           senderPhotoUrl: result.senderPhotoUrl || '',
           senderPhotoBlurMode: result.senderPhotoBlurMode || 'none',
@@ -868,7 +948,7 @@ export default function PromptThreadScreen() {
         setRespondingTo(null);
       }
     }
-  }, [userId, respondToConnect]);
+  }, [userId, respondToConnect, router]);
 
   // RECEIVER: Handle reject T&D connect request
   const handleRejectConnect = useCallback(async (requestId: string) => {
@@ -932,6 +1012,7 @@ export default function PromptThreadScreen() {
       });
 
       if (result.success) {
+        const connectSendResult = result as any;
         const action = (result as any).action as
           | 'pending'
           | 'already_pending'
@@ -954,7 +1035,19 @@ export default function PromptThreadScreen() {
             'They already sent you a connect request. Open Messages to accept it.'
           );
         } else if (action === 'already_connected') {
-          Alert.alert('Already Connected', 'You are already connected. Open Messages to chat.');
+          Alert.alert(
+            'Already Connected',
+            'You are already connected. Continue your conversation?',
+            [
+              { text: 'Not now', style: 'cancel' },
+              ...(connectSendResult.conversationId
+                ? [{
+                    text: 'Continue Chat',
+                    onPress: () => router.push(`/(main)/(private)/(tabs)/chats/${connectSendResult.conversationId}` as any),
+                  }]
+                : []),
+            ],
+          );
         } else if (action === 'already_pending') {
           Alert.alert('Already Sent', 'Your connect request is already pending.');
         } else {
@@ -996,7 +1089,7 @@ export default function PromptThreadScreen() {
         setConnectSending(null);
       }
     }
-  }, [userId, promptId, sendConnectRequest]);
+  }, [userId, promptId, sendConnectRequest, router]);
 
   // Handle tap-to-view for media content
   // P0-001 FIX: Backend is the source of truth for view state.
@@ -1401,6 +1494,7 @@ export default function PromptThreadScreen() {
     const hasReported = item.hasReported;
     const showEmojiPicker = emojiPickerAnswerId === item._id;
     const isSelected = selectedAnswerId === item._id;
+    const isHighlighted = highlightedAnswerId === item._id;
 
     // Get top 3 emojis for display (reactionCounts is array of { emoji, count })
     const topEmojis = (item.reactionCounts ?? [])
@@ -1445,6 +1539,7 @@ export default function PromptThreadScreen() {
           styles.answerCard,
           isOwnAnswer && styles.answerCardOwn,
           isSelected && isEligibleForConnect && styles.answerCardSelected,
+          isHighlighted && styles.answerCardHighlighted,
         ]}>
           {/* Header with 3-dot menu */}
           <View style={styles.answerHeader}>
@@ -1698,6 +1793,7 @@ export default function PromptThreadScreen() {
     // P3-004: keep answer-row deps narrow so unrelated screen state changes don't reshuffle renderItem
     emojiPickerAnswerId,
     selectedAnswerId,
+    highlightedAnswerId,
     authorProfile.name,
     authorProfile.age,
     authorProfile.gender,
@@ -1986,10 +2082,19 @@ export default function PromptThreadScreen() {
         data={answers}
         keyExtractor={(item) => item._id}
         renderItem={renderAnswer}
+        onScrollToIndexFailed={handleScrollToIndexFailed}
         style={styles.answersListContainer}
         contentContainerStyle={styles.listContent}
         ListHeaderComponent={
           <View>
+            {showRequestContextBanner && (
+              <View style={styles.requestContextBanner}>
+                <Ionicons name="git-merge" size={15} color={PREMIUM.coral} />
+                <Text style={styles.requestContextBannerText}>
+                  Request context highlighted
+                </Text>
+              </View>
+            )}
             {/* RECEIVER VISIBILITY: Simple inline Accept/Reject bar */}
             {visiblePendingRequestsForPrompt.map((request, index) => (
               <View
@@ -2441,9 +2546,13 @@ export default function PromptThreadScreen() {
               </View>
 
               {/* Title */}
-              <Text style={styles.successTitle}>You're Connected! 🎉</Text>
+              <Text style={styles.successTitle}>
+                {successSheet.alreadyMatched ? "You're already matched" : "Truth or Dare connection 🎲"}
+              </Text>
               <Text style={styles.successSubtitle}>
-                You and {successSheet.senderName} can now chat
+                {successSheet.alreadyMatched
+                  ? `You and ${successSheet.senderName} already have a conversation.`
+                  : `You and ${successSheet.senderName} can now chat.`}
               </Text>
 
               {/* Actions */}
@@ -2457,7 +2566,9 @@ export default function PromptThreadScreen() {
                   }}
                 >
                   <Ionicons name="chatbubble" size={18} color="#FFF" />
-                  <Text style={styles.successPrimaryText}>Say Hi</Text>
+                  <Text style={styles.successPrimaryText}>
+                    {successSheet.alreadyMatched ? 'Continue Chat' : 'Open Chat'}
+                  </Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
@@ -2845,6 +2956,14 @@ const styles = StyleSheet.create({
   answerCardSelected: {
     backgroundColor: PREMIUM.bgHighlight,
     borderColor: `${PREMIUM.coral}50`,
+  },
+  answerCardHighlighted: {
+    borderColor: `${PREMIUM.coral}85`,
+    shadowColor: PREMIUM.coral,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.24,
+    shadowRadius: 12,
+    elevation: 5,
   },
   answerHeader: {
     flexDirection: 'row',
@@ -3386,6 +3505,26 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: '#FFF',
+  },
+
+  requestContextBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: `${PREMIUM.coral}14`,
+    borderWidth: 1,
+    borderColor: `${PREMIUM.coral}35`,
+    marginHorizontal: 16,
+    marginTop: 8,
+    marginBottom: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    gap: 8,
+  },
+  requestContextBannerText: {
+    color: PREMIUM.coral,
+    fontSize: 13,
+    fontWeight: '800',
   },
 
   // Pending Connect Bar - simple inline Accept/Reject (RECEIVER VISIBILITY)
