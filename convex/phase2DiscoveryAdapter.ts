@@ -47,7 +47,6 @@ export interface Phase2PrivateProfileRecord {
   displayName: string;
   age: number;
   gender: string;
-  city?: string;
 
   // Intent & Desires
   privateIntentKeys: string[];
@@ -202,7 +201,6 @@ export function normalizePhase2Candidate(
     // Demographics
     age: profile.age,
     gender: profile.gender,
-    city: profile.city,
 
     // Location - Phase-2 has no coordinates
     latitude: undefined,
@@ -322,7 +320,6 @@ export function createPhase2ViewerContext(
     // Demographics
     age: profile.age,
     gender: profile.gender,
-    city: profile.city,
 
     // Location - Phase-2 has no coordinates
     latitude: undefined,

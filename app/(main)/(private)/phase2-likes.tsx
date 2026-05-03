@@ -214,13 +214,6 @@ export default function Phase2LikesScreen() {
             </View>
           )}
 
-          {/* City badge */}
-          {like.profile?.city && (
-            <View style={styles.locationBadge}>
-              <Text style={styles.locationBadgeText}>{like.profile.city}</Text>
-            </View>
-          )}
-
           {/* Tap hint overlay */}
           <View style={styles.tapHintOverlay}>
             <Ionicons name="expand-outline" size={16} color="rgba(255,255,255,0.8)" />
@@ -457,20 +450,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.superLike,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  locationBadge: {
-    position: 'absolute',
-    bottom: 8,
-    left: 8,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    borderRadius: 8,
-    paddingHorizontal: 6,
-    paddingVertical: 3,
-  },
-  locationBadgeText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#FFFFFF',
   },
   cardInfo: {
     padding: 10,

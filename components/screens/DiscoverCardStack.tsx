@@ -96,7 +96,10 @@ import {
   unwrapPhase1DiscoverQueryResult,
   type Phase1DiscoverEmptyReason,
 } from "@/lib/phase1DiscoverQuery";
-import { usePhase1NotificationBellBadge } from "@/hooks/useNotifications";
+import {
+  usePhase1NotificationBellBadge,
+  usePhase2NotificationBellBadge,
+} from "@/hooks/useNotifications";
 import { DEMO_PROFILES, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
 import { useBlockStore } from "@/stores/blockStore";
@@ -396,7 +399,6 @@ function mapPhase2CardProfile(input: {
   userId?: string;
   displayName?: unknown;
   age?: number;
-  city?: string;
   distance?: number;
   bio?: string;
   photoUrls?: Array<string | null | undefined>;
@@ -432,7 +434,6 @@ function mapPhase2CardProfile(input: {
     userId: input.userId ?? input.profileId,
     name: resolvePhase2CardName(input.displayName),
     age: input.age,
-    city: input.city,
     distance: input.distance,
     bio: input.bio,
     photos: photoUrls.map((url) => ({ url })),
@@ -796,8 +797,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const discoverProfileActionResult = useInteractionStore((s) => s.discoverProfileActionResult);
   const setDiscoverProfileActionResult = useInteractionStore((s) => s.setDiscoverProfileActionResult);
 
-  // Notifications (Phase-1 only — DiscoverCardStack is Phase-1)
-  const { unseenCount } = usePhase1NotificationBellBadge();
+  // Notifications stay phase-scoped: Phase-1 reads notifications, Phase-2 reads privateNotifications.
+  const phase1Bell = usePhase1NotificationBellBadge();
+  const phase2Bell = usePhase2NotificationBellBadge();
+  const { unseenCount } = mode === "phase2" ? phase2Bell : phase1Bell;
 
   // Demo store — single shallow selector to minimize re-renders.
   // Only subscribes to fields Discover actually needs; shallow compare
@@ -1180,6 +1183,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
         return {
           ...normalized,
+          city: undefined,
           distance: undefined,
           lastActive: undefined,
           createdAt: undefined,
@@ -1206,7 +1210,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               userId: p.id,
               displayName: p.username,
               age: p.age,
-              city: p.city,
               distance: p.distance,
               bio: p.bio,
               photoUrls: p.photos ?? [p.photoUrl],
@@ -1316,7 +1319,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           userId: p.userId,
           displayName: p.displayName,
           age: p.age,
-          city: p.city,
           distance: typeof p.distanceKm === 'number' ? p.distanceKm : undefined,
           bio: p.privateBio,
           photoUrls,
@@ -3662,7 +3664,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     name={next.name}
                     age={next.age}
                     bio={next.bio}
-                    city={next.city}
                     isVerified={next.isVerified}
                     distance={next.distance}
                     photos={next.photos}
@@ -3714,7 +3715,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     name={current.name}
                     age={current.age}
                     bio={current.bio}
-                    city={current.city}
+                    city={isPhase2 ? undefined : current.city}
                     isVerified={current.isVerified}
                     distance={displayDistanceCurrentCard}
                     photos={current.photos}
