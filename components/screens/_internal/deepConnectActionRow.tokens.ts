@@ -71,7 +71,11 @@ export const DC_ROW_PADDING_BOTTOM = SPACING.xs;
 export const DC_ROW_BOTTOM_MIN = SPACING.md + SPACING.sm;
 export const DC_ROW_BOTTOM_MAX = SPACING.xxl + SPACING.sm;
 export const DC_ROW_GAP_ABOVE_INSET = SPACING.sm;
-export const DC_CARD_TO_ROW_GAP = SPACING.md + SPACING.xs;
+// Reduced from `SPACING.md + SPACING.xs` (16) → `SPACING.xs` (4) so the
+// Deep Connect photo/card extends much closer to the top edge of the action
+// row. The photo gains usable height and the buttons feel anchored at the
+// bottom of the screen instead of floating in a gap.
+export const DC_CARD_TO_ROW_GAP = SPACING.xs;
 export const DC_TRANSITION_HINT_OFFSET = SPACING.lg;
 
 // ─── Press feedback / shadows ───────────────────────────────────────────────

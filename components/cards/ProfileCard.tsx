@@ -92,6 +92,16 @@ const GENDER_LABELS: Record<string, string> = {
   other: 'Everyone',
 };
 
+// Phase-2 Deep Connect chip-label display aliases.
+// Render-only: shorter, premium presentation. The underlying data values
+// (used by filters, queries, analytics, schema) are NEVER changed — only
+// the visible chip text inside the Deep Connect profile card.
+const PHASE2_CHIP_LABEL_ALIASES: Record<string, string> = {
+  'Friends with Benefits': 'FWB',
+};
+const phase2ChipDisplayLabel = (label: string): string =>
+  PHASE2_CHIP_LABEL_ALIASES[label] ?? label;
+
 // Gender icon mapping for identity display
 const GENDER_ICONS: Record<string, { icon: string; color: string }> = {
   male: { icon: 'male', color: '#3B82F6' }, // Blue
@@ -2073,23 +2083,42 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </View>
         )}
 
-        {/* Premium gradient overlay - top (elegant, subtle vignette) */}
+        {/* Premium gradient overlay - top (elegant, subtle vignette).
+            Phase-2 (Deep Connect): lighter + shorter so the photo top stays clean. */}
         <LinearGradient
-          colors={dark
-            ? ['rgba(0,0,0,0.45)', 'rgba(0,0,0,0.15)', 'transparent']
-            : ['rgba(0,0,0,0.25)', 'rgba(0,0,0,0.08)', 'transparent']}
+          colors={
+            isPhase2
+              ? (dark
+                  ? ['rgba(0,0,0,0.30)', 'rgba(0,0,0,0.06)', 'transparent']
+                  : ['rgba(0,0,0,0.18)', 'rgba(0,0,0,0.04)', 'transparent'])
+              : (dark
+                  ? ['rgba(0,0,0,0.45)', 'rgba(0,0,0,0.15)', 'transparent']
+                  : ['rgba(0,0,0,0.25)', 'rgba(0,0,0,0.08)', 'transparent'])
+          }
           locations={[0, 0.5, 1]}
-          style={styles.topGradient}
+          style={[styles.topGradient, isPhase2 && styles.topGradientPhase2]}
           pointerEvents="none"
         />
 
-        {/* Premium gradient overlay - bottom (smooth, cinematic fade for immersive feel) */}
+        {/* Premium gradient overlay - bottom (smooth, cinematic fade for immersive feel).
+            Phase-2 (Deep Connect): shorter + softer so the photo dominates and the dark
+            zone only sits behind the lower info area, not across the middle of the photo. */}
         <LinearGradient
-          colors={dark
-            ? ['transparent', 'rgba(0,0,0,0.15)', 'rgba(0,0,0,0.5)', 'rgba(0,0,0,0.85)', 'rgba(0,0,0,0.95)']
-            : ['transparent', 'rgba(0,0,0,0.08)', 'rgba(0,0,0,0.35)', 'rgba(0,0,0,0.65)', 'rgba(0,0,0,0.85)']}
-          locations={dark ? [0, 0.15, 0.4, 0.7, 1] : [0, 0.12, 0.35, 0.6, 1]}
-          style={styles.bottomGradient}
+          colors={
+            isPhase2
+              ? (dark
+                  ? ['transparent', 'rgba(0,0,0,0.20)', 'rgba(0,0,0,0.55)', 'rgba(0,0,0,0.80)']
+                  : ['transparent', 'rgba(0,0,0,0.12)', 'rgba(0,0,0,0.45)', 'rgba(0,0,0,0.70)'])
+              : (dark
+                  ? ['transparent', 'rgba(0,0,0,0.15)', 'rgba(0,0,0,0.5)', 'rgba(0,0,0,0.85)', 'rgba(0,0,0,0.95)']
+                  : ['transparent', 'rgba(0,0,0,0.08)', 'rgba(0,0,0,0.35)', 'rgba(0,0,0,0.65)', 'rgba(0,0,0,0.85)'])
+          }
+          locations={
+            isPhase2
+              ? [0, 0.45, 0.80, 1]
+              : (dark ? [0, 0.15, 0.4, 0.7, 1] : [0, 0.12, 0.35, 0.6, 1])
+          }
+          style={[styles.bottomGradient, isPhase2 && styles.bottomGradientPhase2]}
           pointerEvents="none"
         />
 
@@ -2164,8 +2193,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </View>
         )}
 
-        {/* Arrow button to open full profile */}
-        {showCarousel && onOpenProfile && (
+        {/* Arrow button to open full profile (Phase-1 only).
+            Phase-2 (Deep Connect) renders the arrow inline with the name row
+            inside the identity layer below, so this absolute-positioned
+            variant is suppressed to avoid a duplicate. */}
+        {showCarousel && onOpenProfile && !isPhase2 && (
           <TouchableOpacity
             style={[styles.arrowBtn, dark && styles.arrowBtnDark, { bottom: arrowButtonBottom }]}
             onPress={onOpenProfile}
@@ -2182,37 +2214,55 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       {/* PREMIUM UX: Fixed gradient, stable identity, smooth content transitions */}
       {isPhase2 && (
         <LinearGradient
-          colors={['transparent', 'rgba(0,0,0,0.55)', 'rgba(0,0,0,0.78)']}
+          colors={['transparent', 'rgba(0,0,0,0.40)', 'rgba(0,0,0,0.68)']}
           locations={[0, 0.55, 1]}
           style={styles.phase2Scrim}
           pointerEvents="none"
         />
       )}
       {isPhase2 ? (
-        <View style={[styles.overlay, styles.overlayDark, styles.phase2Overlay]} pointerEvents="none">
+        // box-none lets the arrow inside the identity row receive taps while
+        // text/badge children remain non-interactive (they have no handlers).
+        <View style={[styles.overlay, styles.overlayDark, styles.phase2Overlay]} pointerEvents="box-none">
           {/* ═══════════════════════════════════════════════════════════════════════════
               PHASE-2 PARITY: ENHANCED IDENTITY LAYER
               Name + Age + Gender + Badge = always visible (persistent anchor)
               Photo-1 only: Presence status + distance
               ═══════════════════════════════════════════════════════════════════════════ */}
-          <View style={styles.phase2IdentitySection}>
-            {/* LAYER A: PERSISTENT IDENTITY (ALL PHOTOS) - Name + Age + Gender */}
-            <View style={styles.phase2IdentityRow}>
-              <Text style={styles.phase2Name}>{name}</Text>
-              {ageLabel && <Text style={styles.phase2Age}>{ageLabel}</Text>}
-              {/* Gender icon - matches Phase-1 styling */}
-              {gender && GENDER_ICONS[gender] && (
-                <View style={[styles.phase2GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}30` }]}>
-                  <Ionicons
-                    name={GENDER_ICONS[gender].icon as any}
-                    size={12}
-                    color={GENDER_ICONS[gender].color}
-                  />
-                </View>
+          <View style={styles.phase2IdentitySection} pointerEvents="box-none">
+            {/* LAYER A: PERSISTENT IDENTITY (ALL PHOTOS) - Name + Age + Gender + Arrow */}
+            <View style={styles.phase2IdentityRow} pointerEvents="box-none">
+              <View style={styles.phase2IdentityLeft} pointerEvents="none">
+                <Text style={styles.phase2Name} numberOfLines={1}>{name}</Text>
+                {ageLabel && <Text style={styles.phase2Age} numberOfLines={1}>{ageLabel}</Text>}
+                {/* Gender icon - matches Phase-1 styling */}
+                {gender && GENDER_ICONS[gender] && (
+                  <View style={[styles.phase2GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}30` }]}>
+                    <Ionicons
+                      name={GENDER_ICONS[gender].icon as any}
+                      size={12}
+                      color={GENDER_ICONS[gender].color}
+                    />
+                  </View>
+                )}
+                {isVerified ? (
+                  <Ionicons name="checkmark-circle" size={16} color="#7dd3fc" style={styles.phase2VerifiedIcon} />
+                ) : null}
+              </View>
+              {/* Arrow button: aligned with the name row on the right edge.
+                  hitSlop keeps a comfortable touch target even though the
+                  visible button is compact (36x36). */}
+              {showCarousel && onOpenProfile && (
+                <TouchableOpacity
+                  style={styles.phase2ArrowBtn}
+                  onPress={onOpenProfile}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  accessibilityLabel="Open full profile"
+                >
+                  <Ionicons name="chevron-up" size={20} color={COLORS.white} />
+                </TouchableOpacity>
               )}
-              {isVerified ? (
-                <Ionicons name="checkmark-circle" size={16} color="#7dd3fc" style={styles.phase2VerifiedIcon} />
-              ) : null}
             </View>
 
             {/* LAYER B: PHOTO-1-ONLY METADATA — left: presence, right: distance */}
@@ -2259,27 +2309,27 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               style={styles.phase2RevealSection}
             >
               {/* PRIMARY: bio | prompt | promoted-secondary | fallback
-                  Each block opens with an uppercase section label that
-                  acts as the only "chrome" — no card backgrounds, no
-                  borders. Body text floats over the bottom scrim. */}
+                  Section labels (BIO / PROMPT / LOOKING FOR / etc.) are kept
+                  only as `accessibilityLabel` on the wrapper so screen readers
+                  still announce the section, but no visual chrome is rendered
+                  — body text floats over the bottom scrim for a premium feel. */}
               {currentPlanned.primary.kind === 'bio' && (
-                <View style={styles.phase2PrimaryBlock}>
-                  <Text style={styles.phase2SectionLabel}>BIO</Text>
-                  <Text style={styles.phase2BioBody} numberOfLines={3}>
+                <View style={styles.phase2PrimaryBlock} accessibilityLabel="Bio">
+                  <Text style={styles.phase2BioBody} numberOfLines={2} ellipsizeMode="tail">
                     {currentPlanned.primary.text}
                   </Text>
                 </View>
               )}
 
               {currentPlanned.primary.kind === 'prompt' && (
-                <View style={styles.phase2PrimaryBlock}>
-                  <Text style={styles.phase2SectionLabel}>
-                    {currentPlanned.primary.prompt.sectionLabel}
-                  </Text>
+                <View
+                  style={styles.phase2PrimaryBlock}
+                  accessibilityLabel={currentPlanned.primary.prompt.sectionLabel}
+                >
                   <Text style={styles.phase2PromptQuestionV4} numberOfLines={1}>
                     {currentPlanned.primary.prompt.question}
                   </Text>
-                  <Text style={styles.phase2PromptAnswerV4} numberOfLines={3}>
+                  <Text style={styles.phase2PromptAnswerV4} numberOfLines={2} ellipsizeMode="tail">
                     {currentPlanned.primary.prompt.answer}
                   </Text>
                 </View>
@@ -2287,12 +2337,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
               {currentPlanned.primary.kind === 'lifestyle' &&
                 phase2Lifestyle.length > 0 && (
-                  <View style={styles.phase2PrimaryBlock}>
-                    <Text style={styles.phase2SectionLabel}>LIFESTYLE</Text>
+                  <View style={styles.phase2PrimaryBlock} accessibilityLabel="Lifestyle">
                     <View style={styles.phase2ChipsRow}>
                       {phase2Lifestyle.map((item) => (
                         <View key={`pri-life-${item.label}`} style={styles.phase2ChipUnified}>
-                          <Ionicons name={item.icon as any} size={12} color="rgba(255,255,255,0.92)" />
+                          <Ionicons name={item.icon as any} size={11} color="rgba(255,255,255,0.92)" />
                           <Text style={styles.phase2ChipUnifiedText}>{item.label}</Text>
                         </View>
                       ))}
@@ -2301,8 +2350,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 )}
 
               {currentPlanned.primary.kind === 'lookingFor' && hasPhase2LookingFor && (
-                <View style={styles.phase2PrimaryBlock}>
-                  <Text style={styles.phase2SectionLabel}>LOOKING FOR</Text>
+                <View style={styles.phase2PrimaryBlock} accessibilityLabel="Looking for">
                   <View style={styles.phase2ChipsRow}>
                     {phase2LookingForChips.visible.map((item) => (
                       <View
@@ -2313,7 +2361,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                         }
                         style={styles.phase2ChipUnified}
                       >
-                        <Text style={styles.phase2ChipUnifiedText}>{item.label}</Text>
+                        <Text style={styles.phase2ChipUnifiedText}>
+                          {phase2ChipDisplayLabel(item.label)}
+                        </Text>
                       </View>
                     ))}
                     {phase2LookingForChips.overflow > 0 && (
@@ -2329,8 +2379,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
               {currentPlanned.primary.kind === 'interests' &&
                 phase2Interests.length > 0 && (
-                  <View style={styles.phase2PrimaryBlock}>
-                    <Text style={styles.phase2SectionLabel}>INTERESTS</Text>
+                  <View style={styles.phase2PrimaryBlock} accessibilityLabel="Interests">
                     <View style={styles.phase2ChipsRow}>
                       {phase2Interests.map((item) => (
                         <View key={`pri-int-${item.label}`} style={styles.phase2ChipUnified}>
@@ -2344,13 +2393,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 )}
 
               {currentPlanned.primary.kind === 'education' && phase2EducationItem && (
-                <View style={styles.phase2PrimaryBlock}>
-                  <Text style={styles.phase2SectionLabel}>EDUCATION</Text>
+                <View style={styles.phase2PrimaryBlock} accessibilityLabel="Education">
                   <View style={styles.phase2ChipsRow}>
                     <View style={styles.phase2ChipUnified}>
                       <Ionicons
                         name={phase2EducationItem.icon as any}
-                        size={12}
+                        size={11}
                         color="rgba(255,255,255,0.92)"
                       />
                       <Text style={styles.phase2ChipUnifiedText}>{phase2EducationItem.label}</Text>
@@ -2360,13 +2408,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               )}
 
               {currentPlanned.primary.kind === 'religion' && phase2ReligionItem && (
-                <View style={styles.phase2PrimaryBlock}>
-                  <Text style={styles.phase2SectionLabel}>RELIGION</Text>
+                <View style={styles.phase2PrimaryBlock} accessibilityLabel="Religion">
                   <View style={styles.phase2ChipsRow}>
                     <View style={styles.phase2ChipUnified}>
                       <Ionicons
                         name={phase2ReligionItem.icon as any}
-                        size={12}
+                        size={11}
                         color="rgba(255,255,255,0.92)"
                       />
                       <Text style={styles.phase2ChipUnifiedText}>{phase2ReligionItem.label}</Text>
@@ -2392,15 +2439,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               )}
 
               {/* SECONDARY: compact chip row below primary, one per photo.
-                  Each row is preceded by its own section label so the user
-                  always knows which dimension they are looking at. */}
+                  Visible section labels are removed for a clean premium feel;
+                  the dimension is conveyed by the chip content + accessibilityLabel. */}
               {currentPlanned.secondary === 'lifestyle' && phase2Lifestyle.length > 0 && (
-                <View style={styles.phase2SecondaryRow}>
-                  <Text style={styles.phase2SectionLabel}>LIFESTYLE</Text>
+                <View style={styles.phase2SecondaryRow} accessibilityLabel="Lifestyle">
                   <View style={styles.phase2ChipsRow}>
                     {phase2Lifestyle.map((item) => (
                       <View key={`sec-life-${item.label}`} style={styles.phase2ChipUnified}>
-                        <Ionicons name={item.icon as any} size={12} color="rgba(255,255,255,0.92)" />
+                        <Ionicons name={item.icon as any} size={11} color="rgba(255,255,255,0.92)" />
                         <Text style={styles.phase2ChipUnifiedText}>{item.label}</Text>
                       </View>
                     ))}
@@ -2409,8 +2455,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               )}
 
               {currentPlanned.secondary === 'lookingFor' && hasPhase2LookingFor && (
-                <View style={styles.phase2SecondaryRow}>
-                  <Text style={styles.phase2SectionLabel}>LOOKING FOR</Text>
+                <View style={styles.phase2SecondaryRow} accessibilityLabel="Looking for">
                   <View style={styles.phase2ChipsRow}>
                     {phase2LookingForChips.visible.map((item) => (
                       <View
@@ -2421,7 +2466,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                         }
                         style={styles.phase2ChipUnified}
                       >
-                        <Text style={styles.phase2ChipUnifiedText}>{item.label}</Text>
+                        <Text style={styles.phase2ChipUnifiedText}>
+                          {phase2ChipDisplayLabel(item.label)}
+                        </Text>
                       </View>
                     ))}
                     {phase2LookingForChips.overflow > 0 && (
@@ -2436,8 +2483,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               )}
 
               {currentPlanned.secondary === 'interests' && phase2Interests.length > 0 && (
-                <View style={styles.phase2SecondaryRow}>
-                  <Text style={styles.phase2SectionLabel}>INTERESTS</Text>
+                <View style={styles.phase2SecondaryRow} accessibilityLabel="Interests">
                   <View style={styles.phase2ChipsRow}>
                     {phase2Interests.map((item) => (
                       <View key={`sec-int-${item.label}`} style={styles.phase2ChipUnified}>
@@ -2451,13 +2497,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               )}
 
               {currentPlanned.secondary === 'education' && phase2EducationItem && (
-                <View style={styles.phase2SecondaryRow}>
-                  <Text style={styles.phase2SectionLabel}>EDUCATION</Text>
+                <View style={styles.phase2SecondaryRow} accessibilityLabel="Education">
                   <View style={styles.phase2ChipsRow}>
                     <View style={styles.phase2ChipUnified}>
                       <Ionicons
                         name={phase2EducationItem.icon as any}
-                        size={12}
+                        size={11}
                         color="rgba(255,255,255,0.92)"
                       />
                       <Text style={styles.phase2ChipUnifiedText}>{phase2EducationItem.label}</Text>
@@ -2467,13 +2512,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               )}
 
               {currentPlanned.secondary === 'religion' && phase2ReligionItem && (
-                <View style={styles.phase2SecondaryRow}>
-                  <Text style={styles.phase2SectionLabel}>RELIGION</Text>
+                <View style={styles.phase2SecondaryRow} accessibilityLabel="Religion">
                   <View style={styles.phase2ChipsRow}>
                     <View style={styles.phase2ChipUnified}>
                       <Ionicons
                         name={phase2ReligionItem.icon as any}
-                        size={12}
+                        size={11}
                         color="rgba(255,255,255,0.92)"
                       />
                       <Text style={styles.phase2ChipUnifiedText}>{phase2ReligionItem.label}</Text>
@@ -2815,6 +2859,10 @@ const styles = StyleSheet.create({
     height: 120,
     zIndex: 2,
   },
+  // Phase-2 (Deep Connect): shorter top vignette so the photo top stays clean.
+  topGradientPhase2: {
+    height: 80,
+  },
   bottomGradient: {
     position: 'absolute',
     bottom: 0,
@@ -2822,6 +2870,11 @@ const styles = StyleSheet.create({
     right: 0,
     height: '65%', // Extended for more content coverage
     zIndex: 2,
+  },
+  // Phase-2 (Deep Connect): bottom gradient is reduced from 65% → 35% so the
+  // photo dominates and the dark zone only sits behind the lower info area.
+  bottomGradientPhase2: {
+    height: '35%',
   },
   photoPlaceholder: {
     flex: 1,
@@ -3392,33 +3445,60 @@ const styles = StyleSheet.create({
   // PHASE-2: Premium photo-index-based overlay styles
   // ═══════════════════════════════════════════════════════════════════════════
   phase2Overlay: {
-    paddingHorizontal: 20,
-    paddingBottom: 24,
-    paddingTop: 16,
+    // Compressed padding: photo-first feel, info hugs the bottom edge.
+    paddingHorizontal: 18,
+    paddingBottom: 10,
+    paddingTop: 8,
   },
   phase2IdentityRow: {
+    // Row hosts: [name+age+gender+verified group] + [arrow button on the right].
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  // Left side of the identity row — text/badges flexShrink to make room
+  // for the arrow button without overflowing on narrow devices.
+  phase2IdentityLeft: {
     flexDirection: 'row',
     alignItems: 'baseline',
-    marginBottom: 8,
+    flexShrink: 1,
+    flexGrow: 1,
+    minWidth: 0,
   },
   phase2Name: {
-    fontSize: 30,
+    fontSize: 25,
     fontWeight: '700',
     color: COLORS.white,
-    marginRight: 10,
-    letterSpacing: -0.5,
-  },
-  phase2Age: {
-    fontSize: 26,
-    fontWeight: '300',
-    color: 'rgba(255,255,255,0.75)',
-    marginRight: 10,
-  },
-  phase2VerifiedIcon: {
-    marginLeft: 2,
+    marginRight: 8,
+    letterSpacing: -0.4,
+    flexShrink: 1,
     textShadowColor: 'rgba(0,0,0,0.35)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
+  },
+  phase2Age: {
+    fontSize: 21,
+    fontWeight: '300',
+    color: 'rgba(255,255,255,0.75)',
+    marginRight: 8,
+  },
+  phase2VerifiedIcon: {
+    marginLeft: 1,
+    textShadowColor: 'rgba(0,0,0,0.35)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  // Compact arrow that sits on the right edge of the name row in Phase-2.
+  // Visible button is 36x36; hitSlop on the JSX expands the touch target.
+  phase2ArrowBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
   },
   // PHASE2_PARITY: Identity section wrapper
   phase2IdentitySection: {
@@ -3543,15 +3623,15 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.9)',
     letterSpacing: 0.2,
   },
-  // Photo 3 & 5: Chips row (interests, lifestyle)
+  // Photo 3 & 5: Chips row (interests, lifestyle) — tighter for premium density
   phase2ChipsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
+    gap: 6,
   },
   // V3 composite: secondary chip row sits below the primary block
   phase2SecondaryRow: {
-    marginTop: 8,
+    marginTop: 6,
   },
   phase2InterestChip: {
     backgroundColor: 'rgba(255,255,255,0.1)',
@@ -3596,7 +3676,9 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.75)',
   },
   // V4 PREMIUM TYPOGRAPHY — text-on-gradient, no heavy boxes
-  // Uppercase section label that floats above each primary/secondary block.
+  // Uppercase section label (kept in styles for any legacy references but
+  // no longer rendered visually in primary/secondary blocks — section context
+  // is conveyed via accessibilityLabel on the wrapper).
   phase2SectionLabel: {
     fontSize: 10,
     fontWeight: '700',
@@ -3609,53 +3691,60 @@ const styles = StyleSheet.create({
   phase2PrimaryBlock: {
     paddingVertical: 2,
   },
-  // Bio body — no italic, larger and brighter than V3.
+  // Bio body — premium compact size (was 16/22).
   phase2BioBody: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '400',
     color: 'rgba(255,255,255,0.96)',
-    lineHeight: 22,
+    lineHeight: 19,
+    textShadowColor: 'rgba(0,0,0,0.35)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
-  // Prompt question — sentence case, low-weight context line.
+  // Prompt question — sentence case, low-weight context line (was 13/18).
   phase2PromptQuestionV4: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '500',
-    color: 'rgba(255,255,255,0.72)',
-    lineHeight: 18,
-    marginBottom: 4,
+    color: 'rgba(255,255,255,0.70)',
+    lineHeight: 16,
+    marginBottom: 3,
+    letterSpacing: 0.1,
   },
-  // Prompt answer — the hero line on the card.
+  // Prompt answer — premium hero line (was 17/23 weight 500).
   phase2PromptAnswerV4: {
-    fontSize: 17,
-    fontWeight: '500',
+    fontSize: 15,
+    fontWeight: '600',
     color: 'rgba(255,255,255,0.97)',
-    lineHeight: 23,
+    lineHeight: 20,
+    textShadowColor: 'rgba(0,0,0,0.35)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
-  // Unified chip palette — single neutral glass style for every secondary row.
+  // Unified chip palette — compact premium pill (was 12/6 with 1px border).
   phase2ChipUnified: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
+    gap: 5,
+    backgroundColor: 'rgba(255,255,255,0.13)',
+    borderRadius: 11,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
   },
   phase2ChipUnifiedText: {
-    fontSize: 12,
-    fontWeight: '500',
+    fontSize: 11,
+    fontWeight: '600',
     color: 'rgba(255,255,255,0.92)',
     letterSpacing: 0.1,
   },
   // Bottom gradient scrim — sits behind the entire phase-2 overlay for legibility.
+  // Reduced from 55% → 28%: the scrim now only sits behind the lower info area,
+  // not across the middle of the photo.
   phase2Scrim: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    height: '55%',
+    height: '28%',
     zIndex: 2,
   },
   // Legacy V3 styles kept so any incidental reference still resolves.
