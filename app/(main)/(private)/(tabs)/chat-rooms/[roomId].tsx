@@ -3062,6 +3062,35 @@ export default function ChatRoomScreen() {
     setOverlay('report');
   }, [selectedUser]);
 
+  type BackendReportReason =
+    | 'fake_profile'
+    | 'inappropriate_photos'
+    | 'harassment'
+    | 'spam'
+    | 'underage'
+    | 'other'
+    | 'hate_speech'
+    | 'sexual_content'
+    | 'nudity'
+    | 'violent_threats'
+    | 'impersonation'
+    | 'selling';
+
+  const mapReportReasonForBackend = (reason: ReportReason): BackendReportReason => {
+    switch (reason) {
+      case 'harassment_hate':
+        return 'harassment';
+      case 'sexual_nudity':
+        return 'sexual_content';
+      case 'threats':
+        return 'violent_threats';
+      case 'selling_promotion':
+        return 'selling';
+      default:
+        return reason;
+    }
+  };
+
   // Store report in Convex (reports table with full details)
   const handleSubmitReport = useCallback(
     async (data: { reportedUserId: string; reason: ReportReason; details?: string; roomId?: string }) => {
@@ -3076,7 +3105,7 @@ export default function ChatRoomScreen() {
           authUserId,
           reportedUserId: data.reportedUserId,
           roomId: roomIdStr ?? undefined,
-          reason: data.reason,
+          reason: mapReportReasonForBackend(data.reason),
           details: data.details,
         });
 
