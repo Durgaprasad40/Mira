@@ -999,6 +999,10 @@ export default function PromptThreadScreen() {
   const handleSendConnect = useCallback(async (answerId: string) => {
     if (!userId || !promptId) return;
     if (connectSendInFlightRef.current) return;
+    const targetAnswer = answers.find((answer) => String(answer._id) === String(answerId));
+    const promptScopedConnectKey = targetAnswer?.userId
+      ? `${targetAnswer.promptId ?? promptId}:${targetAnswer.userId}`
+      : null;
 
     connectSendInFlightRef.current = true;
     if (isMountedRef.current) {
@@ -1017,6 +1021,7 @@ export default function PromptThreadScreen() {
           | 'pending'
           | 'already_pending'
           | 'already_connected'
+          | 'already_removed'
           | 'reverse_pending'
           | undefined;
 
@@ -1024,6 +1029,9 @@ export default function PromptThreadScreen() {
           setConnectSentFor((prev) => {
             const next = new Set(prev);
             next.add(answerId);
+            if (promptScopedConnectKey) {
+              next.add(promptScopedConnectKey);
+            }
             return next;
           });
           setSelectedAnswerId(null);
@@ -1050,6 +1058,8 @@ export default function PromptThreadScreen() {
           );
         } else if (action === 'already_pending') {
           Alert.alert('Already Sent', 'Your connect request is already pending.');
+        } else if (action === 'already_removed') {
+          Alert.alert('Already Handled', 'A Connect request was already handled for this person on this prompt.');
         } else {
           Alert.alert('Connect Sent', 'Your connect request has been sent!');
         }
@@ -1060,6 +1070,9 @@ export default function PromptThreadScreen() {
             if (!prev.has(answerId)) return prev;
             const next = new Set(prev);
             next.delete(answerId);
+            if (promptScopedConnectKey) {
+              next.delete(promptScopedConnectKey);
+            }
             return next;
           });
         }
@@ -1072,6 +1085,9 @@ export default function PromptThreadScreen() {
           if (!prev.has(answerId)) return prev;
           const next = new Set(prev);
           next.delete(answerId);
+          if (promptScopedConnectKey) {
+            next.delete(promptScopedConnectKey);
+          }
           return next;
         });
       }
@@ -1089,7 +1105,7 @@ export default function PromptThreadScreen() {
         setConnectSending(null);
       }
     }
-  }, [userId, promptId, sendConnectRequest, router]);
+  }, [answers, userId, promptId, sendConnectRequest, router]);
 
   // Handle tap-to-view for media content
   // P0-001 FIX: Backend is the source of truth for view state.
@@ -1523,7 +1539,17 @@ export default function PromptThreadScreen() {
     // Show Connect for ALL answer types (anonymous, no-photo, full-view, photo, video, voice)
     // Only block for: own answer, existing pending request, already connected
     // NOTE: !isAnon was REMOVED - anonymous display doesn't block connection
-    const isEligibleForConnect = isPromptOwner && !item.hasSentConnect && !connectSentFor.has(item._id) && !isOwnAnswer;
+    const promptScopedConnectKey = item.userId ? `${item.promptId}:${item.userId}` : null;
+    const hasLocallySentConnect =
+      connectSentFor.has(item._id) ||
+      (promptScopedConnectKey ? connectSentFor.has(promptScopedConnectKey) : false);
+    const effectiveConnectStatus =
+      item.connectStatus !== 'none'
+        ? item.connectStatus
+        : hasLocallySentConnect
+          ? 'pending'
+          : 'none';
+    const isEligibleForConnect = isPromptOwner && !item.hasSentConnect && !hasLocallySentConnect && !isOwnAnswer;
     const canConnect = isEligibleForConnect && isSelected;
     const hasSentConnect = isPromptOwner && (item.hasSentConnect || connectSentFor.has(item._id));
 

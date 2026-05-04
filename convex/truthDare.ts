@@ -385,6 +385,34 @@ async function hasBlockBetween(ctx: any, userA: string, userB: string): Promise<
   return !!reverse;
 }
 
+type TodConnectRequestStatus = 'pending' | 'connected' | 'removed';
+
+async function findTodConnectRequestForPromptPair(
+  ctx: any,
+  promptId: string,
+  fromUserId: string,
+  toUserId: string,
+  statuses: TodConnectRequestStatus[] = ['pending', 'connected', 'removed'],
+) {
+  return await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_prompt', (q: any) => q.eq('promptId', promptId))
+    .filter((q: any) =>
+      q.and(
+        q.eq(q.field('fromUserId'), fromUserId),
+        q.eq(q.field('toUserId'), toUserId),
+        q.or(...statuses.map((status) => q.eq(q.field('status'), status))),
+      )
+    )
+    .first();
+}
+
+function getTodConnectDuplicateAction(status: TodConnectRequestStatus) {
+  if (status === 'connected') return 'already_connected' as const;
+  if (status === 'removed') return 'already_removed' as const;
+  return 'already_pending' as const;
+}
+
 function getVoiceMediaUrlForViewer(
   answer: {
     type: string;
@@ -1279,27 +1307,27 @@ export const sendTodConnectRequest = mutation({
       };
     }
 
-    // Check for existing pending/connected request for this user pair
-    const existing = await ctx.db
-      .query('todConnectRequests')
-      .withIndex('by_from_to', (q) => q.eq('fromUserId', fromUserId).eq('toUserId', toUserId))
-      .filter((q) =>
-        q.or(
-          q.eq(q.field('status'), 'pending'),
-          q.eq(q.field('status'), 'connected')
-        )
-      )
-      .first();
+    // One request per recipient per prompt. Do not use the pair-wide index
+    // here: the prompt owner may have multiple prompts with the same commenter,
+    // but must not spam the same commenter repeatedly from this prompt.
+    const existing = await findTodConnectRequestForPromptPair(
+      ctx,
+      promptId,
+      fromUserId as string,
+      toUserId as string,
+    );
 
     if (existing) {
-      console.log('[TOD_CONNECT_SEND] Duplicate forward request:', {
+      console.log('[TOD_CONNECT_SEND] Duplicate prompt request:', {
         from: (fromUserId as string).slice(-8),
         to: (toUserId as string).slice(-8),
+        promptId,
         status: existing.status,
       });
       return {
         success: true,
-        action: existing.status === 'connected' ? 'already_connected' : 'already_pending',
+        action: getTodConnectDuplicateAction(existing.status),
+        requestId: existing._id as string,
       };
     }
 
@@ -1607,21 +1635,25 @@ export const checkTodConnectStatus = query({
       .first();
     if (!answer) return { status: 'none' as const };
 
-    // Check for request from current user to answer author
-    const requestSent = await ctx.db
-      .query('todConnectRequests')
-      .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', answer.userId))
-      .first();
+    // Check for request from current user to answer author on this prompt.
+    const requestSent = await findTodConnectRequestForPromptPair(
+      ctx,
+      promptId,
+      userId as string,
+      answer.userId,
+    );
 
     if (requestSent) {
       return { status: requestSent.status };
     }
 
-    // Check for request from answer author to current user
-    const requestReceived = await ctx.db
-      .query('todConnectRequests')
-      .withIndex('by_from_to', (q) => q.eq('fromUserId', answer.userId).eq('toUserId', userId))
-      .first();
+    // Check for request from answer author to current user on this prompt.
+    const requestReceived = await findTodConnectRequestForPromptPair(
+      ctx,
+      promptId,
+      answer.userId,
+      userId as string,
+    );
 
     if (requestReceived) {
       return { status: requestReceived.status };
@@ -2650,24 +2682,38 @@ export const getPromptThread = query({
           hasViewedMedia = viewRecord?.viewedAt !== undefined;
         }
 
-        // Check if viewer (as prompt owner) has sent a connect request for this answer
+        // Check if viewer (as prompt owner) has sent a connect request for
+        // this prompt/commenter pair. Scope this to the prompt so a request
+        // on another prompt does not incorrectly hide this prompt's Connect
+        // affordance. Accepted private relationships are still global.
         let hasSentConnect = false;
-        let connectStatus: 'none' | 'pending' | 'connected' = 'none';
-        if (viewerDbId && viewerDbId !== answer.userId) {
-          const connectReq = await ctx.db
-            .query('todConnectRequests')
-            .withIndex('by_from_to', (q) =>
-              q.eq('fromUserId', viewerDbId).eq('toUserId', answer.userId)
-            )
-            .filter((q) =>
-              q.or(
-                q.eq(q.field('status'), 'pending'),
-                q.eq(q.field('status'), 'connected')
-              )
-            )
-            .first();
+        let connectStatus: 'none' | 'pending' | 'connected' | 'removed' = 'none';
+        if (
+          viewerDbId &&
+          !isSystemTodOwnerId(prompt.ownerUserId) &&
+          viewerDbId === prompt.ownerUserId &&
+          viewerDbId !== answer.userId
+        ) {
+          const connectReq = await findTodConnectRequestForPromptPair(
+            ctx,
+            promptId,
+            viewerDbId as string,
+            answer.userId,
+          );
           hasSentConnect = !!connectReq;
-          connectStatus = (connectReq?.status as 'pending' | 'connected' | undefined) ?? 'none';
+          connectStatus = (connectReq?.status as 'pending' | 'connected' | 'removed' | undefined) ?? 'none';
+
+          if (!hasSentConnect) {
+            const existingConnection = await findPhase2MatchConversationStatus(
+              ctx,
+              viewerDbId as Id<'users'>,
+              answer.userId as Id<'users'>,
+            );
+            if (existingConnection.isConnected) {
+              hasSentConnect = true;
+              connectStatus = 'connected';
+            }
+          }
         }
 
         return {
