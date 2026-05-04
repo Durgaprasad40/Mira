@@ -1722,29 +1722,40 @@ export default function PromptThreadScreen() {
           : 'none';
     const isEligibleForConnect = isPromptOwner && !item.hasSentConnect && !hasLocallySentConnect && !isOwnAnswer;
     const canConnect = isEligibleForConnect && isSelected;
-    const hasSentConnect = isPromptOwner && (item.hasSentConnect || connectSentFor.has(item._id));
+    const hasSentConnect = isPromptOwner && (item.hasSentConnect || hasLocallySentConnect);
 
     // Compact media tile state machine. The tile occupies an 84×84 square on
     // the right of the answer body and supersedes both the old wide
     // mediaBadge and the inert privateMediaIndicator placeholder.
     //
     // States:
-    //   'photo' | 'video' | 'voice' — viewer can open inline when mediaUrl is present.
+    //   'photo' | 'video' | 'voice' — viewer can open inline (mediaUrl present
+    //     OR prompt-owner-only photo/video that requires a claim).
     //   'locked'   — viewer is not authorized (regular user looking at a
     //     creator-only photo/video/voice). Tile is non-interactive.
     //   'viewed'   — non-owner already consumed a one-time photo/video.
-
+    //
+    // BUG FIX: prompt creator viewing a creator-only photo/video used to fall
+    // into the inert privateMediaIndicator branch (no onPress) so they could
+    // not invoke the existing claim flow. The tile below makes that path
+    // tappable for prompt owners — the backend (`claimAnswerMediaView`)
+    // already authorizes them, only the UI affordance was missing.
     const tileMediaType: 'photo' | 'video' | 'voice' | null =
       item.type === 'photo' || item.type === 'video' || item.type === 'voice'
         ? item.type
         : null;
     const hasPlayableMedia = !!item.mediaUrl;
     const isCreatorOnly = item.visibility === 'owner_only';
+    const canPromptOwnerClaim =
+      isPromptOwner && !isOwnAnswer && item.hasMedia && !hasPlayableMedia &&
+      (item.type === 'photo' || item.type === 'video');
     let tileState: 'photo' | 'video' | 'voice' | 'locked' | 'viewed' | null = null;
     if (tileMediaType) {
       if (item.hasViewedMedia && !isOwnAnswer && (tileMediaType === 'photo' || tileMediaType === 'video')) {
         tileState = 'viewed';
       } else if (hasPlayableMedia) {
+        tileState = tileMediaType;
+      } else if (canPromptOwnerClaim) {
         tileState = tileMediaType;
       } else if (item.hasMedia && !isOwnAnswer) {
         tileState = 'locked';
@@ -1812,9 +1823,13 @@ export default function PromptThreadScreen() {
       if (!tileState) return undefined;
       switch (tileState) {
         case 'photo':
-          return 'Open photo';
+          return canPromptOwnerClaim
+            ? 'Open creator-only photo'
+            : 'Open photo';
         case 'video':
-          return 'Open video';
+          return canPromptOwnerClaim
+            ? 'Open creator-only video'
+            : 'Open video';
         case 'voice':
           if (!hasPlayableMedia) return 'Locked voice message';
           return isThisVoicePlaying ? 'Pause voice message' : 'Play voice message';
@@ -2109,13 +2124,13 @@ export default function PromptThreadScreen() {
                 )}
 
                 {/* Connect status indicator - P0-FIX: Show different states */}
-                {hasSentConnect && item.connectStatus === 'pending' && (
+                {hasSentConnect && effectiveConnectStatus === 'pending' && (
                   <View style={styles.connectPendingInline}>
                     <Ionicons name="hourglass-outline" size={12} color="#F5A623" />
                     <Text style={styles.connectPendingInlineText}>Waiting</Text>
                   </View>
                 )}
-                {hasSentConnect && item.connectStatus === 'connected' && (
+                {hasSentConnect && effectiveConnectStatus === 'connected' && (
                   <TouchableOpacity
                     style={[styles.connectPendingInline, { backgroundColor: 'rgba(76, 175, 80, 0.15)' }]}
                     onPress={() => {
@@ -2126,6 +2141,12 @@ export default function PromptThreadScreen() {
                     <Ionicons name="checkmark-circle" size={12} color="#4CAF50" />
                     <Text style={[styles.connectPendingInlineText, { color: '#4CAF50' }]}>Connected</Text>
                   </TouchableOpacity>
+                )}
+                {hasSentConnect && effectiveConnectStatus === 'removed' && (
+                  <View style={[styles.connectPendingInline, { backgroundColor: 'rgba(110, 110, 130, 0.14)' }]}>
+                    <Ionicons name="remove-circle-outline" size={12} color={PREMIUM.textMuted} />
+                    <Text style={[styles.connectPendingInlineText, { color: PREMIUM.textMuted }]}>Handled</Text>
+                  </View>
                 )}
               </View>
             </View>
