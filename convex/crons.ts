@@ -18,6 +18,14 @@ crons.interval(
   internal.messages.cleanupStaleTypingStatus
 );
 
+// Chat Rooms one-on-one DMs are temporary. Expire/delete room-originated
+// private threads after 3 hours with no messages from either participant.
+crons.interval(
+  'cleanup-expired-chat-room-private-dms',
+  { minutes: 10 },
+  internal.messages.cleanupExpiredChatRoomPrivateDms
+);
+
 // Phase-1 secure media: enforce backend expiry by revoking expired access and
 // retrying storage deletion for already-expired media.
 crons.interval(

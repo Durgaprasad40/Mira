@@ -6,6 +6,10 @@ import { asUserId } from './id';
 import { hashPassword, verifyPassword, encryptPassword, decryptPassword } from './cryptoUtils';
 import { resolveUserIdByAuthId } from './helpers';
 import { shouldCreatePhase2ChatRoomsNotification } from './phase2NotificationPrefs';
+import {
+  isChatRoomPrivateDmConversation,
+  isChatRoomPrivateDmExpired,
+} from './chatRoomDmRetention';
 
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -4929,6 +4933,7 @@ export const getUnreadDmCountsByRoom = query({
     authUserId: v.string(),
   },
   handler: async (ctx, { authUserId }) => {
+    const now = Date.now();
     // Auth guard
     if (!authUserId || authUserId.trim().length === 0) {
       return { byRoomId: {}, totalUnread: 0, hasAnyUnread: false };
@@ -4962,6 +4967,7 @@ export const getUnreadDmCountsByRoom = query({
       const conversation = conversations[i];
       if (!conversation) continue;
       if (!conversation.sourceRoomId) continue;
+      if (isChatRoomPrivateDmExpired(conversation, now)) continue;
 
       const roomIdStr = conversation.sourceRoomId as string;
       const unreadCount = participantRows[i].unreadCount || 0;
@@ -4990,6 +4996,7 @@ export const getDmThreads = query({
     authUserId: v.string(),
   },
   handler: async (ctx, { authUserId }) => {
+    const now = Date.now();
     if (!authUserId || authUserId.trim().length === 0) {
       return [];
     }
@@ -5030,6 +5037,7 @@ export const getDmThreads = query({
         const conversation = await ctx.db.get(row.conversationId);
         if (!conversation) continue;
         if (!conversation.sourceRoomId) continue;
+        if (isChatRoomPrivateDmExpired(conversation, now)) continue;
 
         const lastMsg = await ctx.db
           .query('messages')
@@ -5535,6 +5543,7 @@ export const getOrCreateDmThread = mutation({
         ? [userId, peerUserId]
         : [peerUserId, userId];
 
+    const now = Date.now();
     let found: Id<'conversations'> | null = null;
 
     if (sourceRoomId) {
@@ -5545,6 +5554,9 @@ export const getOrCreateDmThread = mutation({
       for (const c of candidates) {
         if (c.participants.length !== 2) continue;
         if (!c.participants.includes(userId) || !c.participants.includes(peerUserId)) {
+          continue;
+        }
+        if (isChatRoomPrivateDmExpired(c, now)) {
           continue;
         }
         found = c._id;
@@ -5559,12 +5571,12 @@ export const getOrCreateDmThread = mutation({
         const c = await ctx.db.get(row.conversationId);
         if (!c || c.participants.length !== 2) continue;
         if (!c.participants.includes(peerUserId)) continue;
+        if (!isChatRoomPrivateDmConversation(c)) continue;
+        if (isChatRoomPrivateDmExpired(c, now)) continue;
         found = c._id;
         break;
       }
     }
-
-    const now = Date.now();
 
     if (!found) {
       const conversationId = await ctx.db.insert('conversations', {

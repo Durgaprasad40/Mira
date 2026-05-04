@@ -218,10 +218,11 @@ export default function PrivateChatView({
       ? { authUserId, threadId, paginationOpts: { numItems: DM_PAGE_SIZE, cursor: null } }
       : 'skip'
   );
-  const liveMessages = messagesResult?.page ?? [];
+  const isExpiredThread = (messagesResult as { expired?: boolean } | undefined)?.expired === true;
+  const liveMessages = isExpiredThread ? [] : messagesResult?.page ?? [];
   const messages = useMemo(
-    () => mergeDmMessagesById([...olderMessages, ...liveMessages]),
-    [liveMessages, olderMessages]
+    () => (isExpiredThread ? [] : mergeDmMessagesById([...olderMessages, ...liveMessages])),
+    [isExpiredThread, liveMessages, olderMessages]
   );
 
   // DM-ID-FIX: Mutations for sending and marking read (messages module)
@@ -257,6 +258,19 @@ export default function PrivateChatView({
   }, [threadId, authUserId]);
 
   useEffect(() => {
+    if (!isExpiredThread) return;
+    setOlderMessages([]);
+    setOlderMessagesCursor(null);
+    setHasOlderMessages(false);
+    setIsLoadingOlderMessages(false);
+    setLoadOlderError(null);
+    setAttachmentVisible(false);
+    setDoodleVisible(false);
+    setVideoPlayerUri('');
+    setImagePreviewUri('');
+  }, [isExpiredThread]);
+
+  useEffect(() => {
     if (!messagesResult || olderMessages.length > 0) {
       return;
     }
@@ -280,7 +294,7 @@ export default function PrivateChatView({
   }, [dm.peerId]);
 
   const handleLoadOlderMessages = useCallback(async () => {
-    if (!threadId || !authUserId || !hasOlderMessages || !olderMessagesCursor || isLoadingOlderMessages) {
+    if (isExpiredThread || !threadId || !authUserId || !hasOlderMessages || !olderMessagesCursor || isLoadingOlderMessages) {
       return;
     }
 
@@ -308,7 +322,7 @@ export default function PrivateChatView({
     } finally {
       setIsLoadingOlderMessages(false);
     }
-  }, [authUserId, convex, hasOlderMessages, isLoadingOlderMessages, olderMessagesCursor, threadId]);
+  }, [authUserId, convex, hasOlderMessages, isExpiredThread, isLoadingOlderMessages, olderMessagesCursor, threadId]);
 
   // ==========================================================================
   // HELPER: Check if currently near bottom
@@ -530,6 +544,10 @@ export default function PrivateChatView({
   const handleSend = useCallback(async () => {
     const trimmed = inputText.trim();
     if (!trimmed || !threadId || !authUserId) return;
+    if (isExpiredThread) {
+      Alert.alert('Chat Expired', 'This chat expired.');
+      return;
+    }
 
     setInputText('');
     // Optimistic clear: hide any prior muted notice while we attempt to send.
@@ -570,12 +588,16 @@ export default function PrivateChatView({
       // Restore input on error
       setInputText(trimmed);
     }
-  }, [inputText, threadId, authUserId, sendConversationMessage, onSendComplete, scrollToLatest]);
+  }, [inputText, isExpiredThread, threadId, authUserId, sendConversationMessage, onSendComplete, scrollToLatest]);
 
   // DM-MEDIA-FIX: Full media upload implementation for DMs
   const handleSendMedia = useCallback(
     async (uri: string, mediaType: 'image' | 'video' | 'doodle' | 'audio') => {
       if (!threadId || !authUserId) return;
+      if (isExpiredThread) {
+        Alert.alert('Chat Expired', 'This chat expired.');
+        return;
+      }
 
       // Optimistic clear: hide any prior muted notice while we attempt to send.
       setMutedByPeer(false);
@@ -622,7 +644,7 @@ export default function PrivateChatView({
         }
       }
     },
-    [threadId, authUserId, generateUploadUrl, sendConversationMessage, scrollToLatest, onSendComplete]
+    [threadId, authUserId, generateUploadUrl, sendConversationMessage, scrollToLatest, onSendComplete, isExpiredThread]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -926,8 +948,14 @@ export default function PrivateChatView({
                 ListHeaderComponent={historyHeader}
                 ListEmptyComponent={
                   <View style={styles.emptyContainer}>
-                    <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
-                    <Text style={styles.emptyText}>No messages yet. Start the conversation.</Text>
+                    <Ionicons
+                      name={isExpiredThread ? 'time-outline' : 'chatbubble-outline'}
+                      size={40}
+                      color={C.textLight}
+                    />
+                    <Text style={styles.emptyText}>
+                      {isExpiredThread ? 'This chat expired.' : 'No messages yet. Start the conversation.'}
+                    </Text>
                   </View>
                 }
               />
@@ -944,31 +972,40 @@ export default function PrivateChatView({
             onLayout={onComposerLayout}
             style={styles.inputWrapper}
           >
-            {mutedByPeer && (
-              <View style={styles.mutedNotice}>
-                <Ionicons
-                  name="volume-mute-outline"
-                  size={16}
-                  color="#FFB74D"
-                  style={styles.mutedNoticeIcon}
-                />
-                <View style={styles.mutedNoticeTextWrap}>
-                  <Text style={styles.mutedNoticeTitle}>You have been muted</Text>
-                  <Text style={styles.mutedNoticeBody}>
-                    You can&apos;t message this person until they unmute you.
-                  </Text>
-                </View>
+            {isExpiredThread ? (
+              <View style={styles.expiredNotice}>
+                <Ionicons name="time-outline" size={16} color={C.textLight} />
+                <Text style={styles.expiredNoticeText}>This chat expired.</Text>
               </View>
+            ) : (
+              <>
+                {mutedByPeer && (
+                  <View style={styles.mutedNotice}>
+                    <Ionicons
+                      name="volume-mute-outline"
+                      size={16}
+                      color="#FFB74D"
+                      style={styles.mutedNoticeIcon}
+                    />
+                    <View style={styles.mutedNoticeTextWrap}>
+                      <Text style={styles.mutedNoticeTitle}>You have been muted</Text>
+                      <Text style={styles.mutedNoticeBody}>
+                        You can&apos;t message this person until they unmute you.
+                      </Text>
+                    </View>
+                  </View>
+                )}
+                <ChatComposer
+                  value={inputText}
+                  onChangeText={setInputText}
+                  onSend={handleSend}
+                  onPlusPress={() => setAttachmentVisible(true)}
+                  onMicPress={toggleRecording}
+                  isRecording={isRecording}
+                  elapsedMs={elapsedMs}
+                />
+              </>
             )}
-            <ChatComposer
-              value={inputText}
-              onChangeText={setInputText}
-              onSend={handleSend}
-              onPlusPress={() => setAttachmentVisible(true)}
-              onMicPress={toggleRecording}
-              isRecording={isRecording}
-              elapsedMs={elapsedMs}
-            />
           </View>
         </View>
       ) : (
@@ -1010,38 +1047,53 @@ export default function PrivateChatView({
               ListHeaderComponent={historyHeader}
               ListEmptyComponent={
                 <View style={styles.emptyContainer}>
-                  <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
-                  <Text style={styles.emptyText}>No messages yet. Start the conversation.</Text>
+                  <Ionicons
+                    name={isExpiredThread ? 'time-outline' : 'chatbubble-outline'}
+                    size={40}
+                    color={C.textLight}
+                  />
+                  <Text style={styles.emptyText}>
+                    {isExpiredThread ? 'This chat expired.' : 'No messages yet. Start the conversation.'}
+                  </Text>
                 </View>
               }
             />
           )}
           <View style={{ paddingBottom: insets.bottom }}>
-            {mutedByPeer && (
-              <View style={styles.mutedNotice}>
-                <Ionicons
-                  name="volume-mute-outline"
-                  size={16}
-                  color="#FFB74D"
-                  style={styles.mutedNoticeIcon}
-                />
-                <View style={styles.mutedNoticeTextWrap}>
-                  <Text style={styles.mutedNoticeTitle}>You have been muted</Text>
-                  <Text style={styles.mutedNoticeBody}>
-                    You can&apos;t message this person until they unmute you.
-                  </Text>
-                </View>
+            {isExpiredThread ? (
+              <View style={styles.expiredNotice}>
+                <Ionicons name="time-outline" size={16} color={C.textLight} />
+                <Text style={styles.expiredNoticeText}>This chat expired.</Text>
               </View>
+            ) : (
+              <>
+                {mutedByPeer && (
+                  <View style={styles.mutedNotice}>
+                    <Ionicons
+                      name="volume-mute-outline"
+                      size={16}
+                      color="#FFB74D"
+                      style={styles.mutedNoticeIcon}
+                    />
+                    <View style={styles.mutedNoticeTextWrap}>
+                      <Text style={styles.mutedNoticeTitle}>You have been muted</Text>
+                      <Text style={styles.mutedNoticeBody}>
+                        You can&apos;t message this person until they unmute you.
+                      </Text>
+                    </View>
+                  </View>
+                )}
+                <ChatComposer
+                  value={inputText}
+                  onChangeText={setInputText}
+                  onSend={handleSend}
+                  onPlusPress={() => setAttachmentVisible(true)}
+                  onMicPress={toggleRecording}
+                  isRecording={isRecording}
+                  elapsedMs={elapsedMs}
+                />
+              </>
             )}
-            <ChatComposer
-              value={inputText}
-              onChangeText={setInputText}
-              onSend={handleSend}
-              onPlusPress={() => setAttachmentVisible(true)}
-              onMicPress={toggleRecording}
-              isRecording={isRecording}
-              elapsedMs={elapsedMs}
-            />
           </View>
         </KeyboardAvoidingView>
       )}
@@ -1261,6 +1313,20 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 14,
+    color: C.textLight,
+  },
+  expiredNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    backgroundColor: C.surface,
+  },
+  expiredNoticeText: {
+    fontSize: 13,
+    fontWeight: '600',
     color: C.textLight,
   },
   // Inline notice shown above the composer when sendMessage is rejected
