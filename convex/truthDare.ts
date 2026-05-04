@@ -1323,6 +1323,10 @@ export const sendTodConnectRequest = mutation({
     if (prompt.ownerUserId !== fromUserId) {
       return { success: false, reason: 'Only prompt owner can send connect' };
     }
+    const fromUser = await ctx.db.get(fromUserId as Id<'users'>);
+    if (!fromUser || fromUser.isBanned || fromUser.deletedAt || fromUser.phase2OnboardingCompleted !== true) {
+      return { success: false, reason: 'Connect unavailable for this user' };
+    }
 
     // Get answer to find recipient
     const answer = await ctx.db
@@ -1335,9 +1339,16 @@ export const sendTodConnectRequest = mutation({
     if (answer.promptId !== promptId) {
       return { success: false, reason: 'Answer does not belong to this prompt' };
     }
+    if ((answer.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD) {
+      return { success: false, reason: 'Connect unavailable for this answer' };
+    }
 
     // Anonymous answers ARE connectable: identity is revealed only on accept.
     const toUserId = answer.userId;
+    const toUser = await ctx.db.get(toUserId as Id<'users'>);
+    if (!toUser || toUser.isBanned || toUser.deletedAt || toUser.phase2OnboardingCompleted !== true) {
+      return { success: false, reason: 'Connect unavailable for this user' };
+    }
 
     // Cannot connect to self
     if (toUserId === fromUserId) {
