@@ -2048,6 +2048,14 @@ export default defineSchema({
     .index('by_expires', ['expiresAt'])
     .index('by_room_expires', ['roomId', 'expiresAt']),
 
+  chatRoomMediaViews: defineTable({
+    messageId: v.id('chatRoomMessages'),
+    viewerUserId: v.id('users'),
+    viewedAt: v.number(),
+  })
+    .index('by_message', ['messageId'])
+    .index('by_message_viewer', ['messageId', 'viewerUserId']),
+
   // Emoji reactions on chat room messages (Phase-2)
   chatRoomMessageReactions: defineTable({
     roomId: v.id('chatRooms'),

@@ -369,6 +369,24 @@ async function validateChatRoomMediaMetadata(
   }
 }
 
+function isChatRoomVisualMediaType(type: string | undefined): type is 'image' | 'video' {
+  return type === 'image' || type === 'video';
+}
+
+function getChatRoomVisualStorageId(message: {
+  type?: string;
+  imageStorageId?: Id<'_storage'>;
+  videoStorageId?: Id<'_storage'>;
+}): Id<'_storage'> | undefined {
+  if (message.type === 'video') {
+    return message.videoStorageId ?? message.imageStorageId;
+  }
+  if (message.type === 'image') {
+    return message.imageStorageId;
+  }
+  return undefined;
+}
+
 async function cleanupChatRoomMessageRelations(
   ctx: MutationCtx,
   roomId: Id<'chatRooms'>,
@@ -406,6 +424,23 @@ async function cleanupChatRoomMessageRelations(
     }
   } catch {
     // Best-effort cleanup: continue even if notification lookup fails.
+  }
+
+  try {
+    const mediaViews = await ctx.db
+      .query('chatRoomMediaViews')
+      .withIndex('by_message', (q) => q.eq('messageId', messageId))
+      .collect();
+
+    for (const mediaView of mediaViews) {
+      try {
+        await ctx.db.delete(mediaView._id);
+      } catch {
+        // Best-effort cleanup: continue if already deleted concurrently.
+      }
+    }
+  } catch {
+    // Best-effort cleanup: continue even if media-view lookup fails.
   }
 }
 
@@ -1266,6 +1301,22 @@ export const listMessages = query({
           },
         ])
       );
+      const visualMessages = result.filter(
+        (m) => isChatRoomVisualMediaType(m.type) && !!getChatRoomVisualStorageId(m)
+      );
+      const visualViewRows = await Promise.all(
+        visualMessages.map((m) =>
+          ctx.db
+            .query('chatRoomMediaViews')
+            .withIndex('by_message_viewer', (q) =>
+              q.eq('messageId', m._id).eq('viewerUserId', userId!)
+            )
+            .first()
+        )
+      );
+      const visualViewByMessageId = new Map(
+        visualMessages.map((m, idx) => [m._id as string, visualViewRows[idx]])
+      );
 
       // P2-2: Emit the cursor of the oldest row in the returned page so
       // callers can request the next (older) page without any shared
@@ -1282,8 +1333,14 @@ export const listMessages = query({
       return {
         messages: result.map((m) => {
           const p = profileMap.get(String(m.senderId));
+          const visualView = visualViewByMessageId.get(m._id as string);
+          const isVisualMedia = isChatRoomVisualMediaType(m.type);
           return {
             ...m,
+            imageUrl: isVisualMedia ? undefined : m.imageUrl,
+            hasVisualMedia: isVisualMedia && !!getChatRoomVisualStorageId(m),
+            visualMediaConsumed: !!visualView,
+            visualMediaViewedAt: visualView?.viewedAt,
             senderNickname: p?.nickname ?? 'User',
             senderAvatarUrl: p?.avatarUrl ?? null,
             senderAvatarVersion: p?.avatarVersion ?? 0,
@@ -1955,6 +2012,64 @@ export const sendMessage = mutation({
     }
 
     return messageId;
+  },
+});
+
+export const openChatRoomVisualMedia = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    messageId: v.id('chatRoomMessages'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, messageId, authUserId }) => {
+    const { userId } = await requireRoomReadAccess(ctx, roomId, authUserId);
+
+    const message = await ctx.db.get(messageId);
+    if (!message || message.roomId !== roomId || !isChatRoomVisualMediaType(message.type)) {
+      return { status: 'no_media' as const };
+    }
+
+    const now = Date.now();
+    if (
+      message.deletedAt ||
+      (typeof message.expiresAt === 'number' && message.expiresAt <= now)
+    ) {
+      return { status: 'no_media' as const };
+    }
+
+    const existingView = await ctx.db
+      .query('chatRoomMediaViews')
+      .withIndex('by_message_viewer', (q) =>
+        q.eq('messageId', messageId).eq('viewerUserId', userId)
+      )
+      .first();
+    if (existingView) {
+      return { status: 'already_viewed' as const };
+    }
+
+    const storageId = getChatRoomVisualStorageId(message);
+    if (!storageId) {
+      return { status: 'no_media' as const };
+    }
+
+    const url = await ctx.storage.getUrl(storageId);
+    if (!url) {
+      return { status: 'no_media' as const };
+    }
+
+    const viewedAt = Date.now();
+    await ctx.db.insert('chatRoomMediaViews', {
+      messageId,
+      viewerUserId: userId,
+      viewedAt,
+    });
+
+    return {
+      status: 'ok' as const,
+      url,
+      mediaType: message.type,
+      viewedAt,
+    };
   },
 });
 

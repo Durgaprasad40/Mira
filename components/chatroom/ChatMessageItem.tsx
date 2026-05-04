@@ -78,6 +78,10 @@ interface ChatMessageItemProps {
   messageType?: 'text' | 'image' | 'video' | 'doodle' | 'audio';
   /** Media URL for image/video/doodle messages */
   mediaUrl?: string;
+  /** Backend-enforced one-time room visual that must be claimed before URL access */
+  hasOneTimeVisualMedia?: boolean;
+  /** Current viewer has already consumed this one-time room visual */
+  visualMediaConsumed?: boolean;
   /** Local media URI for pending uploads (Phase-1 UX) */
   localUri?: string;
   /** Upload status for pending media (Phase-1 UX) */
@@ -127,6 +131,8 @@ function ChatMessageItem({
   dimmed = false,
   messageType = 'text',
   mediaUrl,
+  hasOneTimeVisualMedia,
+  visualMediaConsumed,
   localUri,
   uploadStatus,
   uploadProgress,
@@ -145,7 +151,13 @@ function ChatMessageItem({
   onReactionTap,
 }: ChatMessageItemProps) {
   const effectiveMediaUrl = uploadStatus && localUri ? localUri : mediaUrl;
-  const isMedia = (messageType === 'image' || messageType === 'video' || messageType === 'doodle') && !!effectiveMediaUrl;
+  const hasClaimOnlyVisualMedia =
+    (messageType === 'image' || messageType === 'video') &&
+    !!hasOneTimeVisualMedia &&
+    !effectiveMediaUrl;
+  const isMedia =
+    ((messageType === 'image' || messageType === 'video' || messageType === 'doodle') && !!effectiveMediaUrl) ||
+    hasClaimOnlyVisualMedia;
   const isSecureMedia = messageType === 'image' || messageType === 'video';
   const isAudio = messageType === 'audio' && audioUrl;
 
@@ -448,13 +460,46 @@ function ChatMessageItem({
                 }
               }}
             >
-              {/* TAP-TO-VIEW-FIX: Use onPress for tap-to-view instead of onHoldStart/End */}
-              <MediaMessage
-                messageId={messageId}
-                mediaUrl={effectiveMediaUrl!}
-                type={messageType as 'image' | 'video' | 'doodle'}
-                onPress={isSecureMedia ? handleMediaTap : undefined}
-              />
+              {hasClaimOnlyVisualMedia ? (
+                <Pressable
+                  style={[
+                    styles.oneTimeMediaCard,
+                    visualMediaConsumed && styles.oneTimeMediaCardViewed,
+                  ]}
+                  onPress={() => {
+                    if (!visualMediaConsumed && !uploadStatus) {
+                      onMediaPress?.(messageId, '', messageType as 'image' | 'video');
+                    }
+                  }}
+                  disabled={!!visualMediaConsumed || !!uploadStatus}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    visualMediaConsumed
+                      ? `${messageType === 'video' ? 'Video' : 'Photo'} already viewed`
+                      : `Open one-time ${messageType === 'video' ? 'video' : 'photo'}`
+                  }
+                >
+                  <Ionicons
+                    name={visualMediaConsumed ? 'checkmark-circle' : messageType === 'video' ? 'videocam' : 'image'}
+                    size={24}
+                    color={visualMediaConsumed ? C.textLight : C.primary}
+                  />
+                  <Text style={[
+                    styles.oneTimeMediaTitle,
+                    visualMediaConsumed && styles.oneTimeMediaTitleViewed,
+                  ]}>
+                    {visualMediaConsumed ? 'Already viewed' : 'Tap to view once'}
+                  </Text>
+                </Pressable>
+              ) : (
+                // TAP-TO-VIEW-FIX: Use onPress for tap-to-view instead of onHoldStart/End
+                <MediaMessage
+                  messageId={messageId}
+                  mediaUrl={effectiveMediaUrl!}
+                  type={messageType as 'image' | 'video' | 'doodle'}
+                  onPress={isSecureMedia ? handleMediaTap : undefined}
+                />
+              )}
               {!!uploadStatus && (
                 <View style={styles.pendingOverlay}>
                   {uploadStatus === 'uploading' ? (
@@ -819,6 +864,28 @@ const styles = StyleSheet.create({
   mediaContainer: {
     borderRadius: 12,
     overflow: 'hidden',
+  },
+  oneTimeMediaCard: {
+    width: 180,
+    height: 132,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  oneTimeMediaCardViewed: {
+    opacity: 0.65,
+  },
+  oneTimeMediaTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.text,
+  },
+  oneTimeMediaTitleViewed: {
+    color: C.textLight,
   },
   pendingOverlay: {
     ...StyleSheet.absoluteFillObject,

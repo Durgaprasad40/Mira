@@ -165,6 +165,9 @@ interface ConvexRoomListMessage {
   text?: string;
   imageUrl?: string;
   audioUrl?: string;
+  hasVisualMedia?: boolean;
+  visualMediaConsumed?: boolean;
+  visualMediaViewedAt?: number;
   createdAt: number;
   clientId?: string;
   replyToMessageId?: string;
@@ -281,6 +284,11 @@ function toUiChatMessage(message: ConvexRoomListMessage): DemoChatMessage {
     text: message.text,
     mediaUrl: message.imageUrl,
     audioUrl: message.audioUrl,
+    ...({
+      hasOneTimeVisualMedia: message.hasVisualMedia,
+      visualMediaConsumed: message.visualMediaConsumed,
+      visualMediaViewedAt: message.visualMediaViewedAt,
+    } as any),
     createdAt: message.createdAt,
     replyToMessageId: message.replyToMessageId,
     replyToSenderNickname: message.replyToSenderNickname,
@@ -548,6 +556,7 @@ export default function ChatRoomScreen() {
   // Convex mutations
   const sendMessageMutation = useMutation(api.chatRooms.sendMessage);
   const generateUploadUrlMutation = useMutation(api.chatRooms.generateUploadUrl); // CR-009: For media upload
+  const openChatRoomVisualMediaMutation = useMutation(api.chatRooms.openChatRoomVisualMedia);
   const joinRoomMutation = useMutation(api.chatRooms.joinRoom);
   const leaveRoomMutation = useMutation(api.chatRooms.leaveRoom);
   const closeRoomMutation = useMutation(api.chatRooms.closeRoom);
@@ -2836,10 +2845,46 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // TAP-TO-VIEW-FIX: Media tap opens viewer, close button dismisses
   // ─────────────────────────────────────────────────────────────────────────
-  const handleMediaPress = useCallback((_messageId: string, mediaUrl: string, type: 'image' | 'video') => {
-    // Open viewer on tap (stays open until dismissed)
-    setSecureMediaState({ visible: true, isHolding: true, uri: mediaUrl, type });
-  }, []);
+  const handleMediaPress = useCallback(async (messageId: string, mediaUrl: string, type: 'image' | 'video') => {
+    const mediaLabel = type === 'video' ? 'video' : 'photo';
+
+    if (isDemoMode) {
+      if (mediaUrl) {
+        setSecureMediaState({ visible: true, isHolding: true, uri: mediaUrl, type });
+      }
+      return;
+    }
+
+    if (!authUserId || !hasValidRoomId) {
+      Alert.alert('Sign In Required', 'Please sign in to view media.');
+      return;
+    }
+
+    try {
+      const result = await openChatRoomVisualMediaMutation({
+        roomId: roomIdStr as Id<'chatRooms'>,
+        messageId: messageId as Id<'chatRoomMessages'>,
+        authUserId,
+      });
+
+      if (result.status === 'already_viewed') {
+        Alert.alert('Already Viewed', `This ${mediaLabel} was already viewed.`);
+        return;
+      }
+      if (result.status === 'no_media') {
+        Alert.alert('Unavailable', `This ${mediaLabel} is no longer available.`);
+        return;
+      }
+      if (result.status !== 'ok' || !result.url) {
+        Alert.alert('Couldn’t Open', `We couldn’t open this ${mediaLabel}. Please try again.`);
+        return;
+      }
+
+      setSecureMediaState({ visible: true, isHolding: true, uri: result.url, type: result.mediaType });
+    } catch (err: any) {
+      Alert.alert('Couldn’t Open', String(err?.message ?? 'Failed to open media.'));
+    }
+  }, [authUserId, hasValidRoomId, isDemoMode, openChatRoomVisualMediaMutation, roomIdStr]);
 
   const handleMediaClose = useCallback(() => {
     // Close viewer when user taps close or backdrop
@@ -3539,6 +3584,8 @@ export default function ChatRoomScreen() {
           dimmed={isMuted || isSending}
           messageType={(msg.type || 'text') as 'text' | 'image' | 'video' | 'audio'}
           mediaUrl={msg.mediaUrl}
+          hasOneTimeVisualMedia={(msg as any).hasOneTimeVisualMedia}
+          visualMediaConsumed={(msg as any).visualMediaConsumed}
           localUri={localUri}
           uploadStatus={uploadStatus}
           uploadProgress={uploadProgress}
