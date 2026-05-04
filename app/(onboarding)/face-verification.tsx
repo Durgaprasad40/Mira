@@ -269,10 +269,10 @@ export default function FaceVerificationScreen() {
       didShowNoPhotoAlertRef.current = true;
       console.log('[ONB] route_decision: NO_REFERENCE_PHOTO - redirecting to photo-upload');
       Alert.alert(
-        'Photo Required',
-        'Please upload a clear photo showing your face before verification.',
+        'Reference Photo Required',
+        "Please upload a clear photo of your face. It's only used for verification and will not appear on your profile.",
         [{
-          text: 'Upload Photo',
+          text: 'Upload Reference Photo',
           onPress: () => {
             // Only navigate if component still mounted
             if (isMounted) {
@@ -509,10 +509,10 @@ export default function FaceVerificationScreen() {
           if (result.reasonCode === 'NO_REFERENCE_PHOTO' || result.reasonCode === 'REFERENCE_NO_FACE') {
             console.log(`[FaceMatch] FAIL reason=${result.reasonCode} - Redirecting to photo upload`);
             Alert.alert(
-              'Photo Required',
-              'Please upload a clear photo showing your face. Your current photo could not be used for verification.',
+              'Reference Photo Required',
+              "Please upload a clearer photo of your face for verification. It's only used for verification and won't appear on your profile.",
               [{
-                text: 'Upload Photo',
+                text: 'Upload Reference Photo',
                 onPress: () => {
                   setStep('photo_upload');
                   router.replace('/(onboarding)/photo-upload' as any);
@@ -913,7 +913,7 @@ export default function FaceVerificationScreen() {
             <>
               <View style={styles.failedHint}>
                 <Text {...TEXT_PROPS} style={styles.failedHintText}>
-                  Make sure your selfie matches your profile photo. Try better lighting or a different angle.
+                  Make sure your selfie matches your reference photo. Try better lighting or a different angle.
                 </Text>
                 {/* PHASE-1 RESTRUCTURE: Show attempt count */}
                 <Text {...TEXT_PROPS} style={styles.attemptCountText}>
@@ -948,7 +948,7 @@ export default function FaceVerificationScreen() {
               {/* PHASE-1 RESTRUCTURE: Allow users to continue with pending verification */}
               <View style={styles.pendingInfo}>
                 <Text {...TEXT_PROPS} style={styles.pendingInfoText}>
-                  Your verification is under manual review. You can continue setting up your profile while we process your request.
+                  Your verification is being reviewed. Your reference photo is kept privately for review and is not shown on your profile. You can continue setting up your profile while we process your request.
                 </Text>
               </View>
               <Button

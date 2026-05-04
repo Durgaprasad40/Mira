@@ -636,9 +636,9 @@ export default function PhotoUploadScreen() {
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <OnboardingProgressHeader />
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.content}>
-        <Text style={styles.title}>Upload your verification photo</Text>
+        <Text style={styles.title}>Reference Photo</Text>
         <Text style={styles.subtitle}>
-          This photo is used to verify your identity. After verification, you can choose to show a blurred or cartoon version instead.
+          Upload a clear photo of your face so we can confirm you're a real person. This photo is only used for verification and will not appear on your profile.
         </Text>
 
         <View style={styles.photoContainer}>
@@ -704,15 +704,23 @@ export default function PhotoUploadScreen() {
           </Text>
           <View style={styles.requirementItem}>
             <MaterialCommunityIcons name="face-recognition" size={18} color={COLORS.text} />
-            <Text style={styles.requirementText}>Clear, solo photo with your face visible</Text>
+            <Text style={styles.requirementText}>Use a clear front-facing photo</Text>
           </View>
           <View style={styles.requirementItem}>
             <Ionicons name="sunny" size={18} color={COLORS.text} />
-            <Text style={styles.requirementText}>Good lighting, no blur or shadows</Text>
+            <Text style={styles.requirementText}>Use good, even lighting</Text>
           </View>
           <View style={styles.requirementItem}>
-            <Ionicons name="close-circle" size={18} color={COLORS.error} />
-            <Text style={styles.requirementText}>No group photos or covered faces</Text>
+            <Ionicons name="glasses-outline" size={18} color={COLORS.text} />
+            <Text style={styles.requirementText}>No sunglasses, masks, or heavy filters</Text>
+          </View>
+          <View style={styles.requirementItem}>
+            <Ionicons name="people-outline" size={18} color={COLORS.text} />
+            <Text style={styles.requirementText}>One person only — no group photos</Text>
+          </View>
+          <View style={styles.requirementItem}>
+            <Ionicons name="phone-portrait-outline" size={18} color={COLORS.text} />
+            <Text style={styles.requirementText}>No screenshots or photos-of-photos</Text>
           </View>
         </View>
 
@@ -720,16 +728,10 @@ export default function PhotoUploadScreen() {
         <View style={styles.privacyNote}>
           <View style={styles.privacyHeader}>
             <Ionicons name="lock-closed" size={18} color={COLORS.primary} />
-            <Text style={styles.privacyTitle}>Your Privacy After Verification</Text>
+            <Text style={styles.privacyTitle}>Private Reference Photo</Text>
           </View>
           <Text style={styles.privacyText}>
-            After face verification, you can choose to:
-          </Text>
-          <Text style={styles.privacyOption}>• Show your original photo</Text>
-          <Text style={styles.privacyOption}>• Use a blurred version</Text>
-          <Text style={styles.privacyOption}>• Use a cartoon avatar</Text>
-          <Text style={styles.privacyFooter}>
-            Your verification photo is kept private and only used to confirm your identity.
+            Your reference photo is stored privately and is not shown to other users. It is used only to confirm you're a real person.
           </Text>
         </View>
 
