@@ -643,7 +643,7 @@ export interface IncognitoMessage {
   durationMs?: number;
 }
 
-// Private Mode Types (Face 2 only — 10 Phase-2 intent categories)
+// Private Mode Types (Face 2 only — 9 Phase-2 intent categories)
 export type PrivateIntentKey =
   | 'fling'
   | 'short_term'
@@ -652,7 +652,6 @@ export type PrivateIntentKey =
   | 'go_with_the_flow'
   | 'friends_first'
   | 'late_night'
-  | 'open_minded'
   | 'weekend_thing'
   | 'see_where_it_goes';
 
@@ -670,7 +669,6 @@ export type PrivateDesireTag =
   | 'intellectual_match'
   | 'creative_energy'
   | 'fitness_partner'
-  | 'open_minded'
   | 'slow_burn'
   | 'confident_energy'
   | 'mystery'

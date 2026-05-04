@@ -17,6 +17,8 @@ import {
   Dimensions,
   BackHandler,
   TextInput,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
@@ -82,6 +84,10 @@ const LIKE_CARD_CONTENT_PADDING = moderateScale(10, 0.25);
 const RECENCY_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 const INBOX_TIMESTAMP_REFRESH_MS = 60 * 1000;
 const INBOX_LOADING_PLACEHOLDER_COUNT = 4;
+// Visual target for the New Matches strip. When fewer than this many real
+// matches exist, ghost (empty) avatar slots fill the remainder so the row
+// reads as a real "ready to fill" UI rather than a blank empty-state card.
+const NEW_MATCHES_TARGET_SLOTS = 4;
 
 // Premium skeleton row with pulsing opacity (restored from c471732 inbox polish)
 const SkeletonChatRow = React.memo(function SkeletonChatRow() {
@@ -157,6 +163,35 @@ type InboxConversationRow = ProcessedThread | {
    * visible but degrades the avatar/name rendering gracefully.
    */
   terminalState?: 'unmatched' | 'user_removed' | null;
+};
+
+type Phase1StandOutUser = {
+  userId?: string;
+  name?: string | null;
+  displayName?: string | null;
+  age?: number | null;
+  photoUrl?: string | null;
+  gender?: string | null;
+  isVerified?: boolean | null;
+  verified?: boolean | null;
+};
+
+type IncomingStandOutRow = {
+  likeId: string;
+  fromUserId?: string;
+  message?: string | null;
+  createdAt: number;
+  firstOpenedAt?: number | null;
+  sender?: Phase1StandOutUser | null;
+};
+
+type OutgoingStandOutRow = {
+  likeId: string;
+  toUserId?: string;
+  message?: string | null;
+  createdAt: number;
+  firstOpenedAt?: number | null;
+  receiver?: Phase1StandOutUser | null;
 };
 
 const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
@@ -250,6 +285,21 @@ function getInboxConversationKey(item: InboxConversationRow, index: number): str
   return `conversation-fallback-${index}`;
 }
 
+function getStandOutDisplayName(user?: Phase1StandOutUser | null): string {
+  const name = user?.name?.trim() || user?.displayName?.trim();
+  return name || 'Someone';
+}
+
+function getStandOutNameLine(user?: Phase1StandOutUser | null): string {
+  const name = getStandOutDisplayName(user);
+  return typeof user?.age === 'number' && user.age > 0 ? `${name}, ${user.age}` : name;
+}
+
+function getStandOutMessagePreview(message?: string | null): string {
+  const safeMessage = message?.trim();
+  return safeMessage || 'Sent you a Stand Out.';
+}
+
 export default function MessagesScreen() {
   useScreenTrace("MESSAGES");
   const router = useRouter();
@@ -275,6 +325,10 @@ export default function MessagesScreen() {
 
   // View state: 'messages' | 'likes' — IN-PLACE toggle, not a route change
   const [activeView, setActiveView] = useState<'messages' | 'likes'>('messages');
+  const [standOutDetailTarget, setStandOutDetailTarget] = useState<IncomingStandOutRow | null>(null);
+  const [standOutReplyMode, setStandOutReplyMode] = useState(false);
+  const [standOutReplyText, setStandOutReplyText] = useState('');
+  const [activeStandOutAction, setActiveStandOutAction] = useState<string | null>(null);
 
   // P1-RESTORE: Search bar state for filtering conversations by name / preview text.
   // P1-POLISH: Debounce filter (120ms) so large inboxes don't lag per-keystroke,
@@ -557,6 +611,10 @@ export default function MessagesScreen() {
     () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
     [convexUserId, retryKey]
   );
+  const standOutQueryArgs = useMemo(
+    () => (!isDemoMode && convexUserId ? { userId: convexUserId, refreshKey: retryKey } : 'skip' as const),
+    [convexUserId, isDemoMode, retryKey]
+  );
 
   // Convex queries (skipped in demo mode)
   const convexConversations = useQuery(api.messages.getConversations, convexConversationsArgs);
@@ -564,9 +622,15 @@ export default function MessagesScreen() {
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexQueryArgs);
   const convexLikesReceived = useQuery(api.likes.getLikesReceived, convexQueryArgs);
   const convexMatches = useQuery(api.matches.getMatches, convexQueryArgs);
+  const incomingStandOutsResult = useQuery(api.likes.getIncomingStandOuts, standOutQueryArgs);
+  const outgoingStandOutsResult = useQuery(api.likes.getOutgoingStandOuts, standOutQueryArgs);
+  const standOutCounts = useQuery(api.likes.getStandOutCounts, standOutQueryArgs);
 
   // Mutation to mark likes as opened (starts 24h expiry timer)
   const markLikesOpened = useMutation(api.likes.markLikesOpened);
+  const acceptStandOutMutation = useMutation(api.likes.acceptStandOut);
+  const ignoreStandOutMutation = useMutation(api.likes.ignoreStandOut);
+  const replyToStandOutMutation = useMutation(api.likes.replyToStandOut);
 
   // DELIVERED-TICK-FIX: Mark all incoming messages as delivered when messages list loads
   const markAllAsDelivered = useMutation(api.messages.markAllAsDelivered);
@@ -631,6 +695,37 @@ export default function MessagesScreen() {
     );
   }, [isDemoMode, demoMessageThreads, demoConfessionThreads]);
 
+  const incomingStandOuts = useMemo<IncomingStandOutRow[]>(() => {
+    if (isDemoMode || !Array.isArray(incomingStandOutsResult)) return [];
+    return (incomingStandOutsResult as any[]).map((row) => ({
+      ...row,
+      likeId: String(row.likeId),
+      fromUserId: row.fromUserId ? String(row.fromUserId) : undefined,
+    }));
+  }, [incomingStandOutsResult, isDemoMode]);
+
+  const outgoingStandOuts = useMemo<OutgoingStandOutRow[]>(() => {
+    if (isDemoMode || !Array.isArray(outgoingStandOutsResult)) return [];
+    return (outgoingStandOutsResult as any[]).map((row) => ({
+      ...row,
+      likeId: String(row.likeId),
+      toUserId: row.toUserId ? String(row.toUserId) : undefined,
+    }));
+  }, [isDemoMode, outgoingStandOutsResult]);
+
+  const pendingStandOutUserIds = useMemo(() => {
+    const ids = new Set<string>();
+    incomingStandOuts.forEach((row) => {
+      if (row.fromUserId) ids.add(row.fromUserId);
+      if (row.sender?.userId) ids.add(String(row.sender.userId));
+    });
+    outgoingStandOuts.forEach((row) => {
+      if (row.toUserId) ids.add(row.toUserId);
+      if (row.receiver?.userId) ids.add(String(row.receiver.userId));
+    });
+    return ids;
+  }, [incomingStandOuts, outgoingStandOuts]);
+
   // FIX: Filter out conversations without messages — those should only appear in
   // Super Likes / New Matches section, not in the Messages list. This prevents
   // the same profile from appearing in both places.
@@ -640,10 +735,12 @@ export default function MessagesScreen() {
   const conversations = useMemo(() => {
     if (isDemoMode) return demoThreads;
     if (!convexConversations) return [];
-    return convexConversations.filter(
-      (c: any) => c.lastMessage !== null || c.terminalState != null,
-    );
-  }, [isDemoMode, demoThreads, convexConversations]);
+    return convexConversations.filter((c: any) => {
+      const otherUserId = c?.otherUser?.id ? String(c.otherUser.id) : '';
+      if (otherUserId && pendingStandOutUserIds.has(otherUserId)) return false;
+      return c.lastMessage !== null || c.terminalState != null;
+    });
+  }, [isDemoMode, demoThreads, convexConversations, pendingStandOutUserIds]);
 
   // P0-RESTORE: Batch-fetch presence for the visible inbox rows so the green
   // "active now" dot lights up via the unified presence system. Returns a map
@@ -681,6 +778,7 @@ export default function MessagesScreen() {
       // Convex mode
       const likes = (convexLikesReceived || []) as any[];
       return likes.filter((l) => {
+        if (l.action === 'super_like') return false;
         if (blockedUserIds.includes(l.userId)) return false;
         if (matchedUserIds.has(l.userId)) return false;
         return true;
@@ -689,6 +787,7 @@ export default function MessagesScreen() {
 
     // Demo mode — use raw likes from store, filter blocked/matched
     const filtered = demoLikesRaw.filter((l) => {
+      if ((l as any).action === 'super_like') return false;
       if (blockedUserIds.includes(l.userId)) return false;
       if (matchedUserIds.has(l.userId)) return false;
       return true;
@@ -757,8 +856,11 @@ export default function MessagesScreen() {
       convex.query(api.users.getCurrentUser, { userId: convexUserId }),
       convex.query(api.likes.getLikesReceived, { userId: convexUserId }),
       convex.query(api.matches.getMatches, { userId: convexUserId }),
+      convex.query(api.likes.getIncomingStandOuts, { userId: convexUserId, refreshKey: retryKey }),
+      convex.query(api.likes.getOutgoingStandOuts, { userId: convexUserId, refreshKey: retryKey }),
+      convex.query(api.likes.getStandOutCounts, { userId: convexUserId, refreshKey: retryKey }),
     ]);
-  }, [convex, convexUserId, isDemoMode, userId]);
+  }, [convex, convexUserId, isDemoMode, retryKey, userId]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -808,6 +910,9 @@ export default function MessagesScreen() {
     const regular: any[] = [];
 
     for (const match of matches) {
+      const otherUserId = match.user?.id ? String(match.user.id) : '';
+      if (otherUserId && pendingStandOutUserIds.has(otherUserId)) continue;
+
       // Only include matches with no messages (new matches)
       if (match.lastMessage) continue;
 
@@ -839,7 +944,7 @@ export default function MessagesScreen() {
     }
 
     return { superLikeMatches: superLikes, newMatches: regular };
-  }, [isDemoMode, demoNewMatches, convexMatches]);
+  }, [isDemoMode, demoNewMatches, convexMatches, pendingStandOutUserIds]);
 
   // ── Like actions ──
 
@@ -970,6 +1075,119 @@ export default function MessagesScreen() {
     safePush(router, `/(main)/profile/${like.userId}` as any, 'messages->likeProfile');
   }, [router]);
 
+  const openStandOutDetail = useCallback((request: IncomingStandOutRow) => {
+    if (activeStandOutAction) return;
+    setStandOutReplyMode(false);
+    setStandOutReplyText('');
+    setStandOutDetailTarget(request);
+  }, [activeStandOutAction]);
+
+  const closeStandOutDetail = useCallback(() => {
+    if (activeStandOutAction) return;
+    setStandOutDetailTarget(null);
+    setStandOutReplyMode(false);
+    setStandOutReplyText('');
+  }, [activeStandOutAction]);
+
+  const handleOpenStandOutProfile = useCallback((request: IncomingStandOutRow) => {
+    const targetUserId = request.fromUserId || request.sender?.userId;
+    if (!targetUserId) {
+      Toast.show('Profile unavailable');
+      return;
+    }
+    setStandOutDetailTarget(null);
+    setStandOutReplyMode(false);
+    safePush(router, `/(main)/profile/${targetUserId}` as any, 'messages->standOutProfile');
+  }, [router]);
+
+  const handleOutgoingStandOutPress = useCallback(() => {
+    Toast.show('Waiting for their response');
+  }, []);
+
+  const finishStandOutAction = useCallback((conversationId?: string | null) => {
+    setStandOutDetailTarget(null);
+    setStandOutReplyMode(false);
+    setStandOutReplyText('');
+    setRetryKey((k) => k + 1);
+    if (conversationId) {
+      safePush(router, `/(main)/(tabs)/messages/chat/${conversationId}` as any, 'messages->standOutChat');
+    }
+  }, [router]);
+
+  const handleAcceptStandOut = useCallback(async (request: IncomingStandOutRow) => {
+    if (!userId || activeStandOutAction) return;
+    const actionKey = `accept:${request.likeId}`;
+    setActiveStandOutAction(actionKey);
+    try {
+      const result = await acceptStandOutMutation({
+        authUserId: userId,
+        likeId: request.likeId as any,
+      });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      finishStandOutAction((result as any)?.conversationId ? String((result as any).conversationId) : null);
+    } catch (error) {
+      log.warn('[MESSAGES]', 'acceptStandOut failed', { error });
+      Toast.show('Couldn’t accept this Stand Out. Please try again.');
+    } finally {
+      setActiveStandOutAction(null);
+    }
+  }, [acceptStandOutMutation, activeStandOutAction, finishStandOutAction, userId]);
+
+  const handleIgnoreStandOut = useCallback(async (request: IncomingStandOutRow) => {
+    if (!userId || activeStandOutAction) return;
+    const actionKey = `ignore:${request.likeId}`;
+    setActiveStandOutAction(actionKey);
+    try {
+      await ignoreStandOutMutation({
+        authUserId: userId,
+        likeId: request.likeId as any,
+      });
+      setStandOutDetailTarget(null);
+      setStandOutReplyMode(false);
+      setStandOutReplyText('');
+      setRetryKey((k) => k + 1);
+      Toast.show('Stand Out ignored');
+    } catch (error) {
+      log.warn('[MESSAGES]', 'ignoreStandOut failed', { error });
+      Toast.show('Couldn’t ignore this Stand Out. Please try again.');
+    } finally {
+      setActiveStandOutAction(null);
+    }
+  }, [activeStandOutAction, ignoreStandOutMutation, userId]);
+
+  const handleSendStandOutReply = useCallback(async () => {
+    if (!userId || !standOutDetailTarget || activeStandOutAction) return;
+    const replyText = standOutReplyText.trim();
+    if (!replyText) {
+      Toast.show('Write a reply to send.');
+      return;
+    }
+
+    const actionKey = `reply:${standOutDetailTarget.likeId}`;
+    setActiveStandOutAction(actionKey);
+    try {
+      const result = await replyToStandOutMutation({
+        authUserId: userId,
+        likeId: standOutDetailTarget.likeId as any,
+        replyText,
+      });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      finishStandOutAction((result as any)?.conversationId ? String((result as any).conversationId) : null);
+    } catch (error) {
+      log.warn('[MESSAGES]', 'replyToStandOut failed', { error });
+      Toast.show('Couldn’t send your reply. Please try again.');
+    } finally {
+      setActiveStandOutAction(null);
+    }
+  }, [
+    activeStandOutAction,
+    finishStandOutAction,
+    replyToStandOutMutation,
+    standOutDetailTarget,
+    standOutReplyText,
+    userId,
+  ]);
+
   // Back to messages (for in-place header button)
   const handleBackToMessages = useCallback(() => {
     // BUGFIX #5: Reset layout ready flag since FlatList will be destroyed
@@ -978,6 +1196,139 @@ export default function MessagesScreen() {
   }, []);
 
   // ── Render functions ──
+
+  const renderStandOutAvatar = (
+    user: Phase1StandOutUser | null | undefined,
+    size: 'request' | 'sent' | 'detail' = 'request',
+  ) => {
+    const avatarStyle =
+      size === 'detail'
+        ? styles.standOutDetailAvatar
+        : size === 'sent'
+          ? styles.standOutSentAvatar
+          : styles.standOutRequestAvatar;
+    const initialStyle =
+      size === 'detail'
+        ? styles.standOutDetailInitial
+        : styles.standOutAvatarInitial;
+    const name = getStandOutDisplayName(user);
+
+    if (user?.photoUrl) {
+      return (
+        <Image
+          source={{ uri: user.photoUrl }}
+          style={avatarStyle}
+          contentFit="cover"
+        />
+      );
+    }
+
+    return (
+      <View style={[avatarStyle, styles.standOutAvatarFallback]}>
+        <Text {...TEXT_PROPS} style={initialStyle}>{name[0] || '?'}</Text>
+      </View>
+    );
+  };
+
+  const renderStandOutRequestsRow = () => {
+    if (incomingStandOuts.length === 0) return null;
+    const sectionCount = standOutCounts?.incoming ?? incomingStandOuts.length;
+
+    return (
+      <View style={styles.standOutSection}>
+        <View style={styles.standOutSectionHeader}>
+          <View style={styles.standOutHeaderLeft}>
+            <View style={styles.standOutIconWrap}>
+              <Ionicons name="star" size={12} color={COLORS.white} />
+            </View>
+            <Text {...TEXT_PROPS} style={styles.standOutSectionTitle}>
+              Stand Out Requests ({sectionCount})
+            </Text>
+          </View>
+        </View>
+        <FlatList
+          horizontal
+          data={incomingStandOuts}
+          keyExtractor={(item) => item.likeId}
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.standOutStripList}
+          renderItem={({ item }) => {
+            const sender = item.sender ?? null;
+            const hasMessage = !!item.message?.trim();
+            return (
+              <TouchableOpacity
+                style={styles.standOutRequestItem}
+                activeOpacity={0.82}
+                onPress={() => openStandOutDetail(item)}
+              >
+                <View style={styles.standOutAvatarRing}>
+                  {renderStandOutAvatar(sender, 'request')}
+                  <View style={styles.standOutStarBadge}>
+                    <Ionicons name="star" size={9} color={COLORS.white} />
+                  </View>
+                  {hasMessage && (
+                    <View style={styles.standOutMessageBadge}>
+                      <Ionicons name="chatbubble-ellipses" size={8} color={COLORS.white} />
+                    </View>
+                  )}
+                </View>
+                <Text {...TEXT_PROPS} style={styles.standOutStripName} numberOfLines={1}>
+                  {getStandOutDisplayName(sender).split(' ')[0]}
+                </Text>
+              </TouchableOpacity>
+            );
+          }}
+        />
+      </View>
+    );
+  };
+
+  const renderStandOutsSentRow = () => {
+    if (outgoingStandOuts.length === 0) return null;
+    const sectionCount = standOutCounts?.outgoing ?? outgoingStandOuts.length;
+
+    return (
+      <View style={styles.standOutSentSection}>
+        <View style={styles.standOutSectionHeader}>
+          <View style={styles.standOutHeaderLeft}>
+            <View style={[styles.standOutIconWrap, styles.standOutSentIconWrap]}>
+              <Ionicons name="paper-plane" size={11} color={COLORS.white} />
+            </View>
+            <Text {...TEXT_PROPS} style={styles.standOutSectionTitle}>
+              Stand Outs Sent ({sectionCount})
+            </Text>
+          </View>
+        </View>
+        <FlatList
+          horizontal
+          data={outgoingStandOuts}
+          keyExtractor={(item) => item.likeId}
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.standOutStripList}
+          renderItem={({ item }) => {
+            const receiver = item.receiver ?? null;
+            return (
+              <TouchableOpacity
+                style={styles.standOutSentItem}
+                activeOpacity={0.82}
+                onPress={handleOutgoingStandOutPress}
+              >
+                <View style={styles.standOutSentAvatarRing}>
+                  {renderStandOutAvatar(receiver, 'sent')}
+                </View>
+                <Text {...TEXT_PROPS} style={[styles.standOutStripName, styles.standOutSentName]} numberOfLines={1}>
+                  {getStandOutDisplayName(receiver).split(' ')[0]}
+                </Text>
+                <View style={styles.standOutPendingPill}>
+                  <Text {...TEXT_PROPS} style={styles.standOutPendingText}>Pending</Text>
+                </View>
+              </TouchableOpacity>
+            );
+          }}
+        />
+      </View>
+    );
+  };
 
   const renderLikeCard = ({ item: like }: { item: any }) => {
     const isRecent = isRecentLike(like.createdAt || Date.now());
@@ -1119,89 +1470,145 @@ export default function MessagesScreen() {
     );
   };
 
-  // New Matches section - only renders when there's data
+  // New Matches section — ALWAYS renders (when not searching) so the row
+  // is visible even with zero real matches. Layout switches based on real-
+  // match count:
+  //  - realCount ≤ NEW_MATCHES_TARGET_SLOTS  → fixed even-distribution row
+  //    (each slot uses flex:1 so 4 circles are evenly spread across the
+  //    available width; ghost slots fill the empty positions).
+  //  - realCount  > NEW_MATCHES_TARGET_SLOTS → horizontal scroll of just
+  //    the real avatars, no ghost fillers.
+  // PHASE-1 PREMIUM empty slot: dashed-feeling soft ring + faint warm fill +
+  // muted heart-outline so the slot reads as a "future match", not a missing
+  // image. No fake names, no fake photos.
+  const renderEmptyMatchSlot = (key: string) => (
+    <View key={key} pointerEvents="none" style={{ alignItems: 'center' }}>
+      <View style={styles.compactAvatarContainer}>
+        <View style={[styles.compactMatchRing, styles.compactMatchRingEmpty]}>
+          <View style={[styles.compactMatchAvatar, styles.compactMatchAvatarEmpty]}>
+            <Ionicons
+              name="heart-outline"
+              size={SIZES.icon.md}
+              color="rgba(255,107,107,0.55)"
+            />
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+
+  const renderRealMatchSlot = (item: any, key: string) => (
+    <TouchableOpacity
+      key={key}
+      style={{ alignItems: 'center' }}
+      activeOpacity={0.7}
+      onPress={async () => {
+        if (item.conversationId) {
+          safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat');
+          return;
+        }
+        // P0-RESTORE: Match cards may not have a conversationId yet.
+        // Lazily create the conversation via ensureConversation, then
+        // navigate. Without this fallback the tap silently fails.
+        const matchId = item.id || item.matchId;
+        if (!matchId || !userId) {
+          log.warn('[MESSAGES]', 'New Match card cannot create conversation', {
+            matchId,
+            hasUserId: !!userId,
+          });
+          Toast.show('Unable to open chat. Please try again.');
+          return;
+        }
+        try {
+          const result = await ensureConversation({ matchId: matchId as any, authUserId: userId });
+          if (result?.conversationId) {
+            safePush(
+              router,
+              `/(main)/(tabs)/messages/chat/${result.conversationId}` as any,
+              'messages->newMatchChat',
+            );
+          } else {
+            log.error('[MESSAGES]', 'ensureConversation returned no conversationId', { result });
+            Toast.show('Unable to open chat. Please try again.');
+          }
+        } catch (error) {
+          log.error('[MESSAGES]', 'ensureConversation failed', { error, matchId });
+          Toast.show('Unable to open chat. Please try again.');
+        }
+      }}
+    >
+      <View style={styles.compactAvatarContainer}>
+        <View style={[styles.compactMatchRing, { borderColor: COLORS.primary }]}>
+          {item.otherUser?.photoUrl ? (
+            <Image
+              source={{ uri: item.otherUser.photoUrl }}
+              style={styles.compactMatchAvatar}
+              contentFit="cover"
+            />
+          ) : (
+            <View style={[styles.compactMatchAvatar, styles.placeholderAvatar]}>
+              <Text {...TEXT_PROPS} style={styles.compactAvatarInitial}>
+                {item.otherUser?.name?.[0] || '?'}
+              </Text>
+            </View>
+          )}
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+
   const renderNewMatchesRow = () => {
-    // Only render if we have real new matches
-    if (!newMatches || newMatches.length === 0) {
-      return null;
-    }
+    const realMatches = newMatches || [];
+    const realCount = realMatches.length;
+    const useEvenRow = realCount <= NEW_MATCHES_TARGET_SLOTS;
 
     return (
       <View style={styles.newMatchesSection}>
         <View style={styles.compactSectionHeader}>
           <Ionicons name="heart-circle" size={SIZES.icon.sm} color={COLORS.primary} />
           <Text {...TEXT_PROPS} style={styles.compactSectionTitle}>New Matches</Text>
-          <View style={[styles.countBadge, { backgroundColor: COLORS.primary + '20' }]}>
-            <Text {...TEXT_PROPS} style={[styles.countBadgeText, { color: COLORS.primary }]}>
-              {newMatches.length}
-            </Text>
-          </View>
-        </View>
-        <FlatList
-          horizontal
-          data={newMatches}
-          keyExtractor={(item: any) => item.id || item.matchId || `newmatch-${item.otherUser?.id}`}
-          renderItem={({ item }: { item: any }) => (
-            <TouchableOpacity
-              style={styles.compactMatchItem}
-              activeOpacity={0.7}
-              onPress={async () => {
-                if (item.conversationId) {
-                  safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat');
-                  return;
-                }
-                // P0-RESTORE: Match cards may not have a conversationId yet.
-                // Lazily create the conversation via ensureConversation, then
-                // navigate. Without this fallback the tap silently fails.
-                const matchId = item.id || item.matchId;
-                if (!matchId || !userId) {
-                  log.warn('[MESSAGES]', 'New Match card cannot create conversation', {
-                    matchId,
-                    hasUserId: !!userId,
-                  });
-                  Toast.show('Unable to open chat. Please try again.');
-                  return;
-                }
-                try {
-                  const result = await ensureConversation({ matchId: matchId as any, authUserId: userId });
-                  if (result?.conversationId) {
-                    safePush(
-                      router,
-                      `/(main)/(tabs)/messages/chat/${result.conversationId}` as any,
-                      'messages->newMatchChat',
-                    );
-                  } else {
-                    log.error('[MESSAGES]', 'ensureConversation returned no conversationId', { result });
-                    Toast.show('Unable to open chat. Please try again.');
-                  }
-                } catch (error) {
-                  log.error('[MESSAGES]', 'ensureConversation failed', { error, matchId });
-                  Toast.show('Unable to open chat. Please try again.');
-                }
-              }}
-            >
-              <View style={styles.compactAvatarContainer}>
-                <View style={[styles.compactMatchRing, { borderColor: COLORS.primary }]}>
-                  {item.otherUser?.photoUrl ? (
-                    <Image
-                      source={{ uri: item.otherUser.photoUrl }}
-                      style={styles.compactMatchAvatar}
-                      contentFit="cover"
-                    />
-                  ) : (
-                    <View style={[styles.compactMatchAvatar, styles.placeholderAvatar]}>
-                      <Text {...TEXT_PROPS} style={styles.compactAvatarInitial}>
-                        {item.otherUser?.name?.[0] || '?'}
-                      </Text>
-                    </View>
-                  )}
-                </View>
-              </View>
-            </TouchableOpacity>
+          {realCount > 0 && (
+            <View style={[styles.countBadge, { backgroundColor: COLORS.primary + '20' }]}>
+              <Text {...TEXT_PROPS} style={[styles.countBadgeText, { color: COLORS.primary }]}>
+                {realCount}
+              </Text>
+            </View>
           )}
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.compactMatchesList}
-        />
+        </View>
+
+        {useEvenRow ? (
+          <View style={styles.newMatchesEvenRow}>
+            {Array.from({ length: NEW_MATCHES_TARGET_SLOTS }).map((_, idx) => {
+              const realItem = realMatches[idx];
+              const realKey =
+                realItem?.id ||
+                realItem?.matchId ||
+                `newmatch-${realItem?.otherUser?.id ?? idx}`;
+              return (
+                <View key={`nm-slot-${idx}`} style={styles.newMatchesEvenSlot}>
+                  {realItem
+                    ? renderRealMatchSlot(realItem, `real-${realKey}`)
+                    : renderEmptyMatchSlot(`empty-${idx}`)}
+                </View>
+              );
+            })}
+          </View>
+        ) : (
+          <FlatList
+            horizontal
+            data={realMatches}
+            keyExtractor={(item: any, idx: number) =>
+              item?.id || item?.matchId || `newmatch-${item?.otherUser?.id ?? idx}`
+            }
+            renderItem={({ item }) => (
+              <View style={styles.matchScrollItem}>
+                {renderRealMatchSlot(item, `real-${item?.id || item?.matchId}`)}
+              </View>
+            )}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.compactMatchesList}
+          />
+        )}
       </View>
     );
   };
@@ -1242,6 +1649,17 @@ export default function MessagesScreen() {
   // ── Main render ──
 
   return (
+    <View style={styles.rootContainer}>
+      {/* PHASE-1 PREMIUM: soft warm-rose gradient backdrop. The pink primary
+          (#FF6B6B) is desaturated to a barely-there blush at the top so the
+          screen no longer reads as harsh flat white but still keeps a clean,
+          airy light feel. */}
+      <LinearGradient
+        colors={['#FFF4F1', '#FFFAF7', '#FFFFFF']}
+        locations={[0, 0.45, 1]}
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none"
+      />
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       {/* Header — changes based on activeView */}
       <View style={styles.header}>
@@ -1367,7 +1785,12 @@ export default function MessagesScreen() {
           // P1-POLISH: Use debounced value for filter; raw `searchQuery` still
           // drives the input so typing feels instant.
           const normalizedSearchQuery = debouncedSearchQuery.trim().toLowerCase();
+          const isSearchActive = searchQuery.trim().length > 0;
           const isSearching = normalizedSearchQuery.length > 0;
+          // The New Matches row now ALWAYS renders when not searching
+          // (ghost slots fill in when there are zero real matches), so the
+          // Recent Chats label simply tracks whether the search is active.
+          const showRecentChatsLabel = !isSearchActive;
           const baseConversations = (conversations || []) as InboxConversationRow[];
           const filteredConversations = isSearching
             ? baseConversations.filter((conversation) => {
@@ -1390,7 +1813,7 @@ export default function MessagesScreen() {
                   <TextInput
                     value={searchQuery}
                     onChangeText={setSearchQuery}
-                    placeholder="Search conversations"
+                    placeholder="Search chats or matches"
                     placeholderTextColor={COLORS.textMuted}
                     style={styles.searchInput}
                     returnKeyType="search"
@@ -1411,14 +1834,25 @@ export default function MessagesScreen() {
               </View>
 
               {/* Optional top sections - hidden while searching */}
-              {!isSearching && showMessagesNudge && (
+              {!isSearchActive && showMessagesNudge && (
                 <ProfileNudge
                   message={NUDGE_MESSAGES.needs_both.messages}
                   onDismiss={() => dismissNudge('messages')}
                 />
               )}
-              {!isSearching && superLikeMatches.length > 0 && renderSuperLikesRow()}
-              {!isSearching && newMatches.length > 0 && renderNewMatchesRow()}
+              {!isSearchActive && renderStandOutRequestsRow()}
+              {!isSearchActive && renderStandOutsSentRow()}
+              {!isSearchActive && superLikeMatches.length > 0 && renderSuperLikesRow()}
+              {/* New Matches Row — always renders when not searching; ghost
+                  avatar slots fill the row when there are fewer than
+                  NEW_MATCHES_TARGET_SLOTS real matches. */}
+              {!isSearchActive && renderNewMatchesRow()}
+
+              {showRecentChatsLabel && (
+                <View style={styles.recentChatsHeader}>
+                  <Text {...TEXT_PROPS} style={styles.recentChatsLabel}>Recent Chats</Text>
+                </View>
+              )}
 
               {/* Conversation list */}
               <FlatList
@@ -1474,6 +1908,131 @@ export default function MessagesScreen() {
         })()
       )}
 
+      <Modal
+        visible={!!standOutDetailTarget}
+        transparent
+        animationType="fade"
+        onRequestClose={closeStandOutDetail}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.standOutModalOverlay}
+        >
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={closeStandOutDetail}
+          />
+          {standOutDetailTarget && (
+            <View style={styles.standOutSheet}>
+              <View style={styles.standOutSheetHandle} />
+              <View style={styles.standOutDetailHeader}>
+                <TouchableOpacity
+                  style={styles.standOutDetailAvatarRing}
+                  activeOpacity={0.82}
+                  onPress={() => handleOpenStandOutProfile(standOutDetailTarget)}
+                >
+                  {renderStandOutAvatar(standOutDetailTarget.sender, 'detail')}
+                  <View style={styles.standOutDetailStarBadge}>
+                    <Ionicons name="star" size={13} color={COLORS.white} />
+                  </View>
+                </TouchableOpacity>
+                <Text {...TEXT_PROPS} style={styles.standOutDetailName} numberOfLines={1}>
+                  {getStandOutNameLine(standOutDetailTarget.sender)}
+                </Text>
+              </View>
+
+              {standOutDetailTarget.message?.trim() ? (
+                <View style={styles.standOutMessageCallout}>
+                  <Ionicons name="chatbubble-ellipses" size={16} color={COLORS.superLike} />
+                  <Text {...TEXT_PROPS} style={styles.standOutMessageText}>
+                    {getStandOutMessagePreview(standOutDetailTarget.message)}
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.standOutMessageCallout}>
+                  <Ionicons name="star" size={16} color={COLORS.superLike} />
+                  <Text {...TEXT_PROPS} style={styles.standOutMessageText}>
+                    {getStandOutMessagePreview(standOutDetailTarget.message)}
+                  </Text>
+                </View>
+              )}
+
+              {standOutReplyMode ? (
+                <>
+                  <Text {...TEXT_PROPS} style={styles.standOutReplyCaption}>
+                    Sending a reply also accepts the request.
+                  </Text>
+                  <TextInput
+                    value={standOutReplyText}
+                    onChangeText={setStandOutReplyText}
+                    placeholder="Write your reply..."
+                    placeholderTextColor={COLORS.textMuted}
+                    style={styles.standOutReplyInput}
+                    multiline
+                    maxLength={5000}
+                    editable={!activeStandOutAction}
+                    textAlignVertical="top"
+                  />
+                  <View style={styles.standOutSheetActions}>
+                    <TouchableOpacity
+                      style={styles.standOutSecondaryButton}
+                      onPress={() => setStandOutReplyMode(false)}
+                      disabled={!!activeStandOutAction}
+                    >
+                      <Text {...TEXT_PROPS} style={styles.standOutSecondaryText}>Back</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.standOutPrimaryButton}
+                      onPress={handleSendStandOutReply}
+                      disabled={!!activeStandOutAction}
+                    >
+                      {activeStandOutAction === `reply:${standOutDetailTarget.likeId}` ? (
+                        <ActivityIndicator size="small" color={COLORS.white} />
+                      ) : (
+                        <Text {...TEXT_PROPS} style={styles.standOutPrimaryText}>Send Reply</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </>
+              ) : (
+                <View style={styles.standOutSheetActions}>
+                  <TouchableOpacity
+                    style={styles.standOutSecondaryButton}
+                    onPress={() => handleIgnoreStandOut(standOutDetailTarget)}
+                    disabled={!!activeStandOutAction}
+                  >
+                    {activeStandOutAction === `ignore:${standOutDetailTarget.likeId}` ? (
+                      <ActivityIndicator size="small" color={COLORS.textMuted} />
+                    ) : (
+                      <Text {...TEXT_PROPS} style={styles.standOutSecondaryText}>Ignore</Text>
+                    )}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.standOutPrimaryButton}
+                    onPress={() => handleAcceptStandOut(standOutDetailTarget)}
+                    disabled={!!activeStandOutAction}
+                  >
+                    {activeStandOutAction === `accept:${standOutDetailTarget.likeId}` ? (
+                      <ActivityIndicator size="small" color={COLORS.white} />
+                    ) : (
+                      <Text {...TEXT_PROPS} style={styles.standOutPrimaryText}>Accept</Text>
+                    )}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.standOutReplyButton}
+                    onPress={() => setStandOutReplyMode(true)}
+                    disabled={!!activeStandOutAction}
+                  >
+                    <Text {...TEXT_PROPS} style={styles.standOutReplyButtonText}>Reply</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          )}
+        </KeyboardAvoidingView>
+      </Modal>
+
       {/* Match Modal */}
       <Modal
         visible={matchModalVisible}
@@ -1527,13 +2086,21 @@ export default function MessagesScreen() {
         </View>
       </Modal>
     </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  // PHASE-1 PREMIUM: rootContainer hosts the gradient backdrop; everything
+  // else (SafeAreaView container) renders transparent on top so the warm
+  // gradient shows through the whole screen.
+  rootContainer: {
     flex: 1,
     backgroundColor: COLORS.background,
+  },
+  container: {
+    flex: 1,
+    backgroundColor: 'transparent',
   },
   // Messages view content wrapper - flex: 1, zero top spacing (gap fix)
   messagesContent: {
@@ -1542,28 +2109,38 @@ const styles = StyleSheet.create({
     paddingTop: 0,
   },
   // P1-RESTORE: Search bar styles
+  // PHASE-1 PREMIUM: subtle elevation + softened pill so the search bar
+  // reads as a tactile control rather than a flat bar in the list.
   searchSection: {
     paddingHorizontal: 16,
     paddingTop: 12,
-    paddingBottom: 4,
-    backgroundColor: COLORS.background,
+    paddingBottom: 10,
+    backgroundColor: 'transparent',
   },
+  // PHASE-1 PREMIUM: white pill with a soft warm border + lifted shadow so
+  // the search bar reads as a tactile control floating on the gradient.
   searchInputWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    minHeight: 44,
-    paddingHorizontal: 14,
-    borderRadius: 16,
-    backgroundColor: COLORS.backgroundDark,
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    gap: 10,
+    minHeight: 48,
+    paddingHorizontal: 16,
+    borderRadius: 22,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,107,107,0.18)',
+    shadowColor: '#FF6B6B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 2,
   },
   searchInput: {
     flex: 1,
     fontSize: 15,
     color: COLORS.text,
     paddingVertical: 11,
+    letterSpacing: 0.1,
   },
   searchClearButton: {
     paddingVertical: 4,
@@ -1592,15 +2169,17 @@ const styles = StyleSheet.create({
   conversationListContent: {
     paddingTop: 0,
   },
+  // PHASE-1 PREMIUM: transparent header so the warm gradient shows through;
+  // hairline divider keeps clear visual separation from the search row.
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: UI_SPACING.base,
     paddingVertical: UI_SPACING.md,
-    backgroundColor: COLORS.background,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    backgroundColor: 'transparent',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(0,0,0,0.06)',
   },
   title: {
     fontSize: TITLE_FONT_SIZE,
@@ -1798,6 +2377,331 @@ const styles = StyleSheet.create({
   // COMPACT SECTIONS - Super Likes & New Matches (responsive spacing)
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // Stand Out Requests / Sent
+  standOutSection: {
+    paddingTop: UI_SPACING.sm,
+    paddingBottom: UI_SPACING.xs,
+  },
+  standOutSentSection: {
+    paddingTop: UI_SPACING.xs,
+    paddingBottom: UI_SPACING.xs,
+    opacity: 0.86,
+  },
+  standOutSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: UI_SPACING.base,
+    marginBottom: moderateScale(8, 0.25),
+  },
+  standOutHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: moderateScale(7, 0.25),
+    flex: 1,
+    minWidth: 0,
+  },
+  standOutIconWrap: {
+    width: moderateScale(22, 0.25),
+    height: moderateScale(22, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.superLike,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  standOutSentIconWrap: {
+    backgroundColor: COLORS.primary,
+  },
+  standOutSectionTitle: {
+    fontSize: FONT_SIZE.body,
+    fontWeight: '700',
+    color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
+  },
+  standOutStripList: {
+    paddingLeft: UI_SPACING.base,
+    paddingRight: UI_SPACING.base,
+    gap: UI_SPACING.md,
+  },
+  standOutRequestItem: {
+    width: moderateScale(66, 0.25),
+    alignItems: 'center',
+    marginRight: UI_SPACING.md,
+  },
+  standOutSentItem: {
+    width: moderateScale(62, 0.25),
+    alignItems: 'center',
+    marginRight: UI_SPACING.md,
+  },
+  standOutAvatarRing: {
+    width: moderateScale(60, 0.25),
+    height: moderateScale(60, 0.25),
+    borderRadius: SIZES.radius.full,
+    borderWidth: 2,
+    borderColor: COLORS.superLike,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: UI_SPACING.xxs,
+    backgroundColor: '#FFFFFF',
+    shadowColor: COLORS.superLike,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.16,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  standOutSentAvatarRing: {
+    width: moderateScale(52, 0.25),
+    height: moderateScale(52, 0.25),
+    borderRadius: SIZES.radius.full,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: UI_SPACING.xxs,
+    backgroundColor: 'rgba(255,255,255,0.72)',
+  },
+  standOutRequestAvatar: {
+    width: moderateScale(52, 0.25),
+    height: moderateScale(52, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  standOutSentAvatar: {
+    width: moderateScale(44, 0.25),
+    height: moderateScale(44, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  standOutAvatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  standOutAvatarInitial: {
+    fontSize: FONT_SIZE.lg,
+    fontWeight: '700',
+    color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
+  },
+  standOutStarBadge: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: moderateScale(20, 0.25),
+    height: moderateScale(20, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.superLike,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+  },
+  standOutMessageBadge: {
+    position: 'absolute',
+    bottom: -2,
+    left: -2,
+    width: moderateScale(18, 0.25),
+    height: moderateScale(18, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+  },
+  standOutStripName: {
+    marginTop: UI_SPACING.xs,
+    fontSize: FONT_SIZE.caption,
+    fontWeight: '600',
+    color: COLORS.text,
+    textAlign: 'center',
+    width: '100%',
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.2),
+  },
+  standOutSentName: {
+    color: COLORS.textMuted,
+    fontSize: FONT_SIZE.xs,
+  },
+  standOutPendingPill: {
+    marginTop: moderateScale(3, 0.25),
+    paddingHorizontal: moderateScale(6, 0.25),
+    paddingVertical: moderateScale(2, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.primary + '14',
+  },
+  standOutPendingText: {
+    fontSize: moderateScale(9, 0.25),
+    fontWeight: '800',
+    color: COLORS.primary,
+    textTransform: 'uppercase',
+    lineHeight: lineHeight(moderateScale(9, 0.25), 1.2),
+  },
+  standOutModalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.36)',
+  },
+  standOutSheet: {
+    marginHorizontal: UI_SPACING.md,
+    marginBottom: UI_SPACING.md,
+    padding: UI_SPACING.base,
+    borderRadius: 22,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,107,107,0.18)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.16,
+    shadowRadius: 18,
+    elevation: 8,
+  },
+  standOutSheetHandle: {
+    alignSelf: 'center',
+    width: moderateScale(38, 0.25),
+    height: moderateScale(4, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: 'rgba(0,0,0,0.12)',
+    marginBottom: UI_SPACING.md,
+  },
+  standOutDetailHeader: {
+    alignItems: 'center',
+    marginBottom: UI_SPACING.md,
+  },
+  standOutDetailAvatarRing: {
+    width: moderateScale(92, 0.25),
+    height: moderateScale(92, 0.25),
+    borderRadius: SIZES.radius.full,
+    borderWidth: 2,
+    borderColor: COLORS.superLike,
+    padding: UI_SPACING.xxs,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: UI_SPACING.sm,
+  },
+  standOutDetailAvatar: {
+    width: moderateScale(82, 0.25),
+    height: moderateScale(82, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  standOutDetailInitial: {
+    fontSize: FONT_SIZE.xxl,
+    fontWeight: '700',
+    color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.xxl, 1.2),
+  },
+  standOutDetailStarBadge: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    width: moderateScale(26, 0.25),
+    height: moderateScale(26, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: COLORS.superLike,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+  },
+  standOutDetailName: {
+    fontSize: FONT_SIZE.lg,
+    fontWeight: '700',
+    color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
+    maxWidth: '90%',
+  },
+  standOutMessageCallout: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: UI_SPACING.sm,
+    padding: UI_SPACING.md,
+    borderRadius: 14,
+    backgroundColor: COLORS.superLike + '10',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.superLike + '35',
+    marginBottom: UI_SPACING.md,
+  },
+  standOutMessageText: {
+    flex: 1,
+    fontSize: FONT_SIZE.body,
+    color: COLORS.text,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
+  },
+  standOutReplyCaption: {
+    fontSize: FONT_SIZE.caption,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginBottom: UI_SPACING.sm,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
+  },
+  standOutReplyInput: {
+    minHeight: moderateScale(96, 0.25),
+    maxHeight: moderateScale(138, 0.25),
+    borderRadius: 14,
+    paddingHorizontal: UI_SPACING.md,
+    paddingVertical: UI_SPACING.sm,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    color: COLORS.text,
+    fontSize: FONT_SIZE.body,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.35),
+    marginBottom: UI_SPACING.md,
+  },
+  standOutSheetActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: UI_SPACING.sm,
+  },
+  standOutSecondaryButton: {
+    flex: 1,
+    minHeight: SIZES.button.md,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: UI_SPACING.sm,
+  },
+  standOutSecondaryText: {
+    fontSize: FONT_SIZE.body,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
+  },
+  standOutPrimaryButton: {
+    flex: 1.25,
+    minHeight: SIZES.button.md,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.superLike,
+    paddingHorizontal: UI_SPACING.sm,
+  },
+  standOutPrimaryText: {
+    fontSize: FONT_SIZE.body,
+    fontWeight: '800',
+    color: COLORS.white,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
+  },
+  standOutReplyButton: {
+    flex: 1,
+    minHeight: SIZES.button.md,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.superLike + '12',
+    borderWidth: 1,
+    borderColor: COLORS.superLike + '35',
+    paddingHorizontal: UI_SPACING.sm,
+  },
+  standOutReplyButtonText: {
+    fontSize: FONT_SIZE.body,
+    fontWeight: '800',
+    color: COLORS.superLike,
+    lineHeight: lineHeight(FONT_SIZE.body, 1.2),
+  },
+
   // Super Likes section (compact)
   superLikesSection: {
     paddingTop: SECTION_SPACING.sectionTop,
@@ -1808,6 +2712,63 @@ const styles = StyleSheet.create({
   newMatchesSection: {
     paddingTop: SECTION_SPACING.sectionGap,
     paddingBottom: SECTION_SPACING.sectionGap,
+  },
+  // Ghost avatar slot — overrides the coloured ring/fill of `compactMatchRing`
+  // and `compactMatchAvatar` so the slot reads as "empty / waiting" while
+  // keeping the exact same outer geometry as a real match avatar.
+  // PHASE-1 PREMIUM: warm-rose hairline ring + faint blush fill — the slot
+  // feels like a "future match" rather than a missing image. The colours
+  // align with the app's primary (#FF6B6B) so the slot reads as part of
+  // Mira's identity.
+  compactMatchRingEmpty: {
+    borderColor: 'rgba(255,107,107,0.22)',
+    borderWidth: 1.25,
+    shadowColor: '#FF6B6B',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    elevation: 0,
+  },
+  compactMatchAvatarEmpty: {
+    backgroundColor: 'rgba(255,107,107,0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,107,107,0.10)',
+  },
+  // ── Even-row mode (≤ NEW_MATCHES_TARGET_SLOTS real matches) ──
+  // Each slot wrapper uses flex:1 so the 4 circles distribute evenly across
+  // the available width — no awkward right-side empty space.
+  newMatchesEvenRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: UI_SPACING.base,
+    paddingTop: UI_SPACING.xxs,
+    paddingBottom: UI_SPACING.xxs,
+  },
+  newMatchesEvenSlot: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  // ── Scroll mode (> NEW_MATCHES_TARGET_SLOTS real matches) ──
+  matchScrollItem: {
+    marginRight: SECTION_SPACING.avatarGap,
+    alignItems: 'center',
+  },
+  recentChatsHeader: {
+    paddingHorizontal: UI_SPACING.base,
+    paddingTop: UI_SPACING.md,
+    paddingBottom: UI_SPACING.sm,
+  },
+  // PHASE-1 PREMIUM: small-caps style label (uppercased, generous tracking)
+  // so the section divider reads as a calm typographic separator.
+  recentChatsLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+    lineHeight: lineHeight(11, 1.3),
   },
 
   // Compact section header (shared)

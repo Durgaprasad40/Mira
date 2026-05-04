@@ -1,7 +1,8 @@
 import { v } from 'convex/values';
-import { mutation, query, MutationCtx } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
+import { Id, Doc } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { softMaskText } from './softMask';
 
 const DAILY_LIKE_LIMIT_FREE = 25;
 const DAILY_STANDOUT_LIMIT_FREE = 2; // stand-out == super_like in this codebase
@@ -15,7 +16,7 @@ function getUtcDayStartMs(nowMs: number): number {
 // D1-REPAIR: Helper to check if either user has blocked the other
 // Returns true if blocked (should prevent messaging)
 async function isBlockedBidirectional(
-  ctx: MutationCtx,
+  ctx: QueryCtx | MutationCtx,
   userId1: Id<'users'>,
   userId2: Id<'users'>
 ): Promise<boolean> {
@@ -54,6 +55,447 @@ async function getPhase1PrimaryPhoto(
   });
 
   return photos[0] ?? null;
+}
+
+function isPhase1UserAvailable(user: Doc<'users'> | null): user is Doc<'users'> {
+  return !!user && user.isActive !== false && user.isBanned !== true && !user.deletedAt;
+}
+
+async function getActivePhase1Match(
+  ctx: QueryCtx | MutationCtx,
+  userAId: Id<'users'>,
+  userBId: Id<'users'>
+): Promise<Doc<'matches'> | null> {
+  const user1Id = userAId < userBId ? userAId : userBId;
+  const user2Id = userAId < userBId ? userBId : userAId;
+
+  const direct = await ctx.db
+    .query('matches')
+    .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+    .filter((q) => q.eq(q.field('isActive'), true))
+    .first();
+  if (direct) return direct;
+
+  // Legacy safety: older rows may not have been normalized by user id order.
+  const [asUser1, asUser2] = await Promise.all([
+    ctx.db
+      .query('matches')
+      .withIndex('by_user1', (q) => q.eq('user1Id', userAId))
+      .filter((q) => q.eq(q.field('isActive'), true))
+      .collect(),
+    ctx.db
+      .query('matches')
+      .withIndex('by_user2', (q) => q.eq('user2Id', userAId))
+      .filter((q) => q.eq(q.field('isActive'), true))
+      .collect(),
+  ]);
+
+  return [...asUser1, ...asUser2].find((match) =>
+    (match.user1Id === userAId && match.user2Id === userBId) ||
+    (match.user1Id === userBId && match.user2Id === userAId)
+  ) ?? null;
+}
+
+async function getStandOutPreviewUser(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<'users'>
+) {
+  const user = await ctx.db.get(userId);
+  if (!isPhase1UserAvailable(user)) return null;
+
+  const photo = await getPhase1PrimaryPhoto(ctx, userId);
+  return {
+    userId,
+    name: user.name,
+    displayName: user.name,
+    age: calculateAge(user.dateOfBirth),
+    photoUrl: photo?.url,
+    gender: user.gender,
+    isVerified: user.isVerified,
+    verified: user.isVerified,
+  };
+}
+
+async function isPendingPhase1StandOutVisible(
+  ctx: QueryCtx | MutationCtx,
+  like: Doc<'likes'>,
+  viewerId: Id<'users'>,
+  otherUserId: Id<'users'>
+): Promise<boolean> {
+  if (like.action !== 'super_like') return false;
+
+  const LIKE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+  const firstOpenedAt = (like as any).firstOpenedAt as number | undefined;
+  if (firstOpenedAt && Date.now() - firstOpenedAt > LIKE_EXPIRY_MS) {
+    return false;
+  }
+
+  const [viewer, otherUser] = await Promise.all([
+    ctx.db.get(viewerId),
+    ctx.db.get(otherUserId),
+  ]);
+  if (!isPhase1UserAvailable(viewer) || !isPhase1UserAvailable(otherUser)) {
+    return false;
+  }
+  if (await isBlockedBidirectional(ctx, viewerId, otherUserId)) {
+    return false;
+  }
+  if (await getActivePhase1Match(ctx, viewerId, otherUserId)) {
+    return false;
+  }
+
+  const reciprocal = await ctx.db
+    .query('likes')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', viewerId).eq('toUserId', otherUserId)
+    )
+    .first();
+
+  return !reciprocal;
+}
+
+async function isPendingPhase1OutgoingStandOutVisible(
+  ctx: QueryCtx | MutationCtx,
+  like: Doc<'likes'>,
+  viewerId: Id<'users'>
+): Promise<boolean> {
+  if (like.action !== 'super_like' || like.fromUserId !== viewerId) return false;
+
+  const LIKE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+  const firstOpenedAt = (like as any).firstOpenedAt as number | undefined;
+  if (firstOpenedAt && Date.now() - firstOpenedAt > LIKE_EXPIRY_MS) {
+    return false;
+  }
+
+  const [viewer, receiver] = await Promise.all([
+    ctx.db.get(viewerId),
+    ctx.db.get(like.toUserId),
+  ]);
+  if (!isPhase1UserAvailable(viewer) || !isPhase1UserAvailable(receiver)) {
+    return false;
+  }
+  if (await isBlockedBidirectional(ctx, viewerId, like.toUserId)) {
+    return false;
+  }
+  if (await getActivePhase1Match(ctx, viewerId, like.toUserId)) {
+    return false;
+  }
+
+  const receiverResponse = await ctx.db
+    .query('likes')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', like.toUserId).eq('toUserId', viewerId)
+    )
+    .first();
+
+  return !receiverResponse;
+}
+
+async function upsertPhase1ParticipantUnreadCount(
+  ctx: MutationCtx,
+  conversationId: Id<'conversations'>,
+  userId: Id<'users'>
+): Promise<void> {
+  const unreadMessages = await ctx.db
+    .query('messages')
+    .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+    .filter((q) =>
+      q.and(
+        q.neq(q.field('senderId'), userId),
+        q.eq(q.field('readAt'), undefined)
+      )
+    )
+    .collect();
+  const unreadCount = unreadMessages.filter((m) =>
+    ['text', 'image', 'video', 'voice', 'template', 'dare'].includes(m.type)
+  ).length;
+
+  const existing = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user_conversation', (q) =>
+      q.eq('userId', userId).eq('conversationId', conversationId)
+    )
+    .first();
+
+  if (existing) {
+    if (existing.unreadCount !== unreadCount) {
+      await ctx.db.patch(existing._id, { unreadCount });
+    }
+    return;
+  }
+
+  await ctx.db.insert('conversationParticipants', {
+    conversationId,
+    userId,
+    unreadCount,
+  });
+}
+
+async function ensurePhase1StandOutMatchAndConversation(
+  ctx: MutationCtx,
+  args: {
+    senderId: Id<'users'>;
+    receiverId: Id<'users'>;
+    now: number;
+  }
+): Promise<{ matchId: Id<'matches'>; conversationId: Id<'conversations'>; createdMatch: boolean }> {
+  const user1Id = args.senderId < args.receiverId ? args.senderId : args.receiverId;
+  const user2Id = args.senderId < args.receiverId ? args.receiverId : args.senderId;
+
+  let match = await getActivePhase1Match(ctx, args.senderId, args.receiverId);
+  let createdMatch = false;
+
+  if (!match) {
+    const matchId = await ctx.db.insert('matches', {
+      user1Id,
+      user2Id,
+      matchedAt: args.now,
+      isActive: true,
+      matchSource: 'super_like',
+    });
+    match = await ctx.db.get(matchId);
+    createdMatch = true;
+  } else if ((match as any).matchSource !== 'super_like') {
+    await ctx.db.patch(match._id, { matchSource: 'super_like' });
+    match = { ...match, matchSource: 'super_like' } as Doc<'matches'>;
+  }
+
+  if (!match) {
+    throw new Error('Failed to create match');
+  }
+
+  let conversation = await ctx.db
+    .query('conversations')
+    .withIndex('by_match', (q) => q.eq('matchId', match._id))
+    .first();
+
+  if (!conversation) {
+    const existingTodConversationId = await findExistingTodConversation(
+      ctx,
+      args.senderId,
+      args.receiverId
+    );
+
+    if (existingTodConversationId) {
+      await ctx.db.patch(existingTodConversationId, {
+        matchId: match._id,
+        isPreMatch: false,
+      });
+      conversation = await ctx.db.get(existingTodConversationId);
+    } else {
+      const conversationId = await ctx.db.insert('conversations', {
+        matchId: match._id,
+        participants: [args.senderId, args.receiverId],
+        isPreMatch: false,
+        createdAt: args.now,
+      });
+      conversation = await ctx.db.get(conversationId);
+    }
+  }
+
+  if (!conversation) {
+    throw new Error('Failed to create conversation');
+  }
+
+  await upsertPhase1ParticipantUnreadCount(ctx, conversation._id, args.senderId);
+  await upsertPhase1ParticipantUnreadCount(ctx, conversation._id, args.receiverId);
+
+  return {
+    matchId: match._id,
+    conversationId: conversation._id,
+    createdMatch,
+  };
+}
+
+async function seedPhase1StandOutMessageIfNeeded(
+  ctx: MutationCtx,
+  args: {
+    conversationId: Id<'conversations'>;
+    senderId: Id<'users'>;
+    recipientId: Id<'users'>;
+    content: string | undefined;
+    createdAt: number;
+    clientMessageId: string;
+  }
+): Promise<{ messageId: Id<'messages'> | null; inserted: boolean }> {
+  const normalizedContent = args.content?.trim();
+  if (!normalizedContent) {
+    return { messageId: null, inserted: false };
+  }
+  if (normalizedContent.length > 5000) {
+    throw new Error('Message too long');
+  }
+
+  const existing = await ctx.db
+    .query('messages')
+    .withIndex('by_conversation_clientMessageId', (q) =>
+      q.eq('conversationId', args.conversationId).eq('clientMessageId', args.clientMessageId)
+    )
+    .first();
+  if (existing) {
+    return { messageId: existing._id, inserted: false };
+  }
+
+  const messageId = await ctx.db.insert('messages', {
+    conversationId: args.conversationId,
+    senderId: args.senderId,
+    type: 'text',
+    content: softMaskText(normalizedContent),
+    clientMessageId: args.clientMessageId,
+    createdAt: args.createdAt,
+  });
+
+  await ctx.db.patch(args.conversationId, { lastMessageAt: args.createdAt });
+  await upsertPhase1ParticipantUnreadCount(ctx, args.conversationId, args.recipientId);
+  await upsertPhase1ParticipantUnreadCount(ctx, args.conversationId, args.senderId);
+
+  return { messageId, inserted: true };
+}
+
+async function createPhase1StandOutMatchNotifications(
+  ctx: MutationCtx,
+  args: {
+    senderId: Id<'users'>;
+    receiverId: Id<'users'>;
+    matchId: Id<'matches'>;
+    now: number;
+  }
+) {
+  const [sender, receiver] = await Promise.all([
+    ctx.db.get(args.senderId),
+    ctx.db.get(args.receiverId),
+  ]);
+
+  const rows = [
+    {
+      userId: args.receiverId,
+      title: 'New Match!',
+      body: `You matched with ${sender?.name || 'someone'}!`,
+    },
+    {
+      userId: args.senderId,
+      title: 'New Match!',
+      body: `You matched with ${receiver?.name || 'someone'}!`,
+    },
+  ];
+
+  for (const row of rows) {
+    const dedupeKey = `match:${args.matchId}`;
+    const existing = await ctx.db
+      .query('notifications')
+      .withIndex('by_user_dedupe', (q) =>
+        q.eq('userId', row.userId).eq('dedupeKey', dedupeKey)
+      )
+      .first();
+    if (existing) continue;
+
+    await ctx.db.insert('notifications', {
+      userId: row.userId,
+      type: 'match',
+      title: row.title,
+      body: row.body,
+      data: { matchId: args.matchId },
+      phase: 'phase1',
+      dedupeKey,
+      createdAt: args.now,
+      expiresAt: args.now + 24 * 60 * 60 * 1000,
+    });
+  }
+}
+
+async function acceptPendingPhase1StandOut(
+  ctx: MutationCtx,
+  args: {
+    receiverId: Id<'users'>;
+    likeId: Id<'likes'>;
+    replyText?: string;
+  }
+) {
+  const now = Date.now();
+  const like = await ctx.db.get(args.likeId);
+  if (!like || like.toUserId !== args.receiverId || like.action !== 'super_like') {
+    throw new Error('Stand Out request not found');
+  }
+  const normalizedReply = args.replyText == null ? null : args.replyText.trim();
+  if (normalizedReply != null && normalizedReply.length === 0) {
+    throw new Error('Reply required');
+  }
+  if (normalizedReply && normalizedReply.length > 5000) {
+    throw new Error('Message too long');
+  }
+
+  const existingReciprocal = await ctx.db
+    .query('likes')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', args.receiverId).eq('toUserId', like.fromUserId)
+    )
+    .first();
+
+  if (existingReciprocal?.action === 'pass') {
+    throw new Error('Stand Out request is already handled');
+  }
+
+  const existingMatch = await getActivePhase1Match(ctx, args.receiverId, like.fromUserId);
+  const isRetryAfterAccept = !!existingReciprocal && !!existingMatch;
+  if (!isRetryAfterAccept) {
+    const isVisible = await isPendingPhase1StandOutVisible(ctx, like, args.receiverId, like.fromUserId);
+    if (!isVisible) {
+      throw new Error('Stand Out request is already handled');
+    }
+  }
+
+  const acceptanceLikeId = existingReciprocal?._id ?? await ctx.db.insert('likes', {
+    fromUserId: args.receiverId,
+    toUserId: like.fromUserId,
+    action: 'like',
+    createdAt: now,
+  });
+
+  const ensured = await ensurePhase1StandOutMatchAndConversation(ctx, {
+    senderId: like.fromUserId,
+    receiverId: args.receiverId,
+    now,
+  });
+
+  const originalMessage = await seedPhase1StandOutMessageIfNeeded(ctx, {
+    conversationId: ensured.conversationId,
+    senderId: like.fromUserId,
+    recipientId: args.receiverId,
+    content: like.message,
+    createdAt: now,
+    clientMessageId: `standout-p1:${like._id}:original`,
+  });
+
+  let replyMessageId: Id<'messages'> | null = null;
+  if (normalizedReply) {
+    const reply = await seedPhase1StandOutMessageIfNeeded(ctx, {
+      conversationId: ensured.conversationId,
+      senderId: args.receiverId,
+      recipientId: like.fromUserId,
+      content: normalizedReply,
+      createdAt: now + 1,
+      clientMessageId: `standout-p1:${like._id}:reply`,
+    });
+    replyMessageId = reply.messageId;
+  }
+
+  await createPhase1StandOutMatchNotifications(ctx, {
+    senderId: like.fromUserId,
+    receiverId: args.receiverId,
+    matchId: ensured.matchId,
+    now,
+  });
+
+  return {
+    success: true,
+    conversationId: ensured.conversationId,
+    matchId: ensured.matchId,
+    acceptanceLikeId,
+    seededOriginalMessage: originalMessage.inserted,
+    originalMessageId: originalMessage.messageId,
+    replyMessageId,
+    createdMatch: ensured.createdMatch,
+  };
 }
 
 // SMART MATCHING: Check for T&D connected status between two users
@@ -742,6 +1184,236 @@ export const getLikesReceived = query({
     }
 
     return result;
+  },
+});
+
+// Phase-1 Stand Out requests received by the viewer.
+// Pending means: incoming super_like, no reciprocal response, no active match,
+// both users still available, and neither side has blocked the other.
+export const getIncomingStandOuts = query({
+  args: {
+    userId: v.id('users'),
+    limit: v.optional(v.number()),
+    refreshKey: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, limit = 50, refreshKey } = args;
+    void refreshKey;
+
+    const viewer = await ctx.db.get(userId);
+    if (!isPhase1UserAvailable(viewer)) return [];
+
+    const fetchWindow = Math.min(Math.max(limit * 4, limit + 30), 200);
+    const likes = await ctx.db
+      .query('likes')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+      .filter((q) => q.eq(q.field('action'), 'super_like'))
+      .order('desc')
+      .take(fetchWindow);
+
+    const rows = [];
+    for (const like of likes) {
+      if (rows.length >= limit) break;
+      if (!(await isPendingPhase1StandOutVisible(ctx, like, userId, like.fromUserId))) {
+        continue;
+      }
+
+      const sender = await getStandOutPreviewUser(ctx, like.fromUserId);
+      if (!sender) continue;
+
+      rows.push({
+        likeId: like._id,
+        fromUserId: like.fromUserId,
+        action: like.action,
+        message: like.message,
+        createdAt: like.createdAt,
+        firstOpenedAt: (like as any).firstOpenedAt,
+        sender,
+      });
+    }
+
+    return rows;
+  },
+});
+
+// Phase-1 Stand Out requests sent by the viewer that are still pending.
+export const getOutgoingStandOuts = query({
+  args: {
+    userId: v.id('users'),
+    limit: v.optional(v.number()),
+    refreshKey: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, limit = 50, refreshKey } = args;
+    void refreshKey;
+
+    const viewer = await ctx.db.get(userId);
+    if (!isPhase1UserAvailable(viewer)) return [];
+
+    const fetchWindow = Math.min(Math.max(limit * 4, limit + 30), 200);
+    const likes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+      .filter((q) => q.eq(q.field('action'), 'super_like'))
+      .order('desc')
+      .take(fetchWindow);
+
+    const rows = [];
+    for (const like of likes) {
+      if (rows.length >= limit) break;
+      if (!(await isPendingPhase1OutgoingStandOutVisible(ctx, like, userId))) {
+        continue;
+      }
+
+      const receiver = await getStandOutPreviewUser(ctx, like.toUserId);
+      if (!receiver) continue;
+
+      rows.push({
+        likeId: like._id,
+        toUserId: like.toUserId,
+        action: like.action,
+        message: like.message,
+        createdAt: like.createdAt,
+        firstOpenedAt: (like as any).firstOpenedAt,
+        receiver,
+      });
+    }
+
+    return rows;
+  },
+});
+
+export const getStandOutCounts = query({
+  args: {
+    userId: v.id('users'),
+    refreshKey: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, refreshKey } = args;
+    void refreshKey;
+
+    const viewer = await ctx.db.get(userId);
+    if (!isPhase1UserAvailable(viewer)) {
+      return { incoming: 0, outgoing: 0, remainingToday: 0 };
+    }
+
+    const [incomingLikes, outgoingLikes] = await Promise.all([
+      ctx.db
+        .query('likes')
+        .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+        .filter((q) => q.eq(q.field('action'), 'super_like'))
+        .collect(),
+      ctx.db
+        .query('likes')
+        .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+        .filter((q) => q.eq(q.field('action'), 'super_like'))
+        .collect(),
+    ]);
+
+    let incoming = 0;
+    for (const like of incomingLikes) {
+      if (await isPendingPhase1StandOutVisible(ctx, like, userId, like.fromUserId)) {
+        incoming++;
+      }
+    }
+
+    let outgoing = 0;
+    for (const like of outgoingLikes) {
+      if (await isPendingPhase1OutgoingStandOutVisible(ctx, like, userId)) {
+        outgoing++;
+      }
+    }
+
+    const isUnlimitedByPolicy =
+      viewer.gender === 'female' ||
+      viewer.subscriptionTier === 'premium';
+    let remainingToday: number | null = null;
+    if (!isUnlimitedByPolicy) {
+      const now = Date.now();
+      const dayStart = getUtcDayStartMs(now);
+      const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+      const sentToday = await ctx.db
+        .query('likes')
+        .withIndex('by_from_user_createdAt', (q) =>
+          q.eq('fromUserId', userId).gte('createdAt', dayStart).lt('createdAt', dayEnd)
+        )
+        .filter((q) => q.eq(q.field('action'), 'super_like'))
+        .collect();
+      remainingToday = Math.max(0, DAILY_STANDOUT_LIMIT_FREE - sentToday.length);
+    }
+
+    return { incoming, outgoing, remainingToday };
+  },
+});
+
+export const acceptStandOut = mutation({
+  args: {
+    authUserId: v.string(),
+    likeId: v.id('likes'),
+  },
+  handler: async (ctx, args) => {
+    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!receiverId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    return await acceptPendingPhase1StandOut(ctx, {
+      receiverId,
+      likeId: args.likeId,
+    });
+  },
+});
+
+export const replyToStandOut = mutation({
+  args: {
+    authUserId: v.string(),
+    likeId: v.id('likes'),
+    replyText: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!receiverId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    return await acceptPendingPhase1StandOut(ctx, {
+      receiverId,
+      likeId: args.likeId,
+      replyText: args.replyText,
+    });
+  },
+});
+
+export const ignoreStandOut = mutation({
+  args: {
+    authUserId: v.string(),
+    likeId: v.id('likes'),
+  },
+  handler: async (ctx, args) => {
+    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!receiverId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const like = await ctx.db.get(args.likeId);
+    if (!like || like.toUserId !== receiverId || like.action !== 'super_like') {
+      throw new Error('Stand Out request not found');
+    }
+
+    const isVisible = await isPendingPhase1StandOutVisible(ctx, like, receiverId, like.fromUserId);
+    if (!isVisible) {
+      return { success: true, ignored: false, alreadyHandled: true };
+    }
+
+    const now = Date.now();
+    const passId = await ctx.db.insert('likes', {
+      fromUserId: receiverId,
+      toUserId: like.fromUserId,
+      action: 'pass',
+      createdAt: now,
+    });
+
+    return { success: true, ignored: true, passId };
   },
 });
 

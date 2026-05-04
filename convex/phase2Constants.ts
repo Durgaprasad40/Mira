@@ -26,7 +26,6 @@ export const PHASE2_INTENT_KEYS = [
   'go_with_the_flow',
   'friends_first',
   'late_night',
-  'open_minded',
   'weekend_thing',
   'see_where_it_goes',
 ] as const;
@@ -45,7 +44,6 @@ export const PHASE2_DESIRE_TAG_KEYS = [
   'intellectual_match',
   'creative_energy',
   'fitness_partner',
-  'open_minded',
   'slow_burn',
   'confident_energy',
   'mystery',

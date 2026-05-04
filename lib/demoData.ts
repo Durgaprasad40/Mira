@@ -1857,7 +1857,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['spiritual', 'romantic'], distance: 2.5, city: 'Mumbai',
     bio: 'Looking up at the sky, looking for you.',
     isOnline: false, height: 155, bodyStructure: 'curvy', hairColor: 'Black', eyeColor: 'Brown',
-    privateIntentKey: 'open_minded', privateIntentKeys: ['open_minded', 'friends_first', 'go_with_the_flow'], interests: ['Astronomy', 'Philosophy', 'Music'], hobbies: ['Stargazing', 'Meditation', 'Guitar'], faceUnblurred: false,
+    privateIntentKey: 'go_with_the_flow', privateIntentKeys: ['friends_first', 'go_with_the_flow'], interests: ['Astronomy', 'Philosophy', 'Music'], hobbies: ['Stargazing', 'Meditation', 'Guitar'], faceUnblurred: false,
   },
   {
     id: 'inc_6', username: 'Neon_Butterfly', age: 25, gender: 'female',
@@ -1974,7 +1974,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     bio: 'Breaking rules and hearts since \'99.',
     isOnline: true, height: 166, bodyStructure: 'average', tattoos: true, piercings: true,
     hairColor: 'Red', eyeColor: 'Green',
-    privateIntentKey: 'go_with_the_flow', privateIntentKeys: ['go_with_the_flow', 'situationship', 'open_minded'], interests: ['Tattoo Art', 'Rock Music', 'Motorcycles'], hobbies: ['Riding', 'Sketching', 'Concerts'], faceUnblurred: false,
+    privateIntentKey: 'go_with_the_flow', privateIntentKeys: ['go_with_the_flow', 'situationship'], interests: ['Tattoo Art', 'Rock Music', 'Motorcycles'], hobbies: ['Riding', 'Sketching', 'Concerts'], faceUnblurred: false,
   },
   {
     id: 'inc_14', username: 'Silk_Road', age: 29, gender: 'female',
@@ -2003,7 +2003,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['spiritual', 'adventurous'], distance: 3.6, city: 'Mumbai',
     bio: 'Chasing auroras and authentic connections.',
     isOnline: true, height: 156, bodyStructure: 'curvy', hairColor: 'Black', eyeColor: 'Brown',
-    privateIntentKey: 'open_minded', privateIntentKeys: ['open_minded', 'go_with_the_flow'], interests: ['Astronomy', 'Nature', 'Spirituality'], hobbies: ['Telescope Viewing', 'Camping', 'Crystal Collecting'], faceUnblurred: false,
+    privateIntentKey: 'go_with_the_flow', privateIntentKeys: ['go_with_the_flow'], interests: ['Astronomy', 'Nature', 'Spirituality'], hobbies: ['Telescope Viewing', 'Camping', 'Crystal Collecting'], faceUnblurred: false,
   },
   {
     id: 'inc_16', username: 'Crimson_Tide', age: 26, gender: 'female',
@@ -2075,7 +2075,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['adventurous', 'creative'], distance: 3.4, city: 'Mumbai',
     bio: 'I see the world in color. Come paint with me.',
     isOnline: true, height: 162, bodyStructure: 'average', hairColor: 'Highlighted', eyeColor: 'Brown',
-    privateIntentKey: 'go_with_the_flow', privateIntentKeys: ['go_with_the_flow', 'open_minded'], interests: ['Music Festivals', 'Art', 'Fashion'], hobbies: ['Painting', 'Thrifting', 'Dancing'], faceUnblurred: false,
+    privateIntentKey: 'go_with_the_flow', privateIntentKeys: ['go_with_the_flow'], interests: ['Music Festivals', 'Art', 'Fashion'], hobbies: ['Painting', 'Thrifting', 'Dancing'], faceUnblurred: false,
   },
   {
     id: 'inc_21', username: 'Sage_Whisper', age: 28, gender: 'female',
@@ -2149,7 +2149,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['intellectual', 'creative'], distance: 2.8, city: 'Mumbai',
     bio: 'Living in shades of blue and purple.',
     isOnline: false, height: 165, bodyStructure: 'athletic', hairColor: 'Brown', eyeColor: 'Hazel',
-    privateIntentKey: 'see_where_it_goes', privateIntentKeys: ['see_where_it_goes', 'open_minded'], interests: ['Art', 'Literature', 'Museums'], hobbies: ['Painting', 'Reading', 'Gallery Hopping'], faceUnblurred: false,
+    privateIntentKey: 'see_where_it_goes', privateIntentKeys: ['see_where_it_goes'], interests: ['Art', 'Literature', 'Museums'], hobbies: ['Painting', 'Reading', 'Gallery Hopping'], faceUnblurred: false,
   },
   {
     id: 'inc_28', username: 'Scarlet_Fever', age: 24, gender: 'female',
@@ -2221,7 +2221,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['intellectual', 'adventurous'], distance: 5.7, city: 'Hyderabad',
     bio: 'Made of stardust, seeking cosmic connections.',
     isOnline: false, height: 155, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Brown',
-    privateIntentKey: 'open_minded', privateIntentKeys: ['open_minded', 'go_with_the_flow', 'see_where_it_goes'], interests: ['Astronomy', 'Sci-Fi', 'Space'], hobbies: ['Telescope Viewing', 'Reading', 'Star Mapping'], faceUnblurred: false,
+    privateIntentKey: 'go_with_the_flow', privateIntentKeys: ['go_with_the_flow', 'see_where_it_goes'], interests: ['Astronomy', 'Sci-Fi', 'Space'], hobbies: ['Telescope Viewing', 'Reading', 'Star Mapping'], faceUnblurred: false,
   },
   {
     id: 'inc_33', username: 'Honey_Dew', age: 24, gender: 'female',

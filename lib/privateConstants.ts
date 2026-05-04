@@ -8,7 +8,6 @@ export const PRIVATE_INTENT_CATEGORIES = [
   { key: 'go_with_the_flow', label: 'Go with the Flow', icon: 'water', color: '#00BCD4' },
   { key: 'friends_first', label: 'Friends First', icon: 'people', color: '#2196F3' },
   { key: 'late_night', label: 'Late Night', icon: 'moon-outline', color: '#3F51B5' },
-  { key: 'open_minded', label: 'Open-minded', icon: 'compass', color: '#00BCD4' },
   { key: 'weekend_thing', label: 'Weekend Thing', icon: 'calendar', color: '#795548' },
   { key: 'see_where_it_goes', label: 'See Where It Goes', icon: 'help-circle', color: '#9E9E9E' },
 ] as const;
@@ -28,7 +27,6 @@ export const PRIVATE_DESIRE_TAGS = [
   { key: 'intellectual_match', label: 'Intellectual match' },
   { key: 'creative_energy', label: 'Creative energy' },
   { key: 'fitness_partner', label: 'Fitness partner' },
-  { key: 'open_minded', label: 'Open-minded' },
   { key: 'slow_burn', label: 'Slow burn' },
   { key: 'confident_energy', label: 'Confident energy' },
   { key: 'mystery', label: 'Mystery' },

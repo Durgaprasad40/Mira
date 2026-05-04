@@ -118,6 +118,7 @@ import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { usePrivateProfileStore } from "@/stores/privateProfileStore";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
+import { StandOutComposerSheet } from "@/components/discover/StandOutComposerSheet";
 import { useLocationStore, useLiveDistance } from "@/stores/locationStore";
 // REMOVED: IncognitoConversation, ConnectionSource types - no longer needed after disabling local conversation creation
 import type { Id } from "@/convex/_generated/dataModel";
@@ -805,6 +806,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Stand Out result from route screen
   const standOutResult = useInteractionStore((s) => s.standOutResult);
+
+  // Inline Stand Out composer sheet target. When non-null, renders the
+  // premium bottom-sheet composer over the current profile card. Replaces
+  // the legacy `router.push('/(main)/stand-out?...')` navigation, which
+  // showed a separate full screen with a white background flash.
+  // Note: actual send still goes through `useInteractionStore.setStandOutResult`
+  // → existing standOutResult effect → `handleSwipe('up', message)`, so the
+  // Phase-1 / Phase-2 dispatch logic is untouched.
+  const [standOutSheetTarget, setStandOutSheetTarget] = useState<{
+    profileId: string;
+    name: string;
+  } | null>(null);
   const discoverProfileActionResult = useInteractionStore((s) => s.discoverProfileActionResult);
   const setDiscoverProfileActionResult = useInteractionStore((s) => s.setDiscoverProfileActionResult);
 
@@ -2967,11 +2980,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       return;
     }
     if (dy < -thresholdY || vy < -velocityY) {
-      // Up swipe triggers Stand Out screen instead of instant swipe
+      // Up swipe opens the inline Stand Out composer sheet over the current
+      // card (no separate route / no white-page transition).
       resetPosition();
       const c = currentRef.current;
       if (!hasReachedStandOutLimit() && c) {
-        router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsRemaining()}` as any);
+        setStandOutSheetTarget({ profileId: c.id, name: c.name });
       }
       return;
     }
@@ -3958,7 +3972,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           onPress={() => {
             const c = currentRef.current;
             if (!hasReachedStandOutLimit() && c) {
-              router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsLeft}` as any);
+              // Open inline composer over the current profile card. The
+              // numeric `standOutsLeft` is read live by the sheet via the
+              // standOutsRemaining() callback below — no need to pass it
+              // through a route param.
+              setStandOutSheetTarget({ profileId: c.id, name: c.name });
             }
           }}
           disabled={hasReachedStandOutLimit() || !current}
@@ -4203,6 +4221,30 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         visible={showSwipeGuidance}
         onDismiss={() => setShowSwipeGuidance(false)}
         dark={dark}
+      />
+
+      {/* Inline Stand Out composer. Renders as a premium bottom sheet over
+          the current profile card — no separate route, no white-page flash.
+          Sending dispatches to the existing standOutResult pipeline so the
+          Phase-1 / Phase-2 swipe + mutation flow stays untouched. */}
+      <StandOutComposerSheet
+        visible={standOutSheetTarget !== null}
+        targetName={standOutSheetTarget?.name ?? null}
+        standOutsLeft={standOutsRemaining()}
+        mode={isPhase2 ? 'phase2' : 'phase1'}
+        onSend={(message) => {
+          const target = standOutSheetTarget;
+          // Close the sheet first so its dismissal animation runs in parallel
+          // with the card's "stand out" up-animation kicked off by the
+          // existing standOutResult effect.
+          setStandOutSheetTarget(null);
+          if (!target) return;
+          useInteractionStore.getState().setStandOutResult({
+            profileId: target.profileId,
+            message,
+          });
+        }}
+        onClose={() => setStandOutSheetTarget(null)}
       />
     </View>
   );

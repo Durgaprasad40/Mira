@@ -53,6 +53,7 @@ import {
 import { isDemoMode } from '@/hooks/useConvex';
 import { useScreenTrace } from '@/lib/devTrace';
 import { Toast } from '@/components/ui/Toast';
+import { StandOutComposerSheet } from '@/components/discover/StandOutComposerSheet';
 // P2-004: Centralized gender icon utility
 import { getGenderIcon } from '@/lib/genderIcon';
 import { formatPhase2DistanceMiles } from '@/lib/phase2Distance';
@@ -364,6 +365,15 @@ export default function Phase2FullProfileScreen() {
   const hasReachedStandOutLimit = useDiscoverStore((s) => s.hasReachedStandOutLimit);
   const incrementStandOuts = useDiscoverStore((s) => s.incrementStandOuts);
 
+  // Inline Stand Out composer sheet target. When non-null, renders the
+  // premium bottom-sheet composer over the current profile (no route push,
+  // no white-page flash). Sending pipes through the existing standOutResult
+  // effect below so the Phase-2 swipeMutation call path is unchanged.
+  const [standOutSheetTarget, setStandOutSheetTarget] = useState<{
+    profileId: string;
+    name: string;
+  } | null>(null);
+
   // P0-001 FIX: Watch for Stand Out result from stand-out screen
   // When user sends a Stand Out message, this effect handles the API call
   const standOutResult = useInteractionStore((s) => s.standOutResult);
@@ -633,7 +643,10 @@ export default function Phase2FullProfileScreen() {
     }
   };
 
-  // Handle Stand Out action - navigates to same Stand Out screen as discovery card
+  // Handle Stand Out action — opens the inline composer sheet over this
+  // profile screen. Replaces the previous `router.push('/(main)/stand-out')`
+  // navigation, which showed a separate full screen with a white background
+  // flash. The standOutResult effect above still owns the Convex mutation.
   const handleStandOut = () => {
     if (!profile || !profileUserId) return;
     if (hasReachedStandOutLimit()) {
@@ -645,14 +658,12 @@ export default function Phase2FullProfileScreen() {
       console.log('[P2_FULL_PROFILE_ACTION] action=super_like userId=' + profileUserId?.slice?.(-8));
     }
 
-    // Navigate to Stand Out screen (same as discovery card flow)
-    // P0-001 FIX: Include mode=phase2 to ensure Phase-2 swipe mutation is used
     // P0-002 FIX: Use backend display name only (returned as `name` here).
     const profileName = profile.name || 'Someone';
-    const standOutsLeft = standOutsRemaining();
-    router.push(
-      `/(main)/stand-out?profileId=${profileUserId}&name=${encodeURIComponent(profileName)}&standOutsLeft=${standOutsLeft}&mode=phase2` as any
-    );
+    setStandOutSheetTarget({
+      profileId: String(profileUserId),
+      name: profileName,
+    });
   };
 
   // P2-004: Using centralized getGenderIcon from lib/genderIcon.ts
@@ -1139,6 +1150,27 @@ export default function Phase2FullProfileScreen() {
         onLike={handleLike}
         standOutDisabled={hasReachedStandOutLimit()}
         bottomInset={insets.bottom}
+      />
+
+      {/* Inline Stand Out composer for the Phase-2 full-profile screen.
+          Mirrors the Discover-card composer; sending dispatches via
+          `setStandOutResult`, which the standOutResult effect above turns
+          into the existing Phase-2 `swipeMutation` call. */}
+      <StandOutComposerSheet
+        visible={standOutSheetTarget !== null}
+        targetName={standOutSheetTarget?.name ?? null}
+        standOutsLeft={standOutsRemaining()}
+        mode="phase2"
+        onSend={(message) => {
+          const target = standOutSheetTarget;
+          setStandOutSheetTarget(null);
+          if (!target) return;
+          useInteractionStore.getState().setStandOutResult({
+            profileId: target.profileId,
+            message,
+          });
+        }}
+        onClose={() => setStandOutSheetTarget(null)}
       />
     </View>
   );

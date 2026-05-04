@@ -40,6 +40,10 @@ import { P2 } from '@/lib/p2Instrumentation';
 
 const C = INCOGNITO_COLORS;
 const NEW_MATCH_WINDOW_MS = 24 * 60 * 60 * 1000;
+// Visual target for the New Matches strip. When fewer than this many real
+// matches exist, ghost (empty) avatar slots fill the remainder so the row
+// reads as a real "ready to fill" UI rather than a blank empty-state card.
+const NEW_MATCHES_TARGET_SLOTS = 4;
 
 type Phase2LastMessageType = 'text' | 'image' | 'video' | 'voice' | 'system';
 
@@ -272,6 +276,21 @@ export default function ChatsScreen() {
   const reconcileConversations = usePrivateChatStore((s) => s.reconcileConversations);
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string; conversationId: string } | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const clearSearch = useCallback(() => {
+    setSearchQuery('');
+    setDebouncedSearchQuery('');
+  }, []);
+  useEffect(() => {
+    if (searchQuery.length === 0) {
+      setDebouncedSearchQuery('');
+      return;
+    }
+
+    const handle = setTimeout(() => setDebouncedSearchQuery(searchQuery), 120);
+    return () => clearTimeout(handle);
+  }, [searchQuery]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // P2_THREAD_OPEN_GATE
@@ -415,6 +434,12 @@ export default function ChatsScreen() {
   const ignoreStandOutMutation = useMutation(api.privateSwipes.ignoreStandOut);
   const [handledStandOutIds, setHandledStandOutIds] = useState<Set<string>>(() => new Set());
   const [activeStandOutAction, setActiveStandOutAction] = useState<string | null>(null);
+  // Compact-strip + two-mode sheet model:
+  //  - detailTarget: opens the OVERVIEW sheet (profile preview + Ignore/Accept/Reply)
+  //  - replyTarget : opens the REPLY composer sheet (TextInput + Send Reply)
+  // Tapping an incoming Stand Out strip item sets detailTarget. Tapping
+  // "Reply" inside the overview swaps detailTarget → replyTarget.
+  const [detailTarget, setDetailTarget] = useState<IncomingStandOutRow | null>(null);
   const [replyTarget, setReplyTarget] = useState<IncomingStandOutRow | null>(null);
   const [replyText, setReplyText] = useState('');
 
@@ -468,6 +493,7 @@ export default function ChatsScreen() {
         likeId: request.likeId as any,
       });
       markStandOutHandled(request.likeId);
+      setDetailTarget(null);
       const conversationId = (result as any)?.conversationId;
       if (conversationId) {
         handleOpenConversation(String(conversationId));
@@ -498,6 +524,7 @@ export default function ChatsScreen() {
         likeId: request.likeId as any,
       });
       markStandOutHandled(request.likeId);
+      setDetailTarget(null);
       Toast.show('Request ignored');
     } catch (error) {
       Alert.alert('Could not ignore', getStandOutActionError(error));
@@ -512,9 +539,20 @@ export default function ChatsScreen() {
     markStandOutHandled,
   ]);
 
+  const openDetailSheet = useCallback((request: IncomingStandOutRow) => {
+    if (activeStandOutAction) return;
+    setReplyTarget(null);
+    setDetailTarget(request);
+  }, [activeStandOutAction]);
+
+  const closeDetailSheet = useCallback(() => {
+    setDetailTarget(null);
+  }, []);
+
   const openReplyComposer = useCallback((request: IncomingStandOutRow) => {
     if (activeStandOutAction) return;
     setReplyText('');
+    setDetailTarget(null);
     setReplyTarget(request);
   }, [activeStandOutAction]);
 
@@ -568,6 +606,32 @@ export default function ChatsScreen() {
   const handleOutgoingStandOutPress = useCallback(() => {
     Toast.show('Waiting for their response');
   }, []);
+
+  // Tap-to-view-profile from inside the Stand Out detail sheet. Uses the same
+  // Phase-2 profile route that Deep Connect / phase2-likes already use:
+  //   /(main)/(private)/p2-profile/[userId]
+  // We close BOTH detailTarget and replyTarget first so the sheet doesn't
+  // remain mounted on top of the profile screen. The pending Stand Out is
+  // unaffected — `handledStandOutIds` is only mutated by accept/ignore/reply
+  // mutations, so when the user navigates back the request is still pending
+  // and they can tap it again to reopen the sheet.
+  const handleViewStandOutSenderProfile = useCallback(
+    (request: IncomingStandOutRow) => {
+      const targetUserId = request.fromUserId
+        ? String(request.fromUserId)
+        : request.sender?.userId
+          ? String(request.sender.userId)
+          : null;
+      if (!targetUserId) {
+        Toast.show('Profile unavailable');
+        return;
+      }
+      setDetailTarget(null);
+      setReplyTarget(null);
+      router.push(`/(main)/(private)/p2-profile/${targetUserId}` as any);
+    },
+    [router],
+  );
 
   // Note: Likes modal removed - now uses dedicated page at /(main)/(private)/phase2-likes
 
@@ -833,6 +897,23 @@ export default function ChatsScreen() {
     );
   }, [normalizedBackend]);
 
+  // PRODUCT RULE: pending Stand Outs MUST appear ONLY in the Stand Out
+  // Requests / Stand Outs Sent strips — never in New Matches or Recent Chats.
+  // Backend `getUserPrivateConversations` already excludes pending Stand Outs
+  // (a privateConversations row is created only on accept/reply), so this is a
+  // defensive client-side filter that keeps the UI consistent if a transient
+  // backend race ever surfaces a stale conversation row.
+  const pendingStandOutUserIds = useMemo<Set<string>>(() => {
+    const set = new Set<string>();
+    incomingStandOuts.forEach((row) => {
+      if (row.fromUserId) set.add(String(row.fromUserId));
+    });
+    outgoingStandOuts.forEach((row) => {
+      if (row.toUserId) set.add(String(row.toUserId));
+    });
+    return set;
+  }, [incomingStandOuts, outgoingStandOuts]);
+
   // Separate conversations into "new matches" (no real messages) and "message threads" (has real messages)
   // BUG-3 FIX: Use backend real-message state instead of placeholder display text
   const { newMatches, messageThreads } = useMemo(() => {
@@ -840,6 +921,10 @@ export default function ChatsScreen() {
     const threads: typeof conversations = [];
 
     conversations.forEach((convo) => {
+      // Defensive: skip any conversation whose participant is currently a
+      // pending Stand Out — that user belongs in the Stand Out strip only.
+      if (pendingStandOutUserIds.has(String(convo.participantId))) return;
+
       const hasRealMessages =
         hasRealMessagesByConversationId?.get(convo.id) ?? (convo as any).hasRealMessages === true;
 
@@ -856,14 +941,39 @@ export default function ChatsScreen() {
     threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
 
     return { newMatches: newM, messageThreads: threads };
-  }, [conversations, hasRealMessagesByConversationId]);
+  }, [conversations, hasRealMessagesByConversationId, pendingStandOutUserIds]);
 
+  const rawSearchQuery = searchQuery.trim();
+  const normalizedSearchQuery = (debouncedSearchQuery.trim() || rawSearchQuery).toLowerCase();
+  const isSearchActive = rawSearchQuery.length > 0;
+  const filteredSearchResults = useMemo(() => {
+    if (!isSearchActive) return messageThreads;
+
+    return conversations.filter((convo) => {
+      // Same defensive exclusion as newMatches/messageThreads.
+      if (pendingStandOutUserIds.has(String(convo.participantId))) return false;
+      const participantName = (convo.participantName ?? '').toLowerCase();
+      return participantName.includes(normalizedSearchQuery);
+    });
+  }, [conversations, isSearchActive, messageThreads, normalizedSearchQuery, pendingStandOutUserIds]);
+
+  // PHASE-2 PREMIUM (compact strip): three avatar size variants.
+  //  - 'strip'      → 56dp circle used inside the horizontal Stand Out
+  //                   Requests strip on the messages list.
+  //  - 'stripSent'  → 48dp dimmer circle for the outgoing Stand Outs Sent
+  //                   strip (slightly smaller + reduced opacity for hierarchy).
+  //  - 'detail'     → 80dp hero circle used inside the detail sheet.
   const renderStandOutAvatar = (
     user: StandOutPreviewUser | null | undefined,
-    sizeStyle: 'request' | 'sent' = 'request'
+    sizeStyle: 'strip' | 'stripSent' | 'detail' = 'strip',
   ) => {
     const name = getStandOutDisplayName(user);
-    const style = sizeStyle === 'sent' ? styles.standOutSentAvatar : styles.standOutRequestAvatar;
+    const style =
+      sizeStyle === 'detail'
+        ? styles.standOutDetailAvatar
+        : sizeStyle === 'stripSent'
+          ? styles.standOutStripAvatarSent
+          : styles.standOutStripAvatar;
     if (user?.blurredPhotoUrl) {
       return (
         <Image
@@ -877,16 +987,69 @@ export default function ChatsScreen() {
 
     return (
       <View style={[style, styles.standOutAvatarFallback]}>
-        <Text style={styles.standOutAvatarInitial}>{name[0] || '?'}</Text>
+        <Text
+          style={
+            sizeStyle === 'detail'
+              ? styles.standOutDetailInitial
+              : styles.standOutAvatarInitial
+          }
+        >
+          {name[0] || '?'}
+        </Text>
       </View>
     );
   };
 
+  // PHASE-2 PREMIUM compact strip — replaces the previous large stacked
+  // request cards. Each item is a tap-target that opens the detail sheet
+  // (overview mode). Layout rules:
+  //  - 1-4 items  → row left-aligned with consistent gap (NOT flex:1 — that
+  //                 distribution is reserved for New Matches so the two
+  //                 sections are visually distinct at a glance).
+  //  - 5+ items   → horizontal scroll, no centering.
+  // A small star badge sits at bottom-right of every avatar; if the sender
+  // attached a message, a subtle chat-bubble badge appears at bottom-left.
   const renderIncomingStandOutRequests = () => {
     if (incomingStandOuts.length === 0) return null;
     const sectionCount = handledStandOutIds.size > 0
       ? incomingStandOuts.length
       : standOutCounts?.incoming ?? incomingStandOuts.length;
+    const useScroll = incomingStandOuts.length > 4;
+
+    const items = incomingStandOuts.map((request) => {
+      const sender = request.sender ?? null;
+      const firstName = getStandOutDisplayName(sender).split(' ')[0] || 'Someone';
+      const hasMessage = !!(request.message && request.message.trim().length > 0);
+      const isAnyActionActive = !!activeStandOutAction;
+      return (
+        <TouchableOpacity
+          key={request.likeId}
+          style={styles.standOutStripItem}
+          activeOpacity={0.82}
+          disabled={isAnyActionActive}
+          onPress={() => openDetailSheet(request)}
+        >
+          <View style={styles.standOutStripAvatarWrap}>
+            {renderStandOutAvatar(sender, 'strip')}
+            <View style={styles.standOutStripStarBadge}>
+              <Ionicons name="star" size={10} color="#FFFFFF" />
+            </View>
+            {hasMessage && (
+              <View style={styles.standOutStripMessageBadge}>
+                <Ionicons
+                  name="chatbubble-ellipses"
+                  size={9}
+                  color="#FFFFFF"
+                />
+              </View>
+            )}
+          </View>
+          <Text style={styles.standOutStripName} numberOfLines={1}>
+            {firstName}
+          </Text>
+        </TouchableOpacity>
+      );
+    });
 
     return (
       <View style={styles.standOutSection}>
@@ -895,97 +1058,63 @@ export default function ChatsScreen() {
             <View style={styles.standOutIconWrap}>
               <Ionicons name="star" size={13} color="#FFFFFF" />
             </View>
-            <Text style={styles.standOutSectionTitle}>Stand Out Requests ({sectionCount})</Text>
+            <Text style={styles.standOutSectionTitle}>
+              Stand Out Requests ({sectionCount})
+            </Text>
           </View>
         </View>
 
-        {incomingStandOuts.map((request) => {
-          const sender = request.sender ?? null;
-          const acceptKey = `accept:${request.likeId}`;
-          const replyKey = `reply:${request.likeId}`;
-          const ignoreKey = `ignore:${request.likeId}`;
-          const isAnyActionActive = !!activeStandOutAction;
-          const isAccepting = activeStandOutAction === acceptKey;
-          const isReplying = activeStandOutAction === replyKey;
-          const isIgnoring = activeStandOutAction === ignoreKey;
-
-          return (
-            <View key={request.likeId} style={styles.standOutRequestCard}>
-              <View style={styles.standOutRequestTop}>
-                <View style={styles.standOutAvatarWrap}>
-                  {renderStandOutAvatar(sender)}
-                  <View style={styles.standOutStarBadge}>
-                    <Ionicons name="star" size={9} color="#FFFFFF" />
-                  </View>
-                </View>
-                <View style={styles.standOutRequestCopy}>
-                  <View style={styles.standOutNameRow}>
-                    <Text style={styles.standOutName} numberOfLines={1}>
-                      {getStandOutNameLine(sender)}
-                    </Text>
-                    <View style={styles.standOutBadge}>
-                      <Text style={styles.standOutBadgeText}>Stand Out</Text>
-                    </View>
-                  </View>
-                  <Text style={styles.standOutMessage} numberOfLines={2}>
-                    {getStandOutMessagePreview(request.message)}
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.standOutActions}>
-                <TouchableOpacity
-                  style={[styles.standOutActionButton, styles.standOutReplyButton]}
-                  disabled={isAnyActionActive}
-                  onPress={() => openReplyComposer(request)}
-                  activeOpacity={0.8}
-                >
-                  {isReplying ? (
-                    <ActivityIndicator size="small" color={COLORS.superLike} />
-                  ) : (
-                    <>
-                      <Ionicons name="chatbubble-ellipses-outline" size={14} color={COLORS.superLike} />
-                      <Text style={styles.standOutReplyText}>Reply</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.standOutActionButton, styles.standOutAcceptButton]}
-                  disabled={isAnyActionActive}
-                  onPress={() => handleAcceptStandOut(request)}
-                  activeOpacity={0.85}
-                >
-                  {isAccepting ? (
-                    <ActivityIndicator size="small" color="#FFFFFF" />
-                  ) : (
-                    <Text style={styles.standOutAcceptText}>Accept</Text>
-                  )}
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.standOutActionButton, styles.standOutIgnoreButton]}
-                  disabled={isAnyActionActive}
-                  onPress={() => handleIgnoreStandOut(request)}
-                  activeOpacity={0.75}
-                >
-                  {isIgnoring ? (
-                    <ActivityIndicator size="small" color={C.textLight} />
-                  ) : (
-                    <Text style={styles.standOutIgnoreText}>Ignore</Text>
-                  )}
-                </TouchableOpacity>
-              </View>
-            </View>
-          );
-        })}
+        {useScroll ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.standOutStripScroll}
+          >
+            {items}
+          </ScrollView>
+        ) : (
+          <View style={styles.standOutStripRow}>{items}</View>
+        )}
       </View>
     );
   };
 
+  // PHASE-2 PREMIUM compact dimmer strip for outgoing Stand Outs. Smaller,
+  // muted, "Pending" pill below the name. Tap shows a brief toast (no
+  // detail sheet — there's nothing the sender can do until the receiver
+  // responds).
   const renderOutgoingStandOutsSent = () => {
     if (outgoingStandOuts.length === 0) return null;
     const sectionCount = handledStandOutIds.size > 0
       ? outgoingStandOuts.length
       : standOutCounts?.outgoing ?? outgoingStandOuts.length;
+    const useScroll = outgoingStandOuts.length > 4;
+
+    const items = outgoingStandOuts.map((sent) => {
+      const receiver = sent.receiver ?? null;
+      const firstName = getStandOutDisplayName(receiver).split(' ')[0] || 'Someone';
+      return (
+        <TouchableOpacity
+          key={sent.likeId}
+          style={styles.standOutSentStripItem}
+          activeOpacity={0.82}
+          onPress={handleOutgoingStandOutPress}
+        >
+          <View style={styles.standOutSentAvatarWrap}>
+            {renderStandOutAvatar(receiver, 'stripSent')}
+          </View>
+          <Text
+            style={[styles.standOutStripName, styles.standOutSentStripName]}
+            numberOfLines={1}
+          >
+            {firstName}
+          </Text>
+          <View style={styles.standOutSentStripPendingPill}>
+            <Text style={styles.standOutSentStripPendingText}>Pending</Text>
+          </View>
+        </TouchableOpacity>
+      );
+    });
 
     return (
       <View style={styles.standOutSentSection}>
@@ -994,160 +1123,193 @@ export default function ChatsScreen() {
             <View style={[styles.standOutIconWrap, styles.standOutSentIcon]}>
               <Ionicons name="paper-plane" size={12} color="#FFFFFF" />
             </View>
-            <Text style={styles.standOutSectionTitle}>Stand Outs Sent ({sectionCount})</Text>
+            <Text style={styles.standOutSectionTitle}>
+              Stand Outs Sent ({sectionCount})
+            </Text>
           </View>
         </View>
 
-        {outgoingStandOuts.map((sent) => {
-          const receiver = sent.receiver ?? null;
-          return (
-            <TouchableOpacity
-              key={sent.likeId}
-              style={styles.standOutSentCard}
-              activeOpacity={0.82}
-              onPress={handleOutgoingStandOutPress}
-            >
-              <View style={styles.standOutAvatarWrap}>
-                {renderStandOutAvatar(receiver, 'sent')}
-              </View>
-              <View style={styles.standOutSentCopy}>
-                <View style={styles.standOutNameRow}>
-                  <Text style={styles.standOutName} numberOfLines={1}>
-                    {getStandOutNameLine(receiver)}
-                  </Text>
-                  <View style={styles.standOutPendingBadge}>
-                    <Text style={styles.standOutPendingText}>Pending</Text>
-                  </View>
-                </View>
-                <Text style={styles.standOutSentMessage} numberOfLines={1}>
-                  {getStandOutMessagePreview(sent.message)}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          );
-        })}
+        {useScroll ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.standOutStripScroll}
+          >
+            {items}
+          </ScrollView>
+        ) : (
+          <View style={styles.standOutStripRow}>{items}</View>
+        )}
       </View>
     );
   };
 
-  // New Matches row - Phase-2 style (blurred avatars, tap → profile preview)
+  // New Matches row - Phase-2 style (blurred avatars, tap → profile preview).
+  // ALWAYS renders so the row is visible even when there are zero matches.
+  // Layout switches based on real-match count:
+  //  - realCount ≤ NEW_MATCHES_TARGET_SLOTS  → fixed even-distribution row
+  //    (each slot uses flex:1 so 4 circles are evenly spread across the
+  //    available width; ghost slots fill the empty positions).
+  //  - realCount  > NEW_MATCHES_TARGET_SLOTS → horizontal scroll of just
+  //    the real avatars, no ghost fillers (user can swipe through them).
+  // PHASE-2 PREMIUM empty slot: glassy dark ring + soft inner blush of the
+  // primary rose accent + muted heart-outline so the slot reads as a
+  // "future match" instead of a missing image. No fake names, no fake photos.
+  const renderEmptyMatchSlot = (key: string) => (
+    <View key={key} pointerEvents="none" style={{ alignItems: 'center' }}>
+      <View style={styles.matchAvatarContainer}>
+        <View style={[styles.matchRing, styles.matchRingEmpty]}>
+          <View style={[styles.matchAvatar, styles.matchAvatarEmpty]}>
+            <Ionicons name="heart-outline" size={22} color="rgba(233,69,96,0.55)" />
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+
+  const renderRealMatchSlot = (item: (typeof newMatches)[number], key: string) => {
+    const isSuperLike = item.matchSource === 'super_like';
+    const isTodConnect = item.connectionSource === 'tod';
+    const isRecentConnect = Date.now() - item.lastMessageAt < NEW_MATCH_WINDOW_MS;
+    return (
+      <TouchableOpacity
+        key={key}
+        style={{ alignItems: 'center' }}
+        activeOpacity={0.7}
+        // P2_THREAD_OPEN_GATE: route through the prefetch handler so the
+        // thread mounts with all four queries already cached.
+        disabled={!!openingId && openingId !== String(item.id)}
+        onPress={() => handleOpenConversation(String(item.id))}
+      >
+        <View pointerEvents="none" style={{ alignItems: 'center' }}>
+          <View style={styles.matchAvatarContainer}>
+            {openingId === String(item.id) ? (
+              <View style={styles.newConnectionBadge}>
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              </View>
+            ) : isRecentConnect ? (
+              <View style={styles.newConnectionBadge}>
+                <Text style={styles.newConnectionText}>NEW</Text>
+              </View>
+            ) : null}
+            <View
+              style={[
+                styles.matchRing,
+                isSuperLike && { borderColor: COLORS.superLike, borderWidth: 3 },
+                isTodConnect && !isSuperLike && { borderColor: '#FF7849', borderWidth: 3 },
+              ]}
+            >
+              {isTodConnect ? (
+                <TodAvatar
+                  size={58}
+                  photoUrl={item.participantPhotoUrl || null}
+                  isAnonymous={isTodConversationAnonymous(
+                    item.participantName,
+                    item.participantPhotoUrl,
+                  )}
+                  photoBlurMode={getTodConversationPhotoBlurMode(
+                    item.isPhotoBlurred,
+                    item.canViewClearPhoto,
+                  )}
+                  label={item.participantName}
+                  style={styles.matchAvatar}
+                  backgroundColor={C.surface}
+                  textColor={C.text}
+                  iconColor={C.textLight}
+                />
+              ) : item.participantPhotoUrl ? (
+                <Image
+                  source={{ uri: item.participantPhotoUrl }}
+                  style={styles.matchAvatar}
+                  contentFit="cover"
+                  blurRadius={getAvatarBlurRadius({
+                    isPhotoBlurred: item.isPhotoBlurred,
+                    canViewClearPhoto: item.canViewClearPhoto,
+                  })}
+                />
+              ) : (
+                <View style={[styles.matchAvatar, styles.placeholderAvatar]}>
+                  <Text style={styles.avatarInitial}>{item.participantName?.[0] || '?'}</Text>
+                </View>
+              )}
+            </View>
+            {isSuperLike ? (
+              <View style={styles.superLikeStarBadge}>
+                <Ionicons name="star" size={10} color="#FFFFFF" />
+              </View>
+            ) : isTodConnect ? (
+              <View style={styles.todFlameBadge}>
+                <Ionicons name="flame" size={10} color="#FFFFFF" />
+              </View>
+            ) : null}
+          </View>
+          <Text style={styles.matchName} numberOfLines={1} ellipsizeMode="tail">
+            {item.participantName}
+          </Text>
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
   const renderNewMatchesRow = () => {
-    if (newMatches.length === 0) return null;
+    const realCount = newMatches.length;
+    const useEvenRow = realCount <= NEW_MATCHES_TARGET_SLOTS;
 
     return (
       <View style={styles.newMatchesSection}>
         <View style={styles.sectionHeader}>
           <Ionicons name="heart-circle" size={18} color={C.primary} />
           <Text style={styles.sectionTitle}>New Matches</Text>
-          <View style={styles.countBadge}>
-            <Text style={styles.countBadgeText}>{newMatches.length}</Text>
-          </View>
+          {realCount > 0 && (
+            <View style={styles.countBadge}>
+              <Text style={styles.countBadgeText}>{realCount}</Text>
+            </View>
+          )}
         </View>
-        <FlatList
-          horizontal
-          data={newMatches}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => {
-            // Check if this match originated from a super like
-            const isSuperLike = item.matchSource === 'super_like';
-            // Check if this is a T/D connection
-            const isTodConnect = item.connectionSource === 'tod';
-            // Check if this is a recent connection (within 24 hours)
-            const isRecentConnect = Date.now() - item.lastMessageAt < NEW_MATCH_WINDOW_MS;
-            return (
-              <TouchableOpacity
-                style={styles.matchItem}
-                activeOpacity={0.7}
-                // P2_THREAD_OPEN_GATE: route through the prefetch handler so
-                // the thread mounts with all four queries already cached;
-                // see Phase2ChatThreadPrefetcher above.
-                disabled={!!openingId && openingId !== String(item.id)}
-                onPress={() => handleOpenConversation(String(item.id))}
-              >
-                <View pointerEvents="none" style={{ alignItems: 'center' }}>
-                <View style={styles.matchAvatarContainer}>
-                  {/* P2_THREAD_OPEN_GATE: row-level opening spinner — replaces
-                      the NEW chip while the thread payload is being prefetched
-                      so the user has clear feedback that their tap was received. */}
-                  {openingId === String(item.id) ? (
-                    <View style={styles.newConnectionBadge}>
-                      <ActivityIndicator size="small" color="#FFFFFF" />
-                    </View>
-                  ) : isRecentConnect ? (
-                    <View style={styles.newConnectionBadge}>
-                      <Text style={styles.newConnectionText}>NEW</Text>
-                    </View>
-                  ) : null}
-                  <View style={[
-                    styles.matchRing,
-                    isSuperLike && { borderColor: COLORS.superLike, borderWidth: 3 },
-                    isTodConnect && !isSuperLike && { borderColor: '#FF7849', borderWidth: 3 }
-                  ]}>
-                    {isTodConnect ? (
-                      <TodAvatar
-                        size={58}
-                        photoUrl={item.participantPhotoUrl || null}
-                        isAnonymous={isTodConversationAnonymous(
-                          item.participantName,
-                          item.participantPhotoUrl
-                        )}
-                        photoBlurMode={getTodConversationPhotoBlurMode(
-                          item.isPhotoBlurred,
-                          item.canViewClearPhoto
-                        )}
-                        label={item.participantName}
-                        style={styles.matchAvatar}
-                        backgroundColor={C.surface}
-                        textColor={C.text}
-                        iconColor={C.textLight}
-                      />
-                    ) : item.participantPhotoUrl ? (
-                      <Image
-                        source={{ uri: item.participantPhotoUrl }}
-                        style={styles.matchAvatar}
-                        contentFit="cover"
-                        // PHOTO-BLUR-FIX: Use consistent blur based on backend flags
-                        blurRadius={getAvatarBlurRadius({
-                          isPhotoBlurred: item.isPhotoBlurred,
-                          canViewClearPhoto: item.canViewClearPhoto,
-                        })}
-                      />
-                    ) : (
-                      <View style={[styles.matchAvatar, styles.placeholderAvatar]}>
-                        <Text style={styles.avatarInitial}>{item.participantName?.[0] || '?'}</Text>
-                      </View>
-                    )}
-                  </View>
-                  {isSuperLike ? (
-                    <View style={styles.superLikeStarBadge}>
-                      <Ionicons name="star" size={10} color="#FFFFFF" />
-                    </View>
-                  ) : isTodConnect ? (
-                    <View style={styles.todFlameBadge}>
-                      <Ionicons name="flame" size={10} color="#FFFFFF" />
-                    </View>
-                  ) : null}
+
+        {useEvenRow ? (
+          <View style={styles.newMatchesEvenRow}>
+            {Array.from({ length: NEW_MATCHES_TARGET_SLOTS }).map((_, idx) => {
+              const realItem = newMatches[idx];
+              return (
+                <View key={`nm-slot-${idx}`} style={styles.newMatchesEvenSlot}>
+                  {realItem
+                    ? renderRealMatchSlot(realItem, `real-${realItem.id}`)
+                    : renderEmptyMatchSlot(`empty-${idx}`)}
                 </View>
-                <Text style={styles.matchName} numberOfLines={1} ellipsizeMode="tail">{item.participantName}</Text>
-                </View>
-              </TouchableOpacity>
-            );
-          }}
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.matchesList}
-        />
+              );
+            })}
+          </View>
+        ) : (
+          <FlatList
+            horizontal
+            data={newMatches}
+            keyExtractor={(item) => String(item.id)}
+            renderItem={({ item }) => (
+              <View style={styles.matchScrollItem}>
+                {renderRealMatchSlot(item, `real-${item.id}`)}
+              </View>
+            )}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.matchesList}
+          />
+        )}
       </View>
     );
   };
 
   const hasStandOutContent = incomingStandOuts.length > 0 || outgoingStandOuts.length > 0;
+  const displayedThreads = isSearchActive ? filteredSearchResults : messageThreads;
 
   return (
     <LinearGradient
-      // PHASE-2 PREMIUM: matches the thread (chats/[id].tsx) gradient so the
-      // tab → list → thread → tab transition stays cohesive.
-      colors={['#101426', '#1A1633', '#16213E']}
-      locations={[0, 0.55, 1]}
+      // PHASE-2 PREMIUM: deepened four-stop dark gradient — near-black at the
+      // very top fades through deep navy, warm purple-violet, into a softer
+      // midnight blue. Avoids the previous "flat blue" feel and gives the
+      // screen real visual depth without being garish. Stays cohesive with
+      // chats/[id].tsx which uses the same family of hues.
+      colors={['#070A18', '#0F1430', '#1B1340', '#161E3D']}
+      locations={[0, 0.35, 0.7, 1]}
       style={[styles.container, styles.gradientContainer, { paddingTop: insets.top }]}
     >
       <View style={styles.header}>
@@ -1177,6 +1339,32 @@ export default function ChatsScreen() {
             );
           })()}
         </TouchableOpacity>
+      </View>
+
+      <View style={styles.searchSection}>
+        <View style={styles.searchInputWrap}>
+          <Ionicons name="search" size={18} color={C.textLight} />
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search chats or matches"
+            placeholderTextColor={C.textLight}
+            style={styles.searchInput}
+            returnKeyType="search"
+            autoCorrect={false}
+            autoCapitalize="none"
+            clearButtonMode="never"
+          />
+          {searchQuery.length > 0 && (
+            <TouchableOpacity
+              onPress={clearSearch}
+              style={styles.searchClearButton}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Ionicons name="close-circle" size={18} color={C.textLight} />
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       <ScrollView
@@ -1211,21 +1399,25 @@ export default function ChatsScreen() {
         {!isQueryLoading && !hasQueryError && (
           <>
             {/* Stand Out requests stay pending here until accepted/replied */}
-            {renderIncomingStandOutRequests()}
-            {renderOutgoingStandOutsSent()}
+            {!isSearchActive && renderIncomingStandOutRequests()}
+            {!isSearchActive && renderOutgoingStandOutsSent()}
 
-            {/* New Matches Row */}
-            {renderNewMatchesRow()}
+            {/* New Matches Row — always renders when not searching; ghost
+                avatar slots fill the row when there are zero (or fewer than
+                NEW_MATCHES_TARGET_SLOTS) real matches. */}
+            {!isSearchActive && renderNewMatchesRow()}
 
-            {/* Messages section header (only show if we have both new matches and threads) */}
-            {newMatches.length > 0 && messageThreads.length > 0 && (
-              <View style={styles.threadsSectionHeader}>
-                <Text style={styles.sectionTitle}>Messages</Text>
+            {!isSearchActive && (
+              <View style={styles.recentChatsHeader}>
+                <Text style={styles.recentChatsLabel}>Recent Chats</Text>
               </View>
             )}
 
-            {/* Empty state - only show if NO conversations or pending Stand Outs */}
-            {conversations.length === 0 && !hasStandOutContent ? (
+            {isSearchActive && displayedThreads.length === 0 ? (
+              <View style={styles.searchEmptyContainer}>
+                <Text style={styles.searchEmptyText}>No matches for "{rawSearchQuery}"</Text>
+              </View>
+            ) : conversations.length === 0 && !hasStandOutContent && !isSearchActive ? (
           <View style={styles.emptyContainer}>
             <Ionicons name="lock-open-outline" size={64} color={C.textLight} />
             <Text style={styles.emptyTitle}>No conversations yet</Text>
@@ -1234,7 +1426,7 @@ export default function ChatsScreen() {
           </View>
         ) : (
           /* Message threads */
-          messageThreads.map((convo) => {
+          displayedThreads.map((convo) => {
             // PRESENCE: Calculate online status for green dot indicator
             const onlineStatus = getOnlineStatus((convo as any).participantLastActive);
             const previewConvo = {
@@ -1371,73 +1563,236 @@ export default function ChatsScreen() {
         />
       ) : null}
 
-      <Modal
-        transparent
-        visible={!!replyTarget}
-        animationType="fade"
-        onRequestClose={closeReplyComposer}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.replyModalOverlay}
-        >
-          <TouchableOpacity
-            style={StyleSheet.absoluteFill}
-            activeOpacity={1}
-            onPress={closeReplyComposer}
-          />
-          <View style={styles.replySheet}>
-            <View style={styles.replySheetHandle} />
-            <View style={styles.replySheetHeader}>
-              <View style={styles.standOutIconWrap}>
-                <Ionicons name="star" size={13} color="#FFFFFF" />
-              </View>
-              <View style={{ flex: 1, minWidth: 0 }}>
-                <Text style={styles.replySheetTitle}>Reply to Stand Out</Text>
-                <Text style={styles.replySheetSubtitle} numberOfLines={1}>
-                  {replyTarget ? getStandOutNameLine(replyTarget.sender) : ''}
-                </Text>
-              </View>
-            </View>
-            {replyTarget && (
-              <Text style={styles.replyOriginalMessage} numberOfLines={2}>
-                {getStandOutMessagePreview(replyTarget.message)}
-              </Text>
-            )}
-            <TextInput
-              value={replyText}
-              onChangeText={setReplyText}
-              placeholder="Write a short reply..."
-              placeholderTextColor={C.textLight}
-              style={styles.replyInput}
-              multiline
-              maxLength={500}
-              editable={!activeStandOutAction?.startsWith('reply:')}
-              textAlignVertical="top"
-            />
-            <View style={styles.replySheetActions}>
+      {/*
+       * PHASE-2 PREMIUM Stand Out detail sheet — two-mode bottom sheet.
+       *  - OVERVIEW MODE  (detailTarget !== null): hero avatar, name+age,
+       *    "Sent you a Stand Out" caption (or message callout if attached),
+       *    three actions — Ignore, Accept, Reply.
+       *  - REPLY MODE     (replyTarget  !== null): hero avatar, name+age,
+       *    optional original-message callout, multi-line TextInput,
+       *    "Sending a reply also accepts the request." caption, Cancel /
+       *    Send Reply.
+       * Reply button visual emphasis depends on whether the sender attached a
+       * message: filled bordered pill when there's a real message to reply
+       * to; lower-emphasis text-only style when there isn't, so Accept stays
+       * the primary call to action.
+       */}
+      {(() => {
+        const overviewActive = !!detailTarget;
+        const replyActive = !!replyTarget;
+        const sheetTarget = replyTarget ?? detailTarget;
+        if (!sheetTarget) return null;
+
+        const sender = sheetTarget.sender ?? null;
+        const hasMessage = !!(
+          sheetTarget.message && sheetTarget.message.trim().length > 0
+        );
+        const acceptKey = `accept:${sheetTarget.likeId}`;
+        const replyKey = `reply:${sheetTarget.likeId}`;
+        const ignoreKey = `ignore:${sheetTarget.likeId}`;
+        const isAnyActionActive = !!activeStandOutAction;
+        const isAccepting = activeStandOutAction === acceptKey;
+        const isReplying = activeStandOutAction === replyKey;
+        const isIgnoring = activeStandOutAction === ignoreKey;
+        const isReplyInFlight = activeStandOutAction?.startsWith('reply:');
+
+        const onClose = replyActive ? closeReplyComposer : closeDetailSheet;
+
+        return (
+          <Modal
+            transparent
+            visible={overviewActive || replyActive}
+            animationType="fade"
+            onRequestClose={onClose}
+          >
+            <KeyboardAvoidingView
+              behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+              style={styles.replyModalOverlay}
+            >
               <TouchableOpacity
-                style={styles.replyCancelButton}
-                onPress={closeReplyComposer}
-                disabled={activeStandOutAction?.startsWith('reply:')}
+                style={StyleSheet.absoluteFill}
+                activeOpacity={1}
+                onPress={onClose}
+              />
+              <View
+                style={[
+                  styles.replySheet,
+                  {
+                    // SAFE-AREA FIX: lift the sheet above the Android nav /
+                    // gesture area. `insets.bottom` is 0 on most iPhones
+                    // (handled separately by the iOS home indicator) but is
+                    // ~24-48dp on Android devices with on-screen nav buttons
+                    // or a tall gesture pill. We add a baseline of 12dp so
+                    // even devices reporting `insets.bottom = 0` still get
+                    // a visible breathing gap below the action buttons.
+                    marginBottom: Math.max(insets.bottom + 12, 16),
+                  },
+                ]}
               >
-                <Text style={styles.replyCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.replySendButton}
-                onPress={handleSubmitStandOutReply}
-                disabled={activeStandOutAction?.startsWith('reply:')}
-              >
-                {activeStandOutAction?.startsWith('reply:') ? (
-                  <ActivityIndicator size="small" color="#FFFFFF" />
+                <View style={styles.replySheetHandle} />
+
+                {/* Profile preview block — shared across both modes. */}
+                <View style={styles.standOutDetailHeader}>
+                  <TouchableOpacity
+                    style={styles.standOutDetailAvatarWrap}
+                    activeOpacity={0.85}
+                    onPress={() => handleViewStandOutSenderProfile(sheetTarget)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`View ${getStandOutDisplayName(sender)}'s profile`}
+                  >
+                    {renderStandOutAvatar(sender, 'detail')}
+                    <View style={styles.standOutDetailStarBadge}>
+                      <Ionicons name="star" size={12} color="#FFFFFF" />
+                    </View>
+                    {/* Subtle chevron-on-the-corner affordance — premium hint
+                        that the avatar is interactive without cluttering the
+                        sheet with extra text. */}
+                    <View style={styles.standOutDetailViewProfileChip}>
+                      <Ionicons
+                        name="chevron-forward"
+                        size={11}
+                        color="#FFFFFF"
+                      />
+                    </View>
+                  </TouchableOpacity>
+                  <Text style={styles.standOutDetailName} numberOfLines={1}>
+                    {getStandOutNameLine(sender)}
+                  </Text>
+                  {/* Subtle "tap photo" hint — reinforces that the avatar is
+                      a tappable shortcut to the full profile. Hidden in
+                      reply-composer mode to keep that view focused. */}
+                  {!replyActive && (
+                    <Text style={styles.standOutDetailViewProfileHint}>
+                      Tap photo to view profile
+                    </Text>
+                  )}
+                  {hasMessage ? (
+                    <View style={styles.standOutDetailMessageCallout}>
+                      <Ionicons
+                        name="chatbubble-ellipses-outline"
+                        size={14}
+                        color={COLORS.superLike}
+                      />
+                      <Text
+                        style={styles.standOutDetailMessageText}
+                        numberOfLines={3}
+                      >
+                        {getStandOutMessagePreview(sheetTarget.message)}
+                      </Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.standOutDetailNoMessage}>
+                      Sent you a Stand Out
+                    </Text>
+                  )}
+                </View>
+
+                {replyActive ? (
+                  <>
+                    <TextInput
+                      value={replyText}
+                      onChangeText={setReplyText}
+                      placeholder={
+                        hasMessage
+                          ? 'Write your reply...'
+                          : 'Say hi to accept and start the chat...'
+                      }
+                      placeholderTextColor={C.textLight}
+                      style={styles.replyInput}
+                      multiline
+                      maxLength={500}
+                      editable={!isReplyInFlight}
+                      textAlignVertical="top"
+                      autoFocus
+                    />
+                    <Text style={styles.standOutDetailReplyCaption}>
+                      Sending a reply also accepts the request.
+                    </Text>
+                    <View style={styles.replySheetActions}>
+                      <TouchableOpacity
+                        style={styles.replyCancelButton}
+                        onPress={closeReplyComposer}
+                        disabled={isReplyInFlight}
+                      >
+                        <Text style={styles.replyCancelText}>Cancel</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.replySendButton}
+                        onPress={handleSubmitStandOutReply}
+                        disabled={isReplyInFlight}
+                      >
+                        {isReplyInFlight ? (
+                          <ActivityIndicator size="small" color="#FFFFFF" />
+                        ) : (
+                          <Text style={styles.replySendText}>Send Reply</Text>
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                  </>
                 ) : (
-                  <Text style={styles.replySendText}>Send Reply</Text>
+                  <View style={styles.standOutDetailActions}>
+                    <TouchableOpacity
+                      style={styles.standOutDetailIgnoreButton}
+                      disabled={isAnyActionActive}
+                      onPress={() => handleIgnoreStandOut(sheetTarget)}
+                      activeOpacity={0.78}
+                    >
+                      {isIgnoring ? (
+                        <ActivityIndicator size="small" color={C.textLight} />
+                      ) : (
+                        <Text style={styles.standOutDetailIgnoreText}>
+                          Ignore
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.standOutDetailAcceptButton}
+                      disabled={isAnyActionActive}
+                      onPress={() => handleAcceptStandOut(sheetTarget)}
+                      activeOpacity={0.85}
+                    >
+                      {isAccepting ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <Text style={styles.standOutDetailAcceptText}>
+                          Accept
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={
+                        hasMessage
+                          ? styles.standOutDetailReplyButton
+                          : styles.standOutDetailReplyButtonLowEmphasis
+                      }
+                      disabled={isAnyActionActive}
+                      onPress={() => openReplyComposer(sheetTarget)}
+                      activeOpacity={0.78}
+                    >
+                      {isReplying ? (
+                        <ActivityIndicator
+                          size="small"
+                          color={COLORS.superLike}
+                        />
+                      ) : (
+                        <Text
+                          style={
+                            hasMessage
+                              ? styles.standOutDetailReplyText
+                              : styles.standOutDetailReplyTextLowEmphasis
+                          }
+                        >
+                          Reply
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
                 )}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+              </View>
+            </KeyboardAvoidingView>
+          </Modal>
+        );
+      })()}
 
       {reportTarget && (
         <ReportModal
@@ -1463,13 +1818,51 @@ const styles = StyleSheet.create({
   // solid backgroundColor inherited from `container`, letting the gradient
   // paint the full surface.
   gradientContainer: { backgroundColor: 'transparent' },
+  // PHASE-2 PREMIUM: hairline divider on the deepened gradient reads cleaner
+  // than a solid surface-coloured bar; keeps clear separation from search.
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingVertical: 12,
-    borderBottomWidth: 1, borderBottomColor: C.surface,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.06)',
   },
   headerTitle: { fontSize: 20, fontWeight: '700', color: C.text, flex: 1, marginLeft: 10 },
   listContent: { paddingBottom: 16 },
+  searchSection: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 10,
+  },
+  // PHASE-2 PREMIUM: glassy dark pill with rose-tinted hairline border + soft
+  // black drop shadow. Reads as a polished translucent control floating on
+  // the deepened gradient — not a flat input field.
+  searchInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    minHeight: 48,
+    paddingHorizontal: 16,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 15,
+    color: C.text,
+    paddingVertical: 11,
+    letterSpacing: 0.1,
+  },
+  searchClearButton: {
+    paddingVertical: 4,
+    paddingLeft: 4,
+  },
   // P2-003: Loading state styles
   loadingContainer: {
     alignItems: 'center',
@@ -1524,6 +1917,25 @@ const styles = StyleSheet.create({
   newMatchesSection: {
     marginTop: 20,
     marginBottom: 12,
+  },
+  // Ghost avatar slot — overrides the coloured ring/fill of `matchRing`
+  // and `matchAvatar` so the slot reads as "empty / waiting" while keeping
+  // the exact same outer geometry as a real match avatar.
+  // PHASE-2 PREMIUM: warm-rose-tinted hairline ring (echoes the primary
+  // accent at very low opacity) + dark glassy fill — the slot reads as
+  // "future match", not a missing image, and ties into Mira's brand colour.
+  matchRingEmpty: {
+    borderColor: 'rgba(233,69,96,0.20)',
+    borderWidth: 1.25,
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  matchAvatarEmpty: {
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(233,69,96,0.10)',
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -1590,166 +2002,323 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: C.text,
   },
-  standOutRequestCard: {
-    padding: 12,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.055)',
-    borderWidth: 1,
-    borderColor: COLORS.superLike + '38',
-    marginBottom: 8,
-  },
-  standOutRequestTop: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-  },
-  standOutAvatarWrap: {
-    position: 'relative',
-  },
-  standOutRequestAvatar: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: C.accent,
-  },
-  standOutSentAvatar: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: C.accent,
-  },
   standOutAvatarFallback: {
     alignItems: 'center',
     justifyContent: 'center',
   },
   standOutAvatarInitial: {
-    fontSize: 14,
+    fontSize: 18,
     fontWeight: '700',
     color: C.text,
   },
-  standOutStarBadge: {
+
+  // ── Stand Out Requests / Sent strips (compact horizontal items) ──
+  // Items left-align (gap, no flex:1) so the strip doesn't visually mimic
+  // the New Matches even-distribution row. 5+ items switch to horizontal
+  // scroll via the `useScroll` flag in the renderer.
+  standOutStripRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingTop: 6,
+    paddingBottom: 4,
+    gap: 14,
+  },
+  standOutStripScroll: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingTop: 6,
+    paddingBottom: 4,
+    paddingRight: 16,
+    gap: 14,
+  },
+  standOutStripItem: {
+    width: 64,
+    alignItems: 'center',
+  },
+  standOutStripAvatarWrap: {
+    position: 'relative',
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    borderWidth: 2,
+    borderColor: COLORS.superLike,
+    padding: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: COLORS.superLike,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.35,
+    shadowRadius: 5,
+    elevation: 3,
+  },
+  standOutStripAvatar: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: C.accent,
+  },
+  standOutStripStarBadge: {
     position: 'absolute',
-    right: -2,
     bottom: -2,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    right: -2,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
     backgroundColor: COLORS.superLike,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
     borderColor: C.background,
   },
-  standOutRequestCopy: {
-    flex: 1,
-    minWidth: 0,
-    marginLeft: 12,
-  },
-  standOutNameRow: {
-    flexDirection: 'row',
+  // Bottom-LEFT chat-bubble badge — only rendered when sender attached a
+  // message. Subtle dark fill with rose-tinted hairline so it doesn't
+  // compete with the bottom-right star badge for attention.
+  standOutStripMessageBadge: {
+    position: 'absolute',
+    bottom: -2,
+    left: -2,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: C.primary,
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 4,
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: C.background,
   },
-  standOutName: {
-    flex: 1,
-    minWidth: 0,
-    fontSize: 14,
+  standOutStripName: {
+    marginTop: 6,
+    fontSize: 12,
+    color: C.text,
+    fontWeight: '500',
+    textAlign: 'center',
+    width: '100%',
+  },
+
+  // ── Outgoing Stand Outs Sent strip (smaller, dimmer) ──
+  standOutSentStripItem: {
+    width: 60,
+    alignItems: 'center',
+    opacity: 0.78,
+  },
+  standOutSentAvatarWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.18)',
+    padding: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  standOutStripAvatarSent: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: C.accent,
+  },
+  standOutSentStripName: {
+    fontSize: 11,
+    color: C.textLight,
+  },
+  standOutSentStripPendingPill: {
+    marginTop: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: 'rgba(233,69,96,0.16)',
+  },
+  standOutSentStripPendingText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: C.primary,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+
+  // ── Detail sheet (overview + reply mode) ──
+  // Hero avatar + name + message callout + actions. Reused for both modes;
+  // composer-only elements (TextInput, caption, Cancel/Send) sit below this
+  // shared header inside the same sheet.
+  standOutDetailHeader: {
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  standOutDetailAvatarWrap: {
+    position: 'relative',
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    borderWidth: 2.5,
+    borderColor: COLORS.superLike,
+    padding: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: COLORS.superLike,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.45,
+    shadowRadius: 8,
+    elevation: 4,
+    marginBottom: 10,
+  },
+  standOutDetailAvatar: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: C.accent,
+  },
+  standOutDetailInitial: {
+    fontSize: 30,
     fontWeight: '700',
     color: C.text,
   },
-  standOutBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 999,
-    backgroundColor: COLORS.superLike + '20',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: COLORS.superLike + '55',
+  standOutDetailStarBadge: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: COLORS.superLike,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2.5,
+    borderColor: '#171B31',
   },
-  standOutBadgeText: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: COLORS.superLike,
+  // Tiny chevron chip on the bottom-LEFT of the detail-sheet hero avatar.
+  // Mirror image of the bottom-right star badge — together they read as
+  // "Stand Out (right) + Tap-to-view-profile (left)".
+  standOutDetailViewProfileChip: {
+    position: 'absolute',
+    bottom: -2,
+    left: -2,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#171B31',
   },
-  standOutMessage: {
+  standOutDetailName: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 4,
+  },
+  standOutDetailViewProfileHint: {
+    fontSize: 11,
+    color: C.textLight,
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+    fontWeight: '700',
+    opacity: 0.75,
+    marginBottom: 10,
+  },
+  standOutDetailNoMessage: {
     fontSize: 13,
-    lineHeight: 18,
     color: C.textLight,
     fontStyle: 'italic',
   },
-  standOutActions: {
+  standOutDetailMessageCallout: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: COLORS.superLike + '14',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.superLike + '40',
+    alignSelf: 'stretch',
+  },
+  standOutDetailMessageText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+    color: C.text,
+  },
+  standOutDetailActions: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginTop: 10,
+    marginTop: 4,
   },
-  standOutActionButton: {
-    height: 34,
-    borderRadius: 10,
+  standOutDetailIgnoreButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    flexDirection: 'row',
-    gap: 5,
-    paddingHorizontal: 10,
-  },
-  standOutReplyButton: {
-    flex: 1,
-    backgroundColor: COLORS.superLike + '14',
-    borderWidth: 1,
-    borderColor: COLORS.superLike + '45',
-  },
-  standOutAcceptButton: {
-    flex: 1,
-    backgroundColor: COLORS.superLike,
-  },
-  standOutIgnoreButton: {
     backgroundColor: 'rgba(255,255,255,0.06)',
-    paddingHorizontal: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.10)',
   },
-  standOutReplyText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: COLORS.superLike,
-  },
-  standOutAcceptText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#FFFFFF',
-  },
-  standOutIgnoreText: {
-    fontSize: 12,
+  standOutDetailIgnoreText: {
+    fontSize: 13,
     fontWeight: '700',
     color: C.textLight,
   },
-  standOutSentCard: {
-    flexDirection: 'row',
+  standOutDetailAcceptButton: {
+    flex: 1.4,
+    height: 44,
+    borderRadius: 12,
     alignItems: 'center',
-    padding: 10,
-    borderRadius: 13,
-    backgroundColor: 'rgba(255,255,255,0.045)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.09)',
-    marginBottom: 7,
+    justifyContent: 'center',
+    backgroundColor: COLORS.superLike,
+    shadowColor: COLORS.superLike,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 3,
   },
-  standOutSentCopy: {
-    flex: 1,
-    minWidth: 0,
-    marginLeft: 10,
-  },
-  standOutPendingBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 999,
-    backgroundColor: C.primary + '18',
-  },
-  standOutPendingText: {
-    fontSize: 10,
+  standOutDetailAcceptText: {
+    fontSize: 14,
     fontWeight: '800',
-    color: C.primary,
+    color: '#FFFFFF',
   },
-  standOutSentMessage: {
-    fontSize: 12,
+  // Reply button when there's an original message — bordered pill, brand
+  // color, equal weight to Ignore. Encourages a substantive response.
+  standOutDetailReplyButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.superLike + '14',
+    borderWidth: 1,
+    borderColor: COLORS.superLike + '50',
+  },
+  standOutDetailReplyText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.superLike,
+  },
+  // Reply button when there's NO original message — text-only, lower
+  // emphasis so Accept stays the primary action (you don't *need* to write
+  // anything to accept a no-message Stand Out).
+  standOutDetailReplyButtonLowEmphasis: {
+    flex: 1,
+    height: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+  },
+  standOutDetailReplyTextLowEmphasis: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.superLike,
+    opacity: 0.85,
+  },
+  standOutDetailReplyCaption: {
+    marginTop: 8,
+    fontSize: 11,
     color: C.textLight,
+    textAlign: 'center',
     fontStyle: 'italic',
+    letterSpacing: 0.2,
   },
   matchesList: {
     paddingLeft: 16,
@@ -1760,6 +2329,27 @@ const styles = StyleSheet.create({
     marginRight: 16,
     alignItems: 'center',
     width: moderateScale(72, 0.25),
+  },
+  // ── Even-row mode (≤ NEW_MATCHES_TARGET_SLOTS real matches) ──
+  // Each slot wrapper uses flex:1 so the 4 circles distribute evenly across
+  // the available width — no awkward right-side empty space.
+  newMatchesEvenRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  newMatchesEvenSlot: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  // ── Scroll mode (> NEW_MATCHES_TARGET_SLOTS real matches) ──
+  // Uses fixed-width slots so horizontal swipe feels natural.
+  matchScrollItem: {
+    width: moderateScale(72, 0.25),
+    marginRight: 16,
+    alignItems: 'center',
   },
   matchAvatarContainer: {
     position: 'relative',
@@ -1864,6 +2454,34 @@ const styles = StyleSheet.create({
     borderTopColor: C.surface,
     marginTop: 12,
   },
+  recentChatsHeader: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 10,
+  },
+  // PHASE-2 PREMIUM: small-caps style label (uppercased, generous tracking,
+  // muted text colour) so the section divider reads as a calm typographic
+  // separator rather than a heading competing with the chat rows.
+  recentChatsLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: C.textLight,
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+    opacity: 0.9,
+  },
+  searchEmptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 34,
+  },
+  searchEmptyText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.textLight,
+    textAlign: 'center',
+  },
 
   // ── Chat rows ──
   // PHASE-2 PREMIUM: subtle elevation + faint inner border give the card a
@@ -1912,16 +2530,24 @@ const styles = StyleSheet.create({
   chatName: { fontSize: 14, fontWeight: '600', color: C.text },
   chatIntentLabel: { fontSize: 11, color: C.primary, marginTop: 1, opacity: 0.85 },
   // PRESENCE: Online status styles
+  // PHASE-2 PREMIUM: subtle green halo + white-tinted ring lifts the dot off
+  // the avatar so "online" reads instantly without being noisy. Position is
+  // bottom-right so it never collides with the avatar ring corner.
   onlineDot: {
     position: 'absolute',
-    top: 0,
-    right: 0,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: '#4ADE80', // Green
+    bottom: 1,
+    right: 1,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#22C55E',
     borderWidth: 2,
-    borderColor: C.background,
+    borderColor: C.surface,
+    shadowColor: '#22C55E',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.55,
+    shadowRadius: 4,
+    elevation: 3,
     zIndex: 10,
   },
   recentlyActiveText: {
@@ -1966,29 +2592,6 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: 'rgba(255,255,255,0.2)',
     marginBottom: 14,
-  },
-  replySheetHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 12,
-  },
-  replySheetTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: C.text,
-  },
-  replySheetSubtitle: {
-    fontSize: 12,
-    color: C.textLight,
-    marginTop: 2,
-  },
-  replyOriginalMessage: {
-    fontSize: 13,
-    lineHeight: 18,
-    color: C.textLight,
-    fontStyle: 'italic',
-    marginBottom: 10,
   },
   replyInput: {
     minHeight: 92,

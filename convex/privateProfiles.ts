@@ -181,6 +181,46 @@ function validateEnumKeys(
   return { ok: true };
 }
 
+function sanitizeEnumKeysForSave(
+  keys: string[] | undefined,
+  allowedKeys: Set<string>,
+): string[] | undefined {
+  if (keys === undefined) {
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const sanitized: string[] = [];
+  for (const key of keys) {
+    if (!allowedKeys.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    sanitized.push(key);
+  }
+  return sanitized;
+}
+
+function sanitizePrivateIntentKeysForSave(
+  keys: string[] | undefined,
+  legacyPrivateIntentKey?: string | null,
+): string[] | undefined {
+  const sanitizedKeys = sanitizeEnumKeysForSave(keys, PHASE2_INTENT_KEY_SET);
+  if (sanitizedKeys !== undefined) {
+    return sanitizedKeys;
+  }
+
+  if (legacyPrivateIntentKey === undefined || legacyPrivateIntentKey === null) {
+    return undefined;
+  }
+
+  return PHASE2_INTENT_KEY_SET.has(legacyPrivateIntentKey)
+    ? [legacyPrivateIntentKey]
+    : [];
+}
+
+function sanitizePrivateDesireTagKeysForSave(keys: string[] | undefined): string[] | undefined {
+  return sanitizeEnumKeysForSave(keys, PHASE2_DESIRE_TAG_KEY_SET);
+}
+
 const PHASE2_NOTIFICATION_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const PHASE2_NOTIFICATION_RATE_LIMIT_MAX_WRITES = 20;
 
@@ -406,6 +446,7 @@ export const upsert = mutation({
     privatePhotoUrls: v.array(v.string()),
     privatePhotoBlurLevel: v.optional(v.number()),
     privateIntentKeys: v.array(v.string()),
+    privateIntentKey: v.optional(v.union(v.string(), v.null())),
     privateDesireTagKeys: v.array(v.string()),
     privateBoundaries: v.array(v.string()),
     privateBio: v.optional(v.string()),
@@ -441,17 +482,29 @@ export const upsert = mutation({
       .first();
 
     const now = Date.now();
+    const privateIntentKeys = sanitizePrivateIntentKeysForSave(
+      args.privateIntentKeys,
+      args.privateIntentKey,
+    ) ?? [];
+    const privateDesireTagKeys = sanitizePrivateDesireTagKeysForSave(
+      args.privateDesireTagKeys,
+    ) ?? [];
+    const { privateIntentKey: _legacyPrivateIntentKey, ...profileArgs } = args;
 
     if (existing) {
       await ctx.db.patch(existing._id, {
-        ...args,
+        ...profileArgs,
+        privateIntentKeys,
+        privateDesireTagKeys,
         updatedAt: now,
       });
       return { success: true, profileId: existing._id };
     }
 
     const profileId = await ctx.db.insert('userPrivateProfiles', {
-      ...args,
+      ...profileArgs,
+      privateIntentKeys,
+      privateDesireTagKeys,
       createdAt: now,
       updatedAt: now,
     });
@@ -465,6 +518,7 @@ export const updateFields = mutation({
     userId: v.id('users'),
     isPrivateEnabled: v.optional(v.boolean()),
     privateIntentKeys: v.optional(v.array(v.string())),
+    privateIntentKey: v.optional(v.union(v.string(), v.null())),
     privateDesireTagKeys: v.optional(v.array(v.string())),
     privateBoundaries: v.optional(v.array(v.string())),
     privateBio: v.optional(v.string()),
@@ -505,13 +559,24 @@ export const updateFields = mutation({
       throw new Error('Private profile not found');
     }
 
-    const { userId, ...updates } = args;
+    const privateIntentKeys = sanitizePrivateIntentKeysForSave(
+      args.privateIntentKeys,
+      args.privateIntentKey,
+    );
+    const privateDesireTagKeys = sanitizePrivateDesireTagKeysForSave(args.privateDesireTagKeys);
+    const { userId, privateIntentKey: _legacyPrivateIntentKey, ...updates } = args;
     // Remove undefined values
     const cleanUpdates: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(updates)) {
       if (value !== undefined) {
         cleanUpdates[key] = value;
       }
+    }
+    if (privateIntentKeys !== undefined) {
+      cleanUpdates.privateIntentKeys = privateIntentKeys;
+    }
+    if (privateDesireTagKeys !== undefined) {
+      cleanUpdates.privateDesireTagKeys = privateDesireTagKeys;
     }
 
     await ctx.db.patch(existing._id, cleanUpdates);
@@ -613,6 +678,7 @@ export const updateFieldsByAuthId = mutation({
     // Other optional fields
     privateBio: v.optional(v.string()),
     privateIntentKeys: v.optional(v.array(v.string())),
+    privateIntentKey: v.optional(v.union(v.string(), v.null())),
     privateDesireTagKeys: v.optional(v.array(v.string())),
     privateBoundaries: v.optional(v.array(v.string())),
     isPrivateEnabled: v.optional(v.boolean()),
@@ -672,8 +738,14 @@ export const updateFieldsByAuthId = mutation({
       return { success: false, error: lifestyleValidation.error };
     }
 
-    const intentValidation = validateEnumKeys(
+    const privateIntentKeys = sanitizePrivateIntentKeysForSave(
       args.privateIntentKeys,
+      args.privateIntentKey,
+    );
+    const privateDesireTagKeys = sanitizePrivateDesireTagKeysForSave(args.privateDesireTagKeys);
+
+    const intentValidation = validateEnumKeys(
+      privateIntentKeys,
       PHASE2_INTENT_KEY_SET,
       'private_intent_keys',
     );
@@ -682,7 +754,7 @@ export const updateFieldsByAuthId = mutation({
     }
 
     const desireValidation = validateEnumKeys(
-      args.privateDesireTagKeys,
+      privateDesireTagKeys,
       PHASE2_DESIRE_TAG_KEY_SET,
       'private_desire_tag_keys',
     );
@@ -726,11 +798,17 @@ export const updateFieldsByAuthId = mutation({
     // database will reject the write. Stripping null also preserves
     // any existing valid value: a missing key in patch leaves the
     // current row value untouched.
-    const { authUserId, token, ...updates } = args;
+    const { authUserId, token, privateIntentKey: _legacyPrivateIntentKey, ...updates } = args;
     const cleanUpdates: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(updates)) {
       if (value === undefined || value === null) continue;
       cleanUpdates[key] = value;
+    }
+    if (privateIntentKeys !== undefined) {
+      cleanUpdates.privateIntentKeys = privateIntentKeys;
+    }
+    if (privateDesireTagKeys !== undefined) {
+      cleanUpdates.privateDesireTagKeys = privateDesireTagKeys;
     }
 
     if (bioValidation.value !== undefined) {
@@ -1279,6 +1357,7 @@ export const upsertByAuthId = mutation({
     gender: v.string(),
     privateBio: v.optional(v.string()),
     privateIntentKeys: v.array(v.string()),
+    privateIntentKey: v.optional(v.union(v.string(), v.null())),
     privatePhotoUrls: v.array(v.string()),
     city: v.optional(v.string()),
     // Optional fields with defaults
@@ -1332,8 +1411,16 @@ export const upsertByAuthId = mutation({
       return { success: false, error: lifestyleValidation.error };
     }
 
-    const intentValidation = validateEnumKeys(
+    const privateIntentKeys = sanitizePrivateIntentKeysForSave(
       args.privateIntentKeys,
+      args.privateIntentKey,
+    ) ?? [];
+    const privateDesireTagKeys = sanitizePrivateDesireTagKeysForSave(
+      args.privateDesireTagKeys,
+    ) ?? [];
+
+    const intentValidation = validateEnumKeys(
+      privateIntentKeys,
       PHASE2_INTENT_KEY_SET,
       'private_intent_keys',
     );
@@ -1342,7 +1429,7 @@ export const upsertByAuthId = mutation({
     }
 
     const desireValidation = validateEnumKeys(
-      args.privateDesireTagKeys,
+      privateDesireTagKeys,
       PHASE2_DESIRE_TAG_KEY_SET,
       'private_desire_tag_keys',
     );
@@ -1389,7 +1476,7 @@ export const upsertByAuthId = mutation({
       age: ageFromUser(user),
       gender: user?.gender || args.gender,
       privateBio: bioValidation.value,
-      privateIntentKeys: args.privateIntentKeys,
+      privateIntentKeys,
       privatePhotoUrls: args.privatePhotoUrls,
       city: args.city || '',
       isPrivateEnabled: args.isPrivateEnabled ?? true,
@@ -1397,7 +1484,7 @@ export const upsertByAuthId = mutation({
       ageConfirmedAt: args.ageConfirmedAt ?? now,
       privatePhotosBlurred: args.privatePhotosBlurred ?? [],
       privatePhotoBlurLevel: args.privatePhotoBlurLevel ?? 0,
-      privateDesireTagKeys: args.privateDesireTagKeys ?? [],
+      privateDesireTagKeys,
       privateBoundaries: args.privateBoundaries ?? [],
       revealPolicy: args.revealPolicy ?? 'mutual_only',
       isSetupComplete: args.isSetupComplete ?? false,
