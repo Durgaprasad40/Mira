@@ -342,6 +342,7 @@ const starBurstStyles = StyleSheet.create({
 });
 
 const HEADER_H = 44;
+const DEEP_CONNECT_HEADER_VERTICAL_OFFSET = 8;
 const DISCOVER_TEXT_MAX_SCALE = 1.2;
 const DISCOVER_TEXT_PROPS = { maxFontSizeMultiplier: DISCOVER_TEXT_MAX_SCALE } as const;
 const DISCOVER_FONT_15 = moderateScale(15, 0.4);
@@ -3215,12 +3216,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     };
   }, [intentFilters, isPhase2, isPhase2NetworkIssueSettled, sourceProfiles.length]);
 
+  const headerVerticalOffset = isPhase2 ? DEEP_CONNECT_HEADER_VERTICAL_OFFSET : 0;
+  const compactHeaderTopPadding = insets.top + headerVerticalOffset;
+  const compactHeaderHeight = insets.top + HEADER_H + headerVerticalOffset;
+
   const notificationPopover = showNotificationPopover ? (
     <NotificationPopover
       visible
       phase={isPhase2 ? "phase2" : "phase1"}
       onClose={() => setShowNotificationPopover(false)}
-      anchorTop={insets.top + HEADER_H + SPACING.sm}
+      anchorTop={compactHeaderHeight + SPACING.sm}
     />
   ) : null;
   const hasProfiles = profiles.length > 0;
@@ -3409,7 +3414,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         {!hideHeader && (
           <View style={[
             styles.header,
-            { paddingTop: insets.top, height: insets.top + HEADER_H },
+            { paddingTop: compactHeaderTopPadding, height: compactHeaderHeight },
             dark && { backgroundColor: INCOGNITO_COLORS.background },
             !dark && { backgroundColor: 'rgba(255, 255, 255, 0.85)' }
           ]}>
@@ -3615,7 +3620,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         {/* Header - always visible even when feed is empty */}
         {!hideHeader && (
-          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+          <View style={[styles.header, { paddingTop: compactHeaderTopPadding, height: compactHeaderHeight }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
             <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
               <Ionicons name="options-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
@@ -3670,7 +3675,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     return (
       <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         {!hideHeader && (
-          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+          <View style={[styles.header, { paddingTop: compactHeaderTopPadding, height: compactHeaderHeight }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
             <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
               <Ionicons name="options-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
@@ -3707,7 +3712,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
 
   // FIX 10: Layout with safe area compliance across devices
-  const cardTop = hideHeader ? 0 : insets.top + HEADER_H;
+  const cardTop = hideHeader ? 0 : compactHeaderHeight;
   // Phase-2 (Deep Connect): single safe-area helper drives every bottom anchor
   // so the action row, card, and transition hint stay in lockstep across
   // devices. Phase-1 keeps the original three-formula layout unchanged.
@@ -3745,7 +3750,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
       {/* Compact Header */}
       {!hideHeader && (
-        <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        <View style={[styles.header, { paddingTop: compactHeaderTopPadding, height: compactHeaderHeight }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
           <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
             <Ionicons name="options-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
