@@ -206,6 +206,11 @@ export default function MainTabsLayout() {
     }, 1000);
   };
 
+  const handleMessagesTabPress = (e: any) => {
+    e.preventDefault();
+    router.replace('/(main)/(tabs)/messages' as any);
+  };
+
   return (
     <AppErrorBoundary name="MainTabs">
       <Tabs
@@ -262,6 +267,9 @@ export default function MainTabsLayout() {
             ),
             tabBarBadge: unreadChats > 0 ? unreadChats : undefined,
             tabBarBadgeStyle: { backgroundColor: COLORS.primary, fontSize: 10 },
+          }}
+          listeners={{
+            tabPress: handleMessagesTabPress,
           }}
         />
         <Tabs.Screen

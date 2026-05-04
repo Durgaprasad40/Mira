@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useMemo, useCallback } from 'react';
 import { AppState, type AppStateStatus, Platform } from 'react-native';
-import { Tabs } from 'expo-router';
+import { Tabs, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation } from 'convex/react';
@@ -37,6 +37,7 @@ const isPhase2Source = (source: string): boolean => {
 
 export default function PrivateTabsLayout() {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
 
   // Auth for queries
   const authUserId = useAuthStore((s) => s.userId);
@@ -198,6 +199,11 @@ export default function PrivateTabsLayout() {
     ? insets.bottom
     : 0;
 
+  const handleChatsTabPress = (e: any) => {
+    e.preventDefault();
+    router.replace('/(main)/(private)/(tabs)/chats' as any);
+  };
+
   return (
     <Tabs
       initialRouteName="deep-connect"
@@ -272,6 +278,9 @@ export default function PrivateTabsLayout() {
             minWidth: 18,
             height: 18,
           },
+        }}
+        listeners={{
+          tabPress: handleChatsTabPress,
         }}
       />
       <Tabs.Screen
