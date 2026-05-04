@@ -8,10 +8,11 @@
 
 import { v } from 'convex/values';
 import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { Doc, Id } from './_generated/dataModel';
 import { getPhase2DisplayName, validateSessionToken, resolveUserIdByAuthId } from './helpers';
 import { shouldCreatePhase2DeepConnectNotification } from './phase2NotificationPrefs';
 import { dispatchPrivatePush } from './privateNotifications';
+import { softMaskText } from './softMask';
 import {
   createPhase2MatchNotificationIfMissing,
   ensurePhase2MatchAndConversation,
@@ -20,7 +21,7 @@ import {
 
 // Helper: Check if either user has blocked the other
 async function isBlockedBidirectional(
-  ctx: MutationCtx,
+  ctx: MutationCtx | QueryCtx,
   userId1: Id<'users'>,
   userId2: Id<'users'>
 ): Promise<boolean> {
@@ -39,6 +40,412 @@ async function isBlockedBidirectional(
     )
     .first();
   return !!block2;
+}
+
+const STAND_OUT_DAILY_LIMIT = 2;
+const STAND_OUT_COOLDOWN_MS = 30 * 1000;
+const STAND_OUT_MESSAGE_MAX_LENGTH = 120;
+const STAND_OUT_REPLY_MAX_LENGTH = 500;
+
+const STAND_OUT_UNSAFE_PATTERNS: RegExp[] = [
+  /\bp[o0]rn/i,
+  /\bxxx\b/i,
+  /\bnude[s]?\b/i,
+  /\bnaked\b/i,
+  /\bsext(ing)?\b/i,
+  /\bd[i1]ck\s*pic/i,
+  /\bn[u0]de?\s*pic/i,
+  /\bescort\b/i,
+  /\bonlyfans\b/i,
+  /\bfansly\b/i,
+  /\bnsfw\b/i,
+  /\b(pay|paid)\s*(for|me)\s*(sex|meet|hookup)/i,
+  /\b(cash|money|venmo|cashapp|paypal|zelle)\s*.{0,20}(meet|sex|hookup)/i,
+  /\bsugar\s*(daddy|mommy|mama|baby)/i,
+  /\brape\b/i,
+  /\bunder\s*18\b/i,
+  /\bunderage\b/i,
+  /\bminor\b/i,
+];
+
+function getStandOutDayStartMs(now: number): number {
+  const date = new Date(now);
+  date.setUTCHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+function assertStandOutTextIsSafe(text: string): void {
+  for (const pattern of STAND_OUT_UNSAFE_PATTERNS) {
+    if (pattern.test(text)) {
+      throw new Error('Stand Out message contains content that is not allowed');
+    }
+  }
+}
+
+function normalizeStandOutMessage(message: string | undefined): string | undefined {
+  if (message == null) return undefined;
+  const trimmed = message.trim();
+  if (trimmed.length === 0) return undefined;
+  if (trimmed.length > STAND_OUT_MESSAGE_MAX_LENGTH) {
+    throw new Error(`Stand Out message must be ${STAND_OUT_MESSAGE_MAX_LENGTH} characters or fewer`);
+  }
+  assertStandOutTextIsSafe(trimmed);
+  return softMaskText(trimmed);
+}
+
+function normalizeStandOutReply(replyText: string): string {
+  const trimmed = replyText.trim();
+  if (trimmed.length === 0) {
+    throw new Error('Reply cannot be empty');
+  }
+  if (trimmed.length > STAND_OUT_REPLY_MAX_LENGTH) {
+    throw new Error(`Reply must be ${STAND_OUT_REPLY_MAX_LENGTH} characters or fewer`);
+  }
+  assertStandOutTextIsSafe(trimmed);
+  return softMaskText(trimmed);
+}
+
+function isPhase2UserEligible(user: Doc<'users'> | null): user is Doc<'users'> {
+  return !!(
+    user &&
+    user.phase2OnboardingCompleted === true &&
+    user.isActive !== false &&
+    user.isBanned !== true &&
+    !user.deletedAt
+  );
+}
+
+async function getActivePrivateMatch(
+  ctx: QueryCtx | MutationCtx,
+  userAId: Id<'users'>,
+  userBId: Id<'users'>
+) {
+  const { user1Id, user2Id } = getPhase2UserPair(userAId, userBId);
+  const match = await ctx.db
+    .query('privateMatches')
+    .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+    .first();
+  return match?.isActive === true ? match : null;
+}
+
+async function countStandOutsSentToday(
+  ctx: QueryCtx | MutationCtx,
+  fromUserId: Id<'users'>,
+  now: number
+): Promise<number> {
+  const dayStart = getStandOutDayStartMs(now);
+  const rows = await ctx.db
+    .query('privateLikes')
+    .withIndex('by_from_action_createdAt', (q) =>
+      q.eq('fromUserId', fromUserId).eq('action', 'super_like').gte('createdAt', dayStart)
+    )
+    .collect();
+  return rows.length;
+}
+
+async function assertStandOutQuotaAvailable(
+  ctx: MutationCtx,
+  fromUserId: Id<'users'>,
+  now: number
+): Promise<void> {
+  const sentToday = await countStandOutsSentToday(ctx, fromUserId, now);
+  if (sentToday >= STAND_OUT_DAILY_LIMIT) {
+    throw new Error('Daily Stand Out limit reached');
+  }
+
+  const latestStandOut = await ctx.db
+    .query('privateLikes')
+    .withIndex('by_from_action_createdAt', (q) =>
+      q.eq('fromUserId', fromUserId).eq('action', 'super_like')
+    )
+    .order('desc')
+    .first();
+
+  if (latestStandOut && now - latestStandOut.createdAt < STAND_OUT_COOLDOWN_MS) {
+    throw new Error('Please wait before sending another Stand Out');
+  }
+}
+
+async function getStandOutProfilePreview(
+  ctx: QueryCtx,
+  userId: Id<'users'>
+) {
+  const [user, profile, displayName] = await Promise.all([
+    ctx.db.get(userId),
+    ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first(),
+    getPhase2DisplayName(ctx, userId),
+  ]);
+
+  if (!isPhase2UserEligible(user) || !profile || profile.isSetupComplete !== true) {
+    return null;
+  }
+
+  const hasPrivatePhotos = (
+    profile.privatePhotosBlurred?.length ??
+    profile.privatePhotoUrls?.length ??
+    0
+  ) > 0;
+
+  return {
+    userId,
+    displayName,
+    age: profile.age,
+    gender: profile.gender,
+    blurredPhotoUrl: profile.privatePhotoUrls?.[0] ?? null,
+    photoBlurEnabled: (profile as any).photoBlurEnabled ?? undefined,
+    photoBlurSlots: profile.photoBlurSlots ?? undefined,
+    hasPrivatePhotos,
+    isVerified: profile.isVerified === true || user.isVerified === true,
+    lastActive: user.lastActive ?? null,
+  };
+}
+
+async function isPendingStandOutVisibleToViewer(
+  ctx: QueryCtx | MutationCtx,
+  like: Doc<'privateLikes'>,
+  viewerId: Id<'users'>,
+  otherUserId: Id<'users'>
+): Promise<boolean> {
+  if (like.action !== 'super_like') return false;
+  if (await getActivePrivateMatch(ctx, viewerId, otherUserId)) return false;
+  if (await isBlockedBidirectional(ctx, viewerId, otherUserId)) return false;
+
+  const reciprocal = await ctx.db
+    .query('privateLikes')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', viewerId).eq('toUserId', otherUserId)
+    )
+    .first();
+  if (reciprocal) return false;
+
+  return true;
+}
+
+async function incrementPrivateConversationUnread(
+  ctx: MutationCtx,
+  conversationId: Id<'privateConversations'>,
+  userId: Id<'users'>
+): Promise<void> {
+  const participant = await ctx.db
+    .query('privateConversationParticipants')
+    .withIndex('by_user_conversation', (q) =>
+      q.eq('userId', userId).eq('conversationId', conversationId)
+    )
+    .first();
+  if (participant) {
+    await ctx.db.patch(participant._id, {
+      unreadCount: participant.unreadCount + 1,
+    });
+  }
+}
+
+async function getPendingStandOutForReceiver(
+  ctx: MutationCtx,
+  receiverId: Id<'users'>,
+  likeId: Id<'privateLikes'>
+) {
+  const like = await ctx.db.get(likeId);
+  if (!like || like.toUserId !== receiverId || like.action !== 'super_like') {
+    throw new Error('Stand Out request not found');
+  }
+
+  const [receiver, sender] = await Promise.all([
+    ctx.db.get(receiverId),
+    ctx.db.get(like.fromUserId),
+  ]);
+  if (!isPhase2UserEligible(receiver) || !isPhase2UserEligible(sender)) {
+    throw new Error('Stand Out request is no longer available');
+  }
+  if (await isBlockedBidirectional(ctx, receiverId, like.fromUserId)) {
+    throw new Error('Stand Out request is no longer available');
+  }
+  if (await getActivePrivateMatch(ctx, receiverId, like.fromUserId)) {
+    throw new Error('Stand Out request is already handled');
+  }
+
+  const reciprocal = await ctx.db
+    .query('privateLikes')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', receiverId).eq('toUserId', like.fromUserId)
+    )
+    .first();
+  if (reciprocal) {
+    throw new Error('Stand Out request is already handled');
+  }
+
+  return like;
+}
+
+async function insertStandOutTextMessageIfMissing(
+  ctx: MutationCtx,
+  args: {
+    conversationId: Id<'privateConversations'>;
+    senderId: Id<'users'>;
+    recipientId: Id<'users'>;
+    content: string;
+    createdAt: number;
+    clientMessageId: string;
+  }
+) {
+  const existing = await ctx.db
+    .query('privateMessages')
+    .withIndex('by_conversation_clientMessageId', (q) =>
+      q.eq('conversationId', args.conversationId).eq('clientMessageId', args.clientMessageId)
+    )
+    .first();
+  if (existing) {
+    return { messageId: existing._id, inserted: false };
+  }
+
+  const messageId = await ctx.db.insert('privateMessages', {
+    conversationId: args.conversationId,
+    senderId: args.senderId,
+    type: 'text',
+    content: args.content,
+    createdAt: args.createdAt,
+    clientMessageId: args.clientMessageId,
+  });
+
+  await ctx.db.patch(args.conversationId, { lastMessageAt: args.createdAt });
+  await incrementPrivateConversationUnread(ctx, args.conversationId, args.recipientId);
+
+  return { messageId, inserted: true };
+}
+
+async function seedStandOutMessageIfNeeded(
+  ctx: MutationCtx,
+  args: {
+    conversationId: Id<'privateConversations'>;
+    like: Doc<'privateLikes'>;
+    receiverId: Id<'users'>;
+    createdAt: number;
+  }
+): Promise<boolean> {
+  const content = args.like.message?.trim();
+  if (!content) return false;
+
+  const result = await insertStandOutTextMessageIfMissing(ctx, {
+    conversationId: args.conversationId,
+    senderId: args.like.fromUserId,
+    recipientId: args.receiverId,
+    content,
+    createdAt: args.createdAt,
+    clientMessageId: `standout:${args.like._id}:original`,
+  });
+  return result.inserted;
+}
+
+async function createStandOutMatchNotifications(
+  ctx: MutationCtx,
+  args: {
+    senderId: Id<'users'>;
+    receiverId: Id<'users'>;
+    matchId: Id<'privateMatches'>;
+    conversationId: Id<'privateConversations'>;
+    now: number;
+  }
+) {
+  const [senderDisplayNameRaw, receiverDisplayNameRaw] = await Promise.all([
+    getPhase2DisplayName(ctx, args.senderId),
+    getPhase2DisplayName(ctx, args.receiverId),
+  ]);
+  const senderDisplayName = senderDisplayNameRaw ?? 'Someone';
+  const receiverDisplayName = receiverDisplayNameRaw ?? 'Someone';
+
+  await createPhase2MatchNotificationIfMissing(ctx, {
+    userId: args.receiverId,
+    matchId: args.matchId,
+    conversationId: args.conversationId,
+    title: 'New Match! 🎉',
+    body: `You matched with ${senderDisplayName} in Deep Connect!`,
+    now: args.now,
+    data: { otherUserId: args.senderId as string },
+    push: true,
+  });
+
+  await createPhase2MatchNotificationIfMissing(ctx, {
+    userId: args.senderId,
+    matchId: args.matchId,
+    conversationId: args.conversationId,
+    title: 'New Match! 🎉',
+    body: `You matched with ${receiverDisplayName} in Deep Connect!`,
+    now: args.now,
+    data: { otherUserId: args.receiverId as string },
+    push: true,
+  });
+}
+
+async function acceptPendingStandOut(
+  ctx: MutationCtx,
+  args: {
+    receiverId: Id<'users'>;
+    likeId: Id<'privateLikes'>;
+    replyText?: string;
+  }
+) {
+  const now = Date.now();
+  const like = await getPendingStandOutForReceiver(ctx, args.receiverId, args.likeId);
+  const normalizedReply = args.replyText == null ? null : normalizeStandOutReply(args.replyText);
+
+  const acceptanceLikeId = await ctx.db.insert('privateLikes', {
+    fromUserId: args.receiverId,
+    toUserId: like.fromUserId,
+    action: 'like',
+    createdAt: now,
+  });
+
+  const ensured = await ensurePhase2MatchAndConversation(ctx, {
+    userAId: like.fromUserId,
+    userBId: args.receiverId,
+    now,
+    source: 'deep_connect',
+    matchKind: 'super_like',
+    connectionSource: 'desire_super_like',
+    reactivateInactive: true,
+    unhideExistingConversation: true,
+    existingConversationMeansAlreadyMatched: false,
+  });
+
+  const seededStandOutMessage = await seedStandOutMessageIfNeeded(ctx, {
+    conversationId: ensured.conversationId,
+    like,
+    receiverId: args.receiverId,
+    createdAt: now,
+  });
+
+  let replyMessageId: Id<'privateMessages'> | null = null;
+  if (normalizedReply) {
+    const replyResult = await insertStandOutTextMessageIfMissing(ctx, {
+      conversationId: ensured.conversationId,
+      senderId: args.receiverId,
+      recipientId: like.fromUserId,
+      content: normalizedReply,
+      createdAt: now + 1,
+      clientMessageId: `standout:${like._id}:reply`,
+    });
+    replyMessageId = replyResult.messageId;
+  }
+
+  await createStandOutMatchNotifications(ctx, {
+    senderId: like.fromUserId,
+    receiverId: args.receiverId,
+    matchId: ensured.matchId,
+    conversationId: ensured.conversationId,
+    now,
+  });
+
+  return {
+    success: true,
+    conversationId: ensured.conversationId,
+    matchId: ensured.matchId,
+    acceptanceLikeId,
+    seededStandOutMessage,
+    replyMessageId,
+    source: ensured.source,
+  };
 }
 
 /**
@@ -116,12 +523,20 @@ export const swipe = mutation({
         }
       }
 
-      return { success: true, isMatch: false, alreadyMatched: false, source: 'deep_connect' };
+      return {
+        success: true,
+        isMatch: false,
+        alreadyMatched: false,
+        alreadySent: true,
+        likeId: existingLike._id,
+        existingAction: existingLike.action,
+        source: 'deep_connect',
+      };
     }
 
     // FIX 1: Target user Phase-2 validation
     const toUser = await ctx.db.get(toUserId);
-    if (!toUser || toUser.phase2OnboardingCompleted !== true) {
+    if (!isPhase2UserEligible(toUser)) {
       throw new Error('Target user not available in Phase-2');
     }
 
@@ -158,12 +573,18 @@ export const swipe = mutation({
       }
     }
 
+    const normalizedStandOutMessage =
+      action === 'super_like' ? normalizeStandOutMessage(message) : message;
+    if (action === 'super_like') {
+      await assertStandOutQuotaAvailable(ctx, fromUserId, now);
+    }
+
     // Record the swipe in privateLikes (Phase-2 table)
     const likeId = await ctx.db.insert('privateLikes', {
       fromUserId,
       toUserId,
       action,
-      message,
+      message: normalizedStandOutMessage,
       createdAt: now,
     });
 
@@ -227,7 +648,7 @@ export const swipe = mutation({
         }
 
         // Seed super_like message if present
-        const currentSuperLikeMessage = (action === 'super_like' && message) ? message : null;
+        const currentSuperLikeMessage = (action === 'super_like' && normalizedStandOutMessage) ? normalizedStandOutMessage : null;
         const reciprocalSuperLikeMessage = (reciprocalLike.action === 'super_like' && reciprocalLike.message)
           ? reciprocalLike.message
           : null;
@@ -331,6 +752,7 @@ export const swipe = mutation({
           const likeTitle =
             action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜';
           const likeBody = 'Check your likes in Deep Connect to see who!';
+          const notificationSource = action === 'super_like' ? 'stand_out' : 'deep_connect';
           await ctx.db.insert('privateNotifications', {
             userId: toUserId,
             type: 'phase2_like',
@@ -338,6 +760,9 @@ export const swipe = mutation({
             body: likeBody,
             data: {
               otherUserId: fromUserId as string,
+              source: notificationSource,
+              action,
+              likeId: likeId as string,
             },
             phase: 'phase2',
             dedupeKey: `p2_like:${fromUserId}:${toUserId}`,
@@ -350,13 +775,305 @@ export const swipe = mutation({
             type: 'phase2_like',
             title: likeTitle,
             body: likeBody,
-            data: { otherUserId: fromUserId as string },
+            data: {
+              otherUserId: fromUserId as string,
+              source: notificationSource,
+              action,
+              likeId: likeId as string,
+            },
           });
         }
       }
     }
 
     return { success: true, isMatch: false, alreadyMatched: false, source: 'deep_connect' };
+  },
+});
+
+/**
+ * Phase-2 Stand Out requests received by the viewer.
+ *
+ * Pending means: incoming super_like, no reciprocal response, no active match,
+ * both users still Phase-2 eligible, and neither side has blocked the other.
+ */
+export const getIncomingStandOuts = query({
+  args: {
+    authUserId: v.string(),
+    limit: v.optional(v.number()),
+    refreshKey: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const { authUserId, limit = 50, refreshKey } = args;
+    void refreshKey;
+
+    const viewerId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!viewerId) {
+      console.log('[STANDOUT_INCOMING_DENIED] Auth ID not linked to user:', authUserId);
+      return [];
+    }
+
+    const viewer = await ctx.db.get(viewerId);
+    if (!isPhase2UserEligible(viewer)) {
+      return [];
+    }
+
+    const fetchWindow = Math.min(Math.max(limit * 4, limit + 30), 200);
+    const likes = await ctx.db
+      .query('privateLikes')
+      .withIndex('by_to_action_createdAt', (q) =>
+        q.eq('toUserId', viewerId).eq('action', 'super_like')
+      )
+      .order('desc')
+      .take(fetchWindow);
+
+    const rows = [];
+    for (const like of likes) {
+      if (rows.length >= limit) break;
+      if (!(await isPendingStandOutVisibleToViewer(ctx, like, viewerId, like.fromUserId))) {
+        continue;
+      }
+
+      const sender = await getStandOutProfilePreview(ctx, like.fromUserId);
+      if (!sender) continue;
+
+      rows.push({
+        likeId: like._id,
+        fromUserId: like.fromUserId,
+        action: like.action,
+        message: like.message,
+        createdAt: like.createdAt,
+        sender,
+      });
+    }
+
+    return rows;
+  },
+});
+
+/**
+ * Phase-2 Stand Out requests sent by the viewer that are still pending.
+ */
+export const getOutgoingStandOuts = query({
+  args: {
+    authUserId: v.string(),
+    limit: v.optional(v.number()),
+    refreshKey: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const { authUserId, limit = 50, refreshKey } = args;
+    void refreshKey;
+
+    const viewerId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!viewerId) {
+      console.log('[STANDOUT_OUTGOING_DENIED] Auth ID not linked to user:', authUserId);
+      return [];
+    }
+
+    const viewer = await ctx.db.get(viewerId);
+    if (!isPhase2UserEligible(viewer)) {
+      return [];
+    }
+
+    const fetchWindow = Math.min(Math.max(limit * 4, limit + 30), 200);
+    const likes = await ctx.db
+      .query('privateLikes')
+      .withIndex('by_from_action_createdAt', (q) =>
+        q.eq('fromUserId', viewerId).eq('action', 'super_like')
+      )
+      .order('desc')
+      .take(fetchWindow);
+
+    const rows = [];
+    for (const like of likes) {
+      if (rows.length >= limit) break;
+      if (!(await isPendingStandOutVisibleToViewer(ctx, like, viewerId, like.toUserId))) {
+        continue;
+      }
+
+      const receiver = await getStandOutProfilePreview(ctx, like.toUserId);
+      if (!receiver) continue;
+
+      rows.push({
+        likeId: like._id,
+        toUserId: like.toUserId,
+        action: like.action,
+        message: like.message,
+        createdAt: like.createdAt,
+        receiver,
+      });
+    }
+
+    return rows;
+  },
+});
+
+/**
+ * Phase-2 Stand Out badge/count data for future Messages UI.
+ */
+export const getStandOutCounts = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const viewerId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!viewerId) {
+      console.log('[STANDOUT_COUNTS_DENIED] Auth ID not linked to user:', args.authUserId);
+      return {
+        incoming: 0,
+        outgoing: 0,
+        remainingToday: STAND_OUT_DAILY_LIMIT,
+      };
+    }
+
+    const viewer = await ctx.db.get(viewerId);
+    if (!isPhase2UserEligible(viewer)) {
+      return {
+        incoming: 0,
+        outgoing: 0,
+        remainingToday: STAND_OUT_DAILY_LIMIT,
+      };
+    }
+
+    const [incomingLikes, outgoingLikes, sentToday] = await Promise.all([
+      ctx.db
+        .query('privateLikes')
+        .withIndex('by_to_action_createdAt', (q) =>
+          q.eq('toUserId', viewerId).eq('action', 'super_like')
+        )
+        .collect(),
+      ctx.db
+        .query('privateLikes')
+        .withIndex('by_from_action_createdAt', (q) =>
+          q.eq('fromUserId', viewerId).eq('action', 'super_like')
+        )
+        .collect(),
+      countStandOutsSentToday(ctx, viewerId, Date.now()),
+    ]);
+
+    let incoming = 0;
+    for (const like of incomingLikes) {
+      if (await isPendingStandOutVisibleToViewer(ctx, like, viewerId, like.fromUserId)) {
+        const sender = await getStandOutProfilePreview(ctx, like.fromUserId);
+        if (sender) incoming++;
+      }
+    }
+
+    let outgoing = 0;
+    for (const like of outgoingLikes) {
+      if (await isPendingStandOutVisibleToViewer(ctx, like, viewerId, like.toUserId)) {
+        const receiver = await getStandOutProfilePreview(ctx, like.toUserId);
+        if (receiver) outgoing++;
+      }
+    }
+
+    return {
+      incoming,
+      outgoing,
+      remainingToday: Math.max(0, STAND_OUT_DAILY_LIMIT - sentToday),
+    };
+  },
+});
+
+/**
+ * Receiver accepts an incoming Phase-2 Stand Out without adding a reply.
+ */
+export const acceptStandOut = mutation({
+  args: {
+    authUserId: v.string(),
+    likeId: v.id('privateLikes'),
+  },
+  handler: async (ctx, args) => {
+    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!receiverId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    return await acceptPendingStandOut(ctx, {
+      receiverId,
+      likeId: args.likeId,
+    });
+  },
+});
+
+/**
+ * Receiver replies to an incoming Phase-2 Stand Out, which accepts it.
+ */
+export const replyToStandOut = mutation({
+  args: {
+    authUserId: v.string(),
+    likeId: v.id('privateLikes'),
+    replyText: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!receiverId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    return await acceptPendingStandOut(ctx, {
+      receiverId,
+      likeId: args.likeId,
+      replyText: args.replyText,
+    });
+  },
+});
+
+/**
+ * Receiver ignores an incoming Phase-2 Stand Out.
+ *
+ * Stores a Phase-2 private pass from receiver to sender so pending queries
+ * hide the request for both sides without notifying the sender.
+ */
+export const ignoreStandOut = mutation({
+  args: {
+    authUserId: v.string(),
+    likeId: v.id('privateLikes'),
+  },
+  handler: async (ctx, args) => {
+    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!receiverId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const like = await ctx.db.get(args.likeId);
+    if (!like || like.toUserId !== receiverId || like.action !== 'super_like') {
+      throw new Error('Stand Out request not found');
+    }
+
+    const sender = await ctx.db.get(like.fromUserId);
+    const receiver = await ctx.db.get(receiverId);
+    if (!isPhase2UserEligible(sender) || !isPhase2UserEligible(receiver)) {
+      return { success: true, ignored: false, alreadyHandled: true };
+    }
+
+    const existingMatch = await getActivePrivateMatch(ctx, receiverId, like.fromUserId);
+    if (existingMatch) {
+      return { success: true, ignored: false, alreadyHandled: true };
+    }
+
+    const reciprocal = await ctx.db
+      .query('privateLikes')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', receiverId).eq('toUserId', like.fromUserId)
+      )
+      .first();
+    if (reciprocal) {
+      return { success: true, ignored: false, alreadyHandled: true };
+    }
+
+    const now = Date.now();
+    const passId = await ctx.db.insert('privateLikes', {
+      fromUserId: receiverId,
+      toUserId: like.fromUserId,
+      action: 'pass',
+      createdAt: now,
+    });
+
+    return {
+      success: true,
+      ignored: true,
+      passId,
+    };
   },
 });
 

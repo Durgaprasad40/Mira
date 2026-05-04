@@ -844,7 +844,9 @@ export default defineSchema({
   })
     .index('by_from_to', ['fromUserId', 'toUserId'])
     .index('by_from_user', ['fromUserId'])
-    .index('by_to_user', ['toUserId']),
+    .index('by_to_user', ['toUserId'])
+    .index('by_from_action_createdAt', ['fromUserId', 'action', 'createdAt'])
+    .index('by_to_action_createdAt', ['toUserId', 'action', 'createdAt']),
 
   // Phase-2 Matches table (Deep Connect matches)
   // STRICT ISOLATION: Separate from Phase-1 'matches' table
@@ -1015,6 +1017,9 @@ export default defineSchema({
       otherUserId: v.optional(v.string()),
       chatRoomId: v.optional(v.string()),
       threadId: v.optional(v.string()),
+      source: v.optional(v.string()),
+      action: v.optional(v.string()),
+      likeId: v.optional(v.string()),
     })),
     // Strict phase tag — every Phase-2 row MUST be 'phase2'.
     phase: v.literal('phase2'),
