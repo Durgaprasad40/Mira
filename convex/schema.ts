@@ -804,6 +804,23 @@ export default defineSchema({
     .index('by_conversation_system_event', ['conversationId', 'systemEventKey'])
     .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
 
+  privateMessageMediaUploads: defineTable({
+    storageId: v.id('_storage'),
+    uploaderUserId: v.id('users'),
+    mediaKind: v.union(v.literal('image'), v.literal('video'), v.literal('audio')),
+    createdAt: v.number(),
+  })
+    .index('by_storage', ['storageId'])
+    .index('by_uploader', ['uploaderUserId']),
+
+  privateMessageMediaViews: defineTable({
+    messageId: v.id('privateMessages'),
+    viewerUserId: v.id('users'),
+    viewedAt: v.number(),
+  })
+    .index('by_message', ['messageId'])
+    .index('by_message_viewer', ['messageId', 'viewerUserId']),
+
   privateTypingStatus: defineTable({
     conversationId: v.id('privateConversations'),
     userId: v.id('users'),

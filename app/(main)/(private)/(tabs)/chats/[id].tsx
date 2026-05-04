@@ -245,6 +245,9 @@ export default function Phase2ChatThread() {
   const generateMediaUploadUrl = useMutation(
     api.privateConversations.generateSecureMediaUploadUrl
   );
+  const openPrivateSecureMedia = useMutation(
+    api.privateConversations.openPrivateSecureMedia
+  );
   const markRead = useMutation(api.privateConversations.markPrivateMessagesRead);
   // P2_HEADER_PARITY: Phase-2-isolated presence writer. Writes ONLY to
   // `privateUserPresence` (never `users.lastActive`) — see
@@ -324,8 +327,7 @@ export default function Phase2ChatThread() {
 
   // SECURE-MEDIA REVIEW STATE (Phase-1 parity):
   // After camera capture or gallery pick, hold the asset URI + media type so
-  // <Phase2CameraPhotoSheet> can review it and let the user pick Normal /
-  // Once / 30s / 60s before upload + send.
+  // <Phase2CameraPhotoSheet> can review it before upload + one-time send.
   const [pendingMediaUri, setPendingMediaUri] = useState<string | null>(null);
   const [pendingMediaType, setPendingMediaType] = useState<'photo' | 'video'>(
     'photo'
@@ -409,8 +411,8 @@ export default function Phase2ChatThread() {
   // SECURE-MEDIA OPEN STATE (Phase-1 parity, Phase-2 backend):
   //   - protectedViewer: holds the message currently shown in the secure
   //     viewer (Phase2ProtectedMediaViewer). Cleared on close.
-  //   - normalViewer: full-screen lightbox state for non-protected media
-  //     (Normal photo/video) — { uri, type }.
+  //   - normalViewer: legacy full-screen lightbox state for non-protected
+  //     media rows, retained for backward compatibility.
   // Both are HOISTED here (not inside MessageBubble) so the viewer's
   // lifecycle survives bubble re-renders, mirroring how Phase-1
   // ChatScreenInner manages viewerMessageId.
@@ -1202,8 +1204,8 @@ export default function Phase2ChatThread() {
   //
   // All uploads use api.privateConversations.generateSecureMediaUploadUrl,
   // and all sends go through api.privateConversations.sendPrivateMessage.
-  // Image/video sends go out as `isProtected: true` because getPrivateMessages
-  // only resolves imageUrl for protected media (see convex/privateConversations.ts).
+  // Image/video sends go out as protected one-time media. Voice/audio stays
+  // replayable and uses audioStorageId.
   const uploadMediaBlob = useCallback(
     async (uri: string, contentTypeFallback: string): Promise<string | null> => {
       if (!token) return null;
@@ -1381,29 +1383,18 @@ export default function Phase2ChatThread() {
           isProtected: pending.isProtected,
         });
 
-        if (!pending.isProtected) {
-          await sendPrivateMessage({
-            token,
-            conversationId: id as any,
-            type: isVideo ? 'video' : 'image',
-            content: pending.content,
-            imageStorageId: storageId as any,
-            clientMessageId: pending.clientMessageId,
-          });
-        } else {
-          await sendPrivateMessage({
-            token,
-            conversationId: id as any,
-            type: isVideo ? 'video' : 'image',
-            content: pending.content,
-            imageStorageId: storageId as any,
-            isProtected: true,
-            protectedMediaTimer: pending.protectedMediaTimer,
-            protectedMediaViewingMode: pending.protectedMediaViewingMode,
-            protectedMediaIsMirrored: pending.protectedMediaIsMirrored,
-            clientMessageId: pending.clientMessageId,
-          });
-        }
+        await sendPrivateMessage({
+          token,
+          conversationId: id as any,
+          type: isVideo ? 'video' : 'image',
+          content: pending.content,
+          imageStorageId: storageId as any,
+          isProtected: true,
+          protectedMediaTimer: 0,
+          protectedMediaViewingMode: pending.protectedMediaViewingMode ?? 'tap',
+          protectedMediaIsMirrored: pending.protectedMediaIsMirrored,
+          clientMessageId: pending.clientMessageId,
+        });
 
         // ---------------------------------------------------------------- success
         // Server insert succeeded. The optimistic bubble can now be dropped:
@@ -1451,17 +1442,8 @@ export default function Phase2ChatThread() {
 
   // Confirm callback from <Phase2CameraPhotoSheet>: stage an optimistic
   // pending bubble immediately, then upload + send in the background.
-  // Phase-1 timer values:
-  //   -1 = Normal, 0 = View once, 30 = 30s, 60 = 60s
-  //
-  // Phase-2 backend mapping (no schema change):
-  //   Normal     -> isProtected: false, no timer fields
-  //                 (getPrivateMessages now resolves imageUrl for these)
-  //   View once  -> isProtected: true,  protectedMediaTimer: 0
-  //                 (markPrivateSecureMediaViewed sets timerEndsAt = now,
-  //                  recipient gets one open before viewer marks expired)
-  //   30s / 60s  -> isProtected: true,  protectedMediaTimer: 30 | 60
-  //                 (timerEndsAt = now + timer*1000 on first view)
+  // Phase-2 photo/video messages are always protected one-time media; audio
+  // stays on the replayable voice path.
   const handleConfirmSecureSend = useCallback(
     async (uri: string, options: Phase2CameraPhotoOptions) => {
       if (!id || !token || !userId) {
@@ -1470,8 +1452,6 @@ export default function Phase2ChatThread() {
       }
       const isVideo = pendingMediaType === 'video';
       const isMirrored = pendingIsMirrored;
-      const timer = options.timer; // -1 | 0 | 30 | 60
-      const isNormal = timer < 0;
 
       // [P2_MEDIA_UPLOAD] Build the optimistic pending row BEFORE clearing
       // the review-sheet state, so we never lose the user's chosen URI.
@@ -1485,22 +1465,16 @@ export default function Phase2ChatThread() {
         _id: pendingId,
         senderId: userId,
         type: isVideo ? 'video' : 'image',
-        content: isNormal
-          ? isVideo
-            ? 'Video'
-            : 'Photo'
-          : isVideo
-            ? 'Secure Video'
-            : 'Secure Photo',
+        content: isVideo ? 'Secure Video' : 'Secure Photo',
         createdAt: Date.now(),
         localUri: uri,
         uploadStatus: 'uploading',
         uploadProgress: 0,
-        isProtected: !isNormal,
-        protectedMediaTimer: isNormal ? undefined : (timer as 0 | 30 | 60),
-        protectedMediaViewingMode: isNormal ? undefined : options.viewingMode,
+        isProtected: true,
+        protectedMediaTimer: 0,
+        protectedMediaViewingMode: options.viewingMode,
         protectedMediaIsMirrored:
-          isNormal ? undefined : isVideo && isMirrored,
+          isVideo && isMirrored,
         clientMessageId,
       };
       addPendingPhase2Message(pending);
@@ -1562,7 +1536,7 @@ export default function Phase2ChatThread() {
   // hard-enforced. Captured asset comes back via the in-memory handoff store
   // (key: `secure_capture_media_${id}`) and is picked up below by
   // `useFocusEffect` → staged into the existing Phase2CameraPhotoSheet for
-  // Normal / Once / 30s / 60s selection. ImagePicker.launchCameraAsync was
+  // one-time send review. ImagePicker.launchCameraAsync was
   // replaced because it surfaces the OS camera UI, which is photo-only on
   // many Android devices and doesn't enforce the 30s rule.
   const handleSendCameraPress = useCallback(() => {
@@ -1580,7 +1554,7 @@ export default function Phase2ChatThread() {
   // after camera-composer calls `router.back()`. The composer writes to
   // `secure_capture_media_${conversationId}` via setHandoff. We pop it (so it
   // can't be picked up twice) and feed it into the existing pendingMedia*
-  // state, which mounts <Phase2CameraPhotoSheet> for the timer choice.
+  // state, which mounts <Phase2CameraPhotoSheet> for one-time review.
   useFocusEffect(
     useCallback(() => {
       if (!id) return;
@@ -1888,6 +1862,60 @@ export default function Phase2ChatThread() {
     });
   }, [stableMessages, pendingPhase2Messages, secureMediaNowMs]);
 
+  const handleOpenProtectedMedia = useCallback(async (item: any, isOwn: boolean) => {
+    const mediaType: 'image' | 'video' = item.type === 'video' ? 'video' : 'image';
+    const mediaLabel = mediaType === 'video' ? 'video' : 'photo';
+
+    if (isOwn) {
+      Alert.alert('Sent', `This ${mediaLabel} can be opened once by the recipient.`);
+      return;
+    }
+    if (!token) {
+      Alert.alert('Sign In Required', 'Please sign in to view media.');
+      return;
+    }
+
+    try {
+      const result = await openPrivateSecureMedia({
+        token,
+        messageId: item.id as any,
+      });
+
+      if (result.status === 'already_viewed') {
+        Alert.alert('Already Viewed', `This ${mediaLabel} was already viewed.`);
+        return;
+      }
+      if (result.status === 'not_authorized' || result.status === 'unauthorized') {
+        Alert.alert('Not Available', `This ${mediaLabel} is not available.`);
+        return;
+      }
+      if (result.status === 'no_media') {
+        Alert.alert('Unavailable', `This ${mediaLabel} is no longer available.`);
+        return;
+      }
+      if (result.status !== 'ok' || !result.url) {
+        Alert.alert('Couldn’t Open', `We couldn’t open this ${mediaLabel}. Please try again.`);
+        return;
+      }
+
+      setProtectedViewer({
+        raw: {
+          ...item,
+          imageUrl: result.url,
+          isExpired: false,
+          viewedAt: result.viewedAt,
+          timerEndsAt: undefined,
+          protectedMediaTimer: result.protectedMediaTimer ?? 0,
+          protectedMediaViewingMode: result.protectedMediaViewingMode ?? 'tap',
+          protectedMediaIsMirrored: result.protectedMediaIsMirrored,
+        },
+        isSender: false,
+      });
+    } catch (err: any) {
+      Alert.alert('Couldn’t Open', String(err?.message ?? 'Failed to open media.'));
+    }
+  }, [token, openPrivateSecureMedia]);
+
   const renderItem = useCallback(
     ({ item, index }: { item: any; index: number }) => {
       const isOwn = item.senderId === userId;
@@ -2004,12 +2032,9 @@ export default function Phase2ChatThread() {
                     // the viewer opens. Sender (isOwn) bypasses internally.
                     mediaUrl={item.imageUrl ?? undefined}
                     mediaKind={item.type === 'video' ? 'video' : 'image'}
-                    onOpen={() =>
-                      setProtectedViewer({
-                        raw: item,
-                        isSender: isOwn,
-                      })
-                    }
+                    onOpen={() => {
+                      void handleOpenProtectedMedia(item, isOwn);
+                    }}
                   />
                 )
               : undefined
@@ -2023,6 +2048,7 @@ export default function Phase2ChatThread() {
       token,
       otherUserName,
       otherPhotoUrl,
+      handleOpenProtectedMedia,
       messageList,
       handleRetryPendingPhase2Media,
     ]
@@ -2547,7 +2573,7 @@ export default function Phase2ChatThread() {
         </TouchableOpacity>
       </Modal>
 
-      {/* Secure media review sheet (Normal / Once / 30s / 60s) */}
+      {/* Secure media review sheet (photo/video are always one-time) */}
       <Phase2CameraPhotoSheet
         visible={!!pendingMediaUri}
         imageUri={pendingMediaUri}
@@ -2557,9 +2583,9 @@ export default function Phase2ChatThread() {
       />
 
       {/* PROTECTED-MEDIA VIEWER:
-          For Phase-2 secure media (View once / 30s / 60s). Uses
-          api.privateConversations.markPrivateSecureMediaViewed and
-          markPrivateSecureMediaExpired internally — Phase-2 isolated. */}
+          For Phase-2 secure media. URLs are claimed through
+          api.privateConversations.openPrivateSecureMedia before display;
+          close-time expiry remains Phase-2 isolated. */}
       {protectedViewer && id && (
         <Phase2ProtectedMediaViewer
           visible={!!protectedViewer}

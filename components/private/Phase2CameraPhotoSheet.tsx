@@ -2,22 +2,13 @@
  * Phase2CameraPhotoSheet — secure media review + options bottom sheet for
  * Phase-2 (Deep Connect) Messages. UX parity with Phase-1 CameraPhotoSheet:
  *   - Thumbnail preview of the captured/picked photo or video
- *   - TIME selector: Normal | View once | 30s | 60s
+ *   - View-once delivery for all Phase-2 photo/video sends
  *   - Cancel / Send actions
  *
  * Differences from Phase-1:
  *   - Uses INCOGNITO_COLORS (Phase-2 dark navy + rose/pink primary)
- *   - Confirm payload includes phase2Timer values used by sendPrivateMessage:
- *       Normal     -> { isProtected: false, timer: undefined }
- *       View once  -> { isProtected: true,  timer: 0 }
- *       30s        -> { isProtected: true,  timer: 30 }
- *       60s        -> { isProtected: true,  timer: 60 }
- *
- * The mapping above mirrors Phase-1's UX while respecting Phase-2 backend
- * semantics (`markPrivateSecureMediaViewed` sets `timerEndsAt = now +
- * timer*1000`, so timer=0 expires on view = view-once; timer=-1 would
- * resolve to a past timestamp, which is why "Normal" is sent as
- * `isProtected: false`).
+ *   - Confirm payload always uses timer=0; backend also enforces one-time
+ *     delivery so older clients cannot send permanently reopenable visuals.
  */
 import React, { useState, useEffect } from 'react';
 import {
@@ -40,7 +31,7 @@ const SHEET_HEIGHT = SCREEN_HEIGHT * 0.5;
 const C = INCOGNITO_COLORS;
 
 export interface Phase2CameraPhotoOptions {
-  /** -1 Normal | 0 Once | 30/60 timed seconds */
+  /** Phase-2 photo/video is always one-time. */
   timer: number;
   /** Phase-2 backend value */
   viewingMode: 'tap' | 'hold';
@@ -55,10 +46,7 @@ interface Phase2CameraPhotoSheetProps {
 }
 
 const TIMER_OPTIONS: ReadonlyArray<{ label: string; value: number }> = [
-  { label: 'Normal', value: -1 },
   { label: 'View once', value: 0 },
-  { label: '30s', value: 30 },
-  { label: '60s', value: 60 },
 ];
 
 export function Phase2CameraPhotoSheet({
@@ -70,31 +58,26 @@ export function Phase2CameraPhotoSheet({
 }: Phase2CameraPhotoSheetProps) {
   const isVideo = mediaType === 'video';
   const insets = useSafeAreaInsets();
-  const [timer, setTimer] = useState<number>(-1);
+  const [timer, setTimer] = useState<number>(0);
 
   useEffect(() => {
-    if (!visible) setTimer(-1);
+    if (!visible) setTimer(0);
   }, [visible]);
 
   const handleSend = () => {
     if (!imageUri) return;
-    onConfirm(imageUri, { timer, viewingMode: 'tap' });
-    setTimer(-1);
+    onConfirm(imageUri, { timer: 0, viewingMode: 'tap' });
+    setTimer(0);
   };
 
   const handleCancel = () => {
-    setTimer(-1);
+    setTimer(0);
     onCancel();
   };
 
   if (!visible || !imageUri) return null;
 
-  const subtitle =
-    timer === -1
-      ? `${isVideo ? 'Video' : 'Photo'} stays available — recipient can reopen anytime`
-      : timer === 0
-        ? `${isVideo ? 'Video' : 'Photo'} closes after the first successful view`
-        : `${isVideo ? 'Video' : 'Photo'} expires ${timer}s after it is opened`;
+  const subtitle = `${isVideo ? 'Video' : 'Photo'} closes after the first successful view`;
 
   return (
     <Modal visible={visible} transparent animationType="slide">

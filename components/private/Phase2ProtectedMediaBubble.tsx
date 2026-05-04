@@ -14,7 +14,7 @@
  *
  * VISUAL PARITY (border + size polish):
  *   The placeholder card matches normal Phase-2 media in `MediaMessage`
- *   legacy mode — 220×165 with borderRadius 16 — so once-view / 30s / 60s
+ *   legacy mode — 220×165 with borderRadius 16 — so one-time secure media
  *   bubbles share the SAME outer card footprint as normal photo/video. A
  *   visible 2px accent border (rose for own, light slate for received)
  *   replaces the previous near-invisible hairline so the secure frame is
@@ -93,13 +93,14 @@ export function Phase2ProtectedMediaBubble({
 }: Phase2ProtectedMediaBubbleProps) {
   const [nowMs, setNowMs] = useState(() => Date.now());
 
-  const state = useMemo<'expired' | 'viewing' | 'locked'>(() => {
+  const state = useMemo<'viewed' | 'expired' | 'viewing' | 'locked'>(() => {
+    if (viewedAt && (protectedMediaTimer ?? 0) === 0) return 'viewed';
     if (isExpired) return 'expired';
     if (viewedAt && timerEndsAt) {
       return timerEndsAt > nowMs ? 'viewing' : 'expired';
     }
     return 'locked';
-  }, [isExpired, viewedAt, timerEndsAt, nowMs]);
+  }, [isExpired, viewedAt, timerEndsAt, nowMs, protectedMediaTimer]);
 
   // Keep the active timer card live while the viewer can still reopen it.
   useEffect(() => {
@@ -198,6 +199,22 @@ export function Phase2ProtectedMediaBubble({
       >
         <Ionicons name="lock-closed" size={18} color="rgba(255,255,255,0.55)" />
         <Text style={styles.expiredText}>Expired</Text>
+        <View style={styles.timerBadge}>
+          <Text style={styles.timerBadgeText}>{timerLabel}</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (state === 'viewed') {
+    return (
+      <View
+        style={[...frameStyle, styles.cardExpired]}
+        accessibilityRole="image"
+        accessibilityLabel="Secure media already viewed"
+      >
+        <Ionicons name="checkmark-circle" size={18} color="rgba(255,255,255,0.55)" />
+        <Text style={styles.expiredText}>Viewed</Text>
         <View style={styles.timerBadge}>
           <Text style={styles.timerBadgeText}>{timerLabel}</Text>
         </View>

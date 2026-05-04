@@ -23,6 +23,17 @@ import { softMaskText } from './softMask';
 const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice'];
 const EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS = 60 * 1000;
 
+type PrivateMessageMediaKind = 'image' | 'video' | 'audio';
+
+const PRIVATE_MESSAGE_MEDIA_LIMITS: Record<
+  PrivateMessageMediaKind,
+  { maxBytes: number; contentTypePrefix: string }
+> = {
+  image: { maxBytes: 15 * 1024 * 1024, contentTypePrefix: 'image/' },
+  video: { maxBytes: 100 * 1024 * 1024, contentTypePrefix: 'video/' },
+  audio: { maxBytes: 20 * 1024 * 1024, contentTypePrefix: 'audio/' },
+};
+
 type PrivateSecureMediaVisibilityFields = {
   isProtected?: boolean;
   isExpired?: boolean;
@@ -54,6 +65,63 @@ function shouldHideExpiredPrivateSecureMedia(
     typeof expiredAt === 'number' &&
     nowMs - expiredAt >= EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS
   );
+}
+
+function isPrivateVisualMediaType(type: string | undefined): type is 'image' | 'video' {
+  return type === 'image' || type === 'video';
+}
+
+async function verifyOrClaimPrivateMessageMediaOwnership(
+  ctx: MutationCtx,
+  storageId: Id<'_storage'>,
+  senderId: Id<'users'>,
+  mediaKind: PrivateMessageMediaKind
+): Promise<void> {
+  const existing = await ctx.db
+    .query('privateMessageMediaUploads')
+    .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+    .first();
+
+  if (existing) {
+    if (existing.uploaderUserId !== senderId) {
+      throw new Error('Unauthorized: storage reference does not belong to sender');
+    }
+    if (existing.mediaKind !== mediaKind) {
+      throw new Error('Media storage kind does not match message type');
+    }
+    return;
+  }
+
+  await ctx.db.insert('privateMessageMediaUploads', {
+    storageId,
+    uploaderUserId: senderId,
+    mediaKind,
+    createdAt: Date.now(),
+  });
+}
+
+async function validatePrivateMessageMediaMetadata(
+  ctx: MutationCtx,
+  storageId: Id<'_storage'>,
+  mediaKind: PrivateMessageMediaKind
+): Promise<void> {
+  const meta = (await ctx.db.system.get(storageId)) as
+    | { size?: number; contentType?: string }
+    | null;
+
+  if (!meta) {
+    throw new Error('Invalid storage reference: metadata unavailable');
+  }
+
+  const limits = PRIVATE_MESSAGE_MEDIA_LIMITS[mediaKind];
+  if (typeof meta.size === 'number' && meta.size > limits.maxBytes) {
+    throw new Error(`Media exceeds size limit for ${mediaKind}`);
+  }
+
+  const contentType = typeof meta.contentType === 'string' ? meta.contentType : '';
+  if (!contentType.toLowerCase().startsWith(limits.contentTypePrefix)) {
+    throw new Error(`Media content type does not match declared ${mediaKind}`);
+  }
 }
 
 function getPrivateConversationPreviewContent(
@@ -476,12 +544,22 @@ export const getPrivateMessages = query({
     );
     const audioUrlMap = new Map(audioStorageIds.map((id, i) => [id as string, audioUrls[i]]));
 
-    // P1-001: Batch-fetch image URLs for protected media (same pattern as audio)
-    const imageStorageIds = visibleMessages.filter((m) => m.imageStorageId).map((m) => m.imageStorageId!);
-    const imageUrls = await Promise.all(
-      imageStorageIds.map((id) => ctx.storage.getUrl(id))
+    const visualMessages = visibleMessages.filter(
+      (m) => isPrivateVisualMediaType(m.type) && !!m.imageStorageId
     );
-    const imageUrlMap = new Map(imageStorageIds.map((id, i) => [id as string, imageUrls[i]]));
+    const visualViewRows = await Promise.all(
+      visualMessages.map((m) =>
+        ctx.db
+          .query('privateMessageMediaViews')
+          .withIndex('by_message_viewer', (q) =>
+            q.eq('messageId', m._id).eq('viewerUserId', userId)
+          )
+          .first()
+      )
+    );
+    const visualViewByMessageId = new Map(
+      visualMessages.map((m, idx) => [m._id as string, visualViewRows[idx]])
+    );
 
     // Return in chronological order with media URLs resolved
     return visibleMessages.reverse().map((m) => {
@@ -511,11 +589,13 @@ export const getPrivateMessages = query({
         };
       }
 
-      // P1-001: Protected media messages: include image URL and metadata.
+      // Phase-2 visual media is one-time by backend rule. List queries expose
+      // only metadata; playable photo/video URLs are returned exclusively by
+      // openPrivateSecureMedia after it atomically records the viewer's claim.
       // Keep this branch even after the cleanup cron clears imageStorageId so
       // expired secure media renders as an expired card during its grace window
       // instead of falling through as a plain "Secure photo/video" message.
-      if (m.isProtected && (m.type === 'image' || m.type === 'video')) {
+      if (isPrivateVisualMediaType(m.type)) {
         // PHASE-2 SECURE-MEDIA EXPIRY GATE: derive expiry from `isExpired`
         // (frontend-flipped) OR from `timerEndsAt <= now` (deadline elapsed
         // even if the client never round-tripped). When expired, never expose
@@ -524,35 +604,20 @@ export const getPrivateMessages = query({
         const timerEnded =
           typeof m.timerEndsAt === 'number' && m.timerEndsAt <= nowMs;
         const expiredAt = getPrivateSecureMediaExpiredAt(m, nowMs);
-        const derivedExpired = !!m.isExpired || expiredAt !== null || timerEnded;
+        const viewerView = visualViewByMessageId.get(m._id as string);
+        const viewerConsumed = !!viewerView || !!m.viewedAt;
+        const derivedExpired = !!m.isExpired || expiredAt !== null || timerEnded || viewerConsumed;
         return {
           ...baseMessage,
           isProtected: true,
-          imageUrl: derivedExpired
-            ? null
-            : m.imageStorageId
-              ? imageUrlMap.get(m.imageStorageId as string) ?? null
-              : null,
-          protectedMediaTimer: m.protectedMediaTimer,
-          protectedMediaViewingMode: m.protectedMediaViewingMode,
+          imageUrl: null,
+          protectedMediaTimer: 0,
+          protectedMediaViewingMode: m.protectedMediaViewingMode ?? 'tap',
           protectedMediaIsMirrored: m.protectedMediaIsMirrored,
-          viewedAt: m.viewedAt,
+          viewedAt: viewerView?.viewedAt ?? m.viewedAt,
           timerEndsAt: m.timerEndsAt,
           isExpired: derivedExpired,
           expiredAt: expiredAt ?? m.expiredAt,
-        };
-      }
-
-      // PHASE-2 NORMAL MEDIA: Non-protected images/videos still need a URL on
-      // the wire so MessageBubble's <MediaMessage /> path can render them.
-      // This is the Phase-2 equivalent of Phase-1 "Normal" (timer = -1) — the
-      // sender did NOT request expiry, so the message is not in the protected
-      // pipeline but we still resolve the storage URL so the recipient can
-      // view it. Schema is unchanged; this is an additive query enhancement.
-      if (!m.isProtected && (m.type === 'image' || m.type === 'video') && m.imageStorageId) {
-        return {
-          ...baseMessage,
-          imageUrl: imageUrlMap.get(m.imageStorageId as string) ?? null,
         };
       }
 
@@ -744,8 +809,34 @@ export const sendPrivateMessage = mutation({
     // P0-002: Soft-mask sensitive words in text messages (Phase-1 parity)
     const maskedContent = type === 'text' ? softMaskText(content) : content;
 
+    const isVisualMedia = isPrivateVisualMediaType(type);
+    if (isVisualMedia) {
+      if (!imageStorageId) {
+        throw new Error('Visual media messages require a storage reference');
+      }
+      await verifyOrClaimPrivateMessageMediaOwnership(ctx, imageStorageId, senderId, type);
+      await validatePrivateMessageMediaMetadata(ctx, imageStorageId, type);
+    } else if (imageStorageId) {
+      throw new Error('Image storage reference is only valid for photo/video messages');
+    }
+
+    if (audioStorageId) {
+      if (type !== 'voice') {
+        throw new Error('Audio storage reference is only valid for voice messages');
+      }
+      await verifyOrClaimPrivateMessageMediaOwnership(ctx, audioStorageId, senderId, 'audio');
+      await validatePrivateMessageMediaMetadata(ctx, audioStorageId, 'audio');
+    }
+
+    const normalizedIsProtected = isVisualMedia ? true : isProtected;
+    const normalizedProtectedMediaTimer = isVisualMedia ? 0 : protectedMediaTimer;
+    const normalizedProtectedMediaViewingMode =
+      isVisualMedia ? 'tap' : protectedMediaViewingMode;
+    const normalizedProtectedMediaIsMirrored =
+      isVisualMedia ? !!protectedMediaIsMirrored : protectedMediaIsMirrored;
+
     // Insert message into privateMessages table
-    // P1-001: Include protected media fields for secure photos/videos
+    // Phase-2 visual media is always protected one-time. Audio stays replayable.
     const messageId = await ctx.db.insert('privateMessages', {
       conversationId,
       senderId,
@@ -754,10 +845,10 @@ export const sendPrivateMessage = mutation({
       imageStorageId,
       audioStorageId,
       audioDurationMs,
-      isProtected,
-      protectedMediaTimer,
-      protectedMediaViewingMode,
-      protectedMediaIsMirrored,
+      isProtected: normalizedIsProtected,
+      protectedMediaTimer: normalizedProtectedMediaTimer,
+      protectedMediaViewingMode: normalizedProtectedMediaViewingMode,
+      protectedMediaIsMirrored: normalizedProtectedMediaIsMirrored,
       createdAt: now,
       clientMessageId,
     });
@@ -1394,6 +1485,82 @@ export const generateSecureMediaUploadUrl = mutation({
   },
 });
 
+export const openPrivateSecureMedia = mutation({
+  args: {
+    token: v.string(),
+    messageId: v.id('privateMessages'),
+  },
+  handler: async (ctx, { token, messageId }) => {
+    const viewerUserId = await validateSessionToken(ctx, token);
+    if (!viewerUserId) {
+      return { status: 'unauthorized' as const };
+    }
+
+    const message = await ctx.db.get(messageId);
+    if (!message || !isPrivateVisualMediaType(message.type)) {
+      return { status: 'no_media' as const };
+    }
+
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(viewerUserId)) {
+      return { status: 'not_authorized' as const };
+    }
+
+    if (message.senderId === viewerUserId) {
+      return { status: 'not_authorized' as const };
+    }
+
+    const recipientIds = conversation.participants.filter((id) => id !== message.senderId);
+    if (!recipientIds.includes(viewerUserId)) {
+      return { status: 'not_authorized' as const };
+    }
+
+    const otherParticipantId = conversation.participants.find((id) => id !== viewerUserId);
+    if (
+      otherParticipantId &&
+      await isBlockedBidirectional(ctx, viewerUserId, otherParticipantId)
+    ) {
+      return { status: 'not_authorized' as const };
+    }
+
+    if (!message.imageStorageId) {
+      return { status: 'no_media' as const };
+    }
+
+    const existingView = await ctx.db
+      .query('privateMessageMediaViews')
+      .withIndex('by_message_viewer', (q) =>
+        q.eq('messageId', messageId).eq('viewerUserId', viewerUserId)
+      )
+      .first();
+    if (existingView || message.viewedAt) {
+      return { status: 'already_viewed' as const };
+    }
+
+    const url = await ctx.storage.getUrl(message.imageStorageId);
+    if (!url) {
+      return { status: 'no_media' as const };
+    }
+
+    const viewedAt = Date.now();
+    await ctx.db.insert('privateMessageMediaViews', {
+      messageId,
+      viewerUserId,
+      viewedAt,
+    });
+
+    return {
+      status: 'ok' as const,
+      url,
+      mediaType: message.type,
+      viewedAt,
+      protectedMediaTimer: 0,
+      protectedMediaViewingMode: (message.protectedMediaViewingMode ?? 'tap') as 'tap' | 'hold',
+      protectedMediaIsMirrored: !!message.protectedMediaIsMirrored,
+    };
+  },
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // LEAVE CONVERSATION: Hide conversation for current user only
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1497,33 +1664,43 @@ export const markPrivateSecureMediaViewed = mutation({
       return { success: false, error: 'not_authorized' };
     }
 
+    if (!isPrivateVisualMediaType(message.type)) {
+      return { success: false, error: 'not_visual_media' };
+    }
+
+    if (message.senderId === userId) {
+      return { success: false, error: 'not_authorized' };
+    }
+
+    const existingView = await ctx.db
+      .query('privateMessageMediaViews')
+      .withIndex('by_message_viewer', (q) =>
+        q.eq('messageId', messageId).eq('viewerUserId', userId)
+      )
+      .first();
+
     // Skip if already viewed (idempotent)
-    if (message.viewedAt) {
-      return { success: true, alreadyViewed: true, timerEndsAt: message.timerEndsAt };
+    if (existingView || message.viewedAt) {
+      return {
+        success: true,
+        alreadyViewed: true,
+        viewedAt: existingView?.viewedAt ?? message.viewedAt,
+        timerEndsAt: message.timerEndsAt,
+      };
     }
 
-    // Skip if not protected media
-    if (!message.isProtected) {
-      return { success: false, error: 'not_protected' };
-    }
-
-    // Calculate timerEndsAt based on protectedMediaTimer
-    const timerSeconds = message.protectedMediaTimer ?? 0;
-    const timerEndsAt = timerSeconds > 0 ? now + (timerSeconds * 1000) : undefined;
-
-    // Update the message
-    await ctx.db.patch(messageId, {
+    await ctx.db.insert('privateMessageMediaViews', {
+      messageId,
+      viewerUserId: userId,
       viewedAt: now,
-      timerEndsAt,
     });
 
     console.log('[markPrivateSecureMediaViewed]', {
       messageId: (messageId as string)?.slice(-8),
-      timerSeconds,
-      timerEndsAt,
+      timerSeconds: 0,
     });
 
-    return { success: true, viewedAt: now, timerEndsAt };
+    return { success: true, viewedAt: now, timerEndsAt: undefined };
   },
 });
 
