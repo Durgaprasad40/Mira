@@ -3,7 +3,7 @@ import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput, Animated, Pressable, BackHandler,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { Video, ResizeMode } from 'expo-av';
+import { Audio, Video, ResizeMode } from 'expo-av';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,7 +14,12 @@ import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { TodAvatar } from '@/components/truthdare/TodAvatar';
 import { UnifiedAnswerComposer, IdentityMode, Attachment } from '@/components/truthdare/UnifiedAnswerComposer';
-import { TodVoicePlayer } from '@/components/truthdare/TodVoicePlayer';
+// NOTE: `TodVoicePlayer` (the horizontal pill-shaped voice player) is no
+// longer rendered in this thread/response card. Voice playback now happens
+// inside the same compact 84×84 media tile used for photo/video — see
+// `handleToggleVoiceTile` and the tile JSX further below. The component
+// file itself is left untouched in case other Truth/Dare surfaces want to
+// render it later.
 import { uploadMediaToConvex } from '@/lib/uploadUtils';
 import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
@@ -63,6 +68,16 @@ const REPORT_REASONS: { code: TodReportReason; label: string; icon: string }[] =
   { code: 'scam', label: 'Scam', icon: '💰' },
   { code: 'other', label: 'Other', icon: '📝' },
 ];
+
+// Voice playback timer helper — formats milliseconds as `m:ss`. Used by
+// the compact voice tile to show "0:03 / 0:10" while playing. Stays at
+// module scope so the per-render renderItem closure stays cheap.
+function formatVoiceClock(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 // Time remaining helper
 function formatTimeLeft(expiresAt: number): string {
@@ -388,6 +403,10 @@ export default function PromptThreadScreen() {
   const [menuAnswerId, setMenuAnswerId] = useState<string | null>(null);
   const [menuAnswerOwnerId, setMenuAnswerOwnerId] = useState<string | null>(null);
   const [menuIsOwnAnswer, setMenuIsOwnAnswer] = useState(false);
+  // Whether the long-pressed answer's parent prompt is still active. Used to
+  // hide the Edit option in the long-press action sheet once the prompt has
+  // expired (delete is still allowed for own answers post-expiry).
+  const [menuIsExpired, setMenuIsExpired] = useState(false);
 
   // Prompt action popup state (for prompt long-press)
   const [showPromptActionPopup, setShowPromptActionPopup] = useState(false);
@@ -400,6 +419,160 @@ export default function PromptThreadScreen() {
 
   // Selected answer state - for tap-to-reveal Connect (prompt owner only)
   const [selectedAnswerId, setSelectedAnswerId] = useState<string | null>(null);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Compact-tile voice playback
+  // ───────────────────────────────────────────────────────────────────────
+  // Voice answers no longer render the old horizontal `TodVoicePlayer`
+  // pill. Instead, they share the same 84×84 square media tile as photo
+  // and video, with a centered play / pause icon. Tapping toggles
+  // playback inline; only one voice can play at a time across the
+  // screen, and playback auto-resets when the audio finishes one full
+  // cycle, so a second tap restarts from the beginning.
+  //
+  // Lifecycle invariants enforced below:
+  //  - `playingVoiceId` is the answer ID of the currently-playing voice,
+  //    or `null` when nothing is playing.
+  //  - `playingVoiceSoundRef` holds the live `Audio.Sound` instance and
+  //    is cleared whenever the sound is unloaded.
+  //  - On `didJustFinish`, both refs reset so the next tap creates a
+  //    fresh sound from position 0 (no "stuck completed" state).
+  //  - Unmount and screen blur both stop and unload the active sound,
+  //    so leaving the screen never leaves audio playing.
+  const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+  // Live playback position / duration (in ms) for the currently-playing
+  // voice tile. Both reset to 0 whenever playback stops, finishes, or a
+  // new tile is tapped, so the tile microtext + progress bar always
+  // reflect the active sound.
+  const [voicePosMs, setVoicePosMs] = useState(0);
+  const [voiceDurMs, setVoiceDurMs] = useState(0);
+  const playingVoiceSoundRef = useRef<Audio.Sound | null>(null);
+
+  const stopVoicePlayback = useCallback(async () => {
+    const sound = playingVoiceSoundRef.current;
+    playingVoiceSoundRef.current = null;
+    if (sound) {
+      try {
+        await sound.stopAsync();
+      } catch {
+        // ignore — sound may already be stopped
+      }
+      try {
+        await sound.unloadAsync();
+      } catch {
+        // ignore — sound may already be unloaded
+      }
+    }
+    if (isMountedRef.current) {
+      setPlayingVoiceId(null);
+      setVoicePosMs(0);
+      setVoiceDurMs(0);
+    }
+  }, []);
+
+  const handleToggleVoiceTile = useCallback(
+    async (answerId: string, audioUrl: string) => {
+      // Tapping the currently-playing tile pauses & resets it. A
+      // subsequent tap reloads from position 0 — same UX as a simple
+      // play/stop control.
+      if (playingVoiceId === answerId) {
+        await stopVoicePlayback();
+        return;
+      }
+
+      // Stop any other voice that's currently playing before we load a
+      // new one — only one voice plays at a time on this screen.
+      await stopVoicePlayback();
+
+      try {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+        });
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: audioUrl },
+          // `progressUpdateIntervalMillis` throttles the status callback
+          // to ~4Hz — smooth enough for a moving progress bar / clock
+          // without flooding React with re-renders. `shouldPlay: true`
+          // begins playback immediately on load.
+          { shouldPlay: true, progressUpdateIntervalMillis: 250 },
+          (status) => {
+            if (!status.isLoaded) return;
+
+            // Push live position / duration into state so the tile's
+            // progress bar + clock can update while audio plays.
+            const pos = status.positionMillis ?? 0;
+            const dur = status.durationMillis ?? 0;
+            if (isMountedRef.current) {
+              setVoicePosMs(pos);
+              if (dur > 0) setVoiceDurMs(dur);
+            }
+
+            if (status.didJustFinish) {
+              // Auto-reset: unload, clear refs, drop the playing flag,
+              // and zero the progress so the next tap starts at 0:00.
+              const finished = playingVoiceSoundRef.current;
+              playingVoiceSoundRef.current = null;
+              finished?.unloadAsync().catch(() => {});
+              if (isMountedRef.current) {
+                setPlayingVoiceId(null);
+                setVoicePosMs(0);
+                setVoiceDurMs(0);
+              }
+            }
+          },
+        );
+        playingVoiceSoundRef.current = sound;
+        if (isMountedRef.current) {
+          setPlayingVoiceId(answerId);
+          setVoicePosMs(0);
+          // Seed duration from the status snapshot so the clock displays
+          // a useful total even before the first periodic callback fires.
+          // Fall back to the answer's `durationSec` × 1000 in the render
+          // path when this is still 0.
+        } else {
+          // Component unmounted between createAsync resolving and now —
+          // bail out without leaking the sound.
+          sound.unloadAsync().catch(() => {});
+          playingVoiceSoundRef.current = null;
+        }
+      } catch (err) {
+        console.error('[T/D voice tile] playback failed:', err);
+        playingVoiceSoundRef.current = null;
+        if (isMountedRef.current) {
+          setPlayingVoiceId(null);
+          setVoicePosMs(0);
+          setVoiceDurMs(0);
+        }
+      }
+    },
+    [playingVoiceId, stopVoicePlayback],
+  );
+
+  // Hard cleanup on unmount — guarantees no orphan Audio.Sound survives
+  // a screen pop. `stopVoicePlayback` is intentionally not used here so
+  // the cleanup runs synchronously inside the effect teardown.
+  useEffect(() => {
+    return () => {
+      const sound = playingVoiceSoundRef.current;
+      playingVoiceSoundRef.current = null;
+      if (sound) {
+        sound.stopAsync().catch(() => {});
+        sound.unloadAsync().catch(() => {});
+      }
+    };
+  }, []);
+
+  // Stop voice on screen blur so audio doesn't keep playing in the
+  // background after the user navigates away.
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        // Fire-and-forget; teardown can't await.
+        stopVoicePlayback().catch(() => {});
+      };
+    }, [stopVoicePlayback]),
+  );
 
   // Check if current user is the prompt owner
   // FIX: Backend returns isPromptOwner inside prompt object, not at threadData root
@@ -827,10 +1000,16 @@ export default function PromptThreadScreen() {
   }, [userId, deleteAnswer]);
 
   // Open 3-dot menu
-  const handleOpenMenu = useCallback((answerId: string, authorId: string, isOwn: boolean) => {
+  const handleOpenMenu = useCallback((
+    answerId: string,
+    authorId: string,
+    isOwn: boolean,
+    isExpiredFlag: boolean,
+  ) => {
     setMenuAnswerId(answerId);
     setMenuAnswerOwnerId(authorId);
     setMenuIsOwnAnswer(isOwn);
+    setMenuIsExpired(isExpiredFlag);
   }, []);
 
   // Close 3-dot menu
@@ -838,6 +1017,7 @@ export default function PromptThreadScreen() {
     setMenuAnswerId(null);
     setMenuAnswerOwnerId(null);
     setMenuIsOwnAnswer(false);
+    setMenuIsExpired(false);
   }, []);
 
   // Toggle card selection (for prompt owner to reveal Connect)
@@ -856,6 +1036,18 @@ export default function PromptThreadScreen() {
     }
     handleCloseMenu();
   }, [menuAnswerId, menuIsOwnAnswer, handleDeleteAnswer, handleCloseMenu]);
+
+  // Handle menu action: edit own comment.
+  // Closes the action sheet first, then opens the unified composer which is
+  // already wired to load the user's existing answer (text + attachment +
+  // identity mode) when `myAnswer` is present — i.e. the same edit flow the
+  // old visible pencil triggered.
+  const handleMenuEdit = useCallback(() => {
+    if (menuIsOwnAnswer && !menuIsExpired) {
+      setShowUnifiedComposer(true);
+    }
+    handleCloseMenu();
+  }, [menuIsOwnAnswer, menuIsExpired, handleCloseMenu]);
 
   // Handle menu action: report
   const handleMenuReport = useCallback(() => {
@@ -1457,12 +1649,20 @@ export default function PromptThreadScreen() {
     cleanupPendingTodUploads,
   ]);
 
-  // Helper for gender icon
-  const getCommentGenderIcon = (gender: string | undefined): string => {
-    if (!gender) return '';
+  // Helper: returns an Ionicons descriptor + color for the author's gender so
+  // the identity row can render a colored male/female/non-binary glyph instead
+  // of a plain unicode character. Pink/blue accent matches the app-wide gender
+  // color palette used elsewhere in the Phase-2 UI.
+  type GenderAccent = {
+    icon: 'male' | 'female' | 'transgender';
+    color: string;
+    label: string;
+  } | null;
+  const getCommentGenderAccent = (gender: string | undefined): GenderAccent => {
+    if (!gender) return null;
     const g = gender.toLowerCase();
-    if (g === 'male' || g === 'm') return '♂';
-    if (g === 'female' || g === 'f') return '♀';
+    if (g === 'male' || g === 'm') return { icon: 'male', color: '#3B82F6', label: 'Male' };
+    if (g === 'female' || g === 'f') return { icon: 'female', color: '#EC4899', label: 'Female' };
     if (
       g === 'non_binary' ||
       g === 'non-binary' ||
@@ -1470,9 +1670,9 @@ export default function PromptThreadScreen() {
       g === 'nb' ||
       g === 'other'
     ) {
-      return '⚧';
+      return { icon: 'transgender', color: PREMIUM.genderOther, label: 'Non-binary' };
     }
-    return '';
+    return null;
   };
   const hasMyAnswer = !!myAnswer;
   const canReplyInline = !isExpired && !hasMyAnswer && !isPromptOwner;
@@ -1504,13 +1704,7 @@ export default function PromptThreadScreen() {
     const authorGender = normalizedIdentity.authorGender;
     const photoBlurMode = normalizedIdentity.photoBlurMode;
 
-    const genderIcon = getCommentGenderIcon(authorGender);
-
-    // Build age + gender string
-    const ageGenderStr = [
-      authorAge ? `${authorAge}` : '',
-      genderIcon,
-    ].filter(Boolean).join(' · ');
+    const genderAccent = isAnon ? null : getCommentGenderAccent(authorGender ?? undefined);
 
     // CONNECT ELIGIBILITY RULE (Product Rule):
     // Show Connect for ALL answer types (anonymous, no-photo, full-view, photo, video, voice)
@@ -1530,12 +1724,120 @@ export default function PromptThreadScreen() {
     const canConnect = isEligibleForConnect && isSelected;
     const hasSentConnect = isPromptOwner && (item.hasSentConnect || connectSentFor.has(item._id));
 
+    // Compact media tile state machine. The tile occupies an 84×84 square on
+    // the right of the answer body and supersedes both the old wide
+    // mediaBadge and the inert privateMediaIndicator placeholder.
+    //
+    // States:
+    //   'photo' | 'video' | 'voice' — viewer can open inline when mediaUrl is present.
+    //   'locked'   — viewer is not authorized (regular user looking at a
+    //     creator-only photo/video/voice). Tile is non-interactive.
+    //   'viewed'   — non-owner already consumed a one-time photo/video.
+
+    const tileMediaType: 'photo' | 'video' | 'voice' | null =
+      item.type === 'photo' || item.type === 'video' || item.type === 'voice'
+        ? item.type
+        : null;
+    const hasPlayableMedia = !!item.mediaUrl;
+    const isCreatorOnly = item.visibility === 'owner_only';
+    let tileState: 'photo' | 'video' | 'voice' | 'locked' | 'viewed' | null = null;
+    if (tileMediaType) {
+      if (item.hasViewedMedia && !isOwnAnswer && (tileMediaType === 'photo' || tileMediaType === 'video')) {
+        tileState = 'viewed';
+      } else if (hasPlayableMedia) {
+        tileState = tileMediaType;
+      } else if (item.hasMedia && !isOwnAnswer) {
+        tileState = 'locked';
+      }
+    }
+    // Voice now lives inside the same compact 84×84 tile as photo / video.
+    // The icon swaps to `pause` while THIS answer's voice is playing so the
+    // tile clearly reads as a play / stop control.
+    const isThisVoicePlaying = tileState === 'voice' && playingVoiceId === item._id;
+    // While playing, the tile shows a moving "0:03 / 0:10" clock and a
+    // bottom progress bar. We prefer live `voiceDurMs` from the status
+    // callback, falling back to the answer's recorded duration so the
+    // total never reads as "0:00" before the first status tick lands.
+    const voiceTotalMs = (() => {
+      if (isThisVoicePlaying && voiceDurMs > 0) return voiceDurMs;
+      const sec = item.durationSec || 0;
+      return sec > 0 ? sec * 1000 : 0;
+    })();
+    const voiceProgressFraction = (() => {
+      if (!isThisVoicePlaying) return 0;
+      if (voiceTotalMs <= 0) return 0;
+      // Clamp to [0, 1] — defensive against any callback over-shoot.
+      return Math.min(1, Math.max(0, voicePosMs / voiceTotalMs));
+    })();
+    const tileIconName: keyof typeof Ionicons.glyphMap | null = (() => {
+      switch (tileState) {
+        case 'photo':
+          return 'image';
+        case 'video':
+          return 'videocam';
+        case 'voice':
+          return isThisVoicePlaying ? 'pause' : 'play';
+        case 'locked':
+          return 'lock-closed';
+        case 'viewed':
+          return tileMediaType === 'video' ? 'videocam' : 'image';
+        default:
+          return null;
+      }
+    })();
+    const tileMicrotext = (() => {
+      if (tileState === 'locked') return 'Creator only';
+      if (tileState === 'viewed') return 'Viewed';
+      if (tileState === 'voice') {
+        // Idle: show a clean "0:10" total when known, otherwise "Voice".
+        if (!isThisVoicePlaying) {
+          if (voiceTotalMs > 0) return formatVoiceClock(voiceTotalMs);
+          return 'Voice';
+        }
+        // Playing: live "0:03 / 0:10" clock. If the duration is unknown
+        // (some streams expose it lazily) fall back to just the elapsed
+        // time so the user still sees movement.
+        if (voiceTotalMs > 0) {
+          return `${formatVoiceClock(voicePosMs)} / ${formatVoiceClock(voiceTotalMs)}`;
+        }
+        return formatVoiceClock(voicePosMs);
+      }
+      if (isCreatorOnly && (tileState === 'photo' || tileState === 'video')) return 'Tap once';
+      if (tileState === 'photo' || tileState === 'video') return 'Tap to view';
+      return null;
+    })();
+    const tileIsInteractive = tileState === 'photo' || tileState === 'video' ||
+      (tileState === 'voice' && hasPlayableMedia);
+    const tileA11yLabel = (() => {
+      if (!tileState) return undefined;
+      switch (tileState) {
+        case 'photo':
+          return 'Open photo';
+        case 'video':
+          return 'Open video';
+        case 'voice':
+          if (!hasPlayableMedia) return 'Locked voice message';
+          return isThisVoicePlaying ? 'Pause voice message' : 'Play voice message';
+        case 'locked':
+          return `${tileMediaType ?? 'Media'} locked — creator only`;
+        case 'viewed':
+          return `${tileMediaType ?? 'Media'} already viewed`;
+        default:
+          return undefined;
+      }
+    })();
+    // Unified tile rule: every media answer with any resolved `tileState`
+    // renders the same 84×84 square — no more split between the old
+    // horizontal voice player and the tile. Tap routing still differs by
+    // type (handled in `onPress` below).
+    const showTile = !!tileState;
+
     return (
       <TouchableOpacity
         style={styles.answerCardWrapper}
         activeOpacity={0.8}
         onPress={() => isEligibleForConnect && handleToggleSelect(item._id)}
-        onLongPress={() => handleOpenMenu(item._id, item.userId, isOwnAnswer)}
+        onLongPress={() => handleOpenMenu(item._id, item.userId, isOwnAnswer, isExpired)}
         delayLongPress={400}
       >
         <View style={[
@@ -1559,202 +1861,275 @@ export default function PromptThreadScreen() {
               iconColor={PREMIUM.textMuted}
             />
             <View style={styles.answerInfo}>
-              <View style={styles.answerNameRow}>
-                <Text style={styles.answerName}>
+              {/* Single identity row: name · age · colored gender icon */}
+              <View style={styles.answerIdentityRow}>
+                <Text
+                  style={styles.answerName}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                >
                   {isAnon ? 'Anonymous' : (authorName || 'User')}
                 </Text>
+                {!isAnon && authorAge ? (
+                  <Text style={styles.answerAgeInline}>{`, ${authorAge}`}</Text>
+                ) : null}
+                {!isAnon && genderAccent ? (
+                  <Ionicons
+                    name={genderAccent.icon}
+                    size={12}
+                    color={genderAccent.color}
+                    style={styles.answerGenderIcon}
+                    accessibilityLabel={genderAccent.label}
+                  />
+                ) : null}
                 {isOwnAnswer && (
                   <View style={styles.youBadge}>
                     <Text style={styles.youBadgeText}>You</Text>
                   </View>
                 )}
               </View>
-              {/* Time + Age/Gender row */}
-              <View style={styles.answerMetaRow}>
-                <Text style={styles.answerTime}>{getTimeAgo(item.createdAt)}</Text>
-                {!isAnon && ageGenderStr ? (
-                  <>
-                    <Text style={styles.answerMetaDot}>·</Text>
-                    <Text style={styles.answerAgeGender}>{ageGenderStr}</Text>
-                  </>
-                ) : null}
-              </View>
+              {/* Time on its own muted line */}
+              <Text style={styles.answerTime}>{getTimeAgo(item.createdAt)}</Text>
             </View>
-
           </View>
 
-          {/* Content: ALWAYS show text first (if exists), then media below */}
-          {item.text && item.text.trim().length > 0 && (
-            <Text style={styles.answerText}>{item.text}</Text>
-          )}
+          {/* Body row: text column on the left, optional compact media tile
+              on the right. The reaction strip lives at the bottom of the
+              text column so it occupies the empty wedge to the left of the
+              tile when text is short — eliminating the old separate bottom
+              action band and ~42 dp of card height. `alignItems: 'stretch'`
+              + text col `justifyContent: 'space-between'` ensures the strip
+              floats to the visual baseline of the tile when text is short
+              and sits below text when text is long. */}
+          <View
+            style={[
+              styles.answerBodyRow,
+              !showTile && styles.answerBodyRowNoTile,
+            ]}
+          >
+            <View style={styles.answerBodyTextCol}>
+              {item.text && item.text.trim().length > 0 && (
+                <Text style={styles.answerText}>{item.text}</Text>
+              )}
 
-          {/* Voice media */}
-          {item.type === 'voice' && item.mediaUrl && (
-            <TodVoicePlayer
-              answerId={item._id}
-              audioUrl={item.mediaUrl}
-              durationSec={item.durationSec || 0}
-            />
-          )}
-
-          {/* P1-006: Private media indicator - shows when media exists but viewer not authorized */}
-          {item.hasMedia && !item.mediaUrl && !item.isOwnAnswer && (
-            <View style={styles.privateMediaIndicator}>
-              <Ionicons name="lock-closed" size={14} color={PREMIUM.textMuted} />
-              <Text style={styles.privateMediaText}>
-                {item.type === 'voice' ? 'Voice message' : item.type === 'video' ? 'Video' : 'Photo'} for prompt creator only
-              </Text>
-            </View>
-          )}
-
-          {/* Photo/Video media - ONE-TIME PER USER VIEW */}
-          {(item.type === 'photo' || item.type === 'video') && item.mediaUrl && (
-            <TouchableOpacity
-              style={styles.mediaContainer}
-              onPress={() => handleViewMedia(item)}
-              activeOpacity={0.7}
-              disabled={item.hasViewedMedia && !isOwnAnswer}
-            >
-              <View style={[
-                styles.mediaBadge,
-                item.hasViewedMedia && !isOwnAnswer && styles.mediaBadgeViewed,
-              ]}>
-                <Ionicons
-                  name={item.type === 'video' ? 'videocam' : 'image'}
-                  size={18}
-                  color={item.hasViewedMedia && !isOwnAnswer ? PREMIUM.textMuted : PREMIUM.coral}
-                />
-                <Text style={[
-                  styles.mediaBadgeText,
-                  item.hasViewedMedia && !isOwnAnswer && styles.mediaBadgeTextViewed,
-                ]}>
-                  {item.type === 'video' ? 'Video' : 'Photo'}
-                </Text>
-                {/* Visibility label: show who can see this media */}
-                <View style={styles.visibilityLabel}>
+              {/* Reaction strip — relocated from the bottom action row.
+                  Holds existing reaction bubbles + emoji-trigger + reply
+                  plus button so the parent gestures still resolve to the
+                  deepest TouchableOpacity child first (no tap-stealing). */}
+              <View style={styles.reactionStripInline}>
+                {topEmojis.length > 0 && (
+                  <View style={styles.reactionBubblesInline}>
+                    {topEmojis.slice(0, 3).map(({ emoji, count }) => (
+                      <TouchableOpacity
+                        key={emoji}
+                        style={[
+                          styles.reactionBubbleSmall,
+                          item.myReaction === emoji && styles.reactionBubbleSmallActive,
+                        ]}
+                        onPress={() => handleReact(item._id, item.myReaction === emoji ? '' : emoji)}
+                      >
+                        <Text style={styles.reactionEmojiSmall}>{emoji}</Text>
+                        <Text style={styles.reactionCountSmall}>{count}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+                <TouchableOpacity
+                  style={styles.addReactionInline}
+                  onPress={() => setEmojiPickerAnswerId(showEmojiPicker ? null : item._id)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add reaction"
+                >
                   <Ionicons
-                    name={item.visibility === 'owner_only' ? 'lock-closed' : 'eye'}
-                    size={10}
-                    color={item.visibility === 'owner_only' ? PREMIUM.truthPurple : PREMIUM.textMuted}
+                    name={item.myReaction ? 'happy' : 'happy-outline'}
+                    size={16}
+                    color={item.myReaction ? PREMIUM.coral : PREMIUM.textMuted}
                   />
-                  <Text style={[
-                    styles.visibilityLabelText,
-                    item.visibility === 'owner_only' && { color: PREMIUM.truthPurple },
-                  ]}>
-                    {item.visibility === 'owner_only' ? 'Private' : 'Everyone'}
-                  </Text>
-                </View>
-                <Text style={[
-                  styles.mediaViewMode,
-                  item.hasViewedMedia && !isOwnAnswer && { color: PREMIUM.textMuted },
-                ]}>
-                  {item.hasViewedMedia && !isOwnAnswer ? 'Viewed' : 'Tap to view once'}
-                </Text>
+                </TouchableOpacity>
+                {canReplyInline && (
+                  <TouchableOpacity
+                    style={styles.replyBtnInline}
+                    onPress={openComposer}
+                    accessibilityRole="button"
+                    accessibilityLabel="Add your response"
+                  >
+                    <Ionicons name="add-circle-outline" size={16} color={PREMIUM.textMuted} />
+                  </TouchableOpacity>
+                )}
               </View>
-            </TouchableOpacity>
-          )}
+            </View>
 
-          {/* Action row - emoji left, connect right - NO LAYOUT SHIFT */}
-          <View style={styles.actionRow}>
-            {/* Left: Reaction bubbles + add reaction */}
-            <View style={styles.reactionSection}>
-              {topEmojis.length > 0 && (
-                <View style={styles.reactionBubblesInline}>
-                  {topEmojis.slice(0, 3).map(({ emoji, count }) => (
-                    <TouchableOpacity
-                      key={emoji}
-                      style={[
-                        styles.reactionBubbleSmall,
-                        item.myReaction === emoji && styles.reactionBubbleSmallActive,
-                      ]}
-                      onPress={() => handleReact(item._id, item.myReaction === emoji ? '' : emoji)}
-                    >
-                      <Text style={styles.reactionEmojiSmall}>{emoji}</Text>
-                      <Text style={styles.reactionCountSmall}>{count}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              )}
-              {/* Add reaction button */}
+            {/* Edit pencil intentionally NOT rendered on the card.
+                Edit is now exposed only via the long-press action sheet
+                (Cancel | Edit | Delete), which keeps the card surface
+                clean and removes a visual affordance that competed with
+                the media tile. See the comment-menu Modal below. */}
+
+            {showTile && tileIconName && (
               <TouchableOpacity
-                style={styles.addReactionInline}
-                onPress={() => setEmojiPickerAnswerId(showEmojiPicker ? null : item._id)}
+                style={[
+                  styles.todMediaTile,
+                  tileState === 'locked' && styles.todMediaTileLocked,
+                  tileState === 'viewed' && styles.todMediaTileViewed,
+                  isThisVoicePlaying && styles.todMediaTileVoiceActive,
+                ]}
+                activeOpacity={tileIsInteractive ? 0.85 : 1}
+                disabled={!tileIsInteractive}
+                onPress={() => {
+                  if (!tileIsInteractive) return;
+                  // Voice plays/pauses inline inside the tile; photo and
+                  // video continue to open the full-screen viewer via the
+                  // existing claim flow.
+                  if (tileState === 'voice' && hasPlayableMedia && item.mediaUrl) {
+                    handleToggleVoiceTile(item._id, item.mediaUrl);
+                    return;
+                  }
+                  handleViewMedia(item);
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={tileA11yLabel}
               >
-                <Ionicons
-                  name={item.myReaction ? 'happy' : 'happy-outline'}
-                  size={16}
-                  color={item.myReaction ? PREMIUM.coral : PREMIUM.textMuted}
+                {/* Subtle vertical gradient gives the tile depth without
+                    competing with the icon chip. Lighter on top, base on
+                    bottom — reads as a glass chip rather than a flat square.
+                    `pointerEvents='none'` keeps the existing tap target. */}
+                <LinearGradient
+                  colors={
+                    tileState === 'locked' || tileState === 'viewed'
+                      ? [PREMIUM.bgHighlight, PREMIUM.bgBase] as const
+                      : [PREMIUM.bgHighlight, PREMIUM.bgElevated] as const
+                  }
+                  start={{ x: 0.5, y: 0 }}
+                  end={{ x: 0.5, y: 1 }}
+                  style={StyleSheet.absoluteFillObject}
+                  pointerEvents="none"
                 />
+                {/* Icon chip — wraps the Ionicon in a smaller rounded square so
+                    the icon reads as an intentional media chip rather than a
+                    free-floating system glyph. */}
+                <View
+                  style={[
+                    styles.todMediaTileIconChip,
+                    tileState === 'locked' && styles.todMediaTileIconChipMuted,
+                    tileState === 'viewed' && styles.todMediaTileIconChipMuted,
+                  ]}
+                >
+                  <Ionicons
+                    name={tileIconName}
+                    size={20}
+                    color={
+                      tileState === 'locked'
+                        ? PREMIUM.textMuted
+                        : tileState === 'viewed'
+                          ? PREMIUM.textMuted
+                          : PREMIUM.coral
+                    }
+                  />
+                </View>
+                {/* Lock corner badge for creator-only tappable photos/videos
+                    so the prompt owner can tell at a glance that the media is
+                    private even though it is openable for them. */}
+                {isCreatorOnly && tileIsInteractive && (tileState === 'photo' || tileState === 'video') && (
+                  <View style={styles.todMediaTileCorner}>
+                    <Ionicons name="lock-closed" size={9} color="#FFF" />
+                  </View>
+                )}
+                {tileMicrotext && (
+                  <Text
+                    style={[
+                      styles.todMediaTileMicrotext,
+                      tileState === 'locked' && styles.todMediaTileMicrotextMuted,
+                      tileState === 'viewed' && styles.todMediaTileMicrotextMuted,
+                      isThisVoicePlaying && styles.todMediaTileMicrotextActive,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {tileMicrotext}
+                  </Text>
+                )}
+                {/* Voice playback progress bar — pinned to the bottom of
+                    the tile only while THIS voice is playing. The track is
+                    a faint hairline so it doesn't draw attention when
+                    idle; the fill is coral and animates as `voicePosMs`
+                    advances (status callback throttled to ~4Hz). */}
+                {isThisVoicePlaying && (
+                  <View
+                    style={styles.todMediaTileVoiceProgressTrack}
+                    pointerEvents="none"
+                  >
+                    <View
+                      style={[
+                        styles.todMediaTileVoiceProgressFill,
+                        { width: `${voiceProgressFraction * 100}%` },
+                      ]}
+                    />
+                  </View>
+                )}
               </TouchableOpacity>
-              {/* Reply plus button - opens composer for new comment */}
-              {canReplyInline && (
-                <TouchableOpacity
-                  style={styles.replyBtnInline}
-                  onPress={openComposer}
-                >
-                  <Ionicons name="add-circle-outline" size={16} color={PREMIUM.textMuted} />
-                </TouchableOpacity>
-              )}
-            </View>
-
-            {/* Right: Connect / Sent / Edit - fixed height area */}
-            <View style={styles.connectSection}>
-              {/* Connect button - only when selected and eligible */}
-              {canConnect && (
-                <TouchableOpacity
-                  style={styles.connectBtnCompact}
-                  onPress={() => handleSendConnect(item._id)}
-                  disabled={connectSending === item._id}
-                >
-                  {connectSending === item._id ? (
-                    <ActivityIndicator size="small" color={PREMIUM.coral} />
-                  ) : (
-                    <>
-                      <Ionicons name="paper-plane" size={12} color={PREMIUM.coral} />
-                      <Text style={styles.connectBtnCompactText}>Connect</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
-              )}
-
-              {/* Placeholder to maintain height when eligible but not selected */}
-              {isEligibleForConnect && !isSelected && (
-                <View style={styles.connectPlaceholder}>
-                  <Text style={styles.connectPlaceholderText}>Tap to connect</Text>
-                </View>
-              )}
-
-              {/* Connect status indicator - P0-FIX: Show different states */}
-              {hasSentConnect && item.connectStatus === 'pending' && (
-                <View style={styles.connectPendingInline}>
-                  <Ionicons name="hourglass-outline" size={12} color="#F5A623" />
-                  <Text style={styles.connectPendingInlineText}>Waiting</Text>
-                </View>
-              )}
-              {hasSentConnect && item.connectStatus === 'connected' && (
-                <TouchableOpacity
-                  style={[styles.connectPendingInline, { backgroundColor: 'rgba(76, 175, 80, 0.15)' }]}
-                  onPress={() => {
-                    // Navigate to Phase-2 Messages to find the conversation
-                    router.push('/(main)/(private)/(tabs)/chats');
-                  }}
-                >
-                  <Ionicons name="checkmark-circle" size={12} color="#4CAF50" />
-                  <Text style={[styles.connectPendingInlineText, { color: '#4CAF50' }]}>Connected</Text>
-                </TouchableOpacity>
-              )}
-
-              {/* Own comment: Edit button - compact */}
-              {isOwnAnswer && !isExpired && (
-                <TouchableOpacity
-                  style={styles.editBtnCompact}
-                  onPress={openComposer}
-                >
-                  <Ionicons name="pencil" size={12} color={PREMIUM.coral} />
-                </TouchableOpacity>
-              )}
-            </View>
+            )}
           </View>
+
+          {/* Voice playback now happens inside the compact tile above —
+              the old horizontal `TodVoicePlayer` block was removed so
+              photo, video, and voice all share one consistent surface. */}
+
+          {/* Connect row — only rendered when prompt-owner is viewing
+              someone else's answer AND there is real Connect content to
+              show (eligible, sent-pending, or connected). For all other
+              cases (own answer / non-prompt-owner) this row is suppressed
+              entirely so the card height drops by ~42 dp.
+              Edit and reactions have been relocated (header / body row),
+              so this row only contains Connect-state UI. */}
+          {(canConnect || (isEligibleForConnect && !isSelected) || hasSentConnect) && (
+            <View style={styles.actionRow}>
+              <View style={styles.connectSection}>
+                {/* Connect button - only when selected and eligible */}
+                {canConnect && (
+                  <TouchableOpacity
+                    style={styles.connectBtnCompact}
+                    onPress={() => handleSendConnect(item._id)}
+                    disabled={connectSending === item._id}
+                  >
+                    {connectSending === item._id ? (
+                      <ActivityIndicator size="small" color={PREMIUM.coral} />
+                    ) : (
+                      <>
+                        <Ionicons name="paper-plane" size={12} color={PREMIUM.coral} />
+                        <Text style={styles.connectBtnCompactText}>Connect</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                )}
+
+                {/* Placeholder to maintain height when eligible but not selected */}
+                {isEligibleForConnect && !isSelected && (
+                  <View style={styles.connectPlaceholder}>
+                    <Text style={styles.connectPlaceholderText}>Tap to connect</Text>
+                  </View>
+                )}
+
+                {/* Connect status indicator - P0-FIX: Show different states */}
+                {hasSentConnect && item.connectStatus === 'pending' && (
+                  <View style={styles.connectPendingInline}>
+                    <Ionicons name="hourglass-outline" size={12} color="#F5A623" />
+                    <Text style={styles.connectPendingInlineText}>Waiting</Text>
+                  </View>
+                )}
+                {hasSentConnect && item.connectStatus === 'connected' && (
+                  <TouchableOpacity
+                    style={[styles.connectPendingInline, { backgroundColor: 'rgba(76, 175, 80, 0.15)' }]}
+                    onPress={() => {
+                      // Navigate to Phase-2 Messages to find the conversation
+                      router.push('/(main)/(private)/(tabs)/chats');
+                    }}
+                  >
+                    <Ionicons name="checkmark-circle" size={12} color="#4CAF50" />
+                    <Text style={[styles.connectPendingInlineText, { color: '#4CAF50' }]}>Connected</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          )}
 
           {/* Emoji picker overlay - works with inline reactions */}
           {showEmojiPicker && (
@@ -1812,6 +2187,16 @@ export default function PromptThreadScreen() {
     isExpired,
     canReplyInline,
     openComposer,
+    // Voice tile playback — re-render answers when the active voice
+    // changes so the tapped tile flips its play / pause icon and
+    // microtext. `voicePosMs` / `voiceDurMs` drive the live "0:03 /
+    // 0:10" clock and the bottom progress bar (status callback is
+    // throttled to ~4Hz so this is a cheap re-render).
+    // `handleToggleVoiceTile` is stable per playingVoiceId.
+    playingVoiceId,
+    voicePosMs,
+    voiceDurMs,
+    handleToggleVoiceTile,
   ]);
 
   // Loading state
@@ -2183,7 +2568,12 @@ export default function PromptThreadScreen() {
         </View>
       )}
 
-      {/* Premium Comment Menu Modal - Centered popup */}
+      {/* Premium Comment Menu Modal — Centered popup.
+          Own answer (active prompt):    Cancel | Edit | Delete  (3 equal cols)
+          Own answer (expired prompt):   Cancel | Delete         (2 equal cols, edit suppressed)
+          Other user's answer:           Cancel | Report         (2 equal cols)
+          Tapping Delete still triggers the secondary `Alert.alert` confirmation
+          inside `handleDeleteAnswer` (preserving the existing safety message). */}
       <Modal
         visible={!!menuAnswerId}
         transparent
@@ -2197,11 +2587,13 @@ export default function PromptThreadScreen() {
         >
           <View style={styles.menuContent}>
             <Text style={styles.menuTitle}>
-              {menuIsOwnAnswer ? 'Delete Comment?' : 'Report Comment'}
+              {menuIsOwnAnswer ? 'Manage response' : 'Report Comment'}
             </Text>
             <Text style={styles.menuSubtitle}>
               {menuIsOwnAnswer
-                ? 'This action cannot be undone.'
+                ? (menuIsExpired
+                    ? 'This prompt has expired. You can still delete your response.'
+                    : 'Edit or delete your response.')
                 : 'Help us keep the community safe.'}
             </Text>
 
@@ -2211,17 +2603,34 @@ export default function PromptThreadScreen() {
               </TouchableOpacity>
 
               {menuIsOwnAnswer ? (
-                <TouchableOpacity
-                  style={[styles.menuItem, styles.menuItemDestructive]}
-                  onPress={handleMenuDelete}
-                >
-                  <Ionicons name="trash-outline" size={16} color="#FFF" />
-                  <Text style={styles.menuItemTextDestructive}>Delete</Text>
-                </TouchableOpacity>
+                <>
+                  {!menuIsExpired && (
+                    <TouchableOpacity
+                      style={[styles.menuItem, styles.menuItemAccent]}
+                      onPress={handleMenuEdit}
+                      accessibilityRole="button"
+                      accessibilityLabel="Edit your response"
+                    >
+                      <Ionicons name="pencil" size={16} color={PREMIUM.coral} />
+                      <Text style={styles.menuItemTextAccent}>Edit</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity
+                    style={[styles.menuItem, styles.menuItemDestructive]}
+                    onPress={handleMenuDelete}
+                    accessibilityRole="button"
+                    accessibilityLabel="Delete your response"
+                  >
+                    <Ionicons name="trash-outline" size={16} color="#FFF" />
+                    <Text style={styles.menuItemTextDestructive}>Delete</Text>
+                  </TouchableOpacity>
+                </>
               ) : (
                 <TouchableOpacity
                   style={[styles.menuItem, styles.menuItemDestructive]}
                   onPress={handleMenuReport}
+                  accessibilityRole="button"
+                  accessibilityLabel="Report this comment"
                 >
                   <Ionicons name="flag-outline" size={16} color="#FFF" />
                   <Text style={styles.menuItemTextDestructive}>Report</Text>
@@ -2944,35 +3353,56 @@ const styles = StyleSheet.create({
   },
   answerCard: {
     backgroundColor: PREMIUM.bgElevated,
-    borderRadius: 14,
+    // Softer corner radius (14 → 16) reads as a more premium chat card.
+    borderRadius: 16,
     paddingHorizontal: 14,
-    paddingVertical: 14,
+    // Trimmed from 14 → 12: with edit relocated and reactions inline, the
+    // card no longer needs the wider top/bottom padding to counterbalance a
+    // separate action band.
+    paddingVertical: 12,
     borderWidth: 1,
     borderColor: PREMIUM.borderSubtle,
     position: 'relative',
+    // Subtle neutral lift — gives the card a clear plane above the screen
+    // bg without feeling glossy. Android `elevation` kept low so the row
+    // doesn't paint a heavy material shadow.
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    elevation: 2,
   },
   answerCardOwn: {
-    borderColor: `${PREMIUM.coral}40`,
+    // Slightly stronger left accent + soft coral border so own cards feel
+    // distinct without becoming bright.
+    borderColor: `${PREMIUM.coral}55`,
     borderLeftWidth: 3,
     borderLeftColor: PREMIUM.coral,
   },
   answerCardSelected: {
+    // Selected state lifts the surface a touch and warms the border —
+    // distinct from highlighted (which is a pulse) and own (left bar).
     backgroundColor: PREMIUM.bgHighlight,
-    borderColor: `${PREMIUM.coral}50`,
+    borderColor: `${PREMIUM.coral}70`,
   },
   answerCardHighlighted: {
-    borderColor: `${PREMIUM.coral}85`,
+    borderColor: `${PREMIUM.coral}99`,
     shadowColor: PREMIUM.coral,
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.24,
-    shadowRadius: 12,
-    elevation: 5,
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    elevation: 6,
   },
   answerHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 10,
+    // Trimmed 10 → 8 — the body row sits closer to the header. The visible
+    // edit pencil has been removed entirely; edit is reachable via long-press.
+    marginBottom: 8,
   },
+  // (Removed) Visible body-row edit pencil. Edit is now exposed only via
+  // the long-press action sheet (Cancel | Edit | Delete). See the
+  // `menuItemAccent` / `menuItemTextAccent` styles below.
   answerAvatarPlaceholder: {
     width: 32,
     height: 32,
@@ -2997,19 +3427,41 @@ const styles = StyleSheet.create({
     borderColor: PREMIUM.borderSubtle,
   },
   answerInfo: { flex: 1, marginLeft: 10 },
-  answerNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  answerName: { fontSize: 13, fontWeight: '600', color: PREMIUM.textPrimary },
-  youBadge: {
-    backgroundColor: `${PREMIUM.coral}25`,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
+  // Single row that holds name + age + colored gender icon + optional You badge
+  answerIdentityRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'nowrap' },
+  answerName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+    flexShrink: 1,
+    letterSpacing: 0.1,
   },
-  youBadgeText: { fontSize: 9, fontWeight: '700', color: PREMIUM.coral },
-  answerMetaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
-  answerTime: { fontSize: 11, color: PREMIUM.textMuted },
-  answerMetaDot: { fontSize: 11, color: PREMIUM.textMuted, marginHorizontal: 4 },
-  answerAgeGender: { fontSize: 11, color: PREMIUM.textMuted },
+  answerAgeInline: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: PREMIUM.textSecondary,
+    // Bumped 1 → 4 so name and age have actual breathing room.
+    marginLeft: 4,
+  },
+  answerGenderIcon: { marginLeft: 4 },
+  // Slightly softer "You" pill — coral wash + thin coral border so it reads
+  // as an intentional badge rather than a flat fill. Height unchanged.
+  youBadge: {
+    backgroundColor: `${PREMIUM.coral}1F`,
+    borderWidth: 1,
+    borderColor: `${PREMIUM.coral}55`,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  youBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: PREMIUM.coral,
+    letterSpacing: 0.4,
+  },
+  answerTime: { fontSize: 11, color: PREMIUM.textMuted, marginTop: 2 },
 
   // 3-dot menu button
   menuBtn: {
@@ -3031,66 +3483,155 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: PREMIUM.textPrimary,
     lineHeight: 22,
-    marginBottom: 10,
   },
 
-  // Media
-  mediaContainer: { marginBottom: 10 },
-  mediaBadge: {
+  // Body row: text column on the left + optional 84×84 media tile on the
+  // right. `alignItems: 'stretch'` so the text column fills the row's height
+  // (driven by the tile when present); combined with `space-between` on the
+  // text column, the reaction strip floats to the bottom and aligns with the
+  // visual baseline of the tile when text is short.
+  answerBodyRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'stretch',
+    marginBottom: 8,
+    // Two-column layout (text col + 84-dp media tile). Gap kept at 8 so the
+    // card stays tight on narrow ~360-dp devices.
     gap: 8,
-    backgroundColor: PREMIUM.bgHighlight,
-    borderRadius: 10,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: PREMIUM.borderSubtle,
   },
-  mediaBadgeText: { fontSize: 13, fontWeight: '600', color: PREMIUM.textPrimary },
-  mediaViewMode: { fontSize: 11, color: PREMIUM.textSecondary, marginLeft: 'auto' },
-  // T/D VISIBILITY LABEL: Shows who can view this media
-  visibilityLabel: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    backgroundColor: PREMIUM.bgBase,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    marginLeft: 6,
+  // Drops the bottom margin entirely when there is no media tile and no
+  // inline voice player — i.e. text-only answers. The reaction strip already
+  // contributes its own marginTop, and there is no following block, so this
+  // saves a final ~8 dp on the slimmest cards.
+  answerBodyRowNoTile: {
+    marginBottom: 0,
   },
-  visibilityLabelText: { fontSize: 9, fontWeight: '500', color: PREMIUM.textMuted },
-  mediaBadgeViewed: {
-    backgroundColor: PREMIUM.bgBase,
-    borderColor: PREMIUM.textMuted + '30',
+  answerBodyTextCol: {
+    flex: 1,
+    minWidth: 0,
+    justifyContent: 'space-between',
   },
-  // P1-006: Private media indicator for viewers who can't access
-  privateMediaIndicator: {
+  // Reaction strip relocated from the old bottom `actionRow` into the body
+  // text column. Sits just below the response text; when text is short it is
+  // pushed to the bottom of the column by `space-between` so it lines up
+  // with the bottom edge of the 84×84 media tile.
+  reactionStripInline: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: PREMIUM.bgHighlight,
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
     marginTop: 8,
-    opacity: 0.7,
-  },
-  privateMediaText: {
-    fontSize: 12,
-    color: PREMIUM.textMuted,
-    fontStyle: 'italic',
-  },
-  mediaBadgeTextViewed: {
-    color: PREMIUM.textMuted,
+    flexWrap: 'wrap',
   },
 
-  // Action row - NO LAYOUT SHIFT - emoji left, connect right
+  // Compact media tile (photo / video / voice / locked / viewed states).
+  // Background color is now drawn by an absolutely-positioned LinearGradient
+  // child for subtle depth; the `backgroundColor` on the tile itself acts as
+  // the fallback before the gradient mounts. `borderRadius: 14` matches the
+  // card's radius for a more cohesive look.
+  todMediaTile: {
+    width: 84,
+    height: 84,
+    borderRadius: 14,
+    backgroundColor: PREMIUM.bgElevated,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 6,
+    overflow: 'hidden',
+    // Soft neutral lift — keeps the tile feeling like a chip resting on the
+    // card surface. iOS shadow values; Android `elevation` deliberately small
+    // so it doesn't read heavy.
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  todMediaTileLocked: {
+    borderColor: PREMIUM.textMuted + '30',
+    opacity: 0.85,
+  },
+  todMediaTileViewed: {
+    borderColor: PREMIUM.textMuted + '30',
+  },
+  // Inner icon chip — visually contains the Ionicon so it doesn't look like a
+  // bare default glyph. Coral wash + coral border for active media; muted grey
+  // wash for locked/viewed states.
+  todMediaTileIconChip: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: `${PREMIUM.coral}1A`,
+    borderWidth: 1,
+    borderColor: `${PREMIUM.coral}30`,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todMediaTileIconChipMuted: {
+    backgroundColor: `${PREMIUM.textMuted}22`,
+    borderColor: `${PREMIUM.textMuted}40`,
+  },
+  todMediaTileCorner: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todMediaTileMicrotext: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+    marginTop: 6,
+    textAlign: 'center',
+    letterSpacing: 0.2,
+  },
+  todMediaTileMicrotextMuted: {
+    color: PREMIUM.textMuted,
+    fontWeight: '600',
+  },
+  // Voice tile playing-state polish — coral border ring and a slightly
+  // brighter coral microtext so the tile clearly reads as "currently
+  // playing" without changing its dimensions or layout.
+  todMediaTileVoiceActive: {
+    borderColor: PREMIUM.coral + '99',
+  },
+  todMediaTileMicrotextActive: {
+    color: PREMIUM.coral,
+  },
+  // Voice playback progress bar — anchored to the tile bottom edge so it
+  // reads as a "now playing" timeline without expanding the 84×84 tile
+  // or competing with the centered icon chip + clock above it. Track is
+  // a faint hairline; fill is coral and grows with `voicePosMs`.
+  todMediaTileVoiceProgressTrack: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 3,
+    backgroundColor: PREMIUM.coral + '22',
+    overflow: 'hidden',
+  },
+  todMediaTileVoiceProgressFill: {
+    height: '100%',
+    backgroundColor: PREMIUM.coral,
+  },
+
+  // Action row — now Connect-only and conditionally rendered (only when
+  // prompt-owner is viewing someone else's eligible / pending / connected
+  // answer). Emoji + edit have moved out, so this row's marginTop is reduced.
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 10,
+    justifyContent: 'flex-end',
+    marginTop: 8,
   },
   reactionSection: {
     flexDirection: 'row',
@@ -3105,24 +3646,46 @@ const styles = StyleSheet.create({
   reactionBubbleSmall: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    gap: 3,
     backgroundColor: PREMIUM.bgHighlight,
-    paddingHorizontal: 6,
+    paddingHorizontal: 7,
     paddingVertical: 3,
-    borderRadius: 10,
+    borderRadius: 11,
+    borderWidth: 1,
+    // Hairline neutral border ties the chip to the rest of the card surface
+    // instead of letting it look like a flat solid pill.
+    borderColor: PREMIUM.borderSubtle,
   },
   reactionBubbleSmallActive: {
-    backgroundColor: `${PREMIUM.coral}20`,
+    backgroundColor: `${PREMIUM.coral}22`,
     borderWidth: 1,
     borderColor: PREMIUM.coral,
   },
   reactionEmojiSmall: { fontSize: 12 },
-  reactionCountSmall: { fontSize: 10, color: PREMIUM.textSecondary, fontWeight: '600' },
+  reactionCountSmall: { fontSize: 10, color: PREMIUM.textSecondary, fontWeight: '700' },
+  // Add-reaction trigger now reads as an intentional ghost chip, not a
+  // free-floating icon. Same hit area as the old `padding: 4` plus a
+  // hairline border + soft surface — disappears into the row when text is
+  // long, but is still clearly tappable when the row is empty.
   addReactionInline: {
-    padding: 4,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: PREMIUM.bgHighlight,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   replyBtnInline: {
-    padding: 4,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: PREMIUM.bgHighlight,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   connectSection: {
     flexDirection: 'row',
@@ -3207,10 +3770,14 @@ const styles = StyleSheet.create({
   },
   reportedText: { fontSize: 9, color: PREMIUM.textMuted },
 
-  // Emoji picker
+  // Emoji picker — re-anchored. The old `bottom: 60` matched a trigger that
+  // sat in the bottom action band; that trigger has moved into the body row.
+  // We now hover the picker near the bottom-left of the answer card so it
+  // stays close to the relocated emoji button regardless of whether the
+  // (now-conditional) action row is rendered.
   emojiPickerOverlay: {
     position: 'absolute',
-    bottom: 60,
+    bottom: 8,
     left: 12,
     flexDirection: 'row',
     gap: 2,
@@ -3271,34 +3838,35 @@ const styles = StyleSheet.create({
   },
   menuContent: {
     backgroundColor: PREMIUM.bgElevated,
-    borderRadius: 16,
-    padding: 20,
-    width: 280,
+    borderRadius: 18,
+    padding: 22,
+    width: 296,
     borderWidth: 1,
-    borderColor: PREMIUM.borderSubtle,
+    borderColor: 'rgba(255,255,255,0.08)',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.3,
-    shadowRadius: 16,
-    elevation: 10,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.34,
+    shadowRadius: 18,
+    elevation: 12,
   },
   menuTitle: {
     fontSize: 16,
     fontWeight: '700',
     color: PREMIUM.textPrimary,
-    marginBottom: 8,
+    marginBottom: 6,
     textAlign: 'center',
+    letterSpacing: 0.2,
   },
   menuSubtitle: {
     fontSize: 13,
     color: PREMIUM.textMuted,
     textAlign: 'center',
     lineHeight: 18,
-    marginBottom: 20,
+    marginBottom: 18,
   },
   menuActions: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 10,
   },
   menuItem: {
     flex: 1,
@@ -3306,12 +3874,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    paddingVertical: 12,
-    borderRadius: 10,
+    paddingVertical: 11,
+    borderRadius: 12,
     backgroundColor: PREMIUM.bgHighlight,
   },
   menuItemDestructive: {
     backgroundColor: PREMIUM.coral,
+    // Soft coral lift — gives the destructive button a tactile feel without
+    // making it scream. iOS only; Android keeps elevation modest.
+    shadowColor: PREMIUM.coral,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.28,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  // Premium accent variant for the long-press Edit action. Soft coral wash
+  // with coral text + coral icon — distinct from the neutral grey of the
+  // existing prompt-edit `menuItem` and clearly different from the destructive
+  // solid-coral `menuItemDestructive` so users can tell Edit and Delete apart
+  // at a glance even on small screens.
+  menuItemAccent: {
+    backgroundColor: `${PREMIUM.coral}1F`,
+    borderWidth: 1,
+    borderColor: `${PREMIUM.coral}55`,
   },
   menuItemText: {
     fontSize: 14,
@@ -3319,14 +3904,25 @@ const styles = StyleSheet.create({
     color: PREMIUM.textSecondary,
   },
   menuItemTextDestructive: {
+    fontSize: 14,
+    fontWeight: '700',
     color: '#FFF',
+    letterSpacing: 0.2,
+  },
+  menuItemTextAccent: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: PREMIUM.coral,
+    letterSpacing: 0.2,
   },
   menuCancelBtn: {
     flex: 1,
     backgroundColor: PREMIUM.bgHighlight,
-    paddingVertical: 12,
-    borderRadius: 10,
+    paddingVertical: 11,
+    borderRadius: 12,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
   },
   menuCancelText: {
     fontSize: 14,
