@@ -938,30 +938,47 @@ export const uploadVerificationReferencePhoto = mutation({
     });
     const winner = allVerificationPhotos[0];
 
+    // Collect storage IDs of losers being purged from the photos table so we can
+    // also clean up the underlying storage blobs below (best-effort).
+    const losersStorageIds: Id<'_storage'>[] = [];
     if (allVerificationPhotos.length > 1) {
       console.log(`[PHOTO_GATE] M9: Found ${allVerificationPhotos.length} verification photos, keeping winner: ${winner._id}`);
       // Delete all except the deterministic winner
       for (const photo of allVerificationPhotos) {
         if (photo._id !== winner._id) {
+          if (photo.storageId !== winner.storageId) {
+            losersStorageIds.push(photo.storageId);
+          }
           await ctx.db.delete(photo._id);
           console.log(`[PHOTO_GATE] M9: Deleted duplicate verification photo: ${photo._id}`);
         }
       }
-      // Note: Storage files are NOT deleted - they may still be referenced elsewhere
+    }
+
+    // Safety net: include the user's previous verificationReferencePhotoId even if its
+    // photos row was already missing, so an orphaned blob still gets cleaned up.
+    const previousRefStorageId = user.verificationReferencePhotoId;
+    if (
+      previousRefStorageId &&
+      previousRefStorageId !== winner.storageId &&
+      !losersStorageIds.includes(previousRefStorageId)
+    ) {
+      losersStorageIds.push(previousRefStorageId);
     }
 
     console.log(`[PHOTO_GATE] stored verificationReferencePhotoId=${winner.storageId}`);
 
     // M9 FIX: Update user with WINNER's data, not current request's data
     // This ensures both concurrent requests point user to the same deterministic winner
+    //
+    // PRIVACY: The reference photo is private verification evidence and must NOT be
+    // promoted to the public profile. We deliberately no longer set displayPrimaryPhotoId,
+    // displayPrimaryPhotoUrl, or displayPrimaryPhotoVariant here. Public display fields
+    // are managed exclusively by addPhoto / setDisplayPhotoVariant after verification.
     const gridPrimaryPhotoUrl = await getGridPrimaryPhotoUrl(ctx, userId);
     await ctx.db.patch(userId, {
       verificationReferencePhotoId: winner.storageId,
       verificationReferencePhotoUrl: winner.url,
-      // Also set as display photo initially (original variant)
-      displayPrimaryPhotoId: winner.storageId,
-      displayPrimaryPhotoUrl: winner.url,
-      displayPrimaryPhotoVariant: 'original',
       primaryPhotoUrl: gridPrimaryPhotoUrl ?? undefined,
       // Set verification status to pending
       faceVerificationStatus: 'unverified',
@@ -969,6 +986,49 @@ export const uploadVerificationReferencePhoto = mutation({
     });
 
     console.log(`[PHOTO_GATE] user updated verificationReferencePhotoId set=true`);
+
+    // Best-effort cleanup of old reference-photo storage blobs. We skip any blob still
+    // referenced by another field on this user (e.g. legacy soft-leaked displayPrimaryPhotoId,
+    // verificationPhotoId, faceVerificationSelfieId). Reused failedStorageDeletions queue
+    // ensures retries via existing cron if delete fails.
+    for (const oldStorageId of losersStorageIds) {
+      const stillReferenced =
+        oldStorageId === winner.storageId ||
+        oldStorageId === user.displayPrimaryPhotoId ||
+        oldStorageId === user.verificationPhotoId ||
+        oldStorageId === user.faceVerificationSelfieId;
+      if (stillReferenced) {
+        console.log(`[PHOTO_GATE] Skipping storage delete for ${oldStorageId} - still referenced by user record`);
+        continue;
+      }
+      try {
+        await ctx.storage.delete(oldStorageId);
+        console.log(`[PHOTO_GATE] Deleted old reference storage blob: ${oldStorageId}`);
+      } catch (storageError) {
+        const errorString = storageError instanceof Error
+          ? storageError.message.slice(0, 500)
+          : String(storageError).slice(0, 500);
+        console.warn(`[PHOTO_GATE] Storage cleanup failed for ${oldStorageId}, queuing for retry:`, errorString);
+        const existing = await ctx.db
+          .query('failedStorageDeletions')
+          .withIndex('by_storageId', (q) => q.eq('storageId', oldStorageId))
+          .first();
+        if (existing) {
+          await ctx.db.patch(existing._id, {
+            failedAt: Date.now(),
+            retryCount: existing.retryCount + 1,
+            lastError: errorString,
+          });
+        } else {
+          await ctx.db.insert('failedStorageDeletions', {
+            storageId: oldStorageId,
+            failedAt: Date.now(),
+            retryCount: 0,
+            lastError: errorString,
+          });
+        }
+      }
+    }
 
     // H-1: Clean up pending upload record on success (if exists)
     const pendingRecord = await ctx.db

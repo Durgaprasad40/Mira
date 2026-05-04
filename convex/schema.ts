@@ -531,6 +531,12 @@ export default defineSchema({
       v.literal('verified'),    // Face verified successfully
       v.literal('failed')       // Face verification failed
     )),
+    // Verification retry/cooldown counters (additive; future enforcement only — not enforced today)
+    selfieFailedCount: v.optional(v.number()),              // Cumulative failed selfie attempts in current window
+    selfieFailedSince: v.optional(v.number()),              // Window-start timestamp for selfieFailedCount
+    selfieCooldownUntil: v.optional(v.number()),            // Selfie retry cooldown deadline (ms epoch)
+    referencePhotoReplaceCount: v.optional(v.number()),     // Reference-photo replacements in current rolling window
+    referencePhotoReplaceSince: v.optional(v.number()),     // Window-start timestamp for referencePhotoReplaceCount
     emailVerified: v.optional(v.boolean()),
     emailVerifiedAt: v.optional(v.number()),
     // 8B: Email verification token (stored as hash for security)
