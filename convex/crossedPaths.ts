@@ -475,6 +475,9 @@ export const publishLocation = mutation({
     if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
       return { success: false, published: false, reason: 'disabled_or_paused' };
     }
+    if (user.incognitoMode === true) {
+      return { success: false, published: false, reason: 'incognito' };
+    }
 
     // Safe Nearby v2 — Snapshot regeneration gate.
     // A new snapshot is allowed only when BOTH:
@@ -574,6 +577,9 @@ export const detectCrossedUsers = mutation({
     if (currentUser.recordCrossedPaths === false) {
       return { triggered: false, reason: 'crossed_paths_opt_out' };
     }
+    if (currentUser.incognitoMode === true) {
+      return { triggered: false, reason: 'incognito' };
+    }
 
     // 2) Enforce cooldown — check most recent crossedEvent for this user
     const lastEvent = await ctx.db
@@ -618,6 +624,7 @@ export const detectCrossedUsers = mutation({
       // Phase-2: the other side must also be opted into crossed-paths
       // recording. undefined treated as opted-in.
       if (user.recordCrossedPaths === false) continue;
+      if (user.incognitoMode === true) continue;
       // Skip if no published location
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
       // Skip stale foreground snapshots so old stored locations do not create crossings.
@@ -743,13 +750,16 @@ export const recordLocation = mutation({
     if (currentUser.nearbyPausedUntil && currentUser.nearbyPausedUntil > now) {
       return { success: true, nearbyCount: 0, skipped: true, reason: 'disabled_or_paused' };
     }
-    // Phase-2: Crossed-paths is now a separate opt-in from "Show on Nearby map".
-    // If the caller has explicitly turned off "Record crossed paths" we must
+    // Crossed-paths is a separate opt-in from "Show me in Nearby".
+    // If the caller has explicitly turned off "Save crossed paths" we must
     // not insert any crossedPaths / crossPathHistory / crossedEvents rows for
     // them. Map visibility (publishLocation / getNearbyUsers) is unaffected.
     // Treat undefined as true for backward compatibility with existing users.
     if (currentUser.recordCrossedPaths === false) {
       return { success: true, nearbyCount: 0, skipped: true, reason: 'crossed_paths_opt_out' };
+    }
+    if (currentUser.incognitoMode === true) {
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'incognito' };
     }
 
     // ---------------------------------------------------------------------------
@@ -880,9 +890,10 @@ export const recordLocation = mutation({
       if (!user.isActive) { preFilterRejects.push({ candidate: user._id as string, reason: 'inactive' }); continue; }
       if (!user.latitude || !user.longitude) { preFilterRejects.push({ candidate: user._id as string, reason: 'no_location' }); continue; }
 
-      // Incognito mode: Skip users who are hidden (but they can still BE detected for crossings)
-      // Note: Incognito users can still trigger crossings, they just don't appear on map
-      // This is intentional per spec: "Incognito: hidden from map, but crossed-path detection may still happen"
+      // Incognito Nearby is fully hidden from crossed-path recording and
+      // notifications. Incognito users can still browse Nearby themselves,
+      // but other users must not receive new crossing rows involving them.
+      if (user.incognitoMode === true) { preFilterRejects.push({ candidate: user._id as string, reason: 'incognito' }); continue; }
 
       // Nearby visibility opt-out: Skip users who opted out of nearby
       if (user.nearbyEnabled === false) { preFilterRejects.push({ candidate: user._id as string, reason: 'nearby_disabled' }); continue; }
@@ -1545,6 +1556,9 @@ export const recordLocationBatch = mutation({
     if (user.recordCrossedPaths === false) {
       return { success: true, accepted: 0, reason: 'crossed_paths_opt_out' };
     }
+    if (user.incognitoMode === true) {
+      return { success: true, accepted: 0, reason: 'incognito' };
+    }
 
     const currentStatus = user.verificationStatus || 'unverified';
     const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
@@ -1713,6 +1727,10 @@ async function detectCrossingsForSample(
   const windowStart = sampleTime - SAMPLE_TIME_WINDOW_MS;
   const windowEnd = sampleTime + SAMPLE_TIME_WINDOW_MS;
 
+  if (viewer.incognitoMode === true) {
+    return { crossingsWritten: 0 };
+  }
+
   // GPS quality short-circuit (same thresholds as recordLocation).
   if (accuracy !== undefined && accuracy > MAX_ACCURACY_FOR_CROSSING_METERS) {
     if (BG_LOCATION_AUDIT_ENABLED) {
@@ -1787,6 +1805,7 @@ async function detectCrossingsForSample(
     if (!peerUser.isActive) continue;
     if (peerUser.nearbyEnabled === false) continue;
     if (peerUser.recordCrossedPaths === false) continue;
+    if (peerUser.incognitoMode === true) continue;
     if (!peerUser.name || !peerUser.bio || !peerUser.dateOfBirth) continue;
 
     // Verification parity with recordLocation (DEV bypass respected).
@@ -2473,6 +2492,7 @@ export const getCrossPathHistory = query({
       // P0 FIX: Privacy filtering - hide users who disabled/paused Nearby
       if (otherUser.nearbyEnabled === false) continue;
       if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
+      if (otherUser.incognitoMode === true) continue;
 
       const photoUrl = photosMap.get(otherUserId as string) ?? null;
       if (!photoUrl) continue;
@@ -2791,21 +2811,35 @@ export const getDelayedCrossedPathEntries = query({
       ),
     );
 
-    // Return minimal entry data — NO user/photo joins
-    return filtered
-      .filter((entry) => {
-        const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
-        return !dismissedOtherUserIds.has(otherUserId as string);
-      })
-      .map((entry) => ({
-        id: entry._id,
-        otherUserId: entry.user1Id === userId ? entry.user2Id : entry.user1Id,
-        createdAt: entry.createdAt,
-        crossedLatApprox: entry.crossedLatApprox ?? null,
-        crossedLngApprox: entry.crossedLngApprox ?? null,
-        areaName: GENERIC_CROSSING_AREA_NAME,
-        reasonTags: entry.reasonTags ?? [],
-      }));
+    // Return minimal entry data — NO photo joins. We do fetch the other user
+    // only to enforce current visibility/privacy state server-side, including
+    // Incognito Nearby suppressing old history for everyone else.
+    const visibleEntries: Array<{
+      entry: Doc<'crossPathHistory'>;
+      otherUserId: Id<'users'>;
+    }> = [];
+    for (const entry of filtered) {
+      const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
+      if (dismissedOtherUserIds.has(otherUserId as string)) continue;
+
+      const otherUser = await ctx.db.get(otherUserId);
+      if (!otherUser || !otherUser.isActive) continue;
+      if (otherUser.nearbyEnabled === false) continue;
+      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
+      if (otherUser.incognitoMode === true) continue;
+
+      visibleEntries.push({ entry, otherUserId });
+    }
+
+    return visibleEntries.map(({ entry, otherUserId }) => ({
+      id: entry._id,
+      otherUserId,
+      createdAt: entry.createdAt,
+      crossedLatApprox: entry.crossedLatApprox ?? null,
+      crossedLngApprox: entry.crossedLngApprox ?? null,
+      areaName: GENERIC_CROSSING_AREA_NAME,
+      reasonTags: entry.reasonTags ?? [],
+    }));
   },
 });
 
@@ -2888,6 +2922,7 @@ export const getCrossedPaths = query({
       // P0 FIX: Privacy filtering - hide users who disabled/paused Nearby
       if (otherUser.nearbyEnabled === false) continue;
       if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
+      if (otherUser.incognitoMode === true) continue;
 
       const photoUrl = photosMap.get(otherUserId as string) ?? null;
       if (!photoUrl) continue;
@@ -2973,6 +3008,25 @@ export const getCrossedPathCount = query({
   },
   handler: async (ctx, args) => {
     const { user1Id, user2Id } = args;
+    const now = Date.now();
+
+    const [user1, user2] = await Promise.all([
+      ctx.db.get(user1Id),
+      ctx.db.get(user2Id),
+    ]);
+    if (!user1 || !user2) return { count: 0, exists: false };
+    if (user1.incognitoMode === true || user2.incognitoMode === true) {
+      return { count: 0, exists: false };
+    }
+    if (user1.nearbyEnabled === false || user2.nearbyEnabled === false) {
+      return { count: 0, exists: false };
+    }
+    if (
+      (user1.nearbyPausedUntil && user1.nearbyPausedUntil > now) ||
+      (user2.nearbyPausedUntil && user2.nearbyPausedUntil > now)
+    ) {
+      return { count: 0, exists: false };
+    }
 
     const orderedUser1 = user1Id < user2Id ? user1Id : user2Id;
     const orderedUser2 = user1Id < user2Id ? user2Id : user1Id;
@@ -3002,6 +3056,7 @@ export const getCrossedPathsCount = query({
   args: { userId: v.id('users') },
   handler: async (ctx, args) => {
     const { userId } = args;
+    const now = Date.now();
 
     const asUser1 = await ctx.db
       .query('crossedPaths')
@@ -3013,9 +3068,22 @@ export const getCrossedPathsCount = query({
       .withIndex('by_user2', (q) => q.eq('user2Id', userId))
       .collect();
 
-    return [...asUser1, ...asUser2].filter(
+    const visibleCrossedPaths = [...asUser1, ...asUser2].filter(
       (cp) => cp.count > 0 && !isPairDismissedForViewer(cp, userId),
-    ).length;
+    );
+
+    let count = 0;
+    for (const cp of visibleCrossedPaths) {
+      const otherUserId = cp.user1Id === userId ? cp.user2Id : cp.user1Id;
+      const otherUser = await ctx.db.get(otherUserId);
+      if (!otherUser || !otherUser.isActive) continue;
+      if (otherUser.nearbyEnabled === false) continue;
+      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
+      if (otherUser.incognitoMode === true) continue;
+      count++;
+    }
+
+    return count;
   },
 });
 
@@ -3050,11 +3118,20 @@ export const getCrossedPathSummary = query({
     const allCrossedPaths = [...asUser1, ...asUser2].filter(
       (path) => path.count > 0 && !isPairDismissedForViewer(path, userId),
     );
-    const count = allCrossedPaths.length;
 
     // Find the latest createdAt timestamp
+    const now = Date.now();
+    let count = 0;
     let latestCreatedAt: number | null = null;
     for (const path of allCrossedPaths) {
+      const otherUserId = path.user1Id === userId ? path.user2Id : path.user1Id;
+      const otherUser = await ctx.db.get(otherUserId);
+      if (!otherUser || !otherUser.isActive) continue;
+      if (otherUser.nearbyEnabled === false) continue;
+      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
+      if (otherUser.incognitoMode === true) continue;
+
+      count++;
       const ts = path.lastCrossedAt ?? path._creationTime;
       if (latestCreatedAt === null || ts > latestCreatedAt) {
         latestCreatedAt = ts;

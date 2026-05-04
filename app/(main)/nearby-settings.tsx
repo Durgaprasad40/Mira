@@ -49,7 +49,6 @@ export default function NearbySettingsScreen() {
 
   // Local state (initialized from server)
   const [nearbyEnabled, setNearbyEnabled] = useState(true);
-  const [strongPrivacyMode, setStrongPrivacyMode] = useState(false);
   const [hideDistance, setHideDistance] = useState(false);
   const [incognitoMode, setIncognitoMode] = useState(false);
   // Phase-2: separate crossed-paths opt-in. Default true (undefined → on).
@@ -75,7 +74,6 @@ export default function NearbySettingsScreen() {
     if (currentUser) {
       setTimedOut(false);
       setNearbyEnabled(currentUser.nearbyEnabled !== false);
-      setStrongPrivacyMode(currentUser.strongPrivacyMode === true);
       setHideDistance(currentUser.hideDistance === true);
       setIncognitoMode(currentUser.incognitoMode === true);
       // Phase-2: undefined treated as opted-in (default true).
@@ -118,7 +116,6 @@ export default function NearbySettingsScreen() {
         // Revert local state on error
         if (currentUser) {
           if (field === 'nearbyEnabled') setNearbyEnabled(currentUser.nearbyEnabled !== false);
-          if (field === 'strongPrivacyMode') setStrongPrivacyMode(currentUser.strongPrivacyMode === true);
           if (field === 'hideDistance') setHideDistance(currentUser.hideDistance === true);
           if (field === 'incognitoMode') setIncognitoMode(currentUser.incognitoMode === true);
           if (field === 'recordCrossedPaths') setRecordCrossedPaths(currentUser.recordCrossedPaths !== false);
@@ -134,11 +131,6 @@ export default function NearbySettingsScreen() {
   const handleNearbyEnabledToggle = (value: boolean) => {
     setNearbyEnabled(value);
     handleSave('nearbyEnabled', value);
-  };
-
-  const handleStrongPrivacyModeToggle = (value: boolean) => {
-    setStrongPrivacyMode(value);
-    handleSave('strongPrivacyMode', value);
   };
 
   const handleHideDistanceToggle = (value: boolean) => {
@@ -260,15 +252,12 @@ export default function NearbySettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Visibility</Text>
 
-          {/* Phase-2: Show on Nearby map (map visibility only) */}
+          {/* Nearby visibility */}
           <View style={styles.toggleRow}>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Show on Nearby map</Text>
+              <Text style={styles.toggleTitle}>Show me in Nearby</Text>
               <Text style={styles.toggleDescription}>
-                Let others see your profile on the Nearby map. Turn off to
-                hide from the map.{'\n'}
-                Nearby shows an approximate area only — it is not live GPS
-                tracking, and positions are snapped and fuzzed for privacy.
+                Allow nearby people to discover you through Nearby and crossed paths.
               </Text>
             </View>
             <Switch
@@ -280,14 +269,12 @@ export default function NearbySettingsScreen() {
             />
           </View>
 
-          {/* Phase-2: Record crossed paths (independent opt-in) */}
+          {/* Crossed-path history opt-in */}
           <View style={styles.toggleRow}>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Record crossed paths</Text>
+              <Text style={styles.toggleTitle}>Save crossed paths</Text>
               <Text style={styles.toggleDescription}>
-                We remember when you and others were in the same area so we
-                can surface a crossed-paths history and alerts. Independent
-                from the Nearby map — you can turn either one off.
+                Remember people you crossed paths with recently.
               </Text>
             </View>
             <Switch
@@ -311,10 +298,10 @@ export default function NearbySettingsScreen() {
             }}
           >
             <View style={styles.actionInfo}>
-              <Text style={styles.toggleTitle}>Pause Nearby activity</Text>
+              <Text style={styles.toggleTitle}>Pause Nearby</Text>
               <Text style={styles.toggleDescription}>
                 {pauseStatusText
-                  ?? 'Hide from the Nearby map and pause crossing detection for a chosen duration.'}
+                  ?? 'Temporarily stop showing you in Nearby.'}
               </Text>
             </View>
             <View style={[styles.actionButton, isPaused && styles.actionButtonActive]}>
@@ -346,29 +333,12 @@ export default function NearbySettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Privacy</Text>
 
-          {/* Strong Privacy Mode (larger location fuzz) */}
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Strong Privacy Mode</Text>
-              <Text style={styles.toggleDescription}>
-                Your location will be fuzzed more heavily on the map (200-400m instead of 50-150m)
-              </Text>
-            </View>
-            <Switch
-              value={strongPrivacyMode}
-              onValueChange={handleStrongPrivacyModeToggle}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-              disabled={isSaving}
-            />
-          </View>
-
           {/* Hide Distance (don't show distance info to others) */}
           <View style={styles.toggleRow}>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Hide Distance</Text>
+              <Text style={styles.toggleTitle}>Hide my distance</Text>
               <Text style={styles.toggleDescription}>
-                Others won't see how far away you are
+                Do not show your distance to other people.
               </Text>
             </View>
             <Switch
@@ -392,7 +362,7 @@ export default function NearbySettingsScreen() {
                 )}
               </View>
               <Text style={styles.toggleDescription}>
-                Browse Nearby without appearing to others
+                Browse Nearby without appearing to others.
                 {!canUseIncognito && '\nUpgrade to Premium to use this feature'}
               </Text>
             </View>

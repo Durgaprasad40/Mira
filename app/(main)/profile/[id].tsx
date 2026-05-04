@@ -283,6 +283,7 @@ export default function ViewProfileScreen() {
   // marker tap. It's intentionally small — a single line + two chip buttons —
   // and never auto-triggers any action.
   const isFromNearby = normalizedSource === 'nearby';
+  const isNearbyPrivacySource = isFromNearby || normalizedSource === 'crossed_paths';
   const normalizedIntent = Array.isArray(intent) ? intent[0] : intent;
   const nearbyIntentLike = isFromNearby && normalizedIntent === 'like';
   const isPhase2 = mode === 'phase2';
@@ -322,7 +323,11 @@ export default function ViewProfileScreen() {
   const convexPhase1Profile = useQuery(
     api.users.getUserById,
     !isDemoMode && !isPhase2 && userId && currentViewerId
-      ? { userId: userId as Id<'users'>, viewerId: currentViewerId }
+      ? {
+          userId: userId as Id<'users'>,
+          viewerId: currentViewerId,
+          ...(isNearbyPrivacySource ? { source: normalizedSource } : {}),
+        }
       : 'skip'
   );
 
@@ -472,7 +477,10 @@ export default function ViewProfileScreen() {
       isConfessPreview,
     });
   }
-  const distanceLabel = useMemo(() => formatDiscoverDistanceKm(profile?.distance), [profile?.distance]);
+  const distanceLabel = useMemo(
+    () => (isNearbyPrivacySource ? null : formatDiscoverDistanceKm(profile?.distance)),
+    [isNearbyPrivacySource, profile?.distance],
+  );
   const verificationBadge = useMemo(
     () => getVerificationBadgeState({
       isVerified: profile?.isVerified,

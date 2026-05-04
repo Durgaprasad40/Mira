@@ -377,6 +377,7 @@ export const getUserById = query({
   args: {
     userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
     viewerId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
+    source: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     // Map authUserId -> Convex Id<"users"> if needed
@@ -428,10 +429,15 @@ export const getUserById = query({
       ? [primaryPhoto, ...otherPhotos]
       : [...publicPhotos].sort((a, b) => a.order - b.order);
 
-    // Calculate distance if both have location
+    const isNearbySource = args.source === "nearby" || args.source === "crossed_paths";
+
+    // Calculate distance if both have location. Profiles opened from Nearby
+    // deliberately do not return current/raw coordinate distance; Nearby has
+    // its own coarse, event-bound distance context.
     const viewer = await ctx.db.get(viewerId);
     let distance: number | undefined;
     if (
+      !isNearbySource &&
       user.latitude &&
       user.longitude &&
       viewer?.latitude &&
@@ -922,8 +928,9 @@ export const updateNearbySettings = mutation({
     hideDistance: v.optional(v.boolean()),
     strongPrivacyMode: v.optional(v.boolean()),
     incognitoMode: v.optional(v.boolean()),
-    // Phase-2: independent opt-in for crossed-paths recording.
-    // Separate from nearbyEnabled (which now only controls map visibility).
+    // Phase-1: independent opt-in for crossed-paths recording.
+    // Separate from nearbyEnabled, which controls whether the user is surfaced
+    // through Nearby visibility.
     recordCrossedPaths: v.optional(v.boolean()),
     // Phase-1 Background Crossed Paths: iOS-only opt-in. Server-side gate
     // for recordLocationBatch. Client UI should only allow toggling this

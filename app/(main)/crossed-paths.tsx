@@ -345,7 +345,7 @@ export default function CrossedPathsScreen() {
     } catch {
       // Haptics not available
     }
-    safePush(router, `/(main)/profile/${profileId}` as any, 'crossed-paths->profile');
+    safePush(router, `/(main)/profile/${profileId}?source=crossed_paths` as any, 'crossed-paths->profile');
   }, [router]);
 
   // ---------------------------------------------------------------------------

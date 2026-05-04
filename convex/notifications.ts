@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { internal } from './_generated/api';
-import { mutation, query, internalMutation, type MutationCtx } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { mutation, query, internalMutation, type MutationCtx, type QueryCtx } from './_generated/server';
+import type { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId } from './helpers';
 import { bellNotificationCountsForPhase } from './notificationBellPhase';
 
@@ -21,6 +21,33 @@ function isPhase1Row(row: { phase?: string | null; type: string }): boolean {
   if (row.phase === 'phase1') return true;
   if (row.phase === 'phase2') return false;
   return !PHASE2_LEGACY_TYPES.has(row.type);
+}
+
+async function shouldSurfacePhase1Notification(
+  ctx: QueryCtx,
+  row: Doc<'notifications'>,
+): Promise<boolean> {
+  if (!isPhase1Row(row)) return false;
+  if (row.type !== 'crossed_paths') return true;
+
+  const otherUserId = row.data?.userId ?? row.data?.otherUserId;
+  if (!otherUserId) return true;
+
+  let otherUser: Doc<'users'> | null = null;
+  try {
+    otherUser = await ctx.db.get(otherUserId as Id<'users'>);
+  } catch {
+    otherUser = null;
+  }
+
+  if (!otherUser) {
+    const resolvedOtherUserId = await resolveUserIdByAuthId(ctx, otherUserId);
+    if (resolvedOtherUserId) {
+      otherUser = await ctx.db.get(resolvedOtherUserId);
+    }
+  }
+
+  return otherUser?.incognitoMode !== true;
 }
 
 /**
@@ -87,7 +114,14 @@ export const getNotifications = query({
 
     const rows = await queryBuilder.order('desc').take(limit * 2);
     // Strict Phase-1 isolation enforced server-side
-    return rows.filter(isPhase1Row).slice(0, limit);
+    const visibleRows = [];
+    for (const row of rows) {
+      if (await shouldSurfacePhase1Notification(ctx, row)) {
+        visibleRows.push(row);
+      }
+      if (visibleRows.length >= limit) break;
+    }
+    return visibleRows;
   },
 });
 
@@ -121,8 +155,14 @@ export const getUnreadCount = query({
       )
       .collect();
 
-    // Strict Phase-1 isolation
-    return notifications.filter(isPhase1Row).length;
+    // Strict Phase-1 isolation + Nearby Incognito suppression for crossed-path rows.
+    let count = 0;
+    for (const notification of notifications) {
+      if (await shouldSurfacePhase1Notification(ctx, notification)) {
+        count++;
+      }
+    }
+    return count;
   },
 });
 
@@ -163,7 +203,7 @@ export const getBellUnreadCount = query({
 
     let count = 0;
     for (const n of notifications) {
-      if (!isPhase1Row(n)) continue;
+      if (!(await shouldSurfacePhase1Notification(ctx, n))) continue;
       if (bellNotificationCountsForPhase(n.type, 'phase1')) {
         count++;
       }
