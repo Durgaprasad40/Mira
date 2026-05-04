@@ -321,9 +321,8 @@ export default function PromptThreadScreen() {
   const deleteAnswer = useMutation(api.truthDare.deleteMyAnswer);
   const deletePrompt = useMutation(api.truthDare.deleteMyPrompt); // Prompt owner delete
   const editPrompt = useMutation(api.truthDare.editMyPrompt); // Prompt owner edit
-  // Secure media APIs (for future viewer implementation)
+  // Secure media APIs
   const claimAnswerMediaView = useMutation(api.truthDare.claimAnswerMediaView);
-  const finalizeAnswerMediaView = useMutation(api.truthDare.finalizeAnswerMediaView);
   // T&D Connect
   const sendConnectRequest = useMutation(api.truthDare.sendTodConnectRequest);
 
@@ -454,7 +453,6 @@ export default function PromptThreadScreen() {
 
   // P0-001 FIX: Ref to track media claims in progress (prevents double-tap and stale state issues)
   const pendingMediaClaimsRef = useRef<Set<string>>(new Set());
-  const pendingMediaFinalizeRef = useRef<Set<string>>(new Set());
   const connectSendInFlightRef = useRef(false);
   const pendingConnectResponsesRef = useRef<Set<string>>(new Set());
   const pendingScrollAnswerIdRef = useRef<string | null>(null);
@@ -1109,12 +1107,22 @@ export default function PromptThreadScreen() {
 
   // Handle tap-to-view for media content
   // P0-001 FIX: Backend is the source of truth for view state.
-  // P0-17 FIX: Durable consumption happens on finalize after successful display.
+  // Phase-2 visual media is consumed by the backend claim before a URL is returned.
   const handleViewMedia = useCallback(async (answer: typeof answers[0]) => {
-    if (!answer.mediaUrl || (answer.type !== 'photo' && answer.type !== 'video')) return;
+    // Only photo / video are openable through this flow. Voice has its own
+    // inline player; other types have nothing to open.
+    if (answer.type !== 'photo' && answer.type !== 'video') return;
 
     const answerId = answer._id;
     const isOwner = answer.isOwnAnswer;
+
+    // BUG FIX: If the answer is the viewer's own, mediaUrl is required
+    // (owner views inline). For non-owners, mediaUrl may be absent — e.g.
+    // creator-only media that the prompt owner is authorized to claim.
+    // The previous early return bailed for *any* missing mediaUrl, which
+    // hid the affordance for the prompt creator entirely. Now we only bail
+    // for the owner-with-no-url case; non-owners proceed to the claim path.
+    if (isOwner && !answer.mediaUrl) return;
 
     // P0-001 FIX: Prevent double-tap while claim is in flight
     if (pendingMediaClaimsRef.current.has(answerId)) {
@@ -1122,8 +1130,10 @@ export default function PromptThreadScreen() {
       return;
     }
 
-    // Owner can always view their own media (no claim needed)
-    if (isOwner) {
+    // Owner can always view their own media (no claim needed). The guard
+    // above already returned when `isOwner && !answer.mediaUrl`, so the URL
+    // is guaranteed here — restate it locally so TypeScript narrows.
+    if (isOwner && answer.mediaUrl) {
       if (isMountedRef.current) {
         setViewingMedia({
           answerId,
@@ -1150,7 +1160,7 @@ export default function PromptThreadScreen() {
 
     try {
       const mediaLabel = answer.type === 'video' ? 'video' : 'photo';
-      // Backend returns a fresh URL without durably consuming the one-time view yet.
+      // Backend records the one-time view before returning a playable URL.
       const result = await claimAnswerMediaView({
         answerId,
         viewerId: userId,
@@ -1161,7 +1171,7 @@ export default function PromptThreadScreen() {
       if (result.status === 'already_viewed') {
         Alert.alert(
           'Already Viewed',
-          `This one-time ${mediaLabel} has already been opened on your account.`
+          `This ${mediaLabel} was already viewed.`
         );
         return;
       }
@@ -1197,7 +1207,7 @@ export default function PromptThreadScreen() {
           mediaUrl: result.url,
           mediaType: result.mediaType,
           isOwnAnswer: false,
-          hasViewed: false, // Will be marked true on close
+          hasViewed: true,
           isFrontCamera: result.isFrontCamera,
         });
       }
@@ -1219,9 +1229,9 @@ export default function PromptThreadScreen() {
     }
   }, [userId, claimAnswerMediaView]);
 
-  // Handle closing the media viewer
+  // Handle closing the media viewer. Backend consumption already happened
+  // during claim/open, so close is UI-only.
   const handleCloseMediaViewer = useCallback(async () => {
-    const activeMedia = viewingMedia;
     if (isMountedRef.current) {
       setViewingMedia(null);
     }
@@ -1230,40 +1240,7 @@ export default function PromptThreadScreen() {
       setVideoProgress({ position: 0, duration: 0, isPlaying: false });
     }
 
-    if (!activeMedia || activeMedia.isOwnAnswer || activeMedia.hasViewed || !userId) {
-      return;
-    }
-
-    if (pendingMediaFinalizeRef.current.has(activeMedia.answerId)) {
-      return;
-    }
-
-    pendingMediaFinalizeRef.current.add(activeMedia.answerId);
-    try {
-      // Finalize the view for non-owners
-      await finalizeAnswerMediaView({
-        answerId: activeMedia.answerId,
-        viewerId: userId,
-      });
-      debugTodLog('[T/D] Media view finalized');
-    } catch (error) {
-      console.error('[T/D] Finalize media view failed:', error);
-      if (isRetryableTodError(error)) {
-        Alert.alert(
-          'View Unconfirmed',
-          'We could not confirm the view was recorded. Refresh the thread before trying again.'
-        );
-      } else {
-        Alert.alert(
-          'View Not Recorded',
-          'Your view may not have been recorded. The media may still be viewable.',
-          [{ text: 'OK', style: 'default' }]
-        );
-      }
-    } finally {
-      pendingMediaFinalizeRef.current.delete(activeMedia.answerId);
-    }
-  }, [viewingMedia, userId, finalizeAnswerMediaView]);
+  }, []);
 
   // Unified submit handler - handles text + optional media attachment
   // Uses MERGE behavior: only sends fields that changed

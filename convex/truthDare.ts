@@ -193,6 +193,63 @@ async function deleteStorageIfPresent(
   }
 }
 
+type TodUploadMediaKind = 'photo' | 'video' | 'audio';
+
+const TOD_UPLOAD_MEDIA_LIMITS: Record<
+  TodUploadMediaKind,
+  { maxBytes: number; contentTypePrefix: string }
+> = {
+  photo: { maxBytes: 15 * 1024 * 1024, contentTypePrefix: 'image/' },
+  video: { maxBytes: 100 * 1024 * 1024, contentTypePrefix: 'video/' },
+  audio: { maxBytes: 20 * 1024 * 1024, contentTypePrefix: 'audio/' },
+};
+
+function getTodUploadKindFromMedia(
+  mediaMime: string | undefined,
+  fallbackType: 'text' | 'photo' | 'video' | 'voice' | undefined
+): TodUploadMediaKind {
+  const normalizedMime = mediaMime?.toLowerCase() ?? '';
+  if (normalizedMime.startsWith('audio/')) return 'audio';
+  if (normalizedMime.startsWith('video/')) return 'video';
+  if (normalizedMime.startsWith('image/')) return 'photo';
+  if (fallbackType === 'voice') return 'audio';
+  if (fallbackType === 'video') return 'video';
+  return 'photo';
+}
+
+async function validateTodUploadReference(
+  ctx: any,
+  storageId: Id<'_storage'>,
+  userId: Id<'users'>,
+  mediaKind: TodUploadMediaKind
+): Promise<void> {
+  const pending = await ctx.db
+    .query('pendingUploads')
+    .withIndex('by_storage', (q: any) => q.eq('storageId', storageId))
+    .first();
+
+  if (!pending || pending.userId !== userId) {
+    throw new Error('Unauthorized storage reference');
+  }
+
+  const meta = (await ctx.db.system.get(storageId)) as
+    | { size?: number; contentType?: string }
+    | null;
+  if (!meta) {
+    throw new Error('Invalid storage reference: metadata unavailable');
+  }
+
+  const limits = TOD_UPLOAD_MEDIA_LIMITS[mediaKind];
+  if (typeof meta.size === 'number' && meta.size > limits.maxBytes) {
+    throw new Error(`Media exceeds size limit for ${mediaKind}`);
+  }
+
+  const contentType = typeof meta.contentType === 'string' ? meta.contentType.toLowerCase() : '';
+  if (!contentType.startsWith(limits.contentTypePrefix)) {
+    throw new Error(`Media content type does not match declared ${mediaKind}`);
+  }
+}
+
 function getNormalizedTodAnswerIdentity(
   answer: {
     isAnonymous?: boolean;
@@ -2941,14 +2998,28 @@ export const createOrEditAnswer = mutation({
     const normalizedText = validateAnswerText(args.text);
     const viewDurationSec = validateViewDuration(args.viewDurationSec);
 
+    if (args.mediaStorageId) {
+      const mediaKind = getTodUploadKindFromMedia(args.mediaMime, args.type);
+      await validateTodUploadReference(ctx, args.mediaStorageId, userId, mediaKind);
+    }
+    if (args.authorPhotoStorageId) {
+      await validateTodUploadReference(ctx, args.authorPhotoStorageId, userId, 'photo');
+    }
+
     // Generate media URL if storage ID provided
     let mediaUrl: string | undefined;
     if (args.mediaStorageId) {
       mediaUrl = await ctx.storage.getUrl(args.mediaStorageId) ?? undefined;
+      if (!mediaUrl) {
+        throw new Error('Invalid media storage reference');
+      }
     }
     let resolvedAuthorPhotoUrl = args.authorPhotoUrl;
     if (args.authorPhotoStorageId) {
       resolvedAuthorPhotoUrl = await ctx.storage.getUrl(args.authorPhotoStorageId) ?? undefined;
+      if (!resolvedAuthorPhotoUrl) {
+        throw new Error('Invalid author photo storage reference');
+      }
     }
 
     if (existing) {
@@ -3566,8 +3637,7 @@ export const deleteMyAnswer = mutation({
  * Claim viewing rights for an answer's secure media.
  * - For 'owner_only' visibility: only prompt owner can view
  * - For 'public' visibility: anyone can view, but only once
- * Generates a one-time media URL without durably consuming the view.
- * Durable consumption happens in finalizeAnswerMediaView after successful display.
+ * Atomically records the viewer's one-time claim before returning a URL.
  */
 export const claimAnswerMediaView = mutation({
   args: {
@@ -3599,11 +3669,6 @@ export const claimAnswerMediaView = mutation({
       (answer.type !== 'photo' && answer.type !== 'video')
     ) {
       return { status: 'no_media' as const };
-    }
-
-    // Check if media was already deleted (prompt owner viewed it)
-    if (answer.promptOwnerViewedAt) {
-      return { status: 'already_deleted' as const };
     }
 
     // Get the prompt to check ownership
@@ -3638,8 +3703,8 @@ export const claimAnswerMediaView = mutation({
       role = 'viewer';
     }
 
-    // Check if already viewed (one-time enforcement)
-    // Answer author can always re-view their own media
+    // Check if already viewed (one-time enforcement). Answer author can still
+    // review their own upload through the inline owner URL.
     if (!isAnswerAuthor) {
       const existingView = await ctx.db
         .query('todAnswerViews')
@@ -3653,10 +3718,31 @@ export const claimAnswerMediaView = mutation({
       }
     }
 
-    // Generate a fresh URL before consuming one-time access.
+    // Generate a fresh URL before recording the claim. The mutation is
+    // serialized by Convex, so the insert below is the durable one-time gate.
     const url = await ctx.storage.getUrl(answer.mediaStorageId);
     if (!url) {
       return { status: 'no_media' as const };
+    }
+
+    const viewedAt = Date.now();
+    if (!isAnswerAuthor) {
+      await ctx.db.insert('todAnswerViews', {
+        answerId,
+        viewerUserId: viewerId,
+        viewedAt,
+      });
+    }
+
+    const answerPatch: Record<string, any> = {};
+    if (!answer.mediaViewedAt) {
+      answerPatch.mediaViewedAt = viewedAt;
+    }
+    if (isPromptOwner && !answer.promptOwnerViewedAt) {
+      answerPatch.promptOwnerViewedAt = viewedAt;
+    }
+    if (Object.keys(answerPatch).length > 0) {
+      await ctx.db.patch(answer._id, answerPatch);
     }
 
     debugTodLog(
@@ -3671,14 +3757,15 @@ export const claimAnswerMediaView = mutation({
       durationSec: answer.viewDurationSec ?? 10,
       role,
       isFrontCamera: answer.isFrontCamera ?? false,
+      viewedAt,
     };
   },
 });
 
 /**
- * Finalize answer media view.
- * Durably consumes a one-time view after successful display.
- * If prompt owner is viewing, also deletes the underlying storage for everyone.
+ * Legacy finalize hook retained for older clients. Current Phase-2 clients
+ * consume photo/video access in claimAnswerMediaView before receiving a URL.
+ * This mutation is idempotent and never deletes shared storage.
  */
 export const finalizeAnswerMediaView = mutation({
   args: {
@@ -3754,16 +3841,9 @@ export const finalizeAnswerMediaView = mutation({
       });
     }
 
-    // If prompt owner finalized viewing, delete media for everyone
-    if (isPromptOwner && answer.mediaStorageId && !answer.promptOwnerViewedAt) {
-      // Delete storage file
-      await deleteStorageIfPresent(ctx, answer.mediaStorageId);
-
-      // Mark as viewed by owner (this locks it for everyone)
+    if (isPromptOwner && !answer.promptOwnerViewedAt) {
       await ctx.db.patch(answer._id, {
         promptOwnerViewedAt: finalizedAt,
-        mediaStorageId: undefined,
-        mediaUrl: undefined,
       });
     }
 
