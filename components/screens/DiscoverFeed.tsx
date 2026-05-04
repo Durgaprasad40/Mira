@@ -762,7 +762,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
               }}
             >
               <View style={styles.prefsMenuItemContent}>
-                <Text style={styles.prefsMenuItemTitle}>Discovery Preferences</Text>
+                <Text style={styles.prefsMenuItemTitle}>Discover Preferences</Text>
                 <Text style={styles.prefsMenuItemSubtitle}>Age, distance, and who you see</Text>
               </View>
               <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />

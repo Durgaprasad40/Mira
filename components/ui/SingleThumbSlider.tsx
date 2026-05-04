@@ -1,5 +1,5 @@
 /**
- * SingleThumbSlider - PHASE-2 ONLY
+ * SingleThumbSlider - Shared (Phase-1 + Phase-2)
  *
  * A single-thumb slider for distance/value selection.
  * Features:
@@ -7,8 +7,9 @@
  * - Smooth, responsive gesture handling using react-native-gesture-handler
  * - Live helper text display
  * - Step size of 1
+ * - Dark + light theme support via isDarkTheme prop
  *
- * PERFORMANCE FIX:
+ * PERFORMANCE:
  * - Uses local state during drag, only commits to parent on release
  * - Uses useSharedValue for worklet-safe value tracking (no ref.current mutations)
  */
@@ -36,9 +37,9 @@ interface SingleThumbSliderProps {
   isDarkTheme?: boolean;
 }
 
-const THUMB_SIZE = 32;
-const TRACK_HEIGHT = 6;
-const HIT_SLOP = 16;
+const THUMB_SIZE = 28;
+const TRACK_HEIGHT = 8;
+const HIT_SLOP = 20;
 
 export function SingleThumbSlider({
   value,
@@ -145,10 +146,29 @@ export function SingleThumbSlider({
 
   return (
     <View style={styles.container}>
-      {/* Helper text shows LOCAL state for instant feedback */}
-      <Text style={[styles.helperText, { color: theme.primary }]}>
-        {helperTextPrefix} {localValue} {unit}
-      </Text>
+      {/* Premium value pill — matches RangeSlider styling */}
+      <View
+        style={[
+          styles.valuePill,
+          {
+            backgroundColor: isDarkTheme
+              ? 'rgba(233, 69, 96, 0.12)'
+              : 'rgba(255, 107, 107, 0.08)',
+            borderColor: isDarkTheme
+              ? 'rgba(233, 69, 96, 0.35)'
+              : 'rgba(255, 107, 107, 0.25)',
+          },
+        ]}
+      >
+        <Text style={[styles.valuePrefix, { color: theme.primary }]}>
+          {helperTextPrefix}
+        </Text>
+        <Text style={[styles.valueNumber, { color: theme.primary }]}>
+          {' '}
+          {localValue}
+        </Text>
+        <Text style={[styles.valueUnit, { color: theme.primary }]}> {unit}</Text>
+      </View>
 
       <View style={styles.sliderContainer} onLayout={handleLayout}>
         <View style={[styles.track, { backgroundColor: trackBg }]} />
@@ -170,20 +190,34 @@ export function SingleThumbSlider({
             <Animated.View
               style={[
                 styles.thumb,
-                { backgroundColor: thumbBg, left: thumbPos },
+                {
+                  backgroundColor: '#FFFFFF',
+                  borderColor: thumbBg,
+                  left: thumbPos,
+                },
               ]}
             >
-              <Text style={styles.thumbText}>{localValue}</Text>
+              <View style={[styles.thumbCore, { backgroundColor: thumbBg }]} />
             </Animated.View>
           </GestureDetector>
         )}
       </View>
 
       <View style={styles.labelsRow}>
-        <Text style={[styles.limitLabel, { color: isDarkTheme ? INCOGNITO_COLORS.textLight : COLORS.textLight }]}>
+        <Text
+          style={[
+            styles.limitLabel,
+            { color: isDarkTheme ? INCOGNITO_COLORS.textLight : COLORS.textLight },
+          ]}
+        >
           {minValue}
         </Text>
-        <Text style={[styles.limitLabel, { color: isDarkTheme ? INCOGNITO_COLORS.textLight : COLORS.textLight }]}>
+        <Text
+          style={[
+            styles.limitLabel,
+            { color: isDarkTheme ? INCOGNITO_COLORS.textLight : COLORS.textLight },
+          ]}
+        >
           {maxValue}
         </Text>
       </View>
@@ -191,18 +225,40 @@ export function SingleThumbSlider({
   );
 }
 
+const SLIDER_HEIGHT = THUMB_SIZE + 24;
+
 const styles = StyleSheet.create({
   container: {
-    paddingVertical: 8,
+    paddingVertical: 4,
   },
-  helperText: {
-    fontSize: 14,
-    fontWeight: '600',
-    textAlign: 'center',
-    marginBottom: 20,
+  valuePill: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    alignSelf: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    marginBottom: 18,
+  },
+  valuePrefix: {
+    fontSize: 13,
+    fontWeight: '500',
+    opacity: 0.85,
+  },
+  valueNumber: {
+    fontSize: 22,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  valueUnit: {
+    fontSize: 13,
+    fontWeight: '500',
+    opacity: 0.85,
   },
   sliderContainer: {
-    height: THUMB_SIZE + 20,
+    height: SLIDER_HEIGHT,
     justifyContent: 'center',
     marginHorizontal: 4,
   },
@@ -212,43 +268,45 @@ const styles = StyleSheet.create({
     right: THUMB_SIZE / 2,
     height: TRACK_HEIGHT,
     borderRadius: TRACK_HEIGHT / 2,
+    top: (SLIDER_HEIGHT - TRACK_HEIGHT) / 2,
   },
   activeTrack: {
     position: 'absolute',
     left: THUMB_SIZE / 2,
     height: TRACK_HEIGHT,
     borderRadius: TRACK_HEIGHT / 2,
-    top: (THUMB_SIZE + 20 - TRACK_HEIGHT) / 2,
+    top: (SLIDER_HEIGHT - TRACK_HEIGHT) / 2,
   },
   thumb: {
     position: 'absolute',
     width: THUMB_SIZE,
     height: THUMB_SIZE,
     borderRadius: THUMB_SIZE / 2,
-    borderWidth: 3,
-    borderColor: '#FFF',
+    borderWidth: 2,
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 4,
+    elevation: 5,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    top: (20 - THUMB_SIZE) / 2 + THUMB_SIZE / 2,
+    shadowOpacity: 0.22,
+    shadowRadius: 5,
+    top: (SLIDER_HEIGHT - THUMB_SIZE) / 2,
   },
-  thumbText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#FFF',
+  thumbCore: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
   },
   labelsRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingHorizontal: 8,
-    marginTop: 4,
+    paddingHorizontal: 4,
+    marginTop: 6,
   },
   limitLabel: {
     fontSize: 12,
+    fontWeight: '500',
+    opacity: 0.7,
   },
 });
 

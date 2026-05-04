@@ -7,3 +7,5 @@ export { Toast, ToastHost } from './Toast';
 export { WelcomeOverlay } from './WelcomeOverlay';
 export { SwipeGuidanceHint } from './SwipeGuidanceHint';
 export { SkeletonCard } from './SkeletonCard';
+export { RangeSlider } from './RangeSlider';
+export { SingleThumbSlider } from './SingleThumbSlider';

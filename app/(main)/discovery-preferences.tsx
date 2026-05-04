@@ -14,7 +14,7 @@ import { useRouter, useLocalSearchParams, useSegments } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, GENDER_OPTIONS, ORIENTATION_OPTIONS, RELATIONSHIP_INTENTS, INCOGNITO_COLORS, VALIDATION } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
-import { Button, Input } from '@/components/ui';
+import { Button, RangeSlider, SingleThumbSlider } from '@/components/ui';
 import { useFilterStore, kmToMiles, milesToKm } from '@/stores/filterStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -29,6 +29,7 @@ const MIN_AGE = VALIDATION.DISCOVERY_MIN_AGE;
 const MAX_AGE = VALIDATION.DISCOVERY_MAX_AGE;
 const MAX_DISTANCE_MILES = VALIDATION.MAX_DISTANCE; // UI shows miles
 const MAX_DISTANCE_KM = milesToKm(MAX_DISTANCE_MILES); // ~161km stored
+const MIN_DISTANCE_MILES = 1;
 
 // "Looking for" is single-select (exactly 1)
 const LOOKING_FOR_COUNT = 1;
@@ -94,10 +95,18 @@ export default function DiscoveryPreferencesScreen() {
 
   // Theme colors based on phase
   const theme = isPhase2 ? INCOGNITO_COLORS : COLORS;
-  const bgColor = isPhase2 ? INCOGNITO_COLORS.background : COLORS.background;
+  const bgColor = isPhase2 ? INCOGNITO_COLORS.background : '#F6F7FB';
   const textColor = isPhase2 ? INCOGNITO_COLORS.text : COLORS.text;
   const textLightColor = isPhase2 ? INCOGNITO_COLORS.textLight : COLORS.textLight;
   const accentColor = isPhase2 ? INCOGNITO_COLORS.primary : COLORS.primary;
+  // Premium card surface tokens (kept local — does not mutate global constants)
+  const cardBg = isPhase2 ? INCOGNITO_COLORS.surface : COLORS.white;
+  const cardBorder = isPhase2 ? 'rgba(233, 69, 96, 0.10)' : '#ECEDF2';
+  const dividerColor = isPhase2 ? 'rgba(255,255,255,0.05)' : '#EDEEF2';
+  // Chip tokens
+  const chipUnselectedBg = isPhase2 ? 'rgba(255,255,255,0.04)' : '#F4F5F8';
+  const chipUnselectedBorder = isPhase2 ? 'rgba(255,255,255,0.08)' : '#E6E7EC';
+  const chipUnselectedText = isPhase2 ? INCOGNITO_COLORS.text : COLORS.text;
 
   // Defensive cleanup: remove stale/invalid Phase-2 intent values
   // NOTE: Phase-1 cleanup is now done during Convex hydration (see hydration effect below)
@@ -203,9 +212,10 @@ export default function DiscoveryPreferencesScreen() {
   // Convert km to miles for display
   const initialDistanceMiles = kmToMiles(maxDistance);
 
-  const [localMinAge, setLocalMinAge] = useState(minAge.toString());
-  const [localMaxAge, setLocalMaxAge] = useState(maxAge.toString());
-  const [localMaxDistanceMiles, setLocalMaxDistanceMiles] = useState(initialDistanceMiles.toString());
+  // Slider-backed numeric state (no more string text inputs)
+  const [localMinAge, setLocalMinAge] = useState<number>(minAge);
+  const [localMaxAge, setLocalMaxAge] = useState<number>(maxAge);
+  const [localMaxDistanceMiles, setLocalMaxDistanceMiles] = useState<number>(initialDistanceMiles);
   const [saving, setSaving] = useState(false);
 
   // Track if we've already hydrated from Convex (prevent re-runs)
@@ -251,10 +261,10 @@ export default function DiscoveryPreferencesScreen() {
       }
     }
 
-    // Update local input state
-    setLocalMinAge(serverMinAge.toString());
-    setLocalMaxAge(serverMaxAge.toString());
-    setLocalMaxDistanceMiles(kmToMiles(serverMaxDistance).toString());
+    // Update local slider state (numeric)
+    setLocalMinAge(serverMinAge);
+    setLocalMaxAge(serverMaxAge);
+    setLocalMaxDistanceMiles(kmToMiles(serverMaxDistance));
 
     // Mark as hydrated to prevent re-runs
     setHasHydratedFromConvex(true);
@@ -301,10 +311,14 @@ export default function DiscoveryPreferencesScreen() {
 
     setSaving(true);
     try {
-      // Parse and clamp values to valid ranges
-      let parsedMinAge = parseInt(localMinAge) || MIN_AGE;
-      let parsedMaxAge = parseInt(localMaxAge) || MAX_AGE;
-      let parsedDistanceMiles = parseInt(localMaxDistanceMiles) || 50;
+      // Read from slider-backed numeric state and defensively clamp.
+      // The sliders already enforce ranges, but we clamp again to guard
+      // against any out-of-band values sneaking in.
+      let parsedMinAge = Number.isFinite(localMinAge) ? localMinAge : MIN_AGE;
+      let parsedMaxAge = Number.isFinite(localMaxAge) ? localMaxAge : MAX_AGE;
+      let parsedDistanceMiles = Number.isFinite(localMaxDistanceMiles)
+        ? localMaxDistanceMiles
+        : 50;
 
       // Enforce age limits (18-70)
       parsedMinAge = Math.max(MIN_AGE, Math.min(MAX_AGE, parsedMinAge));
@@ -316,15 +330,15 @@ export default function DiscoveryPreferencesScreen() {
       }
 
       // Enforce distance limit (1-150 miles)
-      parsedDistanceMiles = Math.max(1, Math.min(MAX_DISTANCE_MILES, parsedDistanceMiles));
+      parsedDistanceMiles = Math.max(MIN_DISTANCE_MILES, Math.min(MAX_DISTANCE_MILES, parsedDistanceMiles));
 
       // Convert miles to km for storage
       const parsedDistanceKm = milesToKm(parsedDistanceMiles);
 
-      // Update local state with clamped values
-      setLocalMinAge(parsedMinAge.toString());
-      setLocalMaxAge(parsedMaxAge.toString());
-      setLocalMaxDistanceMiles(parsedDistanceMiles.toString());
+      // Sync local slider state with clamped values
+      setLocalMinAge(parsedMinAge);
+      setLocalMaxAge(parsedMaxAge);
+      setLocalMaxDistanceMiles(parsedDistanceMiles);
 
       // Update filter store (distance stored in km)
       setMinAge(parsedMinAge);
@@ -398,185 +412,326 @@ export default function DiscoveryPreferencesScreen() {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          <View style={[styles.header, isPhase2 && { borderBottomColor: INCOGNITO_COLORS.accent }]}>
-            <TouchableOpacity onPress={() => router.back()}>
-              <Ionicons name="arrow-back" size={24} color={textColor} />
+          <View
+            style={[
+              styles.header,
+              { borderBottomColor: dividerColor },
+            ]}
+          >
+            <TouchableOpacity
+              onPress={() => router.back()}
+              style={[
+                styles.headerBackBtn,
+                {
+                  backgroundColor: isPhase2
+                    ? 'rgba(255,255,255,0.06)'
+                    : 'rgba(0,0,0,0.04)',
+                },
+              ]}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Ionicons name="arrow-back" size={20} color={textColor} />
             </TouchableOpacity>
-            <Text style={[styles.headerTitle, { color: textColor }]}>
-              {isPhase2 ? 'Desire Preferences' : 'Discovery Preferences'}
-            </Text>
-            <View style={{ width: 24 }} />
+            <View style={styles.headerTitleWrap}>
+              <Text style={[styles.headerTitle, { color: textColor }]}>
+                {isPhase2 ? 'Deep Connect Preferences' : 'Discover Preferences'}
+              </Text>
+              <Text
+                style={[styles.headerSubtitle, { color: textLightColor }]}
+                numberOfLines={1}
+              >
+                {isPhase2 ? 'Tune your Deep Connect matches' : 'Refine who you discover'}
+              </Text>
+            </View>
+            <View style={styles.headerSpacer} />
           </View>
 
         <View style={styles.content}>
-          <View style={styles.inputGroup}>
-            <Text style={[styles.label, { color: textColor }]}>Looking for</Text>
-            <Text style={[styles.sublabel, { color: textLightColor }]}>
-              Select one
-            </Text>
-            <View style={styles.chips}>
-              {GENDER_OPTIONS.map((option) => (
-                <TouchableOpacity
-                  key={option.value}
-                  style={[
-                    styles.chip,
-                    isPhase2 && styles.chipDark,
-                    lookingFor.includes(option.value as Gender) && [styles.chipSelected, { backgroundColor: accentColor, borderColor: accentColor }],
-                  ]}
-                  onPress={() => handleLookingForSelect(option.value as Gender)}
-                >
-                  <Text
-                    style={[
-                      styles.chipText,
-                      { color: isPhase2 ? INCOGNITO_COLORS.text : COLORS.text },
-                      lookingFor.includes(option.value as Gender) && styles.chipTextSelected,
-                    ]}
-                  >
-                    {option.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+          {/* SECTION: Looking for */}
+          <View
+            style={[
+              styles.section,
+              { backgroundColor: cardBg, borderColor: cardBorder },
+              !isPhase2 && styles.sectionShadowLight,
+            ]}
+          >
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: textColor }]}>
+                Looking for
+              </Text>
+              <Text style={[styles.sectionHint, { color: textLightColor }]}>
+                Choose one
+              </Text>
             </View>
-          </View>
-
-          <View style={styles.inputGroup}>
-            <Text style={[styles.label, { color: textColor }]}>Orientation</Text>
-            <Text style={[styles.sublabel, { color: textLightColor }]}>
-              Optional — tap to select, tap again to clear
-            </Text>
             <View style={styles.chips}>
-              {ORIENTATION_OPTIONS.map((option) => (
-                <TouchableOpacity
-                  key={option.value}
-                  style={[
-                    styles.chip,
-                    isPhase2 && styles.chipDark,
-                    orientation === option.value && [styles.chipSelected, { backgroundColor: accentColor, borderColor: accentColor }],
-                  ]}
-                  onPress={() => toggleOrientation(option.value as Orientation)}
-                >
-                  <Text
-                    style={[
-                      styles.chipText,
-                      { color: isPhase2 ? INCOGNITO_COLORS.text : COLORS.text },
-                      orientation === option.value && styles.chipTextSelected,
-                    ]}
-                  >
-                    {option.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </View>
-
-          <View style={styles.inputGroup}>
-            <Text style={[styles.label, { color: textColor }]}>
-              {isPhase2 ? 'What are you looking for?' : 'Relationship Goal'}
-            </Text>
-            <Text style={[styles.sublabel, { color: textLightColor }]}>
-              {isPhase2
-                ? `Select ${MIN_PHASE2_INTENTS}–${MAX_PHASE2_INTENTS} (${privateIntentKeys.length} selected)`
-                : `Select ${MIN_PHASE1_INTENTS}–${MAX_PHASE1_INTENTS} (${relationshipIntent.length} selected)`}
-            </Text>
-            <View style={styles.chips}>
-              {/* Phase 1: Multi-select relationship intents (min 1, max 3) */}
-              {!isPhase2 && RELATIONSHIP_INTENTS.map((intent) => {
-                const isSelected = relationshipIntent.includes(intent.value);
+              {GENDER_OPTIONS.map((option) => {
+                const isSelected = lookingFor.includes(option.value as Gender);
                 return (
                   <TouchableOpacity
-                    key={intent.value}
+                    key={option.value}
+                    activeOpacity={0.85}
                     style={[
                       styles.chip,
-                      isSelected && [styles.chipSelected, { backgroundColor: accentColor, borderColor: accentColor }],
+                      {
+                        backgroundColor: chipUnselectedBg,
+                        borderColor: chipUnselectedBorder,
+                      },
+                      isSelected && {
+                        backgroundColor: accentColor,
+                        borderColor: accentColor,
+                      },
                     ]}
-                    onPress={() => handlePhase1IntentToggle(intent.value)}
+                    onPress={() => handleLookingForSelect(option.value as Gender)}
                   >
-                    <Text style={styles.chipEmoji}>{intent.emoji}</Text>
                     <Text
                       style={[
                         styles.chipText,
-                        { color: COLORS.text },
+                        { color: chipUnselectedText },
                         isSelected && styles.chipTextSelected,
                       ]}
                     >
-                      {intent.label}
+                      {option.label}
                     </Text>
                   </TouchableOpacity>
                 );
               })}
-              {/* Phase 2: Multi-select private intents (min 1, max 5) */}
-              {isPhase2 && PRIVATE_INTENT_CATEGORIES.map((intent) => (
-                <TouchableOpacity
-                  key={intent.key}
-                  style={[
-                    styles.chip,
-                    styles.chipDark,
-                    privateIntentKeys.includes(intent.key) && [styles.chipSelected, { backgroundColor: accentColor, borderColor: accentColor }],
-                  ]}
-                  onPress={() => handlePhase2IntentToggle(intent.key)}
-                >
-                  <Ionicons
-                    name={intent.icon as any}
-                    size={14}
-                    color={privateIntentKeys.includes(intent.key) ? COLORS.white : INCOGNITO_COLORS.textLight}
-                    style={styles.chipIcon}
-                  />
-                  <Text
+            </View>
+          </View>
+
+          {/* SECTION: Orientation */}
+          <View
+            style={[
+              styles.section,
+              { backgroundColor: cardBg, borderColor: cardBorder },
+              !isPhase2 && styles.sectionShadowLight,
+            ]}
+          >
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: textColor }]}>
+                Orientation
+              </Text>
+              <Text style={[styles.sectionHint, { color: textLightColor }]}>
+                Optional · tap again to clear
+              </Text>
+            </View>
+            <View style={styles.chips}>
+              {ORIENTATION_OPTIONS.map((option) => {
+                const isSelected = orientation === option.value;
+                return (
+                  <TouchableOpacity
+                    key={option.value}
+                    activeOpacity={0.85}
                     style={[
-                      styles.chipText,
-                      { color: INCOGNITO_COLORS.text },
-                      privateIntentKeys.includes(intent.key) && styles.chipTextSelected,
+                      styles.chip,
+                      {
+                        backgroundColor: chipUnselectedBg,
+                        borderColor: chipUnselectedBorder,
+                      },
+                      isSelected && {
+                        backgroundColor: accentColor,
+                        borderColor: accentColor,
+                      },
                     ]}
+                    onPress={() => toggleOrientation(option.value as Orientation)}
                   >
-                    {intent.label}
+                    <Text
+                      style={[
+                        styles.chipText,
+                        { color: chipUnselectedText },
+                        isSelected && styles.chipTextSelected,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+
+          {/* SECTION: Relationship Goal / Looking for (intent) */}
+          <View
+            style={[
+              styles.section,
+              { backgroundColor: cardBg, borderColor: cardBorder },
+              !isPhase2 && styles.sectionShadowLight,
+            ]}
+          >
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: textColor }]}>
+                Relationship Goal
+              </Text>
+              <View style={styles.sectionHintRow}>
+                <Text style={[styles.sectionHint, { color: textLightColor }]}>
+                  {isPhase2
+                    ? `Select ${MIN_PHASE2_INTENTS}–${MAX_PHASE2_INTENTS}`
+                    : `Select ${MIN_PHASE1_INTENTS}–${MAX_PHASE1_INTENTS}`}
+                </Text>
+                <View
+                  style={[
+                    styles.countBadge,
+                    {
+                      backgroundColor: isPhase2
+                        ? 'rgba(233, 69, 96, 0.14)'
+                        : 'rgba(255, 107, 107, 0.10)',
+                      borderColor: isPhase2
+                        ? 'rgba(233, 69, 96, 0.30)'
+                        : 'rgba(255, 107, 107, 0.25)',
+                    },
+                  ]}
+                >
+                  <Text style={[styles.countBadgeText, { color: accentColor }]}>
+                    {isPhase2 ? privateIntentKeys.length : relationshipIntent.length}
+                    {' '}
+                    selected
                   </Text>
-                </TouchableOpacity>
-              ))}
+                </View>
+              </View>
+            </View>
+            <View style={styles.chips}>
+              {/* Phase 1: Multi-select relationship intents (min 1, max 3) */}
+              {!isPhase2 &&
+                RELATIONSHIP_INTENTS.map((intent) => {
+                  const isSelected = relationshipIntent.includes(intent.value);
+                  return (
+                    <TouchableOpacity
+                      key={intent.value}
+                      activeOpacity={0.85}
+                      style={[
+                        styles.chip,
+                        {
+                          backgroundColor: chipUnselectedBg,
+                          borderColor: chipUnselectedBorder,
+                        },
+                        isSelected && {
+                          backgroundColor: accentColor,
+                          borderColor: accentColor,
+                        },
+                      ]}
+                      onPress={() => handlePhase1IntentToggle(intent.value)}
+                    >
+                      <Text style={styles.chipEmoji}>{intent.emoji}</Text>
+                      <Text
+                        style={[
+                          styles.chipText,
+                          { color: chipUnselectedText },
+                          isSelected && styles.chipTextSelected,
+                        ]}
+                      >
+                        {intent.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              {/* Phase 2: Multi-select private intents */}
+              {isPhase2 &&
+                PRIVATE_INTENT_CATEGORIES.map((intent) => {
+                  const isSelected = privateIntentKeys.includes(intent.key);
+                  return (
+                    <TouchableOpacity
+                      key={intent.key}
+                      activeOpacity={0.85}
+                      style={[
+                        styles.chip,
+                        {
+                          backgroundColor: chipUnselectedBg,
+                          borderColor: chipUnselectedBorder,
+                        },
+                        isSelected && {
+                          backgroundColor: accentColor,
+                          borderColor: accentColor,
+                        },
+                      ]}
+                      onPress={() => handlePhase2IntentToggle(intent.key)}
+                    >
+                      <Ionicons
+                        name={intent.icon as any}
+                        size={14}
+                        color={isSelected ? COLORS.white : textLightColor}
+                        style={styles.chipIcon}
+                      />
+                      <Text
+                        style={[
+                          styles.chipText,
+                          { color: chipUnselectedText },
+                          isSelected && styles.chipTextSelected,
+                        ]}
+                      >
+                        {intent.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
             </View>
           </View>
 
-          <View style={styles.inputGroup}>
-            <Text style={[styles.label, { color: textColor }]}>Age Range</Text>
-            <Text style={[styles.sublabel, { color: textLightColor }]}>{MIN_AGE} to {MAX_AGE} years</Text>
-            <View style={styles.ageRow}>
-              <Input
-                placeholder={`Min (${MIN_AGE})`}
-                value={localMinAge}
-                onChangeText={setLocalMinAge}
-                keyboardType="numeric"
-                style={styles.ageInput}
-              />
-              <Text style={[styles.ageSeparator, { color: textLightColor }]}>to</Text>
-              <Input
-                placeholder={`Max (${MAX_AGE})`}
-                value={localMaxAge}
-                onChangeText={setLocalMaxAge}
-                keyboardType="numeric"
-                style={styles.ageInput}
-              />
+          {/* SECTION: Age Range */}
+          <View
+            style={[
+              styles.section,
+              { backgroundColor: cardBg, borderColor: cardBorder },
+              !isPhase2 && styles.sectionShadowLight,
+            ]}
+          >
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: textColor }]}>
+                Age Range
+              </Text>
+              <Text style={[styles.sectionHint, { color: textLightColor }]}>
+                Drag the handles
+              </Text>
             </View>
-          </View>
-
-          <View style={styles.inputGroup}>
-            <Text style={[styles.label, { color: textColor }]}>Maximum Distance</Text>
-            <Text style={[styles.sublabel, { color: textLightColor }]}>Up to {MAX_DISTANCE_MILES} miles</Text>
-            <Input
-              placeholder="Distance in miles"
-              value={localMaxDistanceMiles}
-              onChangeText={setLocalMaxDistanceMiles}
-              keyboardType="numeric"
-              style={styles.distanceInput}
+            <RangeSlider
+              lowValue={localMinAge}
+              highValue={localMaxAge}
+              minValue={MIN_AGE}
+              maxValue={MAX_AGE}
+              unit="years"
+              onValuesChange={(low, high) => {
+                setLocalMinAge(low);
+                setLocalMaxAge(high);
+              }}
+              isDarkTheme={isPhase2}
             />
           </View>
 
-          <Button
-            title={saving ? 'Saving…' : 'Save Preferences'}
-            variant="primary"
-            onPress={handleSavePreferences}
-            disabled={saving}
-            loading={saving}
-            style={styles.saveButton}
-          />
+          {/* SECTION: Maximum Distance */}
+          <View
+            style={[
+              styles.section,
+              { backgroundColor: cardBg, borderColor: cardBorder },
+              !isPhase2 && styles.sectionShadowLight,
+            ]}
+          >
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: textColor }]}>
+                Maximum Distance
+              </Text>
+              <Text style={[styles.sectionHint, { color: textLightColor }]}>
+                How far to look
+              </Text>
+            </View>
+            <SingleThumbSlider
+              value={localMaxDistanceMiles}
+              minValue={MIN_DISTANCE_MILES}
+              maxValue={MAX_DISTANCE_MILES}
+              unit="miles"
+              helperTextPrefix="Up to"
+              onValueChange={(v) => setLocalMaxDistanceMiles(v)}
+              isDarkTheme={isPhase2}
+            />
+          </View>
+
+          <View style={styles.saveButtonWrap}>
+            <Button
+              title={saving ? 'Saving…' : 'Save Preferences'}
+              variant="primary"
+              onPress={handleSavePreferences}
+              disabled={saving}
+              loading={saving}
+              style={styles.saveButton}
+            />
+          </View>
         </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -596,36 +751,95 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background,
   },
+  // ─── Header ────────────────────────────────────────────────
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  headerBackBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerTitleWrap: {
+    flex: 1,
+    marginLeft: 12,
   },
   headerTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: COLORS.text,
+    fontSize: 20,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
-  content: {
-    padding: 16,
-  },
-  inputGroup: {
-    marginBottom: 24,
-  },
-  label: {
-    fontSize: 14,
+  headerSubtitle: {
+    fontSize: 12,
     fontWeight: '500',
-    color: COLORS.text,
-    marginBottom: 8,
+    marginTop: 2,
+    opacity: 0.85,
   },
-  sublabel: {
-    fontSize: 13,
-    color: COLORS.textLight,
-    marginBottom: 12,
+  headerSpacer: {
+    width: 36,
   },
+  // ─── Content / Sections ────────────────────────────────────
+  content: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+  },
+  section: {
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 18,
+    marginBottom: 14,
+  },
+  // Subtle shadow only on Phase-1 (light theme); dark theme relies on
+  // surface contrast and border for elevation.
+  sectionShadowLight: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 1,
+  },
+  sectionHeader: {
+    marginBottom: 14,
+  },
+  sectionTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 0.15,
+  },
+  sectionHint: {
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 4,
+    opacity: 0.85,
+  },
+  sectionHintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 4,
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  countBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  countBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  // ─── Chips ─────────────────────────────────────────────────
   chips: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -636,15 +850,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 14,
     paddingVertical: 10,
-    borderRadius: 20,
-    minHeight: 40,
-    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 999,
+    minHeight: 38,
     borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  chipDark: {
-    backgroundColor: INCOGNITO_COLORS.surface,
-    borderColor: INCOGNITO_COLORS.accent,
   },
   chipIcon: {
     marginRight: 6,
@@ -653,34 +861,21 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginRight: 6,
   },
-  chipSelected: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
-  },
   chipText: {
-    fontSize: 14,
-    color: COLORS.text,
+    fontSize: 13,
+    fontWeight: '500',
+    letterSpacing: 0.1,
   },
   chipTextSelected: {
     color: COLORS.white,
-    fontWeight: '600',
+    fontWeight: '700',
   },
-  ageRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  ageInput: {
-    flex: 1,
-  },
-  ageSeparator: {
-    fontSize: 16,
-    color: COLORS.textLight,
-  },
-  distanceInput: {
-    width: '100%',
+  // ─── Save button ───────────────────────────────────────────
+  saveButtonWrap: {
+    marginTop: 8,
+    marginBottom: 8,
   },
   saveButton: {
-    marginTop: 16,
+    borderRadius: 14,
   },
 });

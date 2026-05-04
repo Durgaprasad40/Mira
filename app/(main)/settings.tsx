@@ -283,7 +283,7 @@ export default function SettingsScreen() {
           onPress={() => router.push('/(main)/discovery-preferences' as any)}
         >
           <View style={styles.settingInfo}>
-            <Text style={styles.settingTitle}>Discovery Preferences</Text>
+            <Text style={styles.settingTitle}>Discover Preferences</Text>
             <Text style={styles.settingDescription}>Age, distance, and who you see</Text>
           </View>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />

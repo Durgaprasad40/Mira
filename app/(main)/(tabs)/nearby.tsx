@@ -2247,7 +2247,7 @@ export default function NearbyScreen() {
                     onPress={handleOpenPreferences}
                     activeOpacity={0.85}
                     accessibilityLabel="Adjust preferences"
-                    accessibilityHint="Open discovery preferences to widen your search"
+                    accessibilityHint="Open Discover preferences to widen your search"
                   >
                     <Ionicons name="options-outline" size={SIZES.icon.sm} color={COLORS.primary} />
                     <Text style={styles.emptyActionText} maxFontSizeMultiplier={1.2}>Adjust preferences</Text>
