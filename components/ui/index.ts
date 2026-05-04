@@ -9,3 +9,4 @@ export { SwipeGuidanceHint } from './SwipeGuidanceHint';
 export { SkeletonCard } from './SkeletonCard';
 export { RangeSlider } from './RangeSlider';
 export { SingleThumbSlider } from './SingleThumbSlider';
+export { HeaderAvatarButton } from './HeaderAvatarButton';

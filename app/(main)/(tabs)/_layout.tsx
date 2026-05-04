@@ -276,13 +276,16 @@ export default function MainTabsLayout() {
             tabPress: handlePrivateTabPress,
           }}
         />
+        {/*
+          Profile route is preserved for navigation from header avatar buttons,
+          but hidden from the bottom tab bar via `href: null`. The route file
+          `app/(main)/(tabs)/profile.tsx` remains intact and is opened via
+          `router.push('/(main)/(tabs)/profile')` from <HeaderAvatarButton />.
+        */}
         <Tabs.Screen
           name="profile"
           options={{
-            title: "Profile",
-            tabBarIcon: ({ color, size }) => (
-              <Ionicons name="person" size={size} color={color} />
-            ),
+            href: null,
           }}
         />
       </Tabs>

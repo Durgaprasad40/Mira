@@ -90,6 +90,7 @@ import { Badge } from '@/components/ui/Badge';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
+import { HeaderAvatarButton } from '@/components/ui';
 import { NearbyPreviewCard, NearbyPreviewData } from '@/components/nearby/NearbyPreviewCard';
 import { trackEvent } from '@/lib/analytics';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
@@ -2308,6 +2309,7 @@ export default function NearbyScreen() {
               )}
             </View>
           </TouchableOpacity>
+          <HeaderAvatarButton />
         </View>
         {isDemo && (
           <View style={styles.demoBadge}>

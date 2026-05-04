@@ -39,6 +39,7 @@ import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
+import { HeaderAvatarButton } from '@/components/ui';
 
 type FeedConfession = {
   id: string;
@@ -1166,13 +1167,16 @@ export default function ConfessionsScreen() {
         <Ionicons name="megaphone" size={16} color={COLORS.primary} />
         <Text maxFontSizeMultiplier={1.2} style={styles.headerTitle}>Confess</Text>
         <View style={{ flex: 1 }} />
-        <TouchableOpacity
-          onPress={handleOpenMyConfessions}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          style={styles.headerButton}
-        >
-          <Ionicons name="document-text-outline" size={18} color={COLORS.text} />
-        </TouchableOpacity>
+        <View style={styles.headerRightGroup}>
+          <TouchableOpacity
+            onPress={handleOpenMyConfessions}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={styles.headerButton}
+          >
+            <Ionicons name="document-text-outline" size={18} color={COLORS.text} />
+          </TouchableOpacity>
+          <HeaderAvatarButton />
+        </View>
       </View>
 
       <Text maxFontSizeMultiplier={1.2} style={styles.topHint}>Choose how you want to be seen</Text>
@@ -1573,6 +1577,11 @@ const styles = StyleSheet.create({
   },
   headerButton: {
     padding: SPACING.xs,
+  },
+  headerRightGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.md,
   },
   topHint: {
     fontSize: FONT_SIZE.caption,

@@ -41,6 +41,7 @@ import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
 import { ProfileNudge } from '@/components/ui/ProfileNudge';
 import { Toast } from '@/components/ui/Toast';
+import { HeaderAvatarButton } from '@/components/ui';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import {
@@ -1715,6 +1716,7 @@ export default function MessagesScreen() {
                   </View>
                 )}
               </TouchableOpacity>
+              <HeaderAvatarButton />
             </View>
           </>
         )}

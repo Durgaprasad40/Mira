@@ -33,6 +33,7 @@ import {
 } from "@/components/explore/exploreCategories";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { COLORS, FONT_SIZE, SPACING, SIZES, lineHeight, moderateScale } from "@/lib/constants";
+import { HeaderAvatarButton } from "@/components/ui";
 
 const GRID_PADDING = SPACING.base;
 const GRID_GAP = SPACING.md;
@@ -575,19 +576,22 @@ export default function ExploreScreen() {
         <Text {...TEXT_PROPS} style={styles.headerTitle}>
           Vibes
         </Text>
-        <TouchableOpacity
-          accessibilityRole="button"
-          accessibilityLabel="Refresh Vibes"
-          onPress={handleRefresh}
-          hitSlop={8}
-          style={styles.headerActionButton}
-        >
-          {isLoading && hasLoadedDataOnceRef.current ? (
-            <ActivityIndicator size="small" color={COLORS.primary} />
-          ) : (
-            <Ionicons name="refresh" size={SIZES.icon.md} color={COLORS.text} />
-          )}
-        </TouchableOpacity>
+        <View style={styles.headerRightGroup}>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Refresh Vibes"
+            onPress={handleRefresh}
+            hitSlop={8}
+            style={styles.headerActionButton}
+          >
+            {isLoading && hasLoadedDataOnceRef.current ? (
+              <ActivityIndicator size="small" color={COLORS.primary} />
+            ) : (
+              <Ionicons name="refresh" size={SIZES.icon.md} color={COLORS.text} />
+            )}
+          </TouchableOpacity>
+          <HeaderAvatarButton />
+        </View>
       </View>
 
       {/* Return Hook */}
@@ -713,6 +717,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: COLORS.card,
+  },
+  headerRightGroup: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: SPACING.md,
   },
 
   // Return Hook

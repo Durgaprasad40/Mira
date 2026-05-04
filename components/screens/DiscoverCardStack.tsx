@@ -69,7 +69,7 @@ import { useDiscoverStore } from "@/stores/discoverStore";
 import { useFilterStore } from "@/stores/filterStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { ProfileCardPreview } from "@/components/cards/ProfileCardPreview";
-import { WelcomeOverlay, SwipeGuidanceHint } from "@/components/ui";
+import { WelcomeOverlay, SwipeGuidanceHint, HeaderAvatarButton } from "@/components/ui";
 import {
   DC_BUTTON_DIAMETER,
   DC_BUTTON_DIAMETER_COMPACT,
@@ -3420,23 +3420,26 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               ]}
               onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}
             >
-              <Ionicons name="options-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              <Ionicons name="options-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
             <Text {...DISCOVER_TEXT_PROPS} style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-            <TouchableOpacity
-              style={[
-                styles.headerBtn,
-                !dark && { backgroundColor: 'rgba(0, 0, 0, 0.03)', borderWidth: 1, borderColor: 'rgba(0, 0, 0, 0.04)' }
-              ]}
-              onPress={() => setShowNotificationPopover(true)}
-            >
-              <Ionicons name="notifications-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-              {unseenCount > 0 && (
-                <View style={styles.bellBadge}>
-                  <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
+            <View style={styles.headerRightGroup}>
+              <TouchableOpacity
+                style={[
+                  styles.headerBtn,
+                  !dark && { backgroundColor: 'rgba(0, 0, 0, 0.03)', borderWidth: 1, borderColor: 'rgba(0, 0, 0, 0.04)' }
+                ]}
+                onPress={() => setShowNotificationPopover(true)}
+              >
+                <Ionicons name="notifications-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+                {unseenCount > 0 && (
+                  <View style={styles.bellBadge}>
+                    <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+              {!isPhase2 && <HeaderAvatarButton dark={dark} />}
+            </View>
           </View>
         )}
         <View style={[styles.center, { flex: 1 }, !dark && { backgroundColor: 'transparent' }]}>
@@ -3614,17 +3617,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         {!hideHeader && (
           <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
             <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
-              <Ionicons name="options-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              <Ionicons name="options-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
             <Text {...DISCOVER_TEXT_PROPS} style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-              <Ionicons name="notifications-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-              {unseenCount > 0 && (
-                <View style={styles.bellBadge}>
-                  <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
+            <View style={styles.headerRightGroup}>
+              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+                <Ionicons name="notifications-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+                {unseenCount > 0 && (
+                  <View style={styles.bellBadge}>
+                    <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+              {!isPhase2 && <HeaderAvatarButton dark={dark} />}
+            </View>
           </View>
         )}
         <View style={[styles.center, { flex: 1 }]}>
@@ -3666,17 +3672,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         {!hideHeader && (
           <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
             <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
-              <Ionicons name="options-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              <Ionicons name="options-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
             <Text {...DISCOVER_TEXT_PROPS} style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-              <Ionicons name="notifications-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-              {unseenCount > 0 && (
-                <View style={styles.bellBadge}>
-                  <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
+            <View style={styles.headerRightGroup}>
+              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+                <Ionicons name="notifications-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+                {unseenCount > 0 && (
+                  <View style={styles.bellBadge}>
+                    <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+              {!isPhase2 && <HeaderAvatarButton dark={dark} />}
+            </View>
           </View>
         )}
 
@@ -3738,17 +3747,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       {!hideHeader && (
         <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
           <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
-            <Ionicons name="options-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            <Ionicons name="options-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text {...DISCOVER_TEXT_PROPS} style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-            <Ionicons name="notifications-outline" size={SIZES.icon.lg} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-            {unseenCount > 0 && (
-              <View style={styles.bellBadge}>
-                <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
+          <View style={styles.headerRightGroup}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+              <Ionicons name="notifications-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              {unseenCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+            {!isPhase2 && <HeaderAvatarButton dark={dark} />}
+          </View>
         </View>
       )}
 
@@ -4570,6 +4582,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     position: "relative",
     borderRadius: SIZES.touchTarget / 2,
+  },
+  headerRightGroup: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: SPACING.md,
   },
   headerLogo: {
     fontSize: FONT_SIZE.title,
