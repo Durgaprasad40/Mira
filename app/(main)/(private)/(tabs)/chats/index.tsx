@@ -11,7 +11,7 @@
  * Query: api.privateConversations.getUserPrivateConversations
  */
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, ActivityIndicator, AppState } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, ActivityIndicator, AppState, Alert, Modal, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
@@ -27,6 +27,7 @@ import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { useAuthStore } from '@/stores/authStore';
 import { textForPublicSurface } from '@/lib/contentFilter';
 import { ReportModal } from '@/components/private/ReportModal';
+import { Toast } from '@/components/ui/Toast';
 import { getTimeAgo } from '@/lib/utils';
 // P1-004 FIX: Removed DEMO_INCOGNITO_PROFILES - now using backend participantIntentKey
 import { useScreenTrace } from '@/lib/devTrace';
@@ -38,7 +39,6 @@ import type { ConnectionSource, IncognitoConversation } from '@/types';
 import { P2 } from '@/lib/p2Instrumentation';
 
 const C = INCOGNITO_COLORS;
-const STANDOUT_PREVIEW_LIMIT = 3;
 const NEW_MATCH_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 type Phase2LastMessageType = 'text' | 'image' | 'video' | 'voice' | 'system';
@@ -50,12 +50,29 @@ type Phase2Conversation = IncognitoConversation & {
   lastMessageIsProtected?: boolean;
 };
 
-type StandoutPreview = {
+type StandOutPreviewUser = {
+  userId?: string;
+  displayName?: string | null;
+  age?: number | null;
+  blurredPhotoUrl?: string | null;
+  photoBlurEnabled?: boolean | null;
+  photoBlurSlots?: boolean[] | null;
+};
+
+type IncomingStandOutRow = {
   likeId: string;
-  displayName: string;
-  message: string;
-  photoUrl?: string | null;
-  shouldBlurPhoto: boolean;
+  fromUserId?: string;
+  message?: string | null;
+  createdAt: number;
+  sender?: StandOutPreviewUser | null;
+};
+
+type OutgoingStandOutRow = {
+  likeId: string;
+  toUserId?: string;
+  message?: string | null;
+  createdAt: number;
+  receiver?: StandOutPreviewUser | null;
 };
 
 const PREVIEW_MARKER_RE = /^\[(?:SYSTEM|INTERNAL|PRIVATE|MEDIA|PROTECTED|SECURE):[^\]]+\]/i;
@@ -84,6 +101,25 @@ const getPhase2ConversationPreview = (convo: Phase2Conversation): string => {
   }
 
   return 'New message';
+};
+
+const getStandOutDisplayName = (user?: StandOutPreviewUser | null): string => {
+  const name = user?.displayName?.trim();
+  return name || 'Someone';
+};
+
+const getStandOutNameLine = (user?: StandOutPreviewUser | null): string => {
+  const name = getStandOutDisplayName(user);
+  return typeof user?.age === 'number' && user.age > 0 ? `${name}, ${user.age}` : name;
+};
+
+const getStandOutMessagePreview = (message?: string | null): string => {
+  const safeMessage = textForPublicSurface(message?.trim() || '').trim();
+  return safeMessage || 'Sent a Stand Out';
+};
+
+const shouldBlurStandOutPhoto = (user?: StandOutPreviewUser | null): boolean => {
+  return user?.photoBlurEnabled === true && Array.isArray(user.photoBlurSlots) && user.photoBlurSlots[0] === true;
 };
 
 // Phase-2 connection sources mapped to icons
@@ -362,6 +398,47 @@ export default function ChatsScreen() {
     api.privateSwipes.getIncomingLikesCount,
     canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
   );
+  const incomingStandOutsResult = useQuery(
+    api.privateSwipes.getIncomingStandOuts,
+    canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
+  );
+  const outgoingStandOutsResult = useQuery(
+    api.privateSwipes.getOutgoingStandOuts,
+    canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
+  );
+  const standOutCounts = useQuery(
+    api.privateSwipes.getStandOutCounts,
+    canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
+  );
+  const acceptStandOutMutation = useMutation(api.privateSwipes.acceptStandOut);
+  const replyToStandOutMutation = useMutation(api.privateSwipes.replyToStandOut);
+  const ignoreStandOutMutation = useMutation(api.privateSwipes.ignoreStandOut);
+  const [handledStandOutIds, setHandledStandOutIds] = useState<Set<string>>(() => new Set());
+  const [activeStandOutAction, setActiveStandOutAction] = useState<string | null>(null);
+  const [replyTarget, setReplyTarget] = useState<IncomingStandOutRow | null>(null);
+  const [replyText, setReplyText] = useState('');
+
+  const incomingStandOuts = useMemo<IncomingStandOutRow[]>(() => {
+    if (!Array.isArray(incomingStandOutsResult)) return [];
+    return (incomingStandOutsResult as any[])
+      .map((row) => ({ ...row, likeId: String(row.likeId) }) as IncomingStandOutRow)
+      .filter((row) => !handledStandOutIds.has(row.likeId));
+  }, [handledStandOutIds, incomingStandOutsResult]);
+
+  const outgoingStandOuts = useMemo<OutgoingStandOutRow[]>(() => {
+    if (!Array.isArray(outgoingStandOutsResult)) return [];
+    return (outgoingStandOutsResult as any[])
+      .map((row) => ({ ...row, likeId: String(row.likeId) }) as OutgoingStandOutRow)
+      .filter((row) => !handledStandOutIds.has(row.likeId));
+  }, [handledStandOutIds, outgoingStandOutsResult]);
+
+  const markStandOutHandled = useCallback((likeId: string) => {
+    setHandledStandOutIds((prev) => {
+      const next = new Set(prev);
+      next.add(likeId);
+      return next;
+    });
+  }, []);
 
   // Log incoming likes count
   useEffect(() => {
@@ -373,32 +450,124 @@ export default function ChatsScreen() {
     }
   }, [incomingLikes]);
 
-  const standoutPreviews = useMemo<StandoutPreview[]>(() => {
-    if (!incomingLikes) return [];
+  const getStandOutActionError = useCallback((error: unknown) => {
+    const message = String((error as any)?.message ?? error ?? '');
+    if (/already|handled|not found|no longer|blocked|available/i.test(message)) {
+      return 'This Stand Out is no longer available. It may already have been handled.';
+    }
+    return message || 'Something went wrong. Please try again.';
+  }, []);
 
-    return incomingLikes
-      .filter((like) => {
-        const message = typeof like.message === 'string' ? like.message.trim() : '';
-        return like.action === 'super_like' && message.length > 0;
-      })
-      .slice(0, STANDOUT_PREVIEW_LIMIT)
-      .map((like) => {
-        const profile = like.profile;
-        const photoBlurSlots: boolean[] | undefined = Array.isArray((profile as any)?.photoBlurSlots)
-          ? (profile as any).photoBlurSlots
-          : undefined;
-        const message = typeof like.message === 'string' ? like.message.trim() : '';
-        const safeMessage = textForPublicSurface(message).trim();
-
-        return {
-          likeId: String(like.likeId),
-          displayName: profile?.displayName || 'Someone',
-          message: safeMessage || 'Sent you a standout message',
-          photoUrl: profile?.blurredPhotoUrl ?? null,
-          shouldBlurPhoto: (profile as any)?.photoBlurEnabled === true && Boolean(photoBlurSlots?.[0]),
-        };
+  const handleAcceptStandOut = useCallback(async (request: IncomingStandOutRow) => {
+    if (!currentUserId || activeStandOutAction) return;
+    const actionKey = `accept:${request.likeId}`;
+    setActiveStandOutAction(actionKey);
+    try {
+      const result = await acceptStandOutMutation({
+        authUserId: currentUserId,
+        likeId: request.likeId as any,
       });
-  }, [incomingLikes]);
+      markStandOutHandled(request.likeId);
+      const conversationId = (result as any)?.conversationId;
+      if (conversationId) {
+        handleOpenConversation(String(conversationId));
+      } else {
+        Toast.show('Stand Out accepted');
+      }
+    } catch (error) {
+      Alert.alert('Could not accept', getStandOutActionError(error));
+    } finally {
+      setActiveStandOutAction(null);
+    }
+  }, [
+    acceptStandOutMutation,
+    activeStandOutAction,
+    currentUserId,
+    getStandOutActionError,
+    handleOpenConversation,
+    markStandOutHandled,
+  ]);
+
+  const handleIgnoreStandOut = useCallback(async (request: IncomingStandOutRow) => {
+    if (!currentUserId || activeStandOutAction) return;
+    const actionKey = `ignore:${request.likeId}`;
+    setActiveStandOutAction(actionKey);
+    try {
+      await ignoreStandOutMutation({
+        authUserId: currentUserId,
+        likeId: request.likeId as any,
+      });
+      markStandOutHandled(request.likeId);
+      Toast.show('Request ignored');
+    } catch (error) {
+      Alert.alert('Could not ignore', getStandOutActionError(error));
+    } finally {
+      setActiveStandOutAction(null);
+    }
+  }, [
+    activeStandOutAction,
+    currentUserId,
+    getStandOutActionError,
+    ignoreStandOutMutation,
+    markStandOutHandled,
+  ]);
+
+  const openReplyComposer = useCallback((request: IncomingStandOutRow) => {
+    if (activeStandOutAction) return;
+    setReplyText('');
+    setReplyTarget(request);
+  }, [activeStandOutAction]);
+
+  const closeReplyComposer = useCallback(() => {
+    if (activeStandOutAction?.startsWith('reply:')) return;
+    setReplyTarget(null);
+    setReplyText('');
+  }, [activeStandOutAction]);
+
+  const handleSubmitStandOutReply = useCallback(async () => {
+    if (!currentUserId || !replyTarget || activeStandOutAction) return;
+    const trimmedReply = replyText.trim();
+    if (!trimmedReply) {
+      Alert.alert('Reply required', 'Write a short reply to accept this Stand Out.');
+      return;
+    }
+
+    const actionKey = `reply:${replyTarget.likeId}`;
+    setActiveStandOutAction(actionKey);
+    try {
+      const result = await replyToStandOutMutation({
+        authUserId: currentUserId,
+        likeId: replyTarget.likeId as any,
+        replyText: trimmedReply,
+      });
+      markStandOutHandled(replyTarget.likeId);
+      setReplyTarget(null);
+      setReplyText('');
+      const conversationId = (result as any)?.conversationId;
+      if (conversationId) {
+        handleOpenConversation(String(conversationId));
+      } else {
+        Toast.show('Reply sent');
+      }
+    } catch (error) {
+      Alert.alert('Could not reply', getStandOutActionError(error));
+    } finally {
+      setActiveStandOutAction(null);
+    }
+  }, [
+    activeStandOutAction,
+    currentUserId,
+    getStandOutActionError,
+    handleOpenConversation,
+    markStandOutHandled,
+    replyTarget,
+    replyText,
+    replyToStandOutMutation,
+  ]);
+
+  const handleOutgoingStandOutPress = useCallback(() => {
+    Toast.show('Waiting for their response');
+  }, []);
 
   // Note: Likes modal removed - now uses dedicated page at /(main)/(private)/phase2-likes
 
@@ -689,56 +858,175 @@ export default function ChatsScreen() {
     return { newMatches: newM, messageThreads: threads };
   }, [conversations, hasRealMessagesByConversationId]);
 
-  const renderStandoutPreviewSection = () => {
-    if (standoutPreviews.length === 0) return null;
+  const renderStandOutAvatar = (
+    user: StandOutPreviewUser | null | undefined,
+    sizeStyle: 'request' | 'sent' = 'request'
+  ) => {
+    const name = getStandOutDisplayName(user);
+    const style = sizeStyle === 'sent' ? styles.standOutSentAvatar : styles.standOutRequestAvatar;
+    if (user?.blurredPhotoUrl) {
+      return (
+        <Image
+          source={{ uri: user.blurredPhotoUrl }}
+          style={style}
+          contentFit="cover"
+          blurRadius={shouldBlurStandOutPhoto(user) ? 10 : 0}
+        />
+      );
+    }
 
     return (
-      <TouchableOpacity
-        style={styles.standoutPreviewSection}
-        onPress={() => router.push('/(main)/(private)/phase2-likes' as any)}
-        activeOpacity={0.85}
-      >
-        <View style={styles.standoutPreviewHeader}>
-          <View style={styles.standoutTitleRow}>
-            <View style={styles.standoutIconWrap}>
-              <Ionicons name="star" size={14} color="#FFFFFF" />
+      <View style={[style, styles.standOutAvatarFallback]}>
+        <Text style={styles.standOutAvatarInitial}>{name[0] || '?'}</Text>
+      </View>
+    );
+  };
+
+  const renderIncomingStandOutRequests = () => {
+    if (incomingStandOuts.length === 0) return null;
+    const sectionCount = handledStandOutIds.size > 0
+      ? incomingStandOuts.length
+      : standOutCounts?.incoming ?? incomingStandOuts.length;
+
+    return (
+      <View style={styles.standOutSection}>
+        <View style={styles.standOutSectionHeader}>
+          <View style={styles.standOutHeaderLeft}>
+            <View style={styles.standOutIconWrap}>
+              <Ionicons name="star" size={13} color="#FFFFFF" />
             </View>
-            <Text style={styles.standoutPreviewTitle}>Standout messages</Text>
-            <View style={styles.countBadge}>
-              <Text style={styles.countBadgeText}>{standoutPreviews.length}</Text>
-            </View>
-          </View>
-          <View style={styles.standoutViewCta}>
-            <Text style={styles.standoutViewText}>View</Text>
-            <Ionicons name="chevron-forward" size={14} color={C.primary} />
+            <Text style={styles.standOutSectionTitle}>Stand Out Requests ({sectionCount})</Text>
           </View>
         </View>
 
-        {standoutPreviews.map((preview) => (
-          <View key={preview.likeId} style={styles.standoutPreviewRow}>
-            {preview.photoUrl ? (
-              <Image
-                source={{ uri: preview.photoUrl }}
-                style={styles.standoutAvatar}
-                contentFit="cover"
-                blurRadius={preview.shouldBlurPhoto ? 10 : 0}
-              />
-            ) : (
-              <View style={[styles.standoutAvatar, styles.standoutAvatarPlaceholder]}>
-                <Text style={styles.standoutAvatarInitial}>{preview.displayName?.[0] || '?'}</Text>
+        {incomingStandOuts.map((request) => {
+          const sender = request.sender ?? null;
+          const acceptKey = `accept:${request.likeId}`;
+          const replyKey = `reply:${request.likeId}`;
+          const ignoreKey = `ignore:${request.likeId}`;
+          const isAnyActionActive = !!activeStandOutAction;
+          const isAccepting = activeStandOutAction === acceptKey;
+          const isReplying = activeStandOutAction === replyKey;
+          const isIgnoring = activeStandOutAction === ignoreKey;
+
+          return (
+            <View key={request.likeId} style={styles.standOutRequestCard}>
+              <View style={styles.standOutRequestTop}>
+                <View style={styles.standOutAvatarWrap}>
+                  {renderStandOutAvatar(sender)}
+                  <View style={styles.standOutStarBadge}>
+                    <Ionicons name="star" size={9} color="#FFFFFF" />
+                  </View>
+                </View>
+                <View style={styles.standOutRequestCopy}>
+                  <View style={styles.standOutNameRow}>
+                    <Text style={styles.standOutName} numberOfLines={1}>
+                      {getStandOutNameLine(sender)}
+                    </Text>
+                    <View style={styles.standOutBadge}>
+                      <Text style={styles.standOutBadgeText}>Stand Out</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.standOutMessage} numberOfLines={2}>
+                    {getStandOutMessagePreview(request.message)}
+                  </Text>
+                </View>
               </View>
-            )}
-            <View style={styles.standoutPreviewCopy}>
-              <Text style={styles.standoutSenderName} numberOfLines={1}>
-                {preview.displayName}
-              </Text>
-              <Text style={styles.standoutMessagePreview} numberOfLines={1}>
-                {preview.message}
-              </Text>
+
+              <View style={styles.standOutActions}>
+                <TouchableOpacity
+                  style={[styles.standOutActionButton, styles.standOutReplyButton]}
+                  disabled={isAnyActionActive}
+                  onPress={() => openReplyComposer(request)}
+                  activeOpacity={0.8}
+                >
+                  {isReplying ? (
+                    <ActivityIndicator size="small" color={COLORS.superLike} />
+                  ) : (
+                    <>
+                      <Ionicons name="chatbubble-ellipses-outline" size={14} color={COLORS.superLike} />
+                      <Text style={styles.standOutReplyText}>Reply</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.standOutActionButton, styles.standOutAcceptButton]}
+                  disabled={isAnyActionActive}
+                  onPress={() => handleAcceptStandOut(request)}
+                  activeOpacity={0.85}
+                >
+                  {isAccepting ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.standOutAcceptText}>Accept</Text>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.standOutActionButton, styles.standOutIgnoreButton]}
+                  disabled={isAnyActionActive}
+                  onPress={() => handleIgnoreStandOut(request)}
+                  activeOpacity={0.75}
+                >
+                  {isIgnoring ? (
+                    <ActivityIndicator size="small" color={C.textLight} />
+                  ) : (
+                    <Text style={styles.standOutIgnoreText}>Ignore</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
             </View>
+          );
+        })}
+      </View>
+    );
+  };
+
+  const renderOutgoingStandOutsSent = () => {
+    if (outgoingStandOuts.length === 0) return null;
+    const sectionCount = handledStandOutIds.size > 0
+      ? outgoingStandOuts.length
+      : standOutCounts?.outgoing ?? outgoingStandOuts.length;
+
+    return (
+      <View style={styles.standOutSentSection}>
+        <View style={styles.standOutSectionHeader}>
+          <View style={styles.standOutHeaderLeft}>
+            <View style={[styles.standOutIconWrap, styles.standOutSentIcon]}>
+              <Ionicons name="paper-plane" size={12} color="#FFFFFF" />
+            </View>
+            <Text style={styles.standOutSectionTitle}>Stand Outs Sent ({sectionCount})</Text>
           </View>
-        ))}
-      </TouchableOpacity>
+        </View>
+
+        {outgoingStandOuts.map((sent) => {
+          const receiver = sent.receiver ?? null;
+          return (
+            <TouchableOpacity
+              key={sent.likeId}
+              style={styles.standOutSentCard}
+              activeOpacity={0.82}
+              onPress={handleOutgoingStandOutPress}
+            >
+              <View style={styles.standOutAvatarWrap}>
+                {renderStandOutAvatar(receiver, 'sent')}
+              </View>
+              <View style={styles.standOutSentCopy}>
+                <View style={styles.standOutNameRow}>
+                  <Text style={styles.standOutName} numberOfLines={1}>
+                    {getStandOutNameLine(receiver)}
+                  </Text>
+                  <View style={styles.standOutPendingBadge}>
+                    <Text style={styles.standOutPendingText}>Pending</Text>
+                  </View>
+                </View>
+                <Text style={styles.standOutSentMessage} numberOfLines={1}>
+                  {getStandOutMessagePreview(sent.message)}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
     );
   };
 
@@ -852,6 +1140,8 @@ export default function ChatsScreen() {
     );
   };
 
+  const hasStandOutContent = incomingStandOuts.length > 0 || outgoingStandOuts.length > 0;
+
   return (
     <LinearGradient
       // PHASE-2 PREMIUM: matches the thread (chats/[id].tsx) gradient so the
@@ -920,8 +1210,9 @@ export default function ChatsScreen() {
         {/* Content - only show when not loading and no error */}
         {!isQueryLoading && !hasQueryError && (
           <>
-            {/* Standout message previews */}
-            {renderStandoutPreviewSection()}
+            {/* Stand Out requests stay pending here until accepted/replied */}
+            {renderIncomingStandOutRequests()}
+            {renderOutgoingStandOutsSent()}
 
             {/* New Matches Row */}
             {renderNewMatchesRow()}
@@ -933,8 +1224,8 @@ export default function ChatsScreen() {
               </View>
             )}
 
-            {/* Empty state - only show if NO conversations at all */}
-            {conversations.length === 0 ? (
+            {/* Empty state - only show if NO conversations or pending Stand Outs */}
+            {conversations.length === 0 && !hasStandOutContent ? (
           <View style={styles.emptyContainer}>
             <Ionicons name="lock-open-outline" size={64} color={C.textLight} />
             <Text style={styles.emptyTitle}>No conversations yet</Text>
@@ -1080,6 +1371,74 @@ export default function ChatsScreen() {
         />
       ) : null}
 
+      <Modal
+        transparent
+        visible={!!replyTarget}
+        animationType="fade"
+        onRequestClose={closeReplyComposer}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.replyModalOverlay}
+        >
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={closeReplyComposer}
+          />
+          <View style={styles.replySheet}>
+            <View style={styles.replySheetHandle} />
+            <View style={styles.replySheetHeader}>
+              <View style={styles.standOutIconWrap}>
+                <Ionicons name="star" size={13} color="#FFFFFF" />
+              </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.replySheetTitle}>Reply to Stand Out</Text>
+                <Text style={styles.replySheetSubtitle} numberOfLines={1}>
+                  {replyTarget ? getStandOutNameLine(replyTarget.sender) : ''}
+                </Text>
+              </View>
+            </View>
+            {replyTarget && (
+              <Text style={styles.replyOriginalMessage} numberOfLines={2}>
+                {getStandOutMessagePreview(replyTarget.message)}
+              </Text>
+            )}
+            <TextInput
+              value={replyText}
+              onChangeText={setReplyText}
+              placeholder="Write a short reply..."
+              placeholderTextColor={C.textLight}
+              style={styles.replyInput}
+              multiline
+              maxLength={500}
+              editable={!activeStandOutAction?.startsWith('reply:')}
+              textAlignVertical="top"
+            />
+            <View style={styles.replySheetActions}>
+              <TouchableOpacity
+                style={styles.replyCancelButton}
+                onPress={closeReplyComposer}
+                disabled={activeStandOutAction?.startsWith('reply:')}
+              >
+                <Text style={styles.replyCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.replySendButton}
+                onPress={handleSubmitStandOutReply}
+                disabled={activeStandOutAction?.startsWith('reply:')}
+              >
+                {activeStandOutAction?.startsWith('reply:') ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.replySendText}>Send Reply</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       {reportTarget && (
         <ReportModal
           visible
@@ -1192,30 +1551,30 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: C.primary,
   },
-  standoutPreviewSection: {
+  standOutSection: {
     marginTop: 16,
-    marginBottom: 4,
+    marginBottom: 8,
     marginHorizontal: 16,
-    padding: 12,
-    borderRadius: 14,
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: COLORS.superLike + '45',
   },
-  standoutPreviewHeader: {
+  standOutSentSection: {
+    marginTop: 8,
+    marginBottom: 8,
+    marginHorizontal: 16,
+  },
+  standOutSectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 10,
+    marginBottom: 8,
   },
-  standoutTitleRow: {
+  standOutHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     flex: 1,
     minWidth: 0,
   },
-  standoutIconWrap: {
+  standOutIconWrap: {
     width: 22,
     height: 22,
     borderRadius: 11,
@@ -1223,55 +1582,174 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  standoutPreviewTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: C.text,
+  standOutSentIcon: {
+    backgroundColor: C.primary,
   },
-  standoutViewCta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginLeft: 10,
-  },
-  standoutViewText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: C.primary,
-  },
-  standoutPreviewRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 5,
-  },
-  standoutAvatar: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: C.accent,
-  },
-  standoutAvatarPlaceholder: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  standoutAvatarInitial: {
+  standOutSectionTitle: {
     fontSize: 14,
     fontWeight: '700',
     color: C.text,
   },
-  standoutPreviewCopy: {
+  standOutRequestCard: {
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.055)',
+    borderWidth: 1,
+    borderColor: COLORS.superLike + '38',
+    marginBottom: 8,
+  },
+  standOutRequestTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  standOutAvatarWrap: {
+    position: 'relative',
+  },
+  standOutRequestAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: C.accent,
+  },
+  standOutSentAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: C.accent,
+  },
+  standOutAvatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  standOutAvatarInitial: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.text,
+  },
+  standOutStarBadge: {
+    position: 'absolute',
+    right: -2,
+    bottom: -2,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: COLORS.superLike,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: C.background,
+  },
+  standOutRequestCopy: {
+    flex: 1,
+    minWidth: 0,
+    marginLeft: 12,
+  },
+  standOutNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  standOutName: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.text,
+  },
+  standOutBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: COLORS.superLike + '20',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.superLike + '55',
+  },
+  standOutBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: COLORS.superLike,
+  },
+  standOutMessage: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: C.textLight,
+    fontStyle: 'italic',
+  },
+  standOutActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+  },
+  standOutActionButton: {
+    height: 34,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 5,
+    paddingHorizontal: 10,
+  },
+  standOutReplyButton: {
+    flex: 1,
+    backgroundColor: COLORS.superLike + '14',
+    borderWidth: 1,
+    borderColor: COLORS.superLike + '45',
+  },
+  standOutAcceptButton: {
+    flex: 1,
+    backgroundColor: COLORS.superLike,
+  },
+  standOutIgnoreButton: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    paddingHorizontal: 12,
+  },
+  standOutReplyText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: COLORS.superLike,
+  },
+  standOutAcceptText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  standOutIgnoreText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.textLight,
+  },
+  standOutSentCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: 13,
+    backgroundColor: 'rgba(255,255,255,0.045)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.09)',
+    marginBottom: 7,
+  },
+  standOutSentCopy: {
     flex: 1,
     minWidth: 0,
     marginLeft: 10,
   },
-  standoutSenderName: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: C.text,
-    marginBottom: 1,
+  standOutPendingBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: C.primary + '18',
   },
-  standoutMessagePreview: {
+  standOutPendingText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: C.primary,
+  },
+  standOutSentMessage: {
     fontSize: 12,
     color: C.textLight,
+    fontStyle: 'italic',
   },
   matchesList: {
     paddingLeft: 16,
@@ -1465,6 +1943,97 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   unreadText: { fontSize: 11, fontWeight: '700', color: '#FFFFFF' },
+
+  // ── Stand Out Reply Sheet ──
+  replyModalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  replySheet: {
+    marginHorizontal: 12,
+    marginBottom: 12,
+    padding: 16,
+    borderRadius: 18,
+    backgroundColor: '#171B31',
+    borderWidth: 1,
+    borderColor: COLORS.superLike + '35',
+  },
+  replySheetHandle: {
+    alignSelf: 'center',
+    width: 38,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    marginBottom: 14,
+  },
+  replySheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  replySheetTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: C.text,
+  },
+  replySheetSubtitle: {
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 2,
+  },
+  replyOriginalMessage: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: C.textLight,
+    fontStyle: 'italic',
+    marginBottom: 10,
+  },
+  replyInput: {
+    minHeight: 92,
+    maxHeight: 130,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    color: C.text,
+    fontSize: 14,
+    lineHeight: 19,
+  },
+  replySheetActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  replyCancelButton: {
+    flex: 1,
+    height: 42,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  replyCancelText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.textLight,
+  },
+  replySendButton: {
+    flex: 1.3,
+    height: 42,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.superLike,
+  },
+  replySendText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
 
   // ── Likes Button & Badge ──
   likesButton: {
