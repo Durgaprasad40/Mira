@@ -14,16 +14,17 @@ import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { TodAvatar } from '@/components/truthdare/TodAvatar';
 import { UnifiedAnswerComposer, IdentityMode, Attachment } from '@/components/truthdare/UnifiedAnswerComposer';
+import { PendingAnswerCard } from '@/components/truthdare/PendingAnswerCard';
 // NOTE: `TodVoicePlayer` (the horizontal pill-shaped voice player) is no
 // longer rendered in this thread/response card. Voice playback now happens
 // inside the same compact 84×84 media tile used for photo/video — see
 // `handleToggleVoiceTile` and the tile JSX further below. The component
 // file itself is left untouched in case other Truth/Dare surfaces want to
 // render it later.
-import { uploadMediaToConvex } from '@/lib/uploadUtils';
 import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { isActiveTruthDareUpload, useTruthDareUploadStore } from '@/stores/truthDareUploadStore';
 import type { TodReportReason } from '@/types';
 
 const C = INCOGNITO_COLORS;
@@ -324,11 +325,6 @@ export default function PromptThreadScreen() {
   }, [pendingRequests]);
 
   // Mutations
-  const createOrEditAnswer = useMutation(api.truthDare.createOrEditAnswer);
-  const generateUploadUrl = useMutation(api.truthDare.generateUploadUrl);
-  const trackPendingTodUploads = useMutation(api.truthDare.trackPendingTodUploads);
-  const releasePendingTodUploads = useMutation(api.truthDare.releasePendingTodUploads);
-  const cleanupPendingTodUploads = useMutation(api.truthDare.cleanupPendingTodUploads);
   const setReaction = useMutation(api.truthDare.setAnswerReaction);
   const setPromptReaction = useMutation(api.truthDare.setPromptReaction);
   const reportAnswer = useMutation(api.truthDare.reportAnswer);
@@ -356,6 +352,61 @@ export default function PromptThreadScreen() {
   // Composer state - unified composer for text + optional media
   const [showUnifiedComposer, setShowUnifiedComposer] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const truthDareUploadItems = useTruthDareUploadStore((state) => state.items);
+  const enqueueTruthDareUpload = useTruthDareUploadStore((state) => state.enqueue);
+  const retryTruthDareUpload = useTruthDareUploadStore((state) => state.retry);
+  const removeTruthDareUpload = useTruthDareUploadStore((state) => state.remove);
+
+  const pendingUploadsForPrompt = useMemo(() => {
+    if (!promptId) return [];
+    return truthDareUploadItems
+      .filter((item) => item.promptId === promptId)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }, [truthDareUploadItems, promptId]);
+
+  const hasActiveUploadForCurrentUser = useMemo(() => {
+    if (!promptId || !userId) return false;
+    return pendingUploadsForPrompt.some(
+      (item) => item.userId === userId && isActiveTruthDareUpload(item)
+    );
+  }, [pendingUploadsForPrompt, promptId, userId]);
+
+  const hiddenAnswerIdsForPendingEdits = useMemo(() => {
+    return new Set(
+      pendingUploadsForPrompt
+        .filter((item) => item.existingAnswerId && isActiveTruthDareUpload(item))
+        .map((item) => String(item.existingAnswerId))
+    );
+  }, [pendingUploadsForPrompt]);
+
+  const visiblePendingUploads = useMemo(() => {
+    const answerIds = new Set(answers.map((answer) => String(answer._id)));
+    return pendingUploadsForPrompt.filter((item) => {
+      if (item.status !== 'success') return true;
+      if (item.serverAnswerId && answerIds.has(String(item.serverAnswerId))) return false;
+      return true;
+    });
+  }, [answers, pendingUploadsForPrompt]);
+
+  const answersForList = useMemo(() => {
+    if (hiddenAnswerIdsForPendingEdits.size === 0) return answers;
+    return answers.filter((answer) => !hiddenAnswerIdsForPendingEdits.has(String(answer._id)));
+  }, [answers, hiddenAnswerIdsForPendingEdits]);
+
+  const threadListItems = useMemo(() => {
+    return [
+      ...visiblePendingUploads.map((upload) => ({
+        kind: 'pending' as const,
+        key: `pending:${upload.clientId}`,
+        upload,
+      })),
+      ...answersForList.map((answer) => ({
+        kind: 'answer' as const,
+        key: `answer:${String(answer._id)}`,
+        answer,
+      })),
+    ];
+  }, [answersForList, visiblePendingUploads]);
 
   // Close composer if prompt expires while it's open
   useEffect(() => {
@@ -648,7 +699,7 @@ export default function PromptThreadScreen() {
     if (autoOpenHandledRef.current === autoOpenKey) return;
     autoOpenHandledRef.current = autoOpenKey;
 
-    if (isExpired || isPromptOwner) {
+    if (isExpired || isPromptOwner || hasActiveUploadForCurrentUser) {
       return;
     }
 
@@ -663,7 +714,7 @@ export default function PromptThreadScreen() {
     }
 
     setShowUnifiedComposer(true);
-  }, [autoOpenComposer, isExpired, isPromptOwner, myAnswer, prompt, promptId]);
+  }, [autoOpenComposer, hasActiveUploadForCurrentUser, isExpired, isPromptOwner, myAnswer, prompt, promptId]);
 
   // M-003 FIX: Safe scroll with cleanup support
   const scrollToEnd = () => {
@@ -689,11 +740,26 @@ export default function PromptThreadScreen() {
   }, [answers]);
 
   useEffect(() => {
+    const answerIds = new Set(answers.map((answer) => String(answer._id)));
+    pendingUploadsForPrompt.forEach((item) => {
+      if (item.status !== 'success' || !item.serverAnswerId) return;
+      if (!item.existingAnswerId) {
+        pendingScrollAnswerIdRef.current = item.serverAnswerId;
+      }
+      if (answerIds.has(String(item.serverAnswerId))) {
+        removeTruthDareUpload(item.clientId);
+      }
+    });
+  }, [answers, pendingUploadsForPrompt, removeTruthDareUpload]);
+
+  useEffect(() => {
     if (source !== 'phase2-tod' || !highlightAnswerId || answers.length === 0) return;
     const highlightKey = `${requestId ?? ''}:${highlightAnswerId}`;
     if (requestHighlightHandledRef.current === highlightKey) return;
 
-    const answerIndex = answers.findIndex((answer) => String(answer._id) === String(highlightAnswerId));
+    const answerIndex = threadListItems.findIndex(
+      (item) => item.kind === 'answer' && String(item.answer._id) === String(highlightAnswerId)
+    );
     if (answerIndex < 0) return;
 
     requestHighlightHandledRef.current = highlightKey;
@@ -728,7 +794,7 @@ export default function PromptThreadScreen() {
       }
       requestHighlightTimeoutRef.current = null;
     }, 4500);
-  }, [answers, highlightAnswerId, requestId, source]);
+  }, [answers.length, highlightAnswerId, requestId, source, threadListItems]);
 
   const handleScrollToIndexFailed = useCallback((info: { index: number; averageItemLength: number }) => {
     if (!listRef.current) return;
@@ -1044,10 +1110,15 @@ export default function PromptThreadScreen() {
   // old visible pencil triggered.
   const handleMenuEdit = useCallback(() => {
     if (menuIsOwnAnswer && !menuIsExpired) {
+      if (hasActiveUploadForCurrentUser) {
+        Alert.alert('Upload in progress', 'Please wait for your current answer upload to finish before editing.');
+        handleCloseMenu();
+        return;
+      }
       setShowUnifiedComposer(true);
     }
     handleCloseMenu();
-  }, [menuIsOwnAnswer, menuIsExpired, handleCloseMenu]);
+  }, [hasActiveUploadForCurrentUser, menuIsOwnAnswer, menuIsExpired, handleCloseMenu]);
 
   // Handle menu action: report
   const handleMenuReport = useCallback(() => {
@@ -1444,18 +1515,35 @@ export default function PromptThreadScreen() {
     mediaVisibility?: 'private' | 'public';
   }) => {
     if (!promptId || !userId) return;
-    const uploadedStorageIds: string[] = [];
-
-    if (isMountedRef.current) {
-      setIsSubmitting(true);
-    }
 
     try {
+      if (isExpired) {
+        setServerExpiryLocked(true);
+        setShowUnifiedComposer(false);
+        Alert.alert('Prompt Expired', 'This prompt is no longer accepting responses.');
+        return;
+      }
+
+      if (hasActiveUploadForCurrentUser) {
+        Alert.alert('Upload in progress', 'Please wait for your current answer upload to finish before sending another response.');
+        return;
+      }
+
       const wasEditing = !!myAnswer;
       const { text, attachment, removeMedia, identityMode, mediaVisibility } = params;
+      const trimmedText = text.trim();
 
-      debugTodLog('[T/D BEHAVIOR] submit_pipeline_start', {
-        hasText: !!text.trim(),
+      if (!trimmedText && !attachment && !removeMedia) {
+        Alert.alert('Add a response', 'Write something or attach media before sending.');
+        return;
+      }
+
+      if (isMountedRef.current) {
+        setIsSubmitting(true);
+      }
+
+      debugTodLog('[T/D QUEUE] enqueue_start', {
+        hasText: !!trimmedText,
         hasAttachment: !!attachment,
         attachmentKind: attachment?.kind ?? 'none',
         removeMedia: !!removeMedia,
@@ -1466,64 +1554,6 @@ export default function PromptThreadScreen() {
       const isAnon = identityMode === 'anonymous';
       const isNoPhoto = identityMode === 'no_photo';
       const photoBlurMode = isNoPhoto ? 'blur' : 'none';
-
-      // Upload media if new attachment provided
-      let mediaStorageId: string | undefined;
-      let mediaMime: string | undefined;
-      let durationSec: number | undefined;
-      let isFrontCamera: boolean | undefined;
-      let authorPhotoStorageId: string | undefined;
-      const trackUploadedStorageId = async (storageId: string | undefined) => {
-        if (!storageId) return;
-        uploadedStorageIds.push(storageId);
-        try {
-          await trackPendingTodUploads({
-            storageIds: [storageId as any],
-            // Required: server uses two-tier auth (identity → authUserId fallback);
-            // omitting this throws Unauthorized in demo/custom-auth mode.
-            authUserId: userId,
-          });
-        } catch (trackError) {
-          debugTodWarn('[T/D] Failed to track pending upload:', trackError);
-        }
-      };
-
-      if (attachment) {
-        // Check if this is a remote URL (already uploaded media from existing answer)
-        // Remote URLs start with http:// or https:// and should NOT be re-uploaded
-        const isRemoteUrl = attachment.uri.startsWith('http://') || attachment.uri.startsWith('https://');
-
-        if (isRemoteUrl) {
-          // Media is already in storage - don't upload, don't change mediaStorageId
-          debugTodLog('[T/D UPLOAD] skip - remote URL (existing media)');
-        } else {
-          // Local file - upload to Convex storage
-          isFrontCamera = attachment.isFrontCamera;
-          mediaMime = attachment.mime;
-
-          const mediaType = attachment.kind === 'audio' ? 'audio' : attachment.kind;
-          debugTodLog('[T/D UPLOAD] start', { type: mediaType, isFrontCamera });
-
-          try {
-            // FIX: generateUploadUrl requires authUserId
-            mediaStorageId = await uploadMediaToConvex(
-              attachment.uri,
-              () => generateUploadUrl({ authUserId: userId }),
-              mediaType
-            );
-            await trackUploadedStorageId(mediaStorageId);
-            const storageIdPrefix = mediaStorageId?.substring(0, 8) ?? 'none';
-            debugTodLog('[T/D UPLOAD] success', { storageIdPrefix });
-          } catch (uploadError: any) {
-            console.error('[T/D UPLOAD] failed', { error: uploadError?.message?.substring(0, 50) });
-            throw uploadError;
-          }
-
-          if (attachment.durationMs) {
-            durationSec = Math.ceil(attachment.durationMs / 1000);
-          }
-        }
-      }
 
       const authorPhotoUrl = authorProfile.photoUrl;
       // BLUR-PHOTO PARITY WITH CONFESS: `no_photo` mode needs the real photo
@@ -1536,117 +1566,74 @@ export default function PromptThreadScreen() {
         typeof authorPhotoUrl === 'string' &&
         authorPhotoUrl.length > 0;
 
-      if (shouldAttachProfilePhoto && authorPhotoUrl && !(authorPhotoUrl.startsWith('http://') || authorPhotoUrl.startsWith('https://'))) {
-        // FIX: generateUploadUrl requires authUserId
-        authorPhotoStorageId = await uploadMediaToConvex(
-          authorPhotoUrl,
-          () => generateUploadUrl({ authUserId: userId }),
-          'photo'
-        );
-        await trackUploadedStorageId(authorPhotoStorageId);
-      }
+      const attachmentIsRemote =
+        !!attachment &&
+        (attachment.uri.startsWith('http://') || attachment.uri.startsWith('https://'));
+      const queuedAttachment = attachment && !attachmentIsRemote
+        ? {
+            kind: attachment.kind === 'audio' ? 'voice' as const : attachment.kind,
+            localUri: attachment.uri,
+            mime: attachment.mime,
+            durationMs: attachment.durationMs,
+            durationSec: attachment.durationMs ? Math.ceil(attachment.durationMs / 1000) : undefined,
+            isFrontCamera: attachment.isFrontCamera,
+          }
+        : undefined;
+      const authorPhotoIsRemote =
+        typeof authorPhotoUrl === 'string' &&
+        (authorPhotoUrl.startsWith('http://') || authorPhotoUrl.startsWith('https://'));
+      const clientId = `${promptId}:${userId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 
-      // Create or edit the answer with MERGE behavior
-      // Only send fields that are explicitly provided
-      debugTodLog('[T/D BEHAVIOR] createOrEditAnswer start', { identityMode, visibility: mediaVisibility === 'private' ? 'owner_only' : 'public' });
-      // FIX: Backend expects { userId }, not { token }
-      const result = await createOrEditAnswer({
+      enqueueTruthDareUpload({
+        clientId,
         promptId,
-        userId: userId ?? '',
-        // Text - send if provided (even empty string is valid to clear)
-        text: text.trim() || undefined,
-        // Media - only send if new attachment or removeMedia
-        mediaStorageId: mediaStorageId as any,
-        mediaMime,
-        durationSec,
+        userId,
+        existingAnswerId: wasEditing ? String(myAnswer?._id) : undefined,
+        text: trimmedText || undefined,
+        attachment: queuedAttachment,
+        localUri: queuedAttachment?.localUri,
+        mediaKind: queuedAttachment?.kind,
+        mediaMime: attachment && !attachmentIsRemote ? attachment.mime : undefined,
+        durationSec: queuedAttachment?.durationSec,
+        isFrontCamera: queuedAttachment?.isFrontCamera,
         removeMedia,
-        // Identity - only used on first creation
+        mediaVisibility: mediaVisibility ?? 'public',
+        visibility: mediaVisibility === 'private' ? 'owner_only' : 'public',
         identityMode,
         isAnonymous: isAnon,
-        visibility: mediaVisibility === 'private' ? 'owner_only' : 'public',
-        viewMode: attachment ? 'tap' : undefined, // One-time tap to view for media
-        // Author identity based on choice
+        photoBlurMode: photoBlurMode as 'none' | 'blur',
         authorName: isAnon ? undefined : authorProfile.name,
-        // BLUR-PHOTO PARITY WITH CONFESS: send the real photo URL for `no_photo`
-        // too; the server stores it and the renderer applies blur on top. Only
-        // anonymous mode omits the photo entirely.
-        authorPhotoUrl:
-          isAnon
-            ? undefined
-            : (authorPhotoUrl?.startsWith('http://') || authorPhotoUrl?.startsWith('https://'))
-              ? authorPhotoUrl
-              : undefined,
-        authorPhotoStorageId: isAnon ? undefined : (authorPhotoStorageId as any),
+        authorPhotoUrl: !isAnon && shouldAttachProfilePhoto && authorPhotoIsRemote ? authorPhotoUrl : undefined,
+        authorPhotoLocalUri: !isAnon && shouldAttachProfilePhoto && !authorPhotoIsRemote ? authorPhotoUrl : undefined,
         authorAge: isAnon ? undefined : authorProfile.age,
         authorGender: isAnon ? undefined : authorProfile.gender,
-        photoBlurMode: photoBlurMode as 'none' | 'blur',
-        isFrontCamera,
       });
 
-      if (uploadedStorageIds.length > 0) {
-        try {
-          await releasePendingTodUploads({
-            storageIds: uploadedStorageIds as any,
-            authUserId: userId,
-          });
-        } catch (releaseError) {
-          debugTodWarn('[T/D] Failed to release pending uploads after answer submit:', releaseError);
-        }
-      }
+      debugTodLog('[T/D QUEUE] enqueue_success', {
+        clientId,
+        wasEditing,
+        queuedMedia: queuedAttachment?.kind ?? 'none',
+      });
 
-      debugTodLog('[T/D BEHAVIOR] createOrEditAnswer success');
-      if (!wasEditing && result?.answerId) {
-        pendingScrollAnswerIdRef.current = result.answerId as string;
-      } else {
-        pendingScrollAnswerIdRef.current = null;
-      }
       if (isMountedRef.current) {
         setShowUnifiedComposer(false);
         setIsSubmitting(false);
       }
     } catch (error: any) {
-      console.error('[T/D BEHAVIOR] submit_pipeline_failed', { error: error?.message?.substring(0, 50) });
-      const retryableError = isRetryableTodError(error);
-
-      if (!retryableError && uploadedStorageIds.length > 0) {
-        try {
-          await cleanupPendingTodUploads({
-            storageIds: uploadedStorageIds as any,
-            authUserId: userId,
-          });
-        } catch (cleanupError) {
-          debugTodWarn('[T/D] Failed to clean up pending uploads after failed answer submit:', cleanupError);
-        }
-      }
-
-      if (error?.message?.includes('Prompt has expired')) {
-        if (isMountedRef.current) {
-          setServerExpiryLocked(true);
-          setShowUnifiedComposer(false);
-        }
-        Alert.alert('Prompt Expired', 'This prompt is no longer accepting responses.');
-      } else if (retryableError) {
-        Alert.alert(
-          'Submission Unconfirmed',
-          'We could not confirm your response was posted. Check the thread before trying again.'
-        );
-      } else {
-        Alert.alert('Error', error.message || 'Failed to post comment. Please try again.');
-      }
+      console.error('[T/D QUEUE] enqueue_failed', { error: error?.message?.substring(0, 50) });
+      Alert.alert('Error', error.message || 'Failed to queue your response. Please try again.');
       if (isMountedRef.current) {
         setIsSubmitting(false);
       }
     }
   }, [
+    authorProfile,
+    enqueueTruthDareUpload,
+    hasActiveUploadForCurrentUser,
+    isExpired,
+    myAnswer,
     promptId,
     userId,
-    generateUploadUrl,
-    createOrEditAnswer,
-    authorProfile,
-    myAnswer,
-    trackPendingTodUploads,
-    releasePendingTodUploads,
-    cleanupPendingTodUploads,
   ]);
 
   // Helper: returns an Ionicons descriptor + color for the author's gender so
@@ -1675,10 +1662,15 @@ export default function PromptThreadScreen() {
     return null;
   };
   const hasMyAnswer = !!myAnswer;
-  const canReplyInline = !isExpired && !hasMyAnswer && !isPromptOwner;
+  const hasSubmittedOrPendingAnswer = hasMyAnswer || hasActiveUploadForCurrentUser;
+  const canReplyInline = !isExpired && !hasSubmittedOrPendingAnswer && !isPromptOwner;
   const openComposer = useCallback(() => {
+    if (hasActiveUploadForCurrentUser) {
+      Alert.alert('Upload in progress', 'Please wait for your current answer upload to finish before sending another response.');
+      return;
+    }
     setShowUnifiedComposer(true);
-  }, []);
+  }, [hasActiveUploadForCurrentUser]);
 
   // P2-003 FIX: Wrap renderAnswer in useCallback to prevent recreation on every render
   // Render answer card - Premium elevated design with tap-to-reveal
@@ -1908,14 +1900,12 @@ export default function PromptThreadScreen() {
             </View>
           </View>
 
-          {/* Body row: text column on the left, optional compact media tile
-              on the right. The reaction strip lives at the bottom of the
-              text column so it occupies the empty wedge to the left of the
-              tile when text is short — eliminating the old separate bottom
-              action band and ~42 dp of card height. `alignItems: 'stretch'`
-              + text col `justifyContent: 'space-between'` ensures the strip
-              floats to the visual baseline of the tile when text is short
-              and sits below text when text is long. */}
+          {/* Body row: text column on the left, optional compact media
+              thumbnail (56×56) anchored to the upper-right via
+              `alignItems: 'flex-start'`. The reaction strip has moved to
+              the unified bottom action row below, so the text column no
+              longer needs to stretch to the tile's height — the card now
+              hugs actual content instead of reserving an 84-dp media block. */}
           <View
             style={[
               styles.answerBodyRow,
@@ -1926,52 +1916,6 @@ export default function PromptThreadScreen() {
               {item.text && item.text.trim().length > 0 && (
                 <Text style={styles.answerText}>{item.text}</Text>
               )}
-
-              {/* Reaction strip — relocated from the bottom action row.
-                  Holds existing reaction bubbles + emoji-trigger + reply
-                  plus button so the parent gestures still resolve to the
-                  deepest TouchableOpacity child first (no tap-stealing). */}
-              <View style={styles.reactionStripInline}>
-                {topEmojis.length > 0 && (
-                  <View style={styles.reactionBubblesInline}>
-                    {topEmojis.slice(0, 3).map(({ emoji, count }) => (
-                      <TouchableOpacity
-                        key={emoji}
-                        style={[
-                          styles.reactionBubbleSmall,
-                          item.myReaction === emoji && styles.reactionBubbleSmallActive,
-                        ]}
-                        onPress={() => handleReact(item._id, item.myReaction === emoji ? '' : emoji)}
-                      >
-                        <Text style={styles.reactionEmojiSmall}>{emoji}</Text>
-                        <Text style={styles.reactionCountSmall}>{count}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                )}
-                <TouchableOpacity
-                  style={styles.addReactionInline}
-                  onPress={() => setEmojiPickerAnswerId(showEmojiPicker ? null : item._id)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Add reaction"
-                >
-                  <Ionicons
-                    name={item.myReaction ? 'happy' : 'happy-outline'}
-                    size={16}
-                    color={item.myReaction ? PREMIUM.coral : PREMIUM.textMuted}
-                  />
-                </TouchableOpacity>
-                {canReplyInline && (
-                  <TouchableOpacity
-                    style={styles.replyBtnInline}
-                    onPress={openComposer}
-                    accessibilityRole="button"
-                    accessibilityLabel="Add your response"
-                  >
-                    <Ionicons name="add-circle-outline" size={16} color={PREMIUM.textMuted} />
-                  </TouchableOpacity>
-                )}
-              </View>
             </View>
 
             {/* Edit pencil intentionally NOT rendered on the card.
@@ -2031,7 +1975,7 @@ export default function PromptThreadScreen() {
                 >
                   <Ionicons
                     name={tileIconName}
-                    size={20}
+                    size={18}
                     color={
                       tileState === 'locked'
                         ? PREMIUM.textMuted
@@ -2088,15 +2032,57 @@ export default function PromptThreadScreen() {
               the old horizontal `TodVoicePlayer` block was removed so
               photo, video, and voice all share one consistent surface. */}
 
-          {/* Connect row — only rendered when prompt-owner is viewing
-              someone else's answer AND there is real Connect content to
-              show (eligible, sent-pending, or connected). For all other
-              cases (own answer / non-prompt-owner) this row is suppressed
-              entirely so the card height drops by ~42 dp.
-              Edit and reactions have been relocated (header / body row),
-              so this row only contains Connect-state UI. */}
-          {(canConnect || (isEligibleForConnect && !isSelected) || hasSentConnect) && (
-            <View style={styles.actionRow}>
+          {/* Bottom action row — single unified strip with reactions
+              (emoji bubbles + add-reaction trigger + reply trigger) on the
+              left and Connect-state UI on the right. `space-between`
+              keeps the two clusters at opposite ends of the row regardless
+              of how many reactions are present. The right cluster is
+              conditional: it renders only when prompt-owner is viewing
+              someone else's eligible / pending / connected answer. */}
+          <View style={styles.actionRow}>
+            <View style={styles.reactionStripInline}>
+              {topEmojis.length > 0 && (
+                <View style={styles.reactionBubblesInline}>
+                  {topEmojis.slice(0, 3).map(({ emoji, count }) => (
+                    <TouchableOpacity
+                      key={emoji}
+                      style={[
+                        styles.reactionBubbleSmall,
+                        item.myReaction === emoji && styles.reactionBubbleSmallActive,
+                      ]}
+                      onPress={() => handleReact(item._id, item.myReaction === emoji ? '' : emoji)}
+                    >
+                      <Text style={styles.reactionEmojiSmall}>{emoji}</Text>
+                      <Text style={styles.reactionCountSmall}>{count}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+              <TouchableOpacity
+                style={styles.addReactionInline}
+                onPress={() => setEmojiPickerAnswerId(showEmojiPicker ? null : item._id)}
+                accessibilityRole="button"
+                accessibilityLabel="Add reaction"
+              >
+                <Ionicons
+                  name={item.myReaction ? 'happy' : 'happy-outline'}
+                  size={16}
+                  color={item.myReaction ? PREMIUM.coral : PREMIUM.textMuted}
+                />
+              </TouchableOpacity>
+              {canReplyInline && (
+                <TouchableOpacity
+                  style={styles.replyBtnInline}
+                  onPress={openComposer}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add your response"
+                >
+                  <Ionicons name="add-circle-outline" size={16} color={PREMIUM.textMuted} />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {(canConnect || (isEligibleForConnect && !isSelected) || hasSentConnect) && (
               <View style={styles.connectSection}>
                 {/* Connect button - only when selected and eligible */}
                 {canConnect && (
@@ -2116,7 +2102,7 @@ export default function PromptThreadScreen() {
                   </TouchableOpacity>
                 )}
 
-                {/* Placeholder to maintain height when eligible but not selected */}
+                {/* "Tap to connect" hint when eligible but not selected */}
                 {isEligibleForConnect && !isSelected && (
                   <View style={styles.connectPlaceholder}>
                     <Text style={styles.connectPlaceholderText}>Tap to connect</Text>
@@ -2149,8 +2135,8 @@ export default function PromptThreadScreen() {
                   </View>
                 )}
               </View>
-            </View>
-          )}
+            )}
+          </View>
 
           {/* Emoji picker overlay - works with inline reactions */}
           {showEmojiPicker && (
@@ -2219,6 +2205,20 @@ export default function PromptThreadScreen() {
     voiceDurMs,
     handleToggleVoiceTile,
   ]);
+
+  const renderThreadItem = useCallback(({ item }: { item: typeof threadListItems[number] }) => {
+    if (item.kind === 'pending') {
+      return (
+        <PendingAnswerCard
+          item={item.upload}
+          onRetry={retryTruthDareUpload}
+          onRemove={removeTruthDareUpload}
+        />
+      );
+    }
+
+    return renderAnswer({ item: item.answer });
+  }, [removeTruthDareUpload, renderAnswer, retryTruthDareUpload]);
 
   // Loading state
   if (isLoading) {
@@ -2488,9 +2488,9 @@ export default function PromptThreadScreen() {
       {/* Answers list (SCROLLABLE area - flex:1 takes remaining space) */}
       <FlatList
         ref={listRef}
-        data={answers}
-        keyExtractor={(item) => item._id}
-        renderItem={renderAnswer}
+        data={threadListItems}
+        keyExtractor={(item) => item.key}
+        renderItem={renderThreadItem}
         onScrollToIndexFailed={handleScrollToIndexFailed}
         style={styles.answersListContainer}
         contentContainerStyle={styles.listContent}
@@ -2570,11 +2570,11 @@ export default function PromptThreadScreen() {
 
       {/* FAB (only if not expired, hasn't commented, and NOT prompt owner) */}
       {/* SELF-COMMENT RESTRICTION: Owner cannot answer their own prompt */}
-      {!isExpired && !myAnswer && !isPromptOwner && (
+      {!isExpired && !hasSubmittedOrPendingAnswer && !isPromptOwner && (
         <View style={[styles.commentFab, { bottom: Math.max(insets.bottom, 12) + 8 }]}>
           <TouchableOpacity
             style={styles.fabBtn}
-            onPress={() => setShowUnifiedComposer(true)}
+            onPress={openComposer}
             activeOpacity={0.8}
           >
             <LinearGradient
@@ -2757,7 +2757,7 @@ export default function PromptThreadScreen() {
         visualMediaLocked={myAnswer?.isVisualMediaConsumed ?? false}
         onClose={() => setShowUnifiedComposer(false)}
         onSubmit={handleUnifiedSubmit}
-        isSubmitting={isSubmitting}
+        isSubmitting={isSubmitting || hasActiveUploadForCurrentUser}
       />
 
       {/* Media Viewer Modal - Tap to view */}
@@ -3506,40 +3506,32 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
 
-  // Body row: text column on the left + optional 84×84 media tile on the
-  // right. `alignItems: 'stretch'` so the text column fills the row's height
-  // (driven by the tile when present); combined with `space-between` on the
-  // text column, the reaction strip floats to the bottom and aligns with the
-  // visual baseline of the tile when text is short.
+  // Body row: text column on the left + optional 56×56 media thumbnail
+  // anchored to the upper-right via `alignItems: 'flex-start'`. The text
+  // column hugs its content height — no longer stretched to the tile —
+  // so cards with short text are no longer artificially tall.
   answerBodyRow: {
     flexDirection: 'row',
-    alignItems: 'stretch',
+    alignItems: 'flex-start',
     marginBottom: 8,
-    // Two-column layout (text col + 84-dp media tile). Gap kept at 8 so the
-    // card stays tight on narrow ~360-dp devices.
-    gap: 8,
+    gap: 10,
   },
-  // Drops the bottom margin entirely when there is no media tile and no
-  // inline voice player — i.e. text-only answers. The reaction strip already
-  // contributes its own marginTop, and there is no following block, so this
-  // saves a final ~8 dp on the slimmest cards.
+  // No tile → no need for the trailing gap before the bottom action row.
   answerBodyRowNoTile: {
-    marginBottom: 0,
+    marginBottom: 6,
   },
   answerBodyTextCol: {
     flex: 1,
     minWidth: 0,
-    justifyContent: 'space-between',
   },
-  // Reaction strip relocated from the old bottom `actionRow` into the body
-  // text column. Sits just below the response text; when text is short it is
-  // pushed to the bottom of the column by `space-between` so it lines up
-  // with the bottom edge of the 84×84 media tile.
+  // Reaction strip lives inside the bottom action row (left cluster).
+  // `flexShrink: 1` lets it absorb width when many reactions are present
+  // while still leaving room for the right-side Connect cluster.
   reactionStripInline: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginTop: 8,
+    flexShrink: 1,
     flexWrap: 'wrap',
   },
 
@@ -3549,16 +3541,16 @@ const styles = StyleSheet.create({
   // the fallback before the gradient mounts. `borderRadius: 14` matches the
   // card's radius for a more cohesive look.
   todMediaTile: {
-    width: 84,
-    height: 84,
-    borderRadius: 14,
+    width: 68,
+    height: 68,
+    borderRadius: 13,
     backgroundColor: PREMIUM.bgElevated,
     borderWidth: 1,
     borderColor: PREMIUM.borderSubtle,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 6,
-    paddingVertical: 6,
+    paddingHorizontal: 5,
+    paddingVertical: 5,
     overflow: 'hidden',
     // Soft neutral lift — keeps the tile feeling like a chip resting on the
     // card surface. iOS shadow values; Android `elevation` deliberately small
@@ -3580,9 +3572,9 @@ const styles = StyleSheet.create({
   // bare default glyph. Coral wash + coral border for active media; muted grey
   // wash for locked/viewed states.
   todMediaTileIconChip: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 11,
     backgroundColor: `${PREMIUM.coral}1A`,
     borderWidth: 1,
     borderColor: `${PREMIUM.coral}30`,
@@ -3595,11 +3587,11 @@ const styles = StyleSheet.create({
   },
   todMediaTileCorner: {
     position: 'absolute',
-    top: 6,
-    right: 6,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    top: 5,
+    right: 5,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
     backgroundColor: 'rgba(0,0,0,0.55)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.10)',
@@ -3610,7 +3602,7 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
     color: PREMIUM.textPrimary,
-    marginTop: 6,
+    marginTop: 4,
     textAlign: 'center',
     letterSpacing: 0.2,
   },
@@ -3636,7 +3628,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    height: 3,
+    height: 2,
     backgroundColor: PREMIUM.coral + '22',
     overflow: 'hidden',
   },
@@ -3645,14 +3637,17 @@ const styles = StyleSheet.create({
     backgroundColor: PREMIUM.coral,
   },
 
-  // Action row — now Connect-only and conditionally rendered (only when
-  // prompt-owner is viewing someone else's eligible / pending / connected
-  // answer). Emoji + edit have moved out, so this row's marginTop is reduced.
+  // Bottom action row — unified strip with reactions on the left and the
+  // Connect-state cluster on the right. `space-between` keeps the two
+  // ends pinned to opposite edges of the card; `gap` cushions them when
+  // both sides are populated. Always rendered (reactions are always
+  // present); the right cluster is conditionally mounted by the JSX.
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'flex-end',
-    marginTop: 8,
+    justifyContent: 'space-between',
+    gap: 8,
+    marginTop: 6,
   },
   reactionSection: {
     flexDirection: 'row',
