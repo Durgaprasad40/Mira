@@ -1,7 +1,7 @@
 import { mutation, query } from './_generated/server';
 import { v } from 'convex/values';
 import { Doc, Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from './helpers';
 
 // Phone number & email patterns for server-side validation
 const PHONE_PATTERN = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
@@ -161,6 +161,15 @@ function serializeConfession(
   }
 
   return result;
+}
+
+async function getValidatedViewerFromToken(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  token?: string
+): Promise<Id<'users'> | null> {
+  const trimmed = token?.trim();
+  if (!trimmed) return null;
+  return validateSessionToken(ctx, trimmed);
 }
 
 // Create a new confession
@@ -432,16 +441,29 @@ export const getTrendingConfessions = query({
 });
 
 // Get a single confession by ID
-// P0-2: Fail closed — returns null if missing, deleted, or expired
+// P0-2: Fail closed — returns null if missing, deleted, or expired.
+// Expired rows remain readable only by their owner for My Confessions history.
 export const getConfession = query({
-  args: { confessionId: v.id('confessions') },
-  handler: async (ctx, { confessionId }) => {
+  args: {
+    confessionId: v.id('confessions'),
+    token: v.optional(v.string()),
+  },
+  handler: async (ctx, { confessionId, token }) => {
     const confession = await ctx.db.get(confessionId);
     if (!confession) return null;
     if (confession.isDeleted) return null;
     const now = Date.now();
-    if (confession.expiresAt !== undefined && confession.expiresAt <= now) return null;
-    return serializeConfession(confession, { includeTaggedUserId: true });
+    const isExpired = confession.expiresAt !== undefined && confession.expiresAt <= now;
+
+    if (isExpired) {
+      const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
+      if (!validatedViewerId || validatedViewerId !== confession.userId) return null;
+    }
+
+    return serializeConfession(confession, {
+      includeTaggedUserId: true,
+      isExpired,
+    });
   },
 });
 
@@ -722,17 +744,24 @@ export const getReplies = query({
   args: {
     confessionId: v.id('confessions'),
     viewerId: v.optional(v.union(v.id('users'), v.string())),
+    token: v.optional(v.string()),
   },
-  handler: async (ctx, { confessionId, viewerId }) => {
+  handler: async (ctx, { confessionId, viewerId, token }) => {
     const parent = await ctx.db.get(confessionId);
     if (!parent) return [];
     if (parent.isDeleted) return [];
-    const now = Date.now();
-    if (parent.expiresAt !== undefined && parent.expiresAt <= now) return [];
 
-    // Resolve viewer (optional; null if unknown). Read-only lookup — never create a user here.
-    let resolvedViewerId: Id<'users'> | null = null;
-    if (viewerId) {
+    const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
+    const now = Date.now();
+    const isExpired = parent.expiresAt !== undefined && parent.expiresAt <= now;
+    if (isExpired) {
+      if (!validatedViewerId || validatedViewerId !== parent.userId) return [];
+    }
+
+    // Resolve viewer for display-only isOwnReply. Expired access never relies on
+    // client-provided viewerId; when expired, use the validated token owner.
+    let resolvedViewerId: Id<'users'> | null = validatedViewerId;
+    if (!resolvedViewerId && !isExpired && viewerId) {
       resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
     }
 
@@ -753,16 +782,25 @@ export const getReplies = query({
 export const getMyReplyForConfession = query({
   args: {
     confessionId: v.id('confessions'),
-    viewerId: v.union(v.id('users'), v.string()),
+    viewerId: v.optional(v.union(v.id('users'), v.string())),
+    token: v.optional(v.string()),
   },
-  handler: async (ctx, { confessionId, viewerId }) => {
+  handler: async (ctx, { confessionId, viewerId, token }) => {
     const parent = await ctx.db.get(confessionId);
     if (!parent) return null;
     if (parent.isDeleted) return null;
-    const now = Date.now();
-    if (parent.expiresAt !== undefined && parent.expiresAt <= now) return null;
 
-    const resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
+    const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
+    const now = Date.now();
+    const isExpired = parent.expiresAt !== undefined && parent.expiresAt <= now;
+    if (isExpired) {
+      if (!validatedViewerId || validatedViewerId !== parent.userId) return null;
+    }
+
+    let resolvedViewerId: Id<'users'> | null = validatedViewerId;
+    if (!resolvedViewerId && !isExpired && viewerId) {
+      resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
+    }
     if (!resolvedViewerId) return null;
 
     const own = await ctx.db
@@ -790,6 +828,13 @@ export const toggleReaction = mutation({
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
 
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) return { added: false, replaced: false, chatUnlocked: false };
+    const nowMs = Date.now();
+    if (confession.expiresAt !== undefined && confession.expiresAt <= nowMs) {
+      throw new Error('This confession has expired.');
+    }
+
     // Find existing reaction from this user on this confession
     const existing = await ctx.db
       .query('confessionReactions')
@@ -797,9 +842,6 @@ export const toggleReaction = mutation({
         q.eq('confessionId', args.confessionId).eq('userId', userId)
       )
       .first();
-
-    const confession = await ctx.db.get(args.confessionId);
-    if (!confession) return { added: false, replaced: false, chatUnlocked: false };
 
     // CONSISTENCY FIX B3: Helper to recompute reaction count from source of truth
     const recomputeReactionCount = async () => {

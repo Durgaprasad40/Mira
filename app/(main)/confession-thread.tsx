@@ -94,6 +94,7 @@ type Confession = {
   reactionCount: number;
   createdAt: number;
   expiresAt?: number;
+  isExpired?: boolean;
   isDeleted?: boolean;
 };
 
@@ -118,6 +119,15 @@ function formatTimeAgo(timestamp: number): string {
   if (minutes < 60) return `${minutes}m ago`;
   if (hours < 24) return `${hours}h ago`;
   return `${days}d ago`;
+}
+
+function formatAbsoluteDate(timestamp: number | undefined): string | null {
+  if (timestamp === undefined || !Number.isFinite(timestamp)) return null;
+  return new Intl.DateTimeFormat('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  }).format(new Date(timestamp));
 }
 
 function computeAge(dateOfBirth: string | undefined): number | undefined {
@@ -164,6 +174,7 @@ export default function ConfessionThreadScreen() {
   const insets = useSafeAreaInsets();
   const { confessionId } = useLocalSearchParams<{ confessionId: string }>();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : userId;
 
   // Demo mode stores
@@ -175,18 +186,29 @@ export default function ConfessionThreadScreen() {
   // Convex queries - only run in non-demo mode
   const convexConfession = useQuery(
     api.confessions.getConfession,
-    !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+    !isDemoMode && confessionId
+      ? {
+          confessionId: confessionId as any,
+          ...(token ? { token } : {}),
+        }
+      : 'skip'
   );
   const convexReplies = useQuery(
     api.confessions.getReplies,
     !isDemoMode && confessionId
-      ? { confessionId: confessionId as any, viewerId: currentUserId ?? undefined }
+      ? {
+          confessionId: confessionId as any,
+          ...(token ? { token } : {}),
+        }
       : 'skip'
   );
   const convexMyReply = useQuery(
     api.confessions.getMyReplyForConfession,
-    !isDemoMode && confessionId && currentUserId
-      ? { confessionId: confessionId as any, viewerId: currentUserId }
+    !isDemoMode && confessionId
+      ? {
+          confessionId: confessionId as any,
+          ...(token ? { token } : {}),
+        }
       : 'skip'
   );
   const convexCurrentUser = useQuery(
@@ -301,11 +323,19 @@ export default function ConfessionThreadScreen() {
 
   // Expiry gate — every comment action must fail closed when the parent is gone.
   const isOwner = !!confession && confession.userId === currentUserId;
+  const isOwnerExpiredReadOnly = Boolean(
+    confession?.isExpired && confession.userId === currentUserId
+  );
   const now = Date.now();
   const isThreadClosed =
     !confession ||
     !!confession.isDeleted ||
     (confession.expiresAt !== undefined && confession.expiresAt <= now);
+  const commentsInteractive = !isThreadClosed && !isOwnerExpiredReadOnly;
+  const expiredDateLabel = formatAbsoluteDate(confession?.expiresAt);
+  const closedThreadMessage = expiredDateLabel
+    ? `This confession expired on ${expiredDateLabel}. Comments are closed.`
+    : 'This confession has expired. Comments are closed.';
 
   // If the thread closes mid-session (e.g. 2-minute expiry fires), drop any active
   // composer state so no stale edit/reply UI remains on screen.
@@ -668,7 +698,7 @@ export default function ConfessionThreadScreen() {
 
       // Long-press is available for everyone — own replies get Edit/Delete,
       // others get Report. Closed threads are frozen.
-      const onLongPress = !isThreadClosed ? () => setMenuReplyId(child._id) : undefined;
+      const onLongPress = commentsInteractive ? () => setMenuReplyId(child._id) : undefined;
 
       return (
         <Pressable
@@ -708,7 +738,7 @@ export default function ConfessionThreadScreen() {
         </Pressable>
       );
     },
-    [currentUserId, isThreadClosed, renderReplyAvatar]
+    [commentsInteractive, currentUserId, renderReplyAvatar]
   );
 
   const renderReplyItem = useCallback(
@@ -725,7 +755,7 @@ export default function ConfessionThreadScreen() {
 
       // Long-press works on every comment — own vs others is branched in the
       // modal (Edit/Delete vs Report). Closed threads are frozen.
-      const onLongPress = !isThreadClosed ? () => setMenuReplyId(item._id) : undefined;
+      const onLongPress = commentsInteractive ? () => setMenuReplyId(item._id) : undefined;
 
       const children = childrenByParent[item._id] ?? [];
       const hasOwnerReply = children.length > 0;
@@ -734,7 +764,7 @@ export default function ConfessionThreadScreen() {
       const showOwnerReplyButton =
         isOwner &&
         !ownReply &&
-        !isThreadClosed &&
+        commentsInteractive &&
         !hasOwnerReply &&
         composerMode !== 'edit';
 
@@ -801,7 +831,7 @@ export default function ConfessionThreadScreen() {
       currentUserId,
       handleBeginOwnerReply,
       isOwner,
-      isThreadClosed,
+      commentsInteractive,
       renderInlineOwnerReply,
       renderReplyAvatar,
     ]
@@ -831,32 +861,40 @@ export default function ConfessionThreadScreen() {
       <View style={styles.headerSection}>
         <View style={styles.confessionCard}>
           <View style={styles.authorRow}>
-            {isFullyAnonymous ? (
-              <View style={[styles.avatar, styles.avatarAnonymous]}>
-                <Ionicons name="eye-off" size={12} color={COLORS.textMuted} />
+            <View style={styles.authorIdentityCluster}>
+              {isFullyAnonymous ? (
+                <View style={[styles.avatar, styles.avatarAnonymous]}>
+                  <Ionicons name="eye-off" size={12} color={COLORS.textMuted} />
+                </View>
+              ) : isBlurPhoto && confession.authorPhotoUrl ? (
+                <Image
+                  source={{ uri: confession.authorPhotoUrl }}
+                  style={styles.avatarImage}
+                  contentFit="cover"
+                  blurRadius={BLUR_PHOTO_RADIUS}
+                />
+              ) : confession.authorPhotoUrl ? (
+                <Image
+                  source={{ uri: confession.authorPhotoUrl }}
+                  style={styles.avatarImage}
+                  contentFit="cover"
+                />
+              ) : (
+                <View style={styles.avatar}>
+                  <Ionicons name="person" size={12} color={COLORS.primary} />
+                </View>
+              )}
+              <View style={styles.authorIdentityText}>
+                <Text
+                  maxFontSizeMultiplier={1.2}
+                  style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}
+                  numberOfLines={1}
+                >
+                  {getDisplayName()}
+                </Text>
+                {!isFullyAnonymous ? <GenderSymbol gender={confession.authorGender} /> : null}
               </View>
-            ) : isBlurPhoto && confession.authorPhotoUrl ? (
-              <Image
-                source={{ uri: confession.authorPhotoUrl }}
-                style={styles.avatarImage}
-                contentFit="cover"
-                blurRadius={BLUR_PHOTO_RADIUS}
-              />
-            ) : confession.authorPhotoUrl ? (
-              <Image
-                source={{ uri: confession.authorPhotoUrl }}
-                style={styles.avatarImage}
-                contentFit="cover"
-              />
-            ) : (
-              <View style={styles.avatar}>
-                <Ionicons name="person" size={12} color={COLORS.primary} />
-              </View>
-            )}
-            <Text maxFontSizeMultiplier={1.2} style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>
-              {getDisplayName()}
-            </Text>
-            {!isFullyAnonymous ? <GenderSymbol gender={confession.authorGender} /> : null}
+            </View>
             <Text maxFontSizeMultiplier={1.2} style={styles.timeAgo}>{formatTimeAgo(confession.createdAt)}</Text>
           </View>
 
@@ -884,7 +922,7 @@ export default function ConfessionThreadScreen() {
           <View style={styles.closedBanner}>
             <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
             <Text maxFontSizeMultiplier={1.2} style={styles.closedBannerText}>
-              This confession has expired. Comments are closed.
+              {closedThreadMessage}
             </Text>
           </View>
         ) : null}
@@ -899,7 +937,7 @@ export default function ConfessionThreadScreen() {
         ) : null}
       </View>
     );
-  }, [confession, isThreadClosed, topLevelReplies.length]);
+  }, [closedThreadMessage, confession, isThreadClosed, topLevelReplies.length]);
 
   const renderEmpty = useCallback(() => {
     if (isLoading) return null;
@@ -913,12 +951,12 @@ export default function ConfessionThreadScreen() {
         </Text>
         <Text maxFontSizeMultiplier={1.2} style={styles.emptySubtitle}>
           {isThreadClosed
-            ? 'This confession has expired.'
+            ? closedThreadMessage
             : 'Be the first to share your thoughts'}
         </Text>
       </View>
     );
-  }, [isLoading, isThreadClosed]);
+  }, [closedThreadMessage, isLoading, isThreadClosed]);
 
   // ────────────────────────────────────────────────────────────
   // Loading / not-found states
@@ -1109,7 +1147,7 @@ export default function ConfessionThreadScreen() {
           <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
         </View>
         <Text maxFontSizeMultiplier={1.2} style={styles.ownerNoticeText}>
-          This confession has expired. Comments are closed.
+          {closedThreadMessage}
         </Text>
       </View>
     </View>
@@ -1373,6 +1411,19 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.sm,
     minHeight: 26,
   },
+  authorIdentityCluster: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  authorIdentityText: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   avatar: {
     width: AVATAR_SIZE,
     height: AVATAR_SIZE,
@@ -1393,7 +1444,8 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZE.body2,
     fontWeight: '600',
     color: COLORS.textLight,
-    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
   authorNamePublic: {
     color: COLORS.primary,
@@ -1401,6 +1453,7 @@ const styles = StyleSheet.create({
   timeAgo: {
     fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
+    flexShrink: 0,
   },
   confessionText: {
     fontSize: FONT_SIZE.lg,

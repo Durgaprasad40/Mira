@@ -64,6 +64,8 @@ interface ConfessionCardProps {
   authorGender?: string;
   createdAt: number;
   isExpired?: boolean; // true if confession has expired from public feed
+  expiredDateLabel?: string; // owner-only My Confessions absolute expiry label
+  reactionsReadOnly?: boolean; // show counts only; no picker/toggle affordance
   isTaggedForMe?: boolean; // true if current user is tagged in this confession
   previewUsed?: boolean; // true if one-time profile preview has been used
   isConnected?: boolean; // true if tagged user has connected (chat created)
@@ -135,6 +137,8 @@ export default function ConfessionCard({
   authorGender,
   createdAt,
   isExpired,
+  expiredDateLabel,
+  reactionsReadOnly = false,
   isTaggedForMe,
   previewUsed,
   isConnected,
@@ -352,7 +356,9 @@ export default function ConfessionCard({
         )}
         {isExpired && (
           <View style={styles.expiredBadge}>
-            <Text maxFontSizeMultiplier={1.2} style={styles.expiredText}>Expired</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.expiredText}>
+              {expiredDateLabel ?? 'Expired'}
+            </Text>
           </View>
         )}
       </View>
@@ -460,14 +466,26 @@ export default function ConfessionCard({
 
           {/* Emoji Reactions */}
           <View style={styles.reactionBarWrap}>
-            <ReactionBar
-              topEmojis={topEmojis}
-              userEmoji={userEmoji}
-              reactionCount={reactionCount}
-              onReact={onReact}
-              onToggleEmoji={onToggleEmoji}
-              size="compact"
-            />
+            {reactionsReadOnly ? (
+              <View style={styles.readOnlyReactionRow}>
+                <Ionicons name="heart-outline" size={SIZES.icon.sm - 2} color={COLORS.textMuted} />
+                <Text maxFontSizeMultiplier={1.2} style={styles.readOnlyReactionCount}>
+                  {reactionCount}
+                </Text>
+                <Text maxFontSizeMultiplier={1.2} style={styles.readOnlyReactionLabel}>
+                  {reactionCount === 1 ? 'Reaction' : 'Reactions'}
+                </Text>
+              </View>
+            ) : (
+              <ReactionBar
+                topEmojis={topEmojis}
+                userEmoji={userEmoji}
+                reactionCount={reactionCount}
+                onReact={onReact}
+                onToggleEmoji={onToggleEmoji}
+                size="compact"
+              />
+            )}
           </View>
 
           {/* Reply Previews (first 2 replies) */}
@@ -738,6 +756,25 @@ const styles = StyleSheet.create({
   reactionBarWrap: {
     marginBottom: SPACING.sm,
     marginTop: SPACING.xxs,
+  },
+  readOnlyReactionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xxs,
+    alignSelf: 'flex-start',
+    paddingHorizontal: SPACING.xs + 2,
+    paddingVertical: SPACING.xxs + 1,
+    borderRadius: SIZES.radius.xs,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  readOnlyReactionCount: {
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textMuted,
+  },
+  readOnlyReactionLabel: {
+    fontSize: FONT_SIZE.caption,
+    color: COLORS.textMuted,
   },
   replyPreviewSection: {
     marginBottom: SPACING.xs + 2,

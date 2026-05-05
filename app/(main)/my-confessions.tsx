@@ -22,6 +22,20 @@ import { safePush } from '@/lib/safeRouter';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
 
+function formatAbsoluteDate(timestamp: number | undefined): string | undefined {
+  if (timestamp === undefined || !Number.isFinite(timestamp)) return undefined;
+  return new Intl.DateTimeFormat('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  }).format(new Date(timestamp));
+}
+
+function formatExpiredDateLabel(timestamp: number | undefined): string | undefined {
+  const dateLabel = formatAbsoluteDate(timestamp);
+  return dateLabel ? `Expired on ${dateLabel}` : undefined;
+}
+
 export default function MyConfessionsScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
@@ -66,6 +80,7 @@ export default function MyConfessionsScreen() {
         replyCount: confession.replyCount ?? 0,
         reactionCount: confession.reactionCount ?? 0,
         createdAt: confession.createdAt,
+        expiresAt: confession.expiresAt,
         isExpired: confession.isExpired === true,
       }));
     }
@@ -89,6 +104,7 @@ export default function MyConfessionsScreen() {
         replyCount: confession.replyCount ?? 0,
         reactionCount: confession.reactionCount ?? 0,
         createdAt: confession.createdAt,
+        expiresAt: confession.expiresAt ?? confession.createdAt + 24 * 60 * 60 * 1000,
         isExpired: (confession.expiresAt ?? confession.createdAt + 24 * 60 * 60 * 1000) <= now,
       }));
   }, [currentUserId, demoConfessions, liveMyConfessions]);
@@ -195,6 +211,8 @@ export default function MyConfessionsScreen() {
             authorGender={item.authorGender}
             createdAt={item.createdAt}
             isExpired={item.isExpired}
+            expiredDateLabel={item.isExpired ? formatExpiredDateLabel(item.expiresAt) : undefined}
+            reactionsReadOnly={item.isExpired}
             authorId={item.userId}
             viewerId={effectiveViewerId ?? undefined}
             // EXPLICIT INTERACTION CONTRACT for My Confessions
