@@ -5,10 +5,12 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
+  Pressable,
   useWindowDimensions,
   NativeSyntheticEvent,
   NativeScrollEvent,
 } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { safePush } from '@/lib/safeRouter';
@@ -25,9 +27,10 @@ import {
   RELIGION_OPTIONS,
   SMOKING_OPTIONS,
   DRINKING_OPTIONS,
+  CORE_VALUES_OPTIONS,
+  GENDER_OPTIONS,
 } from '@/lib/constants';
 import { computeIntentCompat, getIntentCompatColor, getIntentMismatchWarning } from '@/lib/intentCompat';
-import { getTrustBadges } from '@/lib/trustBadges';
 // P0 UNIFIED PRESENCE: Reactive presence query for profile page
 import { useUserPresence } from '@/hooks/usePresence';
 import { Button, Avatar } from '@/components/ui';
@@ -42,7 +45,40 @@ import { Toast } from '@/components/ui/Toast';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { useInteractionStore } from '@/stores/interactionStore';
 import { formatDiscoverDistanceKm } from '@/lib/distanceRules';
+import { formatPhase2DistanceMiles } from '@/lib/phase2Distance';
 import { getRenderableProfilePhotos } from '@/lib/profileData';
+// Phase-1 only premium light/shaded theme tokens. Phase-2 surfaces must
+// not import this file.
+import { PHASE1_DISCOVER_THEME } from '@/components/screens/_internal/phase1DiscoverTheme.tokens';
+// Phase-1 floating action-row tokens. Mirrors the structure of the Deep
+// Connect token system but stays in the Phase-1 light visual identity.
+// Phase-2 paths must not import this file.
+import {
+  P1_BUTTON_DIAMETER,
+  P1_BUTTON_DIAMETER_COMPACT,
+  P1_ICON_SIZE,
+  P1_STAR_ICON_SIZE,
+  P1_BUTTON_GAP,
+  P1_ROW_PADDING_X,
+  P1_BUTTON_SHADOW,
+  P1_SURFACE,
+  P1_SURFACE_TINT_STANDOUT,
+  P1_SURFACE_TINT_LIKE,
+  P1_BORDER_WIDTH,
+  P1_BORDER_SKIP,
+  P1_BORDER_STANDOUT,
+  P1_BORDER_LIKE,
+  P1_ICON_SKIP,
+  P1_ICON_STANDOUT,
+  P1_ICON_LIKE,
+  P1_GLASS_HIGHLIGHT_COLORS,
+  P1_GLASS_HIGHLIGHT_LOCATIONS,
+  P1_GLASS_HIGHLIGHT_START,
+  P1_GLASS_HIGHLIGHT_END,
+  P1_DISABLED_OPACITY,
+  P1_DISABLED_SHADOW_OPACITY,
+  getPhase1OpenProfileActionLayout,
+} from '@/components/screens/_internal/phase1ActionRow.tokens';
 // P0-FIX: Haptic feedback for premium interactions
 import * as Haptics from 'expo-haptics';
 import { trackEvent } from '@/lib/analytics';
@@ -55,14 +91,7 @@ import Animated, {
   interpolate,
 } from 'react-native-reanimated';
 
-// Gender labels for "Looking for" display
-const GENDER_LABELS: Record<string, string> = {
-  male: 'Men',
-  female: 'Women',
-  non_binary: 'Non-binary',
-  lesbian: 'Women',
-  other: 'Everyone',
-};
+const PHASE1_OPEN_PROFILE_ACTION_LIFT = 30;
 
 function getVerificationBadgeState(profile: { isVerified?: boolean; verificationStatus?: string }) {
   const status = profile.isVerified ? 'verified' : (profile.verificationStatus || 'unverified');
@@ -298,6 +327,30 @@ export default function ViewProfileScreen() {
   );
   const currentViewerId = currentViewer?._id as Id<'users'> | undefined;
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
+  const photoListRef = useRef<FlatList<any>>(null);
+  // Phase-1 premium polish: tap-zone press feedback + action-button press
+  // feedback. Mirrors the Phase-2 opened-profile micro-interaction model
+  // (subtle scale on press) without changing the Phase-1 light identity.
+  const leftTapScale = useSharedValue(1);
+  const rightTapScale = useSharedValue(1);
+  const leftTapAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: leftTapScale.value }],
+  }));
+  const rightTapAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: rightTapScale.value }],
+  }));
+  const skipBtnScale = useSharedValue(1);
+  const standOutBtnScale = useSharedValue(1);
+  const likeBtnScale = useSharedValue(1);
+  const skipBtnAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: skipBtnScale.value }],
+  }));
+  const standOutBtnAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: standOutBtnScale.value }],
+  }));
+  const likeBtnAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: likeBtnScale.value }],
+  }));
   const [showReportBlock, setShowReportBlock] = useState(false);
   const [isActionPending, setIsActionPending] = useState(false);
   const [sharedPlacesReady, setSharedPlacesReady] = useState(false);
@@ -425,6 +478,7 @@ export default function ViewProfileScreen() {
         return {
           name: p.name,
           age: p.age,
+          gender: p.gender,
           bio: p.bio,
           city: p.city,
           isVerified: p.isVerified,
@@ -477,10 +531,11 @@ export default function ViewProfileScreen() {
       isConfessPreview,
     });
   }
-  const distanceLabel = useMemo(
-    () => (isNearbyPrivacySource ? null : formatDiscoverDistanceKm(profile?.distance)),
-    [isNearbyPrivacySource, profile?.distance],
-  );
+  const distanceLabel = useMemo(() => {
+    if (isNearbyPrivacySource) return null;
+    if (isPhase2) return formatDiscoverDistanceKm(profile?.distance);
+    return formatPhase2DistanceMiles(profile?.distance, { includeAway: true });
+  }, [isNearbyPrivacySource, isPhase2, profile?.distance]);
   const verificationBadge = useMemo(
     () => getVerificationBadgeState({
       isVerified: profile?.isVerified,
@@ -501,6 +556,39 @@ export default function ViewProfileScreen() {
       setCurrentPhotoIndex(0);
     }
   }, [currentPhotoIndex, visiblePhotos.length]);
+
+  // Phase-1 premium polish: tap-left / tap-right photo navigation matching
+  // the outer Discover swipe card. Swipe (FlatList paging) is preserved;
+  // tap zones provide an additional, faster navigation affordance.
+  // Uses `animated: false` so the photo + top progress bar update
+  // instantly on tap (no slow scroll easing). State is updated
+  // optimistically so progress bars react on press, not on scroll-end.
+  const goPrevPhoto = () => {
+    if (visiblePhotos.length <= 1) return;
+    const next = Math.max(0, currentPhotoIndex - 1);
+    if (next === currentPhotoIndex) return;
+    setCurrentPhotoIndex(next);
+    photoListRef.current?.scrollToOffset({ offset: next * screenWidth, animated: false });
+    try { Haptics.selectionAsync(); } catch {}
+  };
+  const goNextPhoto = () => {
+    if (visiblePhotos.length <= 1) return;
+    const next = Math.min(visiblePhotos.length - 1, currentPhotoIndex + 1);
+    if (next === currentPhotoIndex) return;
+    setCurrentPhotoIndex(next);
+    photoListRef.current?.scrollToOffset({ offset: next * screenWidth, animated: false });
+    try { Haptics.selectionAsync(); } catch {}
+  };
+  const onLeftZonePressIn = () => { leftTapScale.value = withTiming(0.98, { duration: 90 }); };
+  const onLeftZonePressOut = () => { leftTapScale.value = withTiming(1, { duration: 160 }); };
+  const onRightZonePressIn = () => { rightTapScale.value = withTiming(0.98, { duration: 90 }); };
+  const onRightZonePressOut = () => { rightTapScale.value = withTiming(1, { duration: 160 }); };
+  const pressInScale = (sv: typeof skipBtnScale) => () => {
+    sv.value = withTiming(0.93, { duration: 90 });
+  };
+  const pressOutScale = (sv: typeof skipBtnScale) => () => {
+    sv.value = withTiming(1, { duration: 180 });
+  };
 
   useEffect(() => {
     if (isDemoMode || isPhase2 || !userId || !token) {
@@ -655,9 +743,23 @@ export default function ViewProfileScreen() {
 
   const age = typeof profile.age === 'number' && profile.age > 0 ? profile.age : null;
   const profileIdentity = age ? `${profile.name}, ${age}` : profile.name;
+  const genderLabel =
+    !isPhase2 && typeof profile.gender === 'string' && profile.gender.trim().length > 0
+      ? GENDER_OPTIONS.find((option) => option.value === profile.gender)?.label ??
+        profile.gender.replace(/_/g, ' ')
+      : null;
 
   // P1-FIX: Determine if action buttons should be shown
   const showActionButtons = fromChat !== '1' && !isConfessPreview;
+
+  // Floating Phase-1 action-row layout (Skip / Super Like / Like). Mirrors
+  // the Phase-2 helper shape so the opened profile shows three independent
+  // floating orbs above the page rather than a full-width sticky bar.
+  const { actionRowBottom, actionRowClearance } =
+    getPhase1OpenProfileActionLayout({ bottom: insets.bottom });
+  const floatingActionRowBottom =
+    actionRowBottom + (!isPhase2 ? PHASE1_OPEN_PROFILE_ACTION_LIFT : 0);
+  const actionScrollPaddingBottom = floatingActionRowBottom + actionRowClearance;
 
   return (
     <View style={styles.rootContainer}>
@@ -687,7 +789,9 @@ export default function ViewProfileScreen() {
         showsVerticalScrollIndicator={false}
         onScroll={handleScroll}
         scrollEventThrottle={16}
-        contentContainerStyle={showActionButtons ? { paddingBottom: 100 } : undefined}
+        contentContainerStyle={
+          showActionButtons ? { paddingBottom: actionScrollPaddingBottom } : undefined
+        }
       >
         {/* Header: No back button, no overlay, just the 3-dots menu in top-right */}
         <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
@@ -703,10 +807,15 @@ export default function ViewProfileScreen() {
           )}
         </View>
 
-        {/* Photo carousel with count indicator */}
+        {/* Phase-1 premium polish: photo carousel with tap-zone navigation
+            (mirrors the outer Discover swipe card) and slim top progress
+            bars. The "1/N" counter and dots row have been removed in favor
+            of the on-photo progress bars; swipe + tap navigation are both
+            preserved. */}
         <View style={styles.photoCarouselContainer}>
           {visiblePhotos.length > 0 ? (
             <FlatList
+              ref={photoListRef}
               horizontal
               pagingEnabled
               showsHorizontalScrollIndicator={false}
@@ -743,29 +852,55 @@ export default function ViewProfileScreen() {
             </View>
           )}
 
-          {/* P1-FIX: Photo count indicator (e.g., "2/5") */}
+          {/* Tap zones: left half = previous photo, right half = next photo.
+              Sit above the FlatList but below the top progress bars and
+              header. Pressable provides press-in feedback; FlatList swipe
+              still works because tap zones only consume taps, not drags. */}
           {visiblePhotos.length > 1 && (
-            <View style={[styles.photoCountIndicator, { top: insets.top + 16 }]}>
-              <Text style={styles.photoCountText}>
-                {currentPhotoIndex + 1}/{visiblePhotos.length}
-              </Text>
+            <>
+              <Animated.View
+                style={[styles.photoTapZoneLeft, leftTapAnimStyle]}
+                pointerEvents="box-none"
+              >
+                <Pressable
+                  style={StyleSheet.absoluteFill}
+                  onPress={goPrevPhoto}
+                  onPressIn={onLeftZonePressIn}
+                  onPressOut={onLeftZonePressOut}
+                  accessibilityLabel="Previous photo"
+                />
+              </Animated.View>
+              <Animated.View
+                style={[styles.photoTapZoneRight, rightTapAnimStyle]}
+                pointerEvents="box-none"
+              >
+                <Pressable
+                  style={StyleSheet.absoluteFill}
+                  onPress={goNextPhoto}
+                  onPressIn={onRightZonePressIn}
+                  onPressOut={onRightZonePressOut}
+                  accessibilityLabel="Next photo"
+                />
+              </Animated.View>
+            </>
+          )}
+
+          {/* Top progress bars — segmented bar per photo, current photo
+              filled, rest tinted. Premium / clean / no numeric counter. */}
+          {visiblePhotos.length > 1 && (
+            <View style={[styles.photoTopBars, { top: insets.top + 12 }]}>
+              {visiblePhotos.map((_: any, index: number) => (
+                <View
+                  key={index}
+                  style={[
+                    styles.photoTopBar,
+                    index === currentPhotoIndex && styles.photoTopBarActive,
+                  ]}
+                />
+              ))}
             </View>
           )}
         </View>
-
-        {visiblePhotos.length > 1 && (
-          <View style={styles.photoIndicators}>
-            {visiblePhotos.map((_: any, index: number) => (
-              <View
-                key={index}
-                style={[
-                  styles.indicator,
-                  index === currentPhotoIndex && styles.indicatorActive,
-                ]}
-              />
-            ))}
-          </View>
-        )}
 
       <View style={styles.content}>
         <View style={styles.nameRow}>
@@ -851,40 +986,53 @@ export default function ViewProfileScreen() {
           </View>
         )}
 
-        {/* Trust Badges - includes verification status */}
+        {/* Phase-1 premium polish: header metadata row.
+            - Verified is rendered as a premium standalone pill (success
+              tint) — feels like a certification mark, not a generic chip.
+            - Presence is rendered as a single chip with explicit wording:
+              "Online" (with green dot) when presenceStatus === 'online',
+              "Recently active" when presenceStatus === 'active_today'.
+              "Active Today" wording is no longer used here.
+            - "Photos Added", "Profile Complete", "Popular" and the
+              "+N" overflow are intentionally not rendered to keep the
+              metadata clean and premium. */}
         {!isConfessPreview && (() => {
-          // P0 UNIFIED PRESENCE: Use presenceStatus from reactive query
-          const badges = getTrustBadges({
-            isVerified: profile.isVerified,
-            presenceStatus,
-            photoCount: profile.photos?.length,
-            bio: profile.bio,
-          });
-          // Filter out the "Verified" badge from getTrustBadges since we show it separately
-          const otherBadges = badges.filter((b) => b.key !== 'verified');
-          const visible = otherBadges.slice(0, 2); // Show 2 other badges max
-          const overflow = otherBadges.length - 2;
+          const isOnline = presenceStatus === 'online';
+          const isRecentlyActive = presenceStatus === 'active_today';
+          const showPresence = isOnline || isRecentlyActive;
 
           return (
             <View style={styles.trustBadgeRow}>
-              {/* Verification badge - always first */}
-              <View style={[styles.trustBadge, { borderColor: verificationBadge.color + '40' }]}>
-                <Ionicons name={verificationBadge.icon} size={14} color={verificationBadge.color} />
-                <Text style={[styles.trustBadgeText, { color: verificationBadge.color }]}>
+              {genderLabel && (
+                <View style={styles.presenceChip}>
+                  <Ionicons name="person-outline" size={13} color={COLORS.textMuted} />
+                  <Text style={styles.presenceChipText}>{genderLabel}</Text>
+                </View>
+              )}
+
+              <View style={styles.verifiedBadgePremium}>
+                <Ionicons name={verificationBadge.icon} size={13} color={verificationBadge.color} />
+                <Text style={styles.verifiedBadgePremiumText}>
                   {verificationBadge.label}
                 </Text>
               </View>
 
-              {/* Other trust badges */}
-              {visible.map((badge) => (
-                <View key={badge.key} style={[styles.trustBadge, { borderColor: badge.color + '40' }]}>
-                  <Ionicons name={badge.icon as any} size={14} color={badge.color} />
-                  <Text style={[styles.trustBadgeText, { color: badge.color }]}>{badge.label}</Text>
-                </View>
-              ))}
-              {overflow > 0 && (
-                <View style={[styles.trustBadge, { borderColor: COLORS.textMuted + '40' }]}>
-                  <Text style={[styles.trustBadgeText, { color: COLORS.textMuted }]}>+{overflow}</Text>
+              {showPresence && (
+                <View
+                  style={[
+                    styles.presenceChip,
+                    isOnline && styles.presenceChipOnline,
+                  ]}
+                >
+                  {isOnline && <View style={styles.presenceDot} />}
+                  <Text
+                    style={[
+                      styles.presenceChipText,
+                      isOnline && styles.presenceChipTextOnline,
+                    ]}
+                  >
+                    {isOnline ? 'Online' : 'Recently active'}
+                  </Text>
                 </View>
               )}
             </View>
@@ -968,37 +1116,32 @@ export default function ViewProfileScreen() {
           );
         })()}
 
-        {/* ========== PHASE-1 SECTION ORDER: Intent → Bio → Prompts → Interests → Hobbies → Details ========== */}
+        {/* ========== PHASE-1 SECTION ORDER: Bio -> Relationship goal -> Quick picks -> Lifestyle -> Family -> Interests -> Work & education -> Religion / Values ========== */}
 
-        {/* Phase-1 Intent - show lookingFor (gender) + relationshipIntent chips */}
+        {/* Phase-1: Bio comes first after identity so the profile reads human before categorical. */}
+        {!isPhase2 && !isConfessPreview && profile.bio && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Bio</Text>
+            <Text style={styles.bio}>{profile.bio}</Text>
+          </View>
+        )}
+
+        {/* Phase-1 Relationship goal: relationshipIntent chips only.
+            Gender preferences (Women / Men / Everyone) are not relationship goals. */}
         {!isPhase2 && !isConfessPreview && (() => {
-          const lookingFor: string[] = (profile as any).lookingFor || [];
           const relIntent: string[] = profile.relationshipIntent || [];
-          if (lookingFor.length === 0 && relIntent.length === 0) return null;
-
-          let lookingForText = '';
-          if (lookingFor.length >= 3) {
-            lookingForText = 'Everyone';
-          } else if (lookingFor.length > 0) {
-            const labels = lookingFor.map(g => GENDER_LABELS[g] || g).filter(Boolean);
-            const unique = [...new Set(labels)];
-            lookingForText = unique.join(', ');
-          }
+          if (relIntent.length === 0) return null;
 
           const intentLabels = relIntent
             .map(key => RELATIONSHIP_INTENTS.find(i => i.value === key))
             .filter(Boolean);
 
+          if (intentLabels.length === 0) return null;
+
           return (
             <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Looking for</Text>
+              <Text style={styles.sectionTitle}>Relationship goal</Text>
               <View style={styles.chips}>
-                {lookingForText && (
-                  <View style={styles.lookingForChip}>
-                    <Ionicons name="people-outline" size={14} color={COLORS.primary} />
-                    <Text style={styles.lookingForText}>{lookingForText}</Text>
-                  </View>
-                )}
                 {intentLabels.map((intent, idx) => (
                   <View key={idx} style={styles.chip}>
                     <Text style={styles.chipText}>{intent!.emoji} {intent!.label}</Text>
@@ -1009,17 +1152,10 @@ export default function ViewProfileScreen() {
           );
         })()}
 
-        {/* Phase-1: About (Bio) */}
-        {!isPhase2 && !isConfessPreview && profile.bio && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>About</Text>
-            <Text style={styles.bio}>{profile.bio}</Text>
-          </View>
-        )}
-
-        {/* Profile Prompts - Phase-1 ONLY */}
+        {/* Phase-1 Quick picks / Prompts. Existing prompt cards, now placed after intent. */}
         {!isPhase2 && !isConfessPreview && profile.profilePrompts && profile.profilePrompts.length > 0 && (
           <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Quick picks</Text>
             {profile.profilePrompts.slice(0, 3).map((prompt: { question: string; answer: string }, idx: number) => (
               <View key={idx} style={styles.promptCard}>
                 <Text style={styles.promptQuestion}>{prompt.question}</Text>
@@ -1029,7 +1165,66 @@ export default function ViewProfileScreen() {
           </View>
         )}
 
-        {/* Shared Interests - Both phases */}
+        {/* Phase-1 Lifestyle and Family. Single Parent intent stays in Relationship goal;
+            Family only renders when a real kids/family field exists. */}
+        {!isPhase2 && !isConfessPreview && (() => {
+          const kidsLabel = profile.kids
+            ? KIDS_OPTIONS.find((o) => o.value === profile.kids)?.label ?? null
+            : null;
+          const smokingLabel = profile.smoking
+            ? SMOKING_OPTIONS.find((o) => o.value === profile.smoking)?.label ?? null
+            : null;
+          const drinkingLabel = profile.drinking
+            ? DRINKING_OPTIONS.find((o) => o.value === profile.drinking)?.label ?? null
+            : null;
+
+          const hasLifestyle = profile.height || smokingLabel || drinkingLabel;
+          const hasFamily = !!kidsLabel;
+
+          return (
+            <>
+              {hasLifestyle && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Lifestyle</Text>
+                  <View style={styles.details}>
+                    {profile.height && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="resize" size={18} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{profile.height} cm</Text>
+                      </View>
+                    )}
+                    {smokingLabel && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="flame-outline" size={18} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>Smoking: {smokingLabel}</Text>
+                      </View>
+                    )}
+                    {drinkingLabel && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="wine-outline" size={18} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>Drinking: {drinkingLabel}</Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              )}
+
+              {hasFamily && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Family</Text>
+                  <View style={styles.details}>
+                    <View style={styles.detailRow}>
+                      <Ionicons name="people-outline" size={18} color={COLORS.textLight} />
+                      <Text style={styles.detailText}>{kidsLabel}</Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+            </>
+          );
+        })()}
+
+        {/* Shared Interests - Phase-1 interest context, placed inside the Interests / Activities band. */}
         {!isConfessPreview && (() => {
           // P1-3: In live mode, pull current viewer's activities from the Convex
           // currentViewer query (was previously hardcoded to [] outside demo mode,
@@ -1060,22 +1255,7 @@ export default function ViewProfileScreen() {
           );
         })()}
 
-        {/* Common Places - Phase-1 only, privacy-safe shared locations */}
-        {!isPhase2 && !isConfessPreview && sharedPlaces && sharedPlaces.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Common Places</Text>
-            <View style={styles.chips}>
-              {sharedPlaces.map((place: { id: string; label: string }) => (
-                <View key={place.id} style={styles.commonPlaceChip}>
-                  <Ionicons name="location-outline" size={14} color={COLORS.secondary} />
-                  <Text style={styles.commonPlaceText}>{place.label}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        )}
-
-        {/* Interests - Both phases (Phase-2 shows above in different section) */}
+        {/* Interests / Activities - Phase-1 */}
         {!isPhase2 && !isConfessPreview && Array.isArray(profile.activities) && profile.activities.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Interests</Text>
@@ -1094,129 +1274,198 @@ export default function ViewProfileScreen() {
           </View>
         )}
 
-        {/* Details - Phase-1 ONLY (hidden in Phase-2) */}
+        {/* Phase-1 Work & education, then Religion / Values. Empty groups are skipped. */}
         {!isPhase2 && !isConfessPreview && (() => {
-          // P2-1: Extend Details section to include kids, religion, school,
-          // smoking, drinking (previously only height, job, education rendered).
-          const kidsLabel = profile.kids
-            ? KIDS_OPTIONS.find((o) => o.value === profile.kids)?.label ?? null
-            : null;
           const religionLabel = profile.religion
             ? RELIGION_OPTIONS.find((o) => o.value === profile.religion)?.label ?? null
             : null;
-          const smokingLabel = profile.smoking
-            ? SMOKING_OPTIONS.find((o) => o.value === profile.smoking)?.label ?? null
-            : null;
-          const drinkingLabel = profile.drinking
-            ? DRINKING_OPTIONS.find((o) => o.value === profile.drinking)?.label ?? null
+          const companyLabel = typeof profile.company === 'string' && profile.company.trim().length > 0
+            ? profile.company.trim()
             : null;
           const schoolLabel = typeof profile.school === 'string' && profile.school.trim().length > 0
             ? profile.school.trim()
             : null;
+          const rawValues = Array.isArray(profile.coreValues)
+            ? profile.coreValues
+            : Array.isArray(profile.lifeRhythm?.coreValues)
+              ? profile.lifeRhythm.coreValues
+              : [];
+          const valueLabels = rawValues
+            .map((value: unknown) => {
+              if (typeof value !== 'string') return null;
+              return CORE_VALUES_OPTIONS.find((o) => o.value === value)?.label ?? value;
+            })
+            .filter((value: unknown): value is string =>
+              typeof value === 'string' && value.trim().length > 0
+            );
 
-          const hasAny =
-            profile.height ||
-            profile.jobTitle ||
-            profile.education ||
-            kidsLabel ||
-            religionLabel ||
-            smokingLabel ||
-            drinkingLabel ||
-            schoolLabel;
-
-          if (!hasAny) return null;
+          const hasWork = profile.jobTitle || companyLabel || profile.education || schoolLabel;
+          const hasReligionValues = !!religionLabel || valueLabels.length > 0;
 
           return (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Details</Text>
-              <View style={styles.details}>
-                {profile.height && (
-                  <View style={styles.detailRow}>
-                    <Ionicons name="resize" size={20} color={COLORS.textLight} />
-                    <Text style={styles.detailText}>{profile.height} cm</Text>
+            <>
+              {hasWork && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Work & education</Text>
+                  <View style={styles.details}>
+                    {profile.jobTitle && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="briefcase" size={18} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{profile.jobTitle}</Text>
+                      </View>
+                    )}
+                    {companyLabel && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="business-outline" size={18} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{companyLabel}</Text>
+                      </View>
+                    )}
+                    {profile.education && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="school" size={18} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{profile.education}</Text>
+                      </View>
+                    )}
+                    {schoolLabel && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="school-outline" size={18} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{schoolLabel}</Text>
+                      </View>
+                    )}
                   </View>
-                )}
-                {profile.jobTitle && (
-                  <View style={styles.detailRow}>
-                    <Ionicons name="briefcase" size={20} color={COLORS.textLight} />
-                    <Text style={styles.detailText}>
-                      {profile.jobTitle}
-                      {profile.company && ` at ${profile.company}`}
-                    </Text>
+                </View>
+              )}
+
+              {hasReligionValues && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Religion / Values</Text>
+                  <View style={styles.details}>
+                    {religionLabel && (
+                      <View style={styles.detailRow}>
+                        <Ionicons name="book-outline" size={18} color={COLORS.textLight} />
+                        <Text style={styles.detailText}>{religionLabel}</Text>
+                      </View>
+                    )}
+                    {valueLabels.length > 0 && (
+                      <View style={styles.chips}>
+                        {valueLabels.map((value: string) => (
+                          <View key={value} style={styles.chip}>
+                            <Text style={styles.chipText}>{value}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
                   </View>
-                )}
-                {profile.education && (
-                  <View style={styles.detailRow}>
-                    <Ionicons name="school" size={20} color={COLORS.textLight} />
-                    <Text style={styles.detailText}>{profile.education}</Text>
-                  </View>
-                )}
-                {schoolLabel && (
-                  <View style={styles.detailRow}>
-                    <Ionicons name="school-outline" size={20} color={COLORS.textLight} />
-                    <Text style={styles.detailText}>{schoolLabel}</Text>
-                  </View>
-                )}
-                {religionLabel && (
-                  <View style={styles.detailRow}>
-                    <Ionicons name="book-outline" size={20} color={COLORS.textLight} />
-                    <Text style={styles.detailText}>{religionLabel}</Text>
-                  </View>
-                )}
-                {kidsLabel && (
-                  <View style={styles.detailRow}>
-                    <Ionicons name="people-outline" size={20} color={COLORS.textLight} />
-                    <Text style={styles.detailText}>{kidsLabel}</Text>
-                  </View>
-                )}
-                {smokingLabel && (
-                  <View style={styles.detailRow}>
-                    <Ionicons name="flame-outline" size={20} color={COLORS.textLight} />
-                    <Text style={styles.detailText}>Smoking: {smokingLabel}</Text>
-                  </View>
-                )}
-                {drinkingLabel && (
-                  <View style={styles.detailRow}>
-                    <Ionicons name="wine-outline" size={20} color={COLORS.textLight} />
-                    <Text style={styles.detailText}>Drinking: {drinkingLabel}</Text>
-                  </View>
-                )}
-              </View>
-            </View>
+                </View>
+              )}
+            </>
           );
         })()}
+
+        {/* Common Places - Phase-1 only, privacy-safe shared locations.
+            Kept after the requested profile-data structure so it does not
+            interrupt the main opened-profile reading order. */}
+        {!isPhase2 && !isConfessPreview && sharedPlaces && sharedPlaces.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Common Places</Text>
+            <View style={styles.chips}>
+              {sharedPlaces.map((place: { id: string; label: string }) => (
+                <View key={place.id} style={styles.commonPlaceChip}>
+                  <Ionicons name="location-outline" size={14} color={COLORS.secondary} />
+                  <Text style={styles.commonPlaceText}>{place.label}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
 
         {/* Action Buttons placeholder removed - now sticky at bottom */}
       </View>
       </ScrollView>
 
-      {/* P1-FIX: Sticky Action Buttons - Fixed at bottom of screen */}
+      {/* Phase-1 floating action row — three independent floating orbs.
+          Wrapper is fully transparent (no slab / no top border / no full-width
+          background). Each button takes only its own circular footprint. */}
       {showActionButtons && (
-        <View style={[styles.stickyActions, { paddingBottom: insets.bottom + 8 }]}>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.passButton, isActionPending && styles.actionButtonDisabled]}
-            onPress={() => handleSwipe('pass')}
-            activeOpacity={isActionPending ? 1 : 0.7}
-            disabled={isActionPending}
-          >
-            <Ionicons name="close" size={28} color={COLORS.pass} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.superLikeButton, isActionPending && styles.actionButtonDisabled]}
-            onPress={() => handleSwipe('super_like')}
-            activeOpacity={isActionPending ? 1 : 0.7}
-            disabled={isActionPending}
-          >
-            <Ionicons name="star" size={28} color={COLORS.superLike} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.likeButton, isActionPending && styles.actionButtonDisabled]}
-            onPress={() => handleSwipe('like')}
-            activeOpacity={isActionPending ? 1 : 0.7}
-            disabled={isActionPending}
-          >
-            <Ionicons name="heart" size={28} color={COLORS.like} />
-          </TouchableOpacity>
+        <View
+          style={[styles.floatingActionRow, { bottom: floatingActionRowBottom }]}
+          pointerEvents="box-none"
+        >
+          {/* Phase-1 premium polish: subtle scale press feedback on each
+              floating action orb. The visual identity (light surface,
+              glass highlight, accent border) stays unchanged. */}
+          <Animated.View style={skipBtnAnimStyle}>
+            <TouchableOpacity
+              style={[
+                styles.floatingSkipBtn,
+                isActionPending && styles.floatingBtnDisabled,
+              ]}
+              onPress={() => handleSwipe('pass')}
+              onPressIn={pressInScale(skipBtnScale)}
+              onPressOut={pressOutScale(skipBtnScale)}
+              activeOpacity={isActionPending ? 1 : 0.85}
+              disabled={isActionPending}
+              accessibilityLabel="Skip"
+            >
+              <LinearGradient
+                colors={P1_GLASS_HIGHLIGHT_COLORS}
+                locations={P1_GLASS_HIGHLIGHT_LOCATIONS}
+                start={P1_GLASS_HIGHLIGHT_START}
+                end={P1_GLASS_HIGHLIGHT_END}
+                pointerEvents="none"
+                style={styles.floatingGlassOverlay}
+              />
+              <Ionicons name="close" size={P1_ICON_SIZE} color={P1_ICON_SKIP} />
+            </TouchableOpacity>
+          </Animated.View>
+          <Animated.View style={standOutBtnAnimStyle}>
+            <TouchableOpacity
+              style={[
+                styles.floatingStandOutBtn,
+                isActionPending && styles.floatingBtnDisabled,
+              ]}
+              onPress={() => handleSwipe('super_like')}
+              onPressIn={pressInScale(standOutBtnScale)}
+              onPressOut={pressOutScale(standOutBtnScale)}
+              activeOpacity={isActionPending ? 1 : 0.85}
+              disabled={isActionPending}
+              accessibilityLabel="Super Like"
+            >
+              <LinearGradient
+                colors={P1_GLASS_HIGHLIGHT_COLORS}
+                locations={P1_GLASS_HIGHLIGHT_LOCATIONS}
+                start={P1_GLASS_HIGHLIGHT_START}
+                end={P1_GLASS_HIGHLIGHT_END}
+                pointerEvents="none"
+                style={styles.floatingGlassOverlayCompact}
+              />
+              <Ionicons name="star" size={P1_STAR_ICON_SIZE} color={P1_ICON_STANDOUT} />
+            </TouchableOpacity>
+          </Animated.View>
+          <Animated.View style={likeBtnAnimStyle}>
+            <TouchableOpacity
+              style={[
+                styles.floatingLikeBtn,
+                isActionPending && styles.floatingBtnDisabled,
+              ]}
+              onPress={() => handleSwipe('like')}
+              onPressIn={pressInScale(likeBtnScale)}
+              onPressOut={pressOutScale(likeBtnScale)}
+              activeOpacity={isActionPending ? 1 : 0.85}
+              disabled={isActionPending}
+              accessibilityLabel="Like"
+            >
+              <LinearGradient
+                colors={P1_GLASS_HIGHLIGHT_COLORS}
+                locations={P1_GLASS_HIGHLIGHT_LOCATIONS}
+                start={P1_GLASS_HIGHLIGHT_START}
+                end={P1_GLASS_HIGHLIGHT_END}
+                pointerEvents="none"
+                style={styles.floatingGlassOverlay}
+              />
+              <Ionicons name="heart" size={P1_ICON_SIZE} color={P1_ICON_LIKE} />
+            </TouchableOpacity>
+          </Animated.View>
         </View>
       )}
 
@@ -1234,13 +1483,14 @@ export default function ViewProfileScreen() {
 
 const styles = StyleSheet.create({
   // P1-FIX: Root container for sticky layout
+  // Phase-1 premium foundation: warm ivory page background.
   rootContainer: {
     flex: 1,
-    backgroundColor: COLORS.background,
+    backgroundColor: PHASE1_DISCOVER_THEME.pageBg,
   },
   container: {
     flex: 1,
-    backgroundColor: COLORS.background,
+    backgroundColor: PHASE1_DISCOVER_THEME.pageBg,
   },
   // P1-FIX: Sticky header styles
   stickyHeader: {
@@ -1254,9 +1504,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 12,
     paddingBottom: 12,
-    backgroundColor: COLORS.background,
+    backgroundColor: PHASE1_DISCOVER_THEME.pageBg,
     borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    borderBottomColor: PHASE1_DISCOVER_THEME.border,
   },
   stickyBackButton: {
     padding: 6,
@@ -1277,40 +1527,122 @@ const styles = StyleSheet.create({
   photoCarouselContainer: {
     position: 'relative',
   },
-  // P1-FIX: Photo count indicator (e.g., "2/5")
-  photoCountIndicator: {
+  // Phase-1 premium polish: top progress bars (one slim segment per photo,
+  // active segment fully opaque white, inactive segments translucent).
+  // Sits above the photo, below the status bar, and replaces the legacy
+  // "1/N" counter and below-photo dots.
+  photoTopBars: {
     position: 'absolute',
+    left: 16,
     right: 16,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 4,
+    zIndex: 3,
   },
-  photoCountText: {
-    color: COLORS.white,
-    fontSize: 13,
-    fontWeight: '600',
+  photoTopBar: {
+    flex: 1,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.32)',
   },
-  // P1-FIX: Sticky action buttons at bottom
-  stickyActions: {
+  photoTopBarActive: {
+    backgroundColor: 'rgba(255,255,255,0.95)',
+  },
+  // Phase-1 premium polish: invisible tap zones layered over the photo
+  // for tap-left / tap-right navigation (mirrors the outer Discover swipe
+  // card behavior). Positioned above the FlatList for hit-testing but
+  // below the top progress bars and the header menu (zIndex order).
+  photoTapZoneLeft: {
     position: 'absolute',
+    top: 0,
     bottom: 0,
+    left: 0,
+    width: '40%',
+    zIndex: 2,
+  },
+  photoTapZoneRight: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    right: 0,
+    width: '40%',
+    zIndex: 2,
+  },
+  // Phase-1 floating action row. Transparent wrapper — each button is an
+  // independent floating orb. No slab background, no top border, no
+  // full-width pill. `bottom` is set inline from
+  // `getPhase1OpenProfileActionLayout(insets)`.
+  floatingActionRow: {
+    position: 'absolute',
     left: 0,
     right: 0,
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingTop: 12,
-    gap: 24,
-    backgroundColor: COLORS.background,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
+    gap: P1_BUTTON_GAP,
+    paddingHorizontal: P1_ROW_PADDING_X,
+  },
+  floatingSkipBtn: {
+    width: P1_BUTTON_DIAMETER,
+    height: P1_BUTTON_DIAMETER,
+    borderRadius: P1_BUTTON_DIAMETER / 2,
+    backgroundColor: P1_SURFACE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderWidth: P1_BORDER_WIDTH,
+    borderColor: P1_BORDER_SKIP,
+    ...P1_BUTTON_SHADOW,
+  },
+  floatingStandOutBtn: {
+    width: P1_BUTTON_DIAMETER_COMPACT,
+    height: P1_BUTTON_DIAMETER_COMPACT,
+    borderRadius: P1_BUTTON_DIAMETER_COMPACT / 2,
+    backgroundColor: P1_SURFACE_TINT_STANDOUT,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderWidth: P1_BORDER_WIDTH,
+    borderColor: P1_BORDER_STANDOUT,
+    ...P1_BUTTON_SHADOW,
+  },
+  floatingLikeBtn: {
+    width: P1_BUTTON_DIAMETER,
+    height: P1_BUTTON_DIAMETER,
+    borderRadius: P1_BUTTON_DIAMETER / 2,
+    backgroundColor: P1_SURFACE_TINT_LIKE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderWidth: P1_BORDER_WIDTH,
+    borderColor: P1_BORDER_LIKE,
+    ...P1_BUTTON_SHADOW,
+  },
+  floatingGlassOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: P1_BUTTON_DIAMETER / 2,
+  },
+  floatingGlassOverlayCompact: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: P1_BUTTON_DIAMETER_COMPACT / 2,
+  },
+  floatingBtnDisabled: {
+    opacity: P1_DISABLED_OPACITY,
+    shadowOpacity: P1_DISABLED_SHADOW_OPACITY,
   },
   loadingContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: COLORS.background,
+    backgroundColor: PHASE1_DISCOVER_THEME.pageBg,
   },
   loadingText: {
     fontSize: 16,
@@ -1345,31 +1677,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  photoIndicators: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 12,
-  },
-  indicator: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: COLORS.border,
-    marginHorizontal: 4,
-  },
-  indicatorActive: {
-    backgroundColor: COLORS.primary,
-    width: 24,
-  },
+  // Phase-1 premium redesign: outer content rail. Cards provide their own
+  // padding so the rail only needs side gutters and a comfortable top
+  // breathing room under the photo carousel.
   content: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 20,
+    paddingBottom: 8,
+    gap: 12,
   },
+  // Phase-1 premium redesign: identity row. Generous baseline alignment so
+  // the large name reads against a soft, muted distance label without the
+  // distance feeling cramped or floating.
   nameRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
+    alignItems: 'baseline',
+    marginBottom: 4,
   },
   // Phase-2: coarse Nearby recency chip. Two-state only ('Recently here' / 'Earlier').
   // Visual: soft chip that sits just above the trust badge row.
@@ -1453,150 +1777,211 @@ const styles = StyleSheet.create({
   trustBadgeRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
+    alignItems: 'center',
     gap: 8,
     marginBottom: 16,
   },
-  trustBadge: {
+  // Phase-1 premium polish: standalone Verified pill. Soft success-tinted
+  // surface, no border ring, slightly tighter padding — reads as a
+  // certification mark rather than a generic chip. Single-line / fixed
+  // height keeps the row premium even when accompanied by one secondary
+  // chip.
+  verifiedBadgePremium: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 5,
     paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: 12,
-    borderWidth: 1,
-    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 14,
+    backgroundColor: 'rgba(34, 139, 102, 0.10)',
   },
-  trustBadgeText: {
+  verifiedBadgePremiumText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1F7A56',
+    letterSpacing: 0.2,
+  },
+  // Phase-1 premium polish: presence chip ("Online" / "Recently active").
+  // Sits next to the Verified pill in the metadata row. Online uses a
+  // soft green tint with a tiny dot — matching the swipe-card status —
+  // and Recently active uses a neutral chip-bg treatment so the row
+  // does not over-shout.
+  presenceChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+    backgroundColor: PHASE1_DISCOVER_THEME.chipBg,
+  },
+  presenceChipOnline: {
+    backgroundColor: 'rgba(46, 160, 95, 0.10)',
+  },
+  presenceChipText: {
     fontSize: 12,
     fontWeight: '600',
+    color: COLORS.textMuted,
+    letterSpacing: 0.2,
   },
+  presenceChipTextOnline: {
+    color: '#1F7A56',
+  },
+  presenceDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#2EA05F',
+  },
+  // Phase-1 premium redesign: name styled as the visual anchor. Slightly
+  // tighter letter-spacing matches premium dating-app identity rows.
   name: {
-    fontSize: 28,
+    fontSize: 30,
     fontWeight: '700',
-    color: COLORS.text,
+    color: PHASE1_DISCOVER_THEME.text,
+    letterSpacing: -0.3,
+    flexShrink: 1,
   },
   distance: {
-    fontSize: 14,
-    color: COLORS.textLight,
+    fontSize: 13,
+    fontWeight: '500',
+    color: PHASE1_DISCOVER_THEME.textMuted,
+    letterSpacing: 0.1,
+    marginLeft: 12,
   },
+  // Phase-1 premium redesign: every section is an elevated white card on
+  // the warm ivory page. Soft cocoa-tinted shadow + warm hairline keeps
+  // the surface from looking flat or cheap.
   section: {
-    marginBottom: 24,
+    backgroundColor: PHASE1_DISCOVER_THEME.surface,
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 18,
+    borderWidth: 1,
+    borderColor: PHASE1_DISCOVER_THEME.border,
+    shadowColor: PHASE1_DISCOVER_THEME.shadowColor,
+    shadowOffset: { width: 0, height: PHASE1_DISCOVER_THEME.shadowOffsetY },
+    shadowOpacity: PHASE1_DISCOVER_THEME.shadowOpacity,
+    shadowRadius: PHASE1_DISCOVER_THEME.shadowRadius,
+    elevation: 1,
   },
+  // Phase-1 premium redesign: section title becomes a quiet eyebrow label
+  // (uppercase, letter-spaced, muted) so the section's content can be the
+  // hero. Mirrors the Phase-2 typography hierarchy without copying the
+  // dark palette.
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: COLORS.text,
+    fontSize: 11,
+    fontWeight: '700',
+    color: PHASE1_DISCOVER_THEME.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 1.4,
     marginBottom: 12,
   },
   bio: {
     fontSize: 16,
-    color: COLORS.text,
-    lineHeight: 24,
+    fontWeight: '400',
+    color: PHASE1_DISCOVER_THEME.text,
+    lineHeight: 25,
+    letterSpacing: 0.05,
   },
+  // Phase-1 premium redesign: prompt card. Inherits the same elevated
+  // white surface as `section`, plus a single accent strip on the leading
+  // edge so prompts feel like premium voice cards, not flat sticky notes.
   promptCard: {
-    backgroundColor: COLORS.backgroundDark,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
+    backgroundColor: PHASE1_DISCOVER_THEME.surface,
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 18,
     borderLeftWidth: 3,
     borderLeftColor: COLORS.primary,
+    borderTopWidth: 1,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderTopColor: PHASE1_DISCOVER_THEME.border,
+    borderRightColor: PHASE1_DISCOVER_THEME.border,
+    borderBottomColor: PHASE1_DISCOVER_THEME.border,
+    shadowColor: PHASE1_DISCOVER_THEME.shadowColor,
+    shadowOffset: { width: 0, height: PHASE1_DISCOVER_THEME.shadowOffsetY },
+    shadowOpacity: PHASE1_DISCOVER_THEME.shadowOpacity,
+    shadowRadius: PHASE1_DISCOVER_THEME.shadowRadius,
+    elevation: 1,
   },
   promptQuestion: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.textLight,
-    marginBottom: 6,
+    fontSize: 11,
+    fontWeight: '700',
+    color: PHASE1_DISCOVER_THEME.textMuted,
+    marginBottom: 8,
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    letterSpacing: 1.2,
   },
   promptAnswer: {
-    fontSize: 16,
-    color: COLORS.text,
-    lineHeight: 22,
+    fontSize: 17,
+    fontWeight: '500',
+    color: PHASE1_DISCOVER_THEME.text,
+    lineHeight: 24,
+    letterSpacing: 0.05,
   },
   chips: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
   },
+  // Phase-1 premium redesign: pill chip. Fully rounded (radius 100),
+  // generous horizontal padding, refined typography. Uses the warm chip
+  // surface to sit calmly on the white section card.
   chip: {
-    backgroundColor: COLORS.backgroundDark,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    marginRight: 8,
-    marginBottom: 8,
+    backgroundColor: PHASE1_DISCOVER_THEME.chipBg,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 100,
   },
   chipText: {
-    fontSize: 14,
-    color: COLORS.text,
-  },
-  lookingForChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: COLORS.primary + '15',
-    borderWidth: 1,
-    borderColor: COLORS.primary + '30',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  lookingForText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: COLORS.primary,
+    fontSize: 13,
+    fontWeight: '600',
+    color: PHASE1_DISCOVER_THEME.chipText,
+    letterSpacing: 0.1,
   },
   sharedChip: {
-    backgroundColor: COLORS.secondary + '20',
-    borderWidth: 1,
-    borderColor: COLORS.secondary + '40',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  sharedChipText: {
-    fontSize: 14,
-    color: COLORS.secondary,
-    fontWeight: '600',
-  },
-  // Common Places chip styles (privacy-safe shared locations)
-  commonPlaceChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     backgroundColor: COLORS.secondary + '15',
-    borderWidth: 1,
-    borderColor: COLORS.secondary + '30',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  commonPlaceText: {
-    fontSize: 14,
-    color: COLORS.secondary,
-    fontWeight: '500',
-  },
-  intentChip: {
-    backgroundColor: COLORS.primary + '15',
-    borderWidth: 1,
-    borderColor: COLORS.primary + '30',
     paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 20,
-    marginRight: 8,
-    marginBottom: 8,
+    borderRadius: 100,
+  },
+  sharedChipText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.secondary,
+    letterSpacing: 0.1,
+  },
+  commonPlaceChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: COLORS.secondary + '12',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 100,
+  },
+  commonPlaceText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.secondary,
+    letterSpacing: 0.1,
+  },
+  intentChip: {
+    backgroundColor: COLORS.primary + '12',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 100,
   },
   intentChipText: {
-    fontSize: 15,
-    color: COLORS.primary,
+    fontSize: 13,
     fontWeight: '600',
+    color: COLORS.primary,
+    letterSpacing: 0.1,
   },
   intentCompatBadge: {
     alignSelf: 'flex-start',
@@ -1637,17 +2022,16 @@ const styles = StyleSheet.create({
   intentChipCompact: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.primary + '15',
-    borderWidth: 1,
-    borderColor: COLORS.primary + '30',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 14,
+    backgroundColor: COLORS.primary + '12',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 100,
   },
   intentChipCompactText: {
     fontSize: 13,
     color: COLORS.primary,
     fontWeight: '600',
+    letterSpacing: 0.1,
   },
   intentOverflow: {
     fontSize: 12,
@@ -1657,49 +2041,32 @@ const styles = StyleSheet.create({
   },
   // Hobby chip styles
   hobbyChip: {
-    backgroundColor: COLORS.backgroundDark,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
+    backgroundColor: PHASE1_DISCOVER_THEME.chipBg,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 100,
     marginRight: 8,
     marginBottom: 8,
   },
   hobbyChipText: {
-    fontSize: 14,
-    color: COLORS.text,
+    fontSize: 13,
+    fontWeight: '600',
+    color: PHASE1_DISCOVER_THEME.chipText,
+    letterSpacing: 0.1,
   },
   details: {
-    gap: 12,
+    gap: 14,
   },
   detailRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 12,
   },
   detailText: {
     fontSize: 16,
-    color: COLORS.text,
-    marginLeft: 12,
-  },
-  // Note: actions style replaced by stickyActions (P1-FIX)
-  actionButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.backgroundDark,
-  },
-  actionButtonDisabled: {
-    opacity: 0.55,
-  },
-  passButton: {
-    backgroundColor: COLORS.backgroundDark,
-  },
-  superLikeButton: {
-    backgroundColor: COLORS.backgroundDark,
-  },
-  likeButton: {
-    backgroundColor: COLORS.backgroundDark,
+    fontWeight: '500',
+    color: PHASE1_DISCOVER_THEME.text,
+    letterSpacing: 0.1,
   },
   previewOnlyBanner: {
     flexDirection: 'row',
