@@ -666,6 +666,15 @@ export const getProfileByUserId = query({
       .first();
     if (blockedByOwner) return null;
 
+    // If the viewer reported this profile owner, fail closed like an unavailable profile.
+    const reportedByViewer = await ctx.db
+      .query('reports')
+      .withIndex('by_reporter_reported_created', (q) =>
+        q.eq('reporterId', viewerUserId).eq('reportedUserId', args.userId)
+      )
+      .first();
+    if (reportedByViewer) return null;
+
     // Cast to access optional schema fields that may not be in generated types yet
     const profile = p as typeof p & {
       hobbies?: string[];

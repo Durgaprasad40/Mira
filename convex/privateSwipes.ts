@@ -42,6 +42,30 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
+async function hasViewerReportedUser(
+  ctx: MutationCtx | QueryCtx,
+  viewerId: Id<'users'>,
+  targetUserId: Id<'users'>
+): Promise<boolean> {
+  const report = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', viewerId).eq('reportedUserId', targetUserId)
+    )
+    .first();
+  return !!report;
+}
+
+async function isIncomingLikeHiddenBySafety(
+  ctx: QueryCtx,
+  viewerId: Id<'users'>,
+  likerUserId: Id<'users'>
+): Promise<boolean> {
+  if (await isBlockedBidirectional(ctx, viewerId, likerUserId)) return true;
+  if (await hasViewerReportedUser(ctx, viewerId, likerUserId)) return true;
+  return false;
+}
+
 const STAND_OUT_DAILY_LIMIT = 2;
 const STAND_OUT_COOLDOWN_MS = 30 * 1000;
 const STAND_OUT_MESSAGE_MAX_LENGTH = 120;
@@ -212,6 +236,7 @@ async function isPendingStandOutVisibleToViewer(
   if (like.action !== 'super_like') return false;
   if (await getActivePrivateMatch(ctx, viewerId, otherUserId)) return false;
   if (await isBlockedBidirectional(ctx, viewerId, otherUserId)) return false;
+  if (await hasViewerReportedUser(ctx, viewerId, otherUserId)) return false;
 
   const reciprocal = await ctx.db
     .query('privateLikes')
@@ -1203,6 +1228,9 @@ export const getIncomingLikes = query({
       if (like.action !== 'like' && like.action !== 'super_like') {
         return null;
       }
+      if (await isIncomingLikeHiddenBySafety(ctx, userId, like.fromUserId)) {
+        return null;
+      }
 
       // Check if current user has already liked them back (would be matched)
       const reciprocalLike = await ctx.db
@@ -1285,6 +1313,7 @@ export const getIncomingLikesCount = query({
     let count = 0;
     for (const like of incomingLikes) {
       if (like.action !== 'like' && like.action !== 'super_like') continue;
+      if (await isIncomingLikeHiddenBySafety(ctx, userId, like.fromUserId)) continue;
 
       // Check if current user has already liked them back
       const reciprocalLike = await ctx.db

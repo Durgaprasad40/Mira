@@ -839,6 +839,10 @@ export const getMessages = query({
     if (!conversation.participants.includes(userId)) {
       return [];
     }
+    const otherParticipantId = conversation.participants.find((id) => id !== userId);
+    if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+      return [];
+    }
     if (isChatRoomPrivateDmExpired(conversation)) {
       return [];
     }
@@ -1472,6 +1476,9 @@ export const getConversation = query({
     // Get other participant
     const otherUserId = conversation.participants.find((id) => id !== userId);
     if (!otherUserId) return null;
+    if (await isBlockedBidirectional(ctx, userId, otherUserId)) {
+      return null;
+    }
 
     const otherUser = await ctx.db.get(otherUserId);
 
