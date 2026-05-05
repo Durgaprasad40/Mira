@@ -4834,6 +4834,9 @@ const styles = StyleSheet.create({
     width: DC_BUTTON_DIAMETER_COMPACT,
     height: DC_BUTTON_DIAMETER_COMPACT,
     borderRadius: DC_BUTTON_DIAMETER_COMPACT / 2,
+    // Solid premium blue surface so the white star icon reads clearly.
+    // Mirrors the Phase-2 opened-profile floatingStyles.standOutButton.
+    backgroundColor: "#2196F3",
     // Lit edge — sells the "premium glass orb" silhouette.
     borderWidth: DC_GLASS_BORDER_WIDTH,
     borderColor: DC_GLASS_BORDER_LIGHT,
@@ -4845,6 +4848,9 @@ const styles = StyleSheet.create({
     width: DC_BUTTON_DIAMETER,
     height: DC_BUTTON_DIAMETER,
     borderRadius: DC_BUTTON_DIAMETER / 2,
+    // Solid premium pink surface so the white heart icon reads clearly.
+    // Mirrors the Phase-2 opened-profile floatingStyles.likeButton.
+    backgroundColor: COLORS.primary,
     borderWidth: DC_GLASS_BORDER_WIDTH,
     borderColor: DC_GLASS_BORDER_LIGHT,
     // Neutral lift only — no coloured glow ring.
