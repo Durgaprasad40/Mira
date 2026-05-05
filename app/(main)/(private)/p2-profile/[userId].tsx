@@ -940,18 +940,18 @@ export default function Phase2FullProfileScreen() {
             )}
           </View>
 
-          {/* ─── ABOUT ─────────────────────────────────────────────────── */}
+          {/* ─── BIO ───────────────────────────────────────────────────── */}
           {profile.bio && (
             <View style={styles.cardSection}>
-              <Text style={styles.sectionTitle}>About</Text>
+              <Text style={styles.sectionTitle}>Bio</Text>
               <Text style={styles.bioText}>{profile.bio}</Text>
             </View>
           )}
 
-          {/* ─── LOOKING FOR (intent chips) ────────────────────────────── */}
+          {/* ─── RELATIONSHIP GOAL (private intent chips) ──────────────── */}
           {intentKeys.length > 0 && (
             <View style={styles.cardSection}>
-              <Text style={styles.sectionTitle}>Looking For</Text>
+              <Text style={styles.sectionTitle}>Relationship goal</Text>
               <View style={styles.chipsRow}>
                 {intentKeys.map((key: string, i: number) => {
                   const intent = getIntentInfo(key);
@@ -1356,7 +1356,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.1,
   },
 
-  // ─── Section card (used by About, Looking For, Lifestyle, Interests …)
+  // ─── Section card (used by Bio, Relationship goal, Lifestyle, Interests …)
   cardSection: {
     backgroundColor: P2.cardBg,
     borderRadius: 20,
@@ -1386,7 +1386,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.05,
   },
 
-  // ─── Single chip system (used by Looking For, Desires, Lifestyle, Interests)
+  // ─── Single chip system (used by Relationship goal, Desires, Lifestyle, Interests)
   chipsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
