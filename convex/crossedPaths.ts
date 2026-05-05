@@ -799,12 +799,14 @@ export const recordLocation = mutation({
     // Determine if we should skip crossed-path detection due to GPS quality issues
     const skipCrossedPathsDueToGPS = accuracyTooLow || impossibleSpeed;
 
-    // 30-minute gate: skip update if too recent
-    if (
+    // 30-minute gate: skip tiny repeats, but still allow meaningful foreground
+    // movement through so Nearby can detect 25-40m crossed-path walks.
+    const withinLocationUpdateWindow = Boolean(
       currentUser.lastLocationUpdatedAt &&
       now - currentUser.lastLocationUpdatedAt < LOCATION_UPDATE_INTERVAL_MS
-    ) {
-      return { success: true, nearbyCount: 0, skipped: true };
+    );
+    if (withinLocationUpdateWindow && movementTooSmall) {
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'within_location_update_window' };
     }
 
     // Save location + timestamp (always save valid coordinates for map display)

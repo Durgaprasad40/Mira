@@ -452,6 +452,9 @@ export default function NearbyScreen() {
   const stopLocationTracking = useLocationStore((s) => s.stopLocationTracking);
   const error = useLocationStore((s) => s.error);
   const bestLocation = useBestLocation();
+  const startNearbyLocationTracking = useCallback(() => {
+    void startLocationTracking({ mode: 'nearby' });
+  }, [startLocationTracking]);
 
   // UI state
   const [locationUIState, setLocationUIState] = useState<LocationUIState>('checking');
@@ -815,7 +818,7 @@ export default function NearbyScreen() {
         setQueryError(null);
         setIsRetrying(true);
         requestNearbyRefresh({ force: true });
-        startLocationTracking();
+        startNearbyLocationTracking();
       }
 
       autoRetryTimeoutRef.current = null;
@@ -828,7 +831,7 @@ export default function NearbyScreen() {
         autoRetryTimeoutRef.current = null;
       }
     };
-  }, [queryError, requestNearbyRefresh, startLocationTracking]);
+  }, [queryError, requestNearbyRefresh, startNearbyLocationTracking]);
 
   // ---------------------------------------------------------------------------
   // Publish location mutation (live mode only)
@@ -968,7 +971,7 @@ export default function NearbyScreen() {
 
         // -----------------------------------------------------------------------
         // Crossed Paths Detection: Call recordLocation with rate limiting
-        // Only scan if: moved >= 60m AND >= 30s since last scan
+        // Only scan if: moved >= 25m AND >= 30s since last scan
         // -----------------------------------------------------------------------
         const now = Date.now();
         const timeSinceLastDetection = now - lastDetectionTimeRef.current;
@@ -984,7 +987,7 @@ export default function NearbyScreen() {
           return;
         }
 
-        // Check movement threshold (60 meters minimum)
+        // Check movement threshold (25 meters minimum)
         if (lastDetectionPos) {
           const distanceMoved = calculateDistanceMeters(
             lastDetectionPos.lat,
@@ -1018,8 +1021,10 @@ export default function NearbyScreen() {
           lastDetectionLatLngRef.current = { lat, lng };
 
           if (__DEV__) {
-            console.log('[NEARBY] recordLocation success - crossed paths scan triggered', {
+            console.log('[NEARBY] recordLocation result:', {
               nearbyCount: result?.nearbyCount,
+              skipped: result?.skipped,
+              reason: result?.reason,
             });
           }
 
@@ -1661,7 +1666,7 @@ export default function NearbyScreen() {
               : 0,
         });
       }
-      startLocationTracking();
+      startNearbyLocationTracking();
 
       // Cleanup: stop tracking when leaving Nearby tab (battery optimization)
       return () => {
@@ -1672,7 +1677,7 @@ export default function NearbyScreen() {
         }
         stopLocationTracking();
       };
-    }, [requestNearbyRefresh, startLocationTracking, stopLocationTracking])
+    }, [requestNearbyRefresh, startNearbyLocationTracking, stopLocationTracking])
   );
 
   // ---------------------------------------------------------------------------
@@ -1832,14 +1837,14 @@ export default function NearbyScreen() {
     requestNearbyRefresh({ force: true });
 
     // Re-trigger location tracking and force query identity change so retry is real
-    startLocationTracking();
-  }, [requestNearbyRefresh, startLocationTracking]);
+    startNearbyLocationTracking();
+  }, [requestNearbyRefresh, startNearbyLocationTracking]);
 
   const handleRetryLocation = useCallback(() => {
     setLocationTimeoutMessage(null);
     stopLocationTracking();
-    startLocationTracking();
-  }, [startLocationTracking, stopLocationTracking]);
+    startNearbyLocationTracking();
+  }, [startNearbyLocationTracking, stopLocationTracking]);
 
   const handleRetryNearbySync = useCallback(() => {
     setNearbySyncIssue(null);

@@ -66,6 +66,40 @@ const LIVE_STALE_THRESHOLD_MS = 20 * 1000; // 20 seconds
 const BACKGROUND_FRESHEN_THROTTLE_MS = 10 * 1000; // 10 seconds
 
 // ---------------------------------------------------------------------------
+// Foreground Tracking Profiles
+// ---------------------------------------------------------------------------
+
+type LocationTrackingMode = 'standard' | 'nearby';
+
+interface StartLocationTrackingOptions {
+  mode?: LocationTrackingMode;
+}
+
+const STANDARD_TRACKING_DISTANCE_INTERVAL_METERS = 100;
+const STANDARD_TRACKING_TIME_INTERVAL_MS = 30000;
+
+// Nearby crossed-path detection has a 25m movement gate, so the foreground
+// watcher must deliver updates below that distance while the Nearby tab is open.
+const NEARBY_TRACKING_DISTANCE_INTERVAL_METERS = 10;
+const NEARBY_TRACKING_TIME_INTERVAL_MS = 10000;
+
+function getTrackingConfig(mode: LocationTrackingMode) {
+  if (mode === 'nearby') {
+    return {
+      accuracy: Location.Accuracy.High,
+      distanceInterval: NEARBY_TRACKING_DISTANCE_INTERVAL_METERS,
+      timeInterval: NEARBY_TRACKING_TIME_INTERVAL_MS,
+    };
+  }
+
+  return {
+    accuracy: Location.Accuracy.Balanced,
+    distanceInterval: STANDARD_TRACKING_DISTANCE_INTERVAL_METERS,
+    timeInterval: STANDARD_TRACKING_TIME_INTERVAL_MS,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // GPS Jitter Protection Helpers
 // ---------------------------------------------------------------------------
 
@@ -194,7 +228,7 @@ interface LocationState {
   fetchLastKnownOnly: () => Promise<void>;
 
   /** Start full location tracking — call when Nearby tab opens */
-  startLocationTracking: () => Promise<void>;
+  startLocationTracking: (options?: StartLocationTrackingOptions) => Promise<void>;
 
   /** Stop location tracking — call on app unmount (optional) */
   stopLocationTracking: () => void;
@@ -230,6 +264,7 @@ interface LocationState {
 let watchSubscription: Location.LocationSubscription | null = null;
 let appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
 let trackingSessionGeneration = 0;
+let activeTrackingMode: LocationTrackingMode | null = null;
 
 // ---------------------------------------------------------------------------
 // Store
@@ -280,8 +315,32 @@ export const useLocationStore = create<LocationState>((set, get) => ({
     }
   },
 
-  startLocationTracking: async () => {
+  startLocationTracking: async (options) => {
+    const requestedMode = options?.mode ?? 'standard';
+    const trackingConfig = getTrackingConfig(requestedMode);
     const state = get();
+
+    // Prevent double-start
+    if (state.isTracking) {
+      if (activeTrackingMode === requestedMode) {
+        log.info('[LOCATION]', 'tracking already active, skipping start', {
+          mode: requestedMode,
+        });
+        return;
+      }
+
+      if (activeTrackingMode === 'nearby' && requestedMode !== 'nearby') {
+        log.info('[LOCATION]', 'nearby tracking already active, preserving high-frequency watcher');
+        return;
+      }
+
+      log.info('[LOCATION]', 'restarting tracking with requested mode', {
+        from: activeTrackingMode,
+        to: requestedMode,
+      });
+      get().stopLocationTracking();
+    }
+
     const sessionGeneration = ++trackingSessionGeneration;
     const isCurrentSession = () => sessionGeneration === trackingSessionGeneration;
     let pendingWatchSubscription: Location.LocationSubscription | null = null;
@@ -298,12 +357,6 @@ export const useLocationStore = create<LocationState>((set, get) => ({
       }
     };
 
-    // Prevent double-start
-    if (state.isTracking) {
-      log.info('[LOCATION]', 'tracking already active, skipping start');
-      return;
-    }
-
     // BUGFIX #4: Clean up any orphaned subscriptions from previous runs
     // (e.g., hot reload, store recreation). This prevents GPS listener leaks.
     if (watchSubscription) {
@@ -318,7 +371,18 @@ export const useLocationStore = create<LocationState>((set, get) => ({
     }
 
     set({ isTracking: true, error: null });
-    log.info('[LOCATION]', 'starting location tracking');
+    activeTrackingMode = requestedMode;
+    log.info('[LOCATION]', 'starting location tracking', {
+      mode: requestedMode,
+      distanceIntervalM: trackingConfig.distanceInterval,
+      timeIntervalMs: trackingConfig.timeInterval,
+    });
+    if (__DEV__ && requestedMode === 'nearby') {
+      console.log('[NEARBY_LOCATION] high-frequency foreground tracking enabled', {
+        distanceIntervalM: trackingConfig.distanceInterval,
+        timeIntervalMs: trackingConfig.timeInterval,
+      });
+    }
     // Milestone F: location start
     markTiming('location_start');
 
@@ -330,6 +394,7 @@ export const useLocationStore = create<LocationState>((set, get) => ({
         return;
       }
       if (!servicesEnabled) {
+        activeTrackingMode = null;
         set({
           permissionStatus: 'services_disabled',
           isTracking: false,
@@ -365,6 +430,7 @@ export const useLocationStore = create<LocationState>((set, get) => ({
         }
         const isRestricted = ios?.scope === 'none';
 
+        activeTrackingMode = null;
         set({
           permissionStatus: isRestricted ? 'restricted' : 'denied',
           isTracking: false,
@@ -377,6 +443,7 @@ export const useLocationStore = create<LocationState>((set, get) => ({
       }
 
       if (status !== 'granted') {
+        activeTrackingMode = null;
         set({
           permissionStatus: 'denied',
           isTracking: false,
@@ -410,12 +477,13 @@ export const useLocationStore = create<LocationState>((set, get) => ({
       }
 
       // 3. Start watching position for live updates
-      // Battery-optimized: 100m distance, 30s time interval
+      // Battery-optimized by default; Nearby opts into a tighter foreground
+      // cadence while its tab is focused so 25-40m walks reach crossed-paths.
       pendingWatchSubscription = await Location.watchPositionAsync(
         {
-          accuracy: Location.Accuracy.Balanced,
-          distanceInterval: 100, // Update every 100 meters (was 50)
-          timeInterval: 30000, // Or every 30 seconds (was 10)
+          accuracy: trackingConfig.accuracy,
+          distanceInterval: trackingConfig.distanceInterval,
+          timeInterval: trackingConfig.timeInterval,
         },
         (position) => {
           if (!isCurrentSession()) {
@@ -440,6 +508,14 @@ export const useLocationStore = create<LocationState>((set, get) => ({
 
           // GPS jitter protection: validate against last accepted point
           const lastAccepted = get().currentLocation;
+          const movedMeters = lastAccepted
+            ? calculateDistanceMeters(
+                lastAccepted.latitude,
+                lastAccepted.longitude,
+                coords.latitude,
+                coords.longitude
+              )
+            : null;
           const validation = validateLocationUpdate(coords, lastAccepted);
 
           if (!validation.valid) {
@@ -455,6 +531,13 @@ export const useLocationStore = create<LocationState>((set, get) => ({
 
           // Also update lastKnown for persistence across app restarts
           set({ lastKnownLocation: coords });
+
+          if (__DEV__ && requestedMode === 'nearby') {
+            console.log('[NEARBY_LOCATION] watch update accepted', {
+              moved: movedMeters == null ? 'initial' : Math.round(movedMeters) + 'm',
+              accuracy: coords.accuracy == null ? 'unknown' : Math.round(coords.accuracy) + 'm',
+            });
+          }
         }
       );
       if (!isCurrentSession()) {
@@ -488,6 +571,12 @@ export const useLocationStore = create<LocationState>((set, get) => ({
             lat: coords.latitude.toFixed(4),
             lng: coords.longitude.toFixed(4),
           });
+          if (__DEV__ && requestedMode === 'nearby') {
+            console.log('[NEARBY_LOCATION] current position refreshed', {
+              source: 'initial',
+              accuracy: coords.accuracy == null ? 'unknown' : Math.round(coords.accuracy) + 'm',
+            });
+          }
           // Milestone F: location first fix
           markTiming('location_fix');
 
@@ -544,6 +633,7 @@ export const useLocationStore = create<LocationState>((set, get) => ({
       if (!isCurrentSession()) {
         return;
       }
+      activeTrackingMode = null;
       const errorMsg = e instanceof Error ? e.message : 'Failed to start location tracking';
       set({ error: errorMsg, isTracking: false });
       log.error('[LOCATION]', 'startTracking failed', { error: errorMsg });
@@ -552,6 +642,7 @@ export const useLocationStore = create<LocationState>((set, get) => ({
 
   stopLocationTracking: () => {
     trackingSessionGeneration += 1;
+    activeTrackingMode = null;
 
     if (watchSubscription) {
       watchSubscription.remove();
