@@ -615,29 +615,29 @@ export const updateProfile = mutation({
         ),
       ),
     ),
+    // Activities accepted by updateProfile. Mirrors the 70-value frontend
+    // ACTIVITY_FILTERS list in lib/constants.ts (and the schema users-table
+    // activities validator) so any UI-selectable activity (e.g.
+    // 'diy_projects') can be persisted without ArgumentValidationError.
     activities: v.optional(
       v.array(
         v.union(
-          v.literal("coffee"),
-          v.literal("date_night"),
-          v.literal("sports"),
-          v.literal("movies"),
-          v.literal("free_tonight"),
-          v.literal("foodie"),
-          v.literal("gym_partner"),
-          v.literal("concerts"),
-          v.literal("travel"),
-          v.literal("outdoors"),
-          v.literal("art_culture"),
-          v.literal("gaming"),
-          v.literal("nightlife"),
-          v.literal("brunch"),
-          v.literal("study_date"),
-          v.literal("this_weekend"),
-          v.literal("beach_pool"),
-          v.literal("road_trip"),
-          v.literal("photography"),
-          v.literal("volunteering"),
+          // Original 20 activities
+          v.literal("coffee"), v.literal("date_night"), v.literal("sports"), v.literal("movies"), v.literal("free_tonight"),
+          v.literal("foodie"), v.literal("gym_partner"), v.literal("concerts"), v.literal("travel"), v.literal("outdoors"),
+          v.literal("art_culture"), v.literal("gaming"), v.literal("nightlife"), v.literal("brunch"), v.literal("study_date"),
+          v.literal("this_weekend"), v.literal("beach_pool"), v.literal("road_trip"), v.literal("photography"), v.literal("volunteering"),
+          // Additional 49 activities (matching frontend ACTIVITY_FILTERS)
+          v.literal("late_night_talks"), v.literal("street_food"), v.literal("home_cooking"), v.literal("baking"), v.literal("healthy_eating"),
+          v.literal("weekend_getaways"), v.literal("long_drives"), v.literal("city_exploring"), v.literal("beach_vibes"), v.literal("mountain_views"),
+          v.literal("nature_walks"), v.literal("sunset_views"), v.literal("hiking"), v.literal("camping"), v.literal("stargazing"),
+          v.literal("gardening"), v.literal("gym"), v.literal("yoga"), v.literal("running"), v.literal("cycling"),
+          v.literal("meditation"), v.literal("pilates"), v.literal("music_lover"), v.literal("live_concerts"), v.literal("singing"),
+          v.literal("podcasts"), v.literal("binge_watching"), v.literal("thrillers"), v.literal("documentaries"), v.literal("anime"),
+          v.literal("k_dramas"), v.literal("board_games"), v.literal("chess"), v.literal("escape_rooms"), v.literal("drawing"),
+          v.literal("painting"), v.literal("writing"), v.literal("journaling"), v.literal("diy_projects"), v.literal("reading"),
+          v.literal("personal_growth"), v.literal("learning_new_skills"), v.literal("mindfulness"), v.literal("tech_enthusiast"), v.literal("startups"),
+          v.literal("coding"), v.literal("community_service"), v.literal("sustainability"), v.literal("plant_parenting"),
         ),
       ),
     ),
@@ -1835,29 +1835,29 @@ export const completeOnboarding = mutation({
         ),
       ),
     ),
+    // Activities accepted by completeOnboarding. Mirrors the 70-value
+    // frontend ACTIVITY_FILTERS list in lib/constants.ts (and the schema
+    // users-table activities validator) so any UI-selectable activity
+    // (e.g. 'diy_projects') can be persisted without ArgumentValidationError.
     activities: v.optional(
       v.array(
         v.union(
-          v.literal("coffee"),
-          v.literal("date_night"),
-          v.literal("sports"),
-          v.literal("movies"),
-          v.literal("free_tonight"),
-          v.literal("foodie"),
-          v.literal("gym_partner"),
-          v.literal("concerts"),
-          v.literal("travel"),
-          v.literal("outdoors"),
-          v.literal("art_culture"),
-          v.literal("gaming"),
-          v.literal("nightlife"),
-          v.literal("brunch"),
-          v.literal("study_date"),
-          v.literal("this_weekend"),
-          v.literal("beach_pool"),
-          v.literal("road_trip"),
-          v.literal("photography"),
-          v.literal("volunteering"),
+          // Original 20 activities
+          v.literal("coffee"), v.literal("date_night"), v.literal("sports"), v.literal("movies"), v.literal("free_tonight"),
+          v.literal("foodie"), v.literal("gym_partner"), v.literal("concerts"), v.literal("travel"), v.literal("outdoors"),
+          v.literal("art_culture"), v.literal("gaming"), v.literal("nightlife"), v.literal("brunch"), v.literal("study_date"),
+          v.literal("this_weekend"), v.literal("beach_pool"), v.literal("road_trip"), v.literal("photography"), v.literal("volunteering"),
+          // Additional 49 activities (matching frontend ACTIVITY_FILTERS)
+          v.literal("late_night_talks"), v.literal("street_food"), v.literal("home_cooking"), v.literal("baking"), v.literal("healthy_eating"),
+          v.literal("weekend_getaways"), v.literal("long_drives"), v.literal("city_exploring"), v.literal("beach_vibes"), v.literal("mountain_views"),
+          v.literal("nature_walks"), v.literal("sunset_views"), v.literal("hiking"), v.literal("camping"), v.literal("stargazing"),
+          v.literal("gardening"), v.literal("gym"), v.literal("yoga"), v.literal("running"), v.literal("cycling"),
+          v.literal("meditation"), v.literal("pilates"), v.literal("music_lover"), v.literal("live_concerts"), v.literal("singing"),
+          v.literal("podcasts"), v.literal("binge_watching"), v.literal("thrillers"), v.literal("documentaries"), v.literal("anime"),
+          v.literal("k_dramas"), v.literal("board_games"), v.literal("chess"), v.literal("escape_rooms"), v.literal("drawing"),
+          v.literal("painting"), v.literal("writing"), v.literal("journaling"), v.literal("diy_projects"), v.literal("reading"),
+          v.literal("personal_growth"), v.literal("learning_new_skills"), v.literal("mindfulness"), v.literal("tech_enthusiast"), v.literal("startups"),
+          v.literal("coding"), v.literal("community_service"), v.literal("sustainability"), v.literal("plant_parenting"),
         ),
       ),
     ),
