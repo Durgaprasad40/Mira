@@ -15,6 +15,7 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { Toast } from "@/components/ui/Toast";
 import { trackEvent } from "@/lib/analytics";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 interface Props {
   visible: boolean;
@@ -64,6 +65,8 @@ export function ReportBlockModal({
   onUnmatchSuccess,
 }: Props) {
   const [viewState, setViewState] = useState<ViewState>('main');
+  const insets = useSafeAreaInsets();
+  const bottomClearance = Math.max(16, insets.bottom + 12);
 
   const blockMutation = useMutation(api.users.blockUser);
   const reportMutation = useMutation(api.users.reportUser);
@@ -299,7 +302,7 @@ export function ReportBlockModal({
         onPress={resetAndClose}
       >
         <TouchableOpacity
-          style={styles.sheet}
+          style={[styles.sheet, { marginBottom: bottomClearance }]}
           activeOpacity={1}
           onPress={() => {}}
         >
@@ -328,7 +331,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
     borderRadius: 20,
     marginHorizontal: 12,
-    marginBottom: 16,
     paddingBottom: 8,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 10 },

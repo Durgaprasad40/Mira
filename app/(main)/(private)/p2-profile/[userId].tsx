@@ -54,6 +54,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useScreenTrace } from '@/lib/devTrace';
 import { Toast } from '@/components/ui/Toast';
 import { StandOutComposerSheet } from '@/components/discover/StandOutComposerSheet';
+import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 // P2-004: Centralized gender icon utility
 import { getGenderIcon } from '@/lib/genderIcon';
 import { formatPhase2DistanceMiles } from '@/lib/phase2Distance';
@@ -359,6 +360,7 @@ export default function Phase2FullProfileScreen() {
 
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const photoListRef = useRef<FlatList>(null);
+  const [showReportBlock, setShowReportBlock] = useState(false);
 
   // Stand Out limits from discover store (shared with discovery card)
   const standOutsRemaining = useDiscoverStore((s) => s.standOutsRemaining);
@@ -591,6 +593,19 @@ export default function Phase2FullProfileScreen() {
   const profileDistanceLabel = formatPhase2DistanceMiles(profileDistanceKm, {
     includeAway: true,
   });
+  const targetUserId =
+    typeof profile.userId === 'string' && profile.userId.trim().length > 0
+      ? profile.userId
+      : profileUserId;
+  const targetUserName = profile.name || 'this user';
+
+  const handleOpenReportBlock = () => {
+    if (!targetUserId) {
+      Toast.show('Profile unavailable');
+      return;
+    }
+    setShowReportBlock(true);
+  };
 
   // Handle like action
   const handleLike = async () => {
@@ -887,7 +902,7 @@ export default function Phase2FullProfileScreen() {
             </View>
           )}
 
-          {/* Top scrim only — minimal, just enough for back-button readability.
+          {/* Top scrim only — minimal, just enough for menu readability.
               No bottom scrim per product direction: photo must end crisply. */}
           <LinearGradient
             colors={["rgba(0,0,0,0.45)", "rgba(0,0,0,0)"]}
@@ -895,13 +910,15 @@ export default function Phase2FullProfileScreen() {
             pointerEvents="none"
           />
 
-          {/* Back button */}
+          {/* Safety menu */}
           <TouchableOpacity
-            style={[styles.backButton, { top: 10 }]}
-            onPress={() => router.back()}
+            style={[styles.moreButton, { top: 10 }]}
+            onPress={handleOpenReportBlock}
+            accessibilityRole="button"
+            accessibilityLabel="Profile actions"
           >
-            <View style={styles.backButtonBg}>
-              <Ionicons name="arrow-back" size={22} color="#FFF" />
+            <View style={styles.moreButtonBg}>
+              <Ionicons name="ellipsis-horizontal" size={18} color="#FFF" />
             </View>
           </TouchableOpacity>
         </View>
@@ -1172,6 +1189,18 @@ export default function Phase2FullProfileScreen() {
         }}
         onClose={() => setStandOutSheetTarget(null)}
       />
+
+      <ReportBlockModal
+        visible={showReportBlock && !!targetUserId}
+        onClose={() => setShowReportBlock(false)}
+        reportedUserId={targetUserId || ''}
+        reportedUserName={targetUserName}
+        currentUserId={currentUserId || ''}
+        onBlockSuccess={() => {
+          setShowReportBlock(false);
+          router.replace('/(main)/(private)/(tabs)/deep-connect' as any);
+        }}
+      />
     </View>
   );
 }
@@ -1288,6 +1317,19 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   backButtonBg: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(0,0,0,0.32)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  moreButton: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 10,
+  },
+  moreButtonBg: {
     width: 38,
     height: 38,
     borderRadius: 19,
