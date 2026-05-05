@@ -90,6 +90,33 @@ import {
   DC_GLASS_HIGHLIGHT_END,
   getDeepConnectBottomLayout,
 } from "./_internal/deepConnectActionRow.tokens";
+import {
+  P1_BUTTON_DIAMETER,
+  P1_BUTTON_DIAMETER_COMPACT,
+  P1_ICON_SIZE,
+  P1_STAR_ICON_SIZE,
+  P1_BUTTON_GAP,
+  P1_ROW_PADDING_X,
+  P1_ROW_PADDING_BOTTOM,
+  P1_PRESS_SCALE,
+  P1_BUTTON_SHADOW,
+  P1_SURFACE,
+  P1_SURFACE_TINT_STANDOUT,
+  P1_SURFACE_TINT_LIKE,
+  P1_BORDER_WIDTH,
+  P1_BORDER_SKIP,
+  P1_BORDER_STANDOUT,
+  P1_BORDER_LIKE,
+  P1_ICON_SKIP,
+  P1_ICON_STANDOUT,
+  P1_ICON_LIKE,
+  P1_GLASS_HIGHLIGHT_COLORS,
+  P1_GLASS_HIGHLIGHT_LOCATIONS,
+  P1_GLASS_HIGHLIGHT_START,
+  P1_GLASS_HIGHLIGHT_END,
+  P1_DISABLED_OPACITY,
+  P1_DISABLED_SHADOW_OPACITY,
+} from "./_internal/phase1ActionRow.tokens";
 import { isDemoMode } from "@/hooks/useConvex";
 import { getDiscoverPrefetchSnapshot, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
 import {
@@ -169,6 +196,12 @@ const PHASE1_LOCATION_FOCUS_REVISIT_GAP_MS = 30 * 1000;
 const DEEP_CONNECT_QUERY_TIMEOUT_MS = 8500;
 /** Deep Connect: downward pull distance before the deck refreshes */
 const DEEP_CONNECT_PULL_REFRESH_MIN_DISTANCE = 92;
+
+function getDistanceDebugValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.round(value * 10) / 10
+    : null;
+}
 
 // ── Star-burst animation for super-like ──
 const STAR_COUNT = 8;
@@ -2217,6 +2250,52 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       : phase1LiveDistance !== undefined
         ? phase1LiveDistance
         : current?.distance;
+  const lastPhase1DistanceDebugRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!__DEV__ || isPhase2 || !current) return;
+
+    const currentWithPrivacy = current as typeof current & {
+      distanceHidden?: boolean;
+      hideDistance?: boolean;
+    };
+    const hasBackendDistance =
+      typeof current.distance === 'number' && Number.isFinite(current.distance);
+    const hasLiveDistance =
+      typeof phase1LiveDistance === 'number' && Number.isFinite(phase1LiveDistance);
+    const hasDistancePassedToProfileCard =
+      typeof displayDistanceCurrentCard === 'number' &&
+      Number.isFinite(displayDistanceCurrentCard);
+    const candidateHasCoordinates =
+      typeof current.latitude === 'number' && Number.isFinite(current.latitude) &&
+      typeof current.longitude === 'number' && Number.isFinite(current.longitude);
+    const payload = {
+      userId: current.userId ?? current.id,
+      hasBackendDistance,
+      backendDistanceValue: getDistanceDebugValue(current.distance),
+      hasLiveDistance,
+      hasDistancePassedToProfileCard,
+      distancePassedToProfileCard: getDistanceDebugValue(displayDistanceCurrentCard),
+      hideDistance:
+        typeof currentWithPrivacy.hideDistance === 'boolean'
+          ? currentWithPrivacy.hideDistance
+          : undefined,
+      distanceHidden:
+        typeof currentWithPrivacy.distanceHidden === 'boolean'
+          ? currentWithPrivacy.distanceHidden
+          : undefined,
+      candidateHasCoordinates,
+    };
+    const debugKey = JSON.stringify(payload);
+    if (lastPhase1DistanceDebugRef.current === debugKey) return;
+    lastPhase1DistanceDebugRef.current = debugKey;
+    console.log('[P1_DISTANCE_DEBUG][stack]', payload);
+  }, [
+    current,
+    displayDistanceCurrentCard,
+    isPhase2,
+    phase1LiveDistance,
+  ]);
 
   // P0 UNIFIED PRESENCE: Batch query for current and next profile presence
   // Use userId or id (both should map to Convex user ID)
@@ -3957,7 +4036,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           ]}
           onPress={() => animateSwipeRef.current("left")}
           disabled={!current}
-          feedbackScale={isPhase2 ? DC_PRESS_SCALE : 0.92}
+          feedbackScale={isPhase2 ? DC_PRESS_SCALE : P1_PRESS_SCALE}
           hapticType="light"
         >
           {/* Phase-2: subtle bottom dark wash for spherical glass depth */}
@@ -3971,10 +4050,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               style={styles.deepConnectGlassOverlay}
             />
           )}
+          {/* Phase-1: top sheen → soft warm shade for premium 3-D orb */}
+          {!isPhase2 && (
+            <LinearGradient
+              colors={P1_GLASS_HIGHLIGHT_COLORS}
+              locations={P1_GLASS_HIGHLIGHT_LOCATIONS}
+              start={P1_GLASS_HIGHLIGHT_START}
+              end={P1_GLASS_HIGHLIGHT_END}
+              pointerEvents="none"
+              style={styles.premiumGlassOverlay}
+            />
+          )}
           <Ionicons
             name="close"
-            size={isPhase2 ? DC_ICON_SIZE : DISCOVER_ACTION_ICON_SIZE}
-            color="#F44336"
+            size={isPhase2 ? DC_ICON_SIZE : P1_ICON_SIZE}
+            color={isPhase2 ? "#F44336" : P1_ICON_SKIP}
           />
         </AnimatedActionButton>
 
@@ -3997,7 +4087,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             }
           }}
           disabled={hasReachedStandOutLimit() || !current}
-          feedbackScale={isPhase2 ? DC_PRESS_SCALE : 0.9}
+          feedbackScale={isPhase2 ? DC_PRESS_SCALE : P1_PRESS_SCALE}
           hapticType="medium"
         >
           {/* Phase-2: top white sheen + bottom darkening for orb depth */}
@@ -4011,10 +4101,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               style={styles.deepConnectGlassOverlayCompact}
             />
           )}
+          {/* Phase-1: top sheen → soft warm shade for premium 3-D orb */}
+          {!isPhase2 && (
+            <LinearGradient
+              colors={P1_GLASS_HIGHLIGHT_COLORS}
+              locations={P1_GLASS_HIGHLIGHT_LOCATIONS}
+              start={P1_GLASS_HIGHLIGHT_START}
+              end={P1_GLASS_HIGHLIGHT_END}
+              pointerEvents="none"
+              style={styles.premiumGlassOverlayCompact}
+            />
+          )}
           <Ionicons
             name="star"
-            size={isPhase2 ? DC_STAR_ICON_SIZE : DISCOVER_STANDOUT_ICON_SIZE}
-            color={COLORS.white}
+            size={isPhase2 ? DC_STAR_ICON_SIZE : P1_STAR_ICON_SIZE}
+            color={isPhase2 ? COLORS.white : P1_ICON_STANDOUT}
           />
           {/* Numeric "remaining" badge intentionally hidden in both phases.
               standOutsLeft is still computed and passed to /stand-out via
@@ -4031,7 +4132,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           ]}
           onPress={() => animateSwipeRef.current("right")}
           disabled={!current}
-          feedbackScale={isPhase2 ? DC_PRESS_SCALE : 0.9}
+          feedbackScale={isPhase2 ? DC_PRESS_SCALE : P1_PRESS_SCALE}
           hapticType="medium"
         >
           {/* Phase-2: top white sheen + bottom darkening for orb depth */}
@@ -4045,10 +4146,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               style={styles.deepConnectGlassOverlay}
             />
           )}
+          {/* Phase-1: top sheen → soft warm shade for premium 3-D orb */}
+          {!isPhase2 && (
+            <LinearGradient
+              colors={P1_GLASS_HIGHLIGHT_COLORS}
+              locations={P1_GLASS_HIGHLIGHT_LOCATIONS}
+              start={P1_GLASS_HIGHLIGHT_START}
+              end={P1_GLASS_HIGHLIGHT_END}
+              pointerEvents="none"
+              style={styles.premiumGlassOverlay}
+            />
+          )}
           <Ionicons
             name="heart"
-            size={isPhase2 ? DC_ICON_SIZE : DISCOVER_ACTION_ICON_SIZE}
-            color={COLORS.white}
+            size={isPhase2 ? DC_ICON_SIZE : P1_ICON_SIZE}
+            color={isPhase2 ? COLORS.white : P1_ICON_LIKE}
           />
         </AnimatedActionButton>
       </View>
@@ -4756,54 +4868,70 @@ const styles = StyleSheet.create({
   // PREMIUM ACTION BAR STYLES
   // Floating, semi-transparent, with premium shadows and spacing
   // ══════════════════════════════════════════════════════════════════════════════
-  // FIX 4: Improved button positioning and feel
+  // Phase-1 floating premium action row. The wrapper inherits `styles.actions`
+  // which is already transparent + position:absolute (no slab). cappedScale
+  // diameters keep the row a stable physical size on Samsung 360dp ↔ OnePlus
+  // 411dp ↔ iPhone 390dp. All three buttons share `P1_BUTTON_SHADOW` (warm-
+  // neutral lift) so the row reads as three independent floating orbs, not a
+  // ring of competing coloured halos.
   premiumActions: {
-    gap: SPACING.xxl - SPACING.xs,
-    paddingHorizontal: SPACING.xl,
-    paddingBottom: SPACING.xs,
+    gap: P1_BUTTON_GAP,
+    paddingHorizontal: P1_ROW_PADDING_X,
+    paddingBottom: P1_ROW_PADDING_BOTTOM,
   },
   premiumSkipBtn: {
-    width: DISCOVER_ACTION_BUTTON_SIZE,
-    height: DISCOVER_ACTION_BUTTON_SIZE,
-    borderRadius: DISCOVER_ACTION_BUTTON_SIZE / 2,
-    backgroundColor: "rgba(255,255,255,0.95)",
-    // Softer shadow
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    elevation: 5,
-    borderWidth: 1,
-    borderColor: "rgba(244,67,54,0.12)",
+    width: P1_BUTTON_DIAMETER,
+    height: P1_BUTTON_DIAMETER,
+    borderRadius: P1_BUTTON_DIAMETER / 2,
+    backgroundColor: P1_SURFACE,
+    borderWidth: P1_BORDER_WIDTH,
+    borderColor: P1_BORDER_SKIP,
+    overflow: "hidden",
+    ...P1_BUTTON_SHADOW,
   },
   premiumStandOutBtn: {
-    width: DISCOVER_ACTION_BUTTON_COMPACT_SIZE,
-    height: DISCOVER_ACTION_BUTTON_COMPACT_SIZE,
-    borderRadius: DISCOVER_ACTION_BUTTON_COMPACT_SIZE / 2,
-    backgroundColor: "#2196F3",
+    width: P1_BUTTON_DIAMETER_COMPACT,
+    height: P1_BUTTON_DIAMETER_COMPACT,
+    borderRadius: P1_BUTTON_DIAMETER_COMPACT / 2,
+    backgroundColor: P1_SURFACE_TINT_STANDOUT,
+    borderWidth: P1_BORDER_WIDTH,
+    borderColor: P1_BORDER_STANDOUT,
     position: "relative",
-    // Softer colored shadow
-    shadowColor: "#2196F3",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
+    overflow: "hidden",
+    ...P1_BUTTON_SHADOW,
   },
   premiumLikeBtn: {
-    width: DISCOVER_ACTION_BUTTON_SIZE,
-    height: DISCOVER_ACTION_BUTTON_SIZE,
-    borderRadius: DISCOVER_ACTION_BUTTON_SIZE / 2,
-    backgroundColor: COLORS.primary,
-    // Softer colored shadow
-    shadowColor: COLORS.primary,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
+    width: P1_BUTTON_DIAMETER,
+    height: P1_BUTTON_DIAMETER,
+    borderRadius: P1_BUTTON_DIAMETER / 2,
+    backgroundColor: P1_SURFACE_TINT_LIKE,
+    borderWidth: P1_BORDER_WIDTH,
+    borderColor: P1_BORDER_LIKE,
+    overflow: "hidden",
+    ...P1_BUTTON_SHADOW,
+  },
+  // Phase-1 inner glass-highlight overlays. Borders are clipped by
+  // `overflow:'hidden'` on each button (parent `borderRadius` carries the
+  // circle). Two diameters because Stand Out is the compact size.
+  premiumGlassOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: P1_BUTTON_DIAMETER / 2,
+  },
+  premiumGlassOverlayCompact: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: P1_BUTTON_DIAMETER_COMPACT / 2,
   },
   premiumBtnDisabled: {
-    opacity: 0.35,
-    shadowOpacity: 0.08,
+    opacity: P1_DISABLED_OPACITY,
+    shadowOpacity: P1_DISABLED_SHADOW_OPACITY,
   },
   // ══════════════════════════════════════════════════════════════════════════════
   // PHASE-2 (DEEP CONNECT) ACTION-ROW OVERRIDES

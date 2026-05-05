@@ -75,13 +75,21 @@ import {
   getPhase2PromptSection,
   type Phase2PromptSection,
 } from '@/lib/privateConstants';
-import { MatchSignalBadge } from './MatchSignalBadge';
+// Phase-1 only premium light/shaded theme tokens. Phase-2 surfaces must
+// not import this file.
+import { PHASE1_DISCOVER_THEME } from '@/components/screens/_internal/phase1DiscoverTheme.tokens';
 
 const PHASE1_ACTIVE_CARD_LOOKAHEAD = 2;
 const PHASE2_ACTIVE_CARD_LOOKAHEAD = 4;
 const PHASE2_ACTIVE_CARD_PREVIOUS = 2;
 const PHASE1_PREFETCH_AHEAD = 2;
 const PHASE2_PREFETCH_COUNT = 8;
+
+function getDistanceDebugValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.round(value * 10) / 10
+    : null;
+}
 
 // Gender labels for "Looking for" display
 const GENDER_LABELS: Record<string, string> = {
@@ -396,6 +404,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const phase2DistanceLabel = useMemo(() => {
     return isPhase2 ? formatPhase2DistanceMiles(distance) : null;
   }, [distance, isPhase2]);
+  // Phase-1 Discover: same miles formatter so the public swipe deck and the
+  // Deep Connect deck use identical distance language ("< 1 mi" / "N mi").
+  // Reuses the SAME `distance` prop Phase-1 already had (no Phase-2 backend
+  // coupling) and inherits the formatter's privacy behaviour: when distance
+  // is missing / negative / invalid the formatter returns null and the
+  // metadata row's distance pill renders nothing.
+  const phase1DistanceLabel = useMemo(() => {
+    return !isPhase2 ? formatPhase2DistanceMiles(distance) : null;
+  }, [distance, isPhase2]);
 
   // LOG_NOISE_FIX: Presence logging gated behind DEBUG_CARD_PRESENCE (default: false)
   useEffect(() => {
@@ -480,7 +497,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // ═══════════════════════════════════════════════════════════════════════════
 
   // Display unit types for wave distribution
-  type DisplayUnitType = 'bio' | 'prompt' | 'basics' | 'interests' | 'essentials' | 'relationship';
+  type DisplayUnitType =
+    | 'bio'
+    | 'prompt'
+    | 'basics'
+    | 'interests'
+    | 'essentials'
+    | 'relationship'
+    | 'education'
+    | 'religion';
 
   interface DisplayUnit {
     key: string;
@@ -579,6 +604,24 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
     return items;
   }, [isPhase2, profileHeight, smoking, drinking]);
+
+  // Phase-1: Education (single lifestyle-style item, mirrors Phase-2 pattern)
+  const phase1Education = useMemo(() => {
+    if (isPhase2) return null;
+    if (!education || education === 'prefer_not_to_say') return null;
+    const label =
+      EDUCATION_OPTIONS.find((option) => option.value === education)?.label ?? education;
+    return { icon: 'school-outline', label, key: `edu-${education}` };
+  }, [isPhase2, education]);
+
+  // Phase-1: Religion (single lifestyle-style item, mirrors Phase-2 pattern)
+  const phase1Religion = useMemo(() => {
+    if (isPhase2) return null;
+    if (!religion || religion === 'prefer_not_to_say') return null;
+    const label =
+      RELIGION_OPTIONS.find((option) => option.value === religion)?.label ?? religion;
+    return { icon: 'sparkles-outline', label, key: `rel-${religion}` };
+  }, [isPhase2, religion]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE-1: SHARED INTERESTS (NO comparison text, just matching activities)
@@ -804,7 +847,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       interestChunks.push(allInterestChips.slice(i, i + 3));
     }
 
-    // Unit 1: Bio (priority 1, weight based on length)
+    // Unit 1: Bio (highest priority, weight based on length)
     if (hasBio) {
       const bioWeight = bio!.length > 100 ? 2 : 1;
       units.push({
@@ -816,7 +859,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       });
     }
 
-    // Unit 2: Prompt 1 (priority 2)
+    // Unit 2: Prompt 1
     if (selectedPrompts.length > 0) {
       const promptWeight = selectedPrompts[0].answer.length > 80 ? 2 : 1;
       units.push({
@@ -839,33 +882,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       });
     }
 
-    // Unit 4: Prompt 2 (priority 4)
-    if (selectedPrompts.length > 1) {
-      const promptWeight = selectedPrompts[1].answer.length > 80 ? 2 : 1;
-      units.push({
-        key: 'prompt2',
-        type: 'prompt',
-        priority: priority++,
-        payload: { prompt: selectedPrompts[1] },
-        weight: promptWeight,
-      });
-    }
-
-    // Unit 5: Interests Part 1 (first chunk of 3)
-    if (interestChunks.length > 0) {
-      units.push({
-        key: 'interests_part1',
-        type: 'interests',
-        priority: priority++,
-        payload: { chips: interestChunks[0] },
-        weight: 1,
-      });
-    }
-
-    // Unit 6+: Prompt 3+ omitted — max 2 prompts total (spec)
-
-    // Unit 7: Relationship Intent (priority 7)
-    // Display what user is looking for to help swipe decisions
+    // Unit 4: Relationship Intent — what user is looking for
     if (relationshipIntent && relationshipIntent.length > 0) {
       const intentLabels = relationshipIntent
         .slice(0, 3)
@@ -886,7 +903,52 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       }
     }
 
-    // Unit 8: Interests Part 2 (second chunk of 3, if available)
+    // Unit 5: Interests Part 1 (first chunk of 3)
+    if (interestChunks.length > 0) {
+      units.push({
+        key: 'interests_part1',
+        type: 'interests',
+        priority: priority++,
+        payload: { chips: interestChunks[0] },
+        weight: 1,
+      });
+    }
+
+    // Unit 6: Prompt 2
+    if (selectedPrompts.length > 1) {
+      const promptWeight = selectedPrompts[1].answer.length > 80 ? 2 : 1;
+      units.push({
+        key: 'prompt2',
+        type: 'prompt',
+        priority: priority++,
+        payload: { prompt: selectedPrompts[1] },
+        weight: promptWeight,
+      });
+    }
+
+    // Unit 7: Education (single lifestyle-style item)
+    if (phase1Education) {
+      units.push({
+        key: phase1Education.key,
+        type: 'education',
+        priority: priority++,
+        payload: { item: { icon: phase1Education.icon, label: phase1Education.label } },
+        weight: 1,
+      });
+    }
+
+    // Unit 8: Religion (single lifestyle-style item)
+    if (phase1Religion) {
+      units.push({
+        key: phase1Religion.key,
+        type: 'religion',
+        priority: priority++,
+        payload: { item: { icon: phase1Religion.icon, label: phase1Religion.label } },
+        weight: 1,
+      });
+    }
+
+    // Unit 9: Interests Part 2 (second chunk of 3, if available)
     if (interestChunks.length > 1) {
       units.push({
         key: 'interests_part2',
@@ -896,8 +958,6 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         weight: 1,
       });
     }
-
-    // Unit 9: Prompt 4 omitted — max 2 prompts total (spec)
 
     // Unit 10: Interests Part 3 (third chunk of 3, if available)
     if (interestChunks.length > 2) {
@@ -910,35 +970,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       });
     }
 
-    // Unit 11: Prompt 5 omitted — max 2 prompts total (spec)
+    // Note: max 2 prompts total per spec.
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STRICT UNIQUE-CONTENT PLANNER: NO cycling, NO repetition
-    // Each unit used AT MOST ONCE. Later photos fall back to identity-only.
-    // CORE RULE: Never repeat bio, prompts, interests, lifestyle, etc.
+    // STRICT UNIQUE-CONTENT TRACKING: each unit used AT MOST ONCE.
+    // The smart linear planner below selects units one slide at a time and
+    // marks them via `usedUnitKeys` so no semantic data point repeats.
     // ═══════════════════════════════════════════════════════════════════════
     const usedUnitKeys = new Set<string>();
-
-    // Helper: Get next N unused units (STRICT - NO cycling)
-    // When unique content exhausts, returns empty array (identity-only fallback)
-    const getNextUnits = (count: number): DisplayUnit[] => {
-      const result: DisplayUnit[] = [];
-      let totalWeight = 0;
-
-      for (const unit of units) {
-        if (usedUnitKeys.has(unit.key)) continue;
-        if (result.length >= count) break;
-        // Don't exceed weight of 3 per photo
-        if (totalWeight + unit.weight > 3 && result.length > 0) break;
-        result.push(unit);
-        totalWeight += unit.weight;
-        usedUnitKeys.add(unit.key);
-      }
-
-      // NO CYCLING - return only unique content
-      // Empty result means this photo will show identity-only
-      return result;
-    };
 
     // Helper: Create empty content item
     const createEmptyContent = (): Phase1PhotoContentItem => ({
@@ -951,7 +990,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       waveDensity: 'low',
     });
 
-    // Helper: Apply units to content item
+    // Helper: Apply units to content item (additive — never overwrites)
     const applyUnitsToContent = (content: Phase1PhotoContentItem, unitsToApply: DisplayUnit[]) => {
       for (const unit of unitsToApply) {
         switch (unit.type) {
@@ -962,315 +1001,128 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             content.prompts.push(unit.payload.prompt);
             break;
           case 'basics':
-            content.lifestyle = unit.payload.items;
+            content.lifestyle = [...content.lifestyle, ...unit.payload.items];
             break;
           case 'interests':
-            content.interests = unit.payload.chips;
+            content.interests = [...content.interests, ...unit.payload.chips];
             break;
           case 'relationship':
-            // Relationship intent displayed as interest-style chips
-            // Merge with existing interests if any
+            // Relationship intent displayed as interest-style chips, additive
             content.interests = [...content.interests, ...unit.payload.chips];
             break;
           case 'essentials':
-            // Essentials displayed as lifestyle-style items
+            // Essentials displayed as lifestyle-style items, additive
             content.lifestyle = [...content.lifestyle, ...unit.payload.items];
+            break;
+          case 'education':
+          case 'religion':
+            // Single lifestyle-style item, additive
+            content.lifestyle = [...content.lifestyle, unit.payload.item];
             break;
         }
       }
-      content.waveUnits = unitsToApply;
+      content.waveUnits = [...content.waveUnits, ...unitsToApply];
     };
 
     // ═══════════════════════════════════════════════════════════════════════
-    // SOFT FALLBACK: one variant per late slide (no duplicate interests/intent/bio across photos)
-    // Prompts excluded here (wave handles prompts; max 2 total)
+    // SMART LINEAR PLANNER (Batch Q):
+    //   - Photo 1: identity-only (clean visual first impression).
+    //   - Photo 2: prefers bio if available, else next-best primary alone.
+    //   - Photo 3+: next-best primary; if not bio, optionally pair with one
+    //     small secondary (basics / relationship / education / religion).
+    //   - Each unit appears at most once across the full slide stack.
+    //   - new_here only when there is truly no displayable content.
+    //   - cta appears at most once after content is exhausted.
+    //   - Remaining empty photos fall back to identity (no repeat noise).
     // ═══════════════════════════════════════════════════════════════════════
-    const usedSoftFallbackKinds = new Set<string>();
-    const nextSoftFallback = (): Phase1PhotoContentItem['softFallback'] | undefined => {
-      if (activities && activities.length > 0 && !usedSoftFallbackKinds.has('interests')) {
-        usedSoftFallbackKinds.add('interests');
-        const topChips = activities.slice(0, 3).map(key => {
-          const activity = ACTIVITY_FILTERS.find(a => a.value === key);
-          return activity ? { emoji: activity.emoji, label: activity.label } : null;
-        }).filter(Boolean) as { emoji: string; label: string }[];
-        if (topChips.length > 0) {
-          return { type: 'interests', interestChips: topChips };
+    const hasAnyDisplayableContent = units.length > 0;
+    const SMALL_SECONDARY_TYPES = new Set<DisplayUnitType>([
+      'basics',
+      'relationship',
+      'education',
+      'religion',
+    ]);
+
+    let ctaUsed = false;
+    let newHereUsed = false;
+
+    // Helper: pick the next available unit, optionally preferring a key.
+    const pickNext = (preferKey?: string): DisplayUnit | undefined => {
+      if (preferKey) {
+        const preferred = units.find(
+          (u) => u.key === preferKey && !usedUnitKeys.has(u.key)
+        );
+        if (preferred) {
+          usedUnitKeys.add(preferred.key);
+          return preferred;
         }
       }
-
-      if (relationshipIntent && relationshipIntent.length > 0 && !usedSoftFallbackKinds.has('intent')) {
-        usedSoftFallbackKinds.add('intent');
-        const intentMap: Record<string, string> = {
-          serious_vibes: 'Looking for something real',
-          keep_it_casual: 'Keeping it casual',
-          exploring_vibes: 'Exploring connections',
-          see_where_it_goes: 'See where it goes',
-          open_to_vibes: 'Open to anything',
-          just_friends: 'Looking for friends',
-          open_to_anything: 'Open to all vibes',
-          single_parent: 'Single parent life',
-          new_to_dating: 'New to dating',
-        };
-        const intentLine = intentMap[relationshipIntent[0]] || null;
-        if (intentLine) {
-          return { type: 'intent', intentLine };
-        }
-      }
-
-      if (hasBio && bio && !usedSoftFallbackKinds.has('bio')) {
-        usedSoftFallbackKinds.add('bio');
-        const firstLine = bio.split(/[.\n]/)[0].trim();
-        const snippet = firstLine.length > 50 ? firstLine.slice(0, 47) + '...' : firstLine;
-        if (snippet.length > 10) {
-          return { type: 'bio', bioSnippet: snippet };
-        }
-      }
-
-      if (!usedSoftFallbackKinds.has('new_here')) {
-        usedSoftFallbackKinds.add('new_here');
-        return { type: 'new_here' };
-      }
-
-      return { type: 'cta' };
+      const next = units.find((u) => !usedUnitKeys.has(u.key));
+      if (next) usedUnitKeys.add(next.key);
+      return next;
     };
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // DISTRIBUTION RULES BY PHOTO COUNT
-    // ═══════════════════════════════════════════════════════════════════════
+    // Helper: pick a small secondary (basics/relationship/education/religion)
+    // that isn't the same type as the primary.
+    const pickSmallSecondary = (
+      primaryType: DisplayUnitType
+    ): DisplayUnit | undefined => {
+      const next = units.find(
+        (u) =>
+          !usedUnitKeys.has(u.key) &&
+          SMALL_SECONDARY_TYPES.has(u.type) &&
+          u.type !== primaryType
+      );
+      if (next) usedUnitKeys.add(next.key);
+      return next;
+    };
 
-    if (totalPhotos === 1) {
-      // Single slide = Photo 1 spec: identity overlay only (name/age/gender/presence/distance in chrome)
+    // Photo 1: Identity ONLY (clean visual first impression)
+    {
+      const p1 = createEmptyContent();
+      p1.slotType = 'identity';
+      p1.waveDensity = 'low';
+      contents.push(p1);
+    }
+
+    // Photos 2..N: smart linear fill
+    for (let i = 1; i < totalPhotos; i++) {
       const content = createEmptyContent();
-      content.slotType = 'identity';
-      content.waveDensity = 'low';
+
+      // Photo 2 prefers bio (when available); later photos take next-best.
+      const primary = i === 1 ? pickNext('bio') : pickNext();
+
+      if (primary) {
+        const applied: DisplayUnit[] = [primary];
+        // Don't pair anything with bio (Photo 2 stays a clean bio slide).
+        // For later photos with non-bio primary, optionally add one small
+        // secondary so dense profiles don't waste real estate.
+        if (i >= 2 && primary.type !== 'bio') {
+          const secondary = pickSmallSecondary(primary.type);
+          if (secondary) applied.push(secondary);
+        }
+        applyUnitsToContent(content, applied);
+        content.slotType = 'wave_content';
+        content.waveDensity = applied.length >= 2 ? 'medium' : 'low';
+      } else if (!hasAnyDisplayableContent && !newHereUsed) {
+        // Truly empty profile — surface the new_here nudge once.
+        content.slotType = 'soft_fallback';
+        content.softFallback = { type: 'new_here' };
+        content.waveDensity = 'low';
+        newHereUsed = true;
+      } else if (!ctaUsed) {
+        // Content exhausted — show the CTA once.
+        content.slotType = 'soft_fallback';
+        content.softFallback = { type: 'cta' };
+        content.waveDensity = 'low';
+        ctaUsed = true;
+      } else {
+        // Already showed CTA — fall back to identity to avoid repetition.
+        content.slotType = 'identity';
+        content.waveDensity = 'low';
+      }
+
       contents.push(content);
-
-    } else if (totalPhotos === 2) {
-      // ─────────────────────────────────────────────────────────────────────
-      // 2 PHOTOS: P1 = identity only, P2 = bio + prompt/basics
-      // UX FIX: Clean first impression - no text overload on Photo 1
-      // ─────────────────────────────────────────────────────────────────────
-      // Photo 1: Identity ONLY (clean visual first impression)
-      const p1 = createEmptyContent();
-      p1.slotType = 'identity';
-      p1.waveDensity = 'low';
-      contents.push(p1);
-
-      // Photo 2: Bio + remaining units (prompt + basics) - with soft fallback for sparse profiles
-      const p2 = createEmptyContent();
-      if (hasBio) {
-        const bioUnit = units.find(u => u.key === 'bio');
-        if (bioUnit) {
-          p2.bio = bioUnit.payload.text;
-          p2.waveUnits = [bioUnit];
-          usedUnitKeys.add('bio');
-        }
-      }
-      const p2Units = getNextUnits(2);
-      applyUnitsToContent(p2, p2Units);
-
-      if (hasBio || p2Units.length > 0) {
-        p2.slotType = 'wave_content';
-        p2.waveDensity = (hasBio || p2Units.length >= 2) ? 'medium' : 'low';
-      } else {
-        p2.slotType = 'soft_fallback';
-        p2.softFallback = nextSoftFallback();
-        p2.waveDensity = 'low';
-      }
-      contents.push(p2);
-
-    } else if (totalPhotos === 3) {
-      // ─────────────────────────────────────────────────────────────────────
-      // 3 PHOTOS: P1 = identity only, P2 = bio + prompt, P3 = remaining
-      // UX FIX: Clean first impression - no text overload on Photo 1
-      // ─────────────────────────────────────────────────────────────────────
-      // Photo 1: Identity ONLY (clean visual first impression)
-      const p1 = createEmptyContent();
-      p1.slotType = 'identity';
-      p1.waveDensity = 'low';
-      contents.push(p1);
-
-      // Photo 2: Bio + prompt/basics - with soft fallback for sparse profiles
-      const p2 = createEmptyContent();
-      if (hasBio) {
-        const bioUnit = units.find(u => u.key === 'bio');
-        if (bioUnit) {
-          p2.bio = bioUnit.payload.text;
-          p2.waveUnits = [bioUnit];
-          usedUnitKeys.add('bio');
-        }
-      }
-      const p2Units = getNextUnits(2);
-      applyUnitsToContent(p2, p2Units);
-
-      if (hasBio || p2Units.length > 0) {
-        p2.slotType = 'wave_content';
-        p2.waveDensity = 'medium';
-      } else {
-        p2.slotType = 'soft_fallback';
-        p2.softFallback = nextSoftFallback();
-        p2.waveDensity = 'low';
-      }
-      contents.push(p2);
-
-      // Photo 3: MEDIUM (remaining content) - with soft fallback
-      const p3 = createEmptyContent();
-      const p3Units = getNextUnits(2);
-      applyUnitsToContent(p3, p3Units);
-      if (p3Units.length > 0) {
-        p3.slotType = 'wave_content';
-        p3.waveDensity = 'medium';
-      } else {
-        p3.slotType = 'soft_fallback';
-        p3.softFallback = nextSoftFallback();
-        p3.waveDensity = 'low';
-      }
-      contents.push(p3);
-
-    } else if (totalPhotos === 4) {
-      // ─────────────────────────────────────────────────────────────────────
-      // 4 PHOTOS: P1 = identity only, P2 = bio, P3 = MEDIUM, P4 = MEDIUM
-      // UX FIX: Clean first impression - no text overload on Photo 1
-      // ─────────────────────────────────────────────────────────────────────
-      // Photo 1: Identity ONLY (clean visual first impression)
-      const p1 = createEmptyContent();
-      p1.slotType = 'identity';
-      p1.waveDensity = 'low';
-      contents.push(p1);
-
-      // Photo 2: Bio + some content
-      const p2 = createEmptyContent();
-      if (hasBio) {
-        const bioUnit = units.find(u => u.key === 'bio');
-        if (bioUnit) {
-          p2.bio = bioUnit.payload.text;
-          p2.waveUnits = [bioUnit];
-          usedUnitKeys.add('bio');
-        }
-      }
-      const p2Units = getNextUnits(1); // Get 1 unit to pair with bio
-      applyUnitsToContent(p2, p2Units);
-
-      if (hasBio || p2Units.length > 0) {
-        p2.slotType = 'wave_content';
-        p2.waveDensity = 'medium';
-      } else {
-        p2.slotType = 'soft_fallback';
-        p2.softFallback = nextSoftFallback();
-        p2.waveDensity = 'low';
-      }
-      contents.push(p2);
-
-      // Photos 3-4: Distribute remaining units evenly - with soft fallback
-      for (let i = 2; i < 4; i++) {
-        const content = createEmptyContent();
-        const photoUnits = getNextUnits(2);
-        applyUnitsToContent(content, photoUnits);
-
-        if (photoUnits.length > 0) {
-          content.slotType = 'wave_content';
-          content.waveDensity = 'medium';
-        } else {
-          content.slotType = 'soft_fallback';
-          content.softFallback = nextSoftFallback();
-          content.waveDensity = 'low';
-        }
-        contents.push(content);
-      }
-
-    } else {
-      // ─────────────────────────────────────────────────────────────────────
-      // 5+ PHOTOS: STRICT LOCKED DISTRIBUTION ORDER
-      // Photo 1: identity only (NO bio, NO prompt)
-      // Photo 2: bio only
-      // Photo 3: prompt1 + basics_compact
-      // Photo 4: prompt2 + interests
-      // Photo 5: remaining content (prompt3, etc.)
-      // Photo 6+: continue with remaining unique content
-      // ─────────────────────────────────────────────────────────────────────
-
-      // Helper: Get specific unit by key
-      const getUnitByKey = (key: string): DisplayUnit | undefined => {
-        const unit = units.find(u => u.key === key && !usedUnitKeys.has(u.key));
-        if (unit) usedUnitKeys.add(unit.key);
-        return unit;
-      };
-
-      // Photo 1: Identity only (NO bio, NO prompt)
-      const p1 = createEmptyContent();
-      p1.slotType = 'identity';
-      p1.waveDensity = 'low';
-      contents.push(p1);
-
-      // Photo 2: Bio only
-      const p2 = createEmptyContent();
-      const bioUnit = getUnitByKey('bio');
-      if (bioUnit) {
-        p2.bio = bioUnit.payload.text;
-        p2.waveUnits = [bioUnit];
-        p2.slotType = 'wave_content';
-        p2.waveDensity = 'medium';
-      } else {
-        p2.slotType = 'identity';
-        p2.waveDensity = 'low';
-      }
-      contents.push(p2);
-
-      // Photo 3: prompt1 + basics_compact
-      const p3 = createEmptyContent();
-      const p3Units: DisplayUnit[] = [];
-      const prompt1Unit = getUnitByKey('prompt1');
-      if (prompt1Unit) {
-        p3.prompts.push(prompt1Unit.payload.prompt);
-        p3Units.push(prompt1Unit);
-      }
-      const basicsUnit = getUnitByKey('basics_compact');
-      if (basicsUnit) {
-        p3.lifestyle = basicsUnit.payload.items;
-        p3Units.push(basicsUnit);
-      }
-      p3.waveUnits = p3Units;
-      p3.slotType = p3Units.length > 0 ? 'wave_content' : 'identity';
-      p3.waveDensity = p3Units.length >= 2 ? 'high' : (p3Units.length > 0 ? 'medium' : 'low');
-      contents.push(p3);
-
-      // Photo 4: prompt2 + interests_part1
-      const p4 = createEmptyContent();
-      const p4Units: DisplayUnit[] = [];
-      const prompt2Unit = getUnitByKey('prompt2');
-      if (prompt2Unit) {
-        p4.prompts.push(prompt2Unit.payload.prompt);
-        p4Units.push(prompt2Unit);
-      }
-      const interestsUnit = getUnitByKey('interests_part1');
-      if (interestsUnit) {
-        p4.interests = interestsUnit.payload.chips;
-        p4Units.push(interestsUnit);
-      }
-      p4.waveUnits = p4Units;
-      p4.slotType = p4Units.length > 0 ? 'wave_content' : 'identity';
-      p4.waveDensity = p4Units.length >= 2 ? 'high' : (p4Units.length > 0 ? 'medium' : 'low');
-      contents.push(p4);
-
-      // Photo 5+: Remaining unique units (no extra prompts beyond prompt1/prompt2) + soft fallbacks
-      // REDESIGN: Use soft fallback for late photos when unique content exhausts
-      for (let i = 4; i < totalPhotos; i++) {
-        const content = createEmptyContent();
-        const photoUnits = getNextUnits(2); // Get up to 2 remaining units
-        applyUnitsToContent(content, photoUnits);
-        content.waveUnits = photoUnits;
-
-        if (photoUnits.length > 0) {
-          // Has unique content - show it
-          content.slotType = 'wave_content';
-          content.waveDensity = photoUnits.length >= 2 ? 'medium' : 'low';
-        } else {
-          content.slotType = 'soft_fallback';
-          content.softFallback = nextSoftFallback();
-          content.waveDensity = 'low';
-        }
-        contents.push(content);
-      }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1286,7 +1138,18 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     }
 
     return contents;
-  }, [isPhase2, photos?.length, bio, selectedPrompts, phase1Lifestyle, activities, name, relationshipIntent]);
+  }, [
+    isPhase2,
+    photos?.length,
+    bio,
+    selectedPrompts,
+    phase1Lifestyle,
+    activities,
+    name,
+    relationshipIntent,
+    phase1Education,
+    phase1Religion,
+  ]);
 
   // NOTE: currentPhotoContent is computed after photoIndex state declaration (see below)
 
@@ -1434,6 +1297,41 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       renderCount: displayPhotos.length,
     });
   }
+
+  const phase1MetadataRowShouldRender =
+    !isPhase2 &&
+    photoIndex === 0 &&
+    Boolean(isActiveNow || isActiveToday || phase1DistanceLabel);
+  const phase1DistancePillShouldRender =
+    !isPhase2 && photoIndex === 0 && Boolean(phase1DistanceLabel);
+  const lastPhase1DistanceDebugRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!__DEV__ || isPhase2) return;
+
+    const hasRawDistance = typeof distance === 'number' && Number.isFinite(distance);
+    const payload = {
+      userId: profileId,
+      photoIndex,
+      hasRawDistance,
+      rawDistanceValue: getDistanceDebugValue(distance),
+      phase1DistanceLabel,
+      metadataRowShouldRender: phase1MetadataRowShouldRender,
+      distancePillShouldRender: phase1DistancePillShouldRender,
+    };
+    const debugKey = JSON.stringify(payload);
+    if (lastPhase1DistanceDebugRef.current === debugKey) return;
+    lastPhase1DistanceDebugRef.current = debugKey;
+    console.log('[P1_DISTANCE_DEBUG][card]', payload);
+  }, [
+    distance,
+    isPhase2,
+    phase1DistanceLabel,
+    phase1DistancePillShouldRender,
+    phase1MetadataRowShouldRender,
+    photoIndex,
+    profileId,
+  ]);
 
   // Get content for current photo (consumption-based, no repetition)
   // Note: phase1PhotoContents handles all slot distribution - no separate phase1ContentSlot needed
@@ -2084,7 +1982,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         )}
 
         {/* Premium gradient overlay - top (elegant, subtle vignette).
-            Phase-2 (Deep Connect): lighter + shorter so the photo top stays clean. */}
+            Phase-2 (Deep Connect): lighter + shorter so the photo top stays clean.
+            Phase-1 (Batch C polish): softened to read closer to Phase-2. The
+            top vignette is a quiet horizon shade, not a heavy block — earlier
+            Phase-1 values (0.45 / 0.25) made the top of every photo feel
+            "ceilinged", and the height is reduced from 120 → 80 in styles
+            below so the gradient no longer runs into the face area. */}
         <LinearGradient
           colors={
             isPhase2
@@ -2092,8 +1995,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                   ? ['rgba(0,0,0,0.30)', 'rgba(0,0,0,0.06)', 'transparent']
                   : ['rgba(0,0,0,0.18)', 'rgba(0,0,0,0.04)', 'transparent'])
               : (dark
-                  ? ['rgba(0,0,0,0.45)', 'rgba(0,0,0,0.15)', 'transparent']
-                  : ['rgba(0,0,0,0.25)', 'rgba(0,0,0,0.08)', 'transparent'])
+                  ? ['rgba(0,0,0,0.35)', 'rgba(0,0,0,0.10)', 'transparent']
+                  : ['rgba(0,0,0,0.18)', 'rgba(0,0,0,0.05)', 'transparent'])
           }
           locations={[0, 0.5, 1]}
           style={[styles.topGradient, isPhase2 && styles.topGradientPhase2]}
@@ -2102,7 +2005,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
         {/* Premium gradient overlay - bottom (smooth, cinematic fade for immersive feel).
             Phase-2 (Deep Connect): shorter + softer so the photo dominates and the dark
-            zone only sits behind the lower info area, not across the middle of the photo. */}
+            zone only sits behind the lower info area, not across the middle of the photo.
+            Phase-1 (post-QA tune): the previous refine pushed the curve too late
+            and the cocoa hue (lighter than pure black at any given alpha) made
+            the lower info band lose readable support. This pass keeps the
+            late-starting Phase-2-style curve but bumps the mid/bottom stops
+            and pulls the anchor slightly earlier — moderate shading that
+            still photo-prioritizes but reliably anchors the metadata + miles
+            pill + wave-content text near the bottom. Hue stays warm cocoa so
+            Phase-1's identity does not collapse into Phase-2 dark glass. */}
         <LinearGradient
           colors={
             isPhase2
@@ -2110,13 +2021,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                   ? ['transparent', 'rgba(0,0,0,0.20)', 'rgba(0,0,0,0.55)', 'rgba(0,0,0,0.80)']
                   : ['transparent', 'rgba(0,0,0,0.12)', 'rgba(0,0,0,0.45)', 'rgba(0,0,0,0.70)'])
               : (dark
-                  ? ['transparent', 'rgba(0,0,0,0.15)', 'rgba(0,0,0,0.5)', 'rgba(0,0,0,0.85)', 'rgba(0,0,0,0.95)']
-                  : ['transparent', 'rgba(0,0,0,0.08)', 'rgba(0,0,0,0.35)', 'rgba(0,0,0,0.65)', 'rgba(0,0,0,0.85)'])
+                  ? ['transparent', 'rgba(27,14,4,0.20)', 'rgba(27,14,4,0.60)', 'rgba(27,14,4,0.85)']
+                  : ['transparent', 'rgba(27,14,4,0.18)', 'rgba(27,14,4,0.58)', 'rgba(27,14,4,0.82)'])
           }
           locations={
             isPhase2
               ? [0, 0.45, 0.80, 1]
-              : (dark ? [0, 0.15, 0.4, 0.7, 1] : [0, 0.12, 0.35, 0.6, 1])
+              : [0, 0.40, 0.75, 1]
           }
           style={[styles.bottomGradient, isPhase2 && styles.bottomGradientPhase2]}
           pointerEvents="none"
@@ -2193,19 +2104,6 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </View>
         )}
 
-        {/* Arrow button to open full profile (Phase-1 only).
-            Phase-2 (Deep Connect) renders the arrow inline with the name row
-            inside the identity layer below, so this absolute-positioned
-            variant is suppressed to avoid a duplicate. */}
-        {showCarousel && onOpenProfile && !isPhase2 && (
-          <TouchableOpacity
-            style={[styles.arrowBtn, dark && styles.arrowBtnDark, { bottom: arrowButtonBottom }]}
-            onPress={onOpenProfile}
-            activeOpacity={0.7}
-          >
-            <Ionicons name="chevron-up" size={22} color={COLORS.white} />
-          </TouchableOpacity>
-        )}
       </View>
       </GestureDetector>
 
@@ -2217,6 +2115,27 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           colors={['transparent', 'rgba(0,0,0,0.40)', 'rgba(0,0,0,0.68)']}
           locations={[0, 0.55, 1]}
           style={styles.phase2Scrim}
+          pointerEvents="none"
+        />
+      )}
+      {/* Phase-1 Batch D shading-refine: localized warm-cocoa scrim behind
+          the lower information area. Previously rendered as a solid View
+          (rgba(27,14,4,0.28) over height 32%), which produced a faint but
+          visible HARD edge at the top of the scrim where the constant tint
+          met the un-tinted photo above. The audit called this out as the
+          fade "starting too high". Switched to a LinearGradient that
+          mirrors the structural role of `phase2Scrim`: transparent at the
+          top, growing to warm cocoa at the bottom, height shrunk
+          32% → 28% to match Phase-2 spatial behavior. The result is a
+          smooth, edgeless fade — the photo stays clean above the name
+          row and the cocoa wash only emerges where it's actually needed
+          for glyph readability. Hue stays Phase-1 (rgb(27,14,4)) so the
+          identity stays warm/light, not Phase-2 dark glass. */}
+      {!isPhase2 && (
+        <LinearGradient
+          colors={['transparent', 'rgba(27,14,4,0.32)', 'rgba(27,14,4,0.62)']}
+          locations={[0, 0.50, 1]}
+          style={styles.phase1Scrim}
           pointerEvents="none"
         />
       )}
@@ -2529,17 +2448,10 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           )}
         </View>
       ) : (
-        /* PHASE-1: PREMIUM PROGRESSIVE REVEAL OVERLAY */
-        <View style={[styles.overlay, styles.phase1PremiumOverlay]} pointerEvents="none">
-          {/* P1A: Match Signal Badge - Top-right hook on Photo 1 */}
-          {/* GROWTH: Now shows "Why You're Seeing This" with match reasons */}
-          <MatchSignalBadge
-            commonCount={matchSignalCount}
-            sameRelationshipIntent={hasSameRelationshipIntent}
-            visible={photoIndex > 0 && !isPhase2}
-            matchScore={matchScore}
-          />
-
+        /* PHASE-1: PREMIUM PROGRESSIVE REVEAL OVERLAY
+           box-none lets the inline open-profile chevron in the name row
+           receive taps while text/badge children remain non-interactive. */
+        <View style={[styles.overlay, styles.phase1PremiumOverlay]} pointerEvents="box-none">
           {/* ═══════════════════════════════════════════════════════════════════════════
               IDENTITY LAYER - Split into two parts:
               A) Persistent (ALL photos): name + age + gender icon
@@ -2557,73 +2469,104 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 LAYER A: IDENTITY ROW (Name + Age + Verified Tick + Presence)
                 REQUIREMENT: Visible on ALL photos for consistent identity
                 ───────────────────────────────────────────────────────────────────────── */}
-            <View style={styles.phase1NameRow}>
-              {/* ANON-LOADING-FIX: empty displayName means "not yet known" —
-                  show a skeleton bar instead of the literal word "Anonymous". */}
-              {displayName ? (
-                <Text style={styles.phase1Name} numberOfLines={1}>
-                  {displayName}
-                </Text>
-              ) : (
-                <View
-                  style={{
-                    width: 120,
-                    height: 18,
-                    borderRadius: 4,
-                    backgroundColor: TC.border,
-                  }}
-                />
-              )}
-              {ageLabel && <Text style={styles.phase1Age}>{ageLabel}</Text>}
-              {gender && GENDER_ICONS[gender] && (
-                <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}26` }]}>
-                  <Ionicons
-                    name={GENDER_ICONS[gender].icon as any}
-                    size={12}
-                    color={GENDER_ICONS[gender].color}
+            <View style={styles.phase1NameRow} pointerEvents="box-none">
+              {/* Left group: name + age + gender + verified + pills.
+                  Mirrors Phase-2 identity-row pattern. flexWrap on the
+                  inner group preserves the existing pill-wrap behavior. */}
+              <View style={styles.phase1NameRowLeft} pointerEvents="none">
+                {/* ANON-LOADING-FIX: empty displayName means "not yet known" —
+                    show a skeleton bar instead of the literal word "Anonymous". */}
+                {displayName ? (
+                  <Text style={styles.phase1Name} numberOfLines={1}>
+                    {displayName}
+                  </Text>
+                ) : (
+                  <View
+                    style={{
+                      width: 120,
+                      height: 18,
+                      borderRadius: 4,
+                      backgroundColor: TC.border,
+                    }}
                   />
-                </View>
-              )}
-              {/* Verified tick: shown on ALL photos (including Photo 1) next to name/age.
-                  Product rule: small verified check beside identity, never a separate "Face Verified" badge. */}
-              {isVerified && (
-                <View style={styles.phase1VerifiedTick}>
-                  <Ionicons name="checkmark-circle" size={18} color="#10B981" />
-                </View>
-              )}
-              {/* Presence indicator - only when online or active today */}
-              {isActiveNow && (
-                <View style={styles.phase1PresencePill}>
-                  <View style={styles.phase1PresenceDotInline} />
-                  <Text style={styles.phase1PresenceText}>Online Now</Text>
-                </View>
-              )}
-              {isActiveToday && !isActiveNow && (
-                <View style={styles.phase1PresencePillMuted}>
-                  <Text style={styles.phase1PresenceTextMuted}>Active Today</Text>
-                </View>
-              )}
-              {matchScore && matchScore >= 60 && photoIndex > 0 && (
-                <View style={styles.matchScorePill}>
-                  <Ionicons name="heart" size={10} color="#EC4899" />
-                  <Text style={styles.matchScoreText}>{matchScore}%</Text>
-                </View>
-              )}
-              {theyLikedMe && photoIndex > 0 && (
-                <View style={styles.theyLikedYouPill}>
-                  <Ionicons name="heart" size={11} color="#FFFFFF" />
-                  <Text style={styles.theyLikedYouText}>Likes You</Text>
-                </View>
+                )}
+                {ageLabel && <Text style={styles.phase1Age}>{ageLabel}</Text>}
+                {gender && GENDER_ICONS[gender] && (
+                  <View style={[styles.phase1GenderIcon, { backgroundColor: `${GENDER_ICONS[gender].color}26` }]}>
+                    <Ionicons
+                      name={GENDER_ICONS[gender].icon as any}
+                      size={12}
+                      color={GENDER_ICONS[gender].color}
+                    />
+                  </View>
+                )}
+                {/* Verified tick: shown on ALL photos (including Photo 1) next to name/age.
+                    Product rule: small verified check beside identity, never a separate "Face Verified" badge. */}
+                {isVerified && (
+                  <View style={styles.phase1VerifiedTick}>
+                    <Ionicons name="checkmark-circle" size={18} color="#10B981" />
+                  </View>
+                )}
+                {matchScore && matchScore >= 60 && photoIndex > 0 && (
+                  <View style={styles.matchScorePill}>
+                    <Ionicons name="heart" size={10} color="#EC4899" />
+                    <Text style={styles.matchScoreText}>{matchScore}%</Text>
+                  </View>
+                )}
+                {theyLikedMe && photoIndex > 0 && (
+                  <View style={styles.theyLikedYouPill}>
+                    <Ionicons name="heart" size={11} color="#FFFFFF" />
+                    <Text style={styles.theyLikedYouText}>Likes You</Text>
+                  </View>
+                )}
+              </View>
+              {/* Open-profile chevron: aligned with the name row on the
+                  right edge (mirrors Phase-2). hitSlop expands the touch
+                  target while keeping the visible button compact (36x36). */}
+              {showCarousel && onOpenProfile && (
+                <TouchableOpacity
+                  style={styles.phase1ArrowBtn}
+                  onPress={onOpenProfile}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  accessibilityLabel="Open full profile"
+                >
+                  <Ionicons name="chevron-up" size={20} color={COLORS.white} />
+                </TouchableOpacity>
               )}
             </View>
 
-            {/* Distance row - visible on FIRST photo only (no repetition) */}
-            {!isPhase2 && photoIndex === 0 && distance !== undefined && distance >= 0 && (
-              <View style={styles.phase1DistanceRowPersistent}>
-                <Ionicons name="location-outline" size={13} color="rgba(255,255,255,0.75)" />
-                <Text style={styles.phase1DistanceTextPersistent}>
-                  {distance < 1 ? '< 1 km away' : `${distance.toFixed(0)} km away`}
-                </Text>
+            {/* ─────────────────────────────────────────────────────────────────────────
+                LAYER A.1: Phase-1 metadata row (Photo 1 only)
+                Mirrors Phase-2 phase2MetadataRow structure: a single compact row
+                directly below the name row that carries:
+                  - left: status badge (Online / Recently active), if present
+                  - right: distance pill in miles, if present
+                Gated on photoIndex === 0 so it does not repeat on every photo.
+                Renders nothing if neither status nor distance is available so we
+                don't leave an empty row eating vertical space.
+                Privacy: distance is null whenever backend hides/omits it (the
+                pure `formatPhase2DistanceMiles` returns null) — no pill renders.
+                ───────────────────────────────────────────────────────────────────────── */}
+            {phase1MetadataRowShouldRender && (
+              <View style={styles.phase1MetadataRow} pointerEvents="none">
+                <View style={styles.phase1MetadataLeft}>
+                  {isActiveNow ? (
+                    <View style={styles.phase1StatusBadge}>
+                      <View style={styles.phase1StatusDot} />
+                      <Text style={styles.phase1StatusText}>Online</Text>
+                    </View>
+                  ) : isActiveToday ? (
+                    <View style={styles.phase1StatusBadge}>
+                      <Text style={styles.phase1StatusText}>Recently active</Text>
+                    </View>
+                  ) : null}
+                </View>
+                {phase1DistanceLabel && (
+                  <View style={styles.phase1DistancePill}>
+                    <Text style={styles.phase1DistanceText}>{phase1DistanceLabel}</Text>
+                  </View>
+                )}
               </View>
             )}
 
@@ -2719,9 +2662,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                   { marginTop: (currentPhotoContent.bio || currentPhotoContent.prompts.length > 0) ? 12 : 0 }
                 ]}>
                   {currentPhotoContent.lifestyle.map((item) => (
-                    <View key={item.key} style={styles.phase1LifestyleChip}>
-                      <Ionicons name={item.icon as any} size={14} color="rgba(255,255,255,0.8)" />
-                      <Text style={styles.phase1LifestyleChipText}>{item.label}</Text>
+                    // Batch D: lifestyle items now use the Phase-1 unified chip
+                    // (same geometry as interests / soft-fallback / Phase-2 chips).
+                    // Ionicon shrinks 14 → 11 to sit on the chip's 11px text baseline.
+                    <View key={item.key} style={styles.phase1ChipUnified}>
+                      <Ionicons name={item.icon as any} size={11} color="rgba(255,255,255,0.85)" />
+                      <Text style={styles.phase1ChipUnifiedText}>{item.label}</Text>
                     </View>
                   ))}
                 </View>
@@ -2734,8 +2680,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                   { marginTop: (currentPhotoContent.bio || currentPhotoContent.prompts.length > 0 || currentPhotoContent.lifestyle.length > 0) ? 10 : 0 }
                 ]}>
                   {currentPhotoContent.interests.map((item) => (
-                    <View key={item.key} style={styles.phase1InterestChip}>
-                      <Text style={styles.phase1InterestText}>{item.emoji} {item.label}</Text>
+                    // Batch D: interests now use the Phase-1 unified chip.
+                    // Emoji + label live in a single Text so the chip width
+                    // tracks the natural label length (no extra icon node).
+                    <View key={item.key} style={styles.phase1ChipUnified}>
+                      <Text style={styles.phase1ChipUnifiedText}>{item.emoji} {item.label}</Text>
                     </View>
                   ))}
                 </View>
@@ -2779,8 +2728,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               {currentPhotoContent.softFallback.type === 'interests' && currentPhotoContent.softFallback.interestChips && (
                 <View style={styles.phase1SoftFallbackChipsRow}>
                   {currentPhotoContent.softFallback.interestChips.map((chip, idx) => (
-                    <View key={`soft-interest-${idx}`} style={styles.phase1SoftFallbackChip}>
-                      <Text style={styles.phase1SoftFallbackChipText}>{chip.emoji} {chip.label}</Text>
+                    // Batch D: soft-fallback interest chips collapse onto the
+                    // Phase-1 unified chip so the recap row does not visually
+                    // diverge from the wave_content interest row above it.
+                    <View key={`soft-interest-${idx}`} style={styles.phase1ChipUnified}>
+                      <Text style={styles.phase1ChipUnifiedText}>{chip.emoji} {chip.label}</Text>
                     </View>
                   ))}
                 </View>
@@ -2851,28 +2803,43 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
   },
   // Premium gradient overlays - REDESIGNED for immersive full-photo feel
+  // Batch C polish: Phase-1 base height reduced 120 → 80 to match Phase-2's
+  // tighter top vignette. Combined with the softened color stops in JSX,
+  // this stops the gradient from running into the upper face area on
+  // typical 9:16 portrait photos.
   topGradient: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
-    height: 120,
+    height: 80,
     zIndex: 2,
   },
-  // Phase-2 (Deep Connect): shorter top vignette so the photo top stays clean.
+  // Phase-2 (Deep Connect): top vignette uses the same height as Phase-1
+  // post-polish (80). Kept as a no-op modifier so existing JSX class
+  // composition remains untouched and we don't have to thread phase logic
+  // back into the StyleSheet.
   topGradientPhase2: {
     height: 80,
   },
+  // Phase-1 bottom gradient height. History:
+  //   - 65% (legacy heavy)    — eats half the photo, harsh
+  //   - 50% (Batch C)         — better but still climbs into mid-band
+  //   - 40% (Batch D refine)  — too low coverage, lower info band lost support
+  //   - 44% (post-QA tune)    — moderate setting that anchors the metadata
+  //                              + miles pill + wave content without climbing
+  //                              into the photo's middle band; sits between
+  //                              Phase-2's 35% and the legacy heavy values.
   bottomGradient: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    height: '65%', // Extended for more content coverage
+    height: '44%',
     zIndex: 2,
   },
-  // Phase-2 (Deep Connect): bottom gradient is reduced from 65% → 35% so the
-  // photo dominates and the dark zone only sits behind the lower info area.
+  // Phase-2 (Deep Connect): bottom gradient is reduced to 35% so the photo
+  // dominates and the dark zone only sits behind the lower info area.
   bottomGradientPhase2: {
     height: '35%',
   },
@@ -2998,26 +2965,6 @@ const styles = StyleSheet.create({
   },
   barActiveDark: {
     backgroundColor: 'rgba(255,255,255,0.9)',
-  },
-  // Arrow button (opens full profile) - REDESIGNED: smaller, more integrated
-  // NOTE: `bottom` is computed dynamically via arrowButtonBottom for device responsiveness
-  arrowBtn: {
-    position: 'absolute',
-    right: 14,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 15,
-  },
-  arrowBtnDark: {
-    right: 16,
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: 'rgba(255,255,255,0.1)',
   },
   // Info overlay - REDESIGNED: transparent, relies on gradient for readability
   overlay: {
@@ -3747,6 +3694,26 @@ const styles = StyleSheet.create({
     height: '28%',
     zIndex: 2,
   },
+  // Phase-1 scrim height. History:
+  //   - 32% solid (Batch C)        — visible hard top edge
+  //   - 28% gradient (Batch D)     — edgeless but too low coverage; under
+  //                                   bright photos the metadata pill and
+  //                                   miles pill lost contrast
+  //   - 32% gradient (post-QA tune) — restores comfort margin for the lower
+  //                                   info band while keeping the gradient's
+  //                                   transparent top edge so there is no
+  //                                   detectable seam. JSX gradient stops
+  //                                   carry the cocoa hue (rgb(27,14,4)),
+  //                                   so Phase-1 keeps its warm identity
+  //                                   rather than copying Phase-2 pure-black.
+  phase1Scrim: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: '32%',
+    zIndex: 2,
+  },
   // Legacy V3 styles kept so any incidental reference still resolves.
   phase2PromptCard: {
     paddingVertical: 2,
@@ -3860,96 +3827,153 @@ const styles = StyleSheet.create({
   },
   // Name + Age row - Premium typography, larger and bolder
   phase1NameRow: {
+    // Outer row: 2-column layout (text-group | chevron). Mirrors the
+    // Phase-2 `phase2IdentityRow` pattern. flexWrap is intentionally
+    // moved to the inner left group so the chevron stays pinned right.
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  phase1NameRowLeft: {
+    // Inner left group: name + age + gender + verified + pills.
+    // Keeps the original baseline alignment + wrap behaviour for pills,
+    // while flexShrink/flexGrow allow it to share the row with the
+    // fixed-size chevron without crowding long names.
     flexDirection: 'row',
     flexWrap: 'wrap',
     alignItems: 'baseline',
-    marginBottom: 6,
+    flexShrink: 1,
+    flexGrow: 1,
+    minWidth: 0,
+  },
+  // Compact open-profile chevron pinned to the right of the name row.
+  // 36x36 visible button + hitSlop matches the Phase-2 pattern. Sits on
+  // top of the photo so a translucent black surface keeps it readable
+  // against light or dark photos.
+  phase1ArrowBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
   },
   phase1Name: {
-    fontSize: 34,
+    fontSize: 30,
     fontWeight: '700',
     color: COLORS.white,
     marginRight: 8,
     flexShrink: 1,
-    letterSpacing: -0.8,
-    // Strong shadow for readability on any photo
-    textShadowColor: 'rgba(0,0,0,0.9)',
+    letterSpacing: -0.4,
+    // Premium foundation: softer/richer photo-readability scrim driven by
+    // the Phase-1 token (light/shaded premium theme).
+    textShadowColor: PHASE1_DISCOVER_THEME.scrimText,
     textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 10,
+    // Batch C polish: 12 → 6. The previous radius produced a wide black
+    // halo around glyphs that read as cheap on a light/premium photo.
+    textShadowRadius: 6,
   },
   phase1Age: {
-    fontSize: 30,
+    fontSize: 24,
     fontWeight: '300',
     color: 'rgba(255,255,255,0.95)',
     marginRight: 8,
-    textShadowColor: 'rgba(0,0,0,0.9)',
+    letterSpacing: -0.4,
+    textShadowColor: PHASE1_DISCOVER_THEME.scrimText,
     textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 10,
-  },
-  // P1A: Presence dot styles - compact indicator next to name
-  phase1PresenceDotOnline: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#22c55e', // green-500
-    marginLeft: 6,
-    alignSelf: 'center',
-    // Shadow for depth
-    shadowColor: '#22c55e',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  phase1PresenceDotActive: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#86efac', // green-300 (lighter for active today)
-    marginLeft: 6,
-    alignSelf: 'center',
-    opacity: 0.8,
+    // Batch C polish: 12 → 6. The previous radius produced a wide black
+    // halo around glyphs that read as cheap on a light/premium photo.
+    textShadowRadius: 6,
   },
   // Compact verified tick - inline with name/age
   phase1VerifiedTick: {
     marginLeft: 4,
     alignSelf: 'center',
   },
-  // Presence pill - compact "Online Now" indicator
-  phase1PresencePill: {
+  // Phase-1 metadata row — sits directly below the name row, mirrors the
+  // structural role of Phase-2's `phase2MetadataRow`. Hosts the unified
+  // status badge (left) and the distance pill (right). `space-between`
+  // keeps the distance pill anchored to the right edge regardless of
+  // whether status is present. Kept transparent so it inherits the photo
+  // scrim instead of fighting it with its own background.
+  phase1MetadataRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    justifyContent: 'space-between',
+    marginTop: 4,
+  },
+  // Left half of the metadata row holds the Online / Recently active badge.
+  // Mirrors Phase-2's `phase2MetadataLeft` structure so the two phases share
+  // the same row geometry.
+  phase1MetadataLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 1,
+  },
+  // Single neutral premium chip used for both Online and Recently active.
+  // Replaces the previous loud green-tinted pill + separate muted pill —
+  // one consistent surface, the only difference is the optional green dot.
+  phase1StatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    borderRadius: 12,
     paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: 10,
-    marginLeft: 8,
-    gap: 4,
   },
-  phase1PresenceDotInline: {
+  // Tiny green dot, only rendered for the "Online" variant. Matches the
+  // Phase-2 status dot colour (#4ade80) so the two phases read identically.
+  phase1StatusDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: '#10B981',
+    backgroundColor: '#4ade80',
   },
-  phase1PresenceText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#10B981',
-  },
-  phase1PresencePillMuted: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-    marginLeft: 8,
-  },
-  phase1PresenceTextMuted: {
+  // 11/500 neutral white at 0.85 opacity — same scale as Phase-2's
+  // `phase2StatusText`. Drops the bold green tone of the previous design.
+  phase1StatusText: {
     fontSize: 11,
     fontWeight: '500',
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: 'rgba(255, 255, 255, 0.85)',
+  },
+  // Right-corner distance pill (miles). Mirrors Phase-2's
+  // `phase2DistancePill` geometry. Phase-1 sits in a lighter shading
+  // environment than Phase-2 (warm cocoa scrim instead of dark glass),
+  // so the pill needs slightly more standalone contrast to remain
+  // glanceable on bright photo zones near the metadata row:
+  //   - backgroundColor 0.36 → 0.48 (still subtle, not a black slab)
+  //   - hairline border rgba(255,255,255,0.14) gives the pill a defined
+  //     edge against any photo without darkening it further
+  //   - 1px shadow at 0.45 opacity anchors the glyphs over light photos
+  // `marginLeft: 'auto'` is a defensive nudge — `space-between` on the
+  // parent already anchors the pill to the right edge, but the explicit
+  // auto-margin keeps placement correct even on rare frames where the
+  // left container collapses to zero width.
+  phase1DistancePill: {
+    marginLeft: 'auto',
+    backgroundColor: 'rgba(0,0,0,0.48)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  // 13/500 with a touch of letter spacing — same scale as Phase-2's
+  // `phase2DistanceText`, glanceable against the photo scrim. Soft
+  // text shadow added so the label stays legible on the rare bright
+  // photos that defeat the pill backdrop.
+  phase1DistanceText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255, 255, 255, 0.97)',
+    letterSpacing: 0.2,
+    textShadowColor: 'rgba(0,0,0,0.45)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   // GROWTH: Match score pill - subtle compatibility indicator
   matchScorePill: {
@@ -3990,21 +4014,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     letterSpacing: 0.3,
   },
-  // Distance row - persistent on all photos
-  phase1DistanceRowPersistent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 2,
-    gap: 4,
-  },
-  phase1DistanceTextPersistent: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: 'rgba(255, 255, 255, 0.75)',
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
   phase1VerifiedBadge: {
     width: 20,
     height: 20,
@@ -4041,15 +4050,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.1)',
   },
-  phase1BadgePillOnline: {
-    backgroundColor: 'rgba(16, 185, 129, 0.25)',
-  },
-  phase1OnlineDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#10B981',
-  },
   phase1BadgeText: {
     fontSize: 11,
     fontWeight: '600',
@@ -4058,24 +4058,6 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
-  },
-  phase1BadgeTextOnline: {
-    color: '#34D399',
-  },
-  // Distance row - clean inline text
-  phase1DistanceRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  phase1IdentityDistanceText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.8)',
-    letterSpacing: 0.2,
-    textShadowColor: 'rgba(0,0,0,0.7)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
   },
   // Compact Preview - Photo 1 personality snapshot
   phase1CompactPreview: {
@@ -4214,83 +4196,73 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
   },
-  // Distance card - LEGACY (not used, replaced by inline distance row)
-  phase1DistanceCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    alignSelf: 'flex-start',
-  },
-  phase1DistanceText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.85)',
-    textShadowColor: 'rgba(0,0,0,0.6)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 3,
-  },
   // Bio section - REDESIGNED: elegant text, no box
   phase1BioCard: {
     // NO background, NO border - pure typography
     maxHeight: 90,
     paddingRight: 12,
   },
-  phase1BioLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: 'rgba(255,255,255,0.55)',
-    marginBottom: 4,
-    textTransform: 'uppercase' as const,
-    letterSpacing: 1,
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
   phase1BioText: {
-    fontSize: 15,
+    // Batch D polish: compact bio typography mirroring Phase-2 phase2BioBody
+    // geometry (14 / 400 / lineHeight 19) so that bio paragraphs settle in
+    // the photo overlay instead of dominating it. Italic was dropped because
+    // it added a literary tone the rest of the overlay does not carry, and
+    // because at 14px italic glyphs antialiased poorly over photos. Shadow
+    // values are inherited from Batch C (0.55 / 3) — already balanced with
+    // the `phase1Scrim` view behind the text and intentionally not touched.
+    fontSize: 14,
     fontWeight: '400',
     color: 'rgba(255,255,255,0.95)',
-    lineHeight: 21,
-    fontStyle: 'italic',
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
-  },
-  // Lifestyle row - REDESIGNED: subtle inline items, no heavy chips
-  phase1LifestyleRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-    alignItems: 'center',
-  },
-  phase1LifestyleChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    // NO background - inline text with icon
-  },
-  phase1LifestyleChipText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.9)',
-    textShadowColor: 'rgba(0,0,0,0.7)',
+    lineHeight: 19,
+    textShadowColor: 'rgba(0,0,0,0.55)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
-  // Smaller lifestyle chips for compact view
-  phase1LifestyleChipSmall: {
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase-1 Unified Chip System (Batch D)
+  //
+  // Single chip geometry shared across Phase-1 photo-overlay surfaces
+  // (lifestyle, interests, soft-fallback interests). Mirrors Phase-2's
+  // phase2ChipUnified geometry — paddingX 10 / paddingY 4 / radius 11 /
+  // text 11 / 600 / letterSpacing 0.1 — so the two phases feel like one
+  // design language. The visual identity stays Phase-1 (light/shaded
+  // overlay) instead of Phase-2's dark glass: a soft white tint
+  // rgba(255,255,255,0.14) with a hairline border rgba(255,255,255,0.10)
+  // so chips read as raised-from-photo rather than flat black wells.
+  //
+  // Replaces the previous fragmented chip families (phase1LifestyleChip,
+  // phase1InterestChip, phase1SoftFallbackChip and their dead Small /
+  // Compact variants). Old families had three different paddings, three
+  // different radii, three different font sizes, and three different
+  // shadow strengths — which is why interests were reading as heavier
+  // pills than lifestyle items even though they sat in the same overlay.
+  // ─────────────────────────────────────────────────────────────────────────
+  phase1ChipUnified: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    // NO background
+    gap: 5,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    borderRadius: 11,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
   },
-  phase1LifestyleChipTextSmall: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.85)',
-    textShadowColor: 'rgba(0,0,0,0.6)',
+  phase1ChipUnifiedText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.92)',
+    letterSpacing: 0.1,
+    textShadowColor: 'rgba(0,0,0,0.45)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
+  },
+  // Lifestyle row - holds unified chips, gap matches Phase-2 phase2ChipsRow.
+  phase1LifestyleRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    alignItems: 'center',
   },
   // Compact bio for 2-photo profiles - REDESIGNED: no box
   phase1CompactBio: {
@@ -4322,37 +4294,6 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.6)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
-  },
-  // Small interests row for compact view - subtle inline
-  phase1InterestsRowSmall: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  phase1InterestChipSmall: {
-    backgroundColor: 'rgba(0,0,0,0.25)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-  },
-  phase1InterestTextSmall: {
-    fontSize: 11,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.9)',
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
-  phase1InterestOverflowSmall: {
-    backgroundColor: 'rgba(0,0,0,0.2)',
-    paddingHorizontal: 6,
-    paddingVertical: 4,
-    borderRadius: 8,
-  },
-  phase1InterestOverflowTextSmall: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: 'rgba(255,255,255,0.6)',
   },
   // ═══════════════════════════════════════════════════════════════════════════
   // COMPACT MODE STYLES (≤4 photos) - Natural, flowing, human feel
@@ -4405,33 +4346,6 @@ const styles = StyleSheet.create({
     textShadowRadius: 2,
   },
 
-  // Prompt as THE moment - conversation starter, emphasized
-  phase1PromptMoment: {
-    // More breathing room for emphasis
-    paddingVertical: 4,
-  },
-  phase1PromptQuestionMoment: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: 'rgba(255,255,255,0.5)',
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-    marginBottom: 6,
-    textShadowColor: 'rgba(0,0,0,0.7)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
-  phase1PromptAnswerMoment: {
-    fontSize: 15,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.98)',
-    lineHeight: 22,
-    fontStyle: 'italic',
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
-  },
-
   // Subtle highlights - minimal, inline text
   phase1HighlightsRowSubtle: {
     flexDirection: 'row',
@@ -4465,79 +4379,6 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.6)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
-  },
-  phase1LifestyleChipCompact: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.25)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 10,
-    gap: 5,
-  },
-  phase1LifestyleChipTextCompact: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.9)',
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
-  phase1InterestsRowCompact: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    maxHeight: 60,
-    overflow: 'hidden',
-  },
-  phase1InterestChipCompact: {
-    backgroundColor: 'rgba(0,0,0,0.25)',
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 10,
-  },
-  phase1InterestTextCompact: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.9)',
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
-  phase1InterestOverflowCompact: {
-    backgroundColor: 'rgba(0,0,0,0.2)',
-    paddingHorizontal: 7,
-    paddingVertical: 5,
-    borderRadius: 10,
-  },
-  phase1InterestOverflowTextCompact: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: 'rgba(255,255,255,0.6)',
-  },
-  phase1PromptCardCompact: {
-    maxHeight: 80,
-  },
-  phase1PromptQuestionCompact: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: 'rgba(255,255,255,0.55)',
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-    marginBottom: 4,
-    textShadowColor: 'rgba(0,0,0,0.7)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
-  phase1PromptAnswerCompact: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.95)',
-    lineHeight: 19,
-    fontStyle: 'italic',
-    textShadowColor: 'rgba(0,0,0,0.7)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 3,
   },
   phase1HighlightsRow: {
     flexDirection: 'row',
@@ -4573,39 +4414,13 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
-  // Interests row - REDESIGNED: subtle minimal chips
+  // Interests row - holds unified chips, gap matches Phase-2 phase2ChipsRow.
   phase1InterestsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
+    gap: 6,
     maxHeight: 70,
     overflow: 'hidden',
-  },
-  phase1InterestChip: {
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 10,
-  },
-  phase1InterestText: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.95)',
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
-  // Overflow indicator for interests - subtle
-  phase1InterestOverflow: {
-    backgroundColor: 'rgba(0,0,0,0.2)',
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    borderRadius: 10,
-  },
-  phase1InterestOverflowText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: 'rgba(255,255,255,0.6)',
   },
   // Prompt section - REDESIGNED: elegant typography, no box
   phase1PromptCard: {
@@ -4614,24 +4429,38 @@ const styles = StyleSheet.create({
     paddingRight: 12,
   },
   phase1PromptQuestion: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: 'rgba(255,255,255,0.55)',
-    marginBottom: 4,
-    textTransform: 'uppercase' as const,
-    letterSpacing: 1,
+    // Batch D polish: prompt-question label settles into the same role its
+    // Phase-2 counterpart (phase2PromptQuestionV4) plays — a quiet eyebrow
+    // that introduces the answer rather than shouting at it. Previous values
+    // (10 / 700 / uppercase / letterSpacing 1 / opacity 0.55) read as a
+    // small-caps marketing tag and competed with the answer below it. New
+    // values widen to 12px regular-weight (500), drop uppercase, lift the
+    // opacity to 0.70 so the question is legible without dominating, and
+    // tighten marginBottom so the question/answer pair feels like one unit.
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.70)',
+    lineHeight: 16,
+    marginBottom: 3,
+    letterSpacing: 0.1,
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
   phase1PromptAnswer: {
+    // Batch D polish: prompt answer mirrors phase2PromptAnswerV4 (15 / 600 /
+    // lineHeight 20). Bumping weight 500 → 600 gives the answer a clear
+    // hierarchical edge over the new lighter question label, while the
+    // tighter lineHeight (21 → 20) keeps two-line answers visually compact.
+    // Shadow values inherited from Batch C (0.55 / 3) and intentionally
+    // unchanged.
     fontSize: 15,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.95)',
-    lineHeight: 21,
-    textShadowColor: 'rgba(0,0,0,0.8)',
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.97)',
+    lineHeight: 20,
+    textShadowColor: 'rgba(0,0,0,0.55)',
     textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
+    textShadowRadius: 3,
   },
   // ═══════════════════════════════════════════════════════════════════════════
   // SOFT FALLBACK STYLES: Compact reinforcement for late photos
@@ -4670,20 +4499,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
-  },
-  phase1SoftFallbackChip: {
-    backgroundColor: 'rgba(0,0,0,0.2)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 8,
-  },
-  phase1SoftFallbackChipText: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.75)',
-    textShadowColor: 'rgba(0,0,0,0.4)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
   },
   // P0-FIX: New here card - friendly fallback for sparse profiles
   phase1NewHereCard: {
