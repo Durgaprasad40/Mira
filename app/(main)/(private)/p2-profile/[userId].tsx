@@ -38,7 +38,6 @@ import { useDiscoverStore } from '@/stores/discoverStore';
 import { useInteractionStore } from '@/stores/interactionStore';
 import {
   INCOGNITO_COLORS,
-  COLORS,
   ACTIVITY_FILTERS,
   EDUCATION_OPTIONS,
   RELIGION_OPTIONS,
@@ -347,7 +346,6 @@ export default function Phase2FullProfileScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const currentUserId = useAuthStore((s) => s.userId);
-  const token = useAuthStore((s) => s.token);
 
   // [P2_PROFILE_QUERY] Debug logging - this screen should ONLY be reached from Phase-2
   if (__DEV__) {
