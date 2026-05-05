@@ -46,6 +46,7 @@ import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { useInteractionStore } from '@/stores/interactionStore';
 import { formatDiscoverDistanceKm } from '@/lib/distanceRules';
 import { formatPhase2DistanceMiles } from '@/lib/phase2Distance';
+import { getVerificationDisplay } from '@/lib/verificationStatus';
 import { getRenderableProfilePhotos } from '@/lib/profileData';
 // Phase-1 only premium light/shaded theme tokens. Phase-2 surfaces must
 // not import this file.
@@ -94,27 +95,30 @@ import Animated, {
 const PHASE1_OPEN_PROFILE_ACTION_LIFT = 30;
 
 function getVerificationBadgeState(profile: { isVerified?: boolean; verificationStatus?: string }) {
-  const status = profile.isVerified ? 'verified' : (profile.verificationStatus || 'unverified');
+  const display = getVerificationDisplay(profile);
 
-  switch (status) {
+  // Premium tone-driven palette: green / amber / red. Background is the
+  // text/icon hex at ~14% opacity to keep the pill calm and on-brand.
+  switch (display.tone) {
     case 'verified':
       return {
-        label: 'Verified',
-        color: COLORS.success,
+        label: display.label,
+        color: '#10B981',
+        background: 'rgba(16, 185, 129, 0.14)',
         icon: 'shield-checkmark' as const,
       };
-    case 'pending_auto':
-    case 'pending_manual':
-    case 'pending_verification':
+    case 'pending':
       return {
-        label: 'Verification pending',
-        color: COLORS.secondary,
+        label: display.label,
+        color: '#F59E0B',
+        background: 'rgba(245, 158, 11, 0.14)',
         icon: 'time-outline' as const,
       };
     default:
       return {
-        label: 'Not verified',
-        color: COLORS.textMuted,
+        label: display.label,
+        color: '#EF4444',
+        background: 'rgba(239, 68, 68, 0.14)',
         icon: 'alert-circle-outline' as const,
       };
   }
@@ -1010,9 +1014,9 @@ export default function ViewProfileScreen() {
                 </View>
               )}
 
-              <View style={styles.verifiedBadgePremium}>
+              <View style={[styles.verifiedBadgePremium, { backgroundColor: verificationBadge.background }]}>
                 <Ionicons name={verificationBadge.icon} size={13} color={verificationBadge.color} />
-                <Text style={styles.verifiedBadgePremiumText}>
+                <Text style={[styles.verifiedBadgePremiumText, { color: verificationBadge.color }]}>
                   {verificationBadge.label}
                 </Text>
               </View>

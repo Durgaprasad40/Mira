@@ -31,6 +31,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
+import { getVerificationDisplay } from '@/lib/verificationStatus';
 
 export interface NearbyPreviewData {
   id: string;
@@ -42,6 +43,7 @@ export interface NearbyPreviewData {
   tagline?: string;
   sharedInterests?: string[];
   isVerified?: boolean;
+  verificationStatus?: string | null;
   crossingCount?: number;
   lastCrossedAt?: number;
   areaName?: string;
@@ -131,6 +133,10 @@ export function NearbyPreviewCard({
   const lastCrossedText = formatLastCrossed(user.lastCrossedAt);
   const areaName = user.areaName?.trim();
   const hasCrossingMeta = Boolean(crossingCountText || areaName || lastCrossedText);
+  const verificationDisplay = getVerificationDisplay({
+    isVerified: user.isVerified,
+    verificationStatus: user.verificationStatus,
+  });
 
   return (
     <Modal
@@ -151,18 +157,37 @@ export function NearbyPreviewCard({
                   <Ionicons name="person-outline" size={42} color={COLORS.textMuted} />
                 </View>
               )}
-              {user.isVerified && (
-                <View style={styles.verifiedBadge}>
-                  <Ionicons name="checkmark-circle" size={18} color={COLORS.primary} />
-                </View>
-              )}
             </View>
 
             <View style={styles.titleRow}>
-              <Text style={styles.name} numberOfLines={1}>
-                {user.name}
-                <Text style={styles.age}>{`, ${user.age}`}</Text>
-              </Text>
+              <View style={styles.titleTextGroup}>
+                <Text style={styles.name} numberOfLines={1}>
+                  {user.name}
+                  <Text style={styles.age}>{`, ${user.age}`}</Text>
+                </Text>
+                <View style={styles.verificationRow}>
+                  <View
+                    style={[
+                      styles.verificationDot,
+                      verificationDisplay.tone === 'verified' && styles.verificationDotVerified,
+                      verificationDisplay.tone === 'pending' && styles.verificationDotPending,
+                      verificationDisplay.tone === 'unverified' && styles.verificationDotUnverified,
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.verificationText,
+                      verificationDisplay.tone === 'verified' && styles.verificationTextVerified,
+                      verificationDisplay.tone === 'pending' && styles.verificationTextPending,
+                      verificationDisplay.tone === 'unverified' && styles.verificationTextUnverified,
+                    ]}
+                    numberOfLines={1}
+                    ellipsizeMode="tail"
+                  >
+                    {verificationDisplay.label}
+                  </Text>
+                </View>
+              </View>
               {freshness && (
                 <View style={styles.freshnessChip}>
                   <Ionicons name={freshness.icon} size={12} color={COLORS.textMuted} />
@@ -282,13 +307,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  verifiedBadge: {
-    position: 'absolute',
-    bottom: 0,
-    right: -2,
-    backgroundColor: COLORS.background,
-    borderRadius: 10,
-  },
   titleRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -296,16 +314,64 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     gap: 8,
   },
+  titleTextGroup: {
+    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
+  },
   name: {
     fontSize: 18,
     fontWeight: '700',
     color: COLORS.text,
-    flexShrink: 1,
   },
   age: {
     fontSize: 18,
     fontWeight: '500',
     color: COLORS.textMuted,
+  },
+  // Row that hosts the verification status dot + label below the name.
+  verificationRow: {
+    marginTop: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  verificationDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: COLORS.textMuted,
+  },
+  verificationDotVerified: {
+    backgroundColor: '#10B981',
+  },
+  verificationDotPending: {
+    backgroundColor: '#F59E0B',
+  },
+  verificationDotUnverified: {
+    backgroundColor: '#EF4444',
+  },
+  verificationText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  // Premium tone-driven verification colors on the light Nearby surface.
+  //   Verified: emerald (#10B981)
+  //   Pending:  amber (#F59E0B)
+  //   Not verified: red (#EF4444)
+  verificationTextVerified: {
+    color: '#10B981',
+  },
+  verificationTextPending: {
+    color: '#F59E0B',
+  },
+  verificationTextUnverified: {
+    color: '#EF4444',
   },
   freshnessChip: {
     flexDirection: 'row',

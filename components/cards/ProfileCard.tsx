@@ -49,6 +49,7 @@ import { cmToFeetInches } from '@/lib/utils';
 import { trackAction } from '@/lib/sentry';
 import { getRenderableProfilePhotos } from '@/lib/profileData';
 import { formatPhase2DistanceMiles } from '@/lib/phase2Distance';
+import { getVerificationDisplay } from '@/lib/verificationStatus';
 import {
   DEBUG_PHOTO_RENDER,
   DEBUG_DISCOVER_PLANNER,
@@ -131,6 +132,7 @@ export interface ProfileCardProps {
   bio?: string;
   city?: string;
   isVerified?: boolean;
+  verificationStatus?: string | null;
   distance?: number;
   photos: { url: string }[];
   /** First profile prompt to display on discover card */
@@ -322,6 +324,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   age,
   bio,
   isVerified,
+  verificationStatus,
   distance,
   photos,
   profilePrompt,
@@ -397,6 +400,10 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // Standardized thresholds: Online Now = 10 min, recently active = 24h
   const isActiveNow = presenceStatus === 'online';
   const isActiveToday = presenceStatus === 'active_today';
+  const verificationDisplay = useMemo(
+    () => getVerificationDisplay({ isVerified, verificationStatus }),
+    [isVerified, verificationStatus],
+  );
   // Phase-2 Deep Connect: distance only (miles), no city / area / "Nearby"
   // bucket. If `distance` is undefined / negative / hidden, the formatter
   // returns null and the row renders nothing — privacy is honoured by the
@@ -1301,7 +1308,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const phase1MetadataRowShouldRender =
     !isPhase2 &&
     photoIndex === 0 &&
-    Boolean(isActiveNow || isActiveToday || phase1DistanceLabel);
+    Boolean(isActiveNow || isActiveToday || phase1DistanceLabel || verificationDisplay.label);
   const phase1DistancePillShouldRender =
     !isPhase2 && photoIndex === 0 && Boolean(phase1DistanceLabel);
   const lastPhase1DistanceDebugRef = useRef<string | null>(null);
@@ -1316,6 +1323,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       hasRawDistance,
       rawDistanceValue: getDistanceDebugValue(distance),
       phase1DistanceLabel,
+      verificationLabel: verificationDisplay.label,
       metadataRowShouldRender: phase1MetadataRowShouldRender,
       distancePillShouldRender: phase1DistancePillShouldRender,
     };
@@ -1329,6 +1337,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     phase1DistanceLabel,
     phase1DistancePillShouldRender,
     phase1MetadataRowShouldRender,
+    verificationDisplay.label,
     photoIndex,
     profileId,
   ]);
@@ -1926,7 +1935,6 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               }}
             />
           )}
-          {isVerified && <Ionicons name="checkmark-circle" size={14} color={COLORS.superLike} />}
         </View>
       </TouchableOpacity>
     );
@@ -2164,9 +2172,6 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                     />
                   </View>
                 )}
-                {isVerified ? (
-                  <Ionicons name="checkmark-circle" size={16} color="#7dd3fc" style={styles.phase2VerifiedIcon} />
-                ) : null}
               </View>
               {/* Arrow button: aligned with the name row on the right edge.
                   hitSlop keeps a comfortable touch target even though the
@@ -2200,6 +2205,29 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                       <Text style={styles.phase2StatusText}>Recently active</Text>
                     </View>
                   )}
+                  <View style={styles.verificationMetaRow}>
+                    <View
+                      style={[
+                        styles.verificationMetaDot,
+                        verificationDisplay.tone === 'verified' && styles.verificationMetaDotVerified,
+                        verificationDisplay.tone === 'pending' && styles.verificationMetaDotPending,
+                        verificationDisplay.tone === 'unverified' && styles.verificationMetaDotUnverified,
+                      ]}
+                    />
+                    <Text
+                      style={[
+                        styles.verificationMetaText,
+                        styles.phase2VerificationMetaText,
+                        verificationDisplay.tone === 'verified' && styles.verificationMetaTextVerified,
+                        verificationDisplay.tone === 'pending' && styles.verificationMetaTextPending,
+                        verificationDisplay.tone === 'unverified' && styles.verificationMetaTextUnverified,
+                      ]}
+                      numberOfLines={1}
+                      ellipsizeMode="tail"
+                    >
+                      {verificationDisplay.label}
+                    </Text>
+                  </View>
                 </View>
                 {/* Right: distance only (miles) — pushed to the right corner.
                     No city / locality / "Nearby". Renders nothing if hidden. */}
@@ -2466,7 +2494,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             )}
 
             {/* ─────────────────────────────────────────────────────────────────────────
-                LAYER A: IDENTITY ROW (Name + Age + Verified Tick + Presence)
+                LAYER A: IDENTITY ROW (Name + Age + Gender)
                 REQUIREMENT: Visible on ALL photos for consistent identity
                 ───────────────────────────────────────────────────────────────────────── */}
             <View style={styles.phase1NameRow} pointerEvents="box-none">
@@ -2498,13 +2526,6 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                       size={12}
                       color={GENDER_ICONS[gender].color}
                     />
-                  </View>
-                )}
-                {/* Verified tick: shown on ALL photos (including Photo 1) next to name/age.
-                    Product rule: small verified check beside identity, never a separate "Face Verified" badge. */}
-                {isVerified && (
-                  <View style={styles.phase1VerifiedTick}>
-                    <Ionicons name="checkmark-circle" size={18} color="#10B981" />
                   </View>
                 )}
                 {matchScore && matchScore >= 60 && photoIndex > 0 && (
@@ -2561,6 +2582,29 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                       <Text style={styles.phase1StatusText}>Recently active</Text>
                     </View>
                   ) : null}
+                  <View style={styles.verificationMetaRow}>
+                    <View
+                      style={[
+                        styles.verificationMetaDot,
+                        verificationDisplay.tone === 'verified' && styles.verificationMetaDotVerified,
+                        verificationDisplay.tone === 'pending' && styles.verificationMetaDotPending,
+                        verificationDisplay.tone === 'unverified' && styles.verificationMetaDotUnverified,
+                      ]}
+                    />
+                    <Text
+                      style={[
+                        styles.verificationMetaText,
+                        styles.phase1VerificationMetaText,
+                        verificationDisplay.tone === 'verified' && styles.verificationMetaTextVerified,
+                        verificationDisplay.tone === 'pending' && styles.verificationMetaTextPending,
+                        verificationDisplay.tone === 'unverified' && styles.verificationMetaTextUnverified,
+                      ]}
+                      numberOfLines={1}
+                      ellipsizeMode="tail"
+                    >
+                      {verificationDisplay.label}
+                    </Text>
+                  </View>
                 </View>
                 {phase1DistanceLabel && (
                   <View style={styles.phase1DistancePill}>
@@ -3430,12 +3474,6 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.75)',
     marginRight: 8,
   },
-  phase2VerifiedIcon: {
-    marginLeft: 1,
-    textShadowColor: 'rgba(0,0,0,0.35)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
-  },
   // Compact arrow that sits on the right edge of the name row in Phase-2.
   // Visible button is 36x36; hitSlop on the JSX expands the touch target.
   phase2ArrowBtn: {
@@ -3475,6 +3513,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     flexShrink: 1,
+    minWidth: 0,
   },
   // Right-corner distance pill. `marginLeft: 'auto'` pushes it to the right
   // edge even if the left group is empty (e.g. user is offline and not
@@ -3518,6 +3557,63 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '500',
     color: 'rgba(255,255,255,0.8)',
+  },
+  // Wrapper for verification status: small colored dot + textual label.
+  // Lives next to the Online/Recently active chip in the metadata row.
+  verificationMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  verificationMetaDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.5)',
+  },
+  verificationMetaDotVerified: {
+    backgroundColor: '#34D399',
+  },
+  verificationMetaDotPending: {
+    backgroundColor: '#FBBF24',
+  },
+  verificationMetaDotUnverified: {
+    backgroundColor: '#F87171',
+  },
+  verificationMetaText: {
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.1,
+    flexShrink: 1,
+    minWidth: 0,
+    maxWidth: 128,
+    textShadowColor: 'rgba(0,0,0,0.35)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  phase2VerificationMetaText: {
+    color: 'rgba(255,255,255,0.72)',
+  },
+  phase1VerificationMetaText: {
+    color: 'rgba(255,255,255,0.78)',
+  },
+  // Premium tone-driven colors for verification status. Slightly lighter
+  // tones than the opened-profile palette so the labels stay readable
+  // against the darker photo scrims used on swipe cards (Phase-1 cocoa
+  // gradient + Phase-2 dark glass).
+  //   Verified: soft mint green (#34D399)
+  //   Pending:  warm amber (#FBBF24)
+  //   Not verified: muted red (#F87171)
+  verificationMetaTextVerified: {
+    color: '#34D399',
+  },
+  verificationMetaTextPending: {
+    color: '#FBBF24',
+  },
+  verificationMetaTextUnverified: {
+    color: '#F87171',
   },
   // PHASE2_PARITY: City badge
   phase2CityBadge: {
@@ -3887,11 +3983,6 @@ const styles = StyleSheet.create({
     // halo around glyphs that read as cheap on a light/premium photo.
     textShadowRadius: 6,
   },
-  // Compact verified tick - inline with name/age
-  phase1VerifiedTick: {
-    marginLeft: 4,
-    alignSelf: 'center',
-  },
   // Phase-1 metadata row — sits directly below the name row, mirrors the
   // structural role of Phase-2's `phase2MetadataRow`. Hosts the unified
   // status badge (left) and the distance pill (right). `space-between`
@@ -3912,6 +4003,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     flexShrink: 1,
+    minWidth: 0,
   },
   // Single neutral premium chip used for both Online and Recently active.
   // Replaces the previous loud green-tinted pill + separate muted pill —
@@ -4013,14 +4105,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#FFFFFF',
     letterSpacing: 0.3,
-  },
-  phase1VerifiedBadge: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   // Gender icon badge - subtle, integrated
   phase1GenderIcon: {

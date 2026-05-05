@@ -365,7 +365,7 @@ export const getProfiles = query({
 
         // Build normalized candidates from limited results only (capped)
         const normalizedCandidates: import('./ranking/rankingTypes').NormalizedCandidate[] = limited.map(({ profile: p }) => {
-          const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; promptAnswers?: Array<{ answer?: string }>; height?: number; education?: string };
+          const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; verificationStatus?: string; promptAnswers?: Array<{ answer?: string }>; height?: number; education?: string };
           const metrics = metricsMap.get(p.userId as string);
 
           // Count filled prompts if available (Phase-2 uses promptAnswers field)
@@ -438,6 +438,7 @@ export const getProfiles = query({
       const profile = p as typeof p & {
         hobbies?: string[];
         isVerified?: boolean;
+        verificationStatus?: string;
         privateIntentKey?: string;
         education?: string;
         religion?: string;
@@ -493,6 +494,7 @@ export const getProfiles = query({
         // Include hobbies and verification status if available
         hobbies: profile.hobbies ?? [],
         isVerified: profile.isVerified ?? false,
+        verificationStatus: ownerUser.verificationStatus ?? profile.verificationStatus ?? (profile.isVerified ? 'verified' : 'unverified'),
         ...(distanceKm !== undefined ? { distanceKm } : {}),
       };
     }).filter(Boolean);
@@ -555,6 +557,7 @@ export const getProfileCard = query({
     const profile = p as typeof p & {
       hobbies?: string[];
       isVerified?: boolean;
+      verificationStatus?: string;
       privateIntentKey?: string;
       education?: string;
       religion?: string;
@@ -604,6 +607,7 @@ export const getProfileCard = query({
       // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
+      verificationStatus: owner.verificationStatus ?? profile.verificationStatus ?? (profile.isVerified ? 'verified' : 'unverified'),
       education: profile.education,
       religion: profile.religion,
       ...(distanceKm !== undefined ? { distanceKm } : {}),
@@ -647,6 +651,7 @@ export const getProfileByUserId = query({
       .first();
 
     if (!p || !p.isPrivateEnabled || !p.isSetupComplete) return null;
+    const owner = await ctx.db.get(args.userId);
 
     // Check if viewer blocked the profile owner
     const blockedByViewer = await ctx.db
@@ -679,6 +684,7 @@ export const getProfileByUserId = query({
     const profile = p as typeof p & {
       hobbies?: string[];
       isVerified?: boolean;
+      verificationStatus?: string;
       privateIntentKey?: string;
       education?: string;
       religion?: string;
@@ -691,7 +697,7 @@ export const getProfileByUserId = query({
 
     let distanceKm: number | undefined;
     if (viewerUserId !== args.userId && profile.hideDistance !== true) {
-      const [viewerU, ownerU] = await Promise.all([ctx.db.get(viewerUserId), ctx.db.get(args.userId)]);
+      const [viewerU, ownerU] = await Promise.all([ctx.db.get(viewerUserId), Promise.resolve(owner)]);
       if (
         viewerU?.latitude != null &&
         viewerU?.longitude != null &&
@@ -741,6 +747,7 @@ export const getProfileByUserId = query({
       // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
+      verificationStatus: owner?.verificationStatus ?? profile.verificationStatus ?? (profile.isVerified ? 'verified' : 'unverified'),
       activities: profile.hobbies ?? [],
       // Phase-2 does NOT have Phase-1 fields
       relationshipIntent: [],

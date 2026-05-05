@@ -20,7 +20,6 @@ interface ProfileCardPreviewProps {
 export const ProfileCardPreview = memo(function ProfileCardPreview({
   name,
   age,
-  isVerified,
   photos,
   photoBlurred = false,
   theme = "light",
@@ -85,9 +84,6 @@ export const ProfileCardPreview = memo(function ProfileCardPreview({
         <View style={styles.identityRow}>
           <Text style={styles.name}>{displayName}</Text>
           {ageLabel && <Text style={styles.age}>{ageLabel}</Text>}
-          {isVerified && (
-            <Ionicons name="checkmark-circle" size={18} color="#10B981" />
-          )}
         </View>
       </View>
     </View>

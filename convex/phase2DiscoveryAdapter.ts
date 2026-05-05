@@ -71,6 +71,7 @@ export interface Phase2PrivateProfileRecord {
 
   // Verification
   isVerified?: boolean;
+  verificationStatus?: string;
 
   // Preference Strength
   preferenceStrength?: {
@@ -273,7 +274,7 @@ export function normalizePhase2Candidate(
 
     // Verification
     isVerified: profile.isVerified ?? false,
-    verificationStatus: profile.isVerified ? 'verified' : 'unverified',
+    verificationStatus: profile.verificationStatus ?? (profile.isVerified ? 'verified' : 'unverified'),
 
     // Inbound Interest Signals
     theyLikedMe: signals.theyLikedMe,

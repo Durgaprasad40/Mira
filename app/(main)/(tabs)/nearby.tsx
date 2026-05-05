@@ -255,6 +255,7 @@ interface NearbyUser {
   freshnessLabel?: 'recent' | 'earlier' | 'stale';
   photoUrl: string | null;
   isVerified: boolean;
+  verificationStatus?: string | null;
   strongPrivacyMode: boolean;
   hideDistance: boolean;
   crossingCount?: number;
@@ -1135,6 +1136,7 @@ export default function NearbyScreen() {
         freshnessLabel: 'recent' as const,
         photoUrl: getPrimaryPhotoUrl(profile.photos),
         isVerified: profile.isVerified ?? false,
+        verificationStatus: (profile as any).verificationStatus ?? 'unverified',
         strongPrivacyMode: false,
         hideDistance: false,
         tagline: demoTagline,
@@ -1509,6 +1511,7 @@ export default function NearbyScreen() {
       tagline: user.tagline,
       sharedInterests: user.sharedInterests,
       isVerified: user.isVerified,
+      verificationStatus: user.verificationStatus,
       crossingCount: user.crossingCount,
       lastCrossedAt: user.lastCrossedAt,
       areaName: user.areaName,

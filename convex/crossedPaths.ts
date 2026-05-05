@@ -2322,6 +2322,7 @@ export const getNearbyUsers = query({
           freshnessLabel,
           photoUrl,
           isVerified: user.isVerified || candidateStatus === 'verified',
+          verificationStatus: user.verificationStatus ?? 'unverified',
           strongPrivacyMode: user.strongPrivacyMode ?? false,
           hideDistance: user.hideDistance ?? false,
           crossingCount,

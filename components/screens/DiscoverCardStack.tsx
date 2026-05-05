@@ -444,6 +444,7 @@ function mapPhase2CardProfile(input: {
   photoUrls?: Array<string | null | undefined>;
   activities?: string[];
   isVerified?: boolean;
+  verificationStatus?: string;
   intentKeys?: string[];
   fallbackIntentKeys?: string[];
   desireTagKeys?: string[];
@@ -479,6 +480,7 @@ function mapPhase2CardProfile(input: {
     photos: photoUrls.map((url) => ({ url })),
     activities: input.activities ?? [],
     isVerified: input.isVerified ?? false,
+    verificationStatus: input.verificationStatus,
     privateIntentKeys: intentKeys,
     privateIntentKey: intentKeys[0],
     desireTagKeys: Array.isArray(input.desireTagKeys) ? input.desireTagKeys : [],
@@ -1407,6 +1409,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           photoUrls,
           activities: p.hobbies ?? [],
           isVerified: p.isVerified ?? false,
+          verificationStatus: (p as any).verificationStatus,
           intentKeys,
           desireTagKeys: Array.isArray(p.desireTagKeys) ? p.desireTagKeys : [],
           gender: p.gender,
@@ -3921,6 +3924,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     age={next.age}
                     bio={next.bio}
                     isVerified={next.isVerified}
+                    verificationStatus={next.verificationStatus}
                     distance={next.distance}
                     photos={next.photos}
                     photoBlurred={next.photoBlurred}
@@ -3973,6 +3977,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     bio={current.bio}
                     city={isPhase2 ? undefined : current.city}
                     isVerified={current.isVerified}
+                    verificationStatus={current.verificationStatus}
                     distance={displayDistanceCurrentCard}
                     photos={current.photos}
                     photoBlurred={current.photoBlurred}

@@ -8,7 +8,6 @@ interface AvatarProps {
   uri?: string | null;
   size?: number;
   style?: ViewStyle;
-  showVerified?: boolean;
   showOnline?: boolean;
 }
 
@@ -16,7 +15,6 @@ export function Avatar({
   uri,
   size = 48,
   style,
-  showVerified = false,
   showOnline = false,
 }: AvatarProps) {
   return (
@@ -36,12 +34,6 @@ export function Avatar({
           ]}
         >
           <Ionicons name="person" size={size * 0.5} color={COLORS.textMuted} />
-        </View>
-      )}
-
-      {showVerified && (
-        <View style={[styles.badge, styles.verifiedBadge]}>
-          <Ionicons name="checkmark-circle" size={16} color={COLORS.secondary} />
         </View>
       )}
 
@@ -68,10 +60,6 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 0,
     right: 0,
-  },
-  verifiedBadge: {
-    backgroundColor: COLORS.white,
-    borderRadius: 10,
   },
   onlineBadge: {
     width: 12,

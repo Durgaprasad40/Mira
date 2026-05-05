@@ -48,6 +48,7 @@ interface ProfileData {
   bio?: string;
   city?: string;
   isVerified?: boolean;
+  verificationStatus?: string | null;
   /** Backend-computed distance (fallback if no live GPS) */
   distance?: number;
   /** LIVE_LOCATION: Profile latitude for client-side instant distance */
@@ -662,6 +663,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
               bio={nextProfile.bio}
               city={nextProfile.city}
               isVerified={nextProfile.isVerified}
+              verificationStatus={nextProfile.verificationStatus}
               distance={nextProfile.distance}
               lastActive={nextProfile.lastActive}
               photos={nextProfile.photos}
@@ -689,6 +691,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
               bio={currentProfile.bio}
               city={currentProfile.city}
               isVerified={currentProfile.isVerified}
+              verificationStatus={currentProfile.verificationStatus}
               distance={currentProfile.distance}
               lastActive={currentProfile.lastActive}
               photos={currentProfile.photos}

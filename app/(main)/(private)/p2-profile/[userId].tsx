@@ -58,6 +58,7 @@ import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 // P2-004: Centralized gender icon utility
 import { getGenderIcon } from '@/lib/genderIcon';
 import { formatPhase2DistanceMiles } from '@/lib/phase2Distance';
+import { getVerificationDisplay } from '@/lib/verificationStatus';
 // Phase-2 (Deep Connect) action-row tokens — opened-profile mirrors the
 // homepage swipe-card action row exactly so the two surfaces feel identical.
 import {
@@ -593,6 +594,10 @@ export default function Phase2FullProfileScreen() {
   const profileDistanceLabel = formatPhase2DistanceMiles(profileDistanceKm, {
     includeAway: true,
   });
+  const profileVerificationDisplay = getVerificationDisplay({
+    isVerified: profile.isVerified,
+    verificationStatus: (profile as any).verificationStatus,
+  });
   const targetUserId =
     typeof profile.userId === 'string' && profile.userId.trim().length > 0
       ? profile.userId
@@ -943,9 +948,27 @@ export default function Phase2FullProfileScreen() {
                 color={P2.textMuted}
                 style={styles.genderIcon}
               />
-              {profile.isVerified && (
-                <Ionicons name="checkmark-circle" size={18} color={P2.accent} style={styles.verifiedIcon} />
-              )}
+              <View style={styles.verificationStatusRow}>
+                <View
+                  style={[
+                    styles.verificationStatusDot,
+                    profileVerificationDisplay.tone === 'verified' && styles.verificationStatusDotVerified,
+                    profileVerificationDisplay.tone === 'pending' && styles.verificationStatusDotPending,
+                    profileVerificationDisplay.tone === 'unverified' && styles.verificationStatusDotUnverified,
+                  ]}
+                />
+                <Text
+                  style={[
+                    styles.verificationStatusText,
+                    profileVerificationDisplay.tone === 'verified' && styles.verificationStatusTextVerified,
+                    profileVerificationDisplay.tone === 'pending' && styles.verificationStatusTextPending,
+                    profileVerificationDisplay.tone === 'unverified' && styles.verificationStatusTextUnverified,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {profileVerificationDisplay.label}
+                </Text>
+              </View>
             </View>
             {/* Phase-2 Deep Connect: distance only (miles). No city / locality
                 / area name. If distance is hidden or missing, render nothing. */}
@@ -1382,8 +1405,50 @@ const styles = StyleSheet.create({
   genderIcon: {
     marginLeft: 12,
   },
-  verifiedIcon: {
-    marginLeft: 6,
+  // Row wrapper: dot + status label, sits to the right of name/age/gender.
+  verificationStatusRow: {
+    marginLeft: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  verificationStatusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: P2.textSubtle,
+  },
+  verificationStatusDotVerified: {
+    backgroundColor: '#10B981',
+  },
+  verificationStatusDotPending: {
+    backgroundColor: '#F59E0B',
+  },
+  verificationStatusDotUnverified: {
+    backgroundColor: '#EF4444',
+  },
+  verificationStatusText: {
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.1,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  // Premium tone-driven verification text colors for the Phase-2 opened
+  // profile (light misty-blue surface).
+  //   Verified: emerald (#10B981)
+  //   Pending:  amber (#F59E0B)
+  //   Not verified: red (#EF4444)
+  verificationStatusTextVerified: {
+    color: '#10B981',
+  },
+  verificationStatusTextPending: {
+    color: '#F59E0B',
+  },
+  verificationStatusTextUnverified: {
+    color: '#EF4444',
   },
   distanceRow: {
     flexDirection: 'row',
