@@ -313,6 +313,43 @@ function mergeMessagesById(messages: DemoChatMessage[]): DemoChatMessage[] {
   return Array.from(byId.values()).sort((a, b) => a.createdAt - b.createdAt);
 }
 
+// LINK_BLOCKED UX helpers — read structured ConvexError payload thrown by
+// convex/chatRooms.ts sendMessage when the link/contact/payment policy
+// rejects a message. Surfaces a clean, category-aware copy and avoids
+// retry loops for blocked content. The original blocked text is never
+// echoed back to the UI.
+interface LinkBlockedInfo {
+  category: string;
+}
+
+function extractLinkBlockedInfo(error: unknown): LinkBlockedInfo | null {
+  const data = (error as { data?: { code?: unknown; category?: unknown } } | null | undefined)
+    ?.data;
+  if (!data || data.code !== 'LINK_BLOCKED') return null;
+  const category = typeof data.category === 'string' ? data.category : 'external_url';
+  return { category };
+}
+
+function getLinkBlockedCopy(category: string): string {
+  switch (category) {
+    case 'telegram':
+      return 'Telegram links are not allowed in chat rooms.';
+    case 'whatsapp':
+      return 'WhatsApp links are not allowed in chat rooms.';
+    case 'payment':
+      return 'Payment details are not allowed in chat rooms.';
+    case 'crypto':
+      return 'Crypto/payment wallet details are not allowed in chat rooms.';
+    case 'phone':
+      return 'Phone numbers are not allowed in chat rooms.';
+    case 'shortener':
+    case 'external_url':
+    case 'obfuscated':
+    default:
+      return 'Links, phone numbers, payment details, and outside contact details are not allowed in chat rooms.';
+  }
+}
+
 // Build list items with date separators (normal order, NOT reversed)
 // P1 CR-006: Use index in date separator ID to avoid key collisions
 // AVATAR-STABILITY: Pre-compute showAvatar for each message based on grouping rule:
@@ -1611,6 +1648,40 @@ export default function ChatRoomScreen() {
   // INPUT STATE
   // ─────────────────────────────────────────────────────────────────────────
   const [inputText, setInputText] = useState('');
+  // LINK_BLOCKED inline composer notice — premium replacement for Alert.alert.
+  // Auto-dismisses after a few seconds and clears as soon as the user edits the
+  // composer or sends a successful message. The category drives the copy.
+  const [linkBlockedNotice, setLinkBlockedNotice] = useState<{
+    category: string;
+    issuedAt: number;
+  } | null>(null);
+  const linkBlockedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearLinkBlockedNotice = useCallback(() => {
+    if (linkBlockedTimerRef.current) {
+      clearTimeout(linkBlockedTimerRef.current);
+      linkBlockedTimerRef.current = null;
+    }
+    setLinkBlockedNotice(null);
+  }, []);
+  const showLinkBlockedNotice = useCallback((category: string) => {
+    if (linkBlockedTimerRef.current) {
+      clearTimeout(linkBlockedTimerRef.current);
+      linkBlockedTimerRef.current = null;
+    }
+    setLinkBlockedNotice({ category, issuedAt: Date.now() });
+    linkBlockedTimerRef.current = setTimeout(() => {
+      linkBlockedTimerRef.current = null;
+      setLinkBlockedNotice(null);
+    }, 3500);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (linkBlockedTimerRef.current) {
+        clearTimeout(linkBlockedTimerRef.current);
+        linkBlockedTimerRef.current = null;
+      }
+    };
+  }, []);
   // Reply-to state: track message being replied to
   const [replyToMessage, setReplyToMessage] = useState<{
     id: string;
@@ -2386,24 +2457,41 @@ export default function ChatRoomScreen() {
           // COIN-FLASH-FIX: Coin feedback animation removed
           // Clear mentions after successful send
           setCurrentMentions([]);
+          // LINK_BLOCKED: clear any visible safety notice once a message goes
+          // through cleanly so the composer returns to the neutral state.
+          clearLinkBlockedNotice();
         }
       } catch (error: any) {
         console.log('SEND_MUTATION_CALL_FAIL', { errorMessage: error?.message, errorStack: error?.stack?.slice?.(0, 500) });
-        // P0-005 FINAL FIX: Mark message as failed instead of removing
-        // Message stays visible with failed state; user can retry via tap
-        if (mountedRef.current) {
-          setPendingMessages((prev) =>
-            prev.map((m) =>
-              m.id === pendingId ? { ...m, status: 'failed' as const } : m
-            )
-          );
+        const linkBlocked = extractLinkBlockedInfo(error);
+        if (linkBlocked) {
+          // LINK_BLOCKED: drop the pending bubble (no infinite tap-to-retry),
+          // restore original text into the composer if empty so the user can
+          // edit it, and surface a premium inline safety notice instead of a
+          // disruptive system alert. Never echo the raw ConvexError payload
+          // or the blocked content.
+          if (mountedRef.current) {
+            setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
+            setInputText((prev) => (prev && prev.length > 0 ? prev : textToRestore));
+            showLinkBlockedNotice(linkBlocked.category);
+          }
+        } else {
+          // P0-005 FINAL FIX: Mark message as failed instead of removing
+          // Message stays visible with failed state; user can retry via tap
+          if (mountedRef.current) {
+            setPendingMessages((prev) =>
+              prev.map((m) =>
+                m.id === pendingId ? { ...m, status: 'failed' as const } : m
+              )
+            );
+          }
+          Alert.alert('Send Failed', error?.message || 'Message could not be sent. Tap the message to retry.');
         }
-        Alert.alert('Send Failed', error?.message || 'Message could not be sent. Tap the message to retry.');
       } finally {
         isSendingRef.current = false;
       }
     }
-  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight]);
+  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight, clearLinkBlockedNotice, showLinkBlockedNotice]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // P0-005 FINAL FIX: Retry handler for failed messages
@@ -2434,8 +2522,26 @@ export default function ChatRoomScreen() {
         // Success: remove pending message (server message will appear)
         if (mountedRef.current) {
           setPendingMessages((prev) => prev.filter((m) => m.id !== failedMsg.id));
+          // LINK_BLOCKED: clear any visible safety notice on a successful retry.
+          clearLinkBlockedNotice();
         }
       } catch (error: any) {
+        const linkBlocked = extractLinkBlockedInfo(error);
+        if (linkBlocked) {
+          // LINK_BLOCKED on retry: drop the failed bubble to break the retry
+          // loop, restore the original text into the composer (only if the
+          // composer is empty) so the user can edit before sending again, and
+          // surface the premium inline safety notice in place of a system alert.
+          if (mountedRef.current) {
+            setPendingMessages((prev) => prev.filter((m) => m.id !== failedMsg.id));
+            const textToRestore = failedMsg._retryText ?? '';
+            if (textToRestore) {
+              setInputText((prev) => (prev && prev.length > 0 ? prev : textToRestore));
+            }
+            showLinkBlockedNotice(linkBlocked.category);
+          }
+          return;
+        }
         // Still failed: mark as failed again
         if (mountedRef.current) {
           setPendingMessages((prev) =>
@@ -2447,7 +2553,7 @@ export default function ChatRoomScreen() {
         Alert.alert('Retry Failed', error?.message || 'Could not send message. Please try again.');
       }
     },
-    [roomIdStr, authUserId, sendMessageMutation]
+    [roomIdStr, authUserId, sendMessageMutation, clearLinkBlockedNotice, showLinkBlockedNotice]
   );
 
   const handleRetryMediaMessage = useCallback(
@@ -4045,6 +4151,34 @@ export default function ChatRoomScreen() {
                 </TouchableOpacity>
               )}
 
+              {/* LINK_BLOCKED: premium inline safety notice. Replaces the
+                  cheap Alert.alert popup. Sits ABOVE the composer so typing is
+                  never interrupted, auto-dismisses after a few seconds, and
+                  clears the moment the user edits the input or successfully
+                  sends a message. The blocked text itself is never echoed. */}
+              {linkBlockedNotice ? (
+                <View style={styles.linkBlockedNotice} accessibilityLiveRegion="polite">
+                  <View style={styles.linkBlockedIconWrap}>
+                    <Ionicons name="shield-outline" size={SIZES.icon.sm} color="#F87171" />
+                  </View>
+                  <View style={styles.linkBlockedTextWrap}>
+                    <Text
+                      maxFontSizeMultiplier={TEXT_MAX_SCALE}
+                      style={styles.linkBlockedTitle}
+                    >
+                      Message blocked
+                    </Text>
+                    <Text
+                      maxFontSizeMultiplier={TEXT_MAX_SCALE}
+                      style={styles.linkBlockedBody}
+                      numberOfLines={3}
+                    >
+                      {getLinkBlockedCopy(linkBlockedNotice.category)}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
+
               {/* Phase-2: Show send-blocked notice if user has penalty */}
               {hasSendPenalty ? (
                 <View style={styles.readOnlyNotice}>
@@ -4058,6 +4192,11 @@ export default function ChatRoomScreen() {
                   value={inputText}
                   onChangeText={(text) => {
                     setInputText(text);
+                    // LINK_BLOCKED: dismiss the inline safety notice the moment
+                    // the user starts editing so the composer feels responsive.
+                    if (linkBlockedNotice) {
+                      clearLinkBlockedNotice();
+                    }
                     // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity heartbeat on typing removed, using timer-based only
                   }}
                   onSend={handleSend}
@@ -4398,6 +4537,46 @@ const styles = StyleSheet.create({
     color: C.text,
     fontWeight: '600',
     lineHeight: lineHeight(FONT_SIZE.caption, 1.2),
+  },
+  // LINK_BLOCKED: premium inline safety notice that replaces the system Alert.
+  // Soft red surface with shield icon, sits above the composer, never blocks
+  // typing, and auto-dismisses (handled in JS).
+  linkBlockedNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.base,
+    backgroundColor: 'rgba(239, 68, 68, 0.10)',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(239, 68, 68, 0.22)',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(239, 68, 68, 0.18)',
+  },
+  linkBlockedIconWrap: {
+    width: SIZES.icon.lg,
+    height: SIZES.icon.lg,
+    borderRadius: SIZES.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(239, 68, 68, 0.16)',
+    marginTop: 1,
+  },
+  linkBlockedTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  linkBlockedTitle: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '700',
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.2),
+    color: '#F87171',
+  },
+  linkBlockedBody: {
+    fontSize: FONT_SIZE.caption,
+    fontWeight: '500',
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
+    color: C.text,
   },
   // P2-012: Improved read-only notice styling
   readOnlyNotice: {

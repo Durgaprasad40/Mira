@@ -1,11 +1,12 @@
 import { mutation, query, internalMutation, internalQuery } from './_generated/server';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { softMaskText } from './softMask';
 import { internal } from './_generated/api';
 import { asUserId } from './id';
 import { hashPassword, verifyPassword, encryptPassword, decryptPassword } from './cryptoUtils';
 import { resolveUserIdByAuthId } from './helpers';
 import { shouldCreatePhase2ChatRoomsNotification } from './phase2NotificationPrefs';
+import { validateChatRoomMessageLinks } from './lib/chatRoomLinkPolicy';
 import {
   isChatRoomPrivateDmConversation,
   isChatRoomPrivateDmExpired,
@@ -14,10 +15,33 @@ import {
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const PENALTY_DURATION_MS = 24 * 60 * 60 * 1000;
+const ROOM_REPORT_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
+const SEVERE_ROOM_REPORT_DM_BLOCK_MS = 7 * 24 * 60 * 60 * 1000;
+const AUTO_TIMEOUT_WINDOW_MS = 60 * 60 * 1000;
+const QUALIFYING_REPORTER_MIN_MEMBERSHIP_MS = 10 * 60 * 1000;
+const TIMEOUT_2_REPORTS_MS = 3 * 60 * 1000;
+const TIMEOUT_3_REPORTS_MS = 10 * 60 * 1000;
+const TIMEOUT_4_REPORTS_MS = 30 * 60 * 1000;
+const TIMEOUT_5_REPORTS_MS = 60 * 60 * 1000;
 // Message retention constants
 const MAX_MESSAGES_PER_ROOM = 1000; // Trigger cleanup when exceeded
 const TARGET_AFTER_TRIM = 900;      // Target count after cleanup
 const BATCH_DELETE_SIZE = 200;      // Delete in batches for efficiency
+
+const SEVERE_CHAT_ROOM_REPORT_REASONS = new Set<string>([
+  // UI reason ids
+  'harassment_hate',
+  'sexual_nudity',
+  'threats',
+  'selling_promotion',
+  // Persisted schema reason ids
+  'harassment',
+  'hate_speech',
+  'sexual_content',
+  'nudity',
+  'violent_threats',
+  'selling',
+]);
 
 // Generate a random 6-character alphanumeric join code
 function generateJoinCode(): string {
@@ -476,7 +500,9 @@ async function resolveUserId(
 // - Send Access: send messages/media (blocked by bans AND send-blocking penalties)
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Penalty types that block sending (but allow reading)
+// Penalty types that block sending (but allow reading). The current schema
+// only persists `readOnly`; the extra values are kept for legacy/forward
+// compatibility if older rows or a later schema expansion introduce them.
 const SEND_BLOCKING_PENALTY_TYPES = ['readOnly', 'muted', 'send_blocked'] as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -666,6 +692,370 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
+async function getBidirectionalBlockedUserIds(
+  ctx: QueryCtx | MutationCtx,
+  viewerId: Id<'users'>
+): Promise<Set<string>> {
+  const [blockedByViewer, blockedViewer] = await Promise.all([
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocker', (q) => q.eq('blockerId', viewerId))
+      .collect(),
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerId))
+      .collect(),
+  ]);
+
+  return new Set([
+    ...blockedByViewer.map((row) => String(row.blockedUserId)),
+    ...blockedViewer.map((row) => String(row.blockerId)),
+  ]);
+}
+
+async function getRoomReportedUserHideAfterMap(
+  ctx: QueryCtx | MutationCtx,
+  reporterId: Id<'users'>,
+  roomId: Id<'chatRooms'>
+): Promise<Map<string, number>> {
+  const reports = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter', (q) => q.eq('reporterId', reporterId))
+    .collect();
+
+  const roomIdStr = String(roomId);
+  const hideAfterByUser = new Map<string, number>();
+  for (const report of reports) {
+    if (report.roomId !== roomIdStr) continue;
+    const reportedId = String(report.reportedUserId);
+    const previous = hideAfterByUser.get(reportedId);
+    if (previous === undefined || report.createdAt < previous) {
+      hideAfterByUser.set(reportedId, report.createdAt);
+    }
+  }
+  return hideAfterByUser;
+}
+
+async function findRecentRoomUserReport(
+  ctx: QueryCtx | MutationCtx,
+  reporterId: Id<'users'>,
+  reportedUserId: Id<'users'>,
+  roomId: string,
+  now: number
+): Promise<Doc<'reports'> | null> {
+  const cutoff = now - ROOM_REPORT_DEDUP_WINDOW_MS;
+  const recentReports = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q
+        .eq('reporterId', reporterId)
+        .eq('reportedUserId', reportedUserId)
+        .gt('createdAt', cutoff)
+    )
+    .collect();
+
+  return (
+    recentReports
+      .filter((report) => report.roomId === roomId)
+      .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null
+  );
+}
+
+async function hasActiveSevereRoomReportBetweenUsers(
+  ctx: QueryCtx | MutationCtx,
+  userId1: Id<'users'>,
+  userId2: Id<'users'>,
+  sourceRoomId: Id<'chatRooms'>,
+  now: number
+): Promise<boolean> {
+  const cutoff = now - SEVERE_ROOM_REPORT_DM_BLOCK_MS;
+  const roomIdStr = String(sourceRoomId);
+
+  const [reports1, reports2] = await Promise.all([
+    ctx.db
+      .query('reports')
+      .withIndex('by_reporter_reported_created', (q) =>
+        q.eq('reporterId', userId1).eq('reportedUserId', userId2).gt('createdAt', cutoff)
+      )
+      .collect(),
+    ctx.db
+      .query('reports')
+      .withIndex('by_reporter_reported_created', (q) =>
+        q.eq('reporterId', userId2).eq('reportedUserId', userId1).gt('createdAt', cutoff)
+      )
+      .collect(),
+  ]);
+
+  return [...reports1, ...reports2].some(
+    (report) =>
+      report.roomId === roomIdStr &&
+      SEVERE_CHAT_ROOM_REPORT_REASONS.has(String(report.reason))
+  );
+}
+
+async function getActiveChatRoomReadOnlyPenalty(
+  ctx: QueryCtx | MutationCtx,
+  roomId: Id<'chatRooms'>,
+  userId: Id<'users'>,
+  now = Date.now()
+): Promise<Doc<'chatRoomPenalties'> | null> {
+  const penalties = await ctx.db
+    .query('chatRoomPenalties')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+    .collect();
+
+  return (
+    penalties
+      .filter((penalty) => {
+        const penaltyType = penalty.type as string;
+        return (
+          penalty.expiresAt > now &&
+          SEND_BLOCKING_PENALTY_TYPES.includes(penaltyType as any)
+        );
+      })
+      .sort((a, b) => b.expiresAt - a.expiresAt)[0] ?? null
+  );
+}
+
+async function reporterHasQualifyingChatRoomPresence(
+  ctx: QueryCtx | MutationCtx,
+  roomId: Id<'chatRooms'>,
+  reporterId: Id<'users'>,
+  reportCreatedAt: number
+): Promise<boolean> {
+  const membership = await ctx.db
+    .query('chatRoomMembers')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', reporterId))
+    .first();
+
+  if (
+    membership?.joinedAt &&
+    membership.joinedAt <= reportCreatedAt - QUALIFYING_REPORTER_MIN_MEMBERSHIP_MS
+  ) {
+    return true;
+  }
+
+  const priorMessage = await ctx.db
+    .query('chatRoomMessages')
+    .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+    .filter((q) =>
+      q.and(
+        q.eq(q.field('senderId'), reporterId),
+        q.lt(q.field('createdAt'), reportCreatedAt)
+      )
+    )
+    .first();
+
+  return !!priorMessage;
+}
+
+async function countQualifyingUniqueReporters(
+  ctx: QueryCtx | MutationCtx,
+  roomId: Id<'chatRooms'>,
+  reportedUserId: Id<'users'>,
+  windowStart: number,
+  now = Date.now()
+): Promise<{
+  uniqueReporterCount: number;
+  weightedScore: number;
+  reportIds: Id<'reports'>[];
+}> {
+  const roomIdString = String(roomId);
+  const reports = await ctx.db
+    .query('reports')
+    .withIndex('by_room', (q) => q.eq('roomId', roomIdString))
+    .collect();
+
+  const qualifyingByReporter = new Map<
+    string,
+    { reporterId: Id<'users'>; reportId: Id<'reports'> }
+  >();
+
+  for (const report of reports) {
+    if (report.reportedUserId !== reportedUserId) continue;
+    if (report.createdAt < windowStart) continue;
+    if (report.reporterId === reportedUserId) continue;
+    if (qualifyingByReporter.has(String(report.reporterId))) continue;
+
+    const reporterPenalty = await getActiveChatRoomReadOnlyPenalty(
+      ctx,
+      roomId,
+      report.reporterId,
+      now
+    );
+    if (reporterPenalty) continue;
+
+    const hasPresenceProof = await reporterHasQualifyingChatRoomPresence(
+      ctx,
+      roomId,
+      report.reporterId,
+      report.createdAt
+    );
+    if (!hasPresenceProof) continue;
+
+    qualifyingByReporter.set(String(report.reporterId), {
+      reporterId: report.reporterId,
+      reportId: report._id,
+    });
+  }
+
+  const qualifying = Array.from(qualifyingByReporter.values());
+  return {
+    uniqueReporterCount: qualifying.length,
+    // Severe report reason mapping is currently lossy across report entry
+    // points, so MVP weighting stays 1:1 with unique qualifying reporters.
+    weightedScore: qualifying.length,
+    reportIds: qualifying.map((entry) => entry.reportId),
+  };
+}
+
+async function writeChatRoomModerationLog(
+  ctx: MutationCtx,
+  args: {
+    roomId: Id<'chatRooms'>;
+    targetUserId: Id<'users'>;
+    action: 'auto_timeout_applied' | 'admin_review_required';
+    reason: string;
+    durationMs?: number;
+    expiresAt?: number;
+    metadata?: Record<string, unknown>;
+  }
+): Promise<void> {
+  await ctx.db.insert('chatRoomModerationLog', {
+    actor: 'system',
+    actorRole: 'system',
+    roomId: args.roomId,
+    targetUserId: args.targetUserId,
+    action: args.action,
+    reason: args.reason,
+    durationMs: args.durationMs,
+    expiresAt: args.expiresAt,
+    createdAt: Date.now(),
+    metadata: args.metadata,
+  });
+}
+
+async function applyChatRoomReadOnlyTimeout(
+  ctx: MutationCtx,
+  roomId: Id<'chatRooms'>,
+  targetUserId: Id<'users'>,
+  durationMs: number
+): Promise<{
+  changed: boolean;
+  action: 'inserted' | 'extended' | 'unchanged';
+  expiresAt: number;
+}> {
+  const now = Date.now();
+  const expiresAt = now + durationMs;
+  const activePenalty = await getActiveChatRoomReadOnlyPenalty(ctx, roomId, targetUserId, now);
+
+  if (activePenalty && activePenalty.expiresAt - activePenalty.kickedAt >= durationMs) {
+    return { changed: false, action: 'unchanged', expiresAt: activePenalty.expiresAt };
+  }
+
+  if (activePenalty) {
+    await ctx.db.patch(activePenalty._id, {
+      kickedAt: now,
+      expiresAt,
+    });
+    return { changed: true, action: 'extended', expiresAt };
+  }
+
+  await ctx.db.insert('chatRoomPenalties', {
+    roomId,
+    userId: targetUserId,
+    type: 'readOnly',
+    kickedAt: now,
+    expiresAt,
+  });
+  return { changed: true, action: 'inserted', expiresAt };
+}
+
+function getAutoTimeoutDurationMs(weightedScore: number): number | null {
+  if (weightedScore >= 5) return TIMEOUT_5_REPORTS_MS;
+  if (weightedScore >= 4) return TIMEOUT_4_REPORTS_MS;
+  if (weightedScore >= 3) return TIMEOUT_3_REPORTS_MS;
+  if (weightedScore >= 2) return TIMEOUT_2_REPORTS_MS;
+  return null;
+}
+
+async function evaluateChatRoomAutoTimeoutAfterReport(
+  ctx: MutationCtx,
+  roomId: Id<'chatRooms'>,
+  reportedUserId: Id<'users'>,
+  newReportId: Id<'reports'>,
+  reason: string
+): Promise<{
+  actionApplied: boolean;
+  timeoutUntil?: number;
+}> {
+  const now = Date.now();
+  const windowStart = now - AUTO_TIMEOUT_WINDOW_MS;
+  const counts = await countQualifyingUniqueReporters(
+    ctx,
+    roomId,
+    reportedUserId,
+    windowStart,
+    now
+  );
+  const durationMs = getAutoTimeoutDurationMs(counts.weightedScore);
+
+  if (!durationMs) {
+    return {
+      actionApplied: false,
+    };
+  }
+
+  const penaltyResult = await applyChatRoomReadOnlyTimeout(
+    ctx,
+    roomId,
+    reportedUserId,
+    durationMs
+  );
+
+  if (!penaltyResult.changed) {
+    return {
+      actionApplied: false,
+    };
+  }
+
+  const metadata = {
+    uniqueReporterCount: counts.uniqueReporterCount,
+    weightedScore: counts.weightedScore,
+    reportIds: counts.reportIds,
+    latestReportId: newReportId,
+    timeoutAction: penaltyResult.action,
+    severeWeighting: 'disabled_mapping_ambiguous',
+  };
+
+  await writeChatRoomModerationLog(ctx, {
+    roomId,
+    targetUserId: reportedUserId,
+    action: 'auto_timeout_applied',
+    reason,
+    durationMs,
+    expiresAt: penaltyResult.expiresAt,
+    metadata,
+  });
+
+  if (counts.weightedScore >= 5) {
+    await writeChatRoomModerationLog(ctx, {
+      roomId,
+      targetUserId: reportedUserId,
+      action: 'admin_review_required',
+      reason,
+      durationMs,
+      expiresAt: penaltyResult.expiresAt,
+      metadata,
+    });
+  }
+
+  return {
+    actionApplied: true,
+    timeoutUntil: penaltyResult.expiresAt,
+  };
+}
+
 /** Ensure a conversationParticipants row exists (repair path for getOrCreateDmThread). */
 async function upsertConversationParticipant(
   ctx: MutationCtx,
@@ -795,17 +1185,9 @@ async function requireRoomSendAccess(
 
   // 2. Check user has no active send-blocking penalty
   const now = Date.now();
-  const penalty = await ctx.db
-    .query('chatRoomPenalties')
-    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-    .first();
-
-  if (penalty && penalty.expiresAt > now) {
-    // Only block if penalty type is a send-blocking type
-    const penaltyType = penalty.type as string;
-    if (SEND_BLOCKING_PENALTY_TYPES.includes(penaltyType as any)) {
-      throw new Error('You are restricted from sending messages in this room');
-    }
+  const penalty = await getActiveChatRoomReadOnlyPenalty(ctx, roomId, userId, now);
+  if (penalty) {
+    throw new Error('You are restricted from sending messages in this room');
   }
 
   return { userId, room, membership };
@@ -1211,6 +1593,18 @@ export const listMessages = query({
       }
     }
 
+    let blockedUserIds = new Set<string>();
+    let reportedUserHideAfter = new Map<string, number>();
+    try {
+      [blockedUserIds, reportedUserHideAfter] = await Promise.all([
+        getBidirectionalBlockedUserIds(ctx, userId),
+        getRoomReportedUserHideAfterMap(ctx, userId, roomId),
+      ]);
+    } catch (err) {
+      console.error('LIST_MESSAGES FAIL AT SAFETY_FILTER_LOOKUP', err);
+      return empty;
+    }
+
     let messages: Doc<'chatRoomMessages'>[] = [];
     try {
       const legacyExpiryCutoff = now - 24 * 60 * 60 * 1000;
@@ -1268,6 +1662,17 @@ export const listMessages = query({
       hasMore = messages.length > limit;
       result = hasMore ? messages.slice(0, limit) : messages;
       result = result.reverse();
+      result = result.filter((message) => {
+        const senderId = String(message.senderId);
+        if (senderId === String(userId)) return true;
+        if (blockedUserIds.has(senderId)) return false;
+
+        const hideAfter = reportedUserHideAfter.get(senderId);
+        if (hideAfter !== undefined && message.createdAt >= hideAfter) {
+          return false;
+        }
+        return true;
+      });
     } catch (err) {
       console.error('LIST_MESSAGES FAIL AT RESULT_SHAPING', err);
       return empty;
@@ -1335,8 +1740,14 @@ export const listMessages = query({
           const p = profileMap.get(String(m.senderId));
           const visualView = visualViewByMessageId.get(m._id as string);
           const isVisualMedia = isChatRoomVisualMediaType(m.type);
+          const safeMessage = isVisualMedia ? { ...(m as any) } : m;
+          if (isVisualMedia) {
+            delete (safeMessage as any).imageUrl;
+            delete (safeMessage as any).imageStorageId;
+            delete (safeMessage as any).videoStorageId;
+          }
           return {
-            ...m,
+            ...safeMessage,
             imageUrl: isVisualMedia ? undefined : m.imageUrl,
             hasVisualMedia: isVisualMedia && !!getChatRoomVisualStorageId(m),
             visualMediaConsumed: !!visualView,
@@ -1755,6 +2166,21 @@ export const sendMessage = mutation({
       }
     }
 
+    // MVP room safety: block links, payment handles, phone numbers, and common
+    // scam contact routes in Phase-2 group chat rooms before persistence.
+    const linkPolicyText = [
+      text ?? '',
+      ...(mentions ?? []).map((mention) => mention.nickname),
+    ].join(' ');
+    const linkPolicy = validateChatRoomMessageLinks(linkPolicyText);
+    if (!linkPolicy.ok) {
+      throw new ConvexError({
+        code: linkPolicy.code,
+        category: linkPolicy.category,
+        message: 'Links and payment contact details are not allowed in chat rooms.',
+      });
+    }
+
     // 2. Rate limiting: max 10 messages per minute per user per room
     const now = Date.now();
     const expiresAt = now + 24 * 60 * 60 * 1000;
@@ -2035,6 +2461,17 @@ export const openChatRoomVisualMedia = mutation({
       (typeof message.expiresAt === 'number' && message.expiresAt <= now)
     ) {
       return { status: 'no_media' as const };
+    }
+    if (String(message.senderId) !== String(userId)) {
+      if (await isBlockedBidirectional(ctx, userId, message.senderId)) {
+        return { status: 'no_media' as const };
+      }
+
+      const reportHideAfter = await getRoomReportedUserHideAfterMap(ctx, userId, roomId);
+      const hideAfter = reportHideAfter.get(String(message.senderId));
+      if (hideAfter !== undefined && message.createdAt >= hideAfter) {
+        return { status: 'no_media' as const };
+      }
     }
 
     const existingView = await ctx.db
@@ -2606,17 +3043,51 @@ export const reportMessage = mutation({
       throw new Error('Cannot report your own message');
     }
 
+    const now = Date.now();
+    const roomId = String(message.roomId);
+    const existingRecentReport = await findRecentRoomUserReport(
+      ctx,
+      reporterId,
+      message.senderId,
+      roomId,
+      now
+    );
+    if (existingRecentReport) {
+      return {
+        success: true,
+        duplicate: true,
+        message: 'You already reported this user recently.',
+      };
+    }
+
     // Store report in existing reports table
-    await ctx.db.insert('reports', {
+    const reportId = await ctx.db.insert('reports', {
       reporterId,
       reportedUserId: message.senderId,
       reason: 'harassment', // Map to existing enum
       description: `Chat room message report: ${reason}`,
       status: 'pending',
-      createdAt: Date.now(),
+      createdAt: now,
+      roomId,
     });
 
-    return { success: true };
+    const autoTimeout = await evaluateChatRoomAutoTimeoutAfterReport(
+      ctx,
+      message.roomId,
+      message.senderId,
+      reportId,
+      reason
+    );
+
+    if (autoTimeout.actionApplied) {
+      return {
+        success: true,
+        duplicate: false,
+        actionApplied: true,
+        timeoutUntil: autoTimeout.timeoutUntil,
+      };
+    }
+    return { success: true, duplicate: false, actionApplied: false };
   },
 });
 
@@ -2697,19 +3168,10 @@ export const getUserPenalty = query({
       throw new Error('Room has expired');
     }
 
-    const penalty = await ctx.db
-      .query('chatRoomPenalties')
-      .withIndex('by_room_user', (q) =>
-        q.eq('roomId', roomId).eq('userId', userId)
-      )
-      .first();
+    const now = Date.now();
+    const penalty = await getActiveChatRoomReadOnlyPenalty(ctx, roomId, userId, now);
 
     if (!penalty) return null;
-
-    const now = Date.now();
-    if (penalty.expiresAt <= now) {
-      return null; // Penalty expired
-    }
 
     return {
       type: penalty.type,
@@ -4522,18 +4984,37 @@ export const submitChatRoomReport = mutation({
       throw new Error('Cannot report yourself');
     }
 
-    // 4. Create the report record in the reports table
+    // 4. Dedup same reporter → reported user → room reports for 24h.
+    const now = Date.now();
+    if (roomId) {
+      const existingRecentReport = await findRecentRoomUserReport(
+        ctx,
+        reporterId,
+        reportedId,
+        roomId,
+        now
+      );
+      if (existingRecentReport) {
+        return {
+          success: true,
+          duplicate: true,
+          message: 'You already reported this user recently.',
+        };
+      }
+    }
+
+    // 5. Create the report record in the reports table
     const reportId = await ctx.db.insert('reports', {
       reporterId,
       reportedUserId: reportedId,
       reason,
       description: details ?? undefined,
       status: 'pending',
-      createdAt: Date.now(),
+      createdAt: now,
       roomId: roomId ?? undefined,
     });
 
-    // 5. Also mark the room as reported (for quick lookups)
+    // 6. Also mark the room as reported (for quick lookups)
     if (roomId) {
       const existingRoomReport = await ctx.db
         .query('userRoomReports')
@@ -4549,7 +5030,32 @@ export const submitChatRoomReport = mutation({
       }
     }
 
-    return { success: true, reportId };
+    let autoTimeout:
+      | Awaited<ReturnType<typeof evaluateChatRoomAutoTimeoutAfterReport>>
+      | undefined;
+    const roomDocId = roomId ? ctx.db.normalizeId('chatRooms', roomId) : null;
+    if (roomDocId) {
+      const room = await ctx.db.get(roomDocId);
+      if (room) {
+        autoTimeout = await evaluateChatRoomAutoTimeoutAfterReport(
+          ctx,
+          roomDocId,
+          reportedId,
+          reportId,
+          reason
+        );
+      }
+    }
+
+    if (autoTimeout?.actionApplied) {
+      return {
+        success: true,
+        duplicate: false,
+        actionApplied: true,
+        timeoutUntil: autoTimeout.timeoutUntil,
+      };
+    }
+    return { success: true, duplicate: false, actionApplied: false };
   },
 });
 
@@ -5635,9 +6141,10 @@ export const getOrCreateDmThread = mutation({
       throw new Error('Cannot start conversation');
     }
 
+    const now = Date.now();
     if (sourceRoomId) {
       const r = await ctx.db.get(sourceRoomId);
-      if (!r || (r.expiresAt && r.expiresAt <= Date.now())) {
+      if (!r || (r.expiresAt && r.expiresAt <= now)) {
         throw new Error('Room not found');
       }
       const m1 = await ctx.db
@@ -5651,6 +6158,11 @@ export const getOrCreateDmThread = mutation({
       if (!m1 || !m2) {
         throw new Error('Both users must be in this room');
       }
+      if (
+        await hasActiveSevereRoomReportBetweenUsers(ctx, userId, peerUserId, sourceRoomId, now)
+      ) {
+        throw new Error('Cannot start conversation');
+      }
     }
 
     const sortedParticipants: [Id<'users'>, Id<'users'>] =
@@ -5658,7 +6170,6 @@ export const getOrCreateDmThread = mutation({
         ? [userId, peerUserId]
         : [peerUserId, userId];
 
-    const now = Date.now();
     let found: Id<'conversations'> | null = null;
 
     if (sourceRoomId) {
