@@ -25,7 +25,6 @@ import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { isActiveTruthDareUpload, useTruthDareUploadStore } from '@/stores/truthDareUploadStore';
-import type { TodReportReason } from '@/types';
 
 const C = INCOGNITO_COLORS;
 const PHASE2_TOD_HOME_ROUTE = '/(main)/(private)/(tabs)/truth-or-dare';
@@ -58,15 +57,21 @@ const PREMIUM = {
 // Available emoji reactions
 const REACTION_EMOJIS = ['😂', '🔥', '😍', '👏', '😮', '💀'];
 
+type TodReportReason =
+  | 'sexual_content'
+  | 'threats_violence'
+  | 'targeting_someone'
+  | 'private_information'
+  | 'scam_promotion'
+  | 'other';
+
 // Report reason options must stay aligned with the backend reasonCode union.
 const REPORT_REASONS: { code: TodReportReason; label: string; icon: string }[] = [
-  { code: 'harassment', label: 'Harassment', icon: '🚫' },
-  { code: 'sexual', label: 'Sexual Content', icon: '🔞' },
-  { code: 'spam', label: 'Spam', icon: '📢' },
-  { code: 'hate', label: 'Hate Speech', icon: '💢' },
-  { code: 'violence', label: 'Violence', icon: '⚠️' },
-  { code: 'privacy', label: 'Privacy Violation', icon: '🔒' },
-  { code: 'scam', label: 'Scam', icon: '💰' },
+  { code: 'sexual_content', label: 'Sexual content', icon: '🔞' },
+  { code: 'threats_violence', label: 'Threats or violence', icon: '⚠️' },
+  { code: 'targeting_someone', label: 'Targeting someone', icon: '🚫' },
+  { code: 'private_information', label: 'Sharing private information', icon: '🔒' },
+  { code: 'scam_promotion', label: 'Scam or promotion', icon: '💰' },
   { code: 'other', label: 'Other', icon: '📝' },
 ];
 
@@ -909,7 +914,9 @@ export default function PromptThreadScreen() {
           reasonText: normalizedReasonText,
         });
         setReportModalVisible(false);
-        if (result.isNowHidden) {
+        if (result.alreadyReported) {
+          Alert.alert('Reported', 'Thank you for your report. We will review it.');
+        } else if (result.isNowHidden) {
           Alert.alert('Reported', 'This prompt has been hidden due to multiple reports.');
           handleBackToSource();
         } else {
@@ -925,7 +932,9 @@ export default function PromptThreadScreen() {
         });
         setReportModalVisible(false);
         // P1-002: Content is immediately hidden for the reporter
-        if (result.isNowHidden) {
+        if (result.alreadyReported) {
+          Alert.alert('Reported', 'Thank you for your report. This content is now hidden for you.');
+        } else if (result.isNowHidden) {
           Alert.alert('Reported', 'This comment has been hidden due to multiple reports.');
         } else {
           Alert.alert('Reported', 'Thank you for your report. This content is now hidden for you.');

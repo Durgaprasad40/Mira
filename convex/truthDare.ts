@@ -9,6 +9,10 @@ import {
   ensurePhase2MatchAndConversation,
   findPhase2MatchConversationStatus,
 } from './phase2MatchHelpers';
+import {
+  TOD_REPORT_THRESHOLDS,
+  moderationStatusForTodReportCount,
+} from './lib/todModeration';
 
 // 24-hour auto-delete rule (same as Confessions)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
@@ -24,9 +28,6 @@ const RATE_LIMITS = {
   prompt_report: { max: 10, windowMs: 24 * 60 * 60 * 1000 }, // 10 prompt reports per day
   claim_media: { max: 20, windowMs: 60 * 1000 }, // 20 media claims per minute
 };
-
-// Report threshold for hiding
-const REPORT_HIDE_THRESHOLD = 5;
 
 // TOD-P2-001 FIX: Rate limit error message
 const RATE_LIMIT_ERROR = 'Rate limit exceeded. Please try again later.';
@@ -174,11 +175,38 @@ function getSafePhotoUrl(
   return trimText(user?.primaryPhotoUrl ?? undefined) ?? trimText(fallbackUrl ?? undefined) ?? null;
 }
 
+type TodReportModeratedItem = {
+  reportCount?: number;
+  moderationStatus?: 'normal' | 'under_review' | 'hidden_by_reports';
+};
+
+function isTodHiddenByReports(item: TodReportModeratedItem): boolean {
+  return (
+    item.moderationStatus === 'hidden_by_reports' ||
+    (item.reportCount ?? 0) >= TOD_REPORT_THRESHOLDS.AUTO_HIDE
+  );
+}
+
+function isTodSuppressedFromHighVisibility(item: TodReportModeratedItem): boolean {
+  return (
+    isTodHiddenByReports(item) ||
+    item.moderationStatus === 'under_review' ||
+    (item.reportCount ?? 0) >= TOD_REPORT_THRESHOLDS.TRENDING_SUPPRESS
+  );
+}
+
 function isPromptHiddenForViewer(
-  prompt: { ownerUserId: string; reportCount?: number },
+  prompt: TodReportModeratedItem & { ownerUserId: string },
   viewerUserId: Id<'users'> | undefined
 ): boolean {
-  return (prompt.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD && prompt.ownerUserId !== viewerUserId;
+  return isTodHiddenByReports(prompt) && prompt.ownerUserId !== viewerUserId;
+}
+
+function isAnswerHiddenForViewer(
+  answer: TodReportModeratedItem & { userId: string },
+  viewerUserId: Id<'users'> | undefined
+): boolean {
+  return isTodHiddenByReports(answer) && answer.userId !== viewerUserId;
 }
 
 async function deleteStorageIfPresent(
@@ -442,6 +470,68 @@ async function hasBlockBetween(ctx: any, userA: string, userB: string): Promise<
   return !!reverse;
 }
 
+async function getTodPromptIdsReportedByViewer(
+  ctx: any,
+  viewerUserId: Id<'users'> | undefined
+): Promise<Set<string>> {
+  if (!viewerUserId) return new Set();
+
+  const reports = await ctx.db
+    .query('todPromptReports')
+    .withIndex('by_reporter', (q: any) => q.eq('reporterId', viewerUserId as string))
+    .collect();
+
+  return new Set(reports.map((report: any) => report.promptId as string));
+}
+
+async function getTodAnswerIdsReportedByViewer(
+  ctx: any,
+  viewerUserId: Id<'users'> | undefined
+): Promise<Set<string>> {
+  if (!viewerUserId) return new Set();
+
+  const reports = await ctx.db
+    .query('todAnswerReports')
+    .withIndex('by_reporter', (q: any) => q.eq('reporterId', viewerUserId as string))
+    .collect();
+
+  return new Set(reports.map((report: any) => report.answerId as string));
+}
+
+async function hasViewerReportedPrompt(
+  ctx: any,
+  promptId: string,
+  viewerUserId: Id<'users'> | undefined
+): Promise<boolean> {
+  if (!viewerUserId) return false;
+
+  const report = await ctx.db
+    .query('todPromptReports')
+    .withIndex('by_prompt_reporter', (q: any) =>
+      q.eq('promptId', promptId).eq('reporterId', viewerUserId as string)
+    )
+    .first();
+
+  return !!report;
+}
+
+async function hasViewerReportedAnswer(
+  ctx: any,
+  answerId: string,
+  viewerUserId: Id<'users'> | undefined
+): Promise<boolean> {
+  if (!viewerUserId) return false;
+
+  const report = await ctx.db
+    .query('todAnswerReports')
+    .withIndex('by_answer_reporter', (q: any) =>
+      q.eq('answerId', answerId).eq('reporterId', viewerUserId as string)
+    )
+    .first();
+
+  return !!report;
+}
+
 type TodConnectRequestStatus = 'pending' | 'connected' | 'removed';
 
 async function findTodConnectRequestForPromptPair(
@@ -471,7 +561,7 @@ function getTodConnectDuplicateAction(status: TodConnectRequestStatus) {
 }
 
 function getVoiceMediaUrlForViewer(
-  answer: {
+  answer: TodReportModeratedItem & {
     type: string;
     mediaUrl?: string;
     visibility?: string;
@@ -481,6 +571,9 @@ function getVoiceMediaUrlForViewer(
   promptOwnerUserId: string
 ): string | undefined {
   if (answer.type !== 'voice' || !answer.mediaUrl || !viewerUserId) {
+    return undefined;
+  }
+  if (isAnswerHiddenForViewer(answer, viewerUserId)) {
     return undefined;
   }
   if (viewerUserId === answer.userId) {
@@ -493,7 +586,7 @@ function getVoiceMediaUrlForViewer(
 }
 
 function getInlineAnswerMediaUrlForViewer(
-  answer: {
+  answer: TodReportModeratedItem & {
     type: string;
     mediaUrl?: string;
     visibility?: string;
@@ -503,6 +596,9 @@ function getInlineAnswerMediaUrlForViewer(
   promptOwnerUserId: string
 ): string | undefined {
   if (!viewerUserId) {
+    return undefined;
+  }
+  if (isAnswerHiddenForViewer(answer, viewerUserId)) {
     return undefined;
   }
   if (answer.type === 'voice') {
@@ -516,21 +612,38 @@ function getInlineAnswerMediaUrlForViewer(
 
 async function canViewerAccessAnswerMedia(
   ctx: any,
-  answer: {
+  answer: TodReportModeratedItem & {
+    _id?: Id<'todAnswers'> | string;
     promptId: string;
     visibility?: string;
     userId: string;
   },
   viewerUserId: Id<'users'>,
-  prompt?: { ownerUserId: string } | null
+  prompt?: (TodReportModeratedItem & { ownerUserId: string }) | null
 ): Promise<boolean> {
+  const promptDoc =
+    prompt ?? (await ctx.db.get(answer.promptId as Id<'todPrompts'>));
+  if (!promptDoc) {
+    return false;
+  }
+
+  if (isPromptHiddenForViewer(promptDoc, viewerUserId)) {
+    return false;
+  }
+  if (await hasViewerReportedPrompt(ctx, answer.promptId, viewerUserId)) {
+    return false;
+  }
+
   if (viewerUserId === answer.userId) {
     return true;
   }
 
-  const promptDoc =
-    prompt ?? (await ctx.db.get(answer.promptId as Id<'todPrompts'>));
-  if (!promptDoc) {
+  if (isAnswerHiddenForViewer(answer, viewerUserId)) {
+    return false;
+  }
+
+  const answerId = answer._id ? (answer._id as string) : undefined;
+  if (answerId && await hasViewerReportedAnswer(ctx, answerId, viewerUserId)) {
     return false;
   }
 
@@ -554,13 +667,14 @@ async function canViewerAccessAnswerMedia(
 
 async function canViewerAccessVoiceAnswer(
   ctx: any,
-  answer: {
+  answer: TodReportModeratedItem & {
+    _id?: Id<'todAnswers'> | string;
     promptId: string;
     visibility?: string;
     userId: string;
   },
   viewerUserId: Id<'users'>,
-  prompt?: { ownerUserId: string } | null
+  prompt?: (TodReportModeratedItem & { ownerUserId: string }) | null
 ): Promise<boolean> {
   return canViewerAccessAnswerMedia(ctx, answer, viewerUserId, prompt);
 }
@@ -1339,7 +1453,10 @@ export const sendTodConnectRequest = mutation({
     if (answer.promptId !== promptId) {
       return { success: false, reason: 'Answer does not belong to this prompt' };
     }
-    if ((answer.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD) {
+    if (
+      isAnswerHiddenForViewer(answer, fromUserId) ||
+      await hasViewerReportedAnswer(ctx, answerId, fromUserId)
+    ) {
       return { success: false, reason: 'Connect unavailable for this answer' };
     }
 
@@ -2354,7 +2471,11 @@ export const listActivePromptsWithTop2Answers = query({
     const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, viewerUserId, 'listActivePromptsWithTop2Answers');
 
     // TOD-P2-002 FIX: Get blocked user IDs for viewer (both directions)
-    const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
+    const [blockedUserIds, reportedPromptIds, reportedAnswerIds] = await Promise.all([
+      getBlockedUserIdsForViewer(ctx, viewerDbId),
+      getTodPromptIdsReportedByViewer(ctx, viewerDbId),
+      getTodAnswerIdsReportedByViewer(ctx, viewerDbId),
+    ]);
 
     // Get recent prompts first, then apply the existing visibility filters below.
     const allPrompts = await ctx.db
@@ -2371,6 +2492,7 @@ export const listActivePromptsWithTop2Answers = query({
       if (expires <= now) return false;
       // TOD-P2-002 FIX: Filter out prompts from blocked users
       if (blockedUserIds.has(p.ownerUserId as string)) return false;
+      if (reportedPromptIds.has(p._id as unknown as string)) return false;
       if (isPromptHiddenForViewer(p, viewerDbId)) return false;
       return true;
     });
@@ -2397,15 +2519,13 @@ export const listActivePromptsWithTop2Answers = query({
           .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
           .take(10);
 
-        // Filter: exclude hidden answers (reportCount >= 5) UNLESS viewer is the author
+        // Filter: exclude report-hidden answers unless the viewer is the author.
         // TOD-P2-002 FIX: Also exclude answers from blocked users
         const visibleAnswers = answers.filter((a) => {
           // TOD-P2-002 FIX: Filter out answers from blocked users
           if (blockedUserIds.has(a.userId as string)) return false;
-          const isHidden = (a.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD;
-          if (!isHidden) return true;
-          // Author can always see their own answer
-          return viewerDbId && a.userId === viewerDbId;
+          if (reportedAnswerIds.has(a._id as unknown as string)) return false;
+          return !isAnswerHiddenForViewer(a, viewerDbId);
         });
 
         visibleAnswers.sort(sortTodAnswersByDisplayRank);
@@ -2452,7 +2572,7 @@ export const listActivePromptsWithTop2Answers = query({
               visibility: answer.visibility,
               viewMode: answer.viewMode,
               viewDurationSec: answer.viewDurationSec,
-              isHiddenForOthers: (answer.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD,
+              isHiddenForOthers: isTodHiddenByReports(answer),
             };
           })
         );
@@ -2512,7 +2632,10 @@ export const getTrendingTruthAndDare = query({
   handler: async (ctx, { viewerUserId }) => {
     const now = Date.now();
     const viewerDbId = await getOptionalAuthenticatedTodUserId(ctx, viewerUserId, 'getTrendingTruthAndDare');
-    const blockedUserIds = await getBlockedUserIdsForViewer(ctx, viewerDbId);
+    const [blockedUserIds, reportedPromptIds] = await Promise.all([
+      getBlockedUserIdsForViewer(ctx, viewerDbId),
+      getTodPromptIdsReportedByViewer(ctx, viewerDbId),
+    ]);
 
     // Get bounded recent prompt candidates by type, then reuse the existing filters below.
     const [dareCandidates, truthCandidates] = await Promise.all([
@@ -2539,6 +2662,8 @@ export const getTrendingTruthAndDare = query({
       return (
         expires > now &&
         !blockedUserIds.has(p.ownerUserId as string) &&
+        !reportedPromptIds.has(p._id as unknown as string) &&
+        !isTodSuppressedFromHighVisibility(p) &&
         !isPromptHiddenForViewer(p, viewerDbId)
       );
     });
@@ -2616,8 +2741,10 @@ export const getPromptThread = query({
       .first();
 
     if (!prompt) return null;
+    const promptIdStr = prompt._id as unknown as string;
     if (blockedUserIds.has(prompt.ownerUserId as string)) return null;
     if (isPromptHiddenForViewer(prompt, viewerDbId)) return null;
+    if (await hasViewerReportedPrompt(ctx, promptIdStr, viewerDbId)) return null;
 
     // Check if expired
     const now = Date.now();
@@ -2656,13 +2783,13 @@ export const getPromptThread = query({
       .query('todAnswers')
       .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
       .collect();
+    const reportedAnswerIds = await getTodAnswerIdsReportedByViewer(ctx, viewerDbId);
 
-    // Filter hidden answers (except for author)
+    // Filter hidden/reported answers. A hidden answer stays visible to its author.
     const visibleAnswers = answers.filter((a) => {
       if (blockedUserIds.has(a.userId as string)) return false;
-      const isHidden = (a.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD;
-      if (!isHidden) return true;
-      return viewerDbId && a.userId === viewerDbId;
+      if (reportedAnswerIds.has(a._id as unknown as string)) return false;
+      return !isAnswerHiddenForViewer(a, viewerDbId);
     });
 
     visibleAnswers.sort(sortTodAnswersByDisplayRank);
@@ -2721,17 +2848,8 @@ export const getPromptThread = query({
           viewerDbId
         );
 
-        // Check if viewer reported this
-        let hasReported = false;
-        if (viewerDbId) {
-          const report = await ctx.db
-            .query('todAnswerReports')
-            .withIndex('by_answer_reporter', (q) =>
-              q.eq('answerId', answerId).eq('reporterId', viewerDbId)
-            )
-            .first();
-          hasReported = !!report;
-        }
+        // Reported answers are hidden above, so this flag remains false for visible rows.
+        const hasReported = false;
 
         // Check if viewer has viewed this media (one-time view tracking)
         let hasViewedMedia = false;
@@ -2804,7 +2922,7 @@ export const getPromptThread = query({
           visibility: answer.visibility,
           viewMode: answer.viewMode,
           viewDurationSec: answer.viewDurationSec,
-          isHiddenForOthers: (answer.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD,
+          isHiddenForOthers: isTodHiddenByReports(answer),
           isOwnAnswer: viewerDbId === answer.userId,
           hasReported,
           hasViewedMedia,
@@ -3297,22 +3415,19 @@ export const setAnswerReaction = mutation({
 
 /**
  * Report an answer.
- * Rate limited per day. Same user can't report same answer twice.
- * If answer reaches 5 unique reports, it's hidden from everyone except author.
+ * Rate limited per day. Duplicate reports are idempotent.
+ * Three unique reports hides the answer from everyone except author.
  */
 export const reportAnswer = mutation({
   args: {
     answerId: v.string(),
     reporterId: v.string(),
-    // Structured report reason (must stay aligned with the T/D UI options)
     reasonCode: v.union(
-      v.literal('harassment'),
-      v.literal('sexual'),
-      v.literal('spam'),
-      v.literal('hate'),
-      v.literal('violence'),
-      v.literal('privacy'),
-      v.literal('scam'),
+      v.literal('sexual_content'),
+      v.literal('threats_violence'),
+      v.literal('targeting_someone'),
+      v.literal('private_information'),
+      v.literal('scam_promotion'),
       v.literal('other')
     ),
     // Optional additional details
@@ -3320,7 +3435,7 @@ export const reportAnswer = mutation({
     // Legacy field for backwards compatibility (deprecated)
     reason: v.optional(v.string()),
   },
-  handler: async (ctx, { answerId, reporterId: argsReporterId, reasonCode, reasonText, reason }) => {
+  handler: async (ctx, { answerId, reporterId: argsReporterId, reasonCode, reasonText }) => {
     const reporterId = await requireAuthenticatedTodUserId(ctx, argsReporterId, 'Unauthorized');
 
     // Validate answer exists
@@ -3347,7 +3462,20 @@ export const reportAnswer = mutation({
       .first();
 
     if (existingReport) {
-      throw new Error('You have already reported this answer');
+      const answerModeration = answer as typeof answer & {
+        uniqueReportCount?: number;
+        moderationStatus?: 'normal' | 'under_review' | 'hidden_by_reports';
+      };
+      const currentStatus =
+        answerModeration.moderationStatus ??
+        moderationStatusForTodReportCount(answerModeration.uniqueReportCount ?? answer.reportCount ?? 0);
+
+      return {
+        success: true,
+        alreadyReported: true,
+        moderationStatus: currentStatus,
+        isNowHidden: currentStatus === 'hidden_by_reports',
+      };
     }
 
     // Check rate limit (daily)
@@ -3356,27 +3484,48 @@ export const reportAnswer = mutation({
       throw new Error('You have reached your daily report limit');
     }
 
+    const now = Date.now();
+
     // Create report with structured reason
     await ctx.db.insert('todAnswerReports', {
       answerId,
       reporterId,
-      reasonCode,
+      reasonCode: reasonCode as any,
       reasonText,
-      reason, // Legacy field for backwards compatibility
-      createdAt: Date.now(),
+      createdAt: now,
     });
 
-    // Increment report count
-    const newReportCount = (answer.reportCount ?? 0) + 1;
-    await ctx.db.patch(answer._id, { reportCount: newReportCount });
+    const reports = await ctx.db
+      .query('todAnswerReports')
+      .withIndex('by_answer', (q) => q.eq('answerId', answerId))
+      .collect();
 
-    // Check if threshold reached
-    const isNowHidden = newReportCount >= REPORT_HIDE_THRESHOLD;
+    const nextCount = reports.length;
+    const nextStatus = moderationStatusForTodReportCount(nextCount);
+    const answerModeration = answer as typeof answer & {
+      moderationStatus?: 'normal' | 'under_review' | 'hidden_by_reports';
+      hiddenByReportsAt?: number;
+    };
+    const answerPatch: any = {
+      uniqueReportCount: nextCount,
+      reportCount: nextCount,
+      moderationStatus: nextStatus,
+    };
+
+    if (answerModeration.moderationStatus !== nextStatus) {
+      answerPatch.moderationStatusAt = now;
+    }
+    if (nextStatus === 'hidden_by_reports' && !answerModeration.hiddenByReportsAt) {
+      answerPatch.hiddenByReportsAt = now;
+    }
+
+    await ctx.db.patch(answer._id, answerPatch);
 
     return {
       success: true,
-      reportCount: newReportCount,
-      isNowHidden,
+      alreadyReported: false,
+      moderationStatus: nextStatus,
+      isNowHidden: nextStatus === 'hidden_by_reports',
     };
   },
 });
@@ -3460,21 +3609,19 @@ export const setPromptReaction = mutation({
 
 /**
  * Report a prompt.
- * Rate limited per day. Same user can't report same prompt twice.
- * If prompt reaches 5 unique reports, it's hidden from feeds.
+ * Rate limited per day. Duplicate reports are idempotent.
+ * Three unique reports hides the prompt from public surfaces.
  */
 export const reportPrompt = mutation({
   args: {
     promptId: v.string(),
     reporterId: v.string(),
     reasonCode: v.union(
-      v.literal('harassment'),
-      v.literal('sexual'),
-      v.literal('spam'),
-      v.literal('hate'),
-      v.literal('violence'),
-      v.literal('privacy'),
-      v.literal('scam'),
+      v.literal('sexual_content'),
+      v.literal('threats_violence'),
+      v.literal('targeting_someone'),
+      v.literal('private_information'),
+      v.literal('scam_promotion'),
       v.literal('other')
     ),
     reasonText: v.optional(v.string()),
@@ -3506,7 +3653,20 @@ export const reportPrompt = mutation({
       .first();
 
     if (existingReport) {
-      throw new Error('You have already reported this prompt');
+      const promptModeration = prompt as typeof prompt & {
+        uniqueReportCount?: number;
+        moderationStatus?: 'normal' | 'under_review' | 'hidden_by_reports';
+      };
+      const currentStatus =
+        promptModeration.moderationStatus ??
+        moderationStatusForTodReportCount(promptModeration.uniqueReportCount ?? prompt.reportCount ?? 0);
+
+      return {
+        success: true,
+        alreadyReported: true,
+        moderationStatus: currentStatus,
+        isNowHidden: currentStatus === 'hidden_by_reports',
+      };
     }
 
     // Check rate limit (daily)
@@ -3515,26 +3675,48 @@ export const reportPrompt = mutation({
       throw new Error('You have reached your daily report limit');
     }
 
+    const now = Date.now();
+
     // Create report
     await ctx.db.insert('todPromptReports', {
       promptId,
       reporterId,
-      reasonCode,
+      reasonCode: reasonCode as any,
       reasonText,
-      createdAt: Date.now(),
+      createdAt: now,
     });
 
-    // Increment report count
-    const newReportCount = (prompt.reportCount ?? 0) + 1;
-    await ctx.db.patch(prompt._id, { reportCount: newReportCount });
+    const reports = await ctx.db
+      .query('todPromptReports')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
 
-    // Check if threshold reached
-    const isNowHidden = newReportCount >= REPORT_HIDE_THRESHOLD;
+    const nextCount = reports.length;
+    const nextStatus = moderationStatusForTodReportCount(nextCount);
+    const promptModeration = prompt as typeof prompt & {
+      moderationStatus?: 'normal' | 'under_review' | 'hidden_by_reports';
+      hiddenByReportsAt?: number;
+    };
+    const promptPatch: any = {
+      uniqueReportCount: nextCount,
+      reportCount: nextCount,
+      moderationStatus: nextStatus,
+    };
+
+    if (promptModeration.moderationStatus !== nextStatus) {
+      promptPatch.moderationStatusAt = now;
+    }
+    if (nextStatus === 'hidden_by_reports' && !promptModeration.hiddenByReportsAt) {
+      promptPatch.hiddenByReportsAt = now;
+    }
+
+    await ctx.db.patch(prompt._id, promptPatch);
 
     return {
       success: true,
-      reportCount: newReportCount,
-      isNowHidden,
+      alreadyReported: false,
+      moderationStatus: nextStatus,
+      isNowHidden: nextStatus === 'hidden_by_reports',
     };
   },
 });
@@ -3559,7 +3741,16 @@ export const getUserAnswer = query({
       )
       .first();
 
-    return answer;
+    if (!answer) return null;
+
+    const safeAnswer = { ...(answer as any) };
+    delete safeAnswer.reportCount;
+    delete safeAnswer.uniqueReportCount;
+    delete safeAnswer.moderationStatus;
+    delete safeAnswer.moderationStatusAt;
+    delete safeAnswer.hiddenByReportsAt;
+
+    return safeAnswer;
   },
 });
 

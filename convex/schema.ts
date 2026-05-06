@@ -1611,6 +1611,14 @@ export default defineSchema({
     // Reaction and report counts for prompt-level interactions
     totalReactionCount: v.optional(v.number()), // total reactions on this prompt
     reportCount: v.optional(v.number()), // for hiding prompts with 5+ reports
+    uniqueReportCount: v.optional(v.number()),
+    moderationStatus: v.optional(v.union(
+      v.literal('normal'),
+      v.literal('under_review'),
+      v.literal('hidden_by_reports')
+    )),
+    moderationStatusAt: v.optional(v.number()),
+    hiddenByReportsAt: v.optional(v.number()),
     // Owner profile snapshot (immutable at creation time)
     isAnonymous: v.optional(v.boolean()), // true = hide photo/name, show only age+gender
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))), // 'blur' = show blurred photo
@@ -1624,7 +1632,8 @@ export default defineSchema({
     .index('by_type_created', ['type', 'createdAt'])
     .index('by_owner', ['ownerUserId'])
     .index('by_created', ['createdAt'])
-    .index('by_expires', ['expiresAt']),
+    .index('by_expires', ['expiresAt'])
+    .index('by_moderation_status', ['moderationStatus']),
 
   // Truth & Dare Answers (one per user per prompt)
   todAnswers: defineTable({
@@ -1656,6 +1665,14 @@ export default defineSchema({
     // Reaction and report counts (denormalized for ranking)
     totalReactionCount: v.optional(v.number()), // total emoji reactions
     reportCount: v.optional(v.number()), // unique reporters
+    uniqueReportCount: v.optional(v.number()),
+    moderationStatus: v.optional(v.union(
+      v.literal('normal'),
+      v.literal('under_review'),
+      v.literal('hidden_by_reports')
+    )),
+    moderationStatusAt: v.optional(v.number()),
+    hiddenByReportsAt: v.optional(v.number()),
     // One-time view gating fields (for both owner_only and public visibility)
     viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
     viewDurationSec: v.optional(v.number()), // 1-60 seconds for one-time view
@@ -1668,7 +1685,8 @@ export default defineSchema({
   })
     .index('by_prompt', ['promptId'])
     .index('by_user', ['userId'])
-    .index('by_prompt_user', ['promptId', 'userId']),
+    .index('by_prompt_user', ['promptId', 'userId'])
+    .index('by_moderation_status', ['moderationStatus']),
 
   // Truth & Dare per-user view tracking (for one-time gating before owner views)
   todAnswerViews: defineTable({
@@ -1707,14 +1725,19 @@ export default defineSchema({
     reporterId: v.string(),
     // Structured report reason (required for new reports)
     reasonCode: v.optional(v.union(
+      v.literal('sexual_content'),
+      v.literal('threats_violence'),
+      v.literal('targeting_someone'),
+      v.literal('private_information'),
+      v.literal('scam_promotion'),
+      v.literal('other'),
       v.literal('harassment'),
       v.literal('sexual'),
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
       v.literal('privacy'),
-      v.literal('scam'),
-      v.literal('other')
+      v.literal('scam')
     )),
     // Optional additional details (renamed from reason for clarity)
     reasonText: v.optional(v.string()),
@@ -1743,14 +1766,19 @@ export default defineSchema({
     promptId: v.string(),
     reporterId: v.string(),
     reasonCode: v.optional(v.union(
+      v.literal('sexual_content'),
+      v.literal('threats_violence'),
+      v.literal('targeting_someone'),
+      v.literal('private_information'),
+      v.literal('scam_promotion'),
+      v.literal('other'),
       v.literal('harassment'),
       v.literal('sexual'),
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
       v.literal('privacy'),
-      v.literal('scam'),
-      v.literal('other')
+      v.literal('scam')
     )),
     reasonText: v.optional(v.string()),
     createdAt: v.number(),
