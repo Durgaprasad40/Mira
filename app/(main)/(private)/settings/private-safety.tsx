@@ -70,18 +70,18 @@ export default function SafetyScreen() {
             <Ionicons name="chevron-forward" size={20} color={C.textLight} />
           </TouchableOpacity>
 
-          {/* Report a Person */}
+          {/* Get Help */}
           <TouchableOpacity
             style={[styles.navRow, styles.navRowLast]}
-            onPress={() => router.push('/(main)/(private)/settings/select-person' as any)}
+            onPress={() => router.push('/(main)/(private)/settings/private-support' as any)}
             activeOpacity={0.7}
           >
             <View style={styles.navRowLeft}>
-              <Ionicons name="warning-outline" size={22} color={C.text} />
+              <Ionicons name="help-circle-outline" size={22} color={C.text} />
               <View style={styles.navRowTextBlock}>
-                <Text style={styles.navRowTitle}>Report a Person</Text>
+                <Text style={styles.navRowTitle}>Get help</Text>
                 <Text style={styles.navRowSubtitle} numberOfLines={2}>
-                  Report harassment, fake profiles, or safety concerns
+                  Contact support about safety, scams, or account issues.
                 </Text>
               </View>
             </View>

@@ -20,9 +20,6 @@ import { useAuthStore } from '@/stores/authStore';
 import { Toast } from '@/components/ui/Toast';
 import { isDemoMode } from '@/hooks/useConvex';
 
-// Report reason type matching backend
-type ReportReason = 'harassment' | 'spam' | 'inappropriate_photos';
-
 type BlockedUserListItem = {
   blockedUserId: string;
   blockedAt: number;
@@ -44,7 +41,6 @@ export default function BlockedUsersScreen() {
   );
 
   const unblockUserMutation = useMutation(api.users.unblockUser);
-  const reportUserMutation = useMutation(api.users.reportUser);
 
   const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);
 
@@ -65,67 +61,6 @@ export default function BlockedUsersScreen() {
       }));
 
   const isLoading = !isDemo && token ? blockedUsersQuery === undefined : false;
-
-  const submitReport = async (reportedUserId: string, reason: ReportReason) => {
-    if (isDemo) {
-      Toast.show('Report submitted. Our team will review it.');
-      return;
-    }
-
-    if (!userId) {
-      Toast.show('Please log in to report users');
-      return;
-    }
-
-    setPendingActionKey(`report:${reportedUserId}`);
-    try {
-      const result = await reportUserMutation({
-        authUserId: userId,
-        reportedUserId: reportedUserId as Id<'users'>,
-        reason,
-      });
-
-      if (result.success) {
-        Toast.show('Report submitted. Our team will review it.');
-      } else {
-        // Handle specific errors
-        if (result.error === 'cannot_report_self') {
-          Toast.show('You cannot report yourself');
-        } else {
-          Toast.show('Failed to submit report. Please try again.');
-        }
-      }
-    } catch (error: any) {
-      console.error('[BlockedUsers] Report failed:', error);
-      Toast.show('Failed to submit report. Please try again.');
-    } finally {
-      setPendingActionKey((current) => current === `report:${reportedUserId}` ? null : current);
-    }
-  };
-
-  const handleReport = (reportedUserId: string) => {
-    if (pendingActionKey) return;
-
-    Alert.alert(
-      'Report User',
-      'What would you like to report?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Harassment',
-          onPress: () => submitReport(reportedUserId, 'harassment'),
-        },
-        {
-          text: 'Spam / Scam',
-          onPress: () => submitReport(reportedUserId, 'spam'),
-        },
-        {
-          text: 'Inappropriate Content',
-          onPress: () => submitReport(reportedUserId, 'inappropriate_photos'),
-        },
-      ]
-    );
-  };
 
   const handleUnblock = (blockedUserId: string, displayName: string) => {
     if (pendingActionKey) return;
@@ -243,14 +178,6 @@ export default function BlockedUsersScreen() {
                 <View style={styles.entryActions}>
                   <TouchableOpacity
                     style={[styles.actionButton, pendingActionKey !== null && styles.actionButtonDisabled]}
-                    onPress={() => handleReport(user.blockedUserId)}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    disabled={pendingActionKey !== null}
-                  >
-                    <Text style={styles.actionText}>Report</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.actionButton, pendingActionKey !== null && styles.actionButtonDisabled]}
                     onPress={() => handleUnblock(user.blockedUserId, user.displayName)}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                     disabled={pendingActionKey !== null}
@@ -269,6 +196,21 @@ export default function BlockedUsersScreen() {
           <Text style={styles.infoFooterText}>
             Blocked users cannot message you or appear in your Phase-1 surfaces while blocked. Blocks stay private, and you can unblock at any time.
           </Text>
+        </View>
+
+        <View style={styles.helpFooter}>
+          <Text style={styles.helpFooterText}>
+            Need to report something serious? Contact support with screenshots or details.
+          </Text>
+          <TouchableOpacity
+            style={styles.helpFooterLink}
+            onPress={() => router.push('/(main)/settings/support' as any)}
+            activeOpacity={0.75}
+            accessibilityLabel="Get help"
+          >
+            <Text style={styles.helpFooterLinkText}>Get help</Text>
+            <Ionicons name="chevron-forward" size={16} color={COLORS.primary} />
+          </TouchableOpacity>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -395,5 +337,32 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: COLORS.textMuted,
     lineHeight: 18,
+  },
+  helpFooter: {
+    marginHorizontal: 16,
+    marginBottom: 24,
+    padding: 14,
+    borderRadius: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  helpFooterText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+    marginBottom: 10,
+  },
+  helpFooterLink: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 4,
+  },
+  helpFooterLinkText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.primary,
   },
 });

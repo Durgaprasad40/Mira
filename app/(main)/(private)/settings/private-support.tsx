@@ -388,7 +388,7 @@ export default function PrivateSupportScreen() {
               <View style={styles.categoryHelperNote}>
                 <Ionicons name="information-circle-outline" size={16} color={C.textLight} />
                 <Text style={styles.categoryHelperText}>
-                  To report a specific person, open Profile → Safety → Report a Person.
+                  If this is about a specific person, describe what happened and add any screenshots or details you have.
                 </Text>
               </View>
             )}

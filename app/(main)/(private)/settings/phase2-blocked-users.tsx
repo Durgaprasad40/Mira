@@ -2,9 +2,8 @@
  * Phase-2 Blocked Users Settings Screen
  *
  * Displays list of users the current user has blocked.
- * Read-only view - blocks are permanent.
  */
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -12,15 +11,19 @@ import {
   ScrollView,
   TouchableOpacity,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
+import { useBlockStore } from '@/stores/blockStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { Toast } from '@/components/ui/Toast';
 
 const C = INCOGNITO_COLORS;
 
@@ -28,6 +31,9 @@ export default function BlockedUsersScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
+  const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
+  const unblockUserMutation = useMutation(api.users.unblockUser);
+  const [pendingUnblockId, setPendingUnblockId] = useState<string | null>(null);
 
   // Fetch blocked users
   const blockedData = useQuery(
@@ -44,8 +50,65 @@ export default function BlockedUsersScreen() {
     });
   };
 
-  const blockedUsers = blockedData?.blockedUsers || [];
-  const isLoading = blockedData === undefined;
+  const blockedUsers = isDemoMode
+    ? blockedUsersInfo.map((user) => ({
+        blockId: user.id,
+        blockedUserId: user.id,
+        displayName: 'Blocked user',
+        blockedAt: user.blockedAt,
+      }))
+    : blockedData?.blockedUsers || [];
+  const isLoading = !isDemoMode && userId ? blockedData === undefined : false;
+
+  const handleUnblock = (blockedUserId: string, displayName: string) => {
+    if (pendingUnblockId) return;
+
+    Alert.alert(
+      'Unblock user?',
+      `${displayName} will be able to interact with you again if you reconnect or cross paths in Deep Connect.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unblock',
+          onPress: async () => {
+            setPendingUnblockId(blockedUserId);
+            try {
+              if (isDemoMode) {
+                useBlockStore.getState().unblockUser(blockedUserId);
+                useBlockStore.getState().setJustUnblockedUserId(blockedUserId);
+                Toast.show('User unblocked');
+                return;
+              }
+
+              if (!userId) {
+                Toast.show('Please log in to manage blocked users');
+                return;
+              }
+
+              const result = await unblockUserMutation({
+                authUserId: userId,
+                blockedUserId: blockedUserId as Id<'users'>,
+              });
+
+              if (!result.success) {
+                Toast.show('Failed to unblock user. Please try again.');
+                return;
+              }
+
+              useBlockStore.getState().unblockUser(blockedUserId);
+              useBlockStore.getState().setJustUnblockedUserId(blockedUserId);
+              Toast.show(`${displayName} unblocked`);
+            } catch (error) {
+              console.error('[Phase2BlockedUsers] Unblock failed:', error);
+              Toast.show('Failed to unblock user. Please try again.');
+            } finally {
+              setPendingUnblockId((current) => (current === blockedUserId ? null : current));
+            }
+          },
+        },
+      ]
+    );
+  };
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -63,7 +126,7 @@ export default function BlockedUsersScreen() {
         <View style={styles.infoBanner}>
           <Ionicons name="information-circle-outline" size={20} color={C.textLight} />
           <Text style={styles.infoText}>
-            Blocked users cannot find you in Deep Connect or send you messages. Blocks are permanent.
+            Blocked users cannot find you in Deep Connect or send you messages. You can unblock someone at any time.
           </Text>
         </View>
 
@@ -102,10 +165,37 @@ export default function BlockedUsersScreen() {
                     </Text>
                   </View>
                 </View>
+                <TouchableOpacity
+                  style={[styles.unblockButton, pendingUnblockId !== null && styles.unblockButtonDisabled]}
+                  onPress={() => handleUnblock(String(user.blockedUserId), user.displayName || 'this user')}
+                  disabled={pendingUnblockId !== null}
+                  activeOpacity={0.75}
+                >
+                  {pendingUnblockId === String(user.blockedUserId) ? (
+                    <ActivityIndicator size="small" color={C.primary} />
+                  ) : (
+                    <Text style={styles.unblockText}>Unblock</Text>
+                  )}
+                </TouchableOpacity>
               </View>
             ))}
           </View>
         )}
+
+        <View style={styles.helpFooter}>
+          <Text style={styles.helpFooterText}>
+            Need to report something serious? Contact support with screenshots or details.
+          </Text>
+          <TouchableOpacity
+            style={styles.helpFooterLink}
+            onPress={() => router.push('/(main)/(private)/settings/private-support' as any)}
+            activeOpacity={0.75}
+            accessibilityLabel="Get help"
+          >
+            <Text style={styles.helpFooterLinkText}>Get help</Text>
+            <Ionicons name="chevron-forward" size={16} color={C.primary} />
+          </TouchableOpacity>
+        </View>
       </ScrollView>
     </View>
   );
@@ -207,5 +297,50 @@ const styles = StyleSheet.create({
   blockedDate: {
     fontSize: 12,
     color: C.textLight,
+  },
+  unblockButton: {
+    minWidth: 76,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.surface,
+  },
+  unblockButtonDisabled: {
+    opacity: 0.45,
+  },
+  unblockText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.primary,
+  },
+  helpFooter: {
+    margin: 16,
+    padding: 14,
+    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  helpFooterText: {
+    fontSize: 13,
+    color: C.textLight,
+    lineHeight: 18,
+    marginBottom: 10,
+  },
+  helpFooterLink: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 4,
+  },
+  helpFooterLinkText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.primary,
   },
 });

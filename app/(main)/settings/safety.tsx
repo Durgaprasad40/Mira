@@ -121,10 +121,6 @@ export default function SafetySettingsScreen() {
     router.push('/(main)/verification' as any);
   }, [router]);
 
-  const handleReportUser = () => {
-    router.push('/(main)/settings/report-person' as any);
-  };
-
   // Track layout position of each tip section
   const handleTipLayout = useCallback((tipKey: string, event: LayoutChangeEvent) => {
     tipPositions.current[tipKey] = event.nativeEvent.layout.y;
@@ -276,25 +272,9 @@ export default function SafetySettingsScreen() {
           </View>
         </View>
 
-        {/* Blocking & Reporting Section */}
+        {/* Blocking & Support Section */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Blocking & Reporting</Text>
-
-          <TouchableOpacity
-            style={styles.menuRow}
-            onPress={handleReportUser}
-            activeOpacity={0.7}
-            accessibilityLabel="Report a user"
-          >
-            <View style={styles.menuRowLeft}>
-              <Ionicons name="flag-outline" size={22} color={COLORS.text} />
-              <View style={styles.menuRowInfo}>
-                <Text style={styles.menuRowTitle}>Report a user</Text>
-                <Text style={styles.menuRowSubtitle}>Report suspicious or harmful behavior</Text>
-              </View>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-          </TouchableOpacity>
+          <Text style={styles.sectionTitle}>Blocking & Support</Text>
 
           <TouchableOpacity
             style={styles.menuRow}
@@ -307,6 +287,22 @@ export default function SafetySettingsScreen() {
               <View style={styles.menuRowInfo}>
                 <Text style={styles.menuRowTitle}>Blocked users</Text>
                 <Text style={styles.menuRowSubtitle}>Manage users you've blocked</Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.menuRow}
+            onPress={() => router.push('/(main)/settings/support' as any)}
+            activeOpacity={0.7}
+            accessibilityLabel="Get help"
+          >
+            <View style={styles.menuRowLeft}>
+              <Ionicons name="help-circle-outline" size={22} color={COLORS.text} />
+              <View style={styles.menuRowInfo}>
+                <Text style={styles.menuRowTitle}>Get help</Text>
+                <Text style={styles.menuRowSubtitle}>Report a problem, safety concern, or account issue.</Text>
               </View>
             </View>
             <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
