@@ -1,24 +1,29 @@
 /**
  * CONFESSION CONTEXT MENU
- * Premium floating context menu for confession actions.
- * HORIZONTAL ROW layout: [Edit] [Delete] [Cancel] or [Report] [Cancel]
- * NO bottom sheet, NO dark backdrop, NO slide animation.
+ * Small premium floating popup card for confession actions.
  *
- * Shows different options based on ownership:
- * - Owner: "Your confession" title + [Edit] [Delete] [Cancel]
- * - Non-owner: [Report] [Cancel]
+ * - Owner: Title "Your confession" + Edit / Delete rows + Cancel
+ * - Non-owner: Title "Report this confession" + horizontal [Cancel] [Report] buttons
+ *
+ * Tapping Report invokes the existing onReport callback (which opens the
+ * report-reason picker in the parent screen). Backdrop tap, Cancel, and
+ * Android hardware back all dismiss the popup.
  */
 import React from 'react';
 import {
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { COLORS, FONT_SIZE, FONT_WEIGHT, SPACING, lineHeight } from '@/lib/constants';
 
 interface ConfessionMenuSheetProps {
   visible: boolean;
@@ -37,11 +42,16 @@ export function ConfessionMenuSheet({
   onDelete,
   onReport,
 }: ConfessionMenuSheetProps) {
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const cardWidth = Math.min(330, Math.max(280, width - SPACING.xl * 2));
 
-  // CRITICAL: Call action handler FIRST, then close menu
-  // Previously: onClose() cleared menuTargetConfession before onEdit() could use it
+  const title = isOwner ? 'Your confession' : 'Report this confession';
+  const subtitle = isOwner ? null : 'Choose an action.';
+
+  // CRITICAL: call action handler FIRST, then close, so the parent has a
+  // chance to capture menuTargetConfession before it is cleared.
   const handleEdit = () => {
-    console.log('[EDIT_MENU_TAP] Edit button pressed, onEdit exists:', !!onEdit);
     onEdit?.();
     onClose();
   };
@@ -57,69 +67,122 @@ export function ConfessionMenuSheet({
   };
 
   return (
-    <Modal visible={visible} transparent animationType="fade">
-      {/* Transparent overlay - tap to dismiss */}
-      <Pressable style={styles.overlay} onPress={onClose}>
-        {/* Centered floating menu container */}
-        <View style={styles.menuContainer}>
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      statusBarTranslucent={Platform.OS === 'android'}
+      onRequestClose={onClose}
+    >
+      <Pressable
+        style={styles.overlay}
+        onPress={onClose}
+        accessibilityRole="button"
+        accessibilityLabel="Close confession options"
+      >
+        <View
+          style={[
+            styles.cardWrap,
+            {
+              paddingBottom: Math.max(insets.bottom, SPACING.md),
+              paddingTop: Math.max(insets.top, SPACING.md),
+            },
+          ]}
+          pointerEvents="box-none"
+        >
           <Pressable
-            style={styles.menu}
             onPress={(e) => e.stopPropagation()}
+            style={[styles.card, { width: cardWidth }]}
           >
-            {isOwner ? (
-              // Owner: Title + horizontal row [Edit] [Delete] [Cancel]
-              <>
-                <Text style={styles.menuTitle}>Your confession</Text>
-                <View style={styles.buttonRow}>
-                  <TouchableOpacity
-                    style={styles.actionButton}
-                    onPress={handleEdit}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="pencil" size={16} color={COLORS.text} />
-                    <Text style={styles.actionButtonText}>Edit</Text>
-                  </TouchableOpacity>
+            <View style={styles.header}>
+              <Text maxFontSizeMultiplier={1.2} style={styles.title}>
+                {title}
+              </Text>
+              {subtitle ? (
+                <Text maxFontSizeMultiplier={1.2} style={styles.subtitle}>
+                  {subtitle}
+                </Text>
+              ) : null}
+            </View>
 
+            {isOwner ? (
+              <>
+                <View style={styles.optionGroup}>
                   <TouchableOpacity
-                    style={[styles.actionButton, styles.actionButtonDestructive]}
-                    onPress={handleDelete}
-                    activeOpacity={0.7}
+                    style={styles.optionRow}
+                    onPress={handleEdit}
+                    activeOpacity={0.78}
+                    accessibilityRole="button"
+                    accessibilityLabel="Edit confession"
                   >
-                    <Ionicons name="trash-outline" size={16} color="#DC2626" />
-                    <Text style={[styles.actionButtonText, styles.actionButtonTextDestructive]}>
-                      Delete
+                    <View
+                      style={[styles.iconWrap, { backgroundColor: `${COLORS.primary}14` }]}
+                    >
+                      <Ionicons name="pencil" size={18} color={COLORS.primary} />
+                    </View>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.optionText}>
+                      Edit
                     </Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
-                    style={[styles.actionButton, styles.actionButtonMuted]}
-                    onPress={onClose}
-                    activeOpacity={0.7}
+                    style={[styles.optionRow, styles.optionRowLast]}
+                    onPress={handleDelete}
+                    activeOpacity={0.78}
+                    accessibilityRole="button"
+                    accessibilityLabel="Delete confession"
                   >
-                    <Text style={styles.actionButtonTextMuted}>Cancel</Text>
+                    <View
+                      style={[styles.iconWrap, { backgroundColor: `${COLORS.error}14` }]}
+                    >
+                      <Ionicons name="trash-outline" size={18} color={COLORS.error} />
+                    </View>
+                    <Text
+                      maxFontSizeMultiplier={1.2}
+                      style={[styles.optionText, styles.optionTextDestructive]}
+                    >
+                      Delete
+                    </Text>
                   </TouchableOpacity>
                 </View>
+
+                <TouchableOpacity
+                  style={styles.cancelRow}
+                  onPress={onClose}
+                  activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel"
+                >
+                  <Text maxFontSizeMultiplier={1.2} style={styles.cancelText}>
+                    Cancel
+                  </Text>
+                </TouchableOpacity>
               </>
             ) : (
-              // Non-owner: horizontal row [Report] [Cancel]
               <View style={styles.buttonRow}>
                 <TouchableOpacity
-                  style={[styles.actionButton, styles.actionButtonDestructive]}
-                  onPress={handleReport}
-                  activeOpacity={0.7}
+                  style={[styles.rowButton, styles.rowButtonNeutral]}
+                  onPress={onClose}
+                  activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel"
                 >
-                  <Ionicons name="flag-outline" size={16} color="#DC2626" />
-                  <Text style={[styles.actionButtonText, styles.actionButtonTextDestructive]}>
-                    Report
+                  <Text maxFontSizeMultiplier={1.2} style={styles.rowButtonNeutralText}>
+                    Cancel
                   </Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  style={[styles.actionButton, styles.actionButtonMuted]}
-                  onPress={onClose}
-                  activeOpacity={0.7}
+                  style={[styles.rowButton, styles.rowButtonPrimary]}
+                  onPress={handleReport}
+                  activeOpacity={0.85}
+                  accessibilityRole="button"
+                  accessibilityLabel="Report confession"
                 >
-                  <Text style={styles.actionButtonTextMuted}>Cancel</Text>
+                  <Ionicons name="flag-outline" size={16} color={COLORS.white} />
+                  <Text maxFontSizeMultiplier={1.2} style={styles.rowButtonPrimaryText}>
+                    Report
+                  </Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -131,92 +194,124 @@ export function ConfessionMenuSheet({
 }
 
 const styles = StyleSheet.create({
-  // Transparent overlay - NO dark backdrop
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+    // Extremely subtle wash so the screen behind stays clearly visible.
+    backgroundColor: 'rgba(0,0,0,0.08)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-
-  // Container for centering
-  menuContainer: {
+  cardWrap: {
+    width: '100%',
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: SPACING.lg,
   },
-
-  // Floating menu card
-  menu: {
+  card: {
     backgroundColor: COLORS.background,
-    borderRadius: 16,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    // Premium soft shadow
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 24,
-    elevation: 12,
+    borderRadius: 20,
+    paddingTop: SPACING.md,
+    paddingHorizontal: SPACING.md,
+    paddingBottom: SPACING.sm,
+    shadowColor: COLORS.black,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.18,
+    shadowRadius: 22,
+    elevation: 14,
   },
-
-  // Title for owner menu
-  menuTitle: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: COLORS.textMuted,
+  header: {
+    paddingHorizontal: SPACING.xs,
+    paddingBottom: SPACING.sm,
+    alignItems: 'center',
+  },
+  title: {
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.bold,
+    color: COLORS.text,
     textAlign: 'center',
-    marginBottom: 12,
-    letterSpacing: 0.2,
+    lineHeight: lineHeight(FONT_SIZE.md, 1.2),
   },
-
-  // Horizontal button row
-  buttonRow: {
+  subtitle: {
+    marginTop: 2,
+    fontSize: FONT_SIZE.caption,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.3),
+  },
+  optionGroup: {
+    borderRadius: 14,
+    backgroundColor: COLORS.backgroundDark,
+    overflow: 'hidden',
+    marginBottom: SPACING.sm,
+  },
+  optionRow: {
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    paddingHorizontal: SPACING.md,
+    gap: SPACING.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
   },
-
-  // Individual action button
-  actionButton: {
+  optionRowLast: {
+    borderBottomWidth: 0,
+  },
+  iconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  optionText: {
+    flex: 1,
+    fontSize: FONT_SIZE.body2,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.text,
+  },
+  optionTextDestructive: {
+    color: COLORS.error,
+  },
+  cancelRow: {
+    minHeight: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelText: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textLight,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    marginTop: SPACING.xxs,
+  },
+  rowButton: {
+    flex: 1,
+    minHeight: 46,
+    borderRadius: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 10,
+    paddingHorizontal: SPACING.md,
+  },
+  rowButtonNeutral: {
     backgroundColor: COLORS.backgroundDark,
-    minWidth: 70,
   },
-
-  // Destructive button (delete/report)
-  actionButtonDestructive: {
-    backgroundColor: 'rgba(220, 38, 38, 0.08)',
+  rowButtonNeutralText: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.textLight,
   },
-
-  // Muted button (cancel)
-  actionButtonMuted: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: COLORS.border,
+  rowButtonPrimary: {
+    backgroundColor: COLORS.error,
   },
-
-  // Button text
-  actionButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-
-  // Destructive text
-  actionButtonTextDestructive: {
-    color: '#DC2626',
-  },
-
-  // Muted text (cancel)
-  actionButtonTextMuted: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: COLORS.textMuted,
+  rowButtonPrimaryText: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.white,
   },
 });
