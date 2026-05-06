@@ -15,6 +15,7 @@ const SUPPORT_CATEGORY = v.union(
   v.literal('non_consensual_sharing'),
   v.literal('physical_safety'),
   v.literal('harassment_stalking'),
+  v.literal('app_or_account'),
   v.literal('other_safety')
 );
 

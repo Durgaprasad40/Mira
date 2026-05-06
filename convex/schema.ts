@@ -1230,6 +1230,7 @@ export default defineSchema({
       v.literal('non_consensual_sharing'),
       v.literal('physical_safety'),
       v.literal('harassment_stalking'),
+      v.literal('app_or_account'),
       v.literal('other_safety')
     ),
     description: v.string(),

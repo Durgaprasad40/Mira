@@ -84,12 +84,10 @@ const FAQ_TOPICS = {
 
 // Support categories for the form
 const SUPPORT_CATEGORIES = [
-  { key: 'payment', label: 'Payment issue' },
-  { key: 'subscription', label: 'Subscription issue' },
-  { key: 'account', label: 'Account issue' },
-  { key: 'bug', label: 'Bug report' },
-  { key: 'safety', label: 'Safety concern' },
-  { key: 'verification', label: 'Verification issue' },
+  { key: 'account', label: 'Account or login' },
+  { key: 'verification', label: 'Verification or photos' },
+  { key: 'safety', label: 'Safety or scam' },
+  { key: 'bug', label: 'App bug or crash' },
   { key: 'other', label: 'Other' },
 ] as const;
 

@@ -1,5 +1,5 @@
 /**
- * Phase-2 Safety Support Screen
+ * Phase-2 Get Help Screen
  *
  * Shows existing support cases and allows creating new ones.
  * Tapping a case opens the case thread for messaging.
@@ -34,33 +34,39 @@ const C = INCOGNITO_COLORS;
 const CATEGORIES = [
   {
     value: 'scam_extortion',
-    label: 'Scam or Extortion',
+    label: 'Scam or extortion',
     icon: 'warning-outline',
-    description: 'Someone is trying to scam you or demanding money/favors',
+    description: 'Someone is scamming you or demanding money',
   },
   {
     value: 'non_consensual_sharing',
-    label: 'Non-consensual Sharing',
+    label: 'Non-consensual sharing',
     icon: 'lock-closed-outline',
-    description: 'Someone shared or threatened to share intimate content without consent',
+    description: 'Threats to share intimate content without consent',
   },
   {
     value: 'physical_safety',
-    label: 'Physical Safety',
+    label: 'Physical safety',
     icon: 'shield-outline',
-    description: 'You feel physically unsafe or have been threatened',
+    description: 'You feel unsafe or have been threatened',
   },
   {
     value: 'harassment_stalking',
-    label: 'Harassment or Stalking',
+    label: 'Harassment or stalking',
     icon: 'eye-off-outline',
-    description: 'Persistent unwanted contact or stalking behavior',
+    description: 'Persistent unwanted contact',
+  },
+  {
+    value: 'app_or_account',
+    label: 'App bug or account',
+    icon: 'phone-portrait-outline',
+    description: 'Bug, crash, sign-in, or account issue',
   },
   {
     value: 'other_safety',
-    label: 'Other Safety Concern',
+    label: 'Other',
     icon: 'help-circle-outline',
-    description: 'Another serious safety issue not listed above',
+    description: 'Anything else we should know',
   },
 ] as const;
 
@@ -68,11 +74,12 @@ type CategoryValue = (typeof CATEGORIES)[number]['value'];
 
 // Category labels for display
 const CATEGORY_LABELS: Record<string, string> = {
-  scam_extortion: 'Scam / Extortion',
-  non_consensual_sharing: 'Non-consensual Sharing',
-  physical_safety: 'Physical Safety',
-  harassment_stalking: 'Harassment / Stalking',
-  other_safety: 'Other Safety',
+  scam_extortion: 'Scam or extortion',
+  non_consensual_sharing: 'Non-consensual sharing',
+  physical_safety: 'Physical safety',
+  harassment_stalking: 'Harassment or stalking',
+  app_or_account: 'App bug or account',
+  other_safety: 'Other',
 };
 
 // Status colors
@@ -477,7 +484,7 @@ export default function SafetySupportScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Safety Support</Text>
+        <Text style={styles.headerTitle}>Get help</Text>
         <View style={{ width: 24 }} />
       </View>
 
@@ -486,7 +493,7 @@ export default function SafetySupportScreen() {
         <View style={styles.infoBanner}>
           <Ionicons name="shield-checkmark-outline" size={20} color={C.primary} />
           <Text style={styles.infoText}>
-            Report scam, blackmail, coercion, fake profiles, or non-consensual threats. You can contact the Mira Safety Team and share evidence here.
+            Tell us what happened. Our team reviews every request.
           </Text>
         </View>
 
@@ -514,7 +521,7 @@ export default function SafetySupportScreen() {
             <Ionicons name="chatbubbles-outline" size={40} color={C.textLight} />
             <Text style={styles.emptyTitle}>No Support Cases</Text>
             <Text style={styles.emptyText}>
-              Create a support case if you need help with a safety concern.
+              Create a support case if you need help with safety, scams, or account issues.
             </Text>
           </View>
         )}
@@ -574,7 +581,7 @@ export default function SafetySupportScreen() {
         <View style={styles.privacyNote}>
           <Ionicons name="lock-closed-outline" size={16} color={C.textLight} />
           <Text style={styles.privacyText}>
-            Your support cases are confidential. We will never share your identity with the reported user.
+            Your support cases are confidential. We will never share your identity with anyone involved.
           </Text>
         </View>
       </ScrollView>
