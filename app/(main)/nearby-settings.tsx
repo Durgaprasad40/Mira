@@ -274,7 +274,8 @@ export default function NearbySettingsScreen() {
             <View style={styles.toggleInfo}>
               <Text style={styles.toggleTitle}>Save crossed paths</Text>
               <Text style={styles.toggleDescription}>
-                Remember people you crossed paths with recently.
+                Mira uses approximate location to remember people you crossed paths with. Your live
+                location is never shown.
               </Text>
             </View>
             <Switch

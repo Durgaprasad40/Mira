@@ -528,6 +528,13 @@ export const publishLocation = mutation({
       publishedLat: snapped.lat,
       publishedLng: snapped.lng,
       publishedAt: now,
+      // Keep the crossed-path candidate fields in sync with the privacy-safe
+      // published snapshot. recordLocation candidate filtering reads
+      // users.latitude/users.longitude, so publish-only users still need a
+      // compatible coarse location without storing exact GPS.
+      latitude: snapped.lat,
+      longitude: snapped.lng,
+      lastLocationUpdatedAt: now,
     });
 
     return {
@@ -772,6 +779,12 @@ export const recordLocation = mutation({
     // 2. Speed sanity check: detect impossible jumps
     let impossibleSpeed = false;
     let movementTooSmall = false;
+    const lastUpdateWasPublishMirror = Boolean(
+      currentUser.lastLocationUpdatedAt &&
+      currentUser.publishedAt === currentUser.lastLocationUpdatedAt &&
+      currentUser.publishedLat === currentUser.latitude &&
+      currentUser.publishedLng === currentUser.longitude
+    );
 
     if (currentUser.latitude && currentUser.longitude && currentUser.lastLocationUpdatedAt) {
       const distance = calculateDistanceMeters(
@@ -805,15 +818,18 @@ export const recordLocation = mutation({
       currentUser.lastLocationUpdatedAt &&
       now - currentUser.lastLocationUpdatedAt < LOCATION_UPDATE_INTERVAL_MS
     );
-    if (withinLocationUpdateWindow && movementTooSmall) {
+    if (withinLocationUpdateWindow && movementTooSmall && !lastUpdateWasPublishMirror) {
       return { success: true, nearbyCount: 0, skipped: true, reason: 'within_location_update_window' };
     }
 
-    // Save location + timestamp (always save valid coordinates for map display)
-    // Even if GPS quality is low, we update location for the map; just skip crossed-path detection
+    const snappedCurrentLocation = roundToGrid(latitude, longitude);
+
+    // Save location + timestamp using the same privacy grid as published
+    // snapshots/locationSamples. Even if GPS quality is low, we update the
+    // coarse location for map/candidate consistency; exact GPS is not stored.
     await ctx.db.patch(userId, {
-      latitude,
-      longitude,
+      latitude: snappedCurrentLocation.lat,
+      longitude: snappedCurrentLocation.lng,
       lastActive: now,
       lastLocationUpdatedAt: now,
     });
@@ -830,7 +846,12 @@ export const recordLocation = mutation({
 
     // Skip crossed-path detection if movement is too small (likely stationary jitter)
     // But only if we had a previous location to compare against
-    if (movementTooSmall && currentUser.latitude && currentUser.longitude) {
+    if (
+      movementTooSmall &&
+      currentUser.latitude &&
+      currentUser.longitude &&
+      !lastUpdateWasPublishMirror
+    ) {
       return {
         success: true,
         nearbyCount: 0,
