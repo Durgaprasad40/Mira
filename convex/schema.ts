@@ -1849,6 +1849,14 @@ export default defineSchema({
     recentReactionCount: v.optional(v.number()), // legacy ranking/engagement metadata
     recentReplyCount: v.optional(v.number()), // legacy ranking/engagement metadata
     reportCount: v.optional(v.number()), // legacy moderation metadata
+    uniqueReportCount: v.optional(v.number()),
+    moderationStatus: v.optional(v.union(
+      v.literal('normal'),
+      v.literal('under_review'),
+      v.literal('hidden_by_reports')
+    )),
+    moderationStatusAt: v.optional(v.number()),
+    hiddenByReportsAt: v.optional(v.number()),
     uniqueCommenters: v.optional(v.number()), // legacy ranking/engagement metadata
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
@@ -1860,7 +1868,8 @@ export default defineSchema({
     .index('by_created', ['createdAt'])
     .index('by_user', ['userId'])
     .index('by_expires', ['expiresAt'])
-    .index('by_tagged_user', ['taggedUserId']),
+    .index('by_tagged_user', ['taggedUserId'])
+    .index('by_moderation_status', ['moderationStatus']),
 
   // Confession Reports table (for moderation)
   confessionReports: defineTable({
@@ -1868,11 +1877,16 @@ export default defineSchema({
     reporterId: v.id('users'),
     reportedUserId: v.id('users'),
     reason: v.union(
+      v.literal('sexual_content'),
+      v.literal('threats_violence'),
+      v.literal('targeting_someone'),
+      v.literal('private_information'),
+      v.literal('scam_promotion'),
+      v.literal('other'),
       v.literal('spam'),
       v.literal('harassment'),
       v.literal('hate'),
-      v.literal('sexual'),
-      v.literal('other')
+      v.literal('sexual')
     ),
     description: v.optional(v.string()),
     status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('actioned')),
@@ -1889,11 +1903,16 @@ export default defineSchema({
     reporterId: v.id('users'),
     reportedUserId: v.id('users'),
     reason: v.union(
+      v.literal('sexual_content'),
+      v.literal('threats_violence'),
+      v.literal('targeting_someone'),
+      v.literal('private_information'),
+      v.literal('scam_promotion'),
+      v.literal('other'),
       v.literal('spam'),
       v.literal('harassment'),
       v.literal('hate'),
-      v.literal('sexual'),
-      v.literal('other')
+      v.literal('sexual')
     ),
     description: v.optional(v.string()),
     status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('actioned')),

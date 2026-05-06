@@ -21,6 +21,9 @@ import { useConfessionStore } from '@/stores/confessionStore';
 import { safePush } from '@/lib/safeRouter';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
+import ConfessionUnderReviewBadge, {
+  type ConfessionModerationStatus,
+} from '@/components/confessions/ConfessionUnderReviewBadge';
 
 function formatAbsoluteDate(timestamp: number | undefined): string | undefined {
   if (timestamp === undefined || !Number.isFinite(timestamp)) return undefined;
@@ -34,6 +37,17 @@ function formatAbsoluteDate(timestamp: number | undefined): string | undefined {
 function formatExpiredDateLabel(timestamp: number | undefined): string | undefined {
   const dateLabel = formatAbsoluteDate(timestamp);
   return dateLabel ? `Expired on ${dateLabel}` : undefined;
+}
+
+function getReviewBadgeStatus(confession?: any): ConfessionModerationStatus {
+  if (!confession) return undefined;
+  if (
+    confession.moderationStatus === 'under_review' ||
+    confession.moderationStatus === 'hidden_by_reports'
+  ) {
+    return confession.moderationStatus;
+  }
+  return confession.isUnderReview ? 'under_review' : undefined;
 }
 
 export default function MyConfessionsScreen() {
@@ -82,6 +96,8 @@ export default function MyConfessionsScreen() {
         createdAt: confession.createdAt,
         expiresAt: confession.expiresAt,
         isExpired: confession.isExpired === true,
+        moderationStatus: confession.moderationStatus,
+        isUnderReview: confession.isUnderReview === true,
       }));
     }
 
@@ -193,38 +209,49 @@ export default function MyConfessionsScreen() {
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
-        renderItem={({ item }) => (
-          <ConfessionCard
-            id={item.id}
-            text={item.text}
-            isAnonymous={item.isAnonymous}
-            authorVisibility={item.authorVisibility}
-            mood={item.mood}
-            topEmojis={[]}
-            userEmoji={isDemoMode ? (demoUserReactions[item.id] ?? null) : null}
-            replyPreviews={[]}
-            replyCount={item.replyCount}
-            reactionCount={item.reactionCount}
-            authorName={item.authorName}
-            authorPhotoUrl={item.authorPhotoUrl}
-            authorAge={item.authorAge}
-            authorGender={item.authorGender}
-            createdAt={item.createdAt}
-            isExpired={item.isExpired}
-            expiredDateLabel={item.isExpired ? formatExpiredDateLabel(item.expiresAt) : undefined}
-            reactionsReadOnly={item.isExpired}
-            authorId={item.userId}
-            viewerId={effectiveViewerId ?? undefined}
-            // EXPLICIT INTERACTION CONTRACT for My Confessions
-            // Owner can tap to view thread and long-press to edit/delete
-            screenContext="my-confessions"
-            enableTapToOpenThread={true}
-            enableLongPressMenu={true}
-            onCardPress={() => handleOpenThread(item.id)}
-            onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
-            onReact={() => {}}
-          />
-        )}
+        renderItem={({ item }) => {
+          const reviewStatus = getReviewBadgeStatus(item);
+
+          return (
+            <View>
+              {reviewStatus ? (
+                <View style={styles.reviewBadgeWrap}>
+                  <ConfessionUnderReviewBadge status={reviewStatus} />
+                </View>
+              ) : null}
+              <ConfessionCard
+                id={item.id}
+                text={item.text}
+                isAnonymous={item.isAnonymous}
+                authorVisibility={item.authorVisibility}
+                mood={item.mood}
+                topEmojis={[]}
+                userEmoji={isDemoMode ? (demoUserReactions[item.id] ?? null) : null}
+                replyPreviews={[]}
+                replyCount={item.replyCount}
+                reactionCount={item.reactionCount}
+                authorName={item.authorName}
+                authorPhotoUrl={item.authorPhotoUrl}
+                authorAge={item.authorAge}
+                authorGender={item.authorGender}
+                createdAt={item.createdAt}
+                isExpired={item.isExpired}
+                expiredDateLabel={item.isExpired ? formatExpiredDateLabel(item.expiresAt) : undefined}
+                reactionsReadOnly={item.isExpired}
+                authorId={item.userId}
+                viewerId={effectiveViewerId ?? undefined}
+                // EXPLICIT INTERACTION CONTRACT for My Confessions
+                // Owner can tap to view thread and long-press to edit/delete
+                screenContext="my-confessions"
+                enableTapToOpenThread={true}
+                enableLongPressMenu={true}
+                onCardPress={() => handleOpenThread(item.id)}
+                onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
+                onReact={() => {}}
+              />
+            </View>
+          );
+        }}
         ListEmptyComponent={
           isLoading ? (
             <View style={styles.loadingState}>
@@ -290,6 +317,12 @@ const styles = StyleSheet.create({
   listContent: {
     paddingTop: 4,
     paddingBottom: 40,
+  },
+  reviewBadgeWrap: {
+    marginHorizontal: 14,
+    marginTop: 6,
+    marginBottom: -2,
+    alignItems: 'flex-start',
   },
   loadingState: {
     alignItems: 'center',

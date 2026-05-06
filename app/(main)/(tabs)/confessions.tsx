@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   Animated,
@@ -39,6 +38,13 @@ import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
+import ConfessionUnderReviewBadge, {
+  type ConfessionModerationStatus,
+} from '@/components/confessions/ConfessionUnderReviewBadge';
+import {
+  ReportConfessionSheet,
+  ReportReasonKey,
+} from '@/components/confessions/ReportConfessionSheet';
 import { HeaderAvatarButton } from '@/components/ui';
 
 type FeedConfession = {
@@ -59,6 +65,8 @@ type FeedConfession = {
   replyCount: number;
   reactionCount: number;
   createdAt: number;
+  moderationStatus?: ConfessionModerationStatus;
+  isUnderReview?: boolean;
 };
 
 type TaggedConfessionItem = {
@@ -133,6 +141,17 @@ function getTimeAgoSimple(timestamp: number): string {
   if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
   return `${days}d`;
+}
+
+function getReviewBadgeStatus(confession?: any): ConfessionModerationStatus {
+  if (!confession) return undefined;
+  if (
+    confession.moderationStatus === 'under_review' ||
+    confession.moderationStatus === 'hidden_by_reports'
+  ) {
+    return confession.moderationStatus;
+  }
+  return confession.isUnderReview ? 'under_review' : undefined;
 }
 
 export default function ConfessionsScreen() {
@@ -217,6 +236,7 @@ export default function ConfessionsScreen() {
   const [toastMessage, setToastMessage] = useState('');
   const [showMenuSheet, setShowMenuSheet] = useState(false);
   const [menuTargetConfession, setMenuTargetConfession] = useState<{ id: string; authorId: string } | null>(null);
+  const [reportingConfessionId, setReportingConfessionId] = useState<string | null>(null);
   const [countdownMs, setCountdownMs] = useState(0);
   const toastOpacity = useRef(new Animated.Value(0)).current;
   const composerInputRef = useRef<TextInput>(null);
@@ -308,6 +328,8 @@ export default function ConfessionsScreen() {
           replyCount: confession.replyCount ?? 0,
           reactionCount: confession.reactionCount ?? 0,
           createdAt: confession.createdAt,
+          moderationStatus: confession.moderationStatus,
+          isUnderReview: confession.isUnderReview === true,
         }))
         .filter((confession: FeedConfession) => !blockedUserIds.includes(confession.userId))
         .filter((confession: FeedConfession) => !hiddenSet.has(confession.id));
@@ -793,11 +815,12 @@ export default function ConfessionsScreen() {
 
   const handleSubmitReport = useCallback(async (
     confessionId: string,
-    reason: 'spam' | 'harassment' | 'hate' | 'sexual' | 'other'
+    reason: ReportReasonKey
   ) => {
     if (isDemoMode) {
       demoReportConfession(confessionId);
       setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
+      showToastMessage("Thanks. We'll review this confession.");
       return;
     }
 
@@ -810,48 +833,11 @@ export default function ConfessionsScreen() {
         reason,
       });
       setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
+      showToastMessage("Thanks. We'll review this confession.");
     } catch {
       Alert.alert('Unable to report right now');
     }
-  }, [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation]);
-
-  const showReportReasonPicker = useCallback((confessionId: string) => {
-    const reasons = [
-      { key: 'spam', label: 'Spam' },
-      { key: 'harassment', label: 'Harassment' },
-      { key: 'hate', label: 'Hate Speech' },
-      { key: 'sexual', label: 'Sexual/Inappropriate' },
-      { key: 'other', label: 'Other' },
-    ] as const;
-
-    const submit = (reason: typeof reasons[number]['key']) => {
-      void handleSubmitReport(confessionId, reason);
-    };
-
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          title: 'Why are you reporting this?',
-          options: ['Cancel', ...reasons.map((reason) => reason.label)],
-          cancelButtonIndex: 0,
-        },
-        (buttonIndex) => {
-          if (buttonIndex > 0) {
-            submit(reasons[buttonIndex - 1].key);
-          }
-        }
-      );
-      return;
-    }
-
-    Alert.alert('Report Confession', 'Select a reason:', [
-      { text: 'Cancel', style: 'cancel' },
-      ...reasons.map((reason) => ({
-        text: reason.label,
-        onPress: () => submit(reason.key),
-      })),
-    ]);
-  }, [handleSubmitReport]);
+  }, [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation, showToastMessage]);
 
   const handleBlockAuthor = useCallback(async (authorId: string) => {
     if (!currentUserId || !authorId) return;
@@ -903,8 +889,15 @@ export default function ConfessionsScreen() {
 
   const handleMenuReport = useCallback(() => {
     if (!menuTargetConfession) return;
-    showReportReasonPicker(menuTargetConfession.id);
-  }, [menuTargetConfession, showReportReasonPicker]);
+    setReportingConfessionId(menuTargetConfession.id);
+  }, [menuTargetConfession]);
+
+  const handleSubmitReportSheet = useCallback(async (reason: ReportReasonKey) => {
+    const confessionId = reportingConfessionId;
+    if (!confessionId) return;
+    setReportingConfessionId(null);
+    await handleSubmitReport(confessionId, reason);
+  }, [handleSubmitReport, reportingConfessionId]);
 
   const handleMenuEdit = useCallback(() => {
     console.log('[EDIT_HANDLER] handleMenuEdit called, menuTargetConfession:', menuTargetConfession);
@@ -1034,6 +1027,7 @@ export default function ConfessionsScreen() {
         const myIsAnonymous = myVisibility === 'anonymous';
         const myIsBlurPhoto = myVisibility === 'blur_photo' || myVisibility === 'blur';
         const myGenderSymbol = getConfessGenderSymbol((myLatestConfession as any).authorGender);
+        const reviewStatus = getReviewBadgeStatus(myAny);
         return (
         <TouchableOpacity
           style={styles.myConfessionCard}
@@ -1049,6 +1043,12 @@ export default function ConfessionsScreen() {
           )}
           delayLongPress={300}
         >
+          {reviewStatus ? (
+            <View style={styles.myConfessionReviewBadge}>
+              <ConfessionUnderReviewBadge status={reviewStatus} />
+            </View>
+          ) : null}
+
           {/* Author row - same as normal cards */}
           <View style={styles.myConfessionAuthorRow}>
             {myIsAnonymous ? (
@@ -1192,38 +1192,47 @@ export default function ConfessionsScreen() {
             ? (demoUserReactions[item.id] && isProbablyEmoji(demoUserReactions[item.id]!) ? demoUserReactions[item.id]! : null)
             : (liveUserReactions[item.id] ?? null);
           const isTaggedForMe = item.targetUserId != null && item.targetUserId === effectiveViewerId;
+          const isOwnerCard = item.userId === effectiveViewerId;
+          const reviewStatus = isOwnerCard ? getReviewBadgeStatus(item) : undefined;
 
           return (
-            <ConfessionCard
-              id={item.id}
-              text={item.text}
-              isAnonymous={item.isAnonymous}
-              authorVisibility={item.authorVisibility}
-              mood={item.mood}
-              topEmojis={item.topEmojis}
-              userEmoji={userEmoji}
-              replyPreviews={item.replyPreviews}
-              replyCount={item.replyCount}
-              reactionCount={item.reactionCount}
-              authorName={item.authorName}
-              authorPhotoUrl={item.authorPhotoUrl}
-              authorAge={item.authorAge}
-              authorGender={item.authorGender}
-              createdAt={item.createdAt}
-              isTaggedForMe={isTaggedForMe}
-              taggedUserId={item.targetUserId}
-              taggedUserName={item.targetUserName}
-              authorId={item.userId}
-              viewerId={effectiveViewerId ?? undefined}
-              // EXPLICIT INTERACTION CONTRACT for main feed (/confessions)
-              screenContext="confessions"
-              enableTapToOpenThread={true}
-              enableLongPressMenu={true}
-              onCardPress={() => handleOpenThread(item.id)}
-              onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
-              onReact={() => handleOpenReactionPicker(item.id)}
-              onToggleEmoji={(emoji) => void toggleReaction(item.id, emoji)}
-            />
+            <View>
+              {reviewStatus ? (
+                <View style={styles.feedReviewBadgeWrap}>
+                  <ConfessionUnderReviewBadge status={reviewStatus} />
+                </View>
+              ) : null}
+              <ConfessionCard
+                id={item.id}
+                text={item.text}
+                isAnonymous={item.isAnonymous}
+                authorVisibility={item.authorVisibility}
+                mood={item.mood}
+                topEmojis={item.topEmojis}
+                userEmoji={userEmoji}
+                replyPreviews={item.replyPreviews}
+                replyCount={item.replyCount}
+                reactionCount={item.reactionCount}
+                authorName={item.authorName}
+                authorPhotoUrl={item.authorPhotoUrl}
+                authorAge={item.authorAge}
+                authorGender={item.authorGender}
+                createdAt={item.createdAt}
+                isTaggedForMe={isTaggedForMe}
+                taggedUserId={item.targetUserId}
+                taggedUserName={item.targetUserName}
+                authorId={item.userId}
+                viewerId={effectiveViewerId ?? undefined}
+                // EXPLICIT INTERACTION CONTRACT for main feed (/confessions)
+                screenContext="confessions"
+                enableTapToOpenThread={true}
+                enableLongPressMenu={true}
+                onCardPress={() => handleOpenThread(item.id)}
+                onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
+                onReact={() => handleOpenReactionPicker(item.id)}
+                onToggleEmoji={(emoji) => void toggleReaction(item.id, emoji)}
+              />
+            </View>
           );
         }}
         ListEmptyComponent={
@@ -1268,6 +1277,13 @@ export default function ConfessionsScreen() {
         onEdit={handleMenuEdit}
         onDelete={handleMenuDelete}
         onReport={handleMenuReport}
+      />
+
+      <ReportConfessionSheet
+        visible={reportingConfessionId !== null}
+        mode="confession"
+        onClose={() => setReportingConfessionId(null)}
+        onSubmit={handleSubmitReportSheet}
       />
 
       <EmojiPicker
@@ -1594,6 +1610,12 @@ const styles = StyleSheet.create({
   listContent: {
     paddingBottom: moderateScale(80, 0.5),
   },
+  feedReviewBadgeWrap: {
+    marginHorizontal: SPACING.sm,
+    marginTop: SPACING.xs,
+    marginBottom: -SPACING.xxs,
+    alignItems: 'flex-start',
+  },
   loadingState: {
     flex: 1,
     justifyContent: 'center',
@@ -1831,6 +1853,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.06,
     shadowRadius: 12,
     elevation: 2,
+  },
+  myConfessionReviewBadge: {
+    alignSelf: 'flex-start',
+    marginBottom: SPACING.sm,
   },
   myConfessionAuthorRow: {
     flexDirection: 'row',

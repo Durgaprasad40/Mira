@@ -43,6 +43,10 @@ import { isContentClean } from '@/lib/contentFilter';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
+import {
+  ReportConfessionSheet,
+  ReportReasonKey,
+} from '@/components/confessions/ReportConfessionSheet';
 
 type IdentityMode = 'anonymous' | 'blur_photo' | 'open';
 
@@ -246,6 +250,7 @@ export default function ConfessionThreadScreen() {
 
   // Long-press menu state (viewer's own comment).
   const [menuReplyId, setMenuReplyId] = useState<string | null>(null);
+  const [reportingReplyId, setReportingReplyId] = useState<string | null>(null);
   const menuVisible = !!menuReplyId;
   const menuOpacity = useRef(new Animated.Value(0)).current;
   const menuScale = useRef(new Animated.Value(0.92)).current;
@@ -588,39 +593,28 @@ export default function ConfessionThreadScreen() {
     if (!currentUserId || !menuTargetReply || isThreadClosed) return;
     const targetId = menuTargetReply._id;
     setMenuReplyId(null);
-    Alert.alert(
-      'Report this comment?',
-      'This comment will be submitted for moderation review. You can cancel before it is sent.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Report',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              if (isDemoMode) {
-                Alert.alert('Reported', 'Thanks — our team will review this comment.');
-                return;
-              }
-              const result = await reportReplyMutation({
-                replyId: targetId as any,
-                reporterId: currentUserId,
-                reason: 'other',
-              });
-              Alert.alert(
-                result.alreadyReported ? 'Already reported' : 'Reported',
-                result.alreadyReported
-                  ? 'You have already reported this comment.'
-                  : 'Thanks — our team will review this comment.'
-              );
-            } catch (error: any) {
-              Alert.alert('Error', error?.message || 'Failed to report comment');
-            }
-          },
-        },
-      ]
-    );
-  }, [currentUserId, isThreadClosed, menuTargetReply, reportReplyMutation]);
+    setReportingReplyId(targetId);
+  }, [currentUserId, isThreadClosed, menuTargetReply]);
+
+  const handleSubmitReplyReport = useCallback(async (reason: ReportReasonKey) => {
+    const targetId = reportingReplyId;
+    if (!currentUserId || !targetId || isThreadClosed) return;
+    setReportingReplyId(null);
+    try {
+      if (isDemoMode) {
+        Alert.alert('Reported', "Thanks. We'll review this comment.");
+        return;
+      }
+      await reportReplyMutation({
+        replyId: targetId as any,
+        reporterId: currentUserId,
+        reason,
+      });
+      Alert.alert('Reported', "Thanks. We'll review this comment.");
+    } catch (error: any) {
+      Alert.alert('Error', error?.message || 'Failed to report comment');
+    }
+  }, [currentUserId, isDemoMode, isThreadClosed, reportReplyMutation, reportingReplyId]);
 
   const handleBeginOwnerReply = useCallback(
     (parentReply: Reply) => {
@@ -1295,6 +1289,13 @@ export default function ConfessionThreadScreen() {
           </Pressable>
         </Animated.View>
       </Modal>
+
+      <ReportConfessionSheet
+        visible={reportingReplyId !== null}
+        mode="reply"
+        onClose={() => setReportingReplyId(null)}
+        onSubmit={handleSubmitReplyReport}
+      />
     </SafeAreaView>
   );
 }

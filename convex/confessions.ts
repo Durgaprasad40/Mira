@@ -2,6 +2,8 @@ import { mutation, query } from './_generated/server';
 import { v } from 'convex/values';
 import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from './helpers';
+import { moderationStatusForCount } from './lib/confessionModeration';
+import type { ConfessionModerationStatus } from './lib/confessionModeration';
 
 // Phone number & email patterns for server-side validation
 const PHONE_PATTERN = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
@@ -37,6 +39,8 @@ type SerializedConfession = {
   taggedUserId?: Id<'users'>;
   trendingScore?: number;
   isExpired?: boolean;
+  moderationStatus?: ConfessionModerationStatus;
+  isUnderReview?: boolean;
 };
 
 // Canonical reply identity mode used by the current product contract.
@@ -123,6 +127,7 @@ function serializeConfession(
     includeTaggedUserId?: boolean;
     trendingScore?: number;
     isExpired?: boolean;
+    viewerIsOwner?: boolean;
   }
 ): SerializedConfession {
   const result: SerializedConfession = {
@@ -160,7 +165,50 @@ function serializeConfession(
     result.isExpired = options.isExpired;
   }
 
+  if (options?.viewerIsOwner) {
+    const moderationStatus = getConfessionModerationStatus(confession);
+    result.moderationStatus = moderationStatus;
+    result.isUnderReview =
+      moderationStatus === 'under_review' || moderationStatus === 'hidden_by_reports';
+  }
+
   return result;
+}
+
+function getConfessionModerationStatus(
+  confession: Doc<'confessions'>
+): ConfessionModerationStatus {
+  return (
+    ((confession as any).moderationStatus as ConfessionModerationStatus | undefined) ?? 'normal'
+  );
+}
+
+function isHiddenByReports(confession: Doc<'confessions'>): boolean {
+  return getConfessionModerationStatus(confession) === 'hidden_by_reports';
+}
+
+async function hasViewerReportedConfession(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  viewerId: Id<'users'>,
+  confessionId: Id<'confessions'>
+): Promise<boolean> {
+  const report = await ctx.db
+    .query('confessionReports')
+    .withIndex('by_reporter', (q) => q.eq('reporterId', viewerId))
+    .filter((q) => q.eq(q.field('confessionId'), confessionId))
+    .first();
+  return !!report;
+}
+
+async function getReportedConfessionIdsForViewer(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  viewerId: Id<'users'>
+): Promise<Set<string>> {
+  const reports = await ctx.db
+    .query('confessionReports')
+    .withIndex('by_reporter', (q) => q.eq('reporterId', viewerId))
+    .collect();
+  return new Set(reports.map((report) => String(report.confessionId)));
 }
 
 async function getValidatedViewerFromToken(
@@ -301,23 +349,27 @@ export const listConfessions = query({
 
     // P0-3: Build set of confession IDs the viewer has reported (server-side filter)
     let reportedIds: Set<string> = new Set();
+    let resolvedViewerId: Id<'users'> | null = null;
     if (viewerId) {
-      const resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
+      resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
       if (resolvedViewerId) {
-        const myReports = await ctx.db
-          .query('confessionReports')
-          .withIndex('by_reporter', (q) => q.eq('reporterId', resolvedViewerId))
-          .collect();
-        reportedIds = new Set(myReports.map((r) => r.confessionId as unknown as string));
+        reportedIds = await getReportedConfessionIdsForViewer(ctx, resolvedViewerId);
       }
     }
 
-    // Filter out expired, deleted, and viewer-reported confessions
+    // Filter out expired, deleted, viewer-reported, and non-owner hidden confessions.
     const confessions = allConfessions.filter(
-      (c) =>
-        (c.expiresAt === undefined || c.expiresAt > now) &&
-        !c.isDeleted &&
-        !reportedIds.has(c._id as unknown as string)
+      (c) => {
+        const viewerIsOwner = !!resolvedViewerId && c.userId === resolvedViewerId;
+        const moderationStatus = getConfessionModerationStatus(c);
+        return (
+          (c.expiresAt === undefined || c.expiresAt > now) &&
+          !c.isDeleted &&
+          !reportedIds.has(String(c._id)) &&
+          (moderationStatus !== 'hidden_by_reports' || viewerIsOwner) &&
+          (sortBy !== 'trending' || moderationStatus === 'normal')
+        );
+      }
     );
 
     // Attach 2 reply previews per confession
@@ -346,7 +398,10 @@ export const listConfessions = query({
           .map(([emoji, count]) => ({ emoji, count }));
 
         return {
-          ...serializeConfession(c, { includeTaggedUserId: true }),
+          ...serializeConfession(c, {
+            includeTaggedUserId: true,
+            viewerIsOwner: !!resolvedViewerId && c.userId === resolvedViewerId,
+          }),
           replyPreviews: replies.map((r) => ({
             _id: r._id,
             text: r.text,
@@ -401,21 +456,19 @@ export const getTrendingConfessions = query({
     if (viewerId) {
       const resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
       if (resolvedViewerId) {
-        const myReports = await ctx.db
-          .query('confessionReports')
-          .withIndex('by_reporter', (q) => q.eq('reporterId', resolvedViewerId))
-          .collect();
-        reportedIds = new Set(myReports.map((r) => r.confessionId as unknown as string));
+        reportedIds = await getReportedConfessionIdsForViewer(ctx, resolvedViewerId);
       }
     }
 
-    // Filter to last 48h AND not expired AND not deleted AND not viewer-reported
+    // Filter to last 48h AND not expired AND not deleted AND not viewer-reported.
+    // Trending excludes all moderated rows above normal visibility.
     const recent = confessions.filter(
       (c) =>
         c.createdAt > cutoff &&
         (c.expiresAt === undefined || c.expiresAt > now) &&
         !c.isDeleted &&
-        !reportedIds.has(c._id as unknown as string)
+        !reportedIds.has(String(c._id)) &&
+        getConfessionModerationStatus(c) === 'normal'
     );
 
     // Improved trending scoring with consistent weights
@@ -454,15 +507,29 @@ export const getConfession = query({
     if (confession.isDeleted) return null;
     const now = Date.now();
     const isExpired = confession.expiresAt !== undefined && confession.expiresAt <= now;
+    const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
+    const viewerIsOwner = !!validatedViewerId && validatedViewerId === confession.userId;
 
     if (isExpired) {
-      const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
-      if (!validatedViewerId || validatedViewerId !== confession.userId) return null;
+      if (!viewerIsOwner) return null;
+    }
+
+    if (isHiddenByReports(confession) && !viewerIsOwner) {
+      return null;
+    }
+
+    if (
+      validatedViewerId &&
+      !viewerIsOwner &&
+      (await hasViewerReportedConfession(ctx, validatedViewerId, confessionId))
+    ) {
+      return null;
     }
 
     return serializeConfession(confession, {
       includeTaggedUserId: true,
       isExpired,
+      viewerIsOwner,
     });
   },
 });
@@ -510,6 +577,9 @@ export const createReply = mutation({
     const nowMs = Date.now();
     if (parent.expiresAt !== undefined && parent.expiresAt <= nowMs) {
       throw new Error('This confession has expired.');
+    }
+    if (isHiddenByReports(parent) && parent.userId !== userId) {
+      throw new Error('This confession is no longer accepting interactions.');
     }
 
     // Normalize identity mode. The request-provided value wins; otherwise derive
@@ -752,10 +822,15 @@ export const getReplies = query({
     if (parent.isDeleted) return [];
 
     const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
+    const viewerIsValidatedOwner = !!validatedViewerId && validatedViewerId === parent.userId;
     const now = Date.now();
     const isExpired = parent.expiresAt !== undefined && parent.expiresAt <= now;
     if (isExpired) {
-      if (!validatedViewerId || validatedViewerId !== parent.userId) return [];
+      if (!viewerIsValidatedOwner) return [];
+    }
+
+    if (isHiddenByReports(parent) && !viewerIsValidatedOwner) {
+      return [];
     }
 
     // Resolve viewer for display-only isOwnReply. Expired access never relies on
@@ -763,6 +838,14 @@ export const getReplies = query({
     let resolvedViewerId: Id<'users'> | null = validatedViewerId;
     if (!resolvedViewerId && !isExpired && viewerId) {
       resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
+    }
+
+    if (
+      resolvedViewerId &&
+      resolvedViewerId !== parent.userId &&
+      (await hasViewerReportedConfession(ctx, resolvedViewerId, confessionId))
+    ) {
+      return [];
     }
 
     const replies = await ctx.db
@@ -791,10 +874,15 @@ export const getMyReplyForConfession = query({
     if (parent.isDeleted) return null;
 
     const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
+    const viewerIsValidatedOwner = !!validatedViewerId && validatedViewerId === parent.userId;
     const now = Date.now();
     const isExpired = parent.expiresAt !== undefined && parent.expiresAt <= now;
     if (isExpired) {
-      if (!validatedViewerId || validatedViewerId !== parent.userId) return null;
+      if (!viewerIsValidatedOwner) return null;
+    }
+
+    if (isHiddenByReports(parent) && !viewerIsValidatedOwner) {
+      return null;
     }
 
     let resolvedViewerId: Id<'users'> | null = validatedViewerId;
@@ -802,6 +890,12 @@ export const getMyReplyForConfession = query({
       resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
     }
     if (!resolvedViewerId) return null;
+    if (
+      resolvedViewerId !== parent.userId &&
+      (await hasViewerReportedConfession(ctx, resolvedViewerId, confessionId))
+    ) {
+      return null;
+    }
 
     const own = await ctx.db
       .query('confessionReplies')
@@ -833,6 +927,9 @@ export const toggleReaction = mutation({
     const nowMs = Date.now();
     if (confession.expiresAt !== undefined && confession.expiresAt <= nowMs) {
       throw new Error('This confession has expired.');
+    }
+    if (isHiddenByReports(confession) && confession.userId !== userId) {
+      throw new Error('This confession is no longer accepting interactions.');
     }
 
     // Find existing reaction from this user on this confession
@@ -998,6 +1095,7 @@ export const getMyConfessions = query({
         serializeConfession(confession, {
           includeTaggedUserId: true,
           isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
+          viewerIsOwner: true,
         })
       );
   },
@@ -1010,10 +1108,11 @@ export const reportConfession = mutation({
     confessionId: v.id('confessions'),
     reporterId: v.union(v.id('users'), v.string()),
     reason: v.union(
-      v.literal('spam'),
-      v.literal('harassment'),
-      v.literal('hate'),
-      v.literal('sexual'),
+      v.literal('sexual_content'),
+      v.literal('threats_violence'),
+      v.literal('targeting_someone'),
+      v.literal('private_information'),
+      v.literal('scam_promotion'),
       v.literal('other')
     ),
     description: v.optional(v.string()),
@@ -1025,6 +1124,10 @@ export const reportConfession = mutation({
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) {
       throw new Error('Confession not found.');
+    }
+
+    if (confession.userId === reporterId) {
+      throw new Error('You cannot report your own confession.');
     }
 
     // Check if already reported by this user
@@ -1043,6 +1146,8 @@ export const reportConfession = mutation({
       return { success: true, alreadyReported: true };
     }
 
+    const now = Date.now();
+
     // Create report record
     await ctx.db.insert('confessionReports', {
       confessionId: args.confessionId,
@@ -1051,8 +1156,31 @@ export const reportConfession = mutation({
       reason: args.reason,
       description: args.description,
       status: 'pending',
-      createdAt: Date.now(),
+      createdAt: now,
     });
+
+    const reports = await ctx.db
+      .query('confessionReports')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+    const nextCount = new Set(reports.map((report) => String(report.reporterId))).size;
+    const nextStatus = moderationStatusForCount(nextCount);
+    const previousStatus = (confession as any).moderationStatus;
+    const statusChanged = previousStatus !== nextStatus;
+    const patch: Record<string, unknown> = {
+      uniqueReportCount: nextCount,
+      moderationStatus: nextStatus,
+    };
+
+    if (statusChanged) {
+      patch.moderationStatusAt = now;
+    }
+
+    if (nextStatus === 'hidden_by_reports' && !(confession as any).hiddenByReportsAt) {
+      patch.hiddenByReportsAt = now;
+    }
+
+    await ctx.db.patch(args.confessionId, patch as any);
 
     return { success: true, alreadyReported: false };
   },
@@ -1066,10 +1194,11 @@ export const reportReply = mutation({
     replyId: v.id('confessionReplies'),
     reporterId: v.union(v.id('users'), v.string()),
     reason: v.union(
-      v.literal('spam'),
-      v.literal('harassment'),
-      v.literal('hate'),
-      v.literal('sexual'),
+      v.literal('sexual_content'),
+      v.literal('threats_violence'),
+      v.literal('targeting_someone'),
+      v.literal('private_information'),
+      v.literal('scam_promotion'),
       v.literal('other')
     ),
     description: v.optional(v.string()),
@@ -1146,6 +1275,7 @@ export const listTaggedConfessionsForUser = query({
     }
 
     const now = Date.now();
+    const reportedIds = await getReportedConfessionIdsForViewer(ctx, userId);
 
     // Get notifications for this user (limit 50)
     const notifications = await ctx.db
@@ -1159,6 +1289,8 @@ export const listTaggedConfessionsForUser = query({
     for (const notif of notifications) {
       const confession = await ctx.db.get(notif.confessionId);
       if (!confession) continue;
+      if (isHiddenByReports(confession)) continue;
+      if (reportedIds.has(String(confession._id))) continue;
 
       result.push({
         notificationId: notif._id,
