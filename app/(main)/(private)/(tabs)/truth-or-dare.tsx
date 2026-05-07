@@ -19,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Image as ExpoImage } from 'expo-image';
-import { Video, ResizeMode } from 'expo-av';
+import { Audio, Video, ResizeMode } from 'expo-av';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -81,6 +81,14 @@ const debugTodLog = (...args: unknown[]) => {
     console.log(...args);
   }
 };
+
+// Format millis as `m:ss` for the voice prompt scrubber readout.
+function formatVoiceTime(ms: number): string {
+  const total = Math.max(0, Math.floor((Number.isFinite(ms) ? ms : 0) / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 type TodFeedCacheEntry = {
   prompts: any[];
@@ -833,6 +841,19 @@ function PromptMediaViewerModal({
   const isFrontCamera = !!payload?.isFrontCamera;
   const [imageLoading, setImageLoading] = useState(true);
 
+  // ─── Voice playback state ───
+  // Voice prompts are inline-played inside this viewer using expo-av's
+  // Audio.Sound. We hold the Sound on a ref (so unload cleanups can run
+  // without stale closures) plus mirrored state for the play/pause UI
+  // and progress scrubber. Voice is replayable: there is no view ledger
+  // burn for voice (server-side `markPromptMediaViewed` no-ops voice).
+  const voiceSoundRef = useRef<Audio.Sound | null>(null);
+  const [voicePlaying, setVoicePlaying] = useState(false);
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voicePosMs, setVoicePosMs] = useState(0);
+  const [voiceDurMs, setVoiceDurMs] = useState(0);
+  const [voiceFailed, setVoiceFailed] = useState(false);
+
   // Consumption tracking — refs so they don't trigger re-renders. The
   // owner branch (and voice) never burns a view; we gate firing on the
   // payload's `isPromptMediaOwner` and `mediaKind` below.
@@ -867,15 +888,149 @@ function PromptMediaViewerModal({
     }
   }, [visible, kind, mediaUrl, promptId]);
 
+  // Unload any in-flight voice Sound. Safe to call when there's nothing
+  // loaded — guards on the ref. Resets the mirrored UI state so a later
+  // open starts in a clean idle-not-playing state.
+  const unloadVoice = useCallback(async () => {
+    const s = voiceSoundRef.current;
+    voiceSoundRef.current = null;
+    if (s) {
+      try {
+        await s.setOnPlaybackStatusUpdate(null);
+      } catch {
+        // best-effort
+      }
+      try {
+        await s.unloadAsync();
+      } catch {
+        // best-effort
+      }
+    }
+    setVoicePlaying(false);
+    setVoicePosMs(0);
+    setVoiceDurMs(0);
+    setVoiceLoading(false);
+    setVoiceFailed(false);
+  }, []);
+
+  // Load the voice Sound when the viewer opens onto a voice payload.
+  // We do NOT autoplay — the user must tap play. This matches the
+  // photo/video first-tap-preload UX (no surprise audio bursts) and
+  // gives us a clean place to set the audio mode for silent-mode iPhones.
+  useEffect(() => {
+    if (!visible || kind !== 'voice' || !mediaUrl) {
+      // Effect won't load anything; cleanup below handles teardown when
+      // the viewer transitions OUT of a voice payload.
+      return;
+    }
+    let cancelled = false;
+    setVoiceLoading(true);
+    setVoiceFailed(false);
+    setVoicePlaying(false);
+    setVoicePosMs(0);
+    setVoiceDurMs(0);
+    (async () => {
+      try {
+        // Make sure playback works even when the device is on silent
+        // (iOS) and respects other apps' audio sessions sensibly.
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+          shouldDuckAndroid: true,
+          staysActiveInBackground: false,
+        });
+        const { sound, status } = await Audio.Sound.createAsync(
+          { uri: mediaUrl },
+          { shouldPlay: false },
+          (s) => {
+            if (!s.isLoaded) return;
+            setVoicePosMs(s.positionMillis ?? 0);
+            if (typeof s.durationMillis === 'number') {
+              setVoiceDurMs(s.durationMillis);
+            }
+            setVoicePlaying(!!s.isPlaying);
+            if (s.didJustFinish) {
+              setVoicePlaying(false);
+              // Reset to start so the next play begins from 0 instead
+              // of being stuck at duration.
+              sound.setPositionAsync(0).catch(() => {});
+            }
+          }
+        );
+        if (cancelled) {
+          try {
+            await sound.unloadAsync();
+          } catch {
+            // best-effort
+          }
+          return;
+        }
+        voiceSoundRef.current = sound;
+        if ('isLoaded' in status && status.isLoaded) {
+          if (typeof status.durationMillis === 'number') {
+            setVoiceDurMs(status.durationMillis);
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setVoiceFailed(true);
+          debugTodLog('[T/D] voice load failed', err);
+        }
+      } finally {
+        if (!cancelled) {
+          setVoiceLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      // Tear down whatever was loaded for THIS payload; the next render
+      // will reload if/when the viewer is shown again.
+      unloadVoice();
+    };
+  }, [visible, kind, mediaUrl, unloadVoice]);
+
+  // Toggle play/pause for the loaded voice Sound. Silently no-ops if
+  // nothing is loaded (e.g. mid-load), which keeps the UI from flapping
+  // on rapid taps.
+  const handleToggleVoice = useCallback(async () => {
+    const s = voiceSoundRef.current;
+    if (!s) return;
+    try {
+      const status = await s.getStatusAsync();
+      if (!('isLoaded' in status) || !status.isLoaded) return;
+      if (status.isPlaying) {
+        await s.pauseAsync();
+      } else {
+        // If we previously hit the end, restart from 0. Otherwise resume
+        // from the last paused position.
+        if (
+          typeof status.durationMillis === 'number' &&
+          status.positionMillis >= status.durationMillis - 50
+        ) {
+          await s.setPositionAsync(0);
+        }
+        await s.playAsync();
+      }
+    } catch (err) {
+      debugTodLog('[T/D] voice toggle failed', err);
+    }
+  }, []);
+
   // Wrap close so photo consumption (rendered → closed) fires on the way
   // out. Video consumption fires from `onPlaybackStatusUpdate` instead, so
   // closing mid-playback intentionally does NOT mark the video viewed.
+  // Voice is replayable (no consumption tracking), but we still unload
+  // its Sound so audio doesn't keep playing after the modal dismisses.
   const handleClose = useCallback(() => {
     if (kind === 'photo' && imageRenderedRef.current) {
       fireConsumed();
     }
+    if (kind === 'voice') {
+      unloadVoice();
+    }
     onClose();
-  }, [kind, fireConsumed, onClose]);
+  }, [kind, fireConsumed, onClose, unloadVoice]);
 
   return (
     <Modal
@@ -972,15 +1127,57 @@ function PromptMediaViewerModal({
             />
           ) : null}
 
-          {kind === 'voice' ? (
+          {kind === 'voice' && mediaUrl ? (
             <View style={styles.promptMediaViewerVoiceBox}>
               <View style={styles.promptMediaViewerVoiceIcon}>
                 <Ionicons name="mic" size={36} color={PREMIUM.coral} />
               </View>
               <Text style={styles.promptMediaViewerVoiceTitle}>Voice prompt</Text>
-              <Text style={styles.promptMediaViewerVoiceSubtitle}>
-                Voice playback isn't available in the feed yet.
-              </Text>
+              {voiceFailed ? (
+                <Text style={styles.promptMediaViewerVoiceSubtitle}>
+                  Couldn’t load this voice prompt. Please try again.
+                </Text>
+              ) : (
+                <View style={styles.promptMediaViewerVoiceControls}>
+                  <TouchableOpacity
+                    style={[
+                      styles.promptMediaViewerVoicePlayBtn,
+                      voiceLoading && styles.promptMediaViewerVoicePlayBtnDisabled,
+                    ]}
+                    onPress={handleToggleVoice}
+                    disabled={voiceLoading}
+                    accessibilityRole="button"
+                    accessibilityLabel={voicePlaying ? 'Pause voice' : 'Play voice'}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    {voiceLoading ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <Ionicons
+                        name={voicePlaying ? 'pause' : 'play'}
+                        size={26}
+                        color="#FFFFFF"
+                      />
+                    )}
+                  </TouchableOpacity>
+                  <View style={styles.promptMediaViewerVoiceProgressTrack}>
+                    <View
+                      style={[
+                        styles.promptMediaViewerVoiceProgressFill,
+                        {
+                          width:
+                            voiceDurMs > 0
+                              ? `${Math.min(100, Math.max(0, (voicePosMs / voiceDurMs) * 100))}%`
+                              : '0%',
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.promptMediaViewerVoiceTime} maxFontSizeMultiplier={1.1}>
+                    {formatVoiceTime(voicePosMs)} / {formatVoiceTime(voiceDurMs)}
+                  </Text>
+                </View>
+              )}
             </View>
           ) : null}
         </Pressable>
@@ -2619,6 +2816,43 @@ const styles = StyleSheet.create({
     color: PREMIUM.textSecondary,
     textAlign: 'center',
     paddingHorizontal: 8,
+  },
+  promptMediaViewerVoiceControls: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 8,
+    marginTop: 4,
+  },
+  promptMediaViewerVoicePlayBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: PREMIUM.coral,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  promptMediaViewerVoicePlayBtnDisabled: {
+    opacity: 0.6,
+  },
+  promptMediaViewerVoiceProgressTrack: {
+    flex: 1,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255, 255, 255, 0.16)',
+    overflow: 'hidden',
+  },
+  promptMediaViewerVoiceProgressFill: {
+    height: '100%',
+    backgroundColor: PREMIUM.coral,
+  },
+  promptMediaViewerVoiceTime: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: PREMIUM.textSecondary,
+    minWidth: 64,
+    textAlign: 'right',
   },
   promptMediaViewerCloseBtn: {
     position: 'absolute',
