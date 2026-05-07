@@ -60,6 +60,8 @@ export function InAppMediaCamera({
 
   const cameraRef = useRef<CameraView>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recordSecondsRef = useRef(0);
+  const recordingStartedAtRef = useRef<number | null>(null);
   // STABILITY FIX: C-6 - Track mounted state to prevent setState after unmount
   const mountedRef = useRef(true);
 
@@ -78,6 +80,8 @@ export function InAppMediaCamera({
       setFacing('back');
       setIsRecording(false);
       setRecordSeconds(0);
+      recordSecondsRef.current = 0;
+      recordingStartedAtRef.current = null;
       setIsProcessing(false);
       setCapturedUri(null);
       setCapturedKind(null);
@@ -105,11 +109,12 @@ export function InAppMediaCamera({
           return;
         }
         setRecordSeconds((s) => {
-          if (s >= MAX_VIDEO_DURATION_SEC - 1) {
+          const next = s >= MAX_VIDEO_DURATION_SEC - 1 ? MAX_VIDEO_DURATION_SEC : s + 1;
+          recordSecondsRef.current = next;
+          if (next >= MAX_VIDEO_DURATION_SEC) {
             stopVideoRecording();
-            return MAX_VIDEO_DURATION_SEC;
           }
-          return s + 1;
+          return next;
         });
       }, 1000);
     } else {
@@ -194,6 +199,19 @@ export function InAppMediaCamera({
     }
   }, [facing, isProcessing]);
 
+  const getCurrentRecordingDurationMs = useCallback(() => {
+    const elapsedMs =
+      recordingStartedAtRef.current !== null
+        ? Date.now() - recordingStartedAtRef.current
+        : 0;
+    const timerMs = recordSecondsRef.current * 1000;
+    const durationMs = Math.max(elapsedMs, timerMs);
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      return 1000;
+    }
+    return Math.min(durationMs, MAX_VIDEO_DURATION_SEC * 1000);
+  }, []);
+
   const startVideoRecording = useCallback(async () => {
     if (!cameraRef.current || isRecording || isProcessing) return;
 
@@ -217,6 +235,8 @@ export function InAppMediaCamera({
     try {
       setIsRecording(true);
       setRecordSeconds(0);
+      recordSecondsRef.current = 0;
+      recordingStartedAtRef.current = Date.now();
 
       const video = await cameraRef.current.recordAsync({
         maxDuration: MAX_VIDEO_DURATION_SEC,
@@ -229,7 +249,7 @@ export function InAppMediaCamera({
       if (video?.uri) {
         setCapturedUri(video.uri);
         setCapturedKind('video');
-        setCapturedDurationMs(recordSeconds * 1000);
+        setCapturedDurationMs(getCurrentRecordingDurationMs());
         setCapturedFacing(facing);
         console.log(`[InAppMediaCamera] captured kind=video facingAtCapture=${facing} uri=${video.uri.substring(0, 50)}...`);
       }
@@ -241,7 +261,7 @@ export function InAppMediaCamera({
         setIsRecording(false);
       }
     }
-  }, [facing, isRecording, isProcessing, recordSeconds, micPermission, requestMicPermission]);
+  }, [facing, getCurrentRecordingDurationMs, isRecording, isProcessing, micPermission, requestMicPermission]);
 
   const stopVideoRecording = useCallback(async () => {
     if (!cameraRef.current || !isRecording) return;
@@ -249,7 +269,7 @@ export function InAppMediaCamera({
     try {
       setIsProcessing(true);
       // Store current duration before stopping
-      setCapturedDurationMs(recordSeconds * 1000);
+      setCapturedDurationMs(getCurrentRecordingDurationMs());
       await cameraRef.current.stopRecording();
       // The recordAsync promise will resolve with the video
     } catch (error) {
@@ -264,7 +284,7 @@ export function InAppMediaCamera({
         setIsProcessing(false);
       }
     }
-  }, [isRecording, recordSeconds]);
+  }, [getCurrentRecordingDurationMs, isRecording]);
 
   const handleShutterPress = useCallback(() => {
     if (mode === 'photo') {
@@ -282,6 +302,9 @@ export function InAppMediaCamera({
   const handleCancel = useCallback(() => {
     setCapturedUri(null);
     setCapturedKind(null);
+    setCapturedDurationMs(undefined);
+    recordSecondsRef.current = 0;
+    recordingStartedAtRef.current = null;
     onClose();
   }, [onClose]);
 
@@ -289,6 +312,8 @@ export function InAppMediaCamera({
     setCapturedUri(null);
     setCapturedKind(null);
     setCapturedDurationMs(undefined);
+    recordSecondsRef.current = 0;
+    recordingStartedAtRef.current = null;
   }, []);
 
   const handleUse = useCallback(() => {

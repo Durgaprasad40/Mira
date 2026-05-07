@@ -32,18 +32,24 @@ export function InAppVideoRecorder({
   const [permission, requestPermission] = useCameraPermissions();
   const [state, setState] = useState<RecorderState>('ready');
   const [recordedUri, setRecordedUri] = useState<string | null>(null);
+  const [recordedDurationMs, setRecordedDurationMs] = useState<number | undefined>();
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
 
   const cameraRef = useRef<CameraView>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recordSecondsRef = useRef(0);
+  const recordingStartedAtRef = useRef<number | null>(null);
 
   // Reset state when modal opens
   useEffect(() => {
     if (visible) {
       setState('ready');
       setRecordedUri(null);
+      setRecordedDurationMs(undefined);
       setRecordSeconds(0);
+      recordSecondsRef.current = 0;
+      recordingStartedAtRef.current = null;
       setIsLoading(false);
     }
     return () => {
@@ -59,11 +65,12 @@ export function InAppVideoRecorder({
     if (state === 'recording') {
       timerRef.current = setInterval(() => {
         setRecordSeconds((s) => {
-          if (s >= MAX_DURATION_SEC - 1) {
+          const next = s >= MAX_DURATION_SEC - 1 ? MAX_DURATION_SEC : s + 1;
+          recordSecondsRef.current = next;
+          if (next >= MAX_DURATION_SEC) {
             stopRecording();
-            return MAX_DURATION_SEC;
           }
-          return s + 1;
+          return next;
         });
       }, 1000);
     } else {
@@ -77,12 +84,27 @@ export function InAppVideoRecorder({
     };
   }, [state]);
 
+  const getCurrentRecordingDurationMs = useCallback(() => {
+    const elapsedMs =
+      recordingStartedAtRef.current !== null
+        ? Date.now() - recordingStartedAtRef.current
+        : 0;
+    const timerMs = recordSecondsRef.current * 1000;
+    const durationMs = Math.max(elapsedMs, timerMs);
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      return 1000;
+    }
+    return Math.min(durationMs, MAX_DURATION_SEC * 1000);
+  }, []);
+
   const startRecording = useCallback(async () => {
     if (!cameraRef.current || state !== 'ready') return;
 
     try {
       setState('recording');
       setRecordSeconds(0);
+      recordSecondsRef.current = 0;
+      recordingStartedAtRef.current = Date.now();
 
       const video = await cameraRef.current.recordAsync({
         maxDuration: MAX_DURATION_SEC,
@@ -90,6 +112,7 @@ export function InAppVideoRecorder({
 
       if (video?.uri) {
         setRecordedUri(video.uri);
+        setRecordedDurationMs(getCurrentRecordingDurationMs());
         setState('preview');
         console.log(`[T/D VideoRecorder] Video recorded: ${video.uri}`);
       } else {
@@ -99,7 +122,7 @@ export function InAppVideoRecorder({
       console.error('[T/D VideoRecorder] Recording error:', error);
       setState('ready');
     }
-  }, [state]);
+  }, [getCurrentRecordingDurationMs, state]);
 
   const stopRecording = useCallback(async () => {
     if (!cameraRef.current || state !== 'recording') return;
@@ -119,6 +142,7 @@ export function InAppVideoRecorder({
   const handleCancel = useCallback(() => {
     setState('ready');
     setRecordedUri(null);
+    setRecordedDurationMs(undefined);
     setRecordSeconds(0);
     onClose();
   }, [onClose]);
@@ -127,19 +151,24 @@ export function InAppVideoRecorder({
     // Discard current recording and go back to ready state
     setRecordedUri(null);
     setRecordSeconds(0);
+    recordSecondsRef.current = 0;
+    recordingStartedAtRef.current = null;
     setState('ready');
   }, []);
 
   const handleContinue = useCallback(() => {
     if (recordedUri) {
-      const durationMs = recordSeconds * 1000;
+      const durationMs = recordedDurationMs ?? getCurrentRecordingDurationMs();
       onVideoRecorded(recordedUri, durationMs);
       // Reset state for next use
       setState('ready');
       setRecordedUri(null);
+      setRecordedDurationMs(undefined);
       setRecordSeconds(0);
+      recordSecondsRef.current = 0;
+      recordingStartedAtRef.current = null;
     }
-  }, [recordedUri, recordSeconds, onVideoRecorded]);
+  }, [getCurrentRecordingDurationMs, recordedDurationMs, recordedUri, onVideoRecorded]);
 
   const formatTime = (s: number) => {
     const min = Math.floor(s / 60);

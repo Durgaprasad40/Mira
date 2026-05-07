@@ -1627,6 +1627,16 @@ export default defineSchema({
     ownerPhotoUrl: v.optional(v.string()),
     ownerAge: v.optional(v.number()),
     ownerGender: v.optional(v.string()),
+    // Owner-attached prompt media (optional). Media follows prompt visibility:
+    // if a viewer can see the prompt text, they can see the media. No separate
+    // one-time-view gating in this pass (no todPromptViews).
+    mediaKind: v.optional(v.union(v.literal('photo'), v.literal('video'), v.literal('voice'))),
+    mediaStorageId: v.optional(v.id('_storage')),
+    mediaUrl: v.optional(v.string()),
+    mediaMime: v.optional(v.string()),
+    fileSize: v.optional(v.number()),
+    durationSec: v.optional(v.number()),
+    isFrontCamera: v.optional(v.boolean()),
   })
     .index('by_trending', ['isTrending'])
     .index('by_type', ['type'])

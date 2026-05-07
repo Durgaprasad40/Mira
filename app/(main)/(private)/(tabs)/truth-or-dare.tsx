@@ -21,6 +21,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { TodAvatar } from '@/components/truthdare/TodAvatar';
+import { TodPromptMediaTile } from '@/components/truthdare/TodPromptMediaTile';
 import { TodConnectRequestsIndicator } from '@/components/truthdare/TodConnectRequestsIndicator';
 import { TodConnectRequestsSheet } from '@/components/truthdare/TodConnectRequestsSheet';
 import { useAuthStore } from '@/stores/authStore';
@@ -322,6 +323,13 @@ type TrendingPromptData = {
   ownerPhotoUrl?: string;
   ownerAge?: number;
   ownerGender?: string;
+  // Phase 4: prompt-owner media (Phase 2 backend projection — feed shape).
+  hasMedia?: boolean;
+  mediaUrl?: string;
+  mediaKind?: 'photo' | 'video' | 'voice';
+  mediaMime?: string;
+  durationSec?: number;
+  isFrontCamera?: boolean;
 };
 
 /* ─── Animated Press Wrapper for premium feel ─── */
@@ -379,20 +387,17 @@ const TrendingCard = React.memo(function TrendingCard({
   prompt,
   promptId,
   onOpenThread,
-  onAddComment,
   onLongPress,
   isOwner,
 }: {
   prompt: TrendingPromptData;
   promptId: string;
   onOpenThread: (id: string) => void;
-  onAddComment: (id: string) => void;
   onLongPress?: (id: string) => void;
   isOwner?: boolean;
 }) {
   // P2-002: Stable callback references
   const handleOpenThread = useCallback(() => onOpenThread(promptId), [onOpenThread, promptId]);
-  const handleAddComment = useCallback(() => onAddComment(promptId), [onAddComment, promptId]);
   const handleLongPress = useCallback(() => onLongPress?.(promptId), [onLongPress, promptId]);
   const isTruth = prompt.type === 'truth';
   const isAnon = prompt.isAnonymous ?? true;
@@ -476,7 +481,27 @@ const TrendingCard = React.memo(function TrendingCard({
         </View>
       </View>
 
-      {/* Right column: Pill top, + button bottom */}
+      {/* Phase 4: prompt-owner media tile — only when prompt.hasMedia is true.
+          Tap opens the thread (same as the card press) so the feed never
+          attempts inline playback. */}
+      {prompt.hasMedia && prompt.mediaKind ? (
+        <View style={styles.mediaTileWrap}>
+          <TodPromptMediaTile
+            hasMedia={prompt.hasMedia}
+            mediaUrl={prompt.mediaUrl}
+            mediaKind={prompt.mediaKind}
+            durationSec={prompt.durationSec}
+            onPress={handleOpenThread}
+            accessibilityLabel={
+              prompt.mediaKind === 'voice'
+                ? 'Open prompt voice attachment'
+                : `Open prompt ${prompt.mediaKind}`
+            }
+          />
+        </View>
+      ) : null}
+
+      {/* Right column: Type pill */}
       <View style={styles.cardRightColumn}>
         <LinearGradient
           colors={pillColors}
@@ -487,24 +512,6 @@ const TrendingCard = React.memo(function TrendingCard({
           <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={12} color="#FFF" />
           <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
         </LinearGradient>
-
-        {/* Hide + button on own prompts - backend rejects own-prompt answers anyway */}
-        {!isOwner && (
-          <TouchableOpacity
-            style={styles.addButtonPremium}
-            onPress={(e) => { e.stopPropagation?.(); handleAddComment(); }}
-            activeOpacity={0.85}
-          >
-            <LinearGradient
-              colors={[PREMIUM.coral, PREMIUM.coralSoft]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.addButtonGradient}
-            >
-              <Ionicons name="add" size={22} color="#FFF" />
-            </LinearGradient>
-          </TouchableOpacity>
-        )}
       </View>
     </AnimatedPressCard>
   );
@@ -516,7 +523,6 @@ const PromptCard = React.memo(function PromptCard({
   prompt,
   promptId,
   onOpenThread,
-  onAddComment,
   onLongPress,
   isOwner,
 }: {
@@ -537,16 +543,21 @@ const PromptCard = React.memo(function PromptCard({
     ownerAge?: number;
     ownerGender?: string;
     answerCount?: number;
+    // Phase 4: prompt-owner media (Phase 2 backend projection — feed shape).
+    hasMedia?: boolean;
+    mediaUrl?: string;
+    mediaKind?: 'photo' | 'video' | 'voice';
+    mediaMime?: string;
+    durationSec?: number;
+    isFrontCamera?: boolean;
   };
   promptId: string;
   onOpenThread: (id: string) => void;
-  onAddComment: (id: string) => void;
   onLongPress?: (id: string) => void;
   isOwner?: boolean;
 }) {
   // P2-002: Stable callback references
   const handleOpenThread = useCallback(() => onOpenThread(promptId), [onOpenThread, promptId]);
-  const handleAddComment = useCallback(() => onAddComment(promptId), [onAddComment, promptId]);
   const handleLongPress = useCallback(() => onLongPress?.(promptId), [onLongPress, promptId]);
 
   const isTruth = prompt.type === 'truth';
@@ -629,7 +640,27 @@ const PromptCard = React.memo(function PromptCard({
         </View>
       </View>
 
-      {/* Right column: Pill top, + button bottom */}
+      {/* Phase 4: prompt-owner media tile — only when prompt.hasMedia is true.
+          Tap opens the thread (same as the card press) so the feed never
+          attempts inline playback. */}
+      {prompt.hasMedia && prompt.mediaKind ? (
+        <View style={styles.mediaTileWrap}>
+          <TodPromptMediaTile
+            hasMedia={prompt.hasMedia}
+            mediaUrl={prompt.mediaUrl}
+            mediaKind={prompt.mediaKind}
+            durationSec={prompt.durationSec}
+            onPress={handleOpenThread}
+            accessibilityLabel={
+              prompt.mediaKind === 'voice'
+                ? 'Open prompt voice attachment'
+                : `Open prompt ${prompt.mediaKind}`
+            }
+          />
+        </View>
+      ) : null}
+
+      {/* Right column: Type pill */}
       <View style={styles.cardRightColumn}>
         <LinearGradient
           colors={pillColors}
@@ -640,24 +671,6 @@ const PromptCard = React.memo(function PromptCard({
           <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={12} color="#FFF" />
           <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
         </LinearGradient>
-
-        {/* Hide + button on own prompts - backend rejects own-prompt answers anyway */}
-        {!isOwner && (
-          <TouchableOpacity
-            style={styles.addButtonPremium}
-            onPress={(e) => { e.stopPropagation?.(); handleAddComment(); }}
-            activeOpacity={0.85}
-          >
-            <LinearGradient
-              colors={[PREMIUM.coral, PREMIUM.coralSoft]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.addButtonGradient}
-            >
-              <Ionicons name="add" size={22} color="#FFF" />
-            </LinearGradient>
-          </TouchableOpacity>
-        )}
       </View>
     </AnimatedPressCard>
   );
@@ -891,14 +904,6 @@ export default function TruthOrDareScreen() {
     router.push('/(main)/(private)/my-truth-or-dare' as any);
   }, [router]);
 
-  // Open thread for adding comment (same as opening thread, composer auto-shows)
-  const openThreadForComment = useCallback((promptId: string) => {
-    router.push({
-      pathname: '/(main)/prompt-thread' as any,
-      params: { promptId, autoOpenComposer: 'new', source: 'phase2-tod' },
-    });
-  }, [router]);
-
   // Long-press to show delete popup (owner only)
   const handleLongPressPrompt = useCallback((promptId: string) => {
     setDeletePopupPromptId(promptId);
@@ -981,7 +986,6 @@ export default function TruthOrDareScreen() {
           prompt={item.prompt}
           promptId={promptId}
           onOpenThread={openThread}
-          onAddComment={openThreadForComment}
           onLongPress={handleLongPressPrompt}
           isOwner={isOwner}
         />
@@ -995,12 +999,11 @@ export default function TruthOrDareScreen() {
         prompt={item.prompt}
         promptId={promptId}
         onOpenThread={openThread}
-        onAddComment={openThreadForComment}
         onLongPress={handleLongPressPrompt}
         isOwner={isOwner}
       />
     );
-  }, [connectRequestCount, openConnectRequestsFromTray, openThread, openThreadForComment, handleLongPressPrompt, userId]);
+  }, [connectRequestCount, openConnectRequestsFromTray, openThread, handleLongPressPrompt, userId]);
 
   const getKey = useCallback((item: FeedItem, idx: number) => {
     if (item.type === 'section') return `section_${idx}`;
@@ -1090,7 +1093,7 @@ export default function TruthOrDareScreen() {
             colors={[PREMIUM.coral, PREMIUM.coralSoft]}
             style={styles.fabGradient}
           >
-            <Ionicons name="add" size={26} color="#FFF" />
+            <Ionicons name="create" size={24} color="#FFF" />
           </LinearGradient>
         </TouchableOpacity>
       </LinearGradient>
@@ -1196,7 +1199,7 @@ export default function TruthOrDareScreen() {
           colors={[PREMIUM.coral, PREMIUM.coralSoft]}
           style={styles.fabGradient}
         >
-          <Ionicons name="add" size={26} color="#FFF" />
+          <Ionicons name="create" size={24} color="#FFF" />
         </LinearGradient>
       </TouchableOpacity>
 
@@ -1527,6 +1530,15 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
   },
 
+  // ─── Phase 4: prompt-owner media tile slot (sits between cardContent and
+  //     cardRightColumn). The 8px right margin separates the tile from the
+  //     type pill column on narrow Android screens; the wrap renders only
+  //     when prompt.hasMedia is true so no-media prompts stay full-width.
+  mediaTileWrap: {
+    alignSelf: 'center',
+    marginRight: 8,
+  },
+
   // ─── Type Pills - Gradient styling ───
   typePillGradient: {
     flexDirection: 'row',
@@ -1623,23 +1635,6 @@ const styles = StyleSheet.create({
   commentMedia: {
     color: PREMIUM.coral,
     fontWeight: '600',
-  },
-
-  // ─── Add Button - Premium gradient ───
-  addButtonPremium: {
-    marginLeft: 6,
-  },
-  addButtonGradient: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: PREMIUM.coral,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 4,
   },
 
   // ─── Empty State ───

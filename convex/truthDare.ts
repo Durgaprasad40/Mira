@@ -40,7 +40,7 @@ const RATE_LIMIT_ERROR = 'Rate limit exceeded. Please try again later.';
 const TOD_SYSTEM_OWNER_ID = 'system';
 
 const MIN_PROMPT_CHARS = 20;
-const MAX_PROMPT_CHARS = 280;
+const MAX_PROMPT_CHARS = 400;
 const MAX_ANSWER_CHARS = 400;
 const MIN_MEDIA_VIEW_DURATION_SEC = 1;
 const MAX_MEDIA_VIEW_DURATION_SEC = 60;
@@ -1035,6 +1035,15 @@ export const createPrompt = mutation({
     ownerPhotoStorageId: v.optional(v.id('_storage')),
     ownerAge: v.optional(v.number()),
     ownerGender: v.optional(v.string()),
+    // Owner-attached prompt media (optional, Phase-2). Media follows prompt
+    // visibility: if a viewer can see the text, they can see the media. No
+    // separate one-time-view gating; mediaUrl + fileSize are derived
+    // server-side from the storage reference.
+    mediaStorageId: v.optional(v.id('_storage')),
+    mediaMime: v.optional(v.string()),
+    mediaKind: v.optional(v.union(v.literal('photo'), v.literal('video'), v.literal('voice'))),
+    durationSec: v.optional(v.number()),
+    isFrontCamera: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const ownerUserId = await requireAuthenticatedTodUserId(ctx, args.authUserId, 'Unauthorized');
@@ -1115,6 +1124,36 @@ export const createPrompt = mutation({
       }
     }
 
+    // Resolve & validate owner-attached prompt media (Phase-2). Mirrors the
+    // canonical answer-side flow: validate the pendingUploads reference,
+    // verify MIME + size limits via TOD_MEDIA_LIMITS, validate duration for
+    // video/voice, then resolve the persisted Convex storage URL.
+    let promptMediaUpload: ValidatedTodUploadReference | undefined;
+    let promptMediaDurationSec: number | undefined;
+    let resolvedPromptMediaMime: string | undefined;
+    let resolvedPromptMediaUrl: string | undefined;
+    let resolvedPromptMediaKind: TodUploadMediaKind | undefined;
+    if (args.mediaStorageId) {
+      const declaredKind = getTodUploadKindFromMedia(args.mediaMime, args.mediaKind);
+      promptMediaUpload = await validateTodUploadReference(
+        ctx,
+        args.mediaStorageId,
+        ownerUserId,
+        declaredKind,
+      );
+      promptMediaDurationSec = validateTodMediaDurationSec(
+        promptMediaUpload.kind,
+        args.durationSec,
+      );
+      resolvedPromptMediaMime = promptMediaUpload.contentType;
+      resolvedPromptMediaKind = promptMediaUpload.kind;
+      const url = await ctx.storage.getUrl(args.mediaStorageId);
+      if (!url) {
+        throw new Error('Invalid media storage reference');
+      }
+      resolvedPromptMediaUrl = url;
+    }
+
     const promptId = await ctx.db.insert('todPrompts', {
       type: args.type,
       text: promptText,
@@ -1131,11 +1170,22 @@ export const createPrompt = mutation({
       ownerPhotoUrl: finalOwnerPhotoUrl,
       ownerAge: finalOwnerAge,
       ownerGender: finalOwnerGender,
+      // Owner-attached prompt media (only persisted when supplied)
+      mediaKind: resolvedPromptMediaKind,
+      mediaStorageId: args.mediaStorageId,
+      mediaUrl: resolvedPromptMediaUrl,
+      mediaMime: resolvedPromptMediaMime,
+      fileSize: promptMediaUpload?.size,
+      durationSec: promptMediaDurationSec,
+      isFrontCamera: args.mediaStorageId ? args.isFrontCamera : undefined,
     });
 
     // Debug log for post creation
     const urlPrefix = finalOwnerPhotoUrl ? (finalOwnerPhotoUrl.startsWith('https://') ? 'https' : finalOwnerPhotoUrl.startsWith('http://') ? 'http' : 'other') : 'none';
     debugTodLog(`[T/D] Created prompt: id=${promptId}, type=${args.type}, isAnon=${args.isAnonymous ?? true}, photoBlurMode=${args.photoBlurMode ?? 'none'}, photoUrlPrefix=${urlPrefix}, identityFallback=${needsIdentityFallback}`);
+    if (resolvedPromptMediaKind) {
+      debugTodLog(`[T/D] Prompt media attached: kind=${resolvedPromptMediaKind}, size=${promptMediaUpload?.size}, durationSec=${promptMediaDurationSec ?? 'n/a'}`);
+    }
 
     return { promptId, expiresAt };
   },
@@ -2744,6 +2794,15 @@ export const listActivePromptsWithTop2Answers = query({
           ownerUserId: prompt.ownerUserId, // FIX: Include for owner detection in feed
           // Engagement metrics
           totalReactionCount: prompt.totalReactionCount ?? 0,
+          // Owner-attached prompt media (Phase-2). Media follows prompt
+          // visibility; `mediaStorageId` is intentionally omitted client-side
+          // (already resolved into `mediaUrl` server-side).
+          mediaKind: prompt.mediaKind,
+          mediaUrl: prompt.mediaUrl,
+          mediaMime: prompt.mediaMime,
+          durationSec: prompt.durationSec,
+          isFrontCamera: prompt.isFrontCamera ?? false,
+          hasMedia: !!prompt.mediaStorageId,
           // Answers and viewer state
           top2Answers: top2WithReactions,
           totalAnswers: visibleAnswers.length,
@@ -2847,6 +2906,15 @@ export const getTrendingTruthAndDare = query({
         ownerUserId: prompt.ownerUserId, // FIX: Include for owner detection
         // Engagement metrics
         totalReactionCount: prompt.totalReactionCount ?? 0,
+        // Owner-attached prompt media (Phase-2). Media follows prompt
+        // visibility; `mediaStorageId` is intentionally omitted client-side
+        // (already resolved into `mediaUrl` server-side).
+        mediaKind: prompt.mediaKind,
+        mediaUrl: prompt.mediaUrl,
+        mediaMime: prompt.mediaMime,
+        durationSec: prompt.durationSec,
+        isFrontCamera: prompt.isFrontCamera ?? false,
+        hasMedia: !!prompt.mediaStorageId,
       };
     };
 
@@ -2908,6 +2976,17 @@ export const getPromptThread = query({
           ownerAge: prompt.ownerAge,
           ownerGender: prompt.ownerGender,
           ownerUserId: prompt.ownerUserId, // FIX: Include for owner checks
+          // Owner-attached prompt media (Phase-2). Media follows prompt
+          // visibility — if the viewer can see this payload, they can see
+          // the media. `mediaStorageId` is intentionally omitted client-side
+          // (already resolved into `mediaUrl` server-side).
+          mediaKind: prompt.mediaKind,
+          mediaUrl: prompt.mediaUrl,
+          mediaMime: prompt.mediaMime,
+          fileSize: prompt.fileSize,
+          durationSec: prompt.durationSec,
+          isFrontCamera: prompt.isFrontCamera ?? false,
+          hasMedia: !!prompt.mediaStorageId,
         },
         answers: [],
         isExpired: true,
@@ -3004,6 +3083,25 @@ export const getPromptThread = query({
           hasViewedMedia = viewRecord?.viewedAt !== undefined;
         }
 
+        // Author-only media view count for own photo/video answers.
+        // Voice answers never write `todAnswerViews`, so we skip them.
+        // todAnswerViews rows are unique per (answerId, viewerUserId) because
+        // `claimAnswerMediaView` inserts only when no row exists for the
+        // (answer, viewer) pair, and skips author self-views entirely.
+        let viewCount: number | undefined;
+        if (
+          viewerDbId &&
+          viewerDbId === answer.userId &&
+          (answer.type === 'photo' || answer.type === 'video') &&
+          answer.mediaStorageId
+        ) {
+          const viewRows = await ctx.db
+            .query('todAnswerViews')
+            .withIndex('by_answer', (q) => q.eq('answerId', answerId))
+            .collect();
+          viewCount = viewRows.length;
+        }
+
         // Check if viewer (as prompt owner) has sent a connect request for
         // this prompt/commenter pair. Scope this to the prompt so a request
         // on another prompt does not incorrectly hide this prompt's Connect
@@ -3065,7 +3163,10 @@ export const getPromptThread = query({
           hasSentConnect,
           connectStatus,
           hasMedia: !!answer.mediaStorageId,
-          isVisualMediaConsumed: !!answer.mediaViewedAt || !!answer.promptOwnerViewedAt,
+          // Standard T/D answer media is replayable; the composer no longer
+          // locks photo/video after a view. Always `false` for normal answers.
+          isVisualMediaConsumed: false,
+          viewCount,
           // Author identity snapshot
           authorName: normalizedIdentity.isAnonymous
             ? undefined
@@ -3116,6 +3217,17 @@ export const getPromptThread = query({
         ownerAge: prompt.ownerAge,
         ownerGender: prompt.ownerGender,
         ownerUserId: prompt.ownerUserId, // FIX: Include for owner checks
+        // Owner-attached prompt media (Phase-2). Media follows prompt
+        // visibility — if the viewer can see this payload, they can see
+        // the media. `mediaStorageId` is intentionally omitted client-side
+        // (already resolved into `mediaUrl` server-side).
+        mediaKind: prompt.mediaKind,
+        mediaUrl: prompt.mediaUrl,
+        mediaMime: prompt.mediaMime,
+        fileSize: prompt.fileSize,
+        durationSec: prompt.durationSec,
+        isFrontCamera: prompt.isFrontCamera ?? false,
+        hasMedia: !!prompt.mediaStorageId,
       },
       answers: enrichedAnswers,
       isExpired: false,
@@ -4126,30 +4238,30 @@ export const claimAnswerMediaView = mutation({
       role = 'viewer';
     }
 
-    // Check if already viewed (one-time enforcement). Answer author can still
-    // review their own upload through the inline owner URL.
+    // Look up any existing view ledger row for this (answer, viewer). Standard
+    // T/D answer media is replayable, so an existing row no longer blocks
+    // playback — it just means we should NOT insert a duplicate (unique-viewer
+    // count is preserved via the single row per viewer).
+    let existingView: any = null;
     if (!isAnswerAuthor) {
-      const existingView = await ctx.db
+      existingView = await ctx.db
         .query('todAnswerViews')
         .withIndex('by_answer_viewer', (q) =>
           q.eq('answerId', answerId).eq('viewerUserId', viewerId)
         )
         .first();
-
-      if (existingView) {
-        return { status: 'already_viewed' as const };
-      }
     }
 
-    // Generate a fresh URL before recording the claim. The mutation is
-    // serialized by Convex, so the insert below is the durable one-time gate.
+    // Generate a fresh URL. The author always sees their own upload; other
+    // viewers may replay as long as access checks above still allow it.
     const url = await ctx.storage.getUrl(answer.mediaStorageId);
     if (!url) {
       return { status: 'no_media' as const };
     }
 
     const viewedAt = Date.now();
-    if (!isAnswerAuthor) {
+    if (!isAnswerAuthor && !existingView) {
+      // First non-author open ever: record the unique view exactly once.
       await ctx.db.insert('todAnswerViews', {
         answerId,
         viewerUserId: viewerId,

@@ -34,7 +34,7 @@ function getStatusText(item: TruthDarePendingUpload): string {
     case 'success':
       return 'Posted';
     case 'failed':
-      return 'Failed - Tap to retry';
+      return item.error?.message || 'Upload failed. Please try again.';
     default:
       return 'Uploading';
   }
@@ -50,6 +50,7 @@ export function PendingAnswerCard({ item, onRetry, onRemove }: PendingAnswerCard
   const hasMedia = !!item.attachment?.localUri;
   const isVisualMedia = item.mediaKind === 'photo' || item.mediaKind === 'video';
   const isFailed = item.status === 'failed';
+  const canRetry = !isFailed || item.error?.retryable !== false;
   const isActive = item.status === 'queued' || item.status === 'uploading' || item.status === 'submitting';
   const authorLabel = item.isAnonymous ? 'Anonymous' : item.authorName || 'You';
   const mediaIcon = getMediaIcon(item.mediaKind);
@@ -57,9 +58,9 @@ export function PendingAnswerCard({ item, onRetry, onRemove }: PendingAnswerCard
   return (
     <TouchableOpacity
       style={styles.wrapper}
-      activeOpacity={isFailed ? 0.85 : 1}
+      activeOpacity={isFailed && canRetry ? 0.85 : 1}
       onPress={() => {
-        if (isFailed) onRetry(item.clientId);
+        if (isFailed && canRetry) onRetry(item.clientId);
       }}
     >
       <View style={[styles.card, isFailed && styles.cardFailed]}>
@@ -97,9 +98,9 @@ export function PendingAnswerCard({ item, onRetry, onRemove }: PendingAnswerCard
                 styles.statusText,
                 isFailed && styles.statusTextFailed,
               ]}
-              numberOfLines={1}
+              numberOfLines={2}
             >
-              {item.error?.message && isFailed ? getStatusText(item) : getStatusText(item)}
+              {getStatusText(item)}
             </Text>
           </View>
 
@@ -135,7 +136,7 @@ export function PendingAnswerCard({ item, onRetry, onRemove }: PendingAnswerCard
               )}
               {isFailed && (
                 <View style={styles.failedOverlay}>
-                  <Ionicons name="refresh" size={18} color="#FFF" />
+                  <Ionicons name={canRetry ? 'refresh' : 'alert-circle-outline'} size={18} color="#FFF" />
                 </View>
               )}
             </View>
@@ -144,14 +145,16 @@ export function PendingAnswerCard({ item, onRetry, onRemove }: PendingAnswerCard
 
         {isFailed && (
           <View style={styles.failedActions}>
-            <TouchableOpacity
-              style={styles.retryBtn}
-              onPress={() => onRetry(item.clientId)}
-              activeOpacity={0.85}
-            >
-              <Ionicons name="refresh" size={13} color="#FFF" />
-              <Text style={styles.retryText}>Retry</Text>
-            </TouchableOpacity>
+            {canRetry && (
+              <TouchableOpacity
+                style={styles.retryBtn}
+                onPress={() => onRetry(item.clientId)}
+                activeOpacity={0.85}
+              >
+                <Ionicons name="refresh" size={13} color="#FFF" />
+                <Text style={styles.retryText}>Retry</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity
               style={styles.removeBtn}
               onPress={() => onRemove(item.clientId)}

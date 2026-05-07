@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+import * as FileSystem from 'expo-file-system';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -18,6 +19,7 @@ import {
 
 const MAX_PARALLEL_UPLOADS = 2;
 const PROGRESS_THROTTLE_MS = 50;
+const TOD_UPLOAD_FALLBACK_ERROR = 'Upload failed. Please try again.';
 
 function uploadKindFor(kind?: TruthDareUploadMediaKind): 'photo' | 'video' | 'audio' {
   if (kind === 'video') return 'video';
@@ -48,6 +50,63 @@ function getTodUploadOptions(
   };
 }
 
+async function getLocalFileSizeBytes(localUri?: string): Promise<number | undefined> {
+  if (!localUri) return undefined;
+  try {
+    const info = await FileSystem.getInfoAsync(localUri);
+    return typeof (info as any).size === 'number' ? (info as any).size : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractCleanTodUploadErrorMessage(error: unknown): string {
+  const directDataMessage =
+    typeof error === 'object' &&
+    error !== null &&
+    'data' in error &&
+    typeof (error as { data?: { message?: unknown } }).data?.message === 'string'
+      ? (error as { data: { message: string } }).data.message
+      : undefined;
+  const rawMessage =
+    directDataMessage ??
+    (error instanceof Error ? error.message : typeof error === 'string' ? error : '');
+
+  const knownMessages = [
+    formatTodMediaLimit('photo'),
+    formatTodMediaLimit('video'),
+    formatTodMediaLimit('voice'),
+    'Unsupported media format.',
+    'Prompt has expired',
+  ];
+  for (const message of knownMessages) {
+    if (rawMessage.includes(message)) return message;
+  }
+
+  const uncaughtMatch = rawMessage.match(/Uncaught Error:\s*([^\n]+)/);
+  if (uncaughtMatch?.[1]) {
+    return uncaughtMatch[1].replace(/\s+at\s+.*$/, '').trim();
+  }
+
+  const firstLine = rawMessage.split('\n')[0]?.trim();
+  if (firstLine && !firstLine.includes(' at ') && firstLine.length <= 180) {
+    return firstLine;
+  }
+
+  return TOD_UPLOAD_FALLBACK_ERROR;
+}
+
+function isNonRetryableTodUploadError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('must be under') ||
+    lower.includes('seconds or less') ||
+    lower.includes('unsupported media format') ||
+    lower.includes('prompt has expired') ||
+    lower.includes('rate limit exceeded')
+  );
+}
+
 function sanitizeError(error: unknown): { message: string; code?: string; retryable?: boolean } {
   if (error instanceof UploadError) {
     return {
@@ -57,16 +116,18 @@ function sanitizeError(error: unknown): { message: string; code?: string; retrya
     };
   }
 
-  const message = error instanceof Error ? error.message : 'Upload failed. Please try again.';
+  const message = extractCleanTodUploadErrorMessage(error);
   const lower = message.toLowerCase();
+  const nonRetryable = isNonRetryableTodUploadError(message);
   return {
     message,
     code: lower.includes('expired') ? 'PROMPT_EXPIRED' : undefined,
-    retryable:
-      lower.includes('network') ||
-      lower.includes('timeout') ||
-      lower.includes('temporarily') ||
-      lower.includes('try again'),
+    retryable: nonRetryable
+      ? false
+      : lower.includes('network') ||
+        lower.includes('timeout') ||
+        lower.includes('temporarily') ||
+        lower.includes('try again'),
   };
 }
 
@@ -93,6 +154,7 @@ export function TruthDareUploadManager() {
     const trackedStorageIds: string[] = [];
     let mediaStorageId = item.storageId;
     let authorPhotoStorageId = item.authorPhotoStorageId;
+    let uploadedMediaSizeBytes: number | undefined;
     let lastProgressAt = 0;
 
     const trackStorageId = async (storageId: string | undefined) => {
@@ -132,6 +194,17 @@ export function TruthDareUploadManager() {
         ensureCurrentUser();
         const mediaType = uploadKindFor(item.attachment.kind);
         const limitKind = limitKindFor(item.attachment.kind);
+        const sizeBytes = await getLocalFileSizeBytes(item.attachment.localUri);
+        uploadedMediaSizeBytes = sizeBytes;
+        if (__DEV__) {
+          console.log('[TOD_UPLOAD_DEBUG] media_kind', {
+            kind: item.attachment.kind,
+            sizeBytes,
+            durationMs: item.attachment.durationMs,
+            durationSecSent: item.durationSec ?? item.attachment.durationSec,
+            mime: item.mediaMime ?? item.attachment.mime,
+          });
+        }
         mediaStorageId = await uploadMediaToConvexWithProgress(
           item.attachment.localUri,
           () => generateUploadUrl({ authUserId: item.userId }),
@@ -169,13 +242,23 @@ export function TruthDareUploadManager() {
       });
 
       ensureCurrentUser();
+      const durationSecSent = item.durationSec ?? item.attachment?.durationSec;
+      if (__DEV__ && item.attachment) {
+        console.log('[TOD_UPLOAD_DEBUG] createOrEditAnswer', {
+          kind: item.attachment.kind,
+          sizeBytes: uploadedMediaSizeBytes,
+          durationMs: item.attachment.durationMs,
+          durationSecSent,
+          mime: item.mediaMime,
+        });
+      }
       const result = await createOrEditAnswer({
         promptId: item.promptId,
         userId: item.userId,
         text: item.text?.trim() || undefined,
         mediaStorageId: mediaStorageId as Id<'_storage'> | undefined,
         mediaMime: item.mediaMime,
-        durationSec: item.durationSec,
+        durationSec: durationSecSent,
         removeMedia: item.removeMedia,
         identityMode: item.identityMode,
         isAnonymous: item.isAnonymous,

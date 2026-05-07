@@ -13,6 +13,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { TodAvatar } from '@/components/truthdare/TodAvatar';
+import { TodPromptMediaTile } from '@/components/truthdare/TodPromptMediaTile';
 import { UnifiedAnswerComposer, IdentityMode, Attachment } from '@/components/truthdare/UnifiedAnswerComposer';
 import { PendingAnswerCard } from '@/components/truthdare/PendingAnswerCard';
 // NOTE: `TodVoicePlayer` (the horizontal pill-shaped voice player) is no
@@ -87,6 +88,23 @@ function formatVoiceClock(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+const TOD_MAX_MEDIA_DURATION_SEC = 60;
+
+function normalizeTodAttachmentDurationSec(durationMs?: number): number | undefined {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs <= 0) {
+    return undefined;
+  }
+
+  // Composer attachments should store durationMs, but keep this defensive for
+  // older/stale clients or picker payloads that may already be seconds.
+  const durationSec =
+    durationMs <= TOD_MAX_MEDIA_DURATION_SEC
+      ? Math.ceil(durationMs)
+      : Math.ceil(durationMs / 1000);
+
+  return durationSec > 0 ? durationSec : undefined;
+}
+
 // Time remaining helper
 function formatTimeLeft(expiresAt: number): string {
   const now = Date.now();
@@ -96,6 +114,37 @@ function formatTimeLeft(expiresAt: number): string {
   const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
   if (hours > 0) return `${hours}h left`;
   return `${minutes}m left`;
+}
+
+// Phase 5: typed accessor for prompt-owner media (Phase-2 backend projection).
+// `getPromptThread` returns these fields, but they sit on a Convex inferred
+// type that varies between the active vs expired branches, so we narrow
+// here once and reuse the result. Runtime-validates each field rather than
+// using a naked `as` cast — keeps the prompt-media surface auditable and
+// safe to extend.
+type TodPromptMediaProjection = {
+  hasMedia: boolean;
+  mediaKind?: 'photo' | 'video' | 'voice';
+  mediaUrl?: string;
+  durationSec?: number;
+  isFrontCamera?: boolean;
+};
+
+function getPromptMediaProjection(prompt: unknown): TodPromptMediaProjection {
+  if (!prompt || typeof prompt !== 'object') {
+    return { hasMedia: false };
+  }
+  const obj = prompt as Record<string, unknown>;
+  const kind = obj.mediaKind;
+  return {
+    hasMedia: obj.hasMedia === true,
+    mediaKind:
+      kind === 'photo' || kind === 'video' || kind === 'voice' ? kind : undefined,
+    mediaUrl: typeof obj.mediaUrl === 'string' ? obj.mediaUrl : undefined,
+    durationSec: typeof obj.durationSec === 'number' ? obj.durationSec : undefined,
+    isFrontCamera:
+      typeof obj.isFrontCamera === 'boolean' ? obj.isFrontCamera : undefined,
+  };
 }
 
 type ThreadAuthorProfile = {
@@ -422,7 +471,7 @@ export default function PromptThreadScreen() {
     return answers.filter((answer) => !hiddenAnswerIdsForPendingEdits.has(String(answer._id)));
   }, [answers, hiddenAnswerIdsForPendingEdits]);
 
-  const { getPreloadState } = useTodMediaPreload({
+  const { getPreloadState, revision: preloadRevision } = useTodMediaPreload({
     answers: answersForList,
     authUserId: userId,
     viewableAnswerIds,
@@ -1073,8 +1122,8 @@ export default function PromptThreadScreen() {
       Alert.alert('Too Short', 'Prompt must be at least 10 characters.');
       return;
     }
-    if (trimmedText.length > 280) {
-      Alert.alert('Too Long', 'Prompt cannot exceed 280 characters.');
+    if (trimmedText.length > 400) {
+      Alert.alert('Too Long', 'Prompt cannot exceed 400 characters.');
       return;
     }
 
@@ -1484,16 +1533,11 @@ export default function PromptThreadScreen() {
         viewerId: userId,
       });
 
-      // Handle backend responses
-      // ONE-TIME VIEW: Block if already viewed
-      if (result.status === 'already_viewed') {
-        Alert.alert(
-          'Already Viewed',
-          `This ${mediaLabel} was already viewed.`
-        );
-        return;
-      }
-
+      // Handle backend responses. Standard T/D answer media is replayable, so
+      // the legacy `'already_viewed'` branch is intentionally not handled —
+      // the backend now always returns `'ok'` with a fresh URL for valid
+      // viewers. If an older client/server combo ever returns it, fall through
+      // to the generic open failure below (no Alert, just no-op).
       if (result.status === 'not_authorized') {
         Alert.alert(
           'Not Available',
@@ -1505,7 +1549,7 @@ export default function PromptThreadScreen() {
       if (result.status === 'no_media') {
         Alert.alert(
           'Unavailable',
-          `This one-time ${mediaLabel} is no longer available.`
+          `This ${mediaLabel} is no longer available.`
         );
         return;
       }
@@ -1566,6 +1610,29 @@ export default function PromptThreadScreen() {
     }
 
   }, []);
+
+  // Phase 4: open prompt-owner media in the existing fullscreen viewer.
+  // Prompt-owner media follows prompt visibility (no claim flow, no
+  // todPromptViews, no answerId-based claim). The existing viewer modal
+  // only renders `mediaUrl` + `mediaType` + optional front-camera unmirror,
+  // so we can safely reuse it by passing a synthetic answerId marker that
+  // never feeds back into any answer-side mutation. Voice prompt media is
+  // intentionally non-interactive in the thread (no inline player wired
+  // up here) — see TodPromptMediaTile usage below.
+  const handleViewPromptMedia = useCallback(() => {
+    if (!prompt) return;
+    const projection = getPromptMediaProjection(prompt);
+    if (!projection.mediaUrl) return;
+    if (projection.mediaKind !== 'photo' && projection.mediaKind !== 'video') return;
+    if (!isMountedRef.current) return;
+    setViewingMedia({
+      answerId: '__prompt_owner_media__',
+      mediaUrl: projection.mediaUrl,
+      mediaType: projection.mediaKind,
+      isOwnAnswer: true, // suppresses any owner-vs-claim branches; prompt media has no claim model
+      isFrontCamera: projection.isFrontCamera,
+    });
+  }, [prompt]);
 
   useEffect(() => {
     if (viewingMedia) {
@@ -1643,7 +1710,7 @@ export default function PromptThreadScreen() {
             localUri: attachment.uri,
             mime: attachment.mime,
             durationMs: attachment.durationMs,
-            durationSec: attachment.durationMs ? Math.ceil(attachment.durationMs / 1000) : undefined,
+            durationSec: normalizeTodAttachmentDurationSec(attachment.durationMs),
             isFrontCamera: attachment.isFrontCamera,
           }
         : undefined;
@@ -1676,6 +1743,16 @@ export default function PromptThreadScreen() {
         authorAge: isAnon ? undefined : authorProfile.age,
         authorGender: isAnon ? undefined : authorProfile.gender,
       });
+
+      if (__DEV__ && queuedAttachment) {
+        console.log('[TOD_UPLOAD_DEBUG] media_kind', {
+          kind: queuedAttachment.kind,
+          sizeBytes: undefined,
+          durationMs: queuedAttachment.durationMs,
+          durationSecSent: queuedAttachment.durationSec,
+          mime: queuedAttachment.mime,
+        });
+      }
 
       debugTodLog('[T/D QUEUE] enqueue_success', {
         clientId,
@@ -1856,40 +1933,47 @@ export default function PromptThreadScreen() {
           return null;
       }
     })();
+    // AUTHOR-SIDE TILE STABILITY: the author already has direct access to
+    // their own media (the inline `mediaUrl` is shipped on their card), so
+    // the preload pipeline must not drive their tile UI. If the preload
+    // hook briefly flips to `'loading'` (e.g. while `Image.prefetch` warms
+    // the cache for the inline URL) or `'error'`, the author's tile would
+    // otherwise oscillate between a spinner / refresh glyph and the real
+    // media icon. We force `idle` for `isOwnAnswer` so the author's tile
+    // shows only the stable photo/video/voice icon (plus an optional view
+    // count microtext below). Non-author viewers still get spinner/refresh
+    // feedback during their own preload window.
     const preloadState =
-      tileState && tileState !== 'locked' && tileState !== 'viewed'
+      tileState && tileState !== 'locked' && tileState !== 'viewed' && !isOwnAnswer
         ? getPreloadState(item)
         : { status: 'idle' as const };
     const isMediaTile = tileState === 'photo' || tileState === 'video' || tileState === 'voice';
     const isTilePreloading = isMediaTile && preloadState.status === 'loading';
     const didTilePreloadFail = isMediaTile && preloadState.status === 'error';
+    // The tile shows only the media icon by default. Loading and error states
+    // use spinner / refresh icon states instead of text labels. Two exceptions
+    // remain because they carry information the icon alone cannot express:
+    //   1. Voice playback clock — only while THIS voice is playing.
+    //   2. Author-only view count pill — only on the current user's own
+    //      photo/video answers, only when count > 0. Backend exposes
+    //      `viewCount` only for the answer author, so other viewers
+    //      never see a count regardless of state.
+    const ownerViewCount: number | undefined =
+      isOwnAnswer && (tileState === 'photo' || tileState === 'video')
+        ? typeof (item as any).viewCount === 'number'
+          ? ((item as any).viewCount as number)
+          : undefined
+        : undefined;
     const tileMicrotext = (() => {
-      if (tileState === 'locked') return 'Creator only';
-      if (tileState === 'viewed') return 'Viewed';
-      if (tileState === 'voice') {
-        if (preloadState.status === 'loading') return 'Preparing voice…';
-        if (preloadState.status === 'ready') return 'Tap to play';
-        if (preloadState.status === 'error') return 'Tap to retry';
-        // Idle: show a clean "0:10" total when known, otherwise "Voice".
-        if (!isThisVoicePlaying) {
-          if (voiceTotalMs > 0) return formatVoiceClock(voiceTotalMs);
-          return 'Voice';
-        }
-        // Playing: live "0:03 / 0:10" clock. If the duration is unknown
-        // (some streams expose it lazily) fall back to just the elapsed
-        // time so the user still sees movement.
+      if (tileState === 'voice' && isThisVoicePlaying) {
         if (voiceTotalMs > 0) {
           return `${formatVoiceClock(voicePosMs)} / ${formatVoiceClock(voiceTotalMs)}`;
         }
         return formatVoiceClock(voicePosMs);
       }
-      if (tileState === 'photo' && preloadState.status === 'loading') return 'Preparing photo…';
-      if (tileState === 'video' && preloadState.status === 'loading') return 'Preparing video…';
-      if (tileState === 'photo' && preloadState.status === 'ready') return 'Tap to view';
-      if (tileState === 'video' && preloadState.status === 'ready') return 'Ready • Tap to play';
-      if ((tileState === 'photo' || tileState === 'video') && preloadState.status === 'error') return 'Tap to retry';
-      if (isCreatorOnly && (tileState === 'photo' || tileState === 'video')) return 'Tap once';
-      if (tileState === 'photo' || tileState === 'video') return 'Tap to view';
+      if (typeof ownerViewCount === 'number' && ownerViewCount > 0) {
+        return `${ownerViewCount} ${ownerViewCount === 1 ? 'view' : 'views'}`;
+      }
       return null;
     })();
     const tileIsInteractive = tileState === 'photo' || tileState === 'video' ||
@@ -2468,49 +2552,86 @@ export default function PromptThreadScreen() {
           )}
         </View>
 
-        {/* Hero Prompt Text - with inline edit support */}
-        {isEditingPrompt ? (
-          <View style={styles.inlineEditContainer}>
-            <TextInput
-              style={styles.inlineEditInput}
-              value={editPromptText}
-              onChangeText={setEditPromptText}
-              multiline
-              maxLength={280}
-              autoFocus
-              placeholder="Edit your prompt..."
-              placeholderTextColor={PREMIUM.textMuted}
-            />
-            <Text style={styles.inlineEditCharCount}>
-              {editPromptText.length}/280
-            </Text>
-            <View style={styles.inlineEditActions}>
-              <TouchableOpacity
-                style={styles.inlineEditCancelBtn}
-                onPress={handleCancelEditPrompt}
-                disabled={isSavingPromptEdit}
-              >
-                <Text style={styles.inlineEditCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.inlineEditSaveBtn,
-                  (editPromptText.trim().length < 10 || isSavingPromptEdit) && styles.inlineEditSaveBtnDisabled,
-                ]}
-                onPress={handleSaveEditPrompt}
-                disabled={editPromptText.trim().length < 10 || isSavingPromptEdit}
-              >
-                {isSavingPromptEdit ? (
-                  <ActivityIndicator size="small" color="#FFF" />
-                ) : (
-                  <Text style={styles.inlineEditSaveText}>Save</Text>
-                )}
-              </TouchableOpacity>
+        {/* Hero Prompt Text - with inline edit support.
+            Phase 4: when the prompt has owner-attached media we lay the
+            text and the media tile out side-by-side (text left, tile
+            right) using the same 68×68 chip style as response/comment
+            media. When there is no media, the text uses the full width
+            with no placeholder. */}
+        {(() => {
+          const projection = getPromptMediaProjection(prompt);
+          const promptHasMedia = projection.hasMedia;
+          const promptMediaKind = projection.mediaKind;
+          const promptMediaUrl = projection.mediaUrl;
+          const promptDurationSec = projection.durationSec;
+          const showHeaderMediaTile =
+            promptHasMedia && !!promptMediaKind && !isEditingPrompt;
+          const tileIsTappable =
+            promptMediaKind === 'photo' || promptMediaKind === 'video';
+          const editor = (
+            <View style={styles.inlineEditContainer}>
+              <TextInput
+                style={styles.inlineEditInput}
+                value={editPromptText}
+                onChangeText={setEditPromptText}
+                multiline
+                maxLength={400}
+                autoFocus
+                placeholder="Edit your prompt..."
+                placeholderTextColor={PREMIUM.textMuted}
+              />
+              <Text style={styles.inlineEditCharCount}>
+                {editPromptText.length}/400
+              </Text>
+              <View style={styles.inlineEditActions}>
+                <TouchableOpacity
+                  style={styles.inlineEditCancelBtn}
+                  onPress={handleCancelEditPrompt}
+                  disabled={isSavingPromptEdit}
+                >
+                  <Text style={styles.inlineEditCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.inlineEditSaveBtn,
+                    (editPromptText.trim().length < 10 || isSavingPromptEdit) && styles.inlineEditSaveBtnDisabled,
+                  ]}
+                  onPress={handleSaveEditPrompt}
+                  disabled={editPromptText.trim().length < 10 || isSavingPromptEdit}
+                >
+                  {isSavingPromptEdit ? (
+                    <ActivityIndicator size="small" color="#FFF" />
+                  ) : (
+                    <Text style={styles.inlineEditSaveText}>Save</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
-        ) : (
-          <Text style={styles.promptText}>{prompt.text}</Text>
-        )}
+          );
+          if (isEditingPrompt) return editor;
+          if (showHeaderMediaTile) {
+            return (
+              <View style={styles.promptHeaderMediaRow}>
+                <Text style={[styles.promptText, styles.promptTextWithMedia]}>
+                  {prompt.text}
+                </Text>
+                <TodPromptMediaTile
+                  hasMedia={promptHasMedia}
+                  mediaUrl={promptMediaUrl}
+                  mediaKind={promptMediaKind}
+                  durationSec={promptDurationSec}
+                  onPress={tileIsTappable ? handleViewPromptMedia : undefined}
+                  accessibilityLabel={
+                    tileIsTappable
+                      ? `Open prompt ${promptMediaKind}`
+                      : `Prompt ${promptMediaKind} attachment`
+                  }
+                />
+              </View>
+            );
+          }
+          return <Text style={styles.promptText}>{prompt.text}</Text>;
+        })()}
 
         {/* Prompt Reactions Row */}
         <View style={styles.promptReactionRow}>
@@ -2581,6 +2702,7 @@ export default function PromptThreadScreen() {
         data={threadListItems}
         keyExtractor={(item) => item.key}
         renderItem={renderThreadItem}
+        extraData={preloadRevision}
         onScrollToIndexFailed={handleScrollToIndexFailed}
         onViewableItemsChanged={onViewableItemsChangedRef.current}
         viewabilityConfig={viewabilityConfigRef.current}
@@ -2845,14 +2967,12 @@ export default function PromptThreadScreen() {
         } as Attachment : null}
         existingIdentityMode={myAnswer?.identityMode as IdentityMode | undefined}
         isNewAnswer={!myAnswer}
-        // VISUAL MEDIA LOCK: Lock photo/video if already viewed by authorized viewer
-        visualMediaLocked={myAnswer?.isVisualMediaConsumed ?? false}
         onClose={() => setShowUnifiedComposer(false)}
         onSubmit={handleUnifiedSubmit}
         isSubmitting={isSubmitting || hasActiveUploadForCurrentUser}
       />
 
-      {/* Media Viewer Modal - Tap to view */}
+      {/* Media Viewer Modal */}
       <Modal
         visible={!!viewingMedia}
         transparent
@@ -2928,20 +3048,9 @@ export default function PromptThreadScreen() {
           {mediaViewerLoading && viewingMedia && (
             <View style={styles.mediaViewerLoadingOverlay} pointerEvents="none">
               <ActivityIndicator size="large" color="#FFF" />
-              <Text style={styles.mediaViewerLoadingText}>
-                {viewingMedia.mediaType === 'video' ? 'Preparing video…' : 'Preparing photo…'}
-              </Text>
             </View>
           )}
 
-          {!viewingMedia?.isOwnAnswer && (
-            <View style={styles.mediaViewerHint}>
-              <Ionicons name="eye-outline" size={14} color="#FFF" />
-              <Text style={styles.mediaViewerHintText}>
-                One-time view — you won't be able to view this again
-              </Text>
-            </View>
-          )}
         </View>
       </Modal>
 
@@ -3295,6 +3404,19 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: PREMIUM.textPrimary,
     lineHeight: 26,
+  },
+  // Phase 4: prompt header layout when prompt-owner media is attached.
+  // Text takes the remaining width on the left, the 68×68 media tile sits
+  // on the right with a small left margin so it never crowds the text on
+  // narrow Android screens.
+  promptHeaderMediaRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  promptTextWithMedia: {
+    flex: 1,
+    minWidth: 0,
   },
   // Inline Edit Styles
   inlineEditContainer: {
@@ -4140,23 +4262,6 @@ const styles = StyleSheet.create({
   unmirrorMedia: {
     transform: [{ scaleX: -1 }],
   },
-  mediaViewerHint: {
-    position: 'absolute',
-    bottom: 50,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-  },
-  mediaViewerHintText: {
-    fontSize: 13,
-    color: '#FFF',
-    fontWeight: '500',
-  },
-
   // Report modal styles
   reportModalOverlay: {
     flex: 1,

@@ -44,6 +44,7 @@ type UseTodMediaPreloadArgs = {
 
 const MAX_CACHE_ENTRIES = 50;
 const MAX_CONCURRENT_PRELOADS = 3;
+const PRELOAD_TIMEOUT_MS = 12_000;
 
 const preloadCache = new Map<string, CacheEntry>();
 
@@ -109,9 +110,10 @@ export function useTodMediaPreload({
   lookaheadCount = 5,
 }: UseTodMediaPreloadArgs) {
   const convex = useConvex();
-  const [, setRevision] = useState(0);
+  const [revision, setRevision] = useState(0);
   const cancelledRef = useRef(false);
   const inFlightRef = useRef(new Set<string>());
+  const timeoutRefs = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   const mediaAnswers = useMemo(
     () => answers.filter((answer) => isMediaKind(answer.type) && (answer.hasMedia || answer.mediaUrl)),
@@ -151,10 +153,20 @@ export function useTodMediaPreload({
     setRevision((value) => value + 1);
   }, []);
 
+  const clearPreloadTimeout = useCallback((key: string) => {
+    const timeout = timeoutRefs.current.get(key);
+    if (timeout) {
+      clearTimeout(timeout);
+      timeoutRefs.current.delete(key);
+    }
+  }, []);
+
   useEffect(() => {
     cancelledRef.current = false;
     return () => {
       cancelledRef.current = true;
+      timeoutRefs.current.forEach((timeout) => clearTimeout(timeout));
+      timeoutRefs.current.clear();
     };
   }, []);
 
@@ -176,13 +188,32 @@ export function useTodMediaPreload({
       }
       if (inFlightRef.current.has(key)) return;
       if (!isMediaKind(answer.type)) return;
+      const answerKind = answer.type;
 
       inFlightRef.current.add(key);
-      touchCacheEntry(key, { status: 'loading', kind: answer.type }, answerId);
+      touchCacheEntry(key, { status: 'loading', kind: answerKind }, answerId);
       notify();
+      clearPreloadTimeout(key);
+      timeoutRefs.current.set(
+        key,
+        setTimeout(() => {
+          const current = preloadCache.get(key);
+          if (cancelled || cancelledRef.current || current?.status !== 'loading') {
+            timeoutRefs.current.delete(key);
+            return;
+          }
+          inFlightRef.current.delete(key);
+          timeoutRefs.current.delete(key);
+          touchCacheEntry(key, { status: 'error', kind: answerKind, error: 'timeout' }, answerId);
+          if (__DEV__) {
+            console.log('[TOD_MEDIA_PRELOAD] failed', { answerId, kind: answerKind, reason: 'timeout' });
+          }
+          notify();
+        }, PRELOAD_TIMEOUT_MS),
+      );
 
       if (__DEV__) {
-        console.log('[TOD_MEDIA_PRELOAD] queued', { answerId, kind: answer.type });
+        console.log('[TOD_MEDIA_PRELOAD] queued', { answerId, kind: answerKind });
       }
 
       try {
@@ -211,20 +242,29 @@ export function useTodMediaPreload({
           });
         }
 
-        if (cancelled || cancelledRef.current) return;
-
+        // RECEIVER-SIDE SPINNER FIX: do NOT bail here on `cancelled` /
+        // `cancelledRef.current`. Earlier we returned early when the effect
+        // had been cancelled mid-flight (e.g. `viewableAnswerIds` changed
+        // while `convex.query` was awaiting). That left the cache stuck on
+        // `status: 'loading'` from the earlier `touchCacheEntry` call. The
+        // next effect run then short-circuits on line 183 (`current.status
+        // === 'loading'`), so the cache never advances to `ready`/`error`
+        // and the tile spinner never stops. Always commit the resolved
+        // state to the module-scoped cache; `notify()` is internally gated
+        // by `cancelledRef.current` so it's safe after unmount.
         if (!preloadResult?.url || !isMediaKind(preloadResult.kind)) {
-          touchCacheEntry(key, { status: 'error', kind: answer.type, error: 'unavailable' }, answerId);
+          clearPreloadTimeout(key);
+          touchCacheEntry(key, { status: 'error', kind: answerKind, error: 'unavailable' }, answerId);
           if (__DEV__) {
-            console.log('[TOD_MEDIA_PRELOAD] failed', { answerId, kind: answer.type, reason: 'unavailable' });
+            console.log('[TOD_MEDIA_PRELOAD] failed', { answerId, kind: answerKind, reason: 'unavailable' });
           }
           notify();
           return;
         }
 
         await warmUrl(preloadResult.kind, preloadResult.url);
-        if (cancelled || cancelledRef.current) return;
 
+        clearPreloadTimeout(key);
         touchCacheEntry(
           key,
           {
@@ -243,15 +283,19 @@ export function useTodMediaPreload({
         }
         notify();
       } catch (error) {
-        if (cancelled || cancelledRef.current) return;
+        // Same rationale as the success branch above: always commit a
+        // terminal state so the cache leaves `loading` and the tile can
+        // re-render. `notify()` is gated for unmounted components.
+        clearPreloadTimeout(key);
         const message = error instanceof Error ? error.message : 'preload_failed';
-        touchCacheEntry(key, { status: 'error', kind: answer.type, error: message }, answerId);
+        touchCacheEntry(key, { status: 'error', kind: answerKind, error: message }, answerId);
         if (__DEV__) {
-          console.log('[TOD_MEDIA_PRELOAD] failed', { answerId, kind: answer.type, reason: message });
+          console.log('[TOD_MEDIA_PRELOAD] failed', { answerId, kind: answerKind, reason: message });
         }
         notify();
       } finally {
         inFlightRef.current.delete(key);
+        clearPreloadTimeout(key);
       }
     };
 
@@ -270,8 +314,9 @@ export function useTodMediaPreload({
 
     return () => {
       cancelled = true;
+      targetAnswers.forEach((answer) => clearPreloadTimeout(getCacheKey(answer)));
     };
-  }, [authUserId, convex, enabled, notify, targetAnswers]);
+  }, [authUserId, clearPreloadTimeout, convex, enabled, notify, targetAnswers]);
 
   const getPreloadState = useCallback((answer: TodMediaPreloadAnswer): TodMediaPreloadState => {
     return getCachedState(answer);
@@ -279,5 +324,6 @@ export function useTodMediaPreload({
 
   return {
     getPreloadState,
+    revision,
   };
 }
