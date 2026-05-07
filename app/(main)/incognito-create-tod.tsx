@@ -291,7 +291,8 @@ export default function CreateTodScreen() {
   const maxLength = 400;
   const minLength = 20;
   const trimmedLength = content.trim().length;
-  const canSubmit = trimmedLength >= minLength && !isSubmitting && !!effectiveUserId;
+  const canSubmit =
+    trimmedLength >= minLength && !isSubmitting && !!effectiveUserId;
 
   // Synchronous lock to prevent double-tap race condition
   const isSubmittingRef = useRef(false);
@@ -883,13 +884,13 @@ export default function CreateTodScreen() {
   return (
     <KeyboardAvoidingView
       style={[styles.container, { paddingTop: insets.top }]}
-      behavior="padding"
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
     >
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingBottom: Math.max(insets.bottom, 16) + 96 },
+          { paddingBottom: Math.max(insets.bottom, 12) },
         ]}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
@@ -905,7 +906,7 @@ export default function CreateTodScreen() {
           <View style={{ width: 24 }} />
         </View>
 
-        {/* Type Selector */}
+        {/* Truth/Dare selector */}
         <View style={styles.typeSelector}>
           <TouchableOpacity
             style={[styles.typeOption, postType === 'truth' && styles.typeOptionActive]}
@@ -951,7 +952,6 @@ export default function CreateTodScreen() {
                   <Text
                     style={styles.inputAttachmentText}
                     numberOfLines={1}
-                    maxFontSizeMultiplier={1.2}
                   >
                     {PROMPT_MEDIA_LABEL[promptMediaAttachment.kind]}
                   </Text>
@@ -988,11 +988,6 @@ export default function CreateTodScreen() {
               </View>
             </View>
           </View>
-          {trimmedLength < minLength ? (
-            <Text style={styles.charCount}>
-              {`${minLength - trimmedLength} more characters needed (min ${minLength})`}
-            </Text>
-          ) : null}
         </View>
 
         {/* 3-Option Visibility Selector */}
@@ -1060,13 +1055,16 @@ export default function CreateTodScreen() {
                 color={C.textLight}
                 style={styles.identityWarningIcon}
               />
-              <Text style={styles.identityWarningText} maxFontSizeMultiplier={1.2}>
+              <Text style={styles.identityWarningText}>
                 Media may reveal your identity.
               </Text>
             </View>
           ) : null}
 
-          {/* POST button - directly under visibility options */}
+          {/* Inline POST button — standalone form action placed directly
+              below the identity section. Not sticky, not a footer, and
+              not attached to the keyboard. Scrolls with the rest of the
+              composer content. */}
           <TouchableOpacity
             style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
             onPress={handleSubmit}
@@ -1312,25 +1310,17 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.22)',
     marginLeft: 2,
   },
-  charCount: {
-    fontSize: 12,
-    color: C.textLight,
-    textAlign: 'right',
-    marginTop: 10,
-    letterSpacing: 0.2,
-  },
-
   // Identity chips
   visibilityContainer: {
     paddingHorizontal: 16,
-    paddingTop: 16,
+    paddingTop: 12,
     paddingBottom: 12,
   },
   visibilityLabel: {
     fontSize: 13,
     fontWeight: '700',
     color: C.text,
-    marginBottom: 12,
+    marginBottom: 10,
     letterSpacing: 0.5,
     textTransform: 'uppercase',
     opacity: 0.85,
@@ -1373,7 +1363,7 @@ const styles = StyleSheet.create({
   visibilityHint: {
     fontSize: 12,
     color: C.textLight,
-    marginTop: 12,
+    marginTop: 8,
     textAlign: 'center',
     letterSpacing: 0.2,
     opacity: 0.85,
@@ -1399,14 +1389,17 @@ const styles = StyleSheet.create({
     opacity: 0.85,
   },
 
-  // Main POST button
+  // Main POST button — inline standalone form action. Sits inside the
+  // ScrollView under the identity hint/warning. Compact top/bottom spacing
+  // keeps it close to the identity section without empty area below.
   postButtonMain: {
     backgroundColor: C.primary,
     borderRadius: 14,
     paddingVertical: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 22,
+    marginTop: 14,
+    marginBottom: 24,
     shadowColor: C.primary,
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.36,
