@@ -128,6 +128,12 @@ type TodPromptMediaProjection = {
   mediaUrl?: string;
   durationSec?: number;
   isFrontCamera?: boolean;
+  // Phase 4: prompt-owner media one-time-view metadata. Owners get a count
+  // and the inline `mediaUrl`; non-owners get no inline URL for photo/video
+  // (must round-trip through `openPromptMedia`) plus an already-viewed flag.
+  promptMediaViewCount?: number;
+  viewerHasViewedPromptMedia?: boolean;
+  isPromptMediaOwner?: boolean;
 };
 
 function getPromptMediaProjection(prompt: unknown): TodPromptMediaProjection {
@@ -144,6 +150,12 @@ function getPromptMediaProjection(prompt: unknown): TodPromptMediaProjection {
     durationSec: typeof obj.durationSec === 'number' ? obj.durationSec : undefined,
     isFrontCamera:
       typeof obj.isFrontCamera === 'boolean' ? obj.isFrontCamera : undefined,
+    promptMediaViewCount:
+      typeof obj.promptMediaViewCount === 'number'
+        ? obj.promptMediaViewCount
+        : undefined,
+    viewerHasViewedPromptMedia: obj.viewerHasViewedPromptMedia === true,
+    isPromptMediaOwner: obj.isPromptMediaOwner === true,
   };
 }
 
@@ -258,11 +270,12 @@ export default function PromptThreadScreen() {
   const params = useLocalSearchParams<{
     promptId: string;
     autoOpenComposer?: 'new' | 'edit';
+    autoEditPrompt?: '1' | '0';
     source?: string;
     requestId?: string;
     highlightAnswerId?: string;
   }>();
-  const { promptId, autoOpenComposer, source, requestId, highlightAnswerId } = params;
+  const { promptId, autoOpenComposer, autoEditPrompt, source, requestId, highlightAnswerId } = params;
   const shouldReturnToPhase2TodHome = source === 'phase2-tod';
   const shouldReturnToPhase2TodMine = source === 'phase2-tod-mine';
   const handleBackToSource = useCallback(() => {
@@ -768,12 +781,14 @@ export default function PromptThreadScreen() {
   const pendingConnectResponsesRef = useRef<Set<string>>(new Set());
   const pendingScrollAnswerIdRef = useRef<string | null>(null);
   const autoOpenHandledRef = useRef<string | null>(null);
+  const autoEditPromptHandledRef = useRef<string | null>(null);
   const requestHighlightHandledRef = useRef<string | null>(null);
 
   useEffect(() => {
     setServerExpiryLocked(false);
     pendingScrollAnswerIdRef.current = null;
     autoOpenHandledRef.current = null;
+    autoEditPromptHandledRef.current = null;
     requestHighlightHandledRef.current = null;
     setHighlightedAnswerId(null);
     setShowRequestContextBanner(false);
@@ -802,6 +817,20 @@ export default function PromptThreadScreen() {
 
     setShowUnifiedComposer(true);
   }, [autoOpenComposer, hasActiveUploadForCurrentUser, isExpired, isPromptOwner, myAnswer, prompt, promptId]);
+
+  // Auto-open inline prompt editor when navigated from the feed long-press
+  // owner options menu (Edit). Only applies to the prompt owner; non-owners
+  // navigating with the same param are silently ignored. Reuses the existing
+  // inline editor (handleStartEditPrompt path) so there's no duplicate UI.
+  useEffect(() => {
+    if (autoEditPrompt !== '1') return;
+    if (!promptId || !prompt) return;
+    if (!isPromptOwner) return;
+    if (autoEditPromptHandledRef.current === promptId) return;
+    autoEditPromptHandledRef.current = promptId;
+    setEditPromptText(prompt.text);
+    setIsEditingPrompt(true);
+  }, [autoEditPrompt, isPromptOwner, prompt, promptId]);
 
   // M-003 FIX: Safe scroll with cleanup support
   const scrollToEnd = () => {
@@ -1098,13 +1127,17 @@ export default function PromptThreadScreen() {
     }
   }, [userId, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, handleBackToSource]);
 
-  // Handle inline edit - start editing
+  // Handle edit - open the inline text editor. Edits are intentionally
+  // text-only — type/identity/media are locked after posting because prompt
+  // slots are scarce (weekly/monthly/subscription gated) and we don't want
+  // owners to recycle a slot to swap out media or change Truth↔Dare after
+  // the fact.
   const handleStartEditPrompt = useCallback(() => {
-    if (!prompt?.text) return;
+    if (!prompt) return;
+    setShowPromptActionPopup(false);
     setEditPromptText(prompt.text);
     setIsEditingPrompt(true);
-    setShowPromptActionPopup(false);
-  }, [prompt?.text]);
+  }, [prompt]);
 
   // Handle inline edit - cancel
   const handleCancelEditPrompt = useCallback(() => {
@@ -1118,8 +1151,8 @@ export default function PromptThreadScreen() {
     if (isSavingPromptEdit) return;
 
     const trimmedText = editPromptText.trim();
-    if (trimmedText.length < 10) {
-      Alert.alert('Too Short', 'Prompt must be at least 10 characters.');
+    if (trimmedText.length < 20) {
+      Alert.alert('Too Short', 'Prompt must be at least 20 characters.');
       return;
     }
     if (trimmedText.length > 400) {
@@ -1612,27 +1645,83 @@ export default function PromptThreadScreen() {
   }, []);
 
   // Phase 4: open prompt-owner media in the existing fullscreen viewer.
-  // Prompt-owner media follows prompt visibility (no claim flow, no
-  // todPromptViews, no answerId-based claim). The existing viewer modal
-  // only renders `mediaUrl` + `mediaType` + optional front-camera unmirror,
-  // so we can safely reuse it by passing a synthetic answerId marker that
-  // never feeds back into any answer-side mutation. Voice prompt media is
-  // intentionally non-interactive in the thread (no inline player wired
-  // up here) — see TodPromptMediaTile usage below.
-  const handleViewPromptMedia = useCallback(() => {
-    if (!prompt) return;
+  // Behavior depends on viewer role:
+  //  - Prompt owner: inline `mediaUrl` is present in the projection and we
+  //    open the viewer directly (no view row consumed).
+  //  - Non-owner photo/video, already viewed: surface a friendly "already
+  //    viewed" message — server-side has redacted the URL anyway.
+  //  - Non-owner photo/video, first open: round-trip through the
+  //    `openPromptMedia` mutation, which inserts the one-time view row and
+  //    returns a fresh URL.
+  //  - Voice: thread tile is non-tappable (see usage below).
+  // The existing viewer modal renders `mediaUrl` + `mediaType` + optional
+  // front-camera unmirror, so we reuse it by passing a synthetic answerId
+  // marker that never feeds back into any answer-side mutation.
+  const [isOpeningPromptMedia, setIsOpeningPromptMedia] = useState(false);
+  const openPromptMediaMutation = useMutation(api.truthDare.openPromptMedia);
+  const handleViewPromptMedia = useCallback(async () => {
+    if (!prompt || !promptId) return;
     const projection = getPromptMediaProjection(prompt);
-    if (!projection.mediaUrl) return;
     if (projection.mediaKind !== 'photo' && projection.mediaKind !== 'video') return;
     if (!isMountedRef.current) return;
-    setViewingMedia({
-      answerId: '__prompt_owner_media__',
-      mediaUrl: projection.mediaUrl,
-      mediaType: projection.mediaKind,
-      isOwnAnswer: true, // suppresses any owner-vs-claim branches; prompt media has no claim model
-      isFrontCamera: projection.isFrontCamera,
-    });
-  }, [prompt]);
+
+    // Owner: inline URL is available; open immediately.
+    if (projection.isPromptMediaOwner) {
+      if (!projection.mediaUrl) return;
+      setViewingMedia({
+        answerId: '__prompt_owner_media__',
+        mediaUrl: projection.mediaUrl,
+        mediaType: projection.mediaKind,
+        isOwnAnswer: true,
+        isFrontCamera: projection.isFrontCamera,
+      });
+      return;
+    }
+
+    // Non-owner already-viewed: friendly message, no mutation call.
+    if (projection.viewerHasViewedPromptMedia) {
+      Alert.alert(
+        'Already viewed',
+        projection.mediaKind === 'video'
+          ? 'You can only watch this video once.'
+          : 'You can only view this photo once.'
+      );
+      return;
+    }
+
+    // Non-owner first open: consume the one-time view via mutation.
+    if (!userId || isOpeningPromptMedia) return;
+    setIsOpeningPromptMedia(true);
+    try {
+      const result = await openPromptMediaMutation({
+        promptId,
+        viewerUserId: userId,
+      });
+      if (!isMountedRef.current) return;
+      if (result.status === 'ok' && result.mediaUrl) {
+        setViewingMedia({
+          answerId: '__prompt_owner_media__',
+          mediaUrl: result.mediaUrl,
+          mediaType: result.mediaKind as 'photo' | 'video',
+          isOwnAnswer: true,
+          isFrontCamera: result.isFrontCamera ?? false,
+        });
+      } else if (result.status === 'already_viewed') {
+        Alert.alert(
+          'Already viewed',
+          projection.mediaKind === 'video'
+            ? 'You can only watch this video once.'
+            : 'You can only view this photo once.'
+        );
+      } else {
+        Alert.alert("Can't open", 'This media is no longer available.');
+      }
+    } catch (err) {
+      Alert.alert("Can't open", 'Something went wrong. Please try again.');
+    } finally {
+      if (isMountedRef.current) setIsOpeningPromptMedia(false);
+    }
+  }, [prompt, promptId, userId, isOpeningPromptMedia, openPromptMediaMutation]);
 
   useEffect(() => {
     if (viewingMedia) {
@@ -2594,10 +2683,10 @@ export default function PromptThreadScreen() {
                 <TouchableOpacity
                   style={[
                     styles.inlineEditSaveBtn,
-                    (editPromptText.trim().length < 10 || isSavingPromptEdit) && styles.inlineEditSaveBtnDisabled,
+                    (editPromptText.trim().length < 20 || isSavingPromptEdit) && styles.inlineEditSaveBtnDisabled,
                   ]}
                   onPress={handleSaveEditPrompt}
-                  disabled={editPromptText.trim().length < 10 || isSavingPromptEdit}
+                  disabled={editPromptText.trim().length < 20 || isSavingPromptEdit}
                 >
                   {isSavingPromptEdit ? (
                     <ActivityIndicator size="small" color="#FFF" />
@@ -2620,6 +2709,18 @@ export default function PromptThreadScreen() {
                   mediaUrl={promptMediaUrl}
                   mediaKind={promptMediaKind}
                   durationSec={promptDurationSec}
+                  covered
+                  ownerViewCount={
+                    projection.isPromptMediaOwner &&
+                    (promptMediaKind === 'photo' || promptMediaKind === 'video')
+                      ? projection.promptMediaViewCount
+                      : undefined
+                  }
+                  showViewedBadge={
+                    !projection.isPromptMediaOwner &&
+                    !!projection.viewerHasViewedPromptMedia &&
+                    (promptMediaKind === 'photo' || promptMediaKind === 'video')
+                  }
                   onPress={tileIsTappable ? handleViewPromptMedia : undefined}
                   accessibilityLabel={
                     tileIsTappable

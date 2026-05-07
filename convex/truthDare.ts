@@ -215,6 +215,91 @@ function isAnswerHiddenForViewer(
   return isTodHiddenByReports(answer) && answer.userId !== viewerUserId;
 }
 
+/**
+ * Resolve prompt-owner media view metadata for a feed/thread payload.
+ * - For prompt-owner photo/video: returns unique-viewer count (owner-only) and
+ *   the viewer's already-viewed flag (non-owner only).
+ * - For voice or no-media: count is omitted and viewed flag stays false (voice
+ *   media is replayable and is intentionally NOT tracked in this ledger).
+ *
+ * `isPromptMediaOwner` is computed from prompt.ownerUserId and reused by
+ * clients to decide whether to render owner-only UI (count badge) or
+ * non-owner UI (covered tile + already-viewed badge).
+ */
+async function getPromptMediaViewMeta(
+  ctx: any,
+  prompt: {
+    _id: Id<'todPrompts'> | string;
+    ownerUserId: string;
+    mediaKind?: string | null;
+    mediaStorageId?: Id<'_storage'> | undefined;
+  },
+  viewerDbId: Id<'users'> | undefined
+): Promise<{
+  promptMediaViewCount?: number;
+  viewerHasViewedPromptMedia: boolean;
+  isPromptMediaOwner: boolean;
+}> {
+  const isPromptMediaOwner =
+    !isSystemTodOwnerId(prompt.ownerUserId) &&
+    !!viewerDbId &&
+    prompt.ownerUserId === viewerDbId;
+
+  // Only photo/video media participates in the one-time view ledger.
+  // Voice is replayable and never recorded; "no media" prompts have nothing
+  // to count or gate.
+  if (
+    !prompt.mediaStorageId ||
+    (prompt.mediaKind !== 'photo' && prompt.mediaKind !== 'video')
+  ) {
+    return {
+      promptMediaViewCount: undefined,
+      viewerHasViewedPromptMedia: false,
+      isPromptMediaOwner,
+    };
+  }
+
+  const promptIdStr = prompt._id as unknown as string;
+
+  if (isPromptMediaOwner) {
+    // Owner: compute unique-viewer count by counting view rows for this prompt.
+    // The mutation below NEVER inserts a row for the owner, so this count is
+    // already "non-owner unique viewers" by construction.
+    const rows = await ctx.db
+      .query('todPromptMediaViews')
+      .withIndex('by_prompt', (q: any) => q.eq('promptId', promptIdStr))
+      .collect();
+    return {
+      promptMediaViewCount: rows.length,
+      viewerHasViewedPromptMedia: false,
+      isPromptMediaOwner: true,
+    };
+  }
+
+  // Non-owner: only need to know whether THIS viewer has already opened the
+  // media. No count is exposed to non-owners.
+  if (!viewerDbId) {
+    return {
+      promptMediaViewCount: undefined,
+      viewerHasViewedPromptMedia: false,
+      isPromptMediaOwner: false,
+    };
+  }
+
+  const existing = await ctx.db
+    .query('todPromptMediaViews')
+    .withIndex('by_prompt_viewer', (q: any) =>
+      q.eq('promptId', promptIdStr).eq('viewerUserId', viewerDbId as string)
+    )
+    .first();
+
+  return {
+    promptMediaViewCount: undefined,
+    viewerHasViewedPromptMedia: !!existing,
+    isPromptMediaOwner: false,
+  };
+}
+
 async function deleteStorageIfPresent(
   ctx: any,
   storageId: Id<'_storage'> | undefined
@@ -1191,7 +1276,15 @@ export const createPrompt = mutation({
   },
 });
 
-// Edit own prompt (text only - type cannot be changed)
+// Edit own prompt — text only.
+//
+// Product decision: prompt slots are scarce (weekly/monthly/subscription gated)
+// so an owner is intentionally not allowed to mutate type, identity/visibility
+// or attached media after posting. Re-using a slot to swap content/media would
+// undermine the slot economy. Edits are restricted to the prompt text.
+//
+// Validation: `validatePromptText` enforces 20–400 trimmed chars (same bounds
+// as createPrompt) and trims surrounding whitespace.
 export const editMyPrompt = mutation({
   args: {
     promptId: v.string(),
@@ -1201,7 +1294,6 @@ export const editMyPrompt = mutation({
   handler: async (ctx, { promptId, authUserId, newText }) => {
     const userId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
 
-    // Get the prompt
     const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
     if (!prompt) {
       throw new Error('Prompt not found');
@@ -1209,29 +1301,20 @@ export const editMyPrompt = mutation({
     if (isSystemTodOwnerId(prompt.ownerUserId)) {
       throw new Error('Prompt owner unavailable for private media');
     }
-
-    // Verify ownership
     if (prompt.ownerUserId !== userId) {
       throw new Error('Unauthorized: you can only edit your own prompts');
     }
 
-    // Check if expired
     const now = Date.now();
     const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
     if (expires <= now) {
       throw new Error('Cannot edit expired prompts');
     }
 
-    // Validate new text
     const validatedText = validatePromptText(newText);
+    await ctx.db.patch(prompt._id, { text: validatedText });
 
-    // Update prompt
-    await ctx.db.patch(prompt._id, {
-      text: validatedText,
-    });
-
-    debugTodLog(`[T/D] Edited prompt: id=${promptId}, newTextLength=${validatedText.length}`);
-
+    debugTodLog(`[T/D] Edited prompt: id=${promptId}`);
     return { success: true };
   },
 });
@@ -1320,6 +1403,15 @@ export const deleteMyPrompt = mutation({
       .collect();
     for (const report of promptReports) {
       await ctx.db.delete(report._id);
+    }
+
+    // Phase 4: clean up prompt-owner media one-time-view ledger rows.
+    const promptMediaViews = await ctx.db
+      .query('todPromptMediaViews')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+    for (const view of promptMediaViews) {
+      await ctx.db.delete(view._id);
     }
 
     const privateMediaItems = await ctx.db
@@ -2775,6 +2867,15 @@ export const listActivePromptsWithTop2Answers = query({
         }
 
         const promptIdStr = prompt._id as unknown as string;
+        const promptMediaMeta = await getPromptMediaViewMeta(ctx, prompt, viewerDbId);
+        // Phase 4 safety: prompt-owner photo/video is one-time-view per
+        // non-owner. Always redact the inline mediaUrl for non-owner
+        // photo/video so the only path to playback is `openPromptMedia`.
+        // Voice and owner keep direct URL (voice is replayable; owner is
+        // unlimited).
+        const isPhotoOrVideo = prompt.mediaKind === 'photo' || prompt.mediaKind === 'video';
+        const sanitizedMediaUrl =
+          isPhotoOrVideo && !promptMediaMeta.isPromptMediaOwner ? undefined : prompt.mediaUrl;
         return {
           _id: prompt._id,
           type: prompt.type,
@@ -2798,11 +2899,15 @@ export const listActivePromptsWithTop2Answers = query({
           // visibility; `mediaStorageId` is intentionally omitted client-side
           // (already resolved into `mediaUrl` server-side).
           mediaKind: prompt.mediaKind,
-          mediaUrl: prompt.mediaUrl,
+          mediaUrl: sanitizedMediaUrl,
           mediaMime: prompt.mediaMime,
           durationSec: prompt.durationSec,
           isFrontCamera: prompt.isFrontCamera ?? false,
           hasMedia: !!prompt.mediaStorageId,
+          // Phase 4: prompt-owner media one-time-view metadata.
+          promptMediaViewCount: promptMediaMeta.promptMediaViewCount,
+          viewerHasViewedPromptMedia: promptMediaMeta.viewerHasViewedPromptMedia,
+          isPromptMediaOwner: promptMediaMeta.isPromptMediaOwner,
           // Answers and viewer state
           top2Answers: top2WithReactions,
           totalAnswers: visibleAnswers.length,
@@ -2884,9 +2989,15 @@ export const getTrendingTruthAndDare = query({
     const topTruth = truthPrompts[0] ?? null;
 
     // Helper to format prompt for response
-    const formatPrompt = (prompt: typeof activePrompts[0] | null) => {
+    const formatPrompt = async (prompt: typeof activePrompts[0] | null) => {
       if (!prompt) return null;
       const promptId = prompt._id as unknown as string;
+      const promptMediaMeta = await getPromptMediaViewMeta(ctx, prompt, viewerDbId);
+      // Phase 4: redact inline mediaUrl for non-owner photo/video so playback
+      // is forced through the `openPromptMedia` mutation.
+      const isPhotoOrVideo = prompt.mediaKind === 'photo' || prompt.mediaKind === 'video';
+      const sanitizedMediaUrl =
+        isPhotoOrVideo && !promptMediaMeta.isPromptMediaOwner ? undefined : prompt.mediaUrl;
       return {
         _id: prompt._id,
         type: prompt.type,
@@ -2910,17 +3021,25 @@ export const getTrendingTruthAndDare = query({
         // visibility; `mediaStorageId` is intentionally omitted client-side
         // (already resolved into `mediaUrl` server-side).
         mediaKind: prompt.mediaKind,
-        mediaUrl: prompt.mediaUrl,
+        mediaUrl: sanitizedMediaUrl,
         mediaMime: prompt.mediaMime,
         durationSec: prompt.durationSec,
         isFrontCamera: prompt.isFrontCamera ?? false,
         hasMedia: !!prompt.mediaStorageId,
+        // Phase 4: prompt-owner media one-time-view metadata.
+        promptMediaViewCount: promptMediaMeta.promptMediaViewCount,
+        viewerHasViewedPromptMedia: promptMediaMeta.viewerHasViewedPromptMedia,
+        isPromptMediaOwner: promptMediaMeta.isPromptMediaOwner,
       };
     };
 
+    const [trendingDarePrompt, trendingTruthPrompt] = await Promise.all([
+      formatPrompt(topDare),
+      formatPrompt(topTruth),
+    ]);
     return {
-      trendingDarePrompt: formatPrompt(topDare),
-      trendingTruthPrompt: formatPrompt(topTruth),
+      trendingDarePrompt,
+      trendingTruthPrompt,
     };
   },
 });
@@ -2954,6 +3073,10 @@ export const getPromptThread = query({
     const now = Date.now();
     const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
     if (expires <= now) {
+      const promptMediaMeta = await getPromptMediaViewMeta(ctx, prompt, viewerDbId);
+      const isPhotoOrVideo = prompt.mediaKind === 'photo' || prompt.mediaKind === 'video';
+      const sanitizedMediaUrl =
+        isPhotoOrVideo && !promptMediaMeta.isPromptMediaOwner ? undefined : prompt.mediaUrl;
       return {
         prompt: {
           _id: prompt._id,
@@ -2981,12 +3104,16 @@ export const getPromptThread = query({
           // the media. `mediaStorageId` is intentionally omitted client-side
           // (already resolved into `mediaUrl` server-side).
           mediaKind: prompt.mediaKind,
-          mediaUrl: prompt.mediaUrl,
+          mediaUrl: sanitizedMediaUrl,
           mediaMime: prompt.mediaMime,
           fileSize: prompt.fileSize,
           durationSec: prompt.durationSec,
           isFrontCamera: prompt.isFrontCamera ?? false,
           hasMedia: !!prompt.mediaStorageId,
+          // Phase 4: prompt-owner media one-time-view metadata.
+          promptMediaViewCount: promptMediaMeta.promptMediaViewCount,
+          viewerHasViewedPromptMedia: promptMediaMeta.viewerHasViewedPromptMedia,
+          isPromptMediaOwner: promptMediaMeta.isPromptMediaOwner,
         },
         answers: [],
         isExpired: true,
@@ -3195,6 +3322,11 @@ export const getPromptThread = query({
       })
     );
 
+    const promptMediaMeta = await getPromptMediaViewMeta(ctx, prompt, viewerDbId);
+    const isPhotoOrVideo = prompt.mediaKind === 'photo' || prompt.mediaKind === 'video';
+    const sanitizedMediaUrl =
+      isPhotoOrVideo && !promptMediaMeta.isPromptMediaOwner ? undefined : prompt.mediaUrl;
+
     return {
       prompt: {
         _id: prompt._id,
@@ -3222,12 +3354,16 @@ export const getPromptThread = query({
         // the media. `mediaStorageId` is intentionally omitted client-side
         // (already resolved into `mediaUrl` server-side).
         mediaKind: prompt.mediaKind,
-        mediaUrl: prompt.mediaUrl,
+        mediaUrl: sanitizedMediaUrl,
         mediaMime: prompt.mediaMime,
         fileSize: prompt.fileSize,
         durationSec: prompt.durationSec,
         isFrontCamera: prompt.isFrontCamera ?? false,
         hasMedia: !!prompt.mediaStorageId,
+        // Phase 4: prompt-owner media one-time-view metadata.
+        promptMediaViewCount: promptMediaMeta.promptMediaViewCount,
+        viewerHasViewedPromptMedia: promptMediaMeta.viewerHasViewedPromptMedia,
+        isPromptMediaOwner: promptMediaMeta.isPromptMediaOwner,
       },
       answers: enrichedAnswers,
       isExpired: false,
@@ -4383,6 +4519,131 @@ export const finalizeAnswerMediaView = mutation({
     }
 
     return { status: 'ok' as const };
+  },
+});
+
+/**
+ * Claim viewing rights for prompt-owner photo/video media (Phase 4).
+ *
+ * Behavior:
+ *  - Owner: unlimited views, never inserts a ledger row, returns a fresh URL.
+ *  - Voice: replayable for everyone, never inserts a ledger row, returns URL.
+ *  - Non-owner photo/video: one-time per viewer.
+ *      * If a `todPromptMediaViews` row already exists for (promptId, viewerId)
+ *        the mutation returns `{ status: 'already_viewed' }` and NO URL.
+ *      * Otherwise it inserts a row and returns a fresh URL.
+ *
+ * Intentionally NOT shared with `claimAnswerMediaView`: answer media is
+ * replayable; existence of a `todAnswerViews` row never blocks playback.
+ * Prompt media uses a stricter gate, so it lives in its own table/mutation.
+ */
+export const openPromptMedia = mutation({
+  args: {
+    promptId: v.string(),
+    viewerUserId: v.string(),
+  },
+  handler: async (ctx, { promptId, viewerUserId: argsViewerId }) => {
+    const viewerId = await requireAuthenticatedTodUserId(ctx, argsViewerId, 'Unauthorized');
+
+    const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
+    if (!rateCheck.allowed) {
+      throw new Error('Rate limit exceeded. Please wait a moment.');
+    }
+
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
+      .first();
+    if (!prompt) {
+      return { status: 'no_media' as const };
+    }
+    if (!prompt.mediaStorageId || !prompt.mediaKind) {
+      return { status: 'no_media' as const };
+    }
+    if (isPromptHiddenForViewer(prompt, viewerId)) {
+      return { status: 'not_authorized' as const };
+    }
+
+    const isOwner =
+      !isSystemTodOwnerId(prompt.ownerUserId) && prompt.ownerUserId === viewerId;
+    const kind = prompt.mediaKind as 'photo' | 'video' | 'voice';
+
+    // Voice is replayable for everyone — return URL without recording a view.
+    if (kind === 'voice') {
+      const url = await ctx.storage.getUrl(prompt.mediaStorageId);
+      if (!url) return { status: 'no_media' as const };
+      return {
+        status: 'ok' as const,
+        mediaUrl: url,
+        mediaKind: kind,
+        mediaMime: prompt.mediaMime,
+        durationSec: prompt.durationSec,
+        isFrontCamera: prompt.isFrontCamera ?? false,
+        viewedAt: Date.now(),
+        alreadyViewed: false,
+        isOwner,
+      };
+    }
+
+    // Owner: unlimited access, never recorded.
+    if (isOwner) {
+      const url = await ctx.storage.getUrl(prompt.mediaStorageId);
+      if (!url) return { status: 'no_media' as const };
+      return {
+        status: 'ok' as const,
+        mediaUrl: url,
+        mediaKind: kind,
+        mediaMime: prompt.mediaMime,
+        durationSec: prompt.durationSec,
+        isFrontCamera: prompt.isFrontCamera ?? false,
+        viewedAt: Date.now(),
+        alreadyViewed: false,
+        isOwner: true,
+      };
+    }
+
+    // Non-owner photo/video: one-time gate.
+    const existing = await ctx.db
+      .query('todPromptMediaViews')
+      .withIndex('by_prompt_viewer', (q) =>
+        q.eq('promptId', promptId).eq('viewerUserId', viewerId as string)
+      )
+      .first();
+    if (existing) {
+      return {
+        status: 'already_viewed' as const,
+        alreadyViewed: true,
+        isOwner: false,
+      };
+    }
+
+    const url = await ctx.storage.getUrl(prompt.mediaStorageId);
+    if (!url) return { status: 'no_media' as const };
+
+    const viewedAt = Date.now();
+    await ctx.db.insert('todPromptMediaViews', {
+      promptId,
+      viewerUserId: viewerId as string,
+      ownerUserId: prompt.ownerUserId as string,
+      mediaKind: kind,
+      viewedAt,
+    });
+
+    debugTodLog(
+      `[T/D] openPromptMedia inserted view viewerId=${viewerId} promptId=${promptId} kind=${kind}`
+    );
+
+    return {
+      status: 'ok' as const,
+      mediaUrl: url,
+      mediaKind: kind,
+      mediaMime: prompt.mediaMime,
+      durationSec: prompt.durationSec,
+      isFrontCamera: prompt.isFrontCamera ?? false,
+      viewedAt,
+      alreadyViewed: false,
+      isOwner: false,
+    };
   },
 });
 

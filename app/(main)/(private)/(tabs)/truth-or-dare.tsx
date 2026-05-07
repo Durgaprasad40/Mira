@@ -12,11 +12,14 @@ import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   RefreshControl, Platform, Animated, Pressable, Alert, Modal,
+  Dimensions, ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { Image as ExpoImage } from 'expo-image';
+import { Video, ResizeMode } from 'expo-av';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -308,6 +311,30 @@ function SectionHeader({
   );
 }
 
+/* ─── Prompt-owner media payload passed from a card to the feed-level
+       PromptMediaViewerModal. Decoupled from any card prompt shape so both
+       TrendingCard and PromptCard can call the same handler.
+
+       Phase 4 fields:
+        - `promptId`        : required to invoke `openPromptMedia` for non-
+                              owner photo/video first opens.
+        - `isPromptMediaOwner`         : owner can open inline (URL is in
+                                         payload) without consuming a view.
+        - `viewerHasViewedPromptMedia` : non-owner already-viewed flag —
+                                         tap should surface a friendly
+                                         "already viewed" message instead
+                                         of opening the viewer.
+*/
+type PromptMediaPayload = {
+  promptId?: string;
+  mediaUrl?: string;
+  mediaKind?: 'photo' | 'video' | 'voice';
+  durationSec?: number;
+  isFrontCamera?: boolean;
+  isPromptMediaOwner?: boolean;
+  viewerHasViewedPromptMedia?: boolean;
+};
+
 /* ─── Trending Prompt Data Type ─── */
 type TrendingPromptData = {
   _id: any;
@@ -330,6 +357,10 @@ type TrendingPromptData = {
   mediaMime?: string;
   durationSec?: number;
   isFrontCamera?: boolean;
+  // Phase 4: prompt-owner media one-time-view metadata.
+  promptMediaViewCount?: number;
+  viewerHasViewedPromptMedia?: boolean;
+  isPromptMediaOwner?: boolean;
 };
 
 /* ─── Animated Press Wrapper for premium feel ─── */
@@ -387,18 +418,42 @@ const TrendingCard = React.memo(function TrendingCard({
   prompt,
   promptId,
   onOpenThread,
+  onOpenPromptMedia,
   onLongPress,
   isOwner,
 }: {
   prompt: TrendingPromptData;
   promptId: string;
   onOpenThread: (id: string) => void;
+  onOpenPromptMedia: (payload: PromptMediaPayload) => void;
   onLongPress?: (id: string) => void;
   isOwner?: boolean;
 }) {
   // P2-002: Stable callback references
   const handleOpenThread = useCallback(() => onOpenThread(promptId), [onOpenThread, promptId]);
   const handleLongPress = useCallback(() => onLongPress?.(promptId), [onLongPress, promptId]);
+  const handleOpenPromptMedia = useCallback(
+    () =>
+      onOpenPromptMedia({
+        promptId,
+        mediaUrl: prompt.mediaUrl,
+        mediaKind: prompt.mediaKind,
+        durationSec: prompt.durationSec,
+        isFrontCamera: prompt.isFrontCamera,
+        isPromptMediaOwner: prompt.isPromptMediaOwner,
+        viewerHasViewedPromptMedia: prompt.viewerHasViewedPromptMedia,
+      }),
+    [
+      onOpenPromptMedia,
+      promptId,
+      prompt.mediaUrl,
+      prompt.mediaKind,
+      prompt.durationSec,
+      prompt.isFrontCamera,
+      prompt.isPromptMediaOwner,
+      prompt.viewerHasViewedPromptMedia,
+    ]
+  );
   const isTruth = prompt.type === 'truth';
   const isAnon = prompt.isAnonymous ?? true;
   const answerCount = prompt.totalAnswers ?? prompt.answerCount ?? 0;
@@ -463,7 +518,9 @@ const TrendingCard = React.memo(function TrendingCard({
           </View>
         </View>
 
-        {/* Prompt text - Hero element */}
+        {/* Prompt text - Hero element. Text always uses the full content
+            width on the left; any owner-attached media tile lives in the
+            right column directly below the Truth/Dare pill. */}
         <Text style={styles.promptTextHero} numberOfLines={3}>{prompt.text}</Text>
 
         {/* Engagement row */}
@@ -481,27 +538,8 @@ const TrendingCard = React.memo(function TrendingCard({
         </View>
       </View>
 
-      {/* Phase 4: prompt-owner media tile — only when prompt.hasMedia is true.
-          Tap opens the thread (same as the card press) so the feed never
-          attempts inline playback. */}
-      {prompt.hasMedia && prompt.mediaKind ? (
-        <View style={styles.mediaTileWrap}>
-          <TodPromptMediaTile
-            hasMedia={prompt.hasMedia}
-            mediaUrl={prompt.mediaUrl}
-            mediaKind={prompt.mediaKind}
-            durationSec={prompt.durationSec}
-            onPress={handleOpenThread}
-            accessibilityLabel={
-              prompt.mediaKind === 'voice'
-                ? 'Open prompt voice attachment'
-                : `Open prompt ${prompt.mediaKind}`
-            }
-          />
-        </View>
-      ) : null}
-
-      {/* Right column: Type pill */}
+      {/* Right column: Type pill on top; owner media tile (if any) directly
+          below the pill so the right side reads as a clean media column. */}
       <View style={styles.cardRightColumn}>
         <LinearGradient
           colors={pillColors}
@@ -512,6 +550,33 @@ const TrendingCard = React.memo(function TrendingCard({
           <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={12} color="#FFF" />
           <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
         </LinearGradient>
+        {prompt.hasMedia && prompt.mediaKind ? (
+          <TodPromptMediaTile
+            hasMedia={prompt.hasMedia}
+            mediaUrl={prompt.mediaUrl}
+            mediaKind={prompt.mediaKind}
+            durationSec={prompt.durationSec}
+            size={64}
+            covered
+            ownerViewCount={
+              prompt.isPromptMediaOwner &&
+              (prompt.mediaKind === 'photo' || prompt.mediaKind === 'video')
+                ? prompt.promptMediaViewCount
+                : undefined
+            }
+            showViewedBadge={
+              !prompt.isPromptMediaOwner &&
+              !!prompt.viewerHasViewedPromptMedia &&
+              (prompt.mediaKind === 'photo' || prompt.mediaKind === 'video')
+            }
+            onPress={handleOpenPromptMedia}
+            accessibilityLabel={
+              prompt.mediaKind === 'voice'
+                ? 'Open prompt voice attachment'
+                : `Open covered prompt ${prompt.mediaKind}`
+            }
+          />
+        ) : null}
       </View>
     </AnimatedPressCard>
   );
@@ -523,6 +588,7 @@ const PromptCard = React.memo(function PromptCard({
   prompt,
   promptId,
   onOpenThread,
+  onOpenPromptMedia,
   onLongPress,
   isOwner,
 }: {
@@ -550,15 +616,42 @@ const PromptCard = React.memo(function PromptCard({
     mediaMime?: string;
     durationSec?: number;
     isFrontCamera?: boolean;
+    // Phase 4: prompt-owner media one-time-view metadata.
+    promptMediaViewCount?: number;
+    viewerHasViewedPromptMedia?: boolean;
+    isPromptMediaOwner?: boolean;
   };
   promptId: string;
   onOpenThread: (id: string) => void;
+  onOpenPromptMedia: (payload: PromptMediaPayload) => void;
   onLongPress?: (id: string) => void;
   isOwner?: boolean;
 }) {
   // P2-002: Stable callback references
   const handleOpenThread = useCallback(() => onOpenThread(promptId), [onOpenThread, promptId]);
   const handleLongPress = useCallback(() => onLongPress?.(promptId), [onLongPress, promptId]);
+  const handleOpenPromptMedia = useCallback(
+    () =>
+      onOpenPromptMedia({
+        promptId,
+        mediaUrl: prompt.mediaUrl,
+        mediaKind: prompt.mediaKind,
+        durationSec: prompt.durationSec,
+        isFrontCamera: prompt.isFrontCamera,
+        isPromptMediaOwner: prompt.isPromptMediaOwner,
+        viewerHasViewedPromptMedia: prompt.viewerHasViewedPromptMedia,
+      }),
+    [
+      onOpenPromptMedia,
+      promptId,
+      prompt.mediaUrl,
+      prompt.mediaKind,
+      prompt.durationSec,
+      prompt.isFrontCamera,
+      prompt.isPromptMediaOwner,
+      prompt.viewerHasViewedPromptMedia,
+    ]
+  );
 
   const isTruth = prompt.type === 'truth';
   const isAnon = prompt.isAnonymous ?? true;
@@ -616,7 +709,9 @@ const PromptCard = React.memo(function PromptCard({
           </View>
         </View>
 
-        {/* Prompt text - Hero element */}
+        {/* Prompt text - Hero element. Text always uses the full content
+            width on the left; any owner-attached media tile lives in the
+            right column directly below the Truth/Dare pill. */}
         <Text style={styles.promptTextHero} numberOfLines={3}>{prompt.text}</Text>
 
         {/* Comment previews (up to 2) */}
@@ -640,27 +735,8 @@ const PromptCard = React.memo(function PromptCard({
         </View>
       </View>
 
-      {/* Phase 4: prompt-owner media tile — only when prompt.hasMedia is true.
-          Tap opens the thread (same as the card press) so the feed never
-          attempts inline playback. */}
-      {prompt.hasMedia && prompt.mediaKind ? (
-        <View style={styles.mediaTileWrap}>
-          <TodPromptMediaTile
-            hasMedia={prompt.hasMedia}
-            mediaUrl={prompt.mediaUrl}
-            mediaKind={prompt.mediaKind}
-            durationSec={prompt.durationSec}
-            onPress={handleOpenThread}
-            accessibilityLabel={
-              prompt.mediaKind === 'voice'
-                ? 'Open prompt voice attachment'
-                : `Open prompt ${prompt.mediaKind}`
-            }
-          />
-        </View>
-      ) : null}
-
-      {/* Right column: Type pill */}
+      {/* Right column: Type pill on top; owner media tile (if any) directly
+          below the pill so the right side reads as a clean media column. */}
       <View style={styles.cardRightColumn}>
         <LinearGradient
           colors={pillColors}
@@ -671,10 +747,180 @@ const PromptCard = React.memo(function PromptCard({
           <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={12} color="#FFF" />
           <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
         </LinearGradient>
+        {prompt.hasMedia && prompt.mediaKind ? (
+          <TodPromptMediaTile
+            hasMedia={prompt.hasMedia}
+            mediaUrl={prompt.mediaUrl}
+            mediaKind={prompt.mediaKind}
+            durationSec={prompt.durationSec}
+            size={64}
+            covered
+            ownerViewCount={
+              prompt.isPromptMediaOwner &&
+              (prompt.mediaKind === 'photo' || prompt.mediaKind === 'video')
+                ? prompt.promptMediaViewCount
+                : undefined
+            }
+            showViewedBadge={
+              !prompt.isPromptMediaOwner &&
+              !!prompt.viewerHasViewedPromptMedia &&
+              (prompt.mediaKind === 'photo' || prompt.mediaKind === 'video')
+            }
+            onPress={handleOpenPromptMedia}
+            accessibilityLabel={
+              prompt.mediaKind === 'voice'
+                ? 'Open prompt voice attachment'
+                : `Open covered prompt ${prompt.mediaKind}`
+            }
+          />
+        ) : null}
       </View>
     </AnimatedPressCard>
   );
 });
+
+/* ─── Prompt Media Viewer Modal ─── */
+// Lightweight, feed-local viewer for prompt-owner media. Reused by both the
+// trending and prompt cards. Intentionally NOT coupled to the prompt-thread
+// answer-side viewer (which carries one-time-view / claim state) because
+// prompt-owner media follows prompt visibility only — there is no claim
+// flow, no todPromptViews mutation, no answer-side tracking.
+//
+// Behavior:
+//  - photo: full preview using expo-image with contentFit="contain".
+//  - video: expo-av Video with native controls; no autoplay-on-mount.
+//  - voice: covered placeholder + microcopy explaining playback isn't
+//    available in the feed (intentional limitation).
+function PromptMediaViewerModal({
+  payload,
+  onClose,
+}: {
+  payload: PromptMediaPayload | null;
+  onClose: () => void;
+}) {
+  const visible = !!payload?.mediaUrl && !!payload?.mediaKind;
+  const insets = useSafeAreaInsets();
+  const screen = Dimensions.get('window');
+  const kind = payload?.mediaKind;
+  const mediaUrl = payload?.mediaUrl;
+  const isFrontCamera = !!payload?.isFrontCamera;
+  const [imageLoading, setImageLoading] = useState(true);
+
+  // Reset loading state whenever the source changes so a stale "loaded"
+  // flag doesn't suppress the spinner on the next open.
+  useEffect(() => {
+    if (visible && kind === 'photo') {
+      setImageLoading(true);
+    }
+  }, [visible, kind, mediaUrl]);
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <View style={styles.promptMediaViewerBackdrop}>
+        <Pressable
+          style={StyleSheet.absoluteFillObject}
+          onPress={onClose}
+          accessibilityRole="button"
+          accessibilityLabel="Close media viewer"
+        />
+
+        {/* Media surface — sized to fit within safe-area, centered. Pressing
+            inside the surface does NOT dismiss; only the backdrop and the
+            top-right close button dismiss. For photo/video we give the
+            surface an explicit height so the media frame can actually fill
+            most of the screen (without it the surface would shrink to its
+            content and look tiny in the middle of the backdrop). For voice,
+            we keep the surface auto-sized so the compact placeholder box
+            doesn't get stretched into a giant empty surface. */}
+        <Pressable
+          style={[
+            styles.promptMediaViewerSurface,
+            {
+              maxWidth: Math.min(screen.width - 24, 720),
+              maxHeight: Math.min(
+                screen.height - insets.top - insets.bottom - 80,
+                Math.round(screen.height * 0.86)
+              ),
+            },
+            (kind === 'photo' || kind === 'video') && {
+              height: Math.min(
+                screen.height - insets.top - insets.bottom - 80,
+                Math.round(screen.height * 0.86)
+              ),
+            },
+          ]}
+          onPress={() => {}}
+        >
+          {kind === 'photo' && mediaUrl ? (
+            <>
+              <ExpoImage
+                source={{ uri: mediaUrl }}
+                style={[
+                  styles.promptMediaViewerImage,
+                  isFrontCamera ? { transform: [{ scaleX: -1 }] } : null,
+                ]}
+                contentFit="contain"
+                transition={150}
+                onLoadEnd={() => setImageLoading(false)}
+              />
+              {imageLoading ? (
+                <View style={styles.promptMediaViewerSpinnerWrap} pointerEvents="none">
+                  <ActivityIndicator size="large" color="#FFFFFF" />
+                </View>
+              ) : null}
+            </>
+          ) : null}
+
+          {kind === 'video' && mediaUrl ? (
+            <Video
+              source={{ uri: mediaUrl }}
+              style={[
+                styles.promptMediaViewerVideo,
+                isFrontCamera ? { transform: [{ scaleX: -1 }] } : null,
+              ]}
+              useNativeControls
+              resizeMode={ResizeMode.CONTAIN}
+              shouldPlay={false}
+              isLooping={false}
+            />
+          ) : null}
+
+          {kind === 'voice' ? (
+            <View style={styles.promptMediaViewerVoiceBox}>
+              <View style={styles.promptMediaViewerVoiceIcon}>
+                <Ionicons name="mic" size={36} color={PREMIUM.coral} />
+              </View>
+              <Text style={styles.promptMediaViewerVoiceTitle}>Voice prompt</Text>
+              <Text style={styles.promptMediaViewerVoiceSubtitle}>
+                Voice playback isn't available in the feed yet.
+              </Text>
+            </View>
+          ) : null}
+        </Pressable>
+
+        {/* Close button — pinned top-right, above safe-area inset. */}
+        <TouchableOpacity
+          style={[
+            styles.promptMediaViewerCloseBtn,
+            { top: insets.top + 12 },
+          ]}
+          onPress={onClose}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          accessibilityRole="button"
+          accessibilityLabel="Close media viewer"
+        >
+          <Ionicons name="close" size={22} color="#FFFFFF" />
+        </TouchableOpacity>
+      </View>
+    </Modal>
+  );
+}
 
 /* ─── Main Screen ─── */
 export default function TruthOrDareScreen() {
@@ -735,6 +981,83 @@ export default function TruthOrDareScreen() {
   // Delete popup state
   const [deletePopupPromptId, setDeletePopupPromptId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Prompt-owner media viewer state. Tapping the covered media tile on a feed
+  // card opens this modal — but for non-owner photo/video the URL is NOT
+  // present in the inline payload (server-side redaction in Phase 4) and we
+  // must round-trip through `openPromptMedia` to consume the one-time view
+  // and receive a fresh URL. Voice and owner branches still open inline.
+  const [viewingPromptMedia, setViewingPromptMedia] = useState<PromptMediaPayload | null>(null);
+  const [isOpeningPromptMedia, setIsOpeningPromptMedia] = useState(false);
+  const openPromptMediaMutation = useMutation(api.truthDare.openPromptMedia);
+  const handleOpenPromptMedia = useCallback(
+    async (payload: PromptMediaPayload) => {
+      if (!payload.mediaKind || !payload.promptId) return;
+
+      const isPhotoOrVideo =
+        payload.mediaKind === 'photo' || payload.mediaKind === 'video';
+
+      // Owner OR voice: open inline with URL already in payload (server keeps
+      // the inline URL for these branches; no view row is consumed).
+      if (!isPhotoOrVideo || payload.isPromptMediaOwner) {
+        if (!payload.mediaUrl) return;
+        setViewingPromptMedia(payload);
+        return;
+      }
+
+      // Non-owner photo/video and already-viewed: don't burn a request, show
+      // a friendly message instead.
+      if (payload.viewerHasViewedPromptMedia) {
+        Alert.alert(
+          'Already viewed',
+          payload.mediaKind === 'video'
+            ? 'You can only watch this video once.'
+            : 'You can only view this photo once.'
+        );
+        return;
+      }
+
+      // Non-owner photo/video, first open: consume the one-time view.
+      if (!userId || isOpeningPromptMedia) return;
+      setIsOpeningPromptMedia(true);
+      try {
+        const result = await openPromptMediaMutation({
+          promptId: payload.promptId,
+          viewerUserId: userId,
+        });
+        if (result.status === 'ok' && result.mediaUrl) {
+          setViewingPromptMedia({
+            promptId: payload.promptId,
+            mediaUrl: result.mediaUrl,
+            mediaKind: result.mediaKind as 'photo' | 'video' | 'voice',
+            durationSec: result.durationSec ?? undefined,
+            isFrontCamera: result.isFrontCamera ?? false,
+            isPromptMediaOwner: false,
+            viewerHasViewedPromptMedia: false,
+          });
+        } else if (result.status === 'already_viewed') {
+          Alert.alert(
+            'Already viewed',
+            payload.mediaKind === 'video'
+              ? 'You can only watch this video once.'
+              : 'You can only view this photo once.'
+          );
+        } else if (result.status === 'not_authorized') {
+          Alert.alert("Can't open", 'This media is no longer available.');
+        } else {
+          Alert.alert("Can't open", 'This media is no longer available.');
+        }
+      } catch (err) {
+        Alert.alert("Can't open", 'Something went wrong. Please try again.');
+      } finally {
+        setIsOpeningPromptMedia(false);
+      }
+    },
+    [openPromptMediaMutation, userId, isOpeningPromptMedia]
+  );
+  const handleClosePromptMedia = useCallback(() => {
+    setViewingPromptMedia(null);
+  }, []);
 
   // Delete mutation - for owner prompt deletion from homepage
   const deletePromptMutation = useMutation(api.truthDare.deleteMyPrompt);
@@ -934,6 +1257,21 @@ export default function TruthOrDareScreen() {
     setDeletePopupPromptId(null);
   }, []);
 
+  // Owner: route to the prompt thread with autoEditPrompt='1' so the thread
+  // opens its inline text editor. Edits are intentionally text-only —
+  // type/identity/media are locked after posting because prompt slots are
+  // scarce (weekly/monthly/subscription gated) and we don't want owners to
+  // recycle a slot to swap out media or change Truth↔Dare after the fact.
+  const handleEditPrompt = useCallback(() => {
+    if (!deletePopupPromptId) return;
+    const id = deletePopupPromptId;
+    setDeletePopupPromptId(null);
+    router.push({
+      pathname: '/(main)/prompt-thread' as any,
+      params: { promptId: id, source: 'phase2-tod', autoEditPrompt: '1' },
+    });
+  }, [deletePopupPromptId, router]);
+
   type FeedItem =
     | { type: 'section'; label: string }
     | { type: 'trending'; prompt: TrendingPromptData }
@@ -986,6 +1324,7 @@ export default function TruthOrDareScreen() {
           prompt={item.prompt}
           promptId={promptId}
           onOpenThread={openThread}
+          onOpenPromptMedia={handleOpenPromptMedia}
           onLongPress={handleLongPressPrompt}
           isOwner={isOwner}
         />
@@ -999,11 +1338,19 @@ export default function TruthOrDareScreen() {
         prompt={item.prompt}
         promptId={promptId}
         onOpenThread={openThread}
+        onOpenPromptMedia={handleOpenPromptMedia}
         onLongPress={handleLongPressPrompt}
         isOwner={isOwner}
       />
     );
-  }, [connectRequestCount, openConnectRequestsFromTray, openThread, handleLongPressPrompt, userId]);
+  }, [
+    connectRequestCount,
+    openConnectRequestsFromTray,
+    openThread,
+    handleOpenPromptMedia,
+    handleLongPressPrompt,
+    userId,
+  ]);
 
   const getKey = useCallback((item: FeedItem, idx: number) => {
     if (item.type === 'section') return `section_${idx}`;
@@ -1210,6 +1557,13 @@ export default function TruthOrDareScreen() {
         onClose={closeConnectRequests}
       />
 
+      {/* Prompt-owner media viewer — opens when the user taps a covered
+          media tile on a feed card. Does not navigate to the prompt thread. */}
+      <PromptMediaViewerModal
+        payload={viewingPromptMedia}
+        onClose={handleClosePromptMedia}
+      />
+
       {/* Delete confirmation popup - compact and contextual */}
       <Modal
         visible={!!deletePopupPromptId}
@@ -1219,9 +1573,9 @@ export default function TruthOrDareScreen() {
       >
         <Pressable style={styles.deletePopupOverlay} onPress={handleCloseDeletePopup}>
           <Pressable style={styles.deletePopupContainer} onPress={() => {}}>
-            <Text style={styles.deletePopupTitle}>Delete this post?</Text>
+            <Text style={styles.deletePopupTitle}>Post options</Text>
             <Text style={styles.deletePopupSubtitle}>
-              This will permanently remove the post and all its comments.
+              Edit or delete your post.
             </Text>
             <View style={styles.deletePopupActions}>
               <TouchableOpacity
@@ -1229,7 +1583,15 @@ export default function TruthOrDareScreen() {
                 onPress={handleCloseDeletePopup}
                 disabled={isDeleting}
               >
-                <Text style={styles.deletePopupCancelText}>Cancel</Text>
+                <Text style={styles.deletePopupCancelText} numberOfLines={1}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.deletePopupEditBtn}
+                onPress={handleEditPrompt}
+                disabled={isDeleting}
+              >
+                <Ionicons name="pencil-outline" size={14} color={PREMIUM.textPrimary} />
+                <Text style={styles.deletePopupEditText} numberOfLines={1}>Edit</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.deletePopupDeleteBtn}
@@ -1237,11 +1599,11 @@ export default function TruthOrDareScreen() {
                 disabled={isDeleting}
               >
                 {isDeleting ? (
-                  <Text style={styles.deletePopupDeleteText}>Deleting...</Text>
+                  <Text style={styles.deletePopupDeleteText} numberOfLines={1}>Deleting...</Text>
                 ) : (
                   <>
                     <Ionicons name="trash-outline" size={14} color="#FFF" />
-                    <Text style={styles.deletePopupDeleteText}>Delete</Text>
+                    <Text style={styles.deletePopupDeleteText} numberOfLines={1}>Delete</Text>
                   </>
                 )}
               </TouchableOpacity>
@@ -1521,22 +1883,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
-  // ─── Card Right Column - Pill top, + bottom ───
+  // ─── Card Right Column - Type pill on top; owner media tile (when
+  //     present) directly below the pill. Top-aligned so the tile reads
+  //     as a clean right-side media column rather than floating in the
+  //     middle. When the prompt has no media the column collapses to the
+  //     pill alone and reserves no extra vertical space.
   cardRightColumn: {
     alignItems: 'flex-end',
-    justifyContent: 'space-between',
-    height: '100%',
-    minHeight: 80,
+    justifyContent: 'flex-start',
+    gap: 12,
     paddingVertical: 2,
-  },
-
-  // ─── Phase 4: prompt-owner media tile slot (sits between cardContent and
-  //     cardRightColumn). The 8px right margin separates the tile from the
-  //     type pill column on narrow Android screens; the wrap renders only
-  //     when prompt.hasMedia is true so no-media prompts stay full-width.
-  mediaTileWrap: {
-    alignSelf: 'center',
-    marginRight: 8,
   },
 
   // ─── Type Pills - Gradient styling ───
@@ -1779,7 +2135,8 @@ const styles = StyleSheet.create({
     backgroundColor: PREMIUM.bgElevated,
     borderRadius: 16,
     padding: 20,
-    width: 280,
+    width: 320,
+    maxWidth: '92%',
     borderWidth: 1,
     borderColor: PREMIUM.borderSubtle,
     shadowColor: '#000',
@@ -1804,14 +2161,34 @@ const styles = StyleSheet.create({
   },
   deletePopupActions: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 10,
+  },
+  deletePopupEditBtn: {
+    flex: 1,
+    backgroundColor: PREMIUM.bgHighlight,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 6,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
+  },
+  deletePopupEditText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
   },
   deletePopupCancelBtn: {
     flex: 1,
     backgroundColor: PREMIUM.bgHighlight,
     paddingVertical: 12,
+    paddingHorizontal: 8,
     borderRadius: 10,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   deletePopupCancelText: {
     fontSize: 14,
@@ -1822,6 +2199,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: PREMIUM.coral,
     paddingVertical: 12,
+    paddingHorizontal: 8,
     borderRadius: 10,
     alignItems: 'center',
     flexDirection: 'row',
@@ -1832,5 +2210,85 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     color: '#FFF',
+  },
+  // Prompt-owner media viewer modal (feed-local; not coupled to prompt-thread).
+  promptMediaViewerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.92)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  promptMediaViewerSurface: {
+    width: '92%',
+    backgroundColor: PREMIUM.bgElevated,
+    borderRadius: 16,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
+  },
+  // Photo + video fill the explicit height set on the surface (see inline
+  // height in PromptMediaViewerModal). `flex: 1` lets the media stretch to
+  // the full surface; `contentFit="contain"` (photo) and ResizeMode.CONTAIN
+  // (video) preserve aspect ratio with letterboxing — portrait media
+  // becomes tall and fills the screen, landscape media fits to width.
+  // Earlier `aspectRatio: 1` capped both at a square that looked tiny on
+  // tall phones.
+  promptMediaViewerImage: {
+    flex: 1,
+    width: '100%',
+    backgroundColor: '#000',
+  },
+  promptMediaViewerVideo: {
+    flex: 1,
+    width: '100%',
+    backgroundColor: '#000',
+  },
+  promptMediaViewerVoiceBox: {
+    width: '100%',
+    paddingHorizontal: 24,
+    paddingVertical: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  promptMediaViewerVoiceIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: `${PREMIUM.coral}1F`,
+    borderWidth: 1,
+    borderColor: `${PREMIUM.coral}40`,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  promptMediaViewerVoiceTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+    textAlign: 'center',
+  },
+  promptMediaViewerVoiceSubtitle: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: PREMIUM.textSecondary,
+    textAlign: 'center',
+    paddingHorizontal: 8,
+  },
+  promptMediaViewerCloseBtn: {
+    position: 'absolute',
+    right: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  promptMediaViewerSpinnerWrap: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

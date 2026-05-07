@@ -1709,6 +1709,26 @@ export default defineSchema({
     .index('by_answer', ['answerId'])
     .index('by_answer_viewer', ['answerId', 'viewerUserId']),
 
+  // Truth & Dare prompt-owner media one-time view tracking.
+  // - Used ONLY for prompt-owner photo/video media (NOT voice).
+  // - One row per (promptId, viewerUserId). Owner self-views are NEVER recorded.
+  // - Powers two product behaviors:
+  //   1. Non-owner photo/video media is one-time-view per viewer.
+  //   2. Prompt owner sees a unique-viewer count ("X views").
+  //
+  // Intentionally separate from `todAnswerViews` so prompt-owner media
+  // (one-time per non-owner) does not get conflated with answer media
+  // (replayable; existence of a row never blocks playback there).
+  todPromptMediaViews: defineTable({
+    promptId: v.string(),
+    viewerUserId: v.string(),
+    ownerUserId: v.string(),
+    mediaKind: v.union(v.literal('photo'), v.literal('video')),
+    viewedAt: v.number(),
+  })
+    .index('by_prompt', ['promptId'])
+    .index('by_prompt_viewer', ['promptId', 'viewerUserId']),
+
   // Truth & Dare Answer Likes (legacy, kept for migration)
   todAnswerLikes: defineTable({
     answerId: v.string(),

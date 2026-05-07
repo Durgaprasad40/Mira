@@ -45,6 +45,29 @@ export type TodPromptMediaTileProps = {
   size?: number;
   style?: StyleProp<ViewStyle>;
   accessibilityLabel?: string;
+  /**
+   * When true, render the tile as a covered/protected placeholder regardless
+   * of media kind — the gradient background + centered icon chip is shown
+   * and the photo thumbnail is intentionally NOT rendered. Used by the
+   * Truth/Dare feed/thread so prompt-owner photos are not exposed inline;
+   * the user must tap the tile to open the full media in a viewer/modal.
+   *
+   * Defaults to false for callers that intentionally want a raw thumbnail.
+   */
+  covered?: boolean;
+  /**
+   * Phase 4 (one-time view): unique-viewer count badge shown to the prompt
+   * owner only. Pass `undefined` for non-owner views to hide the badge.
+   * Only meaningful for photo/video; voice never displays a count.
+   */
+  ownerViewCount?: number;
+  /**
+   * Phase 4 (one-time view): when true, render a small "Viewed" badge to
+   * tell a non-owner that they have already opened this prompt-owner
+   * photo/video. The tap handler should surface a friendly "already
+   * viewed" message instead of opening the viewer.
+   */
+  showViewedBadge?: boolean;
 };
 
 function isMediaKind(kind: unknown): kind is MediaKind {
@@ -75,15 +98,32 @@ export function TodPromptMediaTile({
   size = 68,
   style,
   accessibilityLabel,
+  covered = false,
+  ownerViewCount,
+  showViewedBadge = false,
 }: TodPromptMediaTileProps) {
   if (!hasMedia || !isMediaKind(mediaKind)) return null;
   const kind: MediaKind = mediaKind;
   const iconName = getIconName(kind);
+  const displayOwnerViewCount =
+    typeof ownerViewCount === 'number' && Number.isFinite(ownerViewCount)
+      ? Math.max(0, Math.floor(ownerViewCount))
+      : 0;
+  const ownerCountLabel = displayOwnerViewCount > 0
+    ? displayOwnerViewCount === 1
+      ? '1 view'
+      : `${displayOwnerViewCount} views`
+    : undefined;
+  // Show duration for video/voice unless the owner view count needs the
+  // bottom label area; on compact tiles the count is the more useful cue.
   const microtext =
-    kind === 'video' || kind === 'voice' ? formatDurationSec(durationSec) : undefined;
-  const showThumb = kind === 'photo' && !!mediaUrl;
+    !ownerCountLabel && (kind === 'video' || kind === 'voice')
+      ? formatDurationSec(durationSec)
+      : undefined;
+  // `covered` forces the gradient/icon-chip placeholder regardless of mediaUrl,
+  // so prompt-owner photos are not exposed inline on feed/thread surfaces.
+  const showThumb = !covered && kind === 'photo' && !!mediaUrl;
   const interactive = !!onPress;
-
   const sizingStyle: ViewStyle = {
     width: size,
     height: size,
@@ -125,6 +165,24 @@ export function TodPromptMediaTile({
         >
           {microtext}
         </Text>
+      ) : null}
+      {/* Phase 4: owner-only unique-viewer count, bottom of the tile. */}
+      {ownerCountLabel ? (
+        <View style={styles.viewCountBadge} pointerEvents="none">
+          <Text style={styles.viewCountText} numberOfLines={1}>
+            {ownerCountLabel}
+          </Text>
+        </View>
+      ) : null}
+      {/* Phase 4: non-owner already-viewed badge, bottom-left. Shown only
+          for one-time-view photo/video; voice replays freely. */}
+      {showViewedBadge && !ownerCountLabel ? (
+        <View style={styles.viewedBadge} pointerEvents="none">
+          <Ionicons name="checkmark" size={9} color="#FFF" />
+          <Text style={styles.viewedBadgeText} numberOfLines={1}>
+            Viewed
+          </Text>
+        </View>
       ) : null}
     </>
   );
@@ -198,6 +256,50 @@ const styles = StyleSheet.create({
     color: '#FFF',
     textShadowColor: 'rgba(0, 0, 0, 0.7)',
     textShadowRadius: 2,
+  },
+  viewCountBadge: {
+    position: 'absolute',
+    left: 6,
+    right: 6,
+    bottom: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(13, 13, 26, 0.82)',
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+    minHeight: 14,
+  },
+  viewCountText: {
+    color: '#FFF',
+    fontSize: 9,
+    fontWeight: '700',
+    lineHeight: 11,
+    letterSpacing: 0.1,
+    textAlign: 'center',
+  },
+  viewedBadge: {
+    position: 'absolute',
+    bottom: 3,
+    left: 3,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: 'rgba(13, 13, 26, 0.85)',
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    minHeight: 13,
+  },
+  viewedBadgeText: {
+    color: '#FFF',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
 });
 
